@@ -135,8 +135,14 @@ class Settings(BaseModel):
         without giving meaningful runway to a stolen-token replay.
     vault_addr:
         Base URL of the Vault server, e.g. ``https://vault.evba.lab``.
-        Required — the backplane refuses to start without it. The OIDC
-        forward-auth chain hangs entirely off this endpoint.
+        Required **only** for the Vault credential backend
+        (``CREDENTIAL_BACKEND=vault``) and the Vault OIDC forward-auth
+        chain, both of which hang off this endpoint. A GCP-native
+        install (``CREDENTIAL_BACKEND=gsm``) runs no Vault, so this is
+        optional and defaults to ``None``; a blank ``VAULT_ADDR`` env
+        value coerces to ``None``. When ``None``, the first actual Vault
+        use raises :class:`~meho_backplane.auth.vault.VaultNotConfiguredError`
+        rather than the backplane refusing to start.
     vault_oidc_role:
         Vault role bound to the JWT auth method that the backplane
         forwards tokens against. Default ``meho-mcp`` matches Goal #11's
@@ -893,7 +899,7 @@ class Settings(BaseModel):
     test_amortize_typed_op_registrars: bool = False
     backplane_url: str = ""
     mcp_resource_uri: str = ""
-    vault_addr: HttpUrl
+    vault_addr: HttpUrl | None = Field(default=None)
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
@@ -1485,7 +1491,11 @@ def get_settings() -> Settings:
         ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),
-        vault_addr=os.environ["VAULT_ADDR"],  # type: ignore[arg-type]
+        # Optional: a GSM-backend (Vault-free) install sets no VAULT_ADDR,
+        # and the configmap renders it blank for a `gsm` deploy — both
+        # coerce to None here so construction stays clean; the first
+        # actual Vault use raises VaultNotConfiguredError instead.
+        vault_addr=os.environ.get("VAULT_ADDR") or None,  # type: ignore[arg-type]
         vault_oidc_role=os.environ.get("VAULT_OIDC_ROLE", "meho-mcp"),
         vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),
         # ``VAULT_NAMESPACE`` distinguishes "unset" (OSS deployment, no

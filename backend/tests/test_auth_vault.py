@@ -45,6 +45,7 @@ from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import (
     VaultClientError,
+    VaultNotConfiguredError,
     VaultRoleDeniedError,
     VaultUnreachableError,
     vault_client_for_operator,
@@ -475,15 +476,19 @@ async def test_readiness_probe_handles_settings_failure(
 ) -> None:
     """A missing required env var on probe call yields ``settings_unavailable``.
 
-    Probes run on every ``/ready`` hit; if an operator deletes
-    ``VAULT_ADDR`` mid-flight (or the cache is cleared and the env is
-    incomplete), the probe must report rather than raise — uncaught
-    probe exceptions surface as 500 from ``/ready`` (Task #19's
+    Probes run on every ``/ready`` hit; if an operator deletes a
+    still-required env var mid-flight (or the cache is cleared and the
+    env is incomplete), the probe must report rather than raise —
+    uncaught probe exceptions surface as 500 from ``/ready`` (Task #19's
     deliberate fail-loud contract for probe-implementation bugs), and
     a settings-resolution failure is a configuration drift, not a
     probe bug.
+
+    ``VAULT_ADDR`` is no longer required (#2277), so this exercises the
+    branch with ``KEYCLOAK_ISSUER_URL`` — one of the env vars
+    ``get_settings`` still reads via ``os.environ[...]``.
     """
-    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    monkeypatch.delenv("KEYCLOAK_ISSUER_URL", raising=False)
     get_settings.cache_clear()
 
     result = await vault_readiness_probe()
@@ -491,3 +496,68 @@ async def test_readiness_probe_handles_settings_failure(
     assert result.ok is False
     assert result.detail is not None
     assert result.detail.startswith("settings_unavailable:")
+
+
+# ---------------------------------------------------------------------------
+# Fail-closed on actual use when VAULT_ADDR is unset (#2277)
+# ---------------------------------------------------------------------------
+
+
+def test_not_configured_error_is_vault_client_error_subclass() -> None:
+    """The new error rides the handled ``VaultClientError`` family.
+
+    The dispatcher maps every ``VaultClientError`` to a handled
+    ``connector_error`` (4xx-class) result — never a 5xx — so a caller
+    catching the base class handles a misconfigured Vault uniformly with
+    every other Vault-side failure.
+    """
+    assert issubclass(VaultNotConfiguredError, VaultClientError)
+
+
+async def test_vault_client_for_operator_raises_not_configured_when_vault_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CREDENTIAL_BACKEND=vault`` with no ``VAULT_ADDR`` fails at first use.
+
+    The app still boots (``get_settings()`` constructs cleanly with
+    ``vault_addr is None``), but the first Vault operation raises the
+    actionable ``VaultNotConfiguredError`` — proven here — rather than a
+    bare ``KeyError`` at startup or a bogus ``str(None)`` URL. The real
+    ``_build_client`` runs (no fake seam installed) so the guard is
+    exercised end to end. The message names both env vars so an operator
+    can self-serve the fix.
+    """
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    get_settings.cache_clear()
+
+    with pytest.raises(VaultNotConfiguredError) as exc_info:
+        async with vault_client_for_operator(_make_operator()):
+            pass  # pragma: no cover - client construction raises first
+
+    message = str(exc_info.value)
+    assert "VAULT_ADDR" in message
+    assert "CREDENTIAL_BACKEND" in message
+    # Handled family — never surfaces as a 5xx.
+    assert isinstance(exc_info.value, VaultClientError)
+
+
+async def test_readiness_probe_skips_when_vault_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``VAULT_ADDR`` (a Vault-free ``gsm`` install) → skipped, not failed.
+
+    Vault is an optional credential backend since #2227. When it is not
+    configured the probe returns ``ok=True`` with ``detail="not_configured"``
+    so a GSM-only deploy's ``/api/v1/health`` readiness stays green,
+    mirroring the docs-backends probe's skip-unconfigured contract
+    (#1606). The connector is never constructed on this path — if it
+    were, it would fail against the string ``"None"`` URL.
+    """
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    get_settings.cache_clear()
+
+    result = await vault_readiness_probe()
+
+    assert result.name == "vault"
+    assert result.ok is True
+    assert result.detail == "not_configured"

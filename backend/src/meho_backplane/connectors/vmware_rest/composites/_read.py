@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 # code-quality-allow: file-size — pre-existing 7-composite handler module
-# (>1200 lines before #2251); this task only appends the direct-session
-# opt-in documentation to the existing "four reasons" note. Splitting the
-# module is I-B migration work (Initiative #2248/#2249), out of scope here.
+# (>1200 lines); #2253 migrated the sub-call mechanism in place (direct
+# session, no ingested sub-ops) without adding a new handler. Splitting
+# the module is separate refactor work, out of scope here.
 
 """Read-only ``vmware.composite.*`` handler functions (7 composites).
 
 Each handler is a module-level ``async def`` that takes the dispatcher's
-composite-branch keyword args ``(operator, target, params,
-dispatch_child)`` and returns a single aggregated dict via 2-3 calls to
-``dispatch_child`` (the
-:class:`~meho_backplane.operations.composite.DispatchChild` callable
-the dispatcher builds in
-:func:`~meho_backplane.operations.dispatcher._run_source_kind_branch`).
+composite-branch keyword args ``(operator, target, params, connector)``
+and returns a single aggregated dict built from 2-3 sub-calls issued
+**directly on the connector's own authenticated session** --
+``connector._get_json`` / ``connector._post_json`` mounted through
+``connector.mount_op_path`` -- with no ``endpoint_descriptor`` lookup
+(#2253, the I-B read migration under Initiative #2249 / Goal #2247).
 
 Why module-level functions
 --------------------------
@@ -25,66 +25,61 @@ time (``__qualname__`` containing ``<locals>``). Module-level
 ``importlib.import_module`` + chained ``getattr`` at first-dispatch
 time.
 
-Why ``dispatch_child`` not direct httpx
----------------------------------------
+Why direct session, not ``dispatch_child``
+------------------------------------------
 
-Composite handlers MUST route every sub-call through ``dispatch_child``
-rather than calling the connector's ``_request_json`` directly, for
-four load-bearing reasons (per #508's issue body + the
-:class:`DispatchChild` Protocol docstring):
+Before #2253 these read handlers routed every sub-call through
+``dispatch_child`` -- the catalog-routed dispatcher seam that resolves
+each sub-op against an ``ingested`` ``endpoint_descriptor`` row. That
+coupled every read composite to a per-deploy vCenter-catalog ingest:
+until an operator ran ``meho connector ingest --catalog vmware/9.0`` the
+``GET:/vcenter/datastore`` / ``POST:/PropertyCollector/...`` sub-ops had
+no descriptor row and the composite failed with ``composite_l2_missing``
+(consumer signal 20, ``claude-rdc-hetzner-dc#697``). The two-world op
+model (Goal #2247) removes that coupling: the handler receives the
+resolved connector instance (the ``connector`` kwarg the #2251 substrate
+added to the composite contract) and issues each sub-call on the
+connector session, so the composite works on a fresh boot with **zero
+catalog ingest**. The precedent is the ``vmware.host.usage`` typed op
+(:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`), which reads
+the same ``GET:/vcenter/host`` + ``RetrievePropertiesEx`` surface
+directly on the session.
 
-1. **Audit-tree linkage** -- ``dispatch_child`` binds
-   :data:`~meho_backplane.operations._audit.parent_audit_id_var` to the
-   composite parent's audit row, so every sub-op's audit row carries
-   ``parent_audit_id`` automatically. Direct httpx breaks the chain.
-2. **Bounded recursion** -- the
-   :data:`~meho_backplane.operations.composite.composite_depth_var`
-   contextvar enforces :attr:`Settings.composite_max_depth`. A
-   misbehaving handler that recursed into another composite would be
-   caught here, not at request-volume scale.
-3. **Policy + broadcast** -- the dispatcher's policy gate (G2.x) and
-   broadcast publish (G6.x) run on every dispatched sub-op. Direct
-   httpx evades both.
-4. **Param validation** -- each sub-op's ``parameter_schema`` validates
-   inbound params at dispatch time; direct httpx skips validation.
-
-Direct-session opt-in (the substrate, #2251)
---------------------------------------------
-
-The composite handler contract also lets a handler receive the
-resolved connector instance directly, by declaring a ``connector``
-parameter alongside (or instead of) ``dispatch_child``. The dispatcher
-forwards the instance it already resolved for the composite's target
-(:func:`~meho_backplane.operations.dispatcher._resolve_connector_instance`);
-:func:`~meho_backplane.operations._branches.dispatch_composite` passes
-it only when the handler declares the parameter, so the existing
-``dispatch_child``-only handlers below are unchanged. A handler that
-opts in issues its sub-calls through the connector's own session
-(``connector._get_json`` / ``connector._post_json`` +
-``connector.mount_op_path``) with **no** ``endpoint_descriptor``
-lookup.
-
-This is the substrate the I-B migrations (Initiative #2248) build on;
-no composite in this module is migrated yet. Taking the direct path
-deliberately drops two of the four ``dispatch_child`` guarantees and
-relocates the other two:
+``dispatch_child`` gave four guarantees (per #508); the direct path
+drops two and relocates the other two, which is why it is a **read**-only
+migration:
 
 * **(2) Bounded recursion is moot** -- a direct session call cannot
   re-enter the dispatcher, so there is no recursion to bound.
 * **(4) Per-sub-op param validation goes away** -- for a
   code-constructed request body this is the point, not a loss:
   re-validating a hand-built vmomi body against a persisted spec
-  schema is the schema-drift defect the two-world model (Goal #2247)
-  exists to remove.
-* **(1) Audit-tree linkage** collapses to the top-level op's own
-  audit row (the row a forensic query reads anyway); the per-sub-op
+  schema is the schema-drift defect the two-world model exists to
+  remove.
+* **(1) Audit-tree linkage** collapses to the top-level composite op's
+  own audit row (the row a forensic query reads anyway); the per-sub-op
   child rows disappear.
 * **(3) Per-sub-op policy-gate + broadcast is evaded** -- acceptable
   for **read** composites (the top-level op is already gated), but
   **load-bearing for write** composites whose sub-ops may be
-  approval-gated. Migrating a write composite to the direct path must
-  first resolve how the top-level policy/approval gate still covers
-  the now-internal writes (Initiative #2249, the property-3 question).
+  approval-gated, so the write composites keep ``dispatch_child``.
+  Migrating a write composite to the direct path must first resolve how
+  the top-level policy/approval gate still covers the now-internal
+  writes (Initiative #2249, the property-3 question).
+
+Error handling
+--------------
+
+A load-bearing sub-op (the datastore listing, a per-datastore detail
+read, a cluster/DRS read, an event/perf query) lets an
+:exc:`httpx.HTTPError` propagate: the dispatcher's outer exception
+branch wraps it into a ``connector_error`` :class:`OperationResult` for
+the composite parent, whose ``str(exc)`` already carries the upstream
+status code + offending URL. Optional enrichment legs (per-datastore
+VM placement, per-host property read, vSAN health) degrade best-effort
+instead -- they catch the transport error, null the enriched fields,
+and record a ``read_note`` / ``enrichment_note`` rather than sinking
+the whole aggregation.
 
 Op_id contract for sub-ops
 --------------------------
@@ -117,17 +112,16 @@ shape verbatim.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import httpx
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.vmware_rest.composites._preflight import (
-    preflight_l2_dependencies,
-)
-from meho_backplane.operations.composite import DispatchChild
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
-    "CompositeSubOpError",
     "cluster_drs_recommendations_composite",
     "datastore_usage_composite",
     "event_tail_composite",
@@ -138,10 +132,13 @@ __all__ = [
 ]
 
 
-# Sub-op ids the handlers dispatch through. Centralised so the
-# registration tests can assert against the same constants without
-# re-spelling the paths.
-_CONNECTOR_ID = "vmware-rest-9.0"
+# Canonical ``METHOD:/path`` sub-op ids. Each handler splits the string
+# into its verb + spec-relative path, substitutes ``{var}`` path params,
+# and mounts the path onto the target's live ``/api`` (modern) / ``/rest``
+# (legacy/vcsim) prefix for the direct session call (see
+# :func:`_read_sub_op`). Centralised so the ingest-reconcile acceptance
+# guard can assert the composite hits the same canonical paths the vCenter
+# catalog would emit.
 _OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 _OP_GET_CLUSTER_DRS = "GET:/vcenter/cluster/{cluster}/drs"
 _OP_POST_QUERY_EVENTS = "POST:/EventManager/{moId}/QueryEvents"
@@ -198,26 +195,15 @@ _OP_VSAN_QUERY_HEALTH_SUMMARY = (
 _VSAN_CLUSTER_HEALTH_SYSTEM_MOID = "vsan-cluster-health-system"
 _CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
 
-# Composite op_ids -- used by the preflight cache key. Centralised here
-# so the test-side coverage assertion (every registered composite has
-# both a sub-op_id tuple and a preflight-cache-key constant) can read
-# them by name rather than re-spelling.
-_COMPOSITE_OP_ID_CLUSTER_DRS_RECS = "vmware.composite.cluster.drs_recommendations"
-_COMPOSITE_OP_ID_EVENT_TAIL = "vmware.composite.event.tail"
-_COMPOSITE_OP_ID_PERFORMANCE_SUMMARY = "vmware.composite.performance.summary"
-_COMPOSITE_OP_ID_DATASTORE_USAGE = "vmware.composite.datastore.usage"
-_COMPOSITE_OP_ID_NETWORK_PORTGROUP_AUDIT = "vmware.composite.network.portgroup.audit"
-_COMPOSITE_OP_ID_HOST_NETWORK_UPLINKS = "vmware.composite.host.network_uplinks"
-_COMPOSITE_OP_ID_HOST_VSAN_HEALTH = "vmware.composite.host.vsan_health"
-
-# Per-composite sub-op-id tuples consumed by the L2 pre-flight check
-# (G0.14-T10 / #1151). Each tuple lists the L2 raw-REST sub-ops the
-# composite dispatches against; the pre-flight helper walks them
-# against ``endpoint_descriptor`` before any ``dispatch_child`` call so
-# a missing-L2 deployment surfaces as a structured
-# ``composite_l2_missing`` error rather than a mid-flight ``unknown_op``
-# from a sub-op call. See ``_preflight.py`` for the design rationale
-# (Option B / lazy pre-resolve).
+# Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
+# vi-json sub-ops the composite issues directly on the connector
+# session. Pre-#2253 these fed the L2 pre-flight check that guarded a
+# missing catalog ingest; the direct-session migration removed that
+# coupling (the composites no longer need ingested descriptor rows), so
+# the tuples now serve as the canonical sub-op-path manifest the
+# ingest-reconcile acceptance guard
+# (``tests/acceptance/test_portgroup_audit_op_id_reconcile.py``) checks
+# against the vCenter spec.
 _SUB_OPS_CLUSTER_DRS_RECS: tuple[str, ...] = (
     _OP_GET_CLUSTER,
     _OP_GET_CLUSTER_DRS,
@@ -262,105 +248,48 @@ def _unwrap_value(payload: Any) -> Any:
     return payload
 
 
-def _describe_sub_op_failure(result: OperationResult) -> str:
-    """Render the most diagnostic line a failed sub-op result carries.
+async def _read_sub_op(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    op_id: str,
+    *,
+    path_params: dict[str, Any] | None = None,
+    query: dict[str, Any] | None = None,
+    body: Any = None,
+) -> Any:
+    """Issue one composite sub-call directly on the connector's session.
 
-    The dispatcher's structured-error builders (``operations/_errors.py``)
-    put different fields on a sub-op's ``extras`` depending on the failure
-    class:
+    Splits the canonical ``METHOD:/path`` *op_id* into its verb + spec-
+    relative path, substitutes any ``{var}`` path params, mounts the path
+    onto *target*'s live ``/api`` (modern) or ``/rest`` (legacy/vcsim)
+    prefix via :meth:`VmwareRestConnector.mount_op_path`, and dispatches
+    through the connector's own authenticated session:
+    :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._get_json`
+    for ``GET`` (tenacity-retried, idempotent) or
+    :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._post_json`
+    for the vi-json ``POST`` methods. No ``endpoint_descriptor`` lookup,
+    so the sub-call works on a fresh boot with zero catalog ingest.
 
-    * An upstream ``403`` / ``422`` / ``401`` / ``440`` lands a structured
-      ``http_status`` plus the upstream's own ``upstream_message`` -- the
-      single most useful diagnostic line.
-    * Every other upstream status (``400``, ``404``, ``5xx`` ...) falls
-      through to the generic ``connector_error`` builder, which keeps the
-      stringified ``httpx.HTTPStatusError`` -- ``"Client error '400 Bad
-      Request' for url 'https://.../api/vcenter/vm?filter.datastores=...'"``
-      -- under ``exception_message``. That string already carries the
-      status code *and* the offending URL, so surfacing it is what the
-      ``filter.datastores`` 400 (#1908) needed.
+    ``path_params`` substitutes the ``{var}`` placeholders (vCenter moids
+    are bare ``[A-Za-z0-9-]`` tokens, so a plain ``str.format`` matches the
+    RFC6570 simple-expansion the ingested path did). ``query`` is the
+    GET query-string bucket (``filter.*``); ``body`` is the vi-json POST
+    method-argument object (moid excluded -- it rides the path).
 
-    Prefer the structured ``http_status`` + ``upstream_message`` when the
-    builder extracted them; otherwise fall back to the capped
-    ``exception_message``; otherwise the bare ``error`` summary. The detail
-    is appended to ``error`` only when it adds information beyond it.
+    Returns the raw parsed JSON (``value``-envelope handling stays with
+    the caller's :func:`_unwrap_value`). Transport / status failures raise
+    :exc:`httpx.HTTPError`; load-bearing callers let it propagate (the
+    dispatcher's outer branch wraps it as ``connector_error`` for the
+    composite parent, whose ``str(exc)`` carries the upstream status code
+    + offending URL), best-effort callers catch it.
     """
-    extras = result.extras
-    http_status = extras.get("http_status")
-    upstream_message = extras.get("upstream_message")
-    detail = extras.get("exception_message")
-    parts: list[str] = []
-    if result.error:
-        parts.append(result.error)
-    if http_status is not None:
-        status_clause = f"HTTP {http_status}"
-        if isinstance(upstream_message, str) and upstream_message.strip():
-            status_clause = f"{status_clause}: {upstream_message}"
-        parts.append(status_clause)
-    elif isinstance(detail, str) and detail.strip() and detail != result.error:
-        parts.append(detail)
-    if not parts:
-        parts.append("<no error message>")
-    return " -- ".join(parts)
-
-
-class CompositeSubOpError(RuntimeError):
-    """A composite sub-op returned a non-OK :class:`OperationResult`.
-
-    Raised by :func:`_require_ok` when a *load-bearing* sub-op fails (the
-    datastore listing, a per-datastore detail read, an event/perf query).
-    The dispatcher's outer exception branch wraps the raised exception
-    into a ``connector_error`` :class:`OperationResult` for the composite
-    parent (``operations/_errors.py::result_connector_error``), which
-    records ``type(exc).__name__`` and the capped ``str(exc)`` under the
-    parent's ``extras``.
-
-    The pre-#1908 shape raised a bare :class:`RuntimeError` whose message
-    stopped at ``status='error'`` plus the sub-op's terse ``error``
-    summary (``connector_error: HTTPStatusError``) -- the actual status
-    code and offending URL only showed when the operator replayed the
-    sub-op by hand. This class threads the sub-op's structured failure
-    (``op_id`` / ``status`` / ``error`` / ``extras``) through as
-    attributes *and* folds the most diagnostic line
-    (:func:`_describe_sub_op_failure` -- a structured ``http_status`` +
-    upstream message, or the stringified ``HTTPStatusError`` carrying the
-    status + URL) into ``str(self)`` so it lands in the composite parent's
-    ``extras["exception_message"]`` rather than being lost.
-
-    The ``returned status='<status>'`` clause is preserved verbatim so
-    existing consumers that string-match it keep working.
-    """
-
-    def __init__(self, result: OperationResult) -> None:
-        self.op_id = result.op_id
-        self.status = result.status
-        self.sub_op_error = result.error
-        self.sub_op_extras = dict(result.extras)
-        super().__init__(
-            f"composite sub-op {result.op_id!r} returned status="
-            f"{result.status!r}: {_describe_sub_op_failure(result)}"
-        )
-
-
-def _require_ok(result: OperationResult) -> Any:
-    """Return :attr:`OperationResult.result` or raise on a non-OK status.
-
-    The composite handlers fail loudly when a *load-bearing* sub-op errors
-    -- a swallowed error would silently produce a malformed aggregation.
-    The dispatcher's outer exception branch wraps the raised
-    :class:`CompositeSubOpError` into a ``connector_error``
-    :class:`OperationResult` for the composite parent, surfacing the
-    underlying sub-op's failure (status code + URL where the sub-op
-    carried them) on ``extras["exception_message"]``.
-
-    Optional enrichment legs (e.g. the per-datastore VM-placement lookup
-    in :func:`datastore_usage_composite`) must NOT route through this
-    helper -- they degrade best-effort instead of sinking the whole
-    composite.
-    """
-    if result.status != "ok":
-        raise CompositeSubOpError(result)
-    return result.result
+    method, _, path_template = op_id.partition(":")
+    path = path_template.format(**path_params) if path_params else path_template
+    mounted = await connector.mount_op_path(target, path, operator)
+    if method == "GET":
+        return await connector._get_json(target, mounted, operator=operator, params=query or None)
+    return await connector._post_json(target, mounted, operator=operator, json=body)
 
 
 async def cluster_drs_recommendations_composite(
@@ -368,13 +297,13 @@ async def cluster_drs_recommendations_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
 ) -> dict[str, Any]:
     """Read cluster summary + DRS state in one composite call.
 
     Op-id: ``vmware.composite.cluster.drs_recommendations``.
 
-    Sub-ops dispatched (sequential):
+    Sub-ops read directly on the connector session (sequential):
 
     1. ``GET:/vcenter/cluster/{cluster}`` -- cluster summary (name,
        resource pool, default host, DRS-enabled flag).
@@ -398,28 +327,14 @@ async def cluster_drs_recommendations_composite(
     cluster summary plus the DRS config -- the format/aggregation is
     what differentiates the composite from a raw GET.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_CLUSTER_DRS_RECS,
-        sub_op_ids=_SUB_OPS_CLUSTER_DRS_RECS,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     cluster_moid = params["cluster"]
     include_history = bool(params.get("include_recommendations_history", False))
 
-    cluster_result = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_GET_CLUSTER,
-            params={"cluster": cluster_moid},
-        )
+    cluster_result = await _read_sub_op(
+        connector, target, operator, _OP_GET_CLUSTER, path_params={"cluster": cluster_moid}
     )
-    drs_result = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_GET_CLUSTER_DRS,
-            params={"cluster": cluster_moid},
-        )
+    drs_result = await _read_sub_op(
+        connector, target, operator, _OP_GET_CLUSTER_DRS, path_params={"cluster": cluster_moid}
     )
     out: dict[str, Any] = {
         "cluster": _unwrap_value(cluster_result),
@@ -446,13 +361,13 @@ async def event_tail_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
 ) -> dict[str, Any]:
     """Tail recent events via EventManager.QueryEvents (vi-json).
 
     Op-id: ``vmware.composite.event.tail``.
 
-    Sub-ops dispatched (sequential, single call):
+    Sub-op read directly on the connector session (single call):
 
     1. ``POST:/EventManager/{moId}/QueryEvents`` -- recent events. The
        vi-json call returns an array of event dicts; the handler caps
@@ -465,20 +380,10 @@ async def event_tail_composite(
         "moId": <str>, "max_events_applied": <int>}``. ``count`` is
         the post-cap length so operators can detect truncation.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_EVENT_TAIL,
-        sub_op_ids=_SUB_OPS_EVENT_TAIL,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     mo_id = params.get("moId", "EventManager")
     max_events = int(params.get("max_events", 100))
-    raw = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_POST_QUERY_EVENTS,
-            params={"moId": mo_id},
-        )
+    raw = await _read_sub_op(
+        connector, target, operator, _OP_POST_QUERY_EVENTS, path_params={"moId": mo_id}
     )
     events = _unwrap_value(raw)
     if not isinstance(events, list):
@@ -502,13 +407,13 @@ async def performance_summary_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
 ) -> dict[str, Any]:
     """Summarise performance metrics for one entity via PerformanceManager (vi-json).
 
     Op-id: ``vmware.composite.performance.summary``.
 
-    Sub-ops dispatched (sequential):
+    Sub-ops read directly on the connector session (sequential):
 
     1. ``POST:/PerformanceManager/{moId}/QueryAvailablePerfMetric`` --
        discover available counter IDs for the target entity.
@@ -527,24 +432,25 @@ async def performance_summary_composite(
     gets a complete snapshot. A counter-curation flag (e.g.
     ``counter_ids``) is an explicit v0.2.next concern per the issue
     body's *Out of scope* section.
+
+    The vi-json method arguments (``entity``, ``interval_seconds``)
+    become the flat JSON request body; the ``moId`` targets the
+    PerformanceManager singleton in the path -- the same method-args-as-
+    body shape the ``vmware.host.usage`` typed op sends for
+    RetrievePropertiesEx.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_PERFORMANCE_SUMMARY,
-        sub_op_ids=_SUB_OPS_PERFORMANCE_SUMMARY,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     entity_moid = params["entity_moid"]
     perf_mgr_moid = params.get("perf_manager_moid", "PerfMgr")
     interval_s = int(params.get("interval_seconds", 20))
     max_samples = int(params.get("max_samples", 60))
 
-    available_raw = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_POST_QUERY_AVAILABLE_PERF_METRIC,
-            params={"moId": perf_mgr_moid, "entity": entity_moid},
-        )
+    available_raw = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_POST_QUERY_AVAILABLE_PERF_METRIC,
+        path_params={"moId": perf_mgr_moid},
+        body={"entity": entity_moid},
     )
     available = _unwrap_value(available_raw)
     if not isinstance(available, list):
@@ -554,16 +460,13 @@ async def performance_summary_composite(
             f"got {type(available).__name__}"
         )
 
-    samples_raw = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_POST_QUERY_PERF,
-            params={
-                "moId": perf_mgr_moid,
-                "entity": entity_moid,
-                "interval_seconds": interval_s,
-            },
-        )
+    samples_raw = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_POST_QUERY_PERF,
+        path_params={"moId": perf_mgr_moid},
+        body={"entity": entity_moid, "interval_seconds": interval_s},
     )
     samples = _unwrap_value(samples_raw)
     if not isinstance(samples, list):
@@ -582,24 +485,22 @@ async def performance_summary_composite(
     }
 
 
-# Pre-existing >100-line handler from G3.1-T5 #508; G0.14-T10 #1151
-# added a 6-line pre-flight call at the top and G0.27 #1908 made the
-# per-datastore VM-placement leg best-effort -- both extend an already
-# block-sized handler. Refactor (e.g. extracting the per-datastore row
-# builder) is out of scope here.
+# Pre-existing >100-line handler from G3.1-T5 #508; G0.27 #1908 made the
+# per-datastore VM-placement leg best-effort. Refactor (e.g. extracting
+# the per-datastore row builder) is out of scope here.
 # code-quality-allow: pre-existing G3.1-T5 #508 handler; #1908 best-effort enrichment only
 async def datastore_usage_composite(
     *,
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
 ) -> dict[str, Any]:
     """List datastores with capacity + free + VM placement summary.
 
     Op-id: ``vmware.composite.datastore.usage``.
 
-    Sub-ops dispatched (per-datastore, sequential):
+    Sub-ops read directly on the connector session (per-datastore, sequential):
 
     1. ``GET:/vcenter/datastore`` -- list every datastore (optionally
        narrowed via ``filter.names``).
@@ -640,24 +541,14 @@ async def datastore_usage_composite(
         describing the skipped enrichment; on success the row has no
         ``enrichment_note`` key.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_DATASTORE_USAGE,
-        sub_op_ids=_SUB_OPS_DATASTORE_USAGE,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     filter_names: list[str] = list(params.get("filter_names") or [])
 
-    listing_params: dict[str, Any] = {}
+    listing_query: dict[str, Any] = {}
     if filter_names:
-        listing_params["filter.names"] = filter_names
+        listing_query["filter.names"] = filter_names
 
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_DATASTORES,
-            params=listing_params,
-        )
+    listing = await _read_sub_op(
+        connector, target, operator, _OP_LIST_DATASTORES, query=listing_query
     )
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
@@ -676,12 +567,8 @@ async def datastore_usage_composite(
             # ``datastore``; absence is an upstream malformation. Skip
             # silently rather than abort the aggregation.
             continue
-        detail = _require_ok(
-            await dispatch_child(
-                connector_id=_CONNECTOR_ID,
-                op_id=_OP_GET_DATASTORE,
-                params={"datastore": ds_id},
-            )
+        detail = await _read_sub_op(
+            connector, target, operator, _OP_GET_DATASTORE, path_params={"datastore": ds_id}
         )
         detail_payload = _unwrap_value(detail)
         detail_capacity = (
@@ -711,15 +598,21 @@ async def datastore_usage_composite(
         # capacity/free/type read above already satisfies the
         # storage-usage use case, so a failure on the optional VM lookup
         # (e.g. a vCenter that 400s the ``filter.datastores`` query)
-        # nulls vm_count/vm_names and records why, rather than raising
-        # through ``_require_ok`` and sinking every datastore row.
-        vms_result = await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_VMS,
-            params={"filter.datastores": [ds_id]},
-        )
-        if vms_result.status == "ok":
-            vm_entries = _unwrap_value(vms_result.result)
+        # nulls vm_count/vm_names and records why, rather than
+        # propagating the transport error and sinking every datastore row.
+        try:
+            vms_raw = await _read_sub_op(
+                connector, target, operator, _OP_LIST_VMS, query={"filter.datastores": [ds_id]}
+            )
+        except httpx.HTTPError as exc:
+            row["vm_count"] = None
+            row["vm_names"] = None
+            row["enrichment_note"] = (
+                f"vm-placement enrichment skipped: sub-op {_OP_LIST_VMS!r} "
+                f"failed with {type(exc).__name__}: {exc}"
+            )
+        else:
+            vm_entries = _unwrap_value(vms_raw)
             if not isinstance(vm_entries, list):
                 vm_entries = []
             vm_names = [
@@ -729,35 +622,24 @@ async def datastore_usage_composite(
             ]
             row["vm_count"] = len(vm_names)
             row["vm_names"] = vm_names
-        else:
-            row["vm_count"] = None
-            row["vm_names"] = None
-            row["enrichment_note"] = (
-                f"vm-placement enrichment skipped: sub-op {_OP_LIST_VMS!r} "
-                f"returned status={vms_result.status!r}: "
-                f"{_describe_sub_op_failure(vms_result)}"
-            )
         aggregated.append(row)
     return {"datastores": aggregated}
 
 
-# Pre-existing >100-line handler from G3.1-T5 #508; G0.14-T10 #1151
-# added a 6-line pre-flight call at the top, pushing the diff-only
-# checker into block territory. Refactor is out of scope for T10
-# (the L2-dependency strategy).
-# code-quality-allow: pre-existing G3.1-T5 #508 handler, T10 added preflight only
+# Pre-existing >100-line handler from G3.1-T5 #508.
+# code-quality-allow: pre-existing G3.1-T5 #508 handler
 async def network_portgroup_audit_composite(
     *,
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
 ) -> dict[str, Any]:
     """Audit distributed portgroups with parent DVS + connected-VM aggregation.
 
     Op-id: ``vmware.composite.network.portgroup.audit``.
 
-    Sub-ops dispatched:
+    Sub-ops read directly on the connector session:
 
     1. ``GET:/vcenter/network/distributed-switches`` -- list DVS
        entries (filtered to ``filter_dvs`` via the resource's
@@ -789,26 +671,14 @@ async def network_portgroup_audit_composite(
     expose a ``vds``/``distributed_switch`` field (e.g. a richer target
     or a future spec revision), ``None`` otherwise.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_NETWORK_PORTGROUP_AUDIT,
-        sub_op_ids=_SUB_OPS_NETWORK_PORTGROUP_AUDIT,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     filter_dvs = params.get("filter_dvs")
     include_disconnected = bool(params.get("include_disconnected_vms", False))
 
-    dvs_params: dict[str, Any] = {}
+    dvs_query: dict[str, Any] = {}
     if isinstance(filter_dvs, str):
-        dvs_params["filter.vdses"] = [filter_dvs]
+        dvs_query["filter.vdses"] = [filter_dvs]
 
-    dvs_listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_DVS,
-            params=dvs_params,
-        )
-    )
+    dvs_listing = await _read_sub_op(connector, target, operator, _OP_LIST_DVS, query=dvs_query)
     dvs_entries = _unwrap_value(dvs_listing)
     if not isinstance(dvs_entries, list):
         dvs_entries = []
@@ -828,15 +698,9 @@ async def network_portgroup_audit_composite(
     # standalone distributed-portgroup list endpoint. ``filter_dvs`` has
     # no analogue on this FilterSpec, so it is deliberately not threaded
     # in here (it scopes the DVS index above instead).
-    pg_params: dict[str, Any] = {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP]}
+    pg_query: dict[str, Any] = {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP]}
 
-    pg_listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_NETWORK,
-            params=pg_params,
-        )
-    )
+    pg_listing = await _read_sub_op(connector, target, operator, _OP_LIST_NETWORK, query=pg_query)
     pg_entries = _unwrap_value(pg_listing)
     if not isinstance(pg_entries, list):
         raise RuntimeError(
@@ -851,19 +715,13 @@ async def network_portgroup_audit_composite(
         pg_id = entry.get("network") or entry.get("portgroup")
         if not isinstance(pg_id, str):
             continue
-        vm_params: dict[str, Any] = {"filter.networks": [pg_id]}
+        vm_query: dict[str, Any] = {"filter.networks": [pg_id]}
         if not include_disconnected:
             # vSphere REST accepts a power-state filter; the
             # ``include_disconnected`` flag toggles it. Default is
             # active VMs only.
-            vm_params["filter.power_states"] = ["POWERED_ON"]
-        vms = _require_ok(
-            await dispatch_child(
-                connector_id=_CONNECTOR_ID,
-                op_id=_OP_LIST_VMS,
-                params=vm_params,
-            )
-        )
+            vm_query["filter.power_states"] = ["POWERED_ON"]
+        vms = await _read_sub_op(connector, target, operator, _OP_LIST_VMS, query=vm_query)
         vm_entries = _unwrap_value(vms)
         if not isinstance(vm_entries, list):
             vm_entries = []
@@ -977,16 +835,18 @@ def _extract_host_network_props(retrieve_result: Any) -> tuple[list[Any], list[A
     )
 
 
-def _build_retrieve_properties_params(host_moid: str) -> dict[str, Any]:
-    """Build the ``RetrievePropertiesEx`` specSet for one host's network config.
+def _build_retrieve_properties_body(host_moid: str) -> dict[str, Any]:
+    """Build the ``RetrievePropertiesEx`` request body for one host's network config.
 
     A single ``PropertyFilterSpec`` scoped directly to the host object
     (no ContainerView / TraversalSpec) requesting the two network
-    config property paths. ``moId`` targets the ``propertyCollector``
-    singleton.
+    config property paths. The ``propertyCollector`` singleton moId
+    rides the request path (:data:`_OP_RETRIEVE_PROPERTIES`), so the
+    body is just the ``specSet`` + ``options`` method arguments -- the
+    VI-JSON ``RetrievePropertiesExRequestType`` shape the
+    ``vmware.host.usage`` typed op sends.
     """
     return {
-        "moId": _PROPERTY_COLLECTOR_MOID,
         "specSet": [
             {
                 "propSet": [
@@ -1006,9 +866,11 @@ def _build_retrieve_properties_params(host_moid: str) -> dict[str, Any]:
 
 
 async def _build_host_uplink_row(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
     host_id: str,
     host_name: Any,
-    dispatch_child: DispatchChild,
 ) -> dict[str, Any]:
     """Build one host row: identity + best-effort pnic / proxy-switch detail.
 
@@ -1018,25 +880,28 @@ async def _build_host_uplink_row(
     why (``read_note``) rather than sinking the whole composite.
     """
     row: dict[str, Any] = {"id": host_id, "name": host_name}
-    props_result = await dispatch_child(
-        connector_id=_CONNECTOR_ID,
-        op_id=_OP_RETRIEVE_PROPERTIES,
-        params=_build_retrieve_properties_params(host_id),
-    )
-    if props_result.status == "ok":
-        raw_pnics, raw_proxy_switches = _extract_host_network_props(props_result.result)
-        row["pnics"] = [_parse_pnic(p) for p in raw_pnics if isinstance(p, dict)]
-        row["proxy_switches"] = [
-            _parse_proxy_switch(ps) for ps in raw_proxy_switches if isinstance(ps, dict)
-        ]
-    else:
+    try:
+        props_result = await _read_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_RETRIEVE_PROPERTIES,
+            path_params={"moId": _PROPERTY_COLLECTOR_MOID},
+            body=_build_retrieve_properties_body(host_id),
+        )
+    except httpx.HTTPError as exc:
         row["pnics"] = None
         row["proxy_switches"] = None
         row["read_note"] = (
             f"host-network property read skipped: sub-op "
-            f"{_OP_RETRIEVE_PROPERTIES!r} returned status="
-            f"{props_result.status!r}: {_describe_sub_op_failure(props_result)}"
+            f"{_OP_RETRIEVE_PROPERTIES!r} failed with {type(exc).__name__}: {exc}"
         )
+        return row
+    raw_pnics, raw_proxy_switches = _extract_host_network_props(props_result)
+    row["pnics"] = [_parse_pnic(p) for p in raw_pnics if isinstance(p, dict)]
+    row["proxy_switches"] = [
+        _parse_proxy_switch(ps) for ps in raw_proxy_switches if isinstance(ps, dict)
+    ]
     return row
 
 
@@ -1045,13 +910,13 @@ async def host_network_uplinks_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
 ) -> dict[str, Any]:
     """Per host: physical NICs (link state + speed) and their proxy-switch uplinks.
 
     Op-id: ``vmware.composite.host.network_uplinks``.
 
-    Sub-ops dispatched:
+    Sub-ops read directly on the connector session:
 
     1. ``GET:/vcenter/host`` -- list every host (optionally narrowed via
        ``filter_hosts``). Load-bearing: a failure here sinks the
@@ -1085,25 +950,13 @@ async def host_network_uplinks_composite(
         ``proxy_switches`` are ``None`` and the row carries a
         ``read_note``.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_HOST_NETWORK_UPLINKS,
-        sub_op_ids=_SUB_OPS_HOST_NETWORK_UPLINKS,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     filter_hosts: list[str] = list(params.get("filter_hosts") or [])
 
-    listing_params: dict[str, Any] = {}
+    listing_query: dict[str, Any] = {}
     if filter_hosts:
-        listing_params["filter.hosts"] = filter_hosts
+        listing_query["filter.hosts"] = filter_hosts
 
-    listing = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_HOSTS,
-            params=listing_params,
-        )
-    )
+    listing = await _read_sub_op(connector, target, operator, _OP_LIST_HOSTS, query=listing_query)
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
         raise RuntimeError(
@@ -1120,7 +973,9 @@ async def host_network_uplinks_composite(
             # vSphere REST returns the moid under ``host``; absence is an
             # upstream malformation -- skip rather than abort.
             continue
-        aggregated.append(await _build_host_uplink_row(host_id, entry.get("name"), dispatch_child))
+        aggregated.append(
+            await _build_host_uplink_row(connector, target, operator, host_id, entry.get("name"))
+        )
     return {"hosts": aggregated}
 
 
@@ -1164,18 +1019,17 @@ def _parse_vsan_health_group(group: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _build_vsan_query_health_params(cluster_moid: str) -> dict[str, Any]:
-    """Build the ``VsanQueryVcClusterHealthSummary`` argument set for one cluster.
+def _build_vsan_query_health_body(cluster_moid: str) -> dict[str, Any]:
+    """Build the ``VsanQueryVcClusterHealthSummary`` request body for one cluster.
 
-    ``moId`` targets the ``vsan-cluster-health-system`` singleton on the
-    ``/vsanHealth`` vmomi endpoint; ``cluster`` carries the target
-    cluster's MoRef (a ``ClusterComputeResource``). Every other
-    parameter of the method (``includeObjUuids`` / ``fields`` / …) is
-    optional and left to the health service's defaults so the read
-    returns the full summary.
+    The ``vsan-cluster-health-system`` singleton moId rides the request
+    path (:data:`_OP_VSAN_QUERY_HEALTH_SUMMARY`); the body carries the
+    method's ``cluster`` argument -- the target cluster's MoRef (a
+    ``ClusterComputeResource``). Every other parameter of the method
+    (``includeObjUuids`` / ``fields`` / …) is optional and left to the
+    health service's defaults so the read returns the full summary.
     """
     return {
-        "moId": _VSAN_CLUSTER_HEALTH_SYSTEM_MOID,
         "cluster": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid},
     }
 
@@ -1185,13 +1039,13 @@ async def host_vsan_health_composite(
     operator: Operator,
     target: Any,
     params: dict[str, Any],
-    dispatch_child: DispatchChild,
+    connector: VmwareRestConnector,
 ) -> dict[str, Any]:
     """Per cluster: vSAN health-test groups + overall health status.
 
     Op-id: ``vmware.composite.host.vsan_health``.
 
-    Sub-ops dispatched:
+    Sub-op read directly on the connector session:
 
     1. ``POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary``
        against the ``vsan-cluster-health-system`` singleton, scoped to
@@ -1201,7 +1055,7 @@ async def host_vsan_health_composite(
        ``/vsanHealth`` endpoint that rejects the vi-json call, a
        transient auth expiry) the summary is returned with ``groups`` /
        ``overall_health`` set to ``null`` and a ``read_note`` recording
-       why, rather than raising through ``_require_ok``.
+       why, rather than propagating the transport error.
 
     vSAN health is the one read the plain vSphere Automation REST
     surface cannot reproduce: the health-test-group / overall-status
@@ -1222,36 +1076,33 @@ async def host_vsan_health_composite(
         and ``groups`` are ``null`` and the payload carries a
         ``read_note``.
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_HOST_VSAN_HEALTH,
-        sub_op_ids=_SUB_OPS_HOST_VSAN_HEALTH,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
     cluster_moid = params["cluster"]
 
     out: dict[str, Any] = {"cluster": cluster_moid}
-    health_result = await dispatch_child(
-        connector_id=_CONNECTOR_ID,
-        op_id=_OP_VSAN_QUERY_HEALTH_SUMMARY,
-        params=_build_vsan_query_health_params(cluster_moid),
-    )
-    if health_result.status == "ok":
-        summary = _unwrap_value(health_result.result)
-        raw_groups = summary.get("groups") if isinstance(summary, dict) else None
-        overall = summary.get("overallHealth") if isinstance(summary, dict) else None
-        out["overall_health"] = overall
-        out["groups"] = (
-            [_parse_vsan_health_group(g) for g in raw_groups if isinstance(g, dict)]
-            if isinstance(raw_groups, list)
-            else []
+    try:
+        health_result = await _read_sub_op(
+            connector,
+            target,
+            operator,
+            _OP_VSAN_QUERY_HEALTH_SUMMARY,
+            path_params={"moId": _VSAN_CLUSTER_HEALTH_SYSTEM_MOID},
+            body=_build_vsan_query_health_body(cluster_moid),
         )
-    else:
+    except httpx.HTTPError as exc:
         out["overall_health"] = None
         out["groups"] = None
         out["read_note"] = (
             f"vsan health-service read skipped: sub-op "
-            f"{_OP_VSAN_QUERY_HEALTH_SUMMARY!r} returned status="
-            f"{health_result.status!r}: {_describe_sub_op_failure(health_result)}"
+            f"{_OP_VSAN_QUERY_HEALTH_SUMMARY!r} failed with {type(exc).__name__}: {exc}"
         )
+        return out
+    summary = _unwrap_value(health_result)
+    raw_groups = summary.get("groups") if isinstance(summary, dict) else None
+    overall = summary.get("overallHealth") if isinstance(summary, dict) else None
+    out["overall_health"] = overall
+    out["groups"] = (
+        [_parse_vsan_health_group(g) for g in raw_groups if isinstance(g, dict)]
+        if isinstance(raw_groups, list)
+        else []
+    )
     return out

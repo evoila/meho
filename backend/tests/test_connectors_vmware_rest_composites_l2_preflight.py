@@ -46,14 +46,10 @@ from uuid import UUID
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites import _preflight
 from meho_backplane.connectors.vmware_rest.composites._preflight import (
     preflight_l2_dependencies,
     reset_preflight_cache,
-)
-from meho_backplane.connectors.vmware_rest.composites._read import (
-    datastore_usage_composite,
 )
 from meho_backplane.operations import (
     CompositeL2DependencyDisabled,
@@ -276,60 +272,13 @@ async def test_preflight_cache_per_composite_keys(monkeypatch: pytest.MonkeyPatc
     assert calls == ["GET:/vcenter/datastore", "GET:/vcenter/datastore"]
 
 
-# ---------------------------------------------------------------------------
-# Composite handler integration
-# ---------------------------------------------------------------------------
-
-
-class _UnusedDispatchChild:
-    """``dispatch_child`` stand-in that asserts it's never called.
-
-    The pre-flight should raise *before* any sub-op dispatch fires --
-    this stand-in fails the test if the composite proceeds past
-    pre-flight when a sub-op is missing.
-    """
-
-    async def __call__(
-        self,
-        *,
-        connector_id: str,
-        op_id: str,
-        params: dict[str, Any],
-        target: Any = None,
-    ) -> OperationResult:
-        raise AssertionError(
-            f"dispatch_child should never be called when preflight failed; "
-            f"got call for op_id={op_id!r}"
-        )
-
-
-@pytest.mark.asyncio
-async def test_datastore_usage_composite_raises_when_l2_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The composite handler raises before any ``dispatch_child`` call.
-
-    Acceptance criterion (issue body): the chosen option's pre-flight
-    must produce a structured error (here: the
-    :class:`CompositeL2DependencyMissing` exception) listing the missing
-    sub-ops + the catalog command before the composite touches its
-    sub-op chain.
-    """
-    _patch_lookup(monkeypatch, present=set())  # no L2 ops registered
-    with pytest.raises(CompositeL2DependencyMissing) as exc_info:
-        await datastore_usage_composite(
-            operator=_make_operator(),
-            target=object(),
-            params={},
-            dispatch_child=_UnusedDispatchChild(),
-        )
-    # Every L2 sub-op the composite declares lands in the missing set.
-    assert set(exc_info.value.missing_op_ids) == {
-        "GET:/vcenter/datastore",
-        "GET:/vcenter/datastore/{datastore}",
-        "GET:/vcenter/vm",
-    }
-    assert exc_info.value.catalog_command == "meho connector ingest --catalog vmware/9.0"
+# NOTE: the read composites migrated to direct-session dispatch (#2253),
+# so they no longer call ``preflight_l2_dependencies`` -- the pre-flight
+# helper is now exercised only by the write composites (which keep
+# ``dispatch_child``) and the direct helper-level tests above. The former
+# ``test_datastore_usage_composite_raises_when_l2_missing`` was removed
+# with that migration: the read composites deliberately work with zero
+# catalog ingest, which is the defect class #2253 closes.
 
 
 # ---------------------------------------------------------------------------

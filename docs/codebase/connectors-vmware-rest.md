@@ -71,6 +71,40 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
+- **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
+  `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
+  typed op is a **bound method** on `VmwareRestConnector`
+  (`host_usage(self, operator, target, params)`) that the dispatcher
+  binds to the resolved connector instance and calls directly — no
+  `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
+  therefore works on a **fresh boot with zero catalog ingest**, which a
+  composite cannot (a composite's `dispatch_child` legs resolve against
+  `endpoint_descriptor` rows that only exist post-ingest). The metadata
+  lives in a frozen `VmwareTypedOp` dataclass (mirroring
+  `argocd/ops.py::ArgoCdOp`); the implementation
+  (`host_usage_impl(connector, operator, target, params)`) lists hosts
+  via `GET /vcenter/host` then, per host, reads `summary.quickStats`
+  (CPU/memory load, MHz/MB), `summary.hardware` (capacity totals:
+  `cpu_mhz` per core, core/package/thread counts, `memory_size_bytes`),
+  and `runtime.inMaintenanceMode` through a direct PropertyCollector
+  `RetrievePropertiesEx` on the connector session. Both calls are routed
+  through `mount_op_path` so they land on `/api` (modern) or `/rest`
+  (legacy/vcsim). The per-host property read is best-effort (a failed
+  read nulls the detail with a `read_note`, mirroring
+  `host_network_uplinks_composite`); the host listing is load-bearing.
+  This op is why the plain REST host summary (liveness only) is not
+  enough — `overallCpuUsage` / `overallMemoryUsage` live on the WS-API
+  `HostSystem`, not the REST resource. It establishes the vmware typed-op
+  pattern future per-host/per-VM typed reads reuse.
+- **`register_vmware_typed_operations`** (`typed_ops.py`) — async
+  registrar wrapper queued onto `run_typed_op_registrars` (via
+  `register_typed_op_registrar` in the package `__init__`, alongside the
+  composite registrar). Walks `VMWARE_TYPED_OPS`, resolves each op's
+  `handler_attr` to the connector bound method, looks the group's
+  curated `when_to_use` blurb up in `VMWARE_TYPED_WHEN_TO_USE_BY_GROUP`
+  (required for a grouped typed op), and upserts each row into
+  `endpoint_descriptor` with `source_kind="typed"` via
+  `register_typed_operation`.
 - **`VsphereTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
   `host`, `port`, `secret_ref`, `auth_model`. Replaced by the concrete
@@ -107,17 +141,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `__init__` calls
    `register_typed_op_registrar(register_vmware_composite_operations)`
    to queue the composite-row upsert onto the lifespan's registrar
-   list.
+   list. The package `__init__` then queues
+   `register_typed_op_registrar(register_vmware_typed_operations)`
+   (`#2257`) for the typed-op rows.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar -- including the composite one -- and upserts the
-   15 `vmware.composite.*` rows into `endpoint_descriptor` with
+   queued registrar and upserts: the 15 `vmware.composite.*` rows with
    `source_kind="composite"` (7 reads with `safety_level="safe"` +
    `requires_approval=False`; 8 writes with `safety_level="dangerous"`
-   + `requires_approval=True`).
+   + `requires_approval=True`), plus the `vmware.host.usage` row with
+   `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
+   The typed row resolves and dispatches with **zero catalog ingest** —
+   it depends on no ingested descriptor.
 
 ### Per-target session
 

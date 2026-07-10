@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — scheduler `fire_at` tick-quantization latency documented on the API schema (#2245)
+
+- **The scheduler's fire-time latency window is now part of the API contract,
+  not just an internal doc** (#2245). `ScheduledTriggerCreate.fire_at` and
+  `ScheduledTriggerRead.{fire_at,next_fire_at,last_fired_at}` gained OpenAPI
+  field descriptions stating that a requested fire time is a **floor, not an
+  exact dispatch instant**: the loop scans on a fixed grid every
+  `SCHEDULER_TICK_INTERVAL_SECONDS` (default 30 s, env-tunable 1–3600 s) and
+  fires on the first tick at or after the requested time, so dispatch can trail
+  it by up to one whole tick interval — and `last_fired_at` reads back
+  tick-aligned because it is stamped with the claiming tick, not the requested
+  time. This is the contract behind an operator-reported "~28 s delay" that was
+  pure grid quantization, not failure fallout (no backoff constant exists;
+  per-fire failure isolation already shipped in PR #1509 / v0.11.0). SLA-
+  sensitive deployments can lower the tick interval (floor 1 s) per deployment.
+  Consumer doc (`docs/codebase/scheduler.md`) and the generated CLI client
+  regenerated from the new descriptions; **no behavioral change**. (#2245)
+
 ### Fixed — crashed ingest no longer strands retry-blocking descriptor debris; `op_id_collision` names its remedy
 
 - **A crashed connector ingest now leaves zero persisted operations for the

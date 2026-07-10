@@ -104,6 +104,7 @@ __all__ = [
     "vm_create_composite",
     "vm_migrate_composite",
     "vm_power_bulk_composite",
+    "vm_power_composite",
     "vm_snapshot_revert_composite",
 ]
 
@@ -164,6 +165,22 @@ def _power_vm_op_id(action: str) -> str:
     return f"POST:/vcenter/vm/{{vm}}/power?action={action}"
 
 
+def _guest_power_vm_op_id(action: str) -> str:
+    """Build the per-action canonical op_id for ``POST:/vcenter/vm/{vm}/guest/power``.
+
+    The vAPI guest-power endpoint mediates a *soft* power transition through
+    VMware Tools: ``?action=shutdown`` asks the guest OS for a clean
+    shutdown, ``?action=reboot`` for a clean restart. Same action-in-the-path
+    keying vCenter uses for hard power (:func:`_power_vm_op_id`), so the op_id
+    round-trips through the ingest parser identically. Distinct from the hard
+    ``/power`` endpoint: guest verbs require running Tools and return
+    ``ServiceUnavailable`` (HTTP 503) when Tools is absent -- surfaced by the
+    single-VM handler as a typed ``tools_unavailable`` status rather than a
+    hang.
+    """
+    return f"POST:/vcenter/vm/{{vm}}/guest/power?action={action}"
+
+
 def _host_maintenance_op_id(action: str) -> str:
     """Build the per-action canonical op_id for ``PATCH:/vcenter/host/{host}/maintenance``.
 
@@ -185,6 +202,7 @@ _COMPOSITE_OP_ID_VM_CLONE = "vmware.composite.vm.clone"
 _COMPOSITE_OP_ID_VM_SNAPSHOT_REVERT = "vmware.composite.vm.snapshot.revert"
 _COMPOSITE_OP_ID_VM_MIGRATE = "vmware.composite.vm.migrate"
 _COMPOSITE_OP_ID_VM_POWER_BULK = "vmware.composite.vm.power.bulk"
+_COMPOSITE_OP_ID_VM_POWER = "vmware.composite.vm.power"
 _COMPOSITE_OP_ID_HOST_EVACUATE = "vmware.composite.host.evacuate"
 _COMPOSITE_OP_ID_HOST_DETACH_FROM_VDS = "vmware.composite.host.detach_from_vds"
 _COMPOSITE_OP_ID_CLUSTER_PATCH = "vmware.composite.cluster.patch"
@@ -198,6 +216,24 @@ _COMPOSITE_OP_ID_CLUSTER_PATCH = "vmware.composite.cluster.patch"
 # (``vmware.composite.*``) are listed for host.evacuate but are routed through
 # ``dispatch_child``, not the direct session.
 _POWER_ACTIONS: tuple[str, ...] = ("start", "stop", "suspend", "reset")
+
+# Single-VM ``vm.power`` operator-facing verb -> raw sub-op_id. Hard verbs
+# hit the ``/power`` endpoint (immediate, may lose in-guest state); the two
+# ``guest_*`` verbs hit ``/guest/power`` (Tools-mediated soft transition).
+# ``reset`` is the hard cycle; ``guest_reboot`` the clean one -- both are
+# offered so the approver picks the blast radius they intend.
+_SINGLE_POWER_VERB_OP_IDS: dict[str, str] = {
+    "on": _power_vm_op_id("start"),
+    "off": _power_vm_op_id("stop"),
+    "reset": _power_vm_op_id("reset"),
+    "guest_shutdown": _guest_power_vm_op_id("shutdown"),
+    "guest_reboot": _guest_power_vm_op_id("reboot"),
+}
+
+#: The ``vm.power`` verbs routed through VMware Tools (``/guest/power``). A
+#: failure on one of these is classified against the Tools state; a hard-power
+#: failure never is (a 503 there is not a Tools signal).
+_GUEST_POWER_VERBS: frozenset[str] = frozenset({"guest_shutdown", "guest_reboot"})
 _SUB_OPS_VM_CREATE: tuple[str, ...] = (
     _OP_LIST_FOLDERS,
     _OP_CREATE_VM,
@@ -222,6 +258,7 @@ _SUB_OPS_VM_POWER_BULK: tuple[str, ...] = (
     _OP_LIST_VMS,
     *(_power_vm_op_id(action) for action in _POWER_ACTIONS),
 )
+_SUB_OPS_VM_POWER: tuple[str, ...] = tuple(dict.fromkeys(_SINGLE_POWER_VERB_OP_IDS.values()))
 _SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
     _OP_LIST_VMS,
     _OP_COMPOSITE_VM_MIGRATE,
@@ -923,6 +960,107 @@ async def vm_power_bulk_composite(
         "results": results,
         "summary": {"ok": ok_count, "error": err_count},
         "aborted_on_failure": aborted,
+    }
+
+
+# ===========================================================================
+# vm.power (single VM)
+# ===========================================================================
+
+
+def _parse_vsphere_error(exc: httpx.HTTPError) -> tuple[int | None, str | None]:
+    """Best-effort ``(http_status, vsphere_error_type)`` from a sub-op fault.
+
+    vCenter error bodies carry a machine ``error_type`` (e.g.
+    ``SERVICE_UNAVAILABLE`` when Tools is down) alongside the HTTP status.
+    Only :class:`httpx.HTTPStatusError` carries a response; transport-level
+    faults (connect/read) surface ``(None, None)`` and are reported as a
+    generic error. Body parsing is defensive -- a non-JSON or
+    unexpectedly-shaped body yields a ``None`` error_type, never a raise.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None, None
+    status = exc.response.status_code
+    try:
+        body = exc.response.json()
+    except (ValueError, httpx.HTTPError):
+        return status, None
+    error_type = body.get("error_type") if isinstance(body, dict) else None
+    return status, error_type if isinstance(error_type, str) else None
+
+
+def _guest_tools_unavailable(status: int | None, error_type: str | None) -> bool:
+    """Whether a guest-power fault means VMware Tools is not running.
+
+    The vAPI guest-power operation returns ``ServiceUnavailable`` -- HTTP
+    503, ``error_type == "SERVICE_UNAVAILABLE"`` -- specifically when Tools
+    is not running, which is the state the operator needs surfaced (a soft
+    shutdown cannot proceed). Matching either signal keeps the classifier
+    robust to a deployment that returns the typed body without the 503, or
+    the 503 without a parseable body.
+    """
+    return status == 503 or error_type == "SERVICE_UNAVAILABLE"
+
+
+async def vm_power_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Apply one power verb to a single VM; approval-gated, typed failures.
+
+    Op-id: ``vmware.composite.vm.power``. Unlike the fan-out
+    :func:`vm_power_bulk_composite`, this acts on one operator-named VM moid
+    -- the ergonomics a one-VM incident action (a hung appliance) wants.
+    Five verbs: ``on`` / ``off`` / ``reset`` hit the hard ``/power``
+    endpoint; ``guest_shutdown`` / ``guest_reboot`` hit the Tools-mediated
+    ``/guest/power`` endpoint for a clean in-guest transition.
+
+    The single write is routed through the #2254 governance seam
+    (:func:`_write_sub_op`); a parked/denied gate returns the
+    :class:`OperationResult` verbatim and no power op fires. A soft verb
+    against a VM whose Tools are down fails *typed* -- ``status =
+    "tools_unavailable"`` with the Tools state echoed -- rather than hanging
+    or surfacing an opaque transport error, so the operator learns why the
+    clean shutdown could not run and can fall back to a hard ``off``.
+    """
+    vm_moid = params["vm"]
+    verb = params["verb"]
+    op_id = _SINGLE_POWER_VERB_OP_IDS[verb]
+    is_guest_verb = verb in _GUEST_POWER_VERBS
+
+    try:
+        gate, _ = await _write_sub_op(connector, target, operator, op_id, {"vm": vm_moid})
+    except httpx.HTTPError as exc:
+        status, error_type = _parse_vsphere_error(exc)
+        if is_guest_verb and _guest_tools_unavailable(status, error_type):
+            return {
+                "vm": vm_moid,
+                "verb": verb,
+                "status": "tools_unavailable",
+                "error": str(exc),
+                "error_type": error_type,
+                "guest_tools": "unavailable",
+            }
+        return {
+            "vm": vm_moid,
+            "verb": verb,
+            "status": "error",
+            "error": str(exc),
+            "error_type": error_type,
+            "guest_tools": "unavailable" if is_guest_verb else None,
+        }
+    if gate is not None:
+        return gate
+    return {
+        "vm": vm_moid,
+        "verb": verb,
+        "status": "ok",
+        "error": None,
+        "error_type": None,
+        "guest_tools": "ok" if is_guest_verb else None,
     }
 
 

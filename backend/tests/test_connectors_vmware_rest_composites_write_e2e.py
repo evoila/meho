@@ -259,7 +259,7 @@ def _seed_connector(recorder: _RecordingVmwareConnector) -> None:
 async def _bootstrap(
     recorder: _RecordingVmwareConnector, stub_embedding_service: AsyncMock
 ) -> None:
-    """Register the connector + all 13 composites and seed the recorder."""
+    """Register the connector + all 14 composites and seed the recorder."""
     _seed_connector(recorder)
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
 
@@ -296,6 +296,7 @@ _WRITE_COMPOSITES: dict[str, str] = {
     "vmware.composite.vm.clone": "vm.clone",
     "vmware.composite.vm.snapshot.revert": "vm.snapshot.revert",
     "vmware.composite.vm.migrate": "vm.migrate",
+    "vmware.composite.vm.power": "vm.power",
     "vmware.composite.vm.power.bulk": "vm.power.bulk",
     "vmware.composite.host.evacuate": "host.evacuate",
     "vmware.composite.host.detach_from_vds": "host.detach_from_vds",
@@ -325,6 +326,7 @@ def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
             "vm": "vm-1",
             "cluster": "domain-c1",
         },
+        "vmware.composite.vm.power": {"vm": "vm-1", "verb": "on"},
         "vmware.composite.vm.power.bulk": {"action": "start"},
         "vmware.composite.host.evacuate": {"host": "host-1"},
         "vmware.composite.host.detach_from_vds": {
@@ -353,6 +355,7 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
         },
         "vmware.composite.vm.snapshot.revert": {"/vcenter/vm/vm-1/snapshot": empty},
         "vmware.composite.vm.migrate": {"/vcenter/cluster/domain-c1/drs/recommendations": empty},
+        "vmware.composite.vm.power": {},
         "vmware.composite.vm.power.bulk": {"/vcenter/vm": empty},
         "vmware.composite.host.evacuate": {"/vcenter/vm": empty},
         "vmware.composite.host.detach_from_vds": {
@@ -365,15 +368,15 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
 
 
 # ===========================================================================
-# Guard: the write set is exactly the expected eight
+# Guard: the write set is exactly the expected nine
 # ===========================================================================
 
 
-def test_write_composite_set_is_the_expected_eight() -> None:
+def test_write_composite_set_is_the_expected_nine() -> None:
     """Pins the op_id set so a renamed / dropped composite can't shrink coverage."""
     registrar_write_op_ids = {f"vmware.composite.{name}" for name in _WRITE_COMPOSITES.values()}
     assert set(_WRITE_COMPOSITES) == registrar_write_op_ids
-    assert len(_WRITE_COMPOSITES) == 8
+    assert len(_WRITE_COMPOSITES) == 9
 
 
 # ===========================================================================
@@ -392,7 +395,7 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     """Each composite runs to a benign business status on the direct session.
 
     No ingested ``endpoint_descriptor`` rows exist in the catalog here — only
-    the 13 composite rows the registrar upserts. Reaching a business status
+    the 14 composite rows the registrar upserts. Reaching a business status
     (``created`` / ``no_recommendation`` / ``detached`` / ...) rather than a
     generic execution error proves every raw-REST sub-op resolved via the
     connector session, not a catalog lookup (the two-world / fresh-boot DoD).

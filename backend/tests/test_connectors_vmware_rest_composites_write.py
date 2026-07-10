@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 8 vmware-rest write-composite handler functions.
+"""Unit tests for the 9 vmware-rest write-composite handler functions.
 
 Post-#2256 the write composites dispatch their sub-ops **directly on the
 connector session** -- ``connector._get_json`` / ``connector._post_json``
@@ -55,6 +55,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_create_composite,
     vm_migrate_composite,
     vm_power_bulk_composite,
+    vm_power_composite,
     vm_snapshot_revert_composite,
 )
 
@@ -672,6 +673,142 @@ async def test_vm_power_bulk_gated_short_circuits(monkeypatch: pytest.MonkeyPatc
     assert out.status == "denied"
     # Only the listing GET hit the session; no power write executed.
     assert [c["method"] for c in conn.calls] == ["GET"]
+
+
+# ===========================================================================
+# vm.power (single VM)
+# ===========================================================================
+
+
+def _http_error_with_body(status: int, url: str, body: dict[str, Any]) -> httpx.HTTPStatusError:
+    """An ``httpx.HTTPStatusError`` whose response carries a JSON vCenter error body."""
+    request = httpx.Request("POST", url)
+    response = httpx.Response(status, json=body, request=request)
+    return httpx.HTTPStatusError(
+        f"Server error '{status}' for url '{url}'", request=request, response=response
+    )
+
+
+@pytest.mark.asyncio
+async def test_vm_power_hard_verb_happy_path(gate: _GateRecorder) -> None:
+    """A hard verb dispatches the mapped power op and reports ``ok`` (Tools not consulted)."""
+    conn = _RecordingConnector({"/api/vcenter/vm/vm-1/power?action=stop": {}})
+    out = await vm_power_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "verb": "off"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out == {
+        "vm": "vm-1",
+        "verb": "off",
+        "status": "ok",
+        "error": None,
+        "error_type": None,
+        "guest_tools": None,
+    }
+    assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}/power?action=stop"]
+    assert [c["method"] for c in conn.calls] == ["POST"]
+
+
+@pytest.mark.asyncio
+async def test_vm_power_guest_shutdown_happy_path(gate: _GateRecorder) -> None:
+    """A soft verb hits the guest-power endpoint and records ``guest_tools='ok'``."""
+    conn = _RecordingConnector({"/api/vcenter/vm/vm-1/guest/power?action=shutdown": {}})
+    out = await vm_power_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "verb": "guest_shutdown"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "ok"
+    assert out["guest_tools"] == "ok"
+    assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}/guest/power?action=shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_vm_power_guest_shutdown_tools_unavailable_is_typed(gate: _GateRecorder) -> None:
+    """Tools-down (HTTP 503 ServiceUnavailable) fails typed, surfacing the Tools state."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/guest/power?action=shutdown": _http_error_with_body(
+                503,
+                "https://vc/api/vcenter/vm/vm-1/guest/power?action=shutdown",
+                {
+                    "error_type": "SERVICE_UNAVAILABLE",
+                    "messages": [{"default_message": "no tools"}],
+                },
+            )
+        }
+    )
+    out = await vm_power_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "verb": "guest_shutdown"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "tools_unavailable"
+    assert out["guest_tools"] == "unavailable"
+    assert out["error_type"] == "SERVICE_UNAVAILABLE"
+    assert "503" in out["error"]
+
+
+@pytest.mark.asyncio
+async def test_vm_power_guest_reboot_non_tools_error_is_generic(gate: _GateRecorder) -> None:
+    """A non-Tools guest fault (e.g. VM suspended, HTTP 400) is a plain typed error."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/guest/power?action=reboot": _http_error_with_body(
+                400,
+                "https://vc/api/vcenter/vm/vm-1/guest/power?action=reboot",
+                {"error_type": "NOT_ALLOWED_IN_CURRENT_STATE"},
+            )
+        }
+    )
+    out = await vm_power_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "verb": "guest_reboot"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "error"
+    assert out["error_type"] == "NOT_ALLOWED_IN_CURRENT_STATE"
+    # Still a guest verb, so the Tools column reads 'unavailable' (the guest
+    # request did not complete), but it is not the tools_unavailable status.
+    assert out["guest_tools"] == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_vm_power_hard_verb_transport_error_is_generic(gate: _GateRecorder) -> None:
+    """A hard-verb fault never classifies as tools_unavailable and carries no Tools column."""
+    conn = _RecordingConnector(
+        {"/api/vcenter/vm/vm-1/power?action=start": _http_error(503, "https://vc/x")}
+    )
+    out = await vm_power_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "verb": "on"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "error"
+    assert out["guest_tools"] is None
+
+
+@pytest.mark.asyncio
+async def test_vm_power_gated_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An awaiting-approval gate returns the seam's result verbatim; no power op fires."""
+    op_id = "POST:/vcenter/vm/{vm}/power?action=reset"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _RecordingConnector({})
+    out = await vm_power_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "verb": "reset"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert conn.calls == []
 
 
 # ===========================================================================

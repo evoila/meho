@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` previews for the 8 vmware write composites.
+"""Park-time ``proposed_effect`` previews for the 9 vmware write composites.
 
 G0.22-T3 (#1608) acceptance criteria, under the post-#2256 direct-session
 model:
@@ -19,7 +19,7 @@ model:
    directly on the connector session (no ``dispatch_child``, no ingested
    descriptor), so the park-time preview works on a fresh boot with zero
    catalog ingest.
-4. All 8 write composites register a builder (4 live-read + 4 param
+4. All 9 write composites register a builder (4 live-read + 5 param
    echo); the wiring test pins the full set.
 
 Plus the #1628 follow-up: a *failed* live-read preview parks with the
@@ -68,6 +68,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.clone",
         "vmware.composite.vm.snapshot.revert",
         "vmware.composite.vm.migrate",
+        "vmware.composite.vm.power",
         "vmware.composite.vm.power.bulk",
         "vmware.composite.host.evacuate",
         "vmware.composite.host.detach_from_vds",
@@ -231,7 +232,7 @@ class _RecordingConnector:
 
 
 async def _bootstrap_registry(stub_embedding_service: AsyncMock) -> _RecordingConnector:
-    """Register the connector + 13 composites and seed the recording instance."""
+    """Register the connector + 14 composites and seed the recording instance."""
     register_connector_v2(
         product="vmware",
         version="9.0",
@@ -268,11 +269,11 @@ async def _park(
 
 
 # ===========================================================================
-# Wiring — all 8 write composites register a builder (criterion 4)
+# Wiring — all 9 write composites register a builder (criterion 4)
 # ===========================================================================
 
 
-def test_all_eight_write_composites_register_a_preview_builder() -> None:
+def test_all_nine_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
@@ -403,12 +404,23 @@ async def test_vm_migrate_preview_names_target_host_resolution() -> None:
     }
 
 
+async def test_vm_power_preview_names_the_hard_vs_soft_power_kind() -> None:
+    """The single-VM power echo surfaces the soft-vs-hard distinction to the approver."""
+    hard = await _write_preview._vm_power_preview(_make_preview_ctx({"vm": "vm-1", "verb": "off"}))
+    assert hard == {"vm": "vm-1", "verb": "off", "power_kind": "hard"}
+    soft = await _write_preview._vm_power_preview(
+        _make_preview_ctx({"vm": "vm-1", "verb": "guest_shutdown"})
+    )
+    assert soft == {"vm": "vm-1", "verb": "guest_shutdown", "power_kind": "guest"}
+
+
 async def test_echo_builders_decline_on_malformed_params() -> None:
     """Missing required params decline (→ identifier-only default), never raise."""
     assert await _write_preview._vm_create_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_clone_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_snapshot_revert_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_migrate_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._vm_power_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_power_bulk_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_evacuate_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_detach_from_vds_preview(_make_preview_ctx({})) is None

@@ -1109,6 +1109,56 @@ open to `succeeded` (a transient DB blip must not strand or degrade a
 completed pipeline). Regression coverage:
 `tests/test_operations_ingest_jobs.py`.
 
+#### Watchdog: a job always reaches a terminal state (#2275)
+
+The dispatchability postcondition and the `except BaseException`
+boundary only guarantee terminality for a pipeline that *returns or
+raises*. A pipeline that **never completes an await** — a starved
+`asyncio.to_thread` executor, a DB connection that never acquires, or a
+grouping LLM call pending on the Anthropic SDK's default 10-min-read ×
+2-retry ceiling (~30 min wall-clock) — left the job at `running` until a
+pod restart cleared the in-memory registry, while the identical *sync*
+request returned a clean 4xx. `run_ingest_job` now time-boxes the whole
+body — the pipeline call **and** the post-run dispatchability probe (a
+real `connector_exists` DB read whose own hang would strand the job if
+only the pipeline call were wrapped) — inside
+`async with asyncio.timeout(_INGEST_JOB_TIMEOUT_SECONDS)`. At the
+deadline the body is cancelled and `asyncio.timeout` re-raises
+`TimeoutError`, which the existing `except` routes to `failed`
+(`error_class="TimeoutError"`). The budget defaults to 30 min and is
+env-overridable via `INGEST_JOB_TIMEOUT_SECONDS` (parsed defensively — a
+malformed value falls back to the default with a warning rather than
+crashing the package at import). The guarantee is scoped precisely to
+the *job leg*: cancellation cannot interrupt an already-running
+`to_thread` OS thread (Python exposes no thread cancellation), so the
+status flips but that thread may linger until it returns.
+
+Two supporting bounds close the same wedge:
+
+* **LLM client bounds.** `build_anthropic_ingest_llm_client`
+  (`ingest/anthropic_client.py`) constructs the grouping
+  `AsyncAnthropic` with an explicit `timeout` + `max_retries`
+  (`_INGEST_LLM_TIMEOUT_SECONDS` = 120 s, `_INGEST_LLM_MAX_RETRIES` = 1)
+  instead of the SDK defaults, so a hung grouping call fails the request
+  fast rather than silently consuming the watchdog budget. The
+  fail-closed 503 contract for a missing key (#1386) is unchanged.
+* **Job-id log correlation.** `run_ingest_job` binds `ingest_job_id`
+  into structlog *contextvars* (`bound_contextvars`), not just a local
+  `_log.bind`. The pipeline binds its own `connector_id` logger and never
+  sees the job id, so before this a job-id-filtered log grep was
+  structurally blind to every pipeline event; the configured
+  `merge_contextvars` processor (`logging.py`) now stamps `ingest_job_id`
+  onto `ingestion_pipeline_start` &c. A future wedge is diagnosable from
+  those events plus a `py-spy` dump against the named
+  `ingest-job-<uuid>` task.
+
+Regression coverage: `tests/test_operations_ingest_jobs.py`
+(`test_wedged_pipeline_times_out_to_failed`,
+`test_wedged_dispatchability_probe_times_out_to_failed`,
+`test_pipeline_log_event_carries_ingest_job_id`) and
+`tests/test_operations_ingest_anthropic_client.py`
+(`test_factory_constructs_client_with_explicit_timeout_and_retries`).
+
 If `load_catalog()` raises `CatalogError` at listing time (only
 possible mid-test-monkeypatch or mid-reload — startup parse failures
 crash the lifespan), the helper degrades to the manual-mode

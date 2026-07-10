@@ -40,7 +40,7 @@ tenant + egress story the build-time grouping pass does not have today).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import structlog
 
@@ -59,6 +59,23 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
+#: Per-request transport timeout (seconds) for the grouping-pass client.
+#: The Anthropic SDK's default is a 10-min *read* timeout, and with the
+#: default ``max_retries`` a timed-out request is retried, so a hung
+#: grouping call can pend on the order of ~30 min wall-clock -- long
+#: enough to outlive the ingest-job watchdog's default budget and the
+#: single wedge candidate that inherently spans "10+ minutes with the
+#: event loop responsive". Pin it well below the watchdog so a stuck LLM
+#: call fails the grouping request (surfaced as the job's failure) rather
+#: than silently consuming the whole watchdog budget.
+_INGEST_LLM_TIMEOUT_SECONDS: Final[float] = 120.0
+
+#: Retry ceiling for the grouping-pass client. One retry (vs the SDK
+#: default of 2) keeps a transient 429/5xx recoverable while bounding the
+#: worst-case wall-clock at ``_INGEST_LLM_TIMEOUT_SECONDS * (1 + retries)``
+#: rather than the SDK default's ~30 min.
+_INGEST_LLM_MAX_RETRIES: Final[int] = 1
+
 
 class AnthropicMessagesLlmClient:
     """:class:`LlmClient` backed by the Anthropic Messages API.
@@ -70,9 +87,13 @@ class AnthropicMessagesLlmClient:
     Protocol the ``ask_docs`` answer legs use (``generate_structured_json``
     -> text + ``stop_reason``, with optional schema-forced output). Retry/
     backoff and transport timeouts are owned by the injected
-    :class:`anthropic.AsyncAnthropic` client (the SDK retries 429 /
-    5xx / connection errors with exponential backoff by default), so
-    this adapter holds no retry state of its own.
+    :class:`anthropic.AsyncAnthropic` client, so this adapter holds no
+    retry state of its own. :func:`build_anthropic_ingest_llm_client`
+    constructs that client with an **explicit** request timeout +
+    retry ceiling (:data:`_INGEST_LLM_TIMEOUT_SECONDS` /
+    :data:`_INGEST_LLM_MAX_RETRIES`) rather than the SDK defaults, whose
+    10-min read timeout with retried requests let a hung grouping call
+    pend ~30 min and outlive the ingest-job watchdog.
 
     One instance wraps one SDK client + one resolved model id; the
     grouping pipeline builds a fresh instance per ingest run (see
@@ -195,4 +216,15 @@ def build_anthropic_ingest_llm_client() -> LlmClient:
         )
     _, model = _split_model_id(settings.agent_default_model)
     _log.info("ingest_llm_client_built", model=model)
-    return AnthropicMessagesLlmClient(client=AsyncAnthropic(api_key=api_key), model=model)
+    # Pin an explicit request timeout + retry ceiling: the SDK defaults
+    # (10-min read timeout, retried) let a hung grouping call pend ~30 min
+    # and silently consume the ingest-job watchdog budget. Bounding them
+    # here fails the grouping request fast instead.
+    return AnthropicMessagesLlmClient(
+        client=AsyncAnthropic(
+            api_key=api_key,
+            timeout=_INGEST_LLM_TIMEOUT_SECONDS,
+            max_retries=_INGEST_LLM_MAX_RETRIES,
+        ),
+        model=model,
+    )

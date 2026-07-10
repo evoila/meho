@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — NSX typed reads on the cookie+XSRF session (audited set) (#2302)
+
+- The audited NSX operational read set is now first-class **typed** ops
+  (`source_kind="typed"`) that dispatch on a fresh boot with **zero
+  catalog ingest** (no per-deploy curation state, the #2247 failure
+  class): `nsx.node.status` + `nsx.cluster.status` (manager/cluster
+  status+version), `nsx.backup.config` + `nsx.backup.status`,
+  `nsx.transport_zone.list`, `nsx.tier1.list`, and `nsx.alarm.list`
+  (optional status/feature/severity filters). `nsx.backup.config` is
+  first-class for the backup disk-fill incident class (Broadcom KB 442696
+  shape): it surfaces `backup_enabled`, `passphrase_configured`, and the
+  retention-relevant `backup_schedule` / `remote_file_server` fields, and
+  scrubs the backup passphrase + any nested SFTP credential at the
+  connector boundary (the default redaction policy masks
+  `password`/`secret` but not `passphrase`). These reads recover from
+  session expiry through the #2067 dispatcher seam — `NsxConnector` now
+  exposes the public `invalidate_session` hook, so a 401 evicts the cached
+  cookie+XSRF session and re-dispatches once, no restart. The remaining
+  reads (transport-node listing, segments, tier-0 gateways,
+  distributed-firewall policies + rules) stay as ingested-row curation in
+  `core_ops.py` so the wider ingested breadth is still browsable; the
+  converted ops are no longer flipped by `apply_nsx_core_curation`. `tier-1
+  gateway create` (a write) is out of scope. (#2302)
+
 ### Connectors — VCFA typed reads on the dual-plane session (#2305)
 
 - The audited VCF Automation read set — provider org list / region list /

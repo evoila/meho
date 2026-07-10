@@ -60,7 +60,13 @@ from meho_backplane.connectors.nsx.session import (
     SessionCredentials,
     load_session_credentials_from_vault,
 )
+from meho_backplane.connectors.nsx.typed_ops import (
+    NSX_TYPED_OPS,
+    NsxTypedOp,
+    register_nsx_typed_operations,
+)
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 register_connector_v2(
     product="nsx",
@@ -82,6 +88,12 @@ register_connector_v2(
     cls=NsxConnector,
 )
 
+# Queue the audited-read typed-op upsert (#2302) onto the lifespan-driven
+# registrar list. The runner (``run_typed_op_registrars``) iterates after
+# ``_eager_import_connectors`` so the ``source_kind='typed'`` descriptor
+# rows land before the first dispatch -- no catalog ingest required.
+register_typed_op_registrar(register_nsx_typed_operations)
+
 __all__ = [
     "NSX_CONNECTOR_ID",
     "NSX_CORE_GROUPS",
@@ -89,14 +101,17 @@ __all__ = [
     "NSX_IMPL_ID",
     "NSX_PATH_RULES",
     "NSX_PRODUCT",
+    "NSX_TYPED_OPS",
     "NSX_VERSION",
     "NsxConnector",
     "NsxCoreGroup",
     "NsxCoreOp",
     "NsxSessionLoader",
     "NsxTargetLike",
+    "NsxTypedOp",
     "SessionCredentials",
     "apply_nsx_core_curation",
     "classify_nsx_op",
     "load_session_credentials_from_vault",
+    "register_nsx_typed_operations",
 ]

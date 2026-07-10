@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""NSX read-only v0.2 core — curated operator-enabled subset.
+"""NSX read-only core — curated operator-enabled subset (browse breadth).
 
-This module names the **9 read-only NSX operations** the G3.5 NSX
-v0.2 ship enables out of the much larger ``policy.yaml`` +
-``manager.yaml`` corpus that the G0.7 spec-ingestion pipeline lands
-under the NSX connector triple. NSX-T 4.x was renumbered onto the
+This module names the **5 read-only NSX operations** left as ingested-row
+curation after the audited operational read set (node/cluster status,
+backup config/status, transport-zones, tier-1 list, alarms) was promoted
+to first-class **typed** ops in
+:mod:`meho_backplane.connectors.nsx.typed_ops` (#2302). The curated set
+here keeps the wider ingested breadth browsable (transport-node listing,
+segments, tier-0 gateways, distributed-firewall policies + rules) out of
+the much larger ``policy.yaml`` + ``manager.yaml`` corpus that the G0.7
+spec-ingestion pipeline lands under the NSX connector triple. NSX-T 4.x
+was renumbered onto the
 VCF train at VCF 9.0 (#1530), so :data:`NSX_VERSION` tracks the
 VCF-9-aligned ``"9.0"`` line and :data:`NSX_CONNECTOR_ID` is the
 default ``"nsx-rest-9.0"`` slug; :func:`apply_nsx_core_curation`
@@ -22,7 +28,7 @@ two-layered:
   ``when_to_use`` is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`NSX_CORE_OPS` — the 9 ``EndpointDescriptor.op_id`` strings
+* :data:`NSX_CORE_OPS` — the 5 ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -39,38 +45,35 @@ review step — the actual curation is applied through
 :func:`apply_nsx_core_curation` against an existing ingested
 connector.
 
-The 9 ops (paths cross-checked against the NSX REST API guide,
+The 5 ops (paths cross-checked against the NSX REST API guide,
 2026-04 snapshot at https://developer.broadcom.com/xapis/nsx-data-center-rest-api/latest/;
 the manager (``/api/v1/...``) and policy (``/policy/api/v1/...``)
 path families are stable across the 4.x and VCF-9-aligned 9.x lines):
 
-1. ``GET:/api/v1/node`` — ``nsx.about`` — manager version / build /
-   node UUID (the same surface :meth:`NsxConnector.fingerprint`
-   already consumes; exposing it as an operator-callable op lets
-   the agent run a sanity probe before any heavier read).
-2. ``GET:/api/v1/transport-nodes`` — ``nsx.node.list`` — list of
+1. ``GET:/api/v1/transport-nodes`` — ``nsx.node.list`` — list of
    transport nodes (ESXi / edge) the NSX manager is aware of.
-3. ``GET:/api/v1/cluster/status`` — ``nsx.cluster.status`` —
-   manager cluster mode + node membership; mirrors the connector's
-   probe target.
-4. ``GET:/policy/api/v1/infra/segments`` — ``nsx.segment.list`` —
+2. ``GET:/policy/api/v1/infra/segments`` — ``nsx.segment.list`` —
    policy-API segments (logical-port + DVS-backed portgroup
    surface).
-5. ``GET:/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones``
-   — ``nsx.transport_zone.list`` — transport-zone inventory under
-   the default enforcement point.
-6. ``GET:/policy/api/v1/infra/tier-0s`` — ``nsx.tier0.list`` —
+3. ``GET:/policy/api/v1/infra/tier-0s`` — ``nsx.tier0.list`` —
    policy-API tier-0 gateway inventory (BGP / NAT summaries via
    nested ``children`` field when present).
-7. ``GET:/policy/api/v1/infra/tier-1s`` — ``nsx.tier1.list`` —
-   tier-1 gateway inventory (the per-tenant routing surface).
-8. ``GET:/policy/api/v1/infra/domains/{domain-id}/security-policies``
+4. ``GET:/policy/api/v1/infra/domains/{domain-id}/security-policies``
    — ``nsx.firewall.policy.list`` — distributed-firewall policy
    listing scoped by domain (``--scope <domain>`` in the CLI verb,
    default ``default``).
-9. ``GET:/policy/api/v1/infra/domains/{domain-id}/security-policies/{security-policy-id}/rules``
+5. ``GET:/policy/api/v1/infra/domains/{domain-id}/security-policies/{security-policy-id}/rules``
    — ``nsx.firewall.rule.list`` — per-policy rule listing; the
    final-grain firewall inspection surface.
+
+The audited operational reads — node/cluster status+version, backup
+config+status, transport-zones list, tier-1 list, and alarms — are **not**
+curated here: #2302 promoted them to first-class typed ops
+(``source_kind="typed"``, :mod:`meho_backplane.connectors.nsx.typed_ops`)
+that dispatch on a fresh boot with zero catalog state. Their ingested rows
+still exist and stay browsable; this module simply no longer flips them to
+``is_enabled=True``. :data:`NSX_PATH_RULES` retains the full manager/policy
+taxonomy so the ingested breadth keeps its group organisation.
 
 Path families and group_keys
 ----------------------------
@@ -91,7 +94,7 @@ Curation application
 --------------------
 
 :func:`apply_nsx_core_curation` is the operator-review-time
-substrate call that makes exactly the 9 curated ops dispatchable
+substrate call that makes exactly the 5 curated ops dispatchable
 and leaves every other ingested op disabled. The substrate has no
 "enable only ops X, Y, Z under group G" verb —
 :meth:`ReviewService.enable_group` cascades ``is_enabled=True`` to
@@ -259,32 +262,13 @@ def classify_nsx_op(op_id: str) -> str:
     return "none"
 
 
-#: Operator-reviewed ``when_to_use`` hints for the seven NSX groups
-#: the read-only v0.2 core spans. Two groups carry one op each
-#: (``manager-node`` for nsx.about, ``manager-cluster`` for
-#: nsx.cluster.status); the rest carry one or two. Every hint is
-#: one complete sentence the agent reads verbatim — vague hints
-#: poison ``search_operations`` ranking, per the ai_engineering pack.
+#: Operator-reviewed ``when_to_use`` hints for the four NSX groups the
+#: browse-breadth curated core spans (the audited operational groups moved
+#: to typed ops in #2302). ``policy-firewall`` carries two ops; the rest
+#: carry one. Every hint is one complete sentence the agent reads verbatim
+#: — vague hints poison ``search_operations`` ranking, per the
+#: ai_engineering pack.
 NSX_CORE_GROUPS: Final[tuple[NsxCoreGroup, ...]] = (
-    NsxCoreGroup(
-        group_key="manager-node",
-        name="NSX Manager (node)",
-        when_to_use=(
-            "Use this group to read the NSX Manager's own identity — "
-            "build, version, node UUID, hostname. The probe / sanity "
-            "surface the agent calls before any heavier inventory "
-            "read."
-        ),
-    ),
-    NsxCoreGroup(
-        group_key="manager-cluster",
-        name="NSX Manager (cluster)",
-        when_to_use=(
-            "Use this group to check whether the NSX management plane "
-            "is healthy — cluster mode (1-node / 3-node), per-member "
-            "status, control-plane availability."
-        ),
-    ),
     NsxCoreGroup(
         group_key="manager-transport-nodes",
         name="NSX Transport Nodes",
@@ -304,28 +288,11 @@ NSX_CORE_GROUPS: Final[tuple[NsxCoreGroup, ...]] = (
         ),
     ),
     NsxCoreGroup(
-        group_key="policy-transport-zones",
-        name="NSX Transport Zones",
-        when_to_use=(
-            "Use this group to list the transport zones segments and "
-            "tier-routers attach to. Read-only inventory under the "
-            "default enforcement point."
-        ),
-    ),
-    NsxCoreGroup(
         group_key="policy-tier0",
         name="NSX Tier-0 Gateways",
         when_to_use=(
             "Use this group to inspect provider tier-0 gateways — "
             "north-south edge routing, BGP peers, NAT summaries."
-        ),
-    ),
-    NsxCoreGroup(
-        group_key="policy-tier1",
-        name="NSX Tier-1 Gateways",
-        when_to_use=(
-            "Use this group to inspect per-tenant tier-1 gateways — "
-            "the east-west routing surface attached under a tier-0."
         ),
     ),
     NsxCoreGroup(
@@ -372,24 +339,6 @@ def _instructions(
 #: (path families unchanged across 4.x and the VCF-9-aligned 9.x line).
 NSX_CORE_OPS: Final[tuple[NsxCoreOp, ...]] = (
     NsxCoreOp(
-        op_id="GET:/api/v1/node",
-        group_key="manager-node",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to identify the NSX Manager — its build, version, "
-                "node UUID, hostname. Useful as a probe before heavier "
-                "policy reads, or to confirm which NSX cluster the "
-                "target points at."
-            ),
-            output_shape=(
-                "Object with node_version, kernel_version, node_uuid, hostname, external_id keys."
-            ),
-            next_step=(
-                "If the manager looks healthy, move on to cluster-status or transport-node listing."
-            ),
-        ),
-    ),
-    NsxCoreOp(
         op_id="GET:/api/v1/transport-nodes",
         group_key="manager-transport-nodes",
         llm_instructions=_instructions(
@@ -407,26 +356,6 @@ NSX_CORE_OPS: Final[tuple[NsxCoreOp, ...]] = (
             next_step=(
                 "Drill into a specific node by id when you need its "
                 "uplink configuration or tunnel state."
-            ),
-        ),
-    ),
-    NsxCoreOp(
-        op_id="GET:/api/v1/cluster/status",
-        group_key="manager-cluster",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to confirm whether the NSX management plane is "
-                "healthy and which members make up the cluster. "
-                "Useful when an operator suspects a control-plane "
-                "outage."
-            ),
-            output_shape=(
-                "Object with mgmt_cluster_status (overall health), "
-                "control_cluster_status, and per-member detail."
-            ),
-            next_step=(
-                "If unhealthy, surface the failing member's id; "
-                "otherwise proceed to the inventory / policy reads."
             ),
         ),
     ),
@@ -456,27 +385,6 @@ NSX_CORE_OPS: Final[tuple[NsxCoreOp, ...]] = (
         ),
     ),
     NsxCoreOp(
-        op_id=("GET:/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones"),
-        group_key="policy-transport-zones",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to list transport zones under the default "
-                "enforcement point — the scope segments and "
-                "tier-gateways attach to. Read-only inventory."
-            ),
-            output_shape=(
-                "Object with a `results` array of transport-zone "
-                "entries; each carries id, display_name, tz_type "
-                "(OVERLAY / VLAN), and host_switch_name."
-            ),
-            next_step=(
-                "Cross-reference a zone's id when answering 'where "
-                "does this segment live' or 'what zones does this "
-                "edge see'."
-            ),
-        ),
-    ),
-    NsxCoreOp(
         op_id="GET:/policy/api/v1/infra/tier-0s",
         group_key="policy-tier0",
         llm_instructions=_instructions(
@@ -497,28 +405,6 @@ NSX_CORE_OPS: Final[tuple[NsxCoreOp, ...]] = (
                 "Drill into a tier-0 by id for its locale-services / "
                 "interfaces, or follow up with tier-1 listing for "
                 "downstream consumers."
-            ),
-        ),
-    ),
-    NsxCoreOp(
-        op_id="GET:/policy/api/v1/infra/tier-1s",
-        group_key="policy-tier1",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to inspect per-tenant tier-1 gateways — the "
-                "east-west routing surface attached under a tier-0. "
-                "Useful when mapping which tier-1 fronts a given "
-                "segment."
-            ),
-            output_shape=(
-                "Object with a `results` array; each tier-1 carries "
-                "id, display_name, tier0_path (its parent), "
-                "route_advertisement_types, and ha_mode."
-            ),
-            next_step=(
-                "Cross-reference tier0_path against the tier-0 "
-                "listing, or drill into a tier-1 for its segment "
-                "attachments."
             ),
         ),
     ),
@@ -580,12 +466,12 @@ async def apply_nsx_core_curation(
     tenant_id: UUID | None,
     connector_id: str = NSX_CONNECTOR_ID,
 ) -> None:
-    """Apply the curated 9-op read core against an ingested NSX connector.
+    """Apply the curated 5-op read core against an ingested NSX connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 9 ops in :data:`NSX_CORE_OPS` are dispatchable
+    the 5 ops in :data:`NSX_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
-    ``is_enabled=False``. The 8 curated groups land
+    ``is_enabled=False``. The 4 curated groups land
     ``review_status='enabled'`` so the agent's
     :func:`~meho_backplane.operations.meta_tools.search_operations`
     surfaces the core ops; non-curated groups are left untouched

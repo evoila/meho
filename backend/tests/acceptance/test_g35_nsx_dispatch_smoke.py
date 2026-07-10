@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""G3.5-T2 dispatch smoke — the 9 curated NSX read ops over respx.
+"""G3.5-T2 dispatch smoke — the curated NSX read ops over respx.
 
 Closes the substrate-proves-out half of the NSX v0.2 ship for
 Initiative #368: each entry in

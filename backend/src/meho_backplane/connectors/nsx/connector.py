@@ -96,13 +96,13 @@ for proactive refresh: revoke-on-close is v0.2.next.
 Operations
 ----------
 
-This module ships zero operations -- the G0.6 dispatch shim
-:meth:`execute` exists for ABC compatibility but operations land in
-the ``endpoint_descriptor`` table via #614's spec ingestion. Until
-then, the connector is registered and discoverable but
-``execute(target, op_id, ...)`` against any ``op_id`` will resolve to
-"unknown operation" at the dispatcher layer -- which is the correct
-behaviour for a registered-but-empty connector at this Task's stage.
+The audited read set (#2302) ships as **typed** ops
+(``source_kind="typed"``) via the bound-method shims below, registered
+through :mod:`meho_backplane.connectors.nsx.typed_ops`; they dispatch on
+a fresh boot with zero catalog ingest. The remaining curated reads stay
+as ingested-row curation in
+:mod:`meho_backplane.connectors.nsx.core_ops`. The G0.6 :meth:`execute`
+shim remains for ABC compatibility.
 """
 
 from __future__ import annotations
@@ -320,11 +320,22 @@ class NsxConnector(HttpConnector):
             )
             return xsrf
 
+    async def invalidate_session(self, target: NsxTargetLike) -> None:
+        """Public duck-typed session-eviction hook for the dispatch path.
+
+        The seam the generic dispatch path calls on an auth-class status
+        (NSX's 401) before re-dispatching once (G0.29-T2 #2067) -- the path
+        the typed read ops (#2302) traverse. Delegates to
+        :meth:`_invalidate_session`, mirroring the vmware-rest / vcf-logs seam.
+        """
+        await self._invalidate_session(target)
+
     async def _invalidate_session(self, target: NsxTargetLike) -> None:
         """Drop the cached XSRF token + clear the client cookie jar for *target*.
 
         Called by :meth:`_get_json_with_session_retry` on 401 from a
-        downstream call so the subsequent :meth:`_session_token`
+        downstream call, and by the public :meth:`invalidate_session`
+        dispatch-path hook (#2067), so the subsequent :meth:`_session_token`
         re-issues ``POST /api/session/create`` from a clean state.
         Holds the lock so a concurrent re-establish doesn't race with
         the invalidation.
@@ -511,6 +522,67 @@ class NsxConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    # Typed read ops (#2302): thin bound-method shims delegating to
+    # ``nsx.typed_reads`` bodies (kept in a sibling module for the
+    # file-length budget). All read-only; a raw 401 propagates to the
+    # dispatcher's #2067 arm (see :meth:`invalidate_session`).
+
+    async def node_status(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.node.status`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_node_status_impl
+
+        return await nsx_node_status_impl(self, operator, target, params)
+
+    async def cluster_status(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.cluster.status`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_cluster_status_impl
+
+        return await nsx_cluster_status_impl(self, operator, target, params)
+
+    async def backup_config(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.backup.config`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_backup_config_impl
+
+        return await nsx_backup_config_impl(self, operator, target, params)
+
+    async def backup_status(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.backup.status`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_backup_status_impl
+
+        return await nsx_backup_status_impl(self, operator, target, params)
+
+    async def transport_zone_list(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.transport_zone.list`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_transport_zone_list_impl
+
+        return await nsx_transport_zone_list_impl(self, operator, target, params)
+
+    async def tier1_list(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.tier1.list`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_tier1_list_impl
+
+        return await nsx_tier1_list_impl(self, operator, target, params)
+
+    async def alarm_list(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.alarm.list`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_alarm_list_impl
+
+        return await nsx_alarm_list_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached XSRF tokens, then tear down the httpx pool.

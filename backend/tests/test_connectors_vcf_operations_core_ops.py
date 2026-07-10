@@ -13,12 +13,14 @@ Covers :mod:`meho_backplane.connectors.vcf_operations.core_ops`:
   carries non-placeholder ``llm_instructions`` / ``when_to_use`` text
   (the AC's "non-empty reviewed text" gate).
 * :func:`apply_vrops_core_curation` — the operator-review-time
-  substrate call that flips ``review_status='enabled'`` on the 7
-  curated groups, lands ``llm_instructions`` on the 8 curated ops,
+  substrate call that flips ``review_status='enabled'`` on the 5
+  curated groups, lands ``llm_instructions`` on the 6 curated ops,
   and explicitly disables non-core ops via the audit-log-driven
-  operator-override exclusion. The load-bearing assertion is "8 ops
+  operator-override exclusion. The load-bearing assertion is "6 ops
   dispatchable, every other op in curated groups stays
-  ``is_enabled=False``".
+  ``is_enabled=False``". The audited liveness / alerts /
+  resources-query reads moved to the typed surface (#2303) and are
+  covered by :mod:`tests.test_connectors_vcf_operations_typed_reads`.
 
 Test harness mirrors :mod:`tests.test_connectors_harbor_core_ops`:
 SQLite via the autouse ``_default_database_url`` fixture, hand-rolled
@@ -140,21 +142,31 @@ def test_classify_vrops_op_all_core_ops_are_classified() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_vrops_core_ops_count_is_eight_and_read_only() -> None:
-    """VROPS_CORE_OPS ships exactly the 8 read-only core ops per #833."""
-    assert len(VROPS_CORE_OPS) == 8, (
-        f"expected exactly 8 vROps core ops per #833 AC; got {len(VROPS_CORE_OPS)}"
+def test_vrops_core_ops_count_is_six_and_read_only() -> None:
+    """VROPS_CORE_OPS ships exactly the 6 ingested-browse ops.
+
+    The audited liveness / alerts / resources-query reads converted to
+    typed ops in #2303 (Initiative #2266 T3); the remaining ingested
+    curation is the browse breadth kept until the T7 apparatus retirement.
+    """
+    assert len(VROPS_CORE_OPS) == 6, (
+        f"expected exactly 6 vROps ingested-browse core ops after #2303; got {len(VROPS_CORE_OPS)}"
     )
     for op in VROPS_CORE_OPS:
         assert op.op_id.startswith("GET:"), (
-            f"vROps core op {op.op_id!r} must be a GET (v0.5 read-only core)"
+            f"vROps core op {op.op_id!r} must be a GET (read-only browse core)"
         )
+    # The two converted reads must no longer flip their ingested twin
+    # (the #2262 no-shadow invariant): they are typed ops now.
+    op_ids = {op.op_id for op in VROPS_CORE_OPS}
+    assert "GET:/suite-api/api/versions/current" not in op_ids
+    assert "GET:/suite-api/api/alerts" not in op_ids
 
 
-def test_vrops_core_groups_count_is_seven_and_unique() -> None:
-    """VROPS_CORE_GROUPS spans the 7 vROps groups the 8 ops fall into."""
-    assert len(VROPS_CORE_GROUPS) == 7, (
-        f"expected exactly 7 vROps core groups; got {len(VROPS_CORE_GROUPS)}"
+def test_vrops_core_groups_count_is_five_and_unique() -> None:
+    """VROPS_CORE_GROUPS spans the 5 vROps groups the 6 ops fall into."""
+    assert len(VROPS_CORE_GROUPS) == 5, (
+        f"expected exactly 5 vROps core groups; got {len(VROPS_CORE_GROUPS)}"
     )
     group_keys = [g.group_key for g in VROPS_CORE_GROUPS]
     assert len(set(group_keys)) == len(group_keys), (
@@ -307,8 +319,8 @@ async def _seed_curated_groups_and_ops(
     return group_ids
 
 
-async def test_apply_vrops_core_curation_enables_exactly_8_ops() -> None:
-    """apply_vrops_core_curation enables exactly the 8 core ops."""
+async def test_apply_vrops_core_curation_enables_exactly_6_ops() -> None:
+    """apply_vrops_core_curation enables exactly the 6 core ops."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)
@@ -369,7 +381,7 @@ async def test_apply_vrops_core_curation_disables_non_core_ops_in_curated_groups
 
 
 async def test_apply_vrops_core_curation_sets_llm_instructions_on_all_core_ops() -> None:
-    """llm_instructions is populated on all 8 core ops after curation."""
+    """llm_instructions is populated on all 6 core ops after curation."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)
@@ -396,8 +408,8 @@ async def test_apply_vrops_core_curation_sets_llm_instructions_on_all_core_ops()
         )
 
 
-async def test_apply_vrops_core_curation_enables_all_7_curated_groups() -> None:
-    """All 7 curated groups land review_status='enabled' after curation."""
+async def test_apply_vrops_core_curation_enables_all_5_curated_groups() -> None:
+    """All 5 curated groups land review_status='enabled' after curation."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)

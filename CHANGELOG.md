@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — vROps typed reads (liveness, alerts, resource query) (#2303)
+
+- The vROps (`vcf-operations`) connector's audited read set now dispatches
+  as **typed** ops (`source_kind="typed"`) directly on its hand-rolled HTTP
+  Basic (+ optional `auth-source`) session, so they work on a fresh boot
+  with **zero catalog ingest** (no per-deploy spec ingestion or operator
+  review): `vrops.liveness` (`GET /suite-api/api/versions/current` — the
+  documented reachability surface; the adopter's `casa/health` names a
+  private/undocumented CaSA API), `vrops.alert.list`
+  (`GET /suite-api/api/alerts` alert triage), and `vrops.resource.query`
+  (a body-shaped `POST /suite-api/api/resources/query` with a typed
+  `ResourceQuerySpec` request body). All three are read-only, `safe`, no
+  approval. The two converted GET reads are removed from the `core_ops.py`
+  ingested curation so the ingested twin is never flipped alongside the
+  typed op (the #2262 no-shadow invariant); the remaining 6 ingested-browse
+  ops stay curated as breadth until the Initiative #2266 T7 apparatus
+  retirement. Unconverted curated ops (resource list/get, alert
+  definitions, symptoms, recommendations, super metrics) are declined from
+  typed conversion — not in the adopter's audited operational set. (#2303)
+
 ### Added — persisted spec provenance at ingest (sha256 + origin + operator/timestamp, surfaced in review) (#2291)
 
 - Every accepted spec ingest now writes a durable, non-spoofable

@@ -70,6 +70,7 @@ def test_named_schemes_match_literal_exactly() -> None:
         "static_header",
         "session_login",
         "session_login_basic",
+        "session_login_token",
         "oauth2_mint",
     } == NAMED_AUTH_SCHEMES
 

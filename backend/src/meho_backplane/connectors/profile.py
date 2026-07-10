@@ -119,6 +119,10 @@ DEFAULT_EXPIRY_STATUSES: frozenset[int] = frozenset({401})
 #:   a login endpoint for a short-lived token returned as a raw JSON-string
 #:   body, then send it verbatim in a bespoke header (vmware_rest / vCenter's
 #:   ``POST /api/session`` → ``vmware-api-session-id``; #2025).
+#: * ``session_login_token`` — exchange credentials via a JSON creds body at
+#:   a login endpoint for a token read out of a response-body field, then send
+#:   it as ``Bearer`` (SDDC Manager's ``POST /v1/tokens`` → ``accessToken``,
+#:   whose Basic surface is rejected — token-only; #2287).
 #: * ``oauth2_mint`` — OAuth2 client-credentials form grant minting a
 #:   ``Bearer`` token (keycloak admin).
 #:
@@ -130,6 +134,7 @@ AuthSchemeName = Literal[
     "static_header",
     "session_login",
     "session_login_basic",
+    "session_login_token",
     "oauth2_mint",
 ]
 
@@ -523,8 +528,9 @@ class AuthSpec(BaseModel):
         default="Authorization",
         description=(
             "The header the extractor writes the auth value into. Defaults to "
-            "Authorization (basic / session_login / oauth2_mint / a bearer "
-            "static_header); a raw static_header may name a custom header "
+            "Authorization (basic / session_login / session_login_token / "
+            "oauth2_mint / a bearer static_header); a raw static_header may "
+            "name a custom header "
             "(e.g. X-Api-Key)."
         ),
     )

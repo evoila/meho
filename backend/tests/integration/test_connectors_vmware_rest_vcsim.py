@@ -858,3 +858,211 @@ async def test_host_evacuate_recursion_over_modern_mount(
     assert maintenance_route.called
     relocate_body = json.loads(relocate_route.calls.last.request.content)
     assert relocate_body["spec"]["placement"]["host"] == "host-target"
+
+
+# ---------------------------------------------------------------------------
+# vmware.vm.info + vmware.object.collect + vmware.tasks.recent typed ops
+# (#2300) — end-to-end transport + mount routing with ZERO ingested descriptors
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vm_info_over_modern_mount_returns_guest_signals(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """vm_info() by name resolves the moid then reads guest/runtime/storage props.
+
+    The name resolution GET and the PropertyCollector read both mount onto
+    ``/api``. Exercises the full #2300 typed-op path end to end against the
+    real connector transport (respx-intercepted) with ZERO ingested
+    descriptors — the fresh-boot / zero-catalog-ingest contract.
+    """
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    def _vm_props(request: httpx.Request) -> httpx.Response:
+        moid = json.loads(request.content)["specSet"][0]["objectSet"][0]["obj"]["value"]
+        return httpx.Response(
+            200,
+            json={
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": moid},
+                        "propSet": [
+                            {"name": "name", "val": "hung-appliance"},
+                            {"name": "runtime.powerState", "val": "poweredOn"},
+                            {"name": "guestHeartbeatStatus", "val": "red"},
+                            {
+                                "name": "storage.perDatastoreUsage",
+                                "val": [
+                                    {
+                                        "datastore": {"type": "Datastore", "value": "datastore-9"},
+                                        "committed": 42949672960,
+                                    }
+                                ],
+                            },
+                        ],
+                    }
+                ]
+            },
+        )
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/api/vcenter/vm").respond(200, json=[{"vm": "vm-9", "name": "hung-appliance"}])
+        mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+            side_effect=_vm_props
+        )
+        mock.delete("/api/session").respond(204)
+        try:
+            result = await connector.vm_info(_operator(), vcsim_target, {"name": "hung-appliance"})
+        finally:
+            await connector.aclose()
+
+    assert result["vm"] == "vm-9"
+    # The hung-appliance shape: poweredOn but no guest IP, red heartbeat.
+    assert result["power_state"] == "poweredOn"
+    assert result["guest_ip"] is None
+    assert result["heartbeat_status"] == "red"
+    assert result["per_datastore_usage"][0]["datastore"] == "datastore-9"
+    assert result["per_datastore_usage"][0]["committed_bytes"] == 42949672960
+
+
+@pytest.mark.asyncio
+async def test_object_collect_over_legacy_mount_routes_to_rest(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """A legacy-only target mounts the bounded generic read onto /rest.
+
+    The modern ``POST /api/session`` 404s, the connector falls back to the
+    legacy path, and the RetrievePropertiesEx call must route through
+    ``/rest`` via ``mount_op_path`` or it 404s — modern+legacy mount
+    coverage on the #2300 typed-op path, with zero ingested descriptors.
+    """
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+    props_path = "/rest/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(404)
+        mock.post("/rest/com/vmware/cis/session").respond(200, json=SESSION_TOKEN)
+        mock.post(props_path).respond(
+            200,
+            json={
+                "objects": [
+                    {
+                        "obj": {"type": "Datastore", "value": "datastore-5"},
+                        "propSet": [{"name": "summary.freeSpace", "val": 1073741824}],
+                        "missingSet": [{"path": "summary.capacity"}],
+                    }
+                ]
+            },
+        )
+        mock.delete("/rest/com/vmware/cis/session").respond(204)
+        try:
+            result = await connector.object_collect(
+                _operator(),
+                vcsim_target,
+                {
+                    "type": "Datastore",
+                    "moid": "datastore-5",
+                    "properties": ["summary.freeSpace", "summary.capacity"],
+                },
+            )
+        finally:
+            await connector.aclose()
+
+    assert result["type"] == "Datastore"
+    assert result["properties"]["summary.freeSpace"] == 1073741824
+    assert result["missing"] == ["summary.capacity"]
+
+
+@pytest.mark.asyncio
+async def test_tasks_recent_over_modern_mount_returns_task_rows(
+    vcsim_target: _VcsimTarget,
+) -> None:
+    """tasks_recent() reads TaskManager.recentTask then Task.info, mounted onto /api."""
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    def _tasks(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        mo_type = body["specSet"][0]["propSet"][0]["type"]
+        if mo_type == "TaskManager":
+            return httpx.Response(
+                200,
+                json={
+                    "objects": [
+                        {
+                            "obj": {"type": "TaskManager", "value": "TaskManager"},
+                            "propSet": [
+                                {
+                                    "name": "recentTask",
+                                    "val": [{"type": "Task", "value": "task-1"}],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "objects": [
+                    {
+                        "obj": {"type": "Task", "value": "task-1"},
+                        "propSet": [
+                            {
+                                "name": "info",
+                                "val": {
+                                    "descriptionId": "VirtualMachine.powerOn",
+                                    "entity": {"type": "VirtualMachine", "value": "vm-9"},
+                                    "entityName": "web-01",
+                                    "state": "success",
+                                    "progress": 100,
+                                },
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+            side_effect=_tasks
+        )
+        mock.delete("/api/session").respond(204)
+        try:
+            result = await connector.tasks_recent(_operator(), vcsim_target, {"max_tasks": 10})
+        finally:
+            await connector.aclose()
+
+    (task,) = result["tasks"]
+    assert task["task"] == "task-1"
+    assert task["operation"] == "VirtualMachine.powerOn"
+    assert task["entity"] == "vm-9"
+    assert task["state"] == "success"
+    assert task["progress"] == 100

@@ -3,10 +3,27 @@
 
 """vRLI 9.x read-only v0.5 core — curated operator-enabled subset.
 
-This module names the **7 read-only vRLI operations** the G3.6 vRLI
+This module names the curated **read-only vRLI operations** the G3.6 vRLI
 v0.5 ship enables out of the much larger ``vcf-logs-9.0/<api-v2>.yaml``
 OpenAPI corpus that the G0.7 spec-ingestion pipeline lands under
-``connector_id="vrli-rest-9.0"``. The curation is two-layered:
+``connector_id="vrli-rest-9.0"``.
+
+Events query moved to a typed op (#2295)
+----------------------------------------
+
+The headline events query (``GET:/api/v2/events/{constraints}``) was the
+one op the adopter's real operations exercise (the hourly sentry cron +
+incident log pulls). #2295 converted it to a ``source_kind="typed"`` op on
+:class:`~meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector`
+(:data:`~meho_backplane.connectors.vcf_logs.typed_ops.VRLI_EVENT_QUERY_OP`)
+so it dispatches on the connector's own session with zero catalog ingest,
+and dropped it from :data:`VRLI_CORE_OPS` — this module no longer flips an
+ingested row for it. The other six curated ops stay ingested (declined from
+typed conversion: unused in real operations; the ingested canonical spec
+covers the browse case). This is the first conversion in Initiative #2266;
+curation-apparatus retirement is a later Task.
+
+The curation is two-layered:
 
 * :data:`VRLI_CORE_GROUPS` — the operator-reviewed ``when_to_use``
   hint per LLM-grouping pass output group. Each entry's ``group_key``
@@ -14,7 +31,7 @@ OpenAPI corpus that the G0.7 spec-ingestion pipeline lands under
   ops; the ``when_to_use`` is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`VRLI_CORE_OPS` — the 7 ``EndpointDescriptor.op_id`` strings
+* :data:`VRLI_CORE_OPS` — the curated ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -38,38 +55,36 @@ compose a useful query (fields known to the indexer, hosts
 reporting, content packs governing field extraction, alert
 definitions running).
 
-The 7 ops (paths sourced against the vRLI 9.x REST API documented at
+The curated ingested ops (paths sourced against the vRLI 9.x REST API
+documented at
 https://developer.broadcom.com/xapis/vrealize-log-insight-api/latest/
 and the v1 reference at https://vmw-loginsight.github.io/, both of
-which describe the same shape under the ``/api/v2/`` family in 9.x):
+which describe the same shape under the ``/api/v2/`` family in 9.x). The
+events query (``GET:/api/v2/events/{constraints}``) is deliberately absent
+— it is now the ``vrli.event.query`` typed op (#2295, see the module note
+above):
 
 1. ``GET:/api/v2/version`` — ``vrli.about`` — appliance version /
    release-name / build. The same surface :meth:`VcfLogsConnector.fingerprint`
    already consumes; exposing it as an operator-callable op lets the
    agent run a sanity probe before any heavier read.
-2. ``GET:/api/v2/events/{constraints}`` — ``vrli.event.query`` —
-   constraint + time-range filtered raw-event search. Returns a
-   :class:`~meho_backplane.connectors.schemas.ResultHandle` for
-   large result sets -- a bounded inline sample plus a ``fetch_more``
-   envelope -- rather than the full payload inline. To act on more than
-   the sample the agent re-runs with a narrower constraint / time range.
-3. ``GET:/api/v2/aggregated-events/{constraints}`` — ``vrli.aggregated.query``
+2. ``GET:/api/v2/aggregated-events/{constraints}`` — ``vrli.aggregated.query``
    — group-by aggregation over the same constraint set as the event
    query. Useful for "how many events per host / severity / source
    in the last 24h" reductions.
-4. ``GET:/api/v2/fields`` — ``vrli.field.list`` — catalog of fields
+3. ``GET:/api/v2/fields`` — ``vrli.field.list`` — catalog of fields
    the indexer knows about (static + extracted). The agent reads
    this before composing a non-trivial event-query constraint to
    confirm a field name exists.
-5. ``GET:/api/v2/hosts`` — ``vrli.host.list`` — hosts currently
+4. ``GET:/api/v2/hosts`` — ``vrli.host.list`` — hosts currently
    reporting events to this vRLI cluster. Combined with the field
    catalog, this is the minimum agent-side composer-context for a
    useful event query.
-6. ``GET:/api/v2/content/contentpack/list`` — ``vrli.content.pack.list``
+5. ``GET:/api/v2/content/contentpack/list`` — ``vrli.content.pack.list``
    — installed content packs (each governs a set of extracted
    fields, dashboards, and alerts). Read when the operator asks
    "which integrations are configured on this vRLI".
-7. ``GET:/api/v2/alerts`` — ``vrli.alert.list`` — alert definitions
+6. ``GET:/api/v2/alerts`` — ``vrli.alert.list`` — alert definitions
    currently configured. Read-only; create / mutate are intentionally
    excluded from v0.5 per #369 DoD (write ops stay ``staged``).
 
@@ -97,7 +112,7 @@ Curation application
 --------------------
 
 :func:`apply_vrli_core_curation` is the operator-review-time
-substrate call that makes exactly the 7 curated ops dispatchable.
+substrate call that makes exactly the curated ops dispatchable.
 Mirrors :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
 verbatim, threading the "enable group but pin non-core ops disabled"
 needle via the audit-log-driven operator-override exclusion. See
@@ -351,9 +366,18 @@ def _instructions(
     }
 
 
-#: The 7 curated read-only vRLI core ops. Each entry carries the
-#: op_id (``GET:/path`` form), the curated group assignment, and the
+#: The curated read-only vRLI core ops (6 after #2295). Each entry carries
+#: the op_id (``GET:/path`` form), the curated group assignment, and the
 #: operator-reviewed ``llm_instructions`` blob.
+#:
+#: The events query (``GET:/api/v2/events/{constraints}``) was converted to a
+#: ``source_kind="typed"`` op on ``VcfLogsConnector`` (#2295,
+#: :data:`~meho_backplane.connectors.vcf_logs.typed_ops.VRLI_EVENT_QUERY_OP`)
+#: and dropped from this curated ingested set: it is the one op the adopter's
+#: real operations run, so it no longer depends on per-deploy catalog state.
+#: The other six ops stay ingested (declined from typed conversion on #2295 —
+#: unused in real operations; the ingested canonical spec covers the browse
+#: case).
 #:
 #: Paths cross-checked against the vRLI 9.x REST API at
 #: https://developer.broadcom.com/xapis/vrealize-log-insight-api/latest/
@@ -380,37 +404,6 @@ VRLI_CORE_OPS: Final[tuple[VrliCoreOp, ...]] = (
                 "the supported range, proceed to vrli.field.list to "
                 "confirm the catalog of queryable fields, then compose "
                 "the event-query constraint."
-            ),
-        ),
-    ),
-    VrliCoreOp(
-        op_id="GET:/api/v2/events/{constraints}",
-        group_key="vrli-events",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to query raw vRLI log events. The {constraints} "
-                "path segment carries the URL-encoded constraint set "
-                "(field/value pairs, time range, limit) — compose it "
-                "with field names obtained from vrli.field.list. The "
-                "headline read surface of vRLI; use when answering "
-                "'show me events where source contains nsx and "
-                "severity is error in the last 1h'."
-            ),
-            output_shape=(
-                "Result-handle-shaped: events[] array of raw event "
-                "rows (each with timestamp, text, fields), plus "
-                "complete (bool) indicating whether the constraint "
-                "exhausted the index or hit the limit. Large result "
-                "sets return a JSONFlux ResultHandle with a bounded "
-                "inline sample plus a ``fetch_more`` envelope; re-run "
-                "with a narrower constraint / time range to act on more "
-                "than the sample."
-            ),
-            next_step=(
-                "If complete=false, surface the truncation to the "
-                "operator. For drill-down, pick an event timestamp + "
-                "host and re-compose a tighter constraint, or switch "
-                "to vrli.aggregated.query for group-by counts."
             ),
         ),
     ),
@@ -548,10 +541,10 @@ async def apply_vrli_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 7-op read core against an ingested vRLI connector.
+    """Apply the curated read core against an ingested vRLI connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 7 ops in :data:`VRLI_CORE_OPS` are dispatchable
+    the ops in :data:`VRLI_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
     ``is_enabled=False``. The 5 curated groups land
     ``review_status='enabled'`` so the agent's

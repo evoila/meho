@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Connectors — vRLI events query converted to a typed op on the connector session (#2295)
+
+- The vRLI (VCF Operations for Logs) events query is now a
+  `source_kind="typed"` op — `vrli.event.query`, a bound method on
+  `VcfLogsConnector` that issues `GET /api/v2/events/<constraints>` (with an
+  optional `limit`) directly on the connector's authenticated session and
+  recovers a 440/401 session expiry with one re-login + retry (the #1909/#1135
+  soak scenario). It works on a fresh boot with **zero catalog ingest**, so
+  the op no longer depends on per-deploy `endpoint_descriptor` state (the
+  #2247 failure class Initiative #2266 retires for the VCF family). The
+  reserved-expansion constraint sub-path (`text/CONTAINS error/...`) is
+  rendered with literal slashes so it reaches the appliance intact
+  (#2003/#2066). `vcf_logs/core_ops.py` no longer flips an ingested row for
+  the events query; the other six curated ops stay ingested (declined from
+  typed conversion — unused in the adopter's real operations, and the
+  ingested canonical spec covers the browse case). First conversion in
+  Initiative #2266; the hand-edited production-overlay retirement is a
+  follow-up RDC-team coordination step. (#2295)
+
 ### Added — persisted spec provenance at ingest (sha256 + origin + operator/timestamp, surfaced in review) (#2291)
 
 - Every accepted spec ingest now writes a durable, non-spoofable

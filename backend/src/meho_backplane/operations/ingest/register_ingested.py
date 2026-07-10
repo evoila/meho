@@ -271,6 +271,7 @@ async def register_ingested_operations(
     tenant_id: UUID | None = None,
     session: AsyncSession | None = None,
     embedding_service: EmbeddingService | None = None,
+    register_shim: bool = True,
 ) -> IngestionResult:
     """Bulk-upsert parsed operations into ``endpoint_descriptor``.
 
@@ -303,6 +304,12 @@ async def register_ingested_operations(
             mid-batch rolls back to zero rows).
         embedding_service: Test seam; production callers leave
             ``None`` to resolve the process-wide singleton.
+        register_shim: ``True`` (default) auto-registers a bare
+            :class:`GenericRestConnector` shim for the triple on first
+            ingest. ``False`` (#2289) skips it because the caller will
+            stamp a dispatchable ``ProfiledRestConnector`` under the same
+            triple from an operator-selected ``auth_scheme``; a bare shim
+            would occupy the triple and make that stamp a no-op.
 
     Returns:
         :class:`IngestionResult` with per-action counts +
@@ -329,6 +336,7 @@ async def register_ingested_operations(
         version=version,
         impl_id=impl_id,
         base_url=base_url,
+        register_shim=register_shim,
     )
     coords = _BatchCoordinates(
         tenant_id=tenant_id,
@@ -358,6 +366,7 @@ def _preflight_and_register_class(
     version: str,
     impl_id: str,
     base_url: str | None,
+    register_shim: bool = True,
 ) -> bool:
     """Run the version-coverage pre-flight, then ensure the v2 class exists.
 
@@ -378,6 +387,16 @@ def _preflight_and_register_class(
     under. So the coverage check finds the real registered class and the
     auto-shim, when synthesised, lands in the dispatchable namespace.
 
+    ``register_shim`` is ``False`` for a profiled ingest (#2289): the
+    operator selected a named ``auth_scheme``, so the pipeline stamps a
+    dispatchable
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+    under the triple *after* this register phase. Synthesising a bare shim
+    here would occupy the triple and make that stamp a no-op, leaving the
+    connector non-dispatchable — so the shim is skipped and this returns
+    ``False`` (the profiled stamp is the registration). The version-coverage
+    pre-flight still runs (a divergent label is caught regardless of tier).
+
     Returns the ``connector_registered`` flag (``True`` when a fresh
     auto-shim was registered).
     """
@@ -386,6 +405,8 @@ def _preflight_and_register_class(
         version=version,
         impl_id=impl_id,
     )
+    if not register_shim:
+        return False
     return ensure_connector_class_registered(
         product=product,
         version=version,

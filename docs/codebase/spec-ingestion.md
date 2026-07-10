@@ -656,6 +656,55 @@ product does not round-trip (the `_fixture` mechanism row parses to
 `validate_shipped_artifacts()`; the stamp path re-parses with the same
 model, so it stays fail-closed as a second line of defence.
 
+### Operator-selectable auth scheme on a non-catalog ingest (#2289)
+
+Boot stamping (above) makes a *shipped* profile-backed catalog row
+dispatchable. `#2289` is the **non-catalog on-ramp**: an operator ingesting an
+arbitrary spec may *select* a named auth scheme at creation time, and the
+register phase synthesises a minimal `ExecutionProfile` and stamps the same
+`ProfiledRestConnector` under the triple — so a hand-authored spec becomes
+dispatchable without a hand-coded connector class.
+
+The selection is exposed on all three surfaces as two optional fields:
+
+* REST — `IngestRequest.auth_scheme` (+ `auth_secret_fields`) in
+  `ingest/api_schemas.py`.
+* MCP — the `auth_scheme` / `auth_secret_fields` properties on the
+  `meho.connector.ingest` tool schema (`mcp/tools/connector_ingest.py`).
+* CLI — `meho connector ingest --auth-scheme <name> [--auth-secret-field
+  <name> ...]` (`cli/internal/cmd/connector/ingest.go`).
+
+`auth_scheme` is a member of the **closed** `AuthSchemeName` catalog
+(`connectors/profile.py`): `basic`, `static_header`, `session_login`,
+`session_login_basic`, `session_login_token`, `oauth2_mint`. The Pydantic
+`Literal` rejects an unknown value **and every reserved typed-only shape**
+(`github_app_jwt`, `kubeconfig`, `cookie_jar_session`, …) with a 422 closed-set
+error naming the allowed members, at the API boundary.
+
+**The boundary (Initiative #2271, grounded in #1177 / Goal #1964 Non-goals) is
+selection only.** The operator picks *which* vetted scheme (and optionally the
+NAMES of the secret-bundle keys it reads); there is **no** free-form auth
+config — no login URL, body template, token JSONPath, or header name. The login
+path, request body shape, and token extractor for each scheme are vetted Python
+selected by the scheme name in `_shared/profile_auth.py::SESSION_SCHEME_SPECS`.
+Adding a new auth shape is a scheme PR (a new `Literal` member + a reviewed
+extractor + coverage-trace update), never a request knob. The secret *values*
+are never carried in the ingest request — `auth_secret_fields` is field NAMES
+only, resolved from the target's `secret_ref` by the broker at dispatch.
+
+Wiring: `IngestionPipelineService.ingest(auth_scheme=…, auth_secret_fields=…)`
+builds the profile via `ingest/ingest_profile.py::build_ingest_execution_profile`
+(per-scheme secret-field defaults in `DEFAULT_SECRET_FIELDS`; conservative
+fingerprint/`delegate`-probe/`none`-pagination defaults, since a non-catalog
+ingest names no version endpoint). The register phase then skips the bare shim
+(`register_ingested_operations(register_shim=False)`) so the triple is free, and
+`_stamp_profiled_connector` stamps the synthesised class through the same
+`record_profile_stamp` seam boot stamping uses. **Stamping never enables an
+op** — the `review_status='staged'` gate (#1971) stays the interlock, so the
+connector lands dispatchable-but-unreviewed (`kind="profiled-but-unreviewed"`)
+and the operator clears the gate per-op via the normal review/enable flow.
+Omitting `auth_scheme` keeps the historical bare-shim behaviour byte-identical.
+
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 
 The enable-time advisory above surfaces the connector tier only at the

@@ -649,6 +649,12 @@ async def _spawn_async_ingest(
             tenant_id=resolved.tenant_id,
             dry_run=False,
             spec_info_versions_compatible=spec_info_versions_compatible,
+            auth_scheme=resolved.auth_scheme,
+            auth_secret_fields=(
+                tuple(resolved.auth_secret_fields)
+                if resolved.auth_secret_fields is not None
+                else None
+            ),
         )
 
     # ``asyncio.create_task`` (not ``BackgroundTasks``) so the work
@@ -1131,6 +1137,10 @@ async def _run_ingest_with_http_mapping(
             tenant_id=body.tenant_id,
             dry_run=body.dry_run,
             spec_info_versions_compatible=spec_info_versions_compatible,
+            auth_scheme=body.auth_scheme,
+            auth_secret_fields=(
+                tuple(body.auth_secret_fields) if body.auth_secret_fields is not None else None
+            ),
         )
     except Exception as exc:
         _raise_ingest_http_error(exc, catalog_entry=catalog_entry)

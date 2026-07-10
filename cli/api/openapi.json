@@ -22888,6 +22888,30 @@
             "nullable": true,
             "title": "Spec Info Versions Compatible"
           },
+          "auth_scheme": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "static_header",
+              "session_login",
+              "session_login_basic",
+              "session_login_token",
+              "oauth2_mint"
+            ],
+            "nullable": true,
+            "title": "Auth Scheme",
+            "description": "Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config \u2014 selection only. Mutually exclusive with catalog_entry."
+          },
+          "auth_secret_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "nullable": true,
+            "title": "Auth Secret Fields",
+            "description": "Optional override of the secret-field NAMES the auth_scheme reads at dispatch (never the values \u2014 those stay in the target's secret_ref). Omit for the per-scheme defaults. Requires auth_scheme."
+          },
           "dry_run": {
             "type": "boolean",
             "title": "Dry Run",

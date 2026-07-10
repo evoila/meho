@@ -305,6 +305,57 @@ def test_ingest_tool_schemas_are_strict_and_describe_async(
 
 @pytest.mark.parametrize(
     "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_ingest_schema_exposes_closed_auth_scheme_selector(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The ingest tool schema advertises auth_scheme as a closed enum + names only (#2289)."""
+    from meho_backplane.connectors.profile import NAMED_AUTH_SCHEMES
+
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools = {t["name"]: t for t in response.json()["result"]["tools"]}
+    props = tools[_INGEST_TOOL]["inputSchema"]["properties"]
+
+    # auth_scheme is a closed enum covering exactly the named catalog (+ null).
+    scheme_enum = set(props["auth_scheme"]["enum"]) - {None}
+    assert scheme_enum == NAMED_AUTH_SCHEMES
+    # auth_secret_fields carries NAMES only — an array of strings, no value field.
+    assert props["auth_secret_fields"]["items"]["type"] == "string"
+    assert "auth_secret" not in {k for k in props if "value" in k}
+
+
+async def test_inline_ingest_threads_auth_scheme_to_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selected auth_scheme + secret-field names reach the pipeline (#2289)."""
+    fake = _FakeIngestionPipelineService()
+    monkeypatch.setattr(ci_mod, "IngestionPipelineService", fake)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    await ci_mod._ingest_handler(
+        op,
+        {
+            "product": "acme",
+            "version": "1.2",
+            "impl_id": "acme-rest",
+            "specs": [{"uri": "docs:acme-1.2/acme.yaml"}],
+            "auth_scheme": "session_login_token",
+            "auth_secret_fields": ["username", "password"],
+            "async": False,
+            "tenant_id": str(OPERATOR_TENANT_ID),
+        },
+    )
+
+    [call] = fake.ingest_calls
+    assert call["auth_scheme"] == "session_login_token"
+    assert call["auth_secret_fields"] == ("username", "password")
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
     [TenantRole.OPERATOR],
     indirect=True,
 )

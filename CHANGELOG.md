@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — operator-selectable auth scheme on non-catalog ingest (#2289)
+
+- `meho connector ingest --auth-scheme <name>` (and the REST
+  `IngestRequest.auth_scheme` / MCP `meho.connector.ingest` fields) let an
+  operator select a named auth scheme from the **closed** catalog (`basic`,
+  `static_header`, `session_login`, `session_login_basic`,
+  `session_login_token`, `oauth2_mint`) when ingesting an arbitrary spec. The
+  register phase then synthesises a minimal `ExecutionProfile` and stamps a
+  **dispatchable** `ProfiledRestConnector` instead of the non-dispatchable
+  bare shim — staged behind the normal review/enable gate (#1971), never
+  auto-enabled. Optional `--auth-secret-field` overrides the secret-field
+  NAMES the scheme reads at dispatch; values stay in the target's
+  `secret_ref` and never ride the request. Selection only — no free-form auth
+  config (login URL / template / token path), and reserved typed-only schemes
+  are rejected at the API boundary with a closed-set 422. Omitting the flag
+  keeps today's bare-shim behaviour unchanged. (#2271 / #2289)
+
 ### Added — profiled-connector boot registration (shipped ExecutionProfiles become dispatchable at boot) (#2288)
 
 - Wire `record_profile_stamp` into production: at boot, immediately after

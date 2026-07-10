@@ -1154,9 +1154,19 @@ only the pipeline call were wrapped) — inside
 deadline the body is cancelled and `asyncio.timeout` re-raises
 `TimeoutError`, which the existing `except` routes to `failed`
 (`error_class="TimeoutError"`). The budget defaults to 30 min and is
-env-overridable via `INGEST_JOB_TIMEOUT_SECONDS` (parsed defensively — a
-malformed value falls back to the default with a warning rather than
-crashing the package at import). The guarantee is scoped precisely to
+env-overridable via `INGEST_JOB_TIMEOUT_SECONDS` — surfaced as the typed
+Helm value `config.ingestJobTimeoutSeconds` (#2318), rendered onto the
+backplane ConfigMap only when set so the default deploy inherits the
+30-min default silently rather than an empty `float("")` that would warn
+every boot. The value is parsed defensively: a malformed, non-finite
+(`inf` / `nan`), or non-positive budget falls back to the default with a
+warning rather than crashing the package at import. The non-finite guard
+is load-bearing, not padding — `float("inf")` / `float("nan")` raise no
+`ValueError` and slip past a bare `value <= 0` check (`inf <= 0` is
+`False`; every `nan` comparison is `False`), and `asyncio.timeout(inf)`
+schedules no deadline, so without the `math.isfinite` guard a
+misconfigured budget would silently re-open this very wedge (#2318). The
+guarantee is scoped precisely to
 the *job leg*: cancellation cannot interrupt an already-running
 `to_thread` OS thread (Python exposes no thread cancellation), so the
 status flips but that thread may linger until it returns.

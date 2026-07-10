@@ -339,6 +339,7 @@ const (
 	Postgres   TargetCreateProduct = "postgres"
 	Prometheus TargetCreateProduct = "prometheus"
 	Proxmox    TargetCreateProduct = "proxmox"
+	Rabbitmq   TargetCreateProduct = "rabbitmq"
 	Sddc       TargetCreateProduct = "sddc"
 	Vault      TargetCreateProduct = "vault"
 	Vcfa       TargetCreateProduct = "vcfa"

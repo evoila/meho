@@ -25527,6 +25527,7 @@
               "postgres",
               "prometheus",
               "proxmox",
+              "rabbitmq",
               "sddc",
               "vault",
               "vcfa",

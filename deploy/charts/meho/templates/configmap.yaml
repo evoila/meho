@@ -116,6 +116,24 @@ data:
   # literals. See `deploy/charts/meho/values.yaml`
   # (`config.targetSsrfAllowlist`) and `docs/codebase/target-ssrf-guard.md`.
   MEHO_TARGET_SSRF_ALLOWLIST: {{ .Values.config.targetSsrfAllowlist | quote }}
+  # Async ingest-job watchdog budget (#2318, hardens #2275). #2275
+  # time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)`
+  # so a wedged pipeline can't sit at `status=running` until a pod restart;
+  # this is the operator's override for that wall-clock ceiling (seconds),
+  # read once at import by `_load_ingest_job_timeout_seconds`
+  # (`backend/src/meho_backplane/operations/ingest/jobs.py`) — NOT via
+  # settings.py. Rendered ONLY when set: the empty default omits the key so
+  # the backend's unset→default (1800 s) path runs silently. An
+  # always-rendered `""` (the SSRF-allowlist pattern above) would instead
+  # hit `float("")` and log a spurious `ingest_job_timeout_env_invalid`
+  # warning on every boot, so the timeout knob is guarded. A non-finite
+  # (`inf`/`nan`), non-positive, or malformed value is rejected at the
+  # backend and falls back to 1800 s with a warning. See
+  # `deploy/charts/meho/values.yaml` (`config.ingestJobTimeoutSeconds`)
+  # and `docs/codebase/spec-ingestion.md`.
+  {{- if .Values.config.ingestJobTimeoutSeconds }}
+  INGEST_JOB_TIMEOUT_SECONDS: {{ .Values.config.ingestJobTimeoutSeconds | quote }}
+  {{- end }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

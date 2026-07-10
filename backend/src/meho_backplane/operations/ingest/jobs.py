@@ -42,6 +42,7 @@ enough scrollback.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 import uuid
@@ -90,10 +91,19 @@ def _load_ingest_job_timeout_seconds() -> float:
 
     Env-overridable (a slow shared executor / very large fleet of specs
     may want a longer ceiling) with a sane default. Parsed defensively —
-    a malformed or non-positive value falls back to
+    a malformed, non-finite, or non-positive value falls back to
     :data:`_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS` with a warning rather
     than crashing the ingest package at import, because a timeout typo
     should not take the whole backplane down on boot.
+
+    The non-finite guard is load-bearing, not defensive padding:
+    ``float("inf")`` / ``float("nan")`` raise no ``ValueError`` and both
+    slip past a bare ``value <= 0`` check (``inf <= 0`` is ``False``;
+    every ``nan`` comparison is ``False``), so an unguarded loader would
+    hand the value straight to ``asyncio.timeout`` — where ``inf``
+    schedules no deadline and ``nan`` is ill-defined — silently
+    re-opening the unbounded-``running`` hole the #2275 watchdog closed.
+    ``math.isfinite`` rejects ``inf`` / ``-inf`` / ``nan`` alike.
     """
     raw = os.environ.get("INGEST_JOB_TIMEOUT_SECONDS")
     if raw is None:
@@ -107,9 +117,9 @@ def _load_ingest_job_timeout_seconds() -> float:
             fallback_seconds=_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS,
         )
         return _DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
-    if value <= 0:
+    if not math.isfinite(value) or value <= 0:
         _log.warning(
-            "ingest_job_timeout_env_non_positive",
+            "ingest_job_timeout_env_out_of_range",
             value=value,
             fallback_seconds=_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS,
         )

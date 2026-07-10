@@ -109,6 +109,30 @@ connector-related release-notes line.
   selects it yet (`sddc_manager` still ships `basic`); flipping a profile
   onto it is a separate task.
 
+### Fixed — non-finite `INGEST_JOB_TIMEOUT_SECONDS` can no longer defeat the ingest-job watchdog; the budget is now a chart value (#2318)
+
+- **`INGEST_JOB_TIMEOUT_SECONDS=inf` (or `nan`) no longer silently
+  disables the async ingest-job watchdog** (#2318, hardens #2275). The
+  env loader's only sanity check was `value <= 0`, which a non-finite
+  float slips past (`inf <= 0` is `False`; every `nan` comparison is
+  `False`), so the value flowed straight into `asyncio.timeout(...)` —
+  where `inf` schedules no deadline and `nan` is ill-defined —
+  re-opening the exact "job wedged at `status=running` forever" hole
+  #2275 was built to close. The loader now rejects non-finite values
+  with `math.isfinite`, logs a warning, and falls back to the 1800 s
+  default, so a misconfigured budget can never disable the watchdog.
+- **The ingest-job watchdog budget is now a first-class Helm chart
+  value** (#2318). `config.ingestJobTimeoutSeconds` (schema-typed
+  optional string) renders `INGEST_JOB_TIMEOUT_SECONDS` on the backplane
+  ConfigMap — injected via the existing `envFrom.configMapRef` — so an
+  operator who needs a longer ceiling for a slow shared executor or a
+  large spec fleet no longer has to reach for the untyped `extraEnv`
+  escape hatch. Rendered only when set: the default `""` omits the env
+  so the backend's own 30-min default applies silently (unlike the
+  always-render-`""` SSRF-allowlist pattern, an empty numeric env would
+  hit `float("")` and warn on every boot). Existing installs are
+  unchanged. (#2318)
+
 ### Fixed — async ingest jobs always reach a terminal state (watchdog + bounded LLM client + job-id log binding) (#2275)
 
 - **A wedged async connector ingest can no longer sit at `status=running`

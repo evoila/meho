@@ -304,6 +304,21 @@ config:
   # ("Deployment impact — action likely required") and
   # `docs/codebase/target-ssrf-guard.md`.
   targetSsrfAllowlist: ""
+  # -- Async ingest-job watchdog budget override, in seconds (#2318,
+  # hardens #2275). The backplane time-boxes each background OpenAPI-ingest
+  # job in `asyncio.timeout(...)` so a wedged pipeline (a starved
+  # `to_thread` executor, a hung grouping LLM call) can't sit at
+  # `status=running` until a pod restart. The 30-min default is owned by the
+  # backend (`_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS`); this knob only overrides
+  # it — raise it for a slow shared executor or a very large fleet of specs.
+  # Rendered into `INGEST_JOB_TIMEOUT_SECONDS` ONLY when non-empty: the
+  # default `""` omits the env so the backend's built-in 30-min default
+  # applies silently (an always-rendered empty string would hit `float("")`
+  # and log a spurious warning every boot). A non-finite (`inf`/`nan`),
+  # non-positive, or malformed value is rejected at the backend, which logs
+  # a warning and falls back to 30 min — a misconfigured budget can never
+  # disable the watchdog. See `docs/codebase/spec-ingestion.md`.
+  ingestJobTimeoutSeconds: ""
 
 # Memory layer (G5.2 #374). The backplane ships an in-process
 # memory-expiry sweeper that runs in the FastAPI lifespan and removes

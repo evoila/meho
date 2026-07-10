@@ -226,9 +226,7 @@ async def _resolve_vm_moid_by_name(
     # session is warm from the mount_op_path call above, so adapt_op_query
     # resolves the flavor without an extra round-trip.
     listing_query = await connector.adapt_op_query(target, {"filter.names": [name]}, operator)
-    listing = await connector._get_json(
-        target, list_path, operator=operator, params=listing_query
-    )
+    listing = await connector._get_json(target, list_path, operator=operator, params=listing_query)
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
         raise RuntimeError(

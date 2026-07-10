@@ -370,6 +370,7 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 stop_event_drain=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
+                stamp_catalog_profiled_connectors=AsyncMock(),
             ),
         ):
             # Manually step through the lifespan async generator.
@@ -458,6 +459,7 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 stop_event_drain=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
+                stamp_catalog_profiled_connectors=AsyncMock(),
             ),
         ):
             gen = lifespan(None)  # type: ignore[arg-type]

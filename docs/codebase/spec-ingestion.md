@@ -628,6 +628,34 @@ enable — not the stamp — is what cleared the review gate and made the op
 callable. Both advisories decorate a write that already landed; neither
 blocks it.
 
+**Boot-time stamping (#2288).** `record_profile_stamp` had no production
+caller until #2288 — shipped profile-backed rows were boot-validated
+package data that never became connector classes.
+`stamp_catalog_profiled_connectors()` (`ingest/boot_stamp.py`) is the
+production wiring: the lifespan calls it once, immediately after
+`validate_shipped_artifacts()`, so every catalog row carrying a
+`profile_resource` registers a `ProfiledRestConnector` (synthesised from
+the already-validated profile by `synthesise_profiled_class`) under the
+built-in (`tenant_id=None`) scope. It runs as a synthetic
+`system:boot-profile-stamp` operator and does **no** network I/O (it only
+re-parses the package-data bytes the boot validator already read). The
+result: a fresh deploy has profiled connector classes registered and
+resolvable for every profile-backed row, with dispatch still behind the
+per-op review gate above (stamping never enables an op).
+
+The path is idempotent and gated by construction: a `(product, version,
+impl_id)` triple already served by a hand-coded class (vmware's
+`VmwareRestConnector`, sddc's `SddcManagerConnector`) — or an already-
+stamped profiled class — no-ops (logged at debug, not an error), because
+`record_profile_stamp` refuses to overwrite an occupied triple. The
+synthesised class's triple is derived from the connector_id
+(`parse_connector_id`), not the catalog's raw `product`, so it agrees with
+the registry key `record_profile_stamp` lands it under even when the raw
+product does not round-trip (the `_fixture` mechanism row parses to
+`fixture`). A malformed profile has already crashed the lifespan at
+`validate_shipped_artifacts()`; the stamp path re-parses with the same
+model, so it stays fail-closed as a second line of defence.
+
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 
 The enable-time advisory above surfaces the connector tier only at the

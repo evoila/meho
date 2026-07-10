@@ -70,6 +70,7 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.operations.ingest.exceptions import UncoveredVersionLabel
 
 if TYPE_CHECKING:
+    from meho_backplane.connectors.profile import ExecutionProfile
     from meho_backplane.operations.ingest.api_schemas import ConnectorAuthoringKind
 
 __all__ = [
@@ -82,6 +83,7 @@ __all__ = [
     "resolved_auto_shim_class",
     "resolved_profiled_connector_class",
     "sibling_handrolled_impl_id",
+    "synthesise_profiled_class",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -316,6 +318,88 @@ def _synthesise_shim_class(
                 "against this connector triple. Replace with a hand-coded "
                 "subclass per G3.x Initiative when adding per-product auth, "
                 "topology discovery, or non-degenerate fingerprint shape."
+            ),
+        },
+    )
+
+
+def _profiled_class_name(product: str, version: str) -> str:
+    """Build a Python-identifier-safe name for a synthesised profiled class.
+
+    The shape ``ProfiledRestConnector_<product>_<version>`` mirrors the
+    ``requires_connector_class`` placeholder the profile-backed catalog rows
+    document (``ProfiledRestConnector_fixture_1_0`` for the ``fixture/1.0``
+    row). Non-alnum characters in *product* / *version* are replaced with
+    underscores so the result is a valid Python identifier even when the
+    inputs carry dots or dashes.
+    """
+    sanitized = "_".join(
+        "".join(ch if ch.isalnum() else "_" for ch in component) for component in (product, version)
+    )
+    return f"ProfiledRestConnector_{sanitized}"
+
+
+def synthesise_profiled_class(
+    *,
+    product: str,
+    version: str,
+    impl_id: str,
+    profile: ExecutionProfile,
+) -> type[Connector]:
+    """Synthesise a :class:`ProfiledRestConnector` subclass carrying *profile*.
+
+    G0.30 / #2288. The profiled-tier sibling of :func:`_synthesise_shim_class`:
+    where that produces a non-dispatchable :class:`GenericRestConnector` shim,
+    this produces a **dispatchable**
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector` subclass
+    whose one hand-coded slot (``auth_headers``) is filled by the vetted
+    *profile* attached as a class attribute. The boot-time stamping path
+    (:func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`)
+    hands the result to
+    :meth:`~meho_backplane.operations.ingest.service.ReviewService.record_profile_stamp`,
+    which registers it under the connector's ``(product, version, impl_id)``
+    v2 key — making a shipped profile-backed catalog row dispatchable from
+    boot without a hand-coded connector.
+
+    The ``supported_version_range`` is derived from *version* the same way a
+    bare shim's is (:func:`derive_supported_version_range`) — a bounded band
+    around the catalog label — so the tri-state resolver ladder keeps the
+    profiled class above a bare shim yet below a hand-coded class (which the
+    ``"profiled"`` tier and ``priority = 0`` already guarantee; see
+    :func:`~meho_backplane.connectors.resolver._demote_lower_dispatch_tiers`).
+    Stamping only makes the connector dispatchable; it never enables an op —
+    the ``is_enabled=False`` / ``review_status='staged'`` review gate (#1971)
+    stays the interlock.
+
+    *product* / *version* / *impl_id* must be the dispatch-canonical triple the
+    connector registers under (i.e. the values ``record_profile_stamp`` derives
+    from the connector_id via :func:`parse_connector_id`), so the synthesised
+    class's resolver-facing attributes agree with its registry key.
+    """
+    from meho_backplane.connectors.profiled import ProfiledRestConnector
+
+    cls_name = _profiled_class_name(product, version)
+    supported_range = derive_supported_version_range(version)
+    return type(
+        cls_name,
+        (ProfiledRestConnector,),
+        {
+            "product": product,
+            "version": version,
+            "impl_id": impl_id,
+            "supported_version_range": supported_range,
+            "priority": 0,
+            "profile": profile,
+            "__module__": __name__,
+            "__doc__": (
+                f"Synthesised :class:`ProfiledRestConnector` for "
+                f"({product!r}, {version!r}, {impl_id!r}).\n\n"
+                "Materialised from a reviewed ExecutionProfile shipped as a "
+                "profile-backed catalog row and registered at boot by "
+                ":func:`meho_backplane.operations.ingest.boot_stamp."
+                "stamp_catalog_profiled_connectors` (#2288). Dispatchable — "
+                "the profile fills the auth slot — but every op stays "
+                "review-gated until an operator enables it (#1971)."
             ),
         },
     )

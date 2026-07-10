@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — profiled-connector boot registration (shipped ExecutionProfiles become dispatchable at boot) (#2288)
+
+- Wire `record_profile_stamp` into production: at boot, immediately after
+  the shipped-artifact validator, every catalog row carrying a
+  `profile_resource` registers a `ProfiledRestConnector` synthesised from
+  its reviewed `ExecutionProfile`, so a shipped profile is dispatchable
+  from a fresh deploy instead of inert package data. Idempotent and gated —
+  a triple already served by a hand-coded class (vmware/sddc) no-ops, and
+  stamping never enables an op (the #1971 review gate stays the interlock).
+  Runs as a system operator with no network I/O. (#2271 / #2288)
+
 ### Fixed — async ingest jobs always reach a terminal state (watchdog + bounded LLM client + job-id log binding) (#2275)
 
 - **A wedged async connector ingest can no longer sit at `status=running`

@@ -5,10 +5,19 @@
 The `sddc-manager` connector is the hand-rolled `HttpConnector` subclass that
 dispatches SDDC Manager REST operations under the
 `(product="sddc-manager", version="9.0", impl_id="sddc-rest")` registry triple.
-G3.5-T4 (#616) shipped the skeleton — HTTP Basic auth, fingerprint, probe, and
-the G0.6 dispatch shim. G3.5-T5 (#617) added spec ingestion + operator-review
-curation + 9 read-only core ops. G3.5-T6 (#618) shipped the CLI verb tree
-(`meho sddc-manager …`) + recorded-fixture E2E integration test.
+G3.5-T4 (#616) shipped the skeleton — fingerprint, probe, and the G0.6 dispatch
+shim. G3.5-T5 (#617) added spec ingestion + operator-review curation. #2290
+rebuilt the auth on the profile-derived `session_login_token` token session
+(`POST /v1/tokens` → Bearer; the appliance rejects HTTP Basic). G3.5-T6 (#618)
+shipped the CLI verb tree (`meho sddc-manager …`) + recorded-fixture E2E test.
+
+#2306 converted the audited 12-read lab-audit set to first-class **typed** ops
+(`source_kind="typed"`, `typed_ops.py` / `typed_reads.py`) that dispatch on a
+fresh boot with zero catalog ingest. This is now the documented operational
+surface; the wider ingested VCF catalog stays as profiled-dispatch breadth
+(#2271) under its own `METHOD:path` op_ids (two surfaces, no resolver
+shadowing — typed ops never resolve through `endpoint_descriptor` rows, #2262).
+The four non-audited curated reads stay as ingested-row curation in `core_ops.py`.
 
 Source: `backend/src/meho_backplane/connectors/sddc_manager/`.
 
@@ -143,10 +152,50 @@ client.
 - **structlog** — a single `sddc_manager_credentials_loaded` info event per
   successful first-use credential load; no other emit points in this skeleton.
 
+## `typed_ops.py` / `typed_reads.py` — typed read surface (#2306)
+
+The audited 12-read lab-audit set ships as typed ops. `typed_reads.py` holds
+the async handler bodies (each issues one `connector._get_json(...)` on the
+token session); `connector.py` exposes them as thin bound-method shims
+(`domain_list`, `credential_list`, …) so the dispatcher's `import_handler`
+walk recovers each callable from its persisted `module.ClassName.method`
+`handler_ref`. `typed_ops.py` carries the `SddcTypedOp` metadata tuple
+(`SDDC_TYPED_OPS`) and the `register_sddc_typed_operations` registrar, queued
+onto the lifespan runner in `__init__.py`. A raw `401` propagates to the
+dispatcher's #2067 recovery arm, which calls the connector's public
+`invalidate_session` hook (from #2290) and re-dispatches once.
+
+| op_id | group | path |
+|---|---|---|
+| `sddc.domain.list` | `sddc-inventory` | `GET /v1/domains` |
+| `sddc.domain.status` | `sddc-inventory` | `GET /v1/domains/{id}/status` |
+| `sddc.cluster.list` | `sddc-inventory` | `GET /v1/clusters` |
+| `sddc.host.list` | `sddc-inventory` | `GET /v1/hosts` |
+| `sddc.vcenter.list` | `sddc-inventory` | `GET /v1/vcenters` |
+| `sddc.nsxt_cluster.list` | `sddc-inventory` | `GET /v1/nsxt-clusters` |
+| `sddc.credential.list` | `sddc-credentials` | `GET /v1/credentials` |
+| `sddc.task.list` | `sddc-tasks-typed` | `GET /v1/tasks` |
+| `sddc.system.info` | `sddc-platform` | `GET /v1/system` |
+| `sddc.vcf_service.list` | `sddc-platform` | `GET /v1/vcf-services` |
+| `sddc.manager.list` | `sddc-platform` | `GET /v1/sddc-managers` |
+| `sddc.license.list` | `sddc-platform` | `GET /v1/license-keys` |
+
+**Credential-read gating (`sddc.credential.list`).** SDDC Manager is the system
+of record for nested-infra credentials; its `GET /v1/credentials` read returns
+live account secrets. The typed op is gated via the existing mechanism:
+`requires_approval=True` (so `policy_gate` routes it to the approval queue —
+not dispatchable without operator approval), the op-id is on
+`broadcast.events._CREDENTIAL_READ_OPS` (so `classify_op` returns
+`credential_read` and audit/broadcast rows collapse to aggregate-only), and the
+handler scrubs every secret-keyed value at the connector boundary
+(`_redact_secrets`). Three layers; no secret ever rides the result. `safety_level`
+is `caution`; the other 11 reads are `safe` / no-approval.
+
 ## `core_ops.py` — curation module
 
-`core_ops.py` is the operator-review metadata store for the curated 9-op read
-core. It mirrors the pattern `connectors/nsx/core_ops.py` established for NSX.
+`core_ops.py` is the operator-review metadata store for the 4 non-audited curated
+reads left after #2306 promoted the audited set to typed ops. It mirrors the
+pattern `connectors/nsx/core_ops.py` established for NSX.
 
 ### `classify_sddc_op(op_id) -> str`
 
@@ -159,8 +208,8 @@ classification.
 
 The operator-review-time substrate call. After this call:
 
-- All 8 curated groups land `review_status='enabled'`.
-- Exactly the 9 ops in `SDDC_CORE_OPS` are `is_enabled=True`.
+- All 4 curated groups land `review_status='enabled'`.
+- Exactly the 4 ops in `SDDC_CORE_OPS` are `is_enabled=True`.
 - Every other op in a curated group carries an operator-override audit row
   (`is_enabled=False`) that the `enable_group` cascade respects.
 - Each curated op carries the reviewed `llm_instructions` blob.
@@ -173,19 +222,21 @@ Re-running is safe: `enable_group` short-circuits on already-enabled groups
 (no audit row), but `edit_group` and `edit_op` always emit one audit row per
 call even on no-op values. Intended posture is a one-shot curation after ingest.
 
-### The 9 curated ops
+### The 4 curated ops
 
 | op_id | group | cli alias |
 |---|---|---|
 | `GET:/v1/releases/system` | `sddc-releases` | `sddc.about` |
-| `GET:/v1/sddc-managers` | `sddc-managers` | `sddc.manager.list` |
-| `GET:/v1/domains` | `sddc-domains` | `sddc.domain.list` |
 | `GET:/v1/domains/{id}` | `sddc-domains` | `sddc.domain.info` |
-| `GET:/v1/clusters` | `sddc-clusters` | `sddc.cluster.list` |
-| `GET:/v1/hosts` | `sddc-hosts` | `sddc.host.list` |
 | `GET:/v1/network-pools` | `sddc-network-pools` | `sddc.network_pool.list` |
 | `GET:/v1/bundles` | `sddc-bundles` | `sddc.bundle.list` |
-| `GET:/v1/tasks` | `sddc-tasks` | `sddc.workflow.list` |
+
+The audited operational reads (domains list + status, clusters, hosts, vcenters,
+nsxt-clusters, credentials, tasks, system, vcf-services, sddc-managers,
+license-keys) moved to typed ops in #2306 (see the typed read surface above);
+their ingested rows still exist and stay browsable but `core_ops.py` no longer
+flips them to `is_enabled=True`. `SDDC_PATH_RULES` retains the full `/v1/`
+taxonomy so the ingested breadth keeps its group organisation.
 
 Lifecycle-write ops (`workflow start`, `domain create`, `cluster expand`,
 `host commission`) remain `staged` (never enabled) per Initiative #368 v0.2

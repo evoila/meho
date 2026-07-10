@@ -21,27 +21,18 @@ and :mod:`meho_backplane.connectors.vcf_automation` established.
 
 Operations for this connector arrive via G0.7 spec ingestion against
 the Fleet (vRSLCM-derived) OpenAPI surface. G3.6-T7 (#831) shipped the
-connector skeleton; G3.6-T8 (#835) adds the curated read-only v0.5
-core — 8 operator-enabled ops + 6 reviewed groups — via the
-:func:`~meho_backplane.connectors.vcf_fleet.core_ops.apply_fleet_core_curation`
-substrate call against an already-ingested connector.
+connector skeleton; the audited read set ships as first-class **typed**
+ops (:mod:`.typed_ops`, ``source_kind="typed"``, T4 · #2304), while the
+wider ingested catalog stays browsable as profiled-dispatch breadth,
+enable-able through the generic review flow
+(``ReviewService.enable_reads``) — the hand-curated ingested-enable
+apparatus was retired in #2358 (T7 of #2266).
 """
+
+from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_fleet.connector import VcfFleetConnector
-from meho_backplane.connectors.vcf_fleet.core_ops import (
-    FLEET_CONNECTOR_ID,
-    FLEET_CORE_GROUPS,
-    FLEET_CORE_OPS,
-    FLEET_IMPL_ID,
-    FLEET_PATH_RULES,
-    FLEET_PRODUCT,
-    FLEET_VERSION,
-    FleetCoreGroup,
-    FleetCoreOp,
-    apply_fleet_core_curation,
-    classify_fleet_op,
-)
 from meho_backplane.connectors.vcf_fleet.session import (
     SessionCredentials,
     VcfFleetCredentialsLoader,
@@ -55,6 +46,18 @@ from meho_backplane.connectors.vcf_fleet.typed_ops import (
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 from meho_backplane.retrieval.embedding import EmbeddingService
+
+#: Endpoint-descriptor identity for the Fleet connector — the
+#: dispatch-canonical ``(product, version, impl_id)`` triple
+#: :func:`parse_connector_id` derives from ``"fleet-rest-9.0"``, plus the
+#: derived ``connector_id`` slug. :class:`VcfFleetConnector` pins the same
+#: triple as class attributes. Relocated from the retired ``core_ops``
+#: curation module (#2358) so acceptance / typed-read tests that seed
+#: ``EndpointDescriptor`` rows import one source of truth.
+FLEET_PRODUCT: Final[str] = "fleet"
+FLEET_VERSION: Final[str] = "9.0"
+FLEET_IMPL_ID: Final[str] = "fleet-rest"
+FLEET_CONNECTOR_ID: Final[str] = f"{FLEET_IMPL_ID}-{FLEET_VERSION}"
 
 
 async def register_fleet_typed_operations(
@@ -114,23 +117,16 @@ register_typed_op_registrar(register_fleet_typed_operations)
 
 __all__ = [
     "FLEET_CONNECTOR_ID",
-    "FLEET_CORE_GROUPS",
-    "FLEET_CORE_OPS",
     "FLEET_IMPL_ID",
-    "FLEET_PATH_RULES",
     "FLEET_PRODUCT",
     "FLEET_TYPED_OPS",
     "FLEET_TYPED_WHEN_TO_USE_BY_GROUP",
     "FLEET_VERSION",
-    "FleetCoreGroup",
-    "FleetCoreOp",
     "FleetTypedOp",
     "SessionCredentials",
     "VcfFleetConnector",
     "VcfFleetCredentialsLoader",
     "VcfFleetTargetLike",
-    "apply_fleet_core_curation",
-    "classify_fleet_op",
     "load_credentials_from_vault",
     "register_fleet_typed_operations",
 ]

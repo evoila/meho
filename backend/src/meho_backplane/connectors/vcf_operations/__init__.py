@@ -41,21 +41,10 @@ All four share the same registration shape; vROps + vRLI + Fleet share the
 ``_shared/vcf_auth.py`` helper module (#841).
 """
 
+from typing import Final
+
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_operations.connector import VcfOperationsConnector
-from meho_backplane.connectors.vcf_operations.core_ops import (
-    VROPS_CONNECTOR_ID,
-    VROPS_CORE_GROUPS,
-    VROPS_CORE_OPS,
-    VROPS_IMPL_ID,
-    VROPS_PATH_RULES,
-    VROPS_PRODUCT,
-    VROPS_VERSION,
-    VropsCoreGroup,
-    VropsCoreOp,
-    apply_vrops_core_curation,
-    classify_vrops_op,
-)
 from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsCredentialsLoader,
     VcfOperationsTargetLike,
@@ -67,6 +56,18 @@ from meho_backplane.connectors.vcf_operations.typed_ops import (
     register_vcf_operations_typed_operations,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+#: Endpoint-descriptor identity for the vROps connector — the
+#: dispatch-canonical ``(product, version, impl_id)`` triple
+#: :func:`parse_connector_id` derives from ``"vrops-rest-9.0"``, plus the
+#: derived ``connector_id`` slug. :class:`VcfOperationsConnector` pins the
+#: same triple as class attributes. Relocated from the retired ``core_ops``
+#: curation module (#2358) so acceptance / typed-read tests that seed
+#: ``EndpointDescriptor`` rows import one source of truth.
+VROPS_PRODUCT: Final[str] = "vrops"
+VROPS_VERSION: Final[str] = "9.0"
+VROPS_IMPL_ID: Final[str] = "vrops-rest"
+VROPS_CONNECTOR_ID: Final[str] = f"{VROPS_IMPL_ID}-{VROPS_VERSION}"
 
 register_connector_v2(
     product="vrops",
@@ -96,21 +97,14 @@ register_typed_op_registrar(register_vcf_operations_typed_operations)
 
 __all__ = [
     "VROPS_CONNECTOR_ID",
-    "VROPS_CORE_GROUPS",
-    "VROPS_CORE_OPS",
     "VROPS_IMPL_ID",
-    "VROPS_PATH_RULES",
     "VROPS_PRODUCT",
     "VROPS_TYPED_OPS",
     "VROPS_VERSION",
     "VcfOperationsConnector",
     "VcfOperationsCredentialsLoader",
     "VcfOperationsTargetLike",
-    "VropsCoreGroup",
-    "VropsCoreOp",
     "VropsTypedOp",
-    "apply_vrops_core_curation",
-    "classify_vrops_op",
     "load_credentials_from_vault",
     "register_vcf_operations_typed_operations",
 ]

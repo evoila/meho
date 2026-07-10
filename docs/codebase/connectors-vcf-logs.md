@@ -69,15 +69,16 @@ typed and profiled paths is proven in
   `VcfTargetLike` with an optional `provider` field
   (`"Local"` / `"ActiveDirectory"` / `"vIDM"`). The concrete `Target`
   model satisfies it structurally once the column lands.
-- **`VRLI_CORE_OPS` / `VRLI_CORE_GROUPS` / `apply_vrli_core_curation`** —
-  `connectors/vcf_logs/core_ops.py` (#834 G3.6-T5). The
-  operator-review metadata + driver for the curated ingested read core.
-  Since #2295 this carries **6** ops across 5 groups (`vrli.about`,
-  `vrli.aggregated.query`, `vrli.field.list`, `vrli.host.list`,
-  `vrli.content.pack.list`, `vrli.alert.list`) — the raw events query
-  moved to a typed op (below). The path-prefix classifier
-  `classify_vrli_op` rejects non-`GET` methods so write ops never land
-  under a curated group — same shape Harbor + NSX use.
+- **Ingested browse breadth** — the reads outside the typed events query
+  (`vrli.about`, `vrli.aggregated.query`, `vrli.field.list`, `vrli.host.list`,
+  `vrli.content.pack.list`, `vrli.alert.list`) land as ordinary
+  `source_kind="ingested"` `endpoint_descriptor` rows via G0.7 spec ingestion
+  and are enabled through the generic review flow
+  (`ReviewService.enable_reads`). The hand-curated ingested-enable apparatus
+  (`core_ops.py`, with its `VRLI_CORE_OPS` / `VRLI_CORE_GROUPS` /
+  `apply_vrli_core_curation` / `classify_vrli_op` symbols) was retired in #2358
+  (T7 of #2266); read enablement is now generic, with no per-product curation
+  code.
 - **`VRLI_EVENT_QUERY_OP` / `event_query_impl` / `register_vrli_typed_operations`** —
   `connectors/vcf_logs/typed_ops.py` (#2295). vRLI's first
   `source_kind="typed"` op, `vrli.event.query`: a bound method on the
@@ -171,7 +172,7 @@ dispatcher-side classification of 440 → structured `connector_auth_failed`
 flat error.
 
 **`_get_json_with_session_retry` is not on the dispatch path (#2067).**
-This helper recovers a 440/401 only for a *direct* caller. vRLI's curated
+This helper recovers a 440/401 only for a *direct* caller. vRLI's ingested
 read ops dispatch as `source_kind='ingested'` through
 `operations/_branches.py::dispatch_ingested` → `HttpConnector._request_json`
 — they never call this wrapper, so #1909's 440-recovery never executed for
@@ -189,7 +190,7 @@ its handler routes through `_get_json_with_session_retry`, so it recovers a
 440/401 via the helper's own re-login + retry-once rather than the #2067
 dispatch-path seam (a typed handler owns its transport call, so the
 dispatch-path `invalidate_session` hook does not wrap it). The remaining six
-curated read ops still dispatch as `source_kind='ingested'` and rely on the
+ingested read ops still dispatch as `source_kind='ingested'` and rely on the
 #2067 dispatch-path recovery.
 
 ### Fingerprint + probe
@@ -301,7 +302,7 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
 - Task: <https://github.com/evoila/meho/issues/830>
   (skeleton + auth) and
   <https://github.com/evoila/meho/issues/834>
-  (spec ingestion + operator-review curation)
+  (spec ingestion + ingested read enablement)
 - Parent initiative: <https://github.com/evoila/meho/issues/369>
 - Parent goal: <https://github.com/evoila/meho/issues/214>
 - Canary runbook: [`docs/cross-repo/g36-vrli-canary.md`](../cross-repo/g36-vrli-canary.md)

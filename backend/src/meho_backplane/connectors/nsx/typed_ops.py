@@ -5,9 +5,8 @@
 
 The audited NSX read set is registered as typed ops
 (``source_kind="typed"``) so it dispatches on a fresh boot with **zero
-catalog ingest** -- the #2247 failure class the ingested-row curation in
-:mod:`meho_backplane.connectors.nsx.core_ops` was subject to (per-deploy
-catalog state). The op bodies live in
+catalog ingest** -- the #2247 failure class the older ingested-row
+enablement was subject to (per-deploy catalog state). The op bodies live in
 :mod:`meho_backplane.connectors.nsx.typed_reads`; thin bound-method shims
 on :class:`~meho_backplane.connectors.nsx.connector.NsxConnector` expose
 them under the ``handler_attr`` names below so the dispatcher's
@@ -19,13 +18,13 @@ The dataclass + tuple + module-level registrar shape mirrors
 :mod:`meho_backplane.connectors.argocd.ops` and
 :mod:`meho_backplane.connectors.vmware_rest.typed_ops`.
 
-Curated ops NOT in the audited set (transport-node listing, segment
-listing, tier-0 gateways, distributed-firewall policies + rules) stay as
-``core_ops.py`` curation over ingested rows -- the ingested breadth
-remains browsable; only the audited operational reads are promoted to
-first-class typed ops. ``tier-1 gateway create`` (a write) is out of
-scope: the first write on a read-only connector is its own approval-gated
-G3.x write-surface initiative.
+Ops NOT in the audited set (transport-node listing, segment listing,
+tier-0 gateways, distributed-firewall policies + rules) stay as ingested
+browse breadth -- enable-able through the generic review flow
+(``ReviewService.enable_reads``); only the audited operational reads are
+promoted to first-class typed ops. ``tier-1 gateway create`` (a write) is
+out of scope: the first write on a read-only connector is its own
+approval-gated G3.x write-surface initiative.
 """
 
 from __future__ import annotations

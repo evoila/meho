@@ -5,7 +5,7 @@
 
 Closes the substrate-proves-out half of the vROps v0.5 ship for
 Initiative #369: each entry in
-:data:`~meho_backplane.connectors.vcf_operations.core_ops.VROPS_CORE_OPS`
+:data:`~tests.acceptance._vrops_canary_fixtures.VROPS_CANARY_CORE_OP_IDS`
 is dispatched against a respx-mocked vROps appliance and the
 dispatcher returns a structured
 :class:`~meho_backplane.connectors.schemas.OperationResult` for every
@@ -17,7 +17,7 @@ The full env-gated suite-api ingestion canary (live
 requires the vROps spec-shelf wired to the meho-runners pool, the
 same env-gated pattern :mod:`tests.acceptance._vcenter_spec` codifies
 for vSphere. Until then, the dispatch leg is exercised directly
-against the curated descriptor set the :data:`VROPS_CORE_OPS`
+against the ingested descriptor set the :data:`VROPS_CANARY_CORE_OP_IDS`
 constants describe — same posture
 :mod:`tests.acceptance.test_g35_nsx_dispatch_smoke` took for NSX.
 
@@ -37,17 +37,18 @@ from __future__ import annotations
 
 import pytest
 
-from meho_backplane.connectors.vcf_operations import VROPS_CORE_OPS
 from meho_backplane.operations.meta_tools import call_operation
-from tests.acceptance._vrops_canary_fixtures import IngestedVropsCanary
+from tests.acceptance._vrops_canary_fixtures import (
+    VROPS_CANARY_CORE_OP_IDS,
+    IngestedVropsCanary,
+)
 
 #: Op ids the smoke test dispatches. Sourced from
-#: :data:`~meho_backplane.connectors.vcf_operations.VROPS_CORE_OPS`;
-#: one of them carries a path template (``{id}`` on
-#: ``vrops.resource.get``) that needs substitution at dispatch
-#: time. The smoke supplies the canary resource's UUID so the
-#: substituted URL hits the registered respx route.
-SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VROPS_CORE_OPS)
+#: :data:`~tests.acceptance._vrops_canary_fixtures.VROPS_CANARY_CORE_OP_IDS`;
+#: one of them carries a path template (``{id}`` on the resource-get op)
+#: that needs substitution at dispatch time. The smoke supplies the canary
+#: resource's UUID so the substituted URL hits the registered respx route.
+SMOKE_OP_IDS: tuple[str, ...] = VROPS_CANARY_CORE_OP_IDS
 
 #: Per-op parameter map. Op ids without ``{var}`` templates get an
 #: empty dict (the respx route matches by literal path); the one

@@ -3,8 +3,7 @@
 
 """Typed (bound-method) read implementations for :class:`NsxConnector`.
 
-The audited NSX read set (#2302) is converted from the ingested-row
-curation in :mod:`meho_backplane.connectors.nsx.core_ops` to typed ops
+The audited NSX read set (#2302) is registered as typed ops
 (``source_kind="typed"``) so it dispatches on a fresh boot with **zero
 catalog state**. Each function here is the body a thin bound-method shim
 on :class:`~meho_backplane.connectors.nsx.connector.NsxConnector`

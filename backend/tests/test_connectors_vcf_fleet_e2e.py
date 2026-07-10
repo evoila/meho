@@ -54,7 +54,6 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_fleet import (
     FLEET_CONNECTOR_ID,
-    FLEET_CORE_OPS,
     VcfFleetConnector,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -67,6 +66,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vcf_fleet_canary_fixtures import (
     FLEET_CANARY_BASE_URL,
+    FLEET_CANARY_CORE_OP_IDS,
     FLEET_CANARY_FINGERPRINT,
     FLEET_CANARY_OPERATOR_TENANT,
     FLEET_CANARY_REQUESTS,
@@ -220,7 +220,8 @@ async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2
 
     Lifecycle:
 
-    1. Insert :data:`~meho_backplane.connectors.vcf_fleet.FLEET_CORE_OPS`
+    1. Insert the ingested browse-breadth Fleet descriptors (from
+       :data:`~tests.acceptance._vcf_fleet_canary_fixtures._FLEET_SEED_OPS`)
        descriptors + groups into the per-test SQLite DB.
     2. Seed a :class:`Target` row carrying :data:`FLEET_CANARY_FINGERPRINT`
        so the resolver binds :class:`VcfFleetConnector`.
@@ -254,8 +255,8 @@ async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in FLEET_CORE_OPS)
-assert len(_OP_IDS) == 6, f"Expected 6 curated Fleet ops, got {len(_OP_IDS)}: {_OP_IDS}"
+_OP_IDS: tuple[str, ...] = FLEET_CANARY_CORE_OP_IDS
+assert len(_OP_IDS) == 6, f"Expected 6 ingested Fleet browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)

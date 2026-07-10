@@ -41,11 +41,12 @@ thin bound-method handlers on the connector, a module-level registrar
 queued onto :func:`register_typed_op_registrar`) and
 :mod:`meho_backplane.connectors.vmware_rest.typed_ops`.
 
-Unconverted curated ops (resource list/get, alert definitions, symptoms,
+Unconverted ops (resource list/get, alert definitions, symptoms,
 recommendations, super metrics) are **declined** from typed conversion —
 they are not in the adopter's audited operational set; the ingested
-breadth catalog still covers the browse case, and their ``is_enabled``
-curation stays in :mod:`.core_ops` until T7 retires the apparatus.
+breadth catalog still covers the browse case, enable-able through the
+generic review flow (``ReviewService.enable_reads``). The hand-curated
+ingested-enable apparatus was retired in #2358 (T7 of #2266).
 """
 
 from __future__ import annotations
@@ -72,12 +73,10 @@ __all__ = [
 _log = structlog.get_logger(__name__)
 
 #: Group keys for the typed read surface. Chosen distinct from the
-#: ingested classifier slugs in
-#: :data:`~meho_backplane.connectors.vcf_operations.core_ops.VROPS_PATH_RULES`
-#: (``vrops-system`` / ``vrops-alerts`` / ``vrops-resources`` / ...) so
-#: the typed OperationGroup rows never share a row with the ingested
-#: browse groups and their curated ``when_to_use`` blurbs can't tug
-#: against each other.
+#: ingested browse-group slugs (``vrops-resources`` / ``vrops-alert-definitions``
+#: / ``vrops-symptoms`` / ...) so the typed OperationGroup rows never share a
+#: row with the ingested browse groups and their curated ``when_to_use``
+#: blurbs can't tug against each other.
 _LIVENESS_GROUP_KEY = "vrops-liveness"
 _ALERT_TRIAGE_GROUP_KEY = "vrops-alert-triage"
 _RESOURCE_QUERY_GROUP_KEY = "vrops-resource-query"

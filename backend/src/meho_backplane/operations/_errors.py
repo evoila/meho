@@ -39,6 +39,7 @@ from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
 __all__ = [
+    "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
     "result_awaiting_approval",
@@ -432,6 +433,44 @@ def result_awaiting_approval(
         duration_ms=duration_ms,
         extras={
             "error_code": "awaiting_approval",
+            "approval_request_id": str(approval_request_id),
+        },
+    )
+
+
+def result_already_resumed(
+    op_id: str,
+    approval_request_id: uuid.UUID,
+    duration_ms: float,
+) -> OperationResult:
+    """Another resumer already won the exactly-one-resumer claim (#2293).
+
+    Task #2293 (Initiative #2286). Every dispatcher of an approved op --
+    the in-process agent waiter (#1117), the shared
+    :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`
+    operator path, any future resumer -- must first win the atomic claim
+    (:func:`~meho_backplane.operations.approval_queue.claim_resume`: a
+    conditional ``UPDATE ... WHERE resumed_at IS NULL``). This result is
+    what a **loser** returns: the approved op is already executing /
+    executed via the resumer that won the claim, so this caller must
+    no-op rather than re-dispatch the write a second time.
+
+    It is deliberately **not** an error and **not** ``denied`` -- the
+    governance loop succeeded, just on the other surface. The distinct
+    ``status="already_resumed"`` lets the approving surface (REST
+    ``/approve`` / ``/decide`` ``dispatch_status``, the MCP ``dispatch``
+    block) report "already executed" to the approver without surfacing a
+    failure (AC #4). Callers that only handled ``"ok"`` treat it as an
+    unrecognised terminal status, which is the correct benign semantics.
+    :func:`status_code_for_result` maps it to ``200``.
+    """
+    return OperationResult(
+        status="already_resumed",
+        op_id=op_id,
+        error=None,
+        duration_ms=duration_ms,
+        extras={
+            "result_status": "already_resumed",
             "approval_request_id": str(approval_request_id),
         },
     )
@@ -1191,14 +1230,17 @@ def status_code_for_result(result_status: str) -> int:
 
     The ``audit_log.status_code`` column is NOT NULL :class:`int` --
     optimised for the HTTP middleware path. The dispatcher contract is
-    not HTTP, so the dispatcher synthesises one: ``200`` for ok,
-    ``202`` for awaiting approval / pending (accepted but not yet
-    executed — the agent needs-approval path), ``403`` for denied,
-    ``500`` for error. The synthetic values are not surfaced to
-    operators; the canonical signal lives in
+    not HTTP, so the dispatcher synthesises one: ``200`` for ok (and for
+    ``already_resumed`` -- the exactly-one-resumer no-op #2293, a benign
+    "executed elsewhere", not a failure), ``202`` for awaiting approval /
+    pending (accepted but not yet executed — the agent needs-approval
+    path), ``403`` for denied, ``500`` for error. The synthetic values
+    are not surfaced to operators; the canonical signal lives in
     ``payload["result_status"]`` on the audit row.
     """
     if result_status == "ok":
+        return 200
+    if result_status == "already_resumed":
         return 200
     if result_status == "awaiting_approval":
         return 202

@@ -1121,11 +1121,20 @@ async def call_operation_with_approval(
     gate — the durable approval-decision row is the authorization the gate
     bypass relies on.
 
-    Not part of the public MCP / REST surface: only the agent layer ever
-    re-dispatches on its own behalf. The REST ``POST /api/v1/approvals/{id}/approve``
-    path keeps its inline ``dispatch(..., _approved=True)`` call for the
-    human-driven express lane; the two coexist by design (the operator/agent
-    split documented in #1117).
+    Not part of the public MCP / REST surface: only the agent layer calls
+    this. The operator surfaces (REST ``/approve`` + ``/decide``, MCP by-id
+    approve, UI approve) re-dispatch through the shared
+    :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`.
+    For a run-bound request both this in-process path (invoked by the agent
+    waiter once the ``approval.approved`` broadcast lands) and an operator
+    surface can race to resume, so the operator/agent split is **enforced**
+    by the exactly-one-resumer claim (#2293), not merely assumed: the agent
+    waiter wins :func:`~meho_backplane.operations.approval_queue.claim_resume`
+    before calling this function, and ``resume_dispatch_after_approval``
+    wins the same claim before it dispatches, so exactly one side executes
+    the approved op (a single conditional ``UPDATE ... WHERE resumed_at IS
+    NULL``; the loser no-ops). This is what closes the double-dispatch the
+    unenforced "coexist by design" note (#1117) had left open.
     """
     return await _call_operation_impl(operator, arguments, approved=True)
 

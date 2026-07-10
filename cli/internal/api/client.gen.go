@@ -3009,13 +3009,15 @@ type DecideRequestBody struct {
 
 // DecideResponseBody Response for a successful operator decision.
 //
-// The “dispatch_*“ fields are populated only when “/decide“
-// re-dispatched the approved op — i.e. an approved **direct** operator
-// op (no “run_id“) whose stored params drove a fresh execution
-// (#1503). They stay “None“ on a rejection and on an approved
-// **agent-run** request (“run_id“ set), where the in-process agent
-// runtime owns the re-dispatch and “/decide“ only records the
-// decision (avoiding a double execution).
+// The “dispatch_*“ fields are populated whenever “/decide“ attempted
+// the approved op's re-dispatch — for **every** approved request now, not
+// only direct operator ops (#2293). “dispatch_status“ is “"ok"“ when
+// “/decide“ won the exactly-one-resumer claim and executed (the direct
+// op, or the run-bound fallback when the in-process waiter was gone), or
+// “"already_resumed"“ when the in-process agent waiter won the claim
+// first (the run-bound waiter-alive case) — a benign "executed elsewhere"
+// that keeps the approver from double-dispatching. They stay “None“
+// only on a rejection.
 type DecideResponseBody struct {
 	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
 	Decision          string                             `json:"decision"`

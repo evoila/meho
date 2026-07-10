@@ -1447,7 +1447,9 @@ for the operator-facing framing.
 The only public entry point for the full walk. Resolves the input
 (file path or `http(s)://` URL via `httpx`), sniffs YAML vs JSON via
 `detect_spec_format`, decodes, validates the OpenAPI version
-(3.0.x / 3.1.x), and walks `paths`. Returns a list.
+(3.0.x / 3.1.x), validates the document against the official OpenAPI
+metaschema (`_validate_openapi_structure`), and walks `paths`. Returns a
+list.
 
 The function is synchronous because callers are CLI / one-shot
 ingestion endpoints that have no in-flight event loop concern. It
@@ -1472,6 +1474,41 @@ schema is JSON-serializable at the proto-build boundary both the real and
 say) fails identically — a structured `invalid_schema` 400 at parse time
 — instead of crashing the real INSERT while `dry_run=true` green-lights
 the same spec.
+
+**Structural (metaschema) gate (#2292).** Immediately after the version
+gate, `_validate_openapi_structure` validates the decoded document
+against the official OpenAPI metaschema — the 2020-12-based schema for a
+`3.1.x` document, the draft-04-based schema for `3.0.x` — via
+`openapi-spec-validator`'s pre-built schema validators
+(`openapi_v30_schema_validator` / `openapi_v31_schema_validator`).
+Validation is **metaschema-only**: the library's optional semantic
+add-ons (duplicate-`operationId`, unresolvable-path-parameter,
+extra-parameter) are *not* run, because they routinely flag
+legal-but-untidy vendor specs and this gate judges structure, not style.
+The first (most-relevant) violation is selected with
+`jsonschema.exceptions.best_match` and surfaced as `InvalidSpecError`
+naming the failing JSON path (e.g. `$.paths['/pets'].get.responses`) plus
+the house remediation anchor, so it flows through the existing
+`invalid_spec` envelope on every transport (REST 400, MCP `-32602`,
+async-job `error`) with no new typed field. Because the gate lives at
+parse, a metaschema-invalid document is refused identically on the
+`dry_run` and effectful legs — it can never partially ingest into
+catalog rows of unknown quality. The gate is deliberately narrower than
+"validate everything": the metaschema does not resolve `$ref` targets
+(so cross-document `$ref` rejection stays with the ref resolver
+downstream) and it permits a `3.1` document with `webhooks`/`components`
+but no `paths`, which meho's own `no 'paths' key` check — sitting behind
+the gate — still rejects because meho ingests only path operations. The
+parser's tolerant-skip of sub-document junk (a path item with no verbs,
+a non-dict path item) is unaffected: those shapes are legal per the
+metaschema and are handled in `_iter_operations`.
+
+Boot-time impact: the same gated parser runs in
+`validate_shipped_artifacts` (`catalog.py`, called at `main.py`
+startup), so every shipped package-data spec and catalog `spec_resource`
+must be metaschema-valid or the backplane crashes on start — the guard
+that keeps a malformed shipped artifact from 500-ing the first ingest
+that touches it (Initiative #1966 boot-validation precedent).
 
 `read_spec_info_version(spec_path_or_uri)` is the companion helper
 the G0.9-T8 cross-check uses. It runs the same load / decode /
@@ -1539,6 +1576,7 @@ parse_openapi
 │  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
 ├─ _decode_spec            # YAML via _SpecYamlLoader (timestamp→str, #2272), stdlib JSON
 ├─ _validate_openapi_version
+├─ _validate_openapi_structure  # metaschema gate: refuse invalid 3.x w/ JSON-pointer (#2292)
 └─ _iter_operations
    └─ _build_proto         # per (method, path) verb under paths
       ├─ _build_parameter_schema

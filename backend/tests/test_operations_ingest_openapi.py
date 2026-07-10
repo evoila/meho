@@ -55,6 +55,7 @@ REQUEST_BODY_REFS_30 = FIXTURES / "request_body_refs_30.yaml"
 HANDAUTHORED_MINIMAL_30 = FIXTURES / "handauthored_minimal_30.yaml"
 TIMESTAMP_EXAMPLES_30 = FIXTURES / "timestamp_examples_30.yaml"
 NONSERIALIZABLE_EXAMPLE_30 = FIXTURES / "nonserializable_example_30.yaml"
+METASCHEMA_INVALID_RESPONSES_30 = FIXTURES / "metaschema_invalid_responses_30.yaml"
 
 # Stable HTTPS URL prefix used by tests that serve fixture content through
 # respx. Using a dedicated subdomain makes it easy to route all fixture
@@ -814,7 +815,20 @@ def test_unsupported_openapi_4_raises() -> None:
 
 
 def test_invalid_spec_missing_paths_raises() -> None:
-    content = b"openapi: '3.1.0'\ninfo: {title: x, version: '1'}\n"
+    """A 3.1 doc that is metaschema-valid but path-less is still refused.
+
+    OpenAPI 3.1 permits a document that declares ``webhooks`` (or
+    ``components``) with no ``paths`` — such a doc passes the structural
+    metaschema gate (#2292) — but meho only ingests path operations, so
+    the bespoke ``no 'paths' key`` check behind the gate still rejects it.
+    This pins the layering: the metaschema gate does not shadow meho's
+    narrower path-required contract for the specs the metaschema allows.
+    """
+    content = (
+        b"openapi: '3.1.0'\ninfo: {title: x, version: '1'}\n"
+        b"webhooks:\n  newPet:\n    post:\n      responses:\n"
+        b"        '200':\n          description: ok\n"
+    )
     with respx.mock(assert_all_called=False) as router:
         url = _mock_yaml_spec(router, "broken.yaml", content)
         with pytest.raises(InvalidSpecError, match="no 'paths' key"):
@@ -827,6 +841,73 @@ def test_invalid_spec_non_mapping_root_raises() -> None:
         url = _mock_yaml_spec(router, "list.yaml", content)
         with pytest.raises(InvalidSpecError, match="must parse to a mapping"):
             parse_openapi(url)
+
+
+def test_metaschema_invalid_spec_refused_naming_pointer() -> None:
+    """A 3.x doc that violates the OpenAPI metaschema is refused (#2292).
+
+    The fixture is well-formed everywhere except its operation's
+    ``responses``, which is a list where the metaschema requires a
+    Responses Object. The version gate and the ``paths``-is-a-mapping
+    check both pass, so the *only* reason to refuse it is the structural
+    metaschema gate. The rejection is actionable: it names the failing
+    JSON path and points at the error-shape convention doc.
+    """
+    content = METASCHEMA_INVALID_RESPONSES_30.read_text()
+    with pytest.raises(InvalidSpecError, match="metaschema") as excinfo:
+        parse_openapi("docs:widgets/spec.yaml", content=content)
+    message = str(excinfo.value)
+    # Names the failing pointer (the operation's responses slot) ...
+    assert "$.paths['/widgets'].get.responses" in message
+    # ... and carries the house remediation anchor.
+    assert "docs/codebase/error-message-shape.md" in message
+
+
+def test_metaschema_invalid_spec_dry_run_and_effectful_refuse_identically() -> None:
+    """The gate lives at parse, so ``dry_run`` and the real run refuse alike.
+
+    ``dry_run`` differs from the effectful ingest only in whether the
+    parsed rows are persisted; both legs call :func:`parse_openapi`. A
+    spec_source tag is threaded on the effectful leg and absent on a bare
+    probe, so exercise both call shapes and assert the same structured
+    refusal — there is no leg on which a metaschema-invalid spec slips
+    through to a partial catalog write.
+    """
+    content = METASCHEMA_INVALID_RESPONSES_30.read_text()
+    with pytest.raises(InvalidSpecError, match="metaschema") as effectful:
+        parse_openapi("docs:widgets/spec.yaml", spec_source="spec:widgets.yaml", content=content)
+    with pytest.raises(InvalidSpecError, match="metaschema") as dry_run:
+        parse_openapi("docs:widgets/spec.yaml", content=content)
+    assert str(effectful.value) == str(dry_run.value)
+
+
+def test_metaschema_valid_path_without_operations_still_tolerated() -> None:
+    """The gate does not disturb the parser's tolerant-skip of empty paths.
+
+    A path item carrying only a ``description`` (no verbs) is legal per
+    the metaschema, so the gate lets it through; the parser then yields no
+    operation for it (existing skip behavior). Guards the boundary that
+    the structural gate refuses *metaschema* violations only, not
+    otherwise-valid specs whose sub-documents the parser deliberately
+    skips.
+    """
+    content = yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "sparse", "version": "1.0.0"},
+            "paths": {
+                "/described-but-empty": {"description": "no operations here"},
+                "/real": {
+                    "get": {
+                        "operationId": "getReal",
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                },
+            },
+        }
+    )
+    rows = parse_openapi("docs:sparse/spec.yaml", content=content)
+    assert [r.op_id for r in rows] == ["GET:/real"]
 
 
 def test_non_https_scheme_raises_invalid_spec() -> None:
@@ -1389,7 +1470,14 @@ paths:
 
 
 def test_non_list_tags_raises() -> None:
-    """A spec with ``tags: "admin"`` would otherwise iterate as characters."""
+    """A spec with ``tags: "admin"`` is refused by the structural gate.
+
+    ``tags`` must be an array per the OpenAPI metaschema, so the #2292
+    structural gate now catches this scalar-tags mistake at parse with a
+    pointer to ``$.paths['/x'].get.tags`` — earlier than, and superseding,
+    the parser's own defensive ``tags must be a list`` check (which stays
+    as belt-and-suspenders for any input that reaches ``_build_proto``).
+    """
     content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
@@ -1402,8 +1490,9 @@ paths:
 """
     with respx.mock(assert_all_called=False) as router:
         url = _mock_yaml_spec(router, "bad_tags.yaml", content)
-        with pytest.raises(InvalidSchemaError, match=r"tags must be a list"):
+        with pytest.raises(InvalidSpecError, match="metaschema") as excinfo:
             parse_openapi(url)
+        assert "$.paths['/x'].get.tags" in str(excinfo.value)
 
 
 def test_openapi_31_boolean_parameter_schema() -> None:

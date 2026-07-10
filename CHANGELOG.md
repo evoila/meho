@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — structural OpenAPI 3.x metaschema gate on spec ingest (#2292)
+
+- Spec ingest now validates a decoded OpenAPI 3.0/3.1 document against the
+  official OpenAPI metaschema (via `openapi-spec-validator`), immediately
+  after the existing version check. A metaschema-invalid document — `paths`
+  as a list, an operation with a non-object `responses`, a missing required
+  field — is refused with a structured `invalid_spec` error naming the
+  failing JSON path (e.g. `$.paths['/pets'].get.responses`) and a
+  remediation line, on every transport (REST 400, MCP `-32602`, async-job
+  `error`). Because the gate lives at parse, `dry_run` and the real ingest
+  refuse an invalid spec identically, so a structurally broken document can
+  no longer partially ingest into catalog rows of unknown quality.
+  Validation is metaschema-only (no `operationId`/parameter semantic
+  add-ons) so legal vendor specs — and every shipped package-data spec, at
+  boot — keep ingesting; Swagger 2.0 still gets its dedicated conversion
+  remedy, and the parser's tolerant-skip of sub-document junk is unchanged.
+  (#2292)
+
 ### Changed — SDDC Manager auth rebuilt on the `session_login_token` profile scheme (#2290)
 
 - Flip the shipped `sddc_manager_minimal.yaml` profile from the false

@@ -3,12 +3,11 @@
 
 """Typed read ops for :class:`VcfFleetConnector` (T4 · #2304, Initiative #2266).
 
-The G3.6 v0.5 core (:mod:`meho_backplane.connectors.vcf_fleet.core_ops`)
-exposed the Fleet operational surface as ``is_enabled`` curation over
-**ingested** ``endpoint_descriptor`` rows — the operator had to ingest
-the vRSLCM-derived Fleet OpenAPI spec before any op could dispatch. That
-spec is the #2272 datetime-crash artifact, so the operational surface was
-hostage to a crash-prone ingest.
+The G3.6 v0.5 core historically exposed the Fleet operational surface as
+``is_enabled`` curation over **ingested** ``endpoint_descriptor`` rows —
+the operator had to ingest the vRSLCM-derived Fleet OpenAPI spec before
+any op could dispatch. That spec is the #2272 datetime-crash artifact, so
+the operational surface was hostage to a crash-prone ingest.
 
 This module converts the **audited read set** (the adopter's real Fleet
 usage from the #2294 T0 audit, row 21: *"about/health probe; component

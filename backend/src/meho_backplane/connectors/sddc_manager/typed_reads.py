@@ -3,12 +3,10 @@
 
 """Typed (bound-method) read implementations for :class:`SddcManagerConnector`.
 
-The audited SDDC Manager read set (#2306) is converted from the
-ingested-row curation in
-:mod:`meho_backplane.connectors.sddc_manager.core_ops` to typed ops
+The audited SDDC Manager read set (#2306) is registered as typed ops
 (``source_kind="typed"``) so it dispatches on a fresh boot with **zero
-catalog state** -- the #2247 failure class the ingested curation was
-subject to (per-deploy catalog state). Each function here is the body a
+catalog state** -- the #2247 failure class the older ingested-row
+enablement was subject to (per-deploy catalog state). Each function here is the body a
 thin bound-method shim on
 :class:`~meho_backplane.connectors.sddc_manager.connector.SddcManagerConnector`
 delegates to; the metadata + registrar live in

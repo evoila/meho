@@ -45,7 +45,6 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.nsx import (
     NSX_CONNECTOR_ID,
-    NSX_CORE_OPS,
     NSX_IMPL_ID,
     NSX_PRODUCT,
     NSX_VERSION,
@@ -62,6 +61,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._nsx_canary_fixtures import (
     NSX_CANARY_BASE_URL,
+    NSX_CANARY_CORE_OP_IDS,
     NSX_CANARY_FINGERPRINT,
     NSX_CANARY_OPERATOR_TENANT,
     NSX_CANARY_SEGMENTS,
@@ -204,7 +204,8 @@ async def nsx_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_NsxE2EBun
     """Dispatcher-ready NSX setup over a respx-mocked manager (standard happy-path).
 
     Lifecycle:
-    1. Insert :data:`~meho_backplane.connectors.nsx.NSX_CORE_OPS`
+    1. Insert the ingested browse-breadth NSX descriptors (from
+       :data:`~tests.acceptance._nsx_canary_fixtures._NSX_SEED_OPS`)
        descriptors + groups into the per-test SQLite DB.
     2. Seed a :class:`Target` row carrying :data:`NSX_CANARY_FINGERPRINT`
        so the resolver binds :class:`NsxConnector`.
@@ -321,10 +322,10 @@ async def nsx_e2e_401_canary(
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in NSX_CORE_OPS)
+_OP_IDS: tuple[str, ...] = NSX_CANARY_CORE_OP_IDS
 # The audited operational reads moved to typed ops in #2302; the ingested
-# curation now covers the 5 browse-breadth reads.
-assert len(_OP_IDS) == 5, f"Expected 5 curated NSX ops, got {len(_OP_IDS)}: {_OP_IDS}"
+# browse-breadth set now covers the 5 remaining reads.
+assert len(_OP_IDS) == 5, f"Expected 5 ingested NSX browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)

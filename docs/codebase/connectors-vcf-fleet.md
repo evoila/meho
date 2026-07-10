@@ -7,13 +7,13 @@ dispatches VCF Fleet REST operations under the
 `(product="vcf-fleet", version="9.0", impl_id="fleet-rest")` registry triple.
 G3.6-T7 (#831) shipped the skeleton — HTTP Basic auth against the LCM-local
 user store, the wrapper-verified fingerprint/probe call, and the G0.6
-dispatch shim. G3.6-T8 (#835) added the operator-review curation surface —
-`FLEET_CORE_GROUPS` + `FLEET_CORE_OPS` + `apply_fleet_core_curation`. T4
+dispatch shim. G3.6-T8 (#835) added an ingested read-enable surface. T4
 (#2304, Initiative #2266) then converted the audited read set (about/health
-probe + component inventory) to **typed** ops in `typed_ops.py`, trimming
-the ingested curation to the 6 declined ops (5 groups) and removing the
-Fleet-LCM-spec ingest dependency for the operational surface. G3.6-T9
-(#839) shipped the CLI verb tree + recorded-fixture E2E.
+probe + component inventory) to **typed** ops in `typed_ops.py`, removing
+the Fleet-LCM-spec ingest dependency for the operational surface. T7 (#2358)
+retired the hand-curated ingested-enable apparatus, leaving the remaining
+reads as generic ingested breadth. G3.6-T9 (#839) shipped the CLI verb tree +
+recorded-fixture E2E.
 
 Source: `backend/src/meho_backplane/connectors/vcf_fleet/`.
 
@@ -140,8 +140,8 @@ off the connector's hand-rolled HTTP Basic session; the declined breadth
 stays **generic-ingested**. Typed ops need no catalog ingest — they are
 registered in code at lifespan startup and dispatch on a fresh boot with
 zero catalog state. Ingested ops still take the G0.7 path: the operator
-ingests the Fleet OpenAPI spec into `endpoint_descriptor`, reviews and
-enables the curated op_ids, then dispatches. Both paths route through
+ingests the Fleet OpenAPI spec into `endpoint_descriptor`, enables the reads
+generically via `ReviewService.enable_reads`, then dispatches. Both paths route through
 `meho_backplane.operations.dispatch` via `POST /api/v1/operations/call`
 (or MCP `call_operation`). The connector's `execute()` is the G0.6
 ABC-compatibility shim that builds a synthetic `Operator` and forwards to
@@ -172,37 +172,21 @@ module-level `register_fleet_typed_operations` wrapper is queued via
 `register_typed_op_registrar` in `__init__.py` so the rows land before the
 first dispatch.
 
-### Declined ingested read-core (G3.6-T8 #835, trimmed by #2304)
+### Remaining ingested breadth (enabled generically)
 
-`core_ops.py` carries the operator-review metadata for the **declined**
-ingested read core — the six ops outside the audited set (kept as
-browsable ingested breadth until T7 retires the curation apparatus):
+The reads outside the audited typed set — datacenters, vcenters, the
+`fleet.environment.get` detail read, products, and LCM requests — stay as
+ordinary `source_kind="ingested"` `endpoint_descriptor` rows that land via
+G0.7 spec ingestion and stay browsable as profiled-dispatch breadth. They are
+enabled through the **generic review flow** —
+`ReviewService.enable_reads(connector_id, tenant_id=...)`.
 
-- **`FLEET_CORE_GROUPS`** — 5 `FleetCoreGroup` entries: `fleet-datacenter`,
-  `fleet-vcenter`, `fleet-environment` (now carries only
-  `fleet.environment.get`), `fleet-product`, `fleet-request`.
-  (`fleet-about` was removed — its op is typed now.)
-- **`FLEET_CORE_OPS`** — 6 `FleetCoreOp` entries (all `GET:`, read-only):
-  `fleet.datacenter.list`, `fleet.vcenter.list`, `fleet.environment.get`,
-  `fleet.product.list`, `fleet.request.list`, `fleet.request.get`.
-  `fleet.about` + `fleet.environment.list` are intentionally absent —
-  they are typed now, and the ingested duplicate must not shadow the typed
-  op.
-- **`FLEET_PATH_RULES` + `classify_fleet_op`** — deterministic path-prefix
-  classifier feeding the curated `group_key` per op_id. The `/about` rule
-  was removed with the typed conversion (an ingested `/about` row now
-  classifies `none` and stays disabled). Rule ordering is load-bearing
-  (vcenters before datacenters; products before environments; request
-  paths under `/lcm/request/` independent of LCM-ops paths under
-  `/lcm/lcops/`).
-- **`apply_fleet_core_curation`** — operator-review-time substrate call
-  that runs against an already-ingested connector: disables non-core ops
-  in curated groups via the audit-log-driven operator-override exclusion,
-  enables each curated group, and lands the per-op `llm_instructions`
-  blob. Mirrors `apply_harbor_core_curation` / `apply_nsx_core_curation`
-  verbatim.
+The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
+`FLEET_CORE_OPS` / `FLEET_CORE_GROUPS` / `FLEET_PATH_RULES` constants and the
+`classify_fleet_op` / `apply_fleet_core_curation` helpers) was retired in #2358
+(T7 of #2266); read enablement is now generic, with no per-product curation code.
 
-The runbook for end-to-end ingest + curate + verify is
+The runbook for end-to-end ingest + enable + verify is
 [`docs/cross-repo/g36-fleet-canary.md`](../cross-repo/g36-fleet-canary.md).
 
 ## Dependencies

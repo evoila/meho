@@ -77,11 +77,11 @@ through :mod:`meho_backplane.connectors.sddc_manager.typed_ops`; they
 dispatch on a fresh boot with zero catalog ingest. ``sddc.credential.list``
 (``GET /v1/credentials``) is credential-read gated
 (``requires_approval=True`` + ``credential_read`` classification +
-boundary redaction). The four non-audited curated reads (release,
-domain detail, network-pools, bundles) stay as ingested-row curation in
-:mod:`meho_backplane.connectors.sddc_manager.core_ops`; the wider ingested
-375-op VCF catalog stays browsable as profiled-dispatch breadth (#2271)
-under its own ``METHOD:path`` op_ids — two surfaces, no resolver shadowing
+boundary redaction). The four non-audited reads (release, domain detail,
+network-pools, bundles) and the wider ingested 375-op VCF catalog stay
+browsable as profiled-dispatch breadth (#2271) under their own
+``METHOD:path`` op_ids, enable-able through the generic review flow
+(``ReviewService.enable_reads``) — two surfaces, no resolver shadowing
 (#1750/#1798 class), because typed ops never resolve through
 ``endpoint_descriptor`` rows (#2262). The G0.6 :meth:`execute` shim remains
 for ABC compatibility.

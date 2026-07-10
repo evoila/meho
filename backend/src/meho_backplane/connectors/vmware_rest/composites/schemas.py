@@ -25,9 +25,10 @@ Conventions
   schema verbatim on ``describe_operation`` calls.
 * The 5 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 8 write composites inherit T4's
+  each. The 9 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
-  (G3.1-T6 / #509). The schema text reflects which side of that line
+  (G3.1-T6 / #509, plus single-VM ``vm.power`` / #2301). The schema
+  text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
 """
@@ -61,6 +62,8 @@ __all__ = [
     "VM_MIGRATE_RESPONSE_SCHEMA",
     "VM_POWER_BULK_PARAMETER_SCHEMA",
     "VM_POWER_BULK_RESPONSE_SCHEMA",
+    "VM_POWER_PARAMETER_SCHEMA",
+    "VM_POWER_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
@@ -522,7 +525,7 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 # Write composites (G3.1-T6 / #509)
 # ===========================================================================
 #
-# The 8 write composites inherit T4's ``safety_level="dangerous"`` +
+# The 9 write composites inherit T4's ``safety_level="dangerous"`` +
 # ``requires_approval=True`` defaults. The registrar passes those
 # explicitly anyway to keep the policy posture obvious at the call site
 # alongside the read overrides.
@@ -755,6 +758,40 @@ VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["action"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.power`` parameter schema.
+#:
+#: Single-VM power verb. Hard verbs (``on`` / ``off`` / ``reset``) hit
+#: ``POST:/vcenter/vm/{vm}/power``; soft verbs (``guest_shutdown`` /
+#: ``guest_reboot``) hit ``POST:/vcenter/vm/{vm}/guest/power`` and require
+#: running VMware Tools.
+VM_POWER_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid to act on.",
+        },
+        "verb": {
+            "type": "string",
+            "enum": ["on", "off", "reset", "guest_shutdown", "guest_reboot"],
+            "description": (
+                "Power verb. ``on`` / ``off`` / ``reset`` are hard "
+                "transitions via ``POST:/vcenter/vm/{vm}/power`` "
+                "(immediate; ``off`` / ``reset`` may lose in-guest state). "
+                "``guest_shutdown`` / ``guest_reboot`` are clean "
+                "Tools-mediated transitions via "
+                "``POST:/vcenter/vm/{vm}/guest/power`` and fail with "
+                "``status='tools_unavailable'`` when VMware Tools is not "
+                "running."
+            ),
+        },
+    },
+    "required": ["vm", "verb"],
     "additionalProperties": False,
 }
 
@@ -1048,6 +1085,52 @@ VM_POWER_BULK_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["results", "summary", "aborted_on_failure"],
+}
+
+
+#: ``vmware.composite.vm.power`` response schema.
+VM_POWER_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {"type": "string", "description": "VM moid the verb targeted."},
+        "verb": {
+            "type": "string",
+            "enum": ["on", "off", "reset", "guest_shutdown", "guest_reboot"],
+            "description": "Verb applied.",
+        },
+        "status": {
+            "type": "string",
+            "enum": ["ok", "error", "tools_unavailable"],
+            "description": (
+                "``'ok'`` -- the power verb issued; ``'tools_unavailable'`` "
+                "-- a soft verb could not run because VMware Tools is not "
+                "running (typed failure, not a hang); ``'error'`` -- any "
+                "other transport / vCenter fault."
+            ),
+        },
+        "error": {
+            "type": ["string", "null"],
+            "description": "Fault text when ``status != 'ok'``; ``null`` on success.",
+        },
+        "error_type": {
+            "type": ["string", "null"],
+            "description": (
+                "vCenter machine ``error_type`` parsed from the fault body "
+                "when present (e.g. ``SERVICE_UNAVAILABLE``); ``null`` when "
+                "unparseable or on success."
+            ),
+        },
+        "guest_tools": {
+            "type": ["string", "null"],
+            "enum": ["ok", "unavailable", None],
+            "description": (
+                "Tools state for a soft verb: ``'ok'`` when the guest "
+                "request issued, ``'unavailable'`` when Tools is down. "
+                "``null`` for the hard verbs, which do not consult Tools."
+            ),
+        },
+    },
+    "required": ["vm", "verb", "status"],
 }
 
 

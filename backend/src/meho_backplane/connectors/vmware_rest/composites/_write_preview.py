@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 8 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 9 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 8 write composites onto the per-op preview hook shipped
+This wires all 9 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -27,6 +27,7 @@ helpers, never the mutating sub-ops.
 ``vm.clone``              echo: source_vm, target_name, library_item, wait flag
 ``vm.snapshot.revert``    echo: vm, snapshot_name
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
+``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
 ========================  ====================================================
 
 Two preview depths, chosen per composite
@@ -41,8 +42,11 @@ Two preview depths, chosen per composite
   :data:`_PREVIEW_RESOLVED_CAP`, with ``total_resolved`` carrying the
   uncapped count).
 * **Param echo** (no I/O — the ``secret.move`` precedent, #1580) for the
-  four single-entity composites whose params fully name the blast
-  radius. ``vm.migrate`` deliberately does **not** pre-resolve a DRS
+  five single-entity composites whose params fully name the blast
+  radius. ``vm.power`` additionally echoes ``power_kind`` so the approver
+  sees the soft-vs-hard distinction (a Tools-mediated ``guest_shutdown``
+  is a very different blast radius from a hard ``off``).
+  ``vm.migrate`` deliberately does **not** pre-resolve a DRS
   recommendation: DRS output is point-in-time and the approved dispatch
   re-consults it, so echoing a predicted host could mislead the reviewer
   — the preview says ``target_host_source="drs_at_execution"`` instead.
@@ -70,7 +74,7 @@ Redaction posture
 
 The whole-builder ``classify_op`` gate runs in
 :func:`~meho_backplane.operations._preview.build_proposed_effect` before
-any builder fires: the 8 op_ids classify as ``write`` (``.create`` /
+any builder fires: the 9 op_ids classify as ``write`` (``.create`` /
 ``.patch`` suffixes) or ``other`` — none is a credential class, so none
 is suppressed. The previews themselves carry only vSphere inventory
 identity (moids, display names, power states) and the operator's own
@@ -90,6 +94,7 @@ from collections.abc import Callable
 from typing import Any
 
 from meho_backplane.connectors.vmware_rest.composites._write import (
+    _GUEST_POWER_VERBS,
     _resolve_cluster_hosts,
     _resolve_vm_list,
 )
@@ -313,13 +318,35 @@ async def _vm_migrate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 8 write composites. Module-level so the
+async def _vm_power_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.power`` — echo the VM + verb + hard-vs-soft power kind (no I/O).
+
+    The params fully name the blast radius (one VM, one verb), so no
+    resolution read is needed. ``power_kind`` makes the soft-vs-hard
+    distinction explicit for the approver: a Tools-mediated
+    ``guest_shutdown`` cleanly quiesces the guest, while a hard ``off`` /
+    ``reset`` yanks power and may lose in-flight state — the reviewer should
+    see which one they are approving.
+    """
+    vm = ctx.params.get("vm")
+    verb = ctx.params.get("verb")
+    if not isinstance(vm, str) or not isinstance(verb, str):
+        return None
+    return {
+        "vm": vm,
+        "verb": verb,
+        "power_kind": "guest" if verb in _GUEST_POWER_VERBS else "hard",
+    }
+
+
+#: op_id → builder for the 9 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
     "vmware.composite.vm.clone": _vm_clone_preview,
     "vmware.composite.vm.snapshot.revert": _vm_snapshot_revert_preview,
     "vmware.composite.vm.migrate": _vm_migrate_preview,
+    "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
     "vmware.composite.host.evacuate": _host_evacuate_preview,
     "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
@@ -328,7 +355,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 8 write-composite park-time preview builders. Import-time.
+    """Wire the 9 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 13 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 14 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,8 +26,8 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 8 write
-composites (T6 / #509) inherit the T4
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 9 write
+composites (T6 / #509, plus single-VM ``vm.power`` / #2301) inherit the T4
 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
 the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -56,6 +56,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_create_composite,
     vm_migrate_composite,
     vm_power_bulk_composite,
+    vm_power_composite,
     vm_snapshot_revert_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
@@ -83,6 +84,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_MIGRATE_RESPONSE_SCHEMA,
     VM_POWER_BULK_PARAMETER_SCHEMA,
     VM_POWER_BULK_RESPONSE_SCHEMA,
+    VM_POWER_PARAMETER_SCHEMA,
+    VM_POWER_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
@@ -166,7 +169,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "clone from a content-library template (long-running task "
         "polling), revert to a named snapshot (ambiguity-rejecting), "
         "migrate via DRS or explicit host, bulk power across a "
-        "filter. Every op is dangerous / approval-required. The "
+        "filter, or a single-VM power verb (on/off/reset plus a "
+        "Tools-mediated guest_shutdown/guest_reboot for one-off "
+        "incident actions). Every op is dangerous / approval-required. The "
         "right group for any operator workflow that would otherwise "
         "be a ``govc vm.*`` invocation orchestrating multiple raw "
         "REST calls. Pair with 'storage' / 'networking' / 'cluster' "
@@ -192,7 +197,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 class _CompositeSpec(NamedTuple):
     """Per-composite registration arguments.
 
-    Field-table form rather than thirteen repeated kwargs blocks:
+    Field-table form rather than fourteen repeated kwargs blocks:
     keeps the op_id / handler / schemas / group / tags / policy
     posture adjacent per composite and drops the outer registrar
     function below the 100-line block limit. Common fields
@@ -436,6 +441,30 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
     ),
     _CompositeSpec(
+        op_id="vmware.composite.vm.power",
+        handler=vm_power_composite,
+        summary="Apply one power verb to a single VM, including a Tools soft shutdown.",
+        description=(
+            "Single-VM power verb for one-off incident actions (the "
+            "one-VM ergonomics vm.power.bulk's fan-out is clumsy for). "
+            "Hard verbs on / off / reset hit "
+            "POST:/vcenter/vm/{vm}/power?action=start|stop|reset; the two "
+            "soft verbs guest_shutdown / guest_reboot hit "
+            "POST:/vcenter/vm/{vm}/guest/power?action=shutdown|reboot for a "
+            "clean Tools-mediated transition. A soft verb against a VM whose "
+            "VMware Tools are not running fails typed "
+            "(status='tools_unavailable', echoing the Tools state) rather "
+            "than hanging, so the operator can fall back to a hard off. "
+            "Equivalent of a single 'govc vm.power' invocation."
+        ),
+        parameter_schema=VM_POWER_PARAMETER_SCHEMA,
+        response_schema=VM_POWER_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "power"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
         op_id="vmware.composite.host.evacuate",
         handler=host_evacuate_composite,
         summary="Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.",
@@ -522,9 +551,10 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 13 composites total -- 5 read (T5 / #508) + 8 write (T6 /
-    #509). (The former ``host.network_uplinks`` / ``host.vsan_health``
-    reads were re-shipped as typed ops in #2258.)
+    Scope: 14 composites total -- 5 read (T5 / #508) + 9 write (T6 /
+    #509, plus single-VM ``vm.power`` / #2301). (The former
+    ``host.network_uplinks`` / ``host.vsan_health`` reads were re-shipped
+    as typed ops in #2258.)
     Each composite's ``safety_level`` +
     ``requires_approval`` come from its :class:`_CompositeSpec` row:
     reads pass ``"safe"`` / ``False``; writes pass ``"dangerous"`` /

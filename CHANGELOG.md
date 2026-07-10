@@ -109,6 +109,43 @@ connector-related release-notes line.
   (`vcf-operations resource list/get`, `sddc-manager domain info`/`about`,
   `nsx node list`) keep their legacy op_ids until their typed ops land.
 
+### Added — vm.power single-VM gated write verbs (incl. guest-shutdown)
+
+- New `vmware.composite.vm.power` write composite acts on **one** VM for
+  one-off incident actions (a hung appliance) — the single-VM ergonomics the
+  fan-out `vm.power.bulk` is clumsy for. Five verbs: `on` / `off` / `reset`
+  hit the hard `POST:/vcenter/vm/{vm}/power` endpoint; `guest_shutdown` /
+  `guest_reboot` hit the Tools-mediated `POST:/vcenter/vm/{vm}/guest/power`
+  for a clean in-guest transition. A soft verb against a VM whose VMware
+  Tools are not running fails **typed** (`status="tools_unavailable"`,
+  echoing the Tools state) instead of hanging, so the operator can fall back
+  to a hard `off`. Approval-gated per row (`dangerous` +
+  `requires_approval=True`) on the shipped write mold (#2256/#2254); the
+  park-time preview echoes the VM, verb, and a `power_kind` (`hard` vs
+  Tools-soft `guest`) so the approver sees the soft-vs-hard blast radius.
+  `vm.power.bulk` is unchanged. (#2301)
+
+### Added — typed vSphere incident reads (vm.info/object.collect/tasks.recent)
+
+- **Three new `source_kind="typed"` vmware-rest reads for incident
+  survival** (#2300), each a bound method on `VmwareRestConnector` that
+  reads directly on the connector session via PropertyCollector — no
+  `dispatch_child`, no ingested descriptor, so they dispatch on a fresh
+  boot with zero catalog ingest:
+  - **`vmware.vm.info`** — one VM's live triage signals (power state,
+    guest IP, VMware Tools status/running, guest heartbeat, per-datastore
+    usage) addressed by moid or name. The "poweredOn but no guest IP"
+    hung-appliance shape is representable in one call — data the plain
+    vCenter REST VM detail (configuration only) cannot supply.
+  - **`vmware.object.collect`** — a bounded generic PropertyCollector
+    read of a caller-specified property set off one `(type, moid)`
+    object. Bounded by construction (one object, no traversal, ≤64 paths
+    each ≤16 segments deep); oversized/malformed requests return a
+    structured `invalid_params` error before any read is issued.
+  - **`vmware.tasks.recent`** — recent vCenter Task objects (operation,
+    entity, state, progress, queued/started/completed times) for
+    change-window monitoring, distinct from `event.tail`'s event-log read.
+
 ### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
 
 - The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,

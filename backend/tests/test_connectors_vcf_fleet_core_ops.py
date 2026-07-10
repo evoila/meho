@@ -17,12 +17,13 @@ Covers :mod:`meho_backplane.connectors.vcf_fleet.core_ops`:
   (``when_to_call`` / ``output_shape`` / ``next_step`` per op,
   ``name`` + ``when_to_use`` per group).
 * :func:`apply_fleet_core_curation` — the operator-review-time
-  substrate call that flips ``review_status='enabled'`` on the 6
-  curated groups, lands ``llm_instructions`` on the 8 curated ops,
+  substrate call that flips ``review_status='enabled'`` on the 5
+  curated groups, lands ``llm_instructions`` on the 6 curated ops,
   and explicitly disables non-core ops via the audit-log-driven
-  operator-override exclusion. The load-bearing assertion is "8 ops
-  dispatchable, every other op in curated groups stays
-  ``is_enabled=False``".
+  operator-override exclusion. The load-bearing assertion is "the
+  FLEET_CORE_OPS set is dispatchable, every other op in curated groups
+  stays ``is_enabled=False``". fleet.about + fleet.environment.list are
+  now typed (see tests.test_connectors_vcf_fleet_typed_reads).
 
 Test harness mirrors :mod:`tests.test_connectors_harbor_core_ops`:
 SQLite via the autouse ``_default_database_url`` fixture, hand-rolled
@@ -89,7 +90,9 @@ def _make_operator(*, tenant_id: uuid.UUID) -> Operator:
 @pytest.mark.parametrize(
     "op_id,expected_group",
     [
-        ("GET:/lcm/lcops/api/v2/about", "fleet-about"),
+        # fleet.about was converted to a typed op (T4 · #2304); the /about
+        # rule was removed from FLEET_PATH_RULES, so it now classifies "none".
+        ("GET:/lcm/lcops/api/v2/about", "none"),
         ("GET:/lcm/lcops/api/v2/datacenters", "fleet-datacenter"),
         (
             "GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters",
@@ -118,7 +121,7 @@ def _make_operator(*, tenant_id: uuid.UUID) -> Operator:
     ids=str,
 )
 def test_classify_fleet_op_returns_correct_group(op_id: str, expected_group: str) -> None:
-    """classify_fleet_op returns the curated group_key for all 8 core ops."""
+    """classify_fleet_op returns the curated group_key for each core op path."""
     assert classify_fleet_op(op_id) == expected_group
 
 
@@ -164,26 +167,48 @@ def test_classify_fleet_op_all_core_ops_are_classified() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_fleet_core_ops_has_exactly_eight_ops() -> None:
-    """FLEET_CORE_OPS carries exactly 8 entries — the v0.5 read core per #835."""
-    assert len(FLEET_CORE_OPS) == 8, (
-        f"v0.5 Fleet read core must have exactly 8 ops; "
-        f"got {len(FLEET_CORE_OPS)}: {[op.op_id for op in FLEET_CORE_OPS]}"
+def test_fleet_core_ops_has_exactly_six_ops() -> None:
+    """FLEET_CORE_OPS carries exactly 6 entries — the declined ingested set.
+
+    The G3.6 ship curated 8; the #2304 audited set (fleet.about +
+    fleet.environment.list) was converted to typed ops and removed from
+    the ingested curation, leaving the 6 declined ops.
+    """
+    assert len(FLEET_CORE_OPS) == 6, (
+        f"Fleet ingested-curation core must have exactly 6 ops after the "
+        f"#2304 typed conversion; got {len(FLEET_CORE_OPS)}: "
+        f"{[op.op_id for op in FLEET_CORE_OPS]}"
     )
 
 
-def test_fleet_core_groups_has_exactly_six_groups() -> None:
-    """FLEET_CORE_GROUPS carries exactly 6 entries spanning the v0.5 core.
+def test_fleet_core_groups_has_exactly_five_groups() -> None:
+    """FLEET_CORE_GROUPS carries exactly 5 entries after the #2304 conversion.
 
-    The 8 ops distribute across 6 groups: fleet-about, fleet-datacenter,
-    fleet-vcenter, fleet-environment (carries env.list + env.get),
-    fleet-product, fleet-request (carries req.list + req.get).
+    The 6 remaining ops distribute across 5 groups: fleet-datacenter,
+    fleet-vcenter, fleet-environment (carries env.get), fleet-product,
+    fleet-request (carries req.list + req.get). fleet-about was removed —
+    its only op (fleet.about) is now typed.
     """
-    assert len(FLEET_CORE_GROUPS) == 6, (
-        f"v0.5 Fleet read core must have exactly 6 groups; "
-        f"got {len(FLEET_CORE_GROUPS)}: "
+    assert len(FLEET_CORE_GROUPS) == 5, (
+        f"Fleet ingested-curation core must have exactly 5 groups after the "
+        f"#2304 typed conversion; got {len(FLEET_CORE_GROUPS)}: "
         f"{[g.group_key for g in FLEET_CORE_GROUPS]}"
     )
+
+
+def test_fleet_about_and_environment_list_not_in_ingested_curation() -> None:
+    """The two typed-converted ops are absent from the ingested curation.
+
+    fleet.about (GET:/lcm/lcops/api/v2/about) and fleet.environment.list
+    (GET:/lcm/lcops/api/v2/environments) dispatch as source_kind="typed"
+    (see tests.test_connectors_vcf_fleet_typed_reads); their ingested
+    duplicates must not be curated, or they would shadow the typed ops.
+    """
+    ingested_op_ids = {op.op_id for op in FLEET_CORE_OPS}
+    assert "GET:/lcm/lcops/api/v2/about" not in ingested_op_ids
+    assert "GET:/lcm/lcops/api/v2/environments" not in ingested_op_ids
+    ingested_group_keys = {g.group_key for g in FLEET_CORE_GROUPS}
+    assert "fleet-about" not in ingested_group_keys
 
 
 def test_fleet_core_ops_are_all_get() -> None:
@@ -258,28 +283,9 @@ def test_fleet_core_groups_when_to_use_is_not_placeholder() -> None:
         )
 
 
-def test_fleet_about_llm_instructions_flag_the_9_0_regression() -> None:
-    """fleet.about's llm_instructions must warn the agent about the 9.0 HTTP 500.
-
-    The wrapper-verified known issue is that ``/lcm/lcops/api/v2/about``
-    returns HTTP 500 in VCF 9.0 builds — the connector's probe falls
-    back to ``/lcm/lcops/api/v2/datacenters``, and the agent needs the
-    same fallback guidance in its reasoning context.
-    """
-    about_ops = [op for op in FLEET_CORE_OPS if op.op_id.endswith(":/lcm/lcops/api/v2/about")]
-    assert len(about_ops) == 1, (
-        f"expected exactly 1 fleet.about op; got {[op.op_id for op in about_ops]}"
-    )
-    about_op = about_ops[0]
-    combined = " ".join(str(v) for v in about_op.llm_instructions.values()).lower()
-    assert "500" in combined, (
-        f"fleet.about llm_instructions must mention the HTTP 500 regression in VCF 9.0; "
-        f"got: {about_op.llm_instructions!r}"
-    )
-    assert "datacenter" in combined, (
-        f"fleet.about llm_instructions must point the agent at "
-        f"fleet.datacenter.list as the fallback; got: {about_op.llm_instructions!r}"
-    )
+# The fleet.about 9.0-HTTP-500 llm_instructions guidance moved with the op
+# to the typed surface; it is asserted in
+# tests.test_connectors_vcf_fleet_typed_reads now.
 
 
 # ---------------------------------------------------------------------------
@@ -380,8 +386,8 @@ async def _seed_curated_groups_and_ops(
     return group_ids
 
 
-async def test_apply_fleet_core_curation_enables_exactly_8_ops() -> None:
-    """apply_fleet_core_curation enables exactly the 8 core ops."""
+async def test_apply_fleet_core_curation_enables_exactly_the_core_ops() -> None:
+    """apply_fleet_core_curation enables exactly the FLEET_CORE_OPS set."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)
@@ -442,7 +448,7 @@ async def test_apply_fleet_core_curation_disables_non_core_ops_in_curated_groups
 
 
 async def test_apply_fleet_core_curation_sets_llm_instructions_on_all_core_ops() -> None:
-    """llm_instructions is populated on all 8 core ops after curation."""
+    """llm_instructions is populated on all curated core ops after curation."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)

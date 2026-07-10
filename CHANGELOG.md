@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — Fleet typed reads on the LCM-local Basic session (#2304)
+
+- VCF Fleet's audited read set — the **about/health probe** (`fleet.about`)
+  and the **component inventory** ("what's deployed", `fleet.environment.list`)
+  — now dispatches as `source_kind="typed"` off the connector's existing
+  HTTP Basic (LCM-local) session, registered in code at lifespan startup.
+  These ops work on a fresh boot with **zero catalog ingest**, removing the
+  Fleet operational surface's dependence on ingesting the crash-prone
+  vRSLCM-derived Fleet OpenAPI spec (the #2272 datetime-crash artifact). The
+  remaining six curated ops (datacenter/vcenter list, environment detail,
+  product list, request list/detail) are declined from typed conversion —
+  outside the adopter's audited set — and stay as browsable ingested breadth
+  until the curation apparatus is retired (T7); their ingested `/about` and
+  `/environments` duplicates no longer curate, so they cannot shadow the
+  typed ops. (#2304)
+
 ### Added — structural OpenAPI 3.x metaschema gate on spec ingest (#2292)
 
 - Spec ingest now validates a decoded OpenAPI 3.0/3.1 document against the

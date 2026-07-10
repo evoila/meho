@@ -382,6 +382,31 @@ def test_modal_controller_script_opens_injected_dialog_on_swap() -> None:
     )
 
 
+def test_modal_controller_script_guards_detached_swap_target() -> None:
+    """The controller skips a detached scan root (htmx 2.0.9 pre-swap target).
+
+    ``htmx:afterSwap`` fires with ``detail.target`` still pointing at the
+    PRE-swap element. An ``outerHTML`` swap (the runbook run driver's
+    abort / reassign / advance forms target ``#runbook-run-step`` with
+    ``hx-swap="outerHTML"``) has already detached that element, so scanning its
+    stale subtree and calling ``showModal()`` on a now-disconnected dialog
+    throws ``InvalidStateError``. An ``isConnected`` guard on the scan root
+    suppresses that while leaving the connected-container auto-open path
+    untouched (#2242).
+    """
+    script = (static_src_dir() / "app" / "modal-dialogs.js").read_text(encoding="utf-8")
+    assert "isConnected" in script, (
+        "the controller must skip a detached scan root so an outerHTML swap "
+        "cannot showModal() a disconnected dialog (InvalidStateError)"
+    )
+    # The guard belongs on the afterSwap scan-root early return, in the same
+    # condition as the existing querySelectorAll capability check.
+    assert re.search(r"querySelectorAll[^)]*isConnected", script), (
+        "isConnected must gate the htmx:afterSwap scan-root early return, "
+        "alongside the querySelectorAll check"
+    )
+
+
 def test_base_template_loads_modal_controller_outside_component_scripts() -> None:
     """``base.html`` ships the modal controller on every page (#1803).
 

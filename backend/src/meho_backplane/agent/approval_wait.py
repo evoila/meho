@@ -511,6 +511,19 @@ async def _resume_approved_or_already_resumed(
     operator surface already executed it, so surface a clean
     already-executed envelope to the agent rather than double-dispatching.
 
+    Audit lineage (#2323, completing #2086): the executed dispatch row must
+    parent-link to the ``approval.request`` row so an approved chain replays
+    as one subtree (request → decision + executed dispatch), not two roots.
+    The operator resume path binds ``parent_audit_id`` off the parked row in
+    :func:`~meho_backplane.operations.approval_queue._dispatch_resume_with_bound_context`;
+    this in-process waiter re-dispatches on the *agent's own task*, where
+    ``parent_audit_id_var`` still carries the original top-level value
+    (``None`` for a plain agent tool call) — so without the bind below the
+    resumed dispatch would emit ``parent_audit_id = NULL`` and orphan as a
+    second audit root. ``agent_session_id_var`` is already bound on the
+    agent task (the requester's run), so the session anchor needs no
+    re-bind; only the parent link does.
+
     Local imports mirror each other (and the wider module convention):
     ``meta_tools`` imports from ``operations.dispatcher`` which imports back
     through ``meho_backplane.agent.invoke``, so a module-level import here
@@ -533,9 +546,27 @@ async def _resume_approved_or_already_resumed(
 
     # The re-dispatch threads ``_approved=True`` through the policy gate, so
     # the durable approval-decision row is the authorization.
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._audit import parent_audit_id_var
+    from meho_backplane.operations.approval_queue import get_request
     from meho_backplane.operations.meta_tools import call_operation_with_approval
 
-    return await call_operation_with_approval(operator, call_arguments)
+    # Load the parked row's pre-generated ``approval.request`` audit id
+    # (tenant-isolated) so the resumed dispatch back-links to it. Pre-0053
+    # rows carry ``request_audit_id IS NULL`` → binds ``None`` (the var's
+    # default), which is the correct no-op for a chain that never had the
+    # anchor.
+    async with get_sessionmaker()() as session:
+        request = await get_request(
+            session,
+            tenant_id=operator.tenant_id,
+            request_id=approval_request_id,
+        )
+    parent_token = parent_audit_id_var.set(request.request_audit_id)
+    try:
+        return await call_operation_with_approval(operator, call_arguments)
+    finally:
+        parent_audit_id_var.reset(parent_token)
 
 
 async def resume_or_surface_awaiting_approval(

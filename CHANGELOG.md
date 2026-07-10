@@ -115,6 +115,29 @@ connector-related release-notes line.
   surface can style the blind case as elevated-risk. `proposed_effect`
   is a free-form JSON field, so no API schema / OpenAPI change (#2332).
 
+### Fixed — agent-run resume stamps `parent_audit_id` so approved chains replay as one subtree (#2323)
+
+- Completing #2086: an approval chain resumed by the **in-process agent
+  runtime** (broadcast-driven `/decide` / MCP path) now emits its executed
+  DISPATCH row with `parent_audit_id` pointing at the `approval.request`
+  row, matching what the decision row already did. Previously the agent
+  waiter re-dispatched on the agent's own task, where `parent_audit_id_var`
+  still held the top-level value (`None`), so the executed row orphaned as a
+  **second root** in `meho.audit.query` / `meho.audit.replay` even though
+  `agent_session_id` anchored the chain.
+- Fix is scoped to `agent/approval_wait.py::_resume_approved_or_already_resumed`:
+  it loads the parked row's pre-generated `request_audit_id` (tenant-isolated
+  `get_request`) and binds `parent_audit_id_var` (token-scoped) around
+  `call_operation_with_approval`. The operator/REST resume path already bound
+  it via #2312's `_dispatch_resume_with_bound_context`; this closes the
+  remaining agent-run gap. No schema change (column shipped in migration
+  0053), no route/OpenAPI change.
+- Adds a regression test that drives the four-eyes agent decide-path resume
+  end to end and asserts the executed dispatch back-links to the request,
+  the chain has exactly one null-parent row, and `replay_session`
+  reconstructs one subtree (`approval.request` → {`approval.decision`,
+  `<op_id>`}).
+
 ### Fixed — vCenter filtered listings key `filter.*` params off the mount flavor (modern `/api` no longer 400s) (#2298)
 
 - Filtered vCenter listings sent legacy `/rest`-style `filter.`-prefixed

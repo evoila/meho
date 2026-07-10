@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Connectors — VCFA typed reads on the dual-plane session (#2305)
+
+- The audited VCF Automation read set — provider org list / region list /
+  health (`/cloudapi/1.0.0/site`) and tenant `/iaas/api/projects` + `about`
+  — is now served by first-class `source_kind="typed"` operations
+  (`vcfa.provider.org.list` / `region.list` / `health`,
+  `vcfa.tenant.project.list` / `about`) that dispatch through the
+  connector's own dual-plane session with **zero catalog state**. VCFA
+  ships no vendor OpenAPI spec, so the prior ingested-curation path was
+  dispatch-inert on a real deploy; typed conversion is the only working
+  read surface. Each op declares the auth plane it rides (provider vs
+  tenant), cross-checked against the request path at import time. The
+  remaining `core_ops` ingested-curation surface is trimmed to the 6-op
+  browse remainder; `org create` (a write) stays out of scope (#2305).
+
 ### Changed — Fleet typed reads on the LCM-local Basic session (#2304)
 
 - VCF Fleet's audited read set — the **about/health probe** (`fleet.about`)

@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""VCF Automation 9.x read-only v0.5 core -- curated operator-enabled subset.
+"""VCF Automation 9.x read-only core -- curated operator-enabled subset.
 
-This module names the **11 read-only VCF Automation operations** the
-G3.6 dual-plane v0.5 ship enables out of the much larger
+This module names the **6 read-only VCF Automation operations** left as
+ingested-curation after T5 (#2305) converted the audited read set
+(org/region list, provider health via ``/cloudapi/1.0.0/site``,
+``/iaas/api/projects`` list, and the tenant ``/iaas/api/about`` probe)
+to ``source_kind="typed"`` ops in :mod:`.typed_ops`. The curated
+remainder is the ingested browse surface out of the larger
 ``vcf-automation-9.0/cloudapi.yaml`` + ``vcf-automation-9.0/iaas.yaml``
-corpus that the G0.7 spec-ingestion pipeline lands under
+corpus the G0.7 spec-ingestion pipeline would land under
 ``connector_id="vcfa-rest-9.0"``. The curation is two-layered:
 
 * :data:`VCFA_CORE_GROUPS` -- the operator-reviewed ``when_to_use``
@@ -15,8 +19,8 @@ corpus that the G0.7 spec-ingestion pipeline lands under
   selection step routes correctly across the dual-plane surface;
   generic hints would let a tenant question collapse onto a
   provider-only group and vice versa.
-* :data:`VCFA_CORE_OPS` -- the 11 ``EndpointDescriptor.op_id`` strings
-  (6 provider + 5 tenant) that flip to ``is_enabled=True`` at
+* :data:`VCFA_CORE_OPS` -- the 6 ``EndpointDescriptor.op_id`` strings
+  (3 provider + 3 tenant) that flip to ``is_enabled=True`` at
   operator-review time, paired with the per-op ``llm_instructions``
   blob the agent inlines into the reasoning context when it sees
   the op in
@@ -38,24 +42,20 @@ plane (``/iaas/api/*``) are two OpenAPI specs ingested under one
 each op to the correct auth plane (see
 :func:`~meho_backplane.connectors.vcf_automation._routing.plane_for_path`).
 The vSphere two-spec merge (``vcenter.yaml`` + ``vi-json.yaml``,
-ingested via #408) is the precedent.
+ingested via #408) is the precedent. The audited read set that operators
+actually run is served typed (:mod:`.typed_ops`) rather than through
+this ingested-curation path, since VCFA ships no vendor spec to ingest.
 
-The 11 ops:
+The 6 ops:
 
-Provider plane (6 ops, paths under ``/cloudapi/1.0.0/*``):
+Provider plane (3 ops, paths under ``/cloudapi/1.0.0/*``):
 
-* ``GET:/cloudapi/1.0.0/site`` -- ``vcfa.provider.about``
-* ``GET:/cloudapi/1.0.0/orgs`` -- ``vcfa.provider.org.list``
 * ``GET:/cloudapi/1.0.0/orgs/{id}`` -- ``vcfa.provider.org.get``
-* ``GET:/cloudapi/1.0.0/regions`` -- ``vcfa.provider.vdc.list``
-  (VCFA 9 evolution of the vCD provider VDC concept)
 * ``GET:/cloudapi/1.0.0/regions/{id}`` -- ``vcfa.provider.vdc.get``
 * ``GET:/cloudapi/1.0.0/users`` -- ``vcfa.provider.user.list``
 
-Tenant plane (5 ops, paths under ``/iaas/api/*``):
+Tenant plane (3 ops, paths under ``/iaas/api/*``):
 
-* ``GET:/iaas/api/about`` -- ``vcfa.tenant.about``
-* ``GET:/iaas/api/projects`` -- ``vcfa.tenant.project.list``
 * ``GET:/iaas/api/deployments`` -- ``vcfa.tenant.deployment.list``
   (largest tenant-side payload; trips the dispatcher's JSONFlux
   seam on large tenants)
@@ -66,7 +66,7 @@ Curation application
 --------------------
 
 :func:`apply_vcfa_core_curation` is the operator-review-time substrate
-call that makes exactly the 11 curated ops dispatchable. Mirrors
+call that makes exactly the 6 curated ops dispatchable. Mirrors
 :func:`apply_nsx_core_curation` /
 :func:`apply_harbor_core_curation` verbatim: per-group ``edit_op``
 override pass to mark non-core ops disabled, then ``edit_group`` +
@@ -285,12 +285,12 @@ async def apply_vcfa_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 11-op read core against an ingested VCFA connector.
+    """Apply the curated 6-op read core against an ingested VCFA connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 11 ops in :data:`VCFA_CORE_OPS` are dispatchable
+    the 6 ops in :data:`VCFA_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
-    ``is_enabled=False``. The 8 curated groups land
+    ``is_enabled=False``. The 5 curated groups land
     ``review_status='enabled'`` so the agent's
     :func:`~meho_backplane.operations.meta_tools.search_operations`
     surfaces the core ops; non-curated groups are left untouched

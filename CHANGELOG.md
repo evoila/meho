@@ -90,6 +90,36 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — async ingest jobs always reach a terminal state (watchdog + bounded LLM client + job-id log binding) (#2275)
+
+- **A wedged async connector ingest can no longer sit at `status=running`
+  forever** (#2275). An ingest job whose pipeline hit a *never-completing
+  await* — a starved `to_thread` executor, a DB connection that never
+  acquires, or a grouping LLM call pending on the Anthropic SDK's default
+  10-min-read × 2-retry ceiling (~30 min wall-clock) — was stranded at
+  `running` until a pod restart cleared the in-memory registry, even
+  though the identical *sync* request returned a clean 400. (The
+  exception boundary was already maximal — an `OpIdCollision`-raising
+  pipeline does flip to `failed` — so the earlier "widen the try/except"
+  framing was a no-op; the real defect was the missing watchdog.)
+  `run_ingest_job` now time-boxes the whole job body — the pipeline call
+  **and** the post-run dispatchability probe — inside
+  `asyncio.timeout`; at the deadline the job flips to `failed` with
+  `error_class="TimeoutError"`. The budget defaults to 30 min and is
+  env-overridable via `INGEST_JOB_TIMEOUT_SECONDS`. Cancellation cannot
+  interrupt an already-running `to_thread` OS thread, so the guarantee is
+  job-state terminality, not thread reclamation.
+- **The grouping LLM client is now constructed with an explicit request
+  timeout + retry ceiling** (120 s × 1 retry) instead of the SDK
+  defaults, so a hung grouping call fails fast rather than consuming the
+  watchdog budget; the fail-closed 503 contract for a missing
+  `ANTHROPIC_API_KEY` (#1386) is unchanged.
+- **Pipeline log events now carry `ingest_job_id`.** The job id is bound
+  via structlog `contextvars` (not just the job coroutine's own logger),
+  so the configured `merge_contextvars` processor stamps it onto pipeline
+  events (`ingestion_pipeline_start` &c.) — a job-id-filtered log grep is
+  no longer blind to the pipeline. No schema or route change. (#2275)
+
 ### Changed — scheduler `fire_at` tick-quantization latency documented on the API schema (#2245)
 
 - **The scheduler's fire-time latency window is now part of the API contract,

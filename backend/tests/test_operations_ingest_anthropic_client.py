@@ -90,6 +90,46 @@ def test_factory_accepts_bare_model_id(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client._model == "claude-haiku-4-5"
 
 
+def test_factory_constructs_client_with_explicit_timeout_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The grouping-pass ``AsyncAnthropic`` is built with explicit bounds (#2275).
+
+    The SDK defaults (10-min read timeout, retried) let a hung grouping
+    call pend ~30 min and outlive the ingest-job watchdog. The factory
+    must pass explicit ``timeout`` + ``max_retries`` so a stuck LLM call
+    fails fast instead of silently consuming the watchdog budget. Patch
+    the SDK constructor (function-local ``from anthropic import
+    AsyncAnthropic``) and assert the kwargs.
+    """
+    import anthropic
+
+    from meho_backplane.operations.ingest.anthropic_client import (
+        _INGEST_LLM_MAX_RETRIES,
+        _INGEST_LLM_TIMEOUT_SECONDS,
+    )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-ingest-test")
+    get_settings.cache_clear()
+
+    captured: dict[str, object] = {}
+
+    class _FakeAsyncAnthropic:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(anthropic, "AsyncAnthropic", _FakeAsyncAnthropic)
+
+    client = build_anthropic_ingest_llm_client()
+
+    assert isinstance(client, AnthropicMessagesLlmClient)
+    # Explicit bounds pinned to the module constants (not the SDK defaults).
+    assert captured["timeout"] == _INGEST_LLM_TIMEOUT_SECONDS
+    assert captured["max_retries"] == _INGEST_LLM_MAX_RETRIES
+    # The fail-closed key contract is unchanged: the key is still forwarded.
+    assert captured["api_key"] == "fake-key-for-ingest-test"
+
+
 # ---------------------------------------------------------------------------
 # Adapter: generate_json -> Messages API
 # ---------------------------------------------------------------------------

@@ -72,12 +72,12 @@ where a malicious approver swaps the params between the "request" and the
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
 import structlog
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -222,6 +222,41 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _resolve_default_ttl() -> timedelta:
+    """The configured default approval TTL as a :class:`~datetime.timedelta`.
+
+    Read lazily off :func:`~meho_backplane.settings.get_settings` (mirrors
+    the local settings import in :func:`_check_self_approval`) so the queue
+    module stays decoupled from settings at import time.
+    """
+    from meho_backplane.settings import get_settings
+
+    return timedelta(seconds=get_settings().approval_default_ttl_seconds)
+
+
+def _bounded_expires_at(
+    created_at: datetime,
+    requested: datetime | None,
+    default_ttl: timedelta,
+) -> datetime:
+    """Resolve the deadline a parked approval is stamped with (#2322).
+
+    The TTL lifecycle is inert unless every parked row carries a concrete
+    ``expires_at`` for the sweep to act on, so a ``None`` request defaults
+    to ``created_at + default_ttl``. An explicit caller deadline is
+    honoured but **capped** at that same ceiling — the single configured
+    TTL doubles as the upper bound, so no surface can park an
+    unbounded-lived approval, while a shorter (e.g. preflight-probe) or
+    already-past deadline the caller asked for is respected as-is. There
+    is deliberately no lower bound / per-op policy (substrate minimalism,
+    #1177).
+    """
+    ceiling = created_at + default_ttl
+    if requested is None:
+        return ceiling
+    return min(requested, ceiling)
+
+
 async def _write_audit_row(
     session: AsyncSession,
     *,
@@ -363,7 +398,10 @@ async def create_pending_request(
             for non-agent-run dispatches.
         proposed_effect: Human-readable summary for the reviewer.
             Defaults to ``{"op_id": op_id, "connector_id": connector_id}``.
-        expires_at: Optional deadline. ``None`` means no expiry.
+        expires_at: Optional caller deadline (#2322). ``None`` defaults to
+            ``created_at + APPROVAL_DEFAULT_TTL``; an explicit value is
+            honoured but capped at that ceiling. The row is never parked
+            with a null deadline — the TTL sweep depends on it.
 
     Returns:
         The flushed :class:`ApprovalRequest` row.
@@ -405,7 +443,13 @@ async def create_pending_request(
     # context (agent run var, or the MCP transport's session binding)
     # is still live; the approve / resume surfaces run on a different
     # operator's task and re-hydrate it from the row.
+    # Stamp the approval-TTL deadline (#2322): default to
+    # ``created_at + APPROVAL_DEFAULT_TTL`` and cap any caller override at
+    # that ceiling, so every parked row — REST, MCP, and run-bound — leaves
+    # the queue with a concrete ``expires_at`` for the sweeper to act on.
     request_audit_id = uuid.uuid4()
+    created_at = _now()
+    bounded_expires_at = _bounded_expires_at(created_at, expires_at, _resolve_default_ttl())
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -419,8 +463,8 @@ async def create_pending_request(
         params=params,
         proposed_effect=proposed_effect,
         status=ApprovalRequestStatus.PENDING.value,
-        created_at=_now(),
-        expires_at=expires_at,
+        created_at=created_at,
+        expires_at=bounded_expires_at,
         work_ref=work_ref_var.get(),
         agent_session_id=resolve_agent_session_id(),
         request_audit_id=request_audit_id,
@@ -904,11 +948,41 @@ async def _rehydrate_resume_target(
     return None, denied
 
 
+def _deadline_passed_clause(cutoff: datetime, default_ttl: timedelta | None) -> Any:
+    """Build the "expiry deadline has passed" WHERE clause for the sweep (#2322).
+
+    A concrete ``expires_at`` compares directly. When *default_ttl* is
+    supplied, legacy null-expiry rows (parked before #2322) are coalesced
+    against ``created_at + default_ttl`` — expressed as
+    ``created_at <= cutoff - default_ttl`` rather than SQL
+    column+interval arithmetic so the predicate binds two plain Python
+    datetimes and stays dialect-portable (PG ``timestamptz`` + the SQLite
+    test path both compare cleanly), the same bound-parameter discipline
+    the grant-expiry sweeper uses. With no *default_ttl* only rows with a
+    concrete deadline are considered (the historical contract).
+    """
+    concrete = and_(
+        ApprovalRequest.expires_at.is_not(None),
+        ApprovalRequest.expires_at <= cutoff,
+    )
+    if default_ttl is None:
+        return concrete
+    legacy_cutoff = cutoff - default_ttl
+    return or_(
+        concrete,
+        and_(
+            ApprovalRequest.expires_at.is_(None),
+            ApprovalRequest.created_at <= legacy_cutoff,
+        ),
+    )
+
+
 async def expire_stale_requests(
     session: AsyncSession,
     *,
     operator: Operator,
     now: datetime | None = None,
+    default_ttl: timedelta | None = None,
 ) -> list[ApprovalRequest]:
     """Transition all ``pending`` rows past their ``expires_at`` to ``expired``.
 
@@ -916,8 +990,16 @@ async def expire_stale_requests(
     session (caller commits). Intended to be called from a background
     task / CLI sweep on a periodic interval.
 
-    Only rows with ``expires_at IS NOT NULL AND expires_at <= now`` and
-    ``status = 'pending'`` are affected.
+    Rows with ``expires_at IS NOT NULL AND expires_at <= now`` and
+    ``status = 'pending'`` are always affected. When *default_ttl* is
+    supplied (the periodic sweeper passes ``APPROVAL_DEFAULT_TTL``),
+    legacy rows parked before #2322 with ``expires_at IS NULL`` are also
+    aged out via a sweep-time coalesce: a null-expiry row is treated as
+    if its deadline were ``created_at + default_ttl`` and, when that
+    coalesced deadline has passed, the row is expired and its
+    ``expires_at`` is backfilled to that value so the decision row and
+    the persisted deadline agree. No schema change is needed — the
+    coalesce lives entirely in this predicate.
 
     Args:
         session: Open :class:`AsyncSession``; flushed, not committed.
@@ -926,6 +1008,10 @@ async def expire_stale_requests(
             ``operator`` role.
         now: Override for "current time" (used in tests). Defaults to
             :func:`datetime.now(UTC)`.
+        default_ttl: When set, null-``expires_at`` legacy rows are
+            coalesced against ``created_at + default_ttl`` (#2322). When
+            ``None`` (the historical contract), only rows with a concrete
+            ``expires_at`` are considered.
 
     Returns:
         List of the expired :class:`ApprovalRequest` rows (may be empty).
@@ -944,14 +1030,17 @@ async def expire_stale_requests(
     stmt = (
         select(ApprovalRequest)
         .where(ApprovalRequest.status == ApprovalRequestStatus.PENDING.value)
-        .where(ApprovalRequest.expires_at.is_not(None))
-        .where(ApprovalRequest.expires_at <= cutoff)
+        .where(_deadline_passed_clause(cutoff, default_ttl))
         .where(ApprovalRequest.tenant_id == operator.tenant_id)
     )
     result = await session.execute(stmt)
     rows = list(result.scalars().all())
 
     for request in rows:
+        # Backfill a legacy null deadline to the coalesced value so the
+        # decision audit row and the persisted row agree on when it expired.
+        if request.expires_at is None and default_ttl is not None:
+            request.expires_at = request.created_at + default_ttl
         request.status = ApprovalRequestStatus.EXPIRED.value
         request.decided_at = cutoff
         await session.flush()

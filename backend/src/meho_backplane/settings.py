@@ -1014,6 +1014,21 @@ class Settings(BaseModel):
     # docs/codebase/approvals.md "Single-operator tenants: use an
     # agent-requester, not break-glass".
     approval_allow_self_approval: bool = False
+    # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
+    # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
+    # (default 14 days); an explicit caller override is honoured but capped
+    # at that same ceiling so no surface can park an unbounded-lived
+    # approval. The default TTL is the single knob -- there is deliberately
+    # no per-op TTL policy (substrate minimalism, #1177). The periodic
+    # sweeper (``operations.approval_expiry``) drives
+    # ``expire_stale_requests`` per tenant on its own cadence; gated on
+    # APPROVAL_EXPIRY_ENABLED so an operator running an external sweep does
+    # not double-expire, and the 300s (5 min) default cadence matches the
+    # sibling GRANT_EXPIRY sweeper so a just-past-deadline row leaves the
+    # pending view within one tick.
+    approval_default_ttl_seconds: int = Field(default=14 * 24 * 3600, ge=60)
+    approval_expiry_enabled: bool = True
+    approval_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
     # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
     # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator
     # running an external lease-reclaim mechanism (DBOS Transact, a
@@ -1593,6 +1608,16 @@ def get_settings() -> Settings:
         # unless this break-glass switch is explicitly enabled.
         approval_allow_self_approval=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_SELF_APPROVAL", "false"),
+        ),
+        # #2322 — approval-TTL default + sweeper knobs.
+        approval_default_ttl_seconds=int(
+            os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),
+        ),
+        approval_expiry_enabled=parse_bool_env(
+            os.environ.get("APPROVAL_EXPIRY_ENABLED", "true"),
+        ),
+        approval_expiry_tick_interval_seconds=int(
+            os.environ.get("APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
         ),
         agent_run_reaper_enabled=parse_bool_env(
             os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),

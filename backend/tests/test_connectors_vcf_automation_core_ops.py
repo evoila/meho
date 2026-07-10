@@ -1,20 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the VCFA dual-plane read-only v0.5 core-ops curation.
+"""Behavioural tests for the VCFA dual-plane read-only core-ops curation.
 
-Covers :mod:`meho_backplane.connectors.vcf_automation.core_ops`:
+Covers :mod:`meho_backplane.connectors.vcf_automation.core_ops` (the
+ingested-curation browse remainder; the audited read set moved to typed
+ops in :mod:`~meho_backplane.connectors.vcf_automation.typed_ops`, T5
+#2305):
 
 * :func:`classify_vcfa_op` — path-prefix classifier rules across both
   the provider plane (``/cloudapi/1.0.0/*``) and the tenant plane
   (``/iaas/api/*``).
 * :func:`apply_vcfa_core_curation` — the operator-review-time
-  substrate call that flips ``review_status='enabled'`` on the 8
-  curated groups, lands ``llm_instructions`` on the 11 curated ops
-  (6 provider + 5 tenant), and explicitly disables non-core ops in
+  substrate call that flips ``review_status='enabled'`` on the 5
+  curated groups, lands ``llm_instructions`` on the 6 curated ops
+  (3 provider + 3 tenant), and explicitly disables non-core ops in
   curated groups via the audit-log-driven operator-override
   exclusion so the :meth:`enable_group` cascade skips them. The
-  load-bearing assertion is "11 ops dispatchable, every other op in
+  load-bearing assertion is "6 ops dispatchable, every other op in
   curated groups stays ``is_enabled=False``".
 * The dual-plane invariant: every enabled op's path resolves through
   :func:`plane_for_path` to the same plane its group declares. A
@@ -258,19 +261,23 @@ async def _group_statuses(*, tenant_id: uuid.UUID) -> dict[str, str]:
 @pytest.mark.parametrize(
     "op_id,expected",
     [
-        # Provider plane families.
-        ("GET:/cloudapi/1.0.0/site", "provider-site"),
-        ("GET:/cloudapi/1.0.0/orgs", "provider-orgs"),
+        # Provider plane families (still ingested-curation).
         ("GET:/cloudapi/1.0.0/orgs/abc-123", "provider-orgs"),
-        ("GET:/cloudapi/1.0.0/regions", "provider-regions"),
         ("GET:/cloudapi/1.0.0/regions/def-456", "provider-regions"),
         ("GET:/cloudapi/1.0.0/users", "provider-users"),
-        # Tenant plane families.
-        ("GET:/iaas/api/about", "tenant-about"),
-        ("GET:/iaas/api/projects", "tenant-projects"),
+        # Tenant plane families (still ingested-curation).
         ("GET:/iaas/api/deployments", "tenant-deployments"),
         ("GET:/iaas/api/deployments/abc-789", "tenant-deployments"),
         ("GET:/iaas/api/blueprints", "tenant-blueprints"),
+        # Audited read set converted to typed ops (T5 #2305): their paths
+        # carry no ingested-curation rule any more, so classify → "none".
+        ("GET:/cloudapi/1.0.0/site", "none"),
+        ("GET:/iaas/api/about", "none"),
+        ("GET:/iaas/api/projects", "none"),
+        # The orgs/regions *collection* prefixes still classify (the rule
+        # stays for the get-by-id ops that share the prefix).
+        ("GET:/cloudapi/1.0.0/orgs", "provider-orgs"),
+        ("GET:/cloudapi/1.0.0/regions", "provider-regions"),
         # Outside both curated families.
         ("GET:/cloudapi/1.0.0/cells", "none"),
         ("GET:/iaas/api/machines", "none"),
@@ -295,19 +302,21 @@ def test_classify_vcfa_op_maps_paths_to_expected_group_keys(
 # ---------------------------------------------------------------------------
 
 
-def test_vcfa_core_ops_has_eleven_entries_six_provider_five_tenant() -> None:
-    """The v0.5 read core is 11 ops total: 6 provider + 5 tenant (per #369 DoD).
+def test_vcfa_core_ops_has_six_entries_three_provider_three_tenant() -> None:
+    """The ingested-curation remainder is 6 ops total: 3 provider + 3 tenant.
 
-    The exact count is contractually fixed in #836's acceptance criteria
-    and the parent Initiative #369's definition of done. A drift here
-    (e.g. someone adds a 12th op) would silently widen the surface
-    beyond the operator-reviewed scope; this assertion catches it.
+    Since T5 (#2305) the audited read set (org/region list, provider
+    health, projects list, tenant about) is served by typed ops
+    (:mod:`~meho_backplane.connectors.vcf_automation.typed_ops`); what
+    stays curated-ingested here is the browse surface. A drift here would
+    either silently widen the ingested surface or re-shadow a converted
+    typed op; this assertion catches it.
     """
     provider_count = sum(1 for op in VCFA_CORE_OPS if op.plane == "provider")
     tenant_count = sum(1 for op in VCFA_CORE_OPS if op.plane == "tenant")
-    assert len(VCFA_CORE_OPS) == 11, f"expected 11 core ops, got {len(VCFA_CORE_OPS)}"
-    assert provider_count == 6, f"expected 6 provider ops, got {provider_count}"
-    assert tenant_count == 5, f"expected 5 tenant ops, got {tenant_count}"
+    assert len(VCFA_CORE_OPS) == 6, f"expected 6 core ops, got {len(VCFA_CORE_OPS)}"
+    assert provider_count == 3, f"expected 3 provider ops, got {provider_count}"
+    assert tenant_count == 3, f"expected 3 tenant ops, got {tenant_count}"
 
 
 def test_every_curated_op_plane_matches_path_classification() -> None:
@@ -365,7 +374,7 @@ def test_path_rules_cover_every_curated_group_key() -> None:
 
 @pytest.mark.asyncio
 async def test_apply_curation_enables_groups_and_lands_llm_instructions() -> None:
-    """All 8 curated groups end ``enabled``; all 11 core ops carry the curated blob."""
+    """All 5 curated groups end ``enabled``; all 6 core ops carry the curated blob."""
     tenant_id = _TEST_TENANT
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)
     operator = _make_operator(tenant_id=tenant_id)
@@ -391,9 +400,9 @@ async def test_apply_curation_keeps_non_core_ops_disabled_via_override_path() ->
     :func:`meho_backplane.operations.ingest._internals.operator_disabled_op_ids`)
     is the substrate that makes per-op exclusivity work inside a
     group-level enable. This test seeds 2 extra non-core ops per
-    curated group (16 extras total across 8 groups), runs the
-    helper, and asserts only the 11 curated ops flip to
-    ``is_enabled=True`` while the 16 non-core ops stay ``False``.
+    curated group (10 extras total across 5 groups), runs the
+    helper, and asserts only the 6 curated ops flip to
+    ``is_enabled=True`` while the 10 non-core ops stay ``False``.
     """
     tenant_id = _TEST_TENANT
     await _seed_curated_groups_and_ops(tenant_id=tenant_id, extra_ops_per_group=2)
@@ -417,8 +426,8 @@ async def test_apply_curation_keeps_non_core_ops_disabled_via_override_path() ->
                 f"the operator-override path was the safeguard"
             )
             disabled_count += 1
-    assert enabled_count == len(VCFA_CORE_OPS) == 11
-    assert disabled_count == len(VCFA_CORE_GROUPS) * 2 == 16
+    assert enabled_count == len(VCFA_CORE_OPS) == 6
+    assert disabled_count == len(VCFA_CORE_GROUPS) * 2 == 10
 
 
 @pytest.mark.asyncio
@@ -430,7 +439,7 @@ async def test_every_enabled_op_carries_spec_source_tag_naming_its_plane() -> No
     ``spec:iaas`` on tenant-plane rows (sourced from
     ``vcf-automation-9.0/iaas.yaml``). Operators distinguish the
     two planes via these tags in ``meho connector review`` output;
-    this test pins that the curated 11-op core preserves the tag
+    this test pins that the curated 6-op core preserves the tag
     after curation runs (curation must not strip the
     spec_source marker).
     """
@@ -516,7 +525,7 @@ async def test_apply_curation_is_safe_to_rerun() -> None:
 
     The audit layer isn't idempotent (each ``edit_group`` /
     ``edit_op`` writes a fresh row even on no-op values), but the
-    end-state assertions hold: 11 ops enabled with the curated
+    end-state assertions hold: 6 ops enabled with the curated
     blob; non-core ops still disabled; all curated groups still
     enabled.
     """

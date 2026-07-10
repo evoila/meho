@@ -110,6 +110,79 @@ connector-related release-notes line.
   definitions, symptoms, recommendations, super metrics) are declined from
   typed conversion — not in the adopter's audited operational set. (#2303)
 
+### Added — NSX typed reads on the cookie+XSRF session (audited set) (#2302)
+
+- The audited NSX operational read set is now first-class **typed** ops
+  (`source_kind="typed"`) that dispatch on a fresh boot with **zero
+  catalog ingest** (no per-deploy curation state, the #2247 failure
+  class): `nsx.node.status` + `nsx.cluster.status` (manager/cluster
+  status+version), `nsx.backup.config` + `nsx.backup.status`,
+  `nsx.transport_zone.list`, `nsx.tier1.list`, and `nsx.alarm.list`
+  (optional status/feature/severity filters). `nsx.backup.config` is
+  first-class for the backup disk-fill incident class (Broadcom KB 442696
+  shape): it surfaces `backup_enabled`, `passphrase_configured`, and the
+  retention-relevant `backup_schedule` / `remote_file_server` fields, and
+  scrubs the backup passphrase + any nested SFTP credential at the
+  connector boundary (the default redaction policy masks
+  `password`/`secret` but not `passphrase`). These reads recover from
+  session expiry through the #2067 dispatcher seam — `NsxConnector` now
+  exposes the public `invalidate_session` hook, so a 401 evicts the cached
+  cookie+XSRF session and re-dispatches once, no restart. The remaining
+  reads (transport-node listing, segments, tier-0 gateways,
+  distributed-firewall policies + rules) stay as ingested-row curation in
+  `core_ops.py` so the wider ingested breadth is still browsable; the
+  converted ops are no longer flipped by `apply_nsx_core_curation`. `tier-1
+  gateway create` (a write) is out of scope. (#2302)
+
+### Connectors — VCFA typed reads on the dual-plane session (#2305)
+
+- The audited VCF Automation read set — provider org list / region list /
+  health (`/cloudapi/1.0.0/site`) and tenant `/iaas/api/projects` + `about`
+  — is now served by first-class `source_kind="typed"` operations
+  (`vcfa.provider.org.list` / `region.list` / `health`,
+  `vcfa.tenant.project.list` / `about`) that dispatch through the
+  connector's own dual-plane session with **zero catalog state**. VCFA
+  ships no vendor OpenAPI spec, so the prior ingested-curation path was
+  dispatch-inert on a real deploy; typed conversion is the only working
+  read surface. Each op declares the auth plane it rides (provider vs
+  tenant), cross-checked against the request path at import time. The
+  remaining `core_ops` ingested-curation surface is trimmed to the 6-op
+  browse remainder; `org create` (a write) stays out of scope (#2305).
+
+### Changed — Fleet typed reads on the LCM-local Basic session (#2304)
+
+- VCF Fleet's audited read set — the **about/health probe** (`fleet.about`)
+  and the **component inventory** ("what's deployed", `fleet.environment.list`)
+  — now dispatches as `source_kind="typed"` off the connector's existing
+  HTTP Basic (LCM-local) session, registered in code at lifespan startup.
+  These ops work on a fresh boot with **zero catalog ingest**, removing the
+  Fleet operational surface's dependence on ingesting the crash-prone
+  vRSLCM-derived Fleet OpenAPI spec (the #2272 datetime-crash artifact). The
+  remaining six curated ops (datacenter/vcenter list, environment detail,
+  product list, request list/detail) are declined from typed conversion —
+  outside the adopter's audited set — and stay as browsable ingested breadth
+  until the curation apparatus is retired (T7); their ingested `/about` and
+  `/environments` duplicates no longer curate, so they cannot shadow the
+  typed ops. (#2304)
+
+### Added — structural OpenAPI 3.x metaschema gate on spec ingest (#2292)
+
+- Spec ingest now validates a decoded OpenAPI 3.0/3.1 document against the
+  official OpenAPI metaschema (via `openapi-spec-validator`), immediately
+  after the existing version check. A metaschema-invalid document — `paths`
+  as a list, an operation with a non-object `responses`, a missing required
+  field — is refused with a structured `invalid_spec` error naming the
+  failing JSON path (e.g. `$.paths['/pets'].get.responses`) and a
+  remediation line, on every transport (REST 400, MCP `-32602`, async-job
+  `error`). Because the gate lives at parse, `dry_run` and the real ingest
+  refuse an invalid spec identically, so a structurally broken document can
+  no longer partially ingest into catalog rows of unknown quality.
+  Validation is metaschema-only (no `operationId`/parameter semantic
+  add-ons) so legal vendor specs — and every shipped package-data spec, at
+  boot — keep ingesting; Swagger 2.0 still gets its dedicated conversion
+  remedy, and the parser's tolerant-skip of sub-document junk is unchanged.
+  (#2292)
+
 ### Added — persisted spec provenance at ingest (sha256 + origin + operator/timestamp, surfaced in review) (#2291)
 
 - Every accepted spec ingest now writes a durable, non-spoofable

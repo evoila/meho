@@ -125,6 +125,13 @@ from meho_backplane.connectors.vcf_automation.session import (
     VcfAutomationTargetLike,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.vcf_automation.typed_ops import (
+    PROVIDER_ORGS_PATH,
+    PROVIDER_REGIONS_PATH,
+    PROVIDER_SITE_PATH,
+    TENANT_ABOUT_PATH,
+    TENANT_PROJECTS_PATH,
+)
 
 __all__ = ["VcfAutomationConfigurationError", "VcfAutomationConnector"]
 
@@ -650,6 +657,150 @@ class VcfAutomationConnector(HttpConnector):
         )
 
     # ------------------------------------------------------------------
+    # Typed read ops on the dual-plane session (T5 #2305)
+    #
+    # Each handler is a thin idempotent GET against a single plane's
+    # surface. The request path drives plane selection inside
+    # :meth:`_request_json` (``plane_for_path`` → tenant for ``/iaas/api/*``,
+    # provider otherwise), so a provider handler and a tenant handler
+    # differ only by the constant path they pass; the per-plane Bearer
+    # session + 401 retry-once dance is shared. The dispatcher binds these
+    # bound methods to the per-process connector instance and threads
+    # ``operator`` by parameter name (see
+    # :func:`~meho_backplane.operations._branches.dispatch_typed`).
+    # ------------------------------------------------------------------
+
+    async def provider_org_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.org.list`` — ``GET /cloudapi/1.0.0/orgs`` (provider plane)."""
+        return await self._request_json(
+            target,
+            "GET",
+            PROVIDER_ORGS_PATH,
+            operator=operator,
+            params=_provider_pagination_query(params),
+        )
+
+    async def provider_region_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.region.list`` — ``GET /cloudapi/1.0.0/regions`` (provider plane)."""
+        return await self._request_json(
+            target,
+            "GET",
+            PROVIDER_REGIONS_PATH,
+            operator=operator,
+            params=_provider_pagination_query(params),
+        )
+
+    async def provider_health(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.provider.health`` — ``GET /cloudapi/1.0.0/site`` (provider plane)."""
+        del params  # schema declares the param object empty
+        return await self._request_json(target, "GET", PROVIDER_SITE_PATH, operator=operator)
+
+    async def tenant_project_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.project.list`` — ``GET /iaas/api/projects`` (tenant plane)."""
+        return await self._request_json(
+            target,
+            "GET",
+            TENANT_PROJECTS_PATH,
+            operator=operator,
+            params=_tenant_odata_query(params),
+        )
+
+    async def tenant_about(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.about`` — ``GET /iaas/api/about`` (tenant plane)."""
+        del params  # schema declares the param object empty
+        return await self._request_json(target, "GET", TENANT_ABOUT_PATH, operator=operator)
+
+    @classmethod
+    async def register_typed_operations(cls) -> None:
+        """Upsert every op in :data:`VCFA_TYPED_OPS` into ``endpoint_descriptor``.
+
+        Called from the application lifespan via the registrar queued in
+        :mod:`meho_backplane.connectors.vcf_automation.__init__`. Walks
+        :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_OPS`,
+        resolves each op's ``handler_attr`` to the bound method, looks the
+        group's curated ``when_to_use`` up in
+        :data:`~meho_backplane.connectors.vcf_automation.typed_ops.VCFA_TYPED_WHEN_TO_USE_BY_GROUP`,
+        and routes each row through
+        :func:`~meho_backplane.operations.typed_register.register_typed_operation`
+        under the ``(product, version, impl_id) = ("vcfa", "9.0",
+        "vcfa-rest")`` triple. Idempotent across pod restarts (the helper
+        skips the embedding recompute on unchanged text) — mirrors the
+        argocd / bind9 / Kubernetes shape.
+        """
+        # Lazy import: the operations package pulls in the embedding
+        # pipeline (ONNX runtime + model) which pure fingerprint/probe unit
+        # tests should not pay. Lifespan callers have it warmed by now.
+        from meho_backplane.connectors.vcf_automation.typed_ops import (
+            VCFA_TYPED_OPS,
+            VCFA_TYPED_WHEN_TO_USE_BY_GROUP,
+        )
+        from meho_backplane.operations.typed_register import register_typed_operation
+
+        for op in VCFA_TYPED_OPS:
+            handler = getattr(cls, op.handler_attr, None)
+            if handler is None:
+                raise AttributeError(
+                    f"VcfAutomationConnector typed op {op.op_id!r} declares "
+                    f"handler_attr={op.handler_attr!r} but the class has no such attribute"
+                )
+            when_to_use = VCFA_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key)
+            if when_to_use is None:
+                raise ValueError(
+                    f"VcfAutomationConnector typed op {op.op_id!r} declares "
+                    f"group_key={op.group_key!r} but no curated when_to_use exists "
+                    f"for that key. Add an entry to VCFA_TYPED_WHEN_TO_USE_BY_GROUP."
+                )
+            await register_typed_operation(
+                product=cls.product,
+                version=cls.version,
+                impl_id=cls.impl_id,
+                op_id=op.op_id,
+                handler=handler,
+                summary=op.summary,
+                description=op.description,
+                parameter_schema=op.parameter_schema,
+                response_schema=op.response_schema,
+                group_key=op.group_key,
+                when_to_use=when_to_use,
+                tags=list(op.tags),
+                safety_level=op.safety_level,
+                requires_approval=op.requires_approval,
+                llm_instructions=op.llm_instructions,
+            )
+        _log.info(
+            "vcfa_typed_operations_registered",
+            count=len(VCFA_TYPED_OPS),
+            product=cls.product,
+            version=cls.version,
+            impl_id=cls.impl_id,
+        )
+
+    # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
 
@@ -686,3 +837,27 @@ async def _try_probe(
     except (httpx.HTTPError, OSError) as exc:
         return exc
     return resp
+
+
+def _provider_pagination_query(params: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Extract the provider-plane ``page`` / ``pageSize`` query params.
+
+    Returns ``None`` when neither is present so the request carries no
+    query string and VCFA applies its appliance-default pagination.
+    """
+    query = {key: params[key] for key in ("page", "pageSize") if params.get(key) is not None}
+    return query or None
+
+
+def _tenant_odata_query(params: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Extract the tenant-plane OData ``$filter`` / ``$orderby`` / ``$top`` / ``$skip`` params.
+
+    Returns ``None`` when none are present so the request carries no query
+    string and VCFA lists the full (paged-default) result set.
+    """
+    query = {
+        key: params[key]
+        for key in ("$filter", "$orderby", "$top", "$skip")
+        if params.get(key) is not None
+    }
+    return query or None

@@ -1434,6 +1434,11 @@ type BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost struct {
 	Version *string `json:"version,omitempty"`
 }
 
+// BodyRunbooksDiscardUiRunbooksSlugDiscardPost defines model for Body_runbooks_discard_ui_runbooks__slug__discard_post.
+type BodyRunbooksDiscardUiRunbooksSlugDiscardPost struct {
+	Version *string `json:"version,omitempty"`
+}
+
 // BodyRunbooksEditorCreateUiRunbooksNewPost defines model for Body_runbooks_editor_create_ui_runbooks_new_post.
 type BodyRunbooksEditorCreateUiRunbooksNewPost struct {
 	Description *string `json:"description,omitempty"`
@@ -7942,6 +7947,9 @@ type RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody = Bod
 // RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody defines body for RunbooksDeprecateUiRunbooksSlugDeprecatePost for application/x-www-form-urlencoded ContentType.
 type RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody = BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost
 
+// RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody defines body for RunbooksDiscardUiRunbooksSlugDiscardPost for application/x-www-form-urlencoded ContentType.
+type RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody = BodyRunbooksDiscardUiRunbooksSlugDiscardPost
+
 // RunbooksEditorUpdateUiRunbooksSlugEditPostFormdataRequestBody defines body for RunbooksEditorUpdateUiRunbooksSlugEditPost for application/x-www-form-urlencoded ContentType.
 type RunbooksEditorUpdateUiRunbooksSlugEditPostFormdataRequestBody = BodyRunbooksEditorUpdateUiRunbooksSlugEditPost
 
@@ -9953,6 +9961,11 @@ type ClientInterface interface {
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBody(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksDiscardUiRunbooksSlugDiscardPostWithBody request with any body
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RunbooksEditorEditUiRunbooksSlugEditGet request
 	RunbooksEditorEditUiRunbooksSlugEditGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15235,6 +15248,30 @@ func (c *Client) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithBody(ctx contex
 
 func (c *Client) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBody(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunbooksDeprecateUiRunbooksSlugDeprecatePostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(c.Server, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody(c.Server, slug, body)
 	if err != nil {
 		return nil, err
 	}
@@ -31829,6 +31866,53 @@ func NewRunbooksDeprecateUiRunbooksSlugDeprecatePostRequestWithBody(server strin
 	return req, nil
 }
 
+// NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody calls the generic RunbooksDiscardUiRunbooksSlugDiscardPost builder with application/x-www-form-urlencoded body
+func NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody(server string, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(server, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody generates requests for RunbooksDiscardUiRunbooksSlugDiscardPost with any type of body
+func NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(server string, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/%s/discard", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRunbooksEditorEditUiRunbooksSlugEditGetRequest generates requests for RunbooksEditorEditUiRunbooksSlugEditGet
 func NewRunbooksEditorEditUiRunbooksSlugEditGetRequest(server string, slug string) (*http.Request, error) {
 	var err error
@@ -34858,6 +34942,11 @@ type ClientWithResponsesInterface interface {
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse, error)
 
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse, error)
+
+	// RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse request with any body
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error)
+
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error)
 
 	// RunbooksEditorEditUiRunbooksSlugEditGetWithResponse request
 	RunbooksEditorEditUiRunbooksSlugEditGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*RunbooksEditorEditUiRunbooksSlugEditGetResponse, error)
@@ -41331,6 +41420,28 @@ func (r RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse) StatusCode() int {
 	return 0
 }
 
+type RunbooksDiscardUiRunbooksSlugDiscardPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksDiscardUiRunbooksSlugDiscardPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksDiscardUiRunbooksSlugDiscardPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RunbooksEditorEditUiRunbooksSlugEditGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -45790,6 +45901,23 @@ func (c *ClientWithResponses) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFo
 		return nil, err
 	}
 	return ParseRunbooksDeprecateUiRunbooksSlugDeprecatePostResponse(rsp)
+}
+
+// RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse request with arbitrary body returning *RunbooksDiscardUiRunbooksSlugDiscardPostResponse
+func (c *ClientWithResponses) RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	rsp, err := c.RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	rsp, err := c.RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp)
 }
 
 // RunbooksEditorEditUiRunbooksSlugEditGetWithResponse request returning *RunbooksEditorEditUiRunbooksSlugEditGetResponse
@@ -54159,6 +54287,32 @@ func ParseRunbooksDeprecateUiRunbooksSlugDeprecatePostResponse(rsp *http.Respons
 	}
 
 	response := &RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse parses an HTTP response from a RunbooksDiscardUiRunbooksSlugDiscardPostWithResponse call
+func ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp *http.Response) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksDiscardUiRunbooksSlugDiscardPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

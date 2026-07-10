@@ -49,7 +49,14 @@ data:
   KEYCLOAK_CLI_CLIENT_ID: {{ .Values.config.keycloakCliClientId | quote }}
   KEYCLOAK_JWKS_CACHE_TTL_SECONDS: {{ .Values.config.keycloakJwksCacheTtlSeconds | quote }}
   KEYCLOAK_JWT_LEEWAY_SECONDS: {{ .Values.config.keycloakJwtLeewaySeconds | quote }}
+  # Emitted only for a Vault-backend install (Initiative #2227). A
+  # GCP-native (`config.credentialBackend: gsm`) deploy leaves
+  # `config.vaultAddr` empty and runs no Vault, so the key is omitted
+  # entirely — the backplane coerces a missing/blank VAULT_ADDR to None
+  # and boots Vault-free.
+  {{- if .Values.config.vaultAddr }}
   VAULT_ADDR: {{ .Values.config.vaultAddr | quote }}
+  {{- end }}
   VAULT_OIDC_ROLE: {{ .Values.config.vaultOidcRole | quote }}
   VAULT_OIDC_MOUNT_PATH: {{ .Values.config.vaultOidcMountPath | quote }}
   VAULT_TIMEOUT_SECONDS: {{ .Values.config.vaultTimeoutSeconds | quote }}
@@ -98,6 +105,17 @@ data:
   # `docs/cross-repo/reverse-proxy-contract.md` for the trust
   # contract.
   FORWARDED_ALLOW_IPS: {{ .Values.config.forwardedAllowIps | quote }}
+  # v0.20.0 (PR #2191) target-destination SSRF guard. The backplane
+  # refuses to register or dial a target that resolves to a non-public
+  # address; this env var is the operator's scoped opt-out. Read per
+  # request from the environment by
+  # `backend/src/meho_backplane/targets/ssrf_guard.py`
+  # (`TARGET_SSRF_ALLOWLIST_ENV`) — NOT via settings.py. Rendered
+  # unconditionally: the default `""` is a genuine no-op (the guard
+  # stays default-deny). Comma-separated CIDRs / bare IPs / hostname
+  # literals. See `deploy/charts/meho/values.yaml`
+  # (`config.targetSsrfAllowlist`) and `docs/codebase/target-ssrf-guard.md`.
+  MEHO_TARGET_SSRF_ALLOWLIST: {{ .Values.config.targetSsrfAllowlist | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

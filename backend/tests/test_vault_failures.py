@@ -58,6 +58,7 @@ from meho_backplane.auth import vault as vault_module
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import (
     VaultClientError,
+    VaultNotConfiguredError,
     VaultRoleDeniedError,
     VaultUnreachableError,
     vault_client_for_operator,
@@ -563,9 +564,13 @@ async def test_readiness_probe_handles_settings_failure(
 ) -> None:
     """Missing required env vars on probe call → ``settings_unavailable: <Cls>``.
 
-    Probes run on every ``/ready`` hit; a missing ``VAULT_ADDR`` mid-flight
-    must surface as a probe-level failure rather than crash ``/ready``."""
-    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    Probes run on every ``/ready`` hit; a missing *required* env var
+    mid-flight must surface as a probe-level failure rather than crash
+    ``/ready``. ``VAULT_ADDR`` is no longer required (#2277 — its absence
+    now means "skip Vault", see
+    ``test_readiness_probe_skips_when_vault_unconfigured``), so this
+    exercises the branch with ``KEYCLOAK_ISSUER_URL``."""
+    monkeypatch.delenv("KEYCLOAK_ISSUER_URL", raising=False)
     get_settings.cache_clear()
 
     result = await vault_readiness_probe()
@@ -573,3 +578,42 @@ async def test_readiness_probe_handles_settings_failure(
     assert result.ok is False
     assert result.detail is not None
     assert result.detail.startswith("settings_unavailable:")
+
+
+async def test_readiness_probe_skips_when_vault_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ``VAULT_ADDR`` (a Vault-free ``gsm`` install) → skipped, not failed.
+
+    Vault is an optional credential backend since #2227; an unconfigured
+    Vault is skipped so a GSM-only deploy's ``/api/v1/health`` readiness
+    stays green (docs-backends skip-unconfigured contract, #1606)."""
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    get_settings.cache_clear()
+
+    result = await vault_readiness_probe()
+
+    assert result.name == "vault"
+    assert result.ok is True
+    assert result.detail == "not_configured"
+
+
+async def test_vault_client_for_operator_raises_not_configured_when_vault_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CREDENTIAL_BACKEND=vault`` with no ``VAULT_ADDR`` fails at first use.
+
+    The app boots (settings construct with ``vault_addr is None``), but
+    the first Vault operation raises the actionable
+    :class:`VaultNotConfiguredError` — a handled ``VaultClientError``
+    (4xx-class via the dispatcher), never a 5xx."""
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    get_settings.cache_clear()
+
+    with pytest.raises(VaultNotConfiguredError) as exc_info:
+        async with vault_client_for_operator(_make_operator()):
+            pass  # pragma: no cover - client construction raises first
+
+    assert "VAULT_ADDR" in str(exc_info.value)
+    assert "CREDENTIAL_BACKEND" in str(exc_info.value)
+    assert isinstance(exc_info.value, VaultClientError)

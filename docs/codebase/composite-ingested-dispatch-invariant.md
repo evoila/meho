@@ -34,10 +34,16 @@ code-shipped op's declared sub-op may resolve to an `ingested` row.
   built-in/global (`tenant_id IS NULL`) row with `source_kind='ingested'`
   is a violation. Enablement is not filtered. `*.composite.*` recursion
   sub-ops are skipped (registrar-guaranteed, never ingested).
+- `register_composite_dispatch_surface(composite_op_id, connector_id,
+  sub_op_ids)` — the declaration seam. A connector registers, per composite,
+  the sub-ops it routes through the dispatcher (`dispatch_child`). A
+  composite that dispatches every sub-op directly on the connector session
+  has no descriptor-routed surface and registers nothing — the shape every
+  shipped composite migrated to (Task #2249), so the registry is empty in
+  production.
 - `assert_registered_composites_have_no_ingested_dispatch()` — the
-  platform-wide sweep over the composite-backing registry
-  (`operations/composite_backing.py`). Connector-agnostic: a connector is
-  covered the moment it registers a backing.
+  platform-wide sweep over that dispatch-surface registry. Connector-agnostic:
+  a connector is covered the moment it registers a surface.
 
 ## Control flow
 
@@ -53,25 +59,26 @@ runner already takes for a registration bug.
 
 The invariant does not enumerate `METHOD:/path` shapes or hard-code
 connector prefixes. It keys purely on what a declared sub-op *resolves to*.
-A sub-op absent on this deploy is not this invariant's concern (absence is
-the `composite_l2_missing` failure class the retired apparatus handles); a
-sub-op resolving to `composite`/`typed` is allowed; only `ingested` is a
-violation.
+A sub-op absent on this deploy is not this invariant's concern (it just
+means the op is not ingested here); a sub-op resolving to `composite`/`typed`
+is allowed; only `ingested` is a violation.
 
 ## Known issues / sequencing
 
-github's `gh.composite.pr_status_summary` and the vmware composites still
-declare raw ingested L2 sub-ops today; they are migrated to direct-session
-sub-calls in Initiative #2248 (task #2249). github is folded into this one
-shared check automatically because it registers a composite backing; its
-bespoke import-time `UnbackedEnabledCompositeError` guard and the vmware
-dispatch-time preflight are retired in #2259. Until #2249 lands, a deploy
-that has ingested the gh catalog would trip this invariant on reboot — the
-intended fail-closed signal that the composite must be migrated.
+github's `gh.composite.pr_status_summary` and the vmware composites were
+migrated to direct-session sub-calls (Initiative #2248, tasks #2249/#2253/
+#2255/#2256), so none declares a descriptor-routed dispatch surface and the
+registry is empty in production. The old failure-coping apparatus — vmware's
+dispatch-time preflight + `composite_l2_missing`/`composite_l2_disabled`
+errors and github's import-time `UnbackedEnabledCompositeError` load guard —
+is deleted (Task #2259); this platform-wide sweep is the sole remaining
+check. The declaration seam persists so a future `dispatch_child`-routed
+composite is covered without new wiring: if one declared a sub-op that
+resolved to an ingested row, the boot would fail closed.
 
 ## References
 
-- Goal #2247 (two-world op model), Initiative #2248, Task #2252.
-- `operations/composite_backing.py` — the L2-dependency registry the sweep
-  reads.
-- `connectors/github/composites/_register.py` — the gh-only guard folded in.
+- Goal #2247 (two-world op model), Initiative #2248, Task #2252 (invariant),
+  Task #2259 (apparatus retirement).
+- `operations/composite_invariant.py` — the sweep plus the dispatch-surface
+  registry it reads.

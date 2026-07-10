@@ -47,8 +47,13 @@ DBOS rebase swaps only the loop module.
     `active`/`paused`/`cancelled`/`fired`).
   - `inputs` (JSON-shaped, nullable; `_coerce_inputs` renders it to the
     run's user-prompt input string — `"prompt"` key when present, else the
-    dict as JSON, else `""` for a `NULL`/no-`inputs` trigger). A `""`
-    result is refused typed at fire time, see the no-input guard below.
+    dict as JSON, else `""` for a `NULL`/no-`inputs` trigger). For
+    `kind=cron`/`one_off` a payload that renders no usable prompt (no
+    `inputs`, `inputs: {}`, or a whitespace-only `"prompt"`) is **rejected
+    at create** with a 422 (payload-only check, see the no-input guard
+    below); `kind=event` is exempt. A `""` result that slips through (an
+    event trigger, or a row inserted around the wire schema) is still
+    refused typed at fire time.
   - `work_ref` (nullable Text, migration `0043`, #1663) — the opaque
     external change-ticket reference (`"gh:evoila/meho#13"`, a Jira key,
     a CR id) the trigger works under. Set at create time (triggers have
@@ -328,6 +333,33 @@ lock — see "Known issues / limitations" (#1502).
 | `SCHEDULER_ENABLED` | `true` | Lifespan skips starting the loop when `false`. Operators with an external orchestrator can opt out. |
 | `SCHEDULER_TICK_INTERVAL_SECONDS` | `30` | Cadence of the scan-for-due loop. Floor 1 s, ceiling 3600 s. 30 s is the consumer-doc-accepted granularity (cron's finest field is a minute). |
 
+## Fire-time latency contract (#2245)
+
+`fire_at` / `next_fire_at` are a **floor, not an exact dispatch time**. The
+loop scans on a fixed grid every `SCHEDULER_TICK_INTERVAL_SECONDS` (default
+30 s) and claims rows whose `next_fire_at <=` the tick instant, so a trigger
+fires on the **first tick at or after** its requested time and dispatch can
+trail that time by **up to one whole tick interval** (worst case).
+`last_fired_at` is stamped with the *claiming tick instant*, not with
+`fire_at`/`next_fire_at`, so two consecutive fires read back exactly
+tick-aligned. That quantization — not failure fallout — is what produced the
+reported "~28 s post-failure delay" (#2245): a `fire_at` that lands just after
+a tick waits nearly a full interval for the next one. The window is designed
+and bounded; there is **no backoff constant**, and per-fire failure isolation
+already exists (PR #1509, v0.11.0), so a failed fire does not shift the grid
+for the next trigger.
+
+The window is now part of the **API contract**, not just this internal doc:
+`ScheduledTriggerCreate.fire_at` and
+`ScheduledTriggerRead.{fire_at,next_fire_at,last_fired_at}` carry it in their
+OpenAPI field `description` (`scheduler/schemas.py`), so consumers can plan
+SLAs against it directly from the generated client/spec.
+
+**Tuning knob.** An SLA-sensitive deployment that needs tighter fire
+resolution lowers `SCHEDULER_TICK_INTERVAL_SECONDS` per deployment (floor
+1 s, e.g. via the chart's `extraEnv`); worst-case latency drops to the chosen
+interval at the cost of one extra scan query per elapsed tick.
+
 ## Known issues / limitations
 
 - **One-off resolution is "to the second"** — `next_fire_at <= now`
@@ -336,7 +368,9 @@ lock — see "Known issues / limitations" (#1502).
   `[12:00:00, 12:00:30]`. Cron has the same semantics: `0 12 * * *`
   fires in `[12:00:00, 12:00:30]`. Tightening this needs a smaller tick;
   the loop is bounded by `_CLAIM_BATCH_LIMIT=50` rows per tick to keep
-  per-tick wall-clock cost low.
+  per-tick wall-clock cost low. The `[fire_at, fire_at + tick]` window is
+  the API-level **fire-time latency contract** above (#2245) — now carried
+  on the schema field descriptions, not only here.
 - **Catch-up policy is "one fire on resume"** — a long outage does not
   replay every missed cron instant. The consumer doc accepts this; an
   operator who needs "fire-every-N-runs" semantics writes that into the
@@ -355,13 +389,28 @@ lock — see "Known issues / limitations" (#1502).
   per blocking run per tick, not for the run's whole lifetime. Driving
   the abandoned background run to a terminal state (lease/heartbeat
   reaper) is a separate concern (T1 #1501), not this loop's job.
-- **No-inputs trigger fails typed, not at create** (#1505) — a trigger
-  created without `inputs` (or whose `inputs` render to a whitespace-only
-  prompt) is *accepted* at create: whether a user turn is needed depends
-  on the referenced agent definition, which the wire-shape validator does
-  not load. At fire time `run_scheduled` detects the empty prompt
-  (`prompt_is_effectively_empty`) **before** the model call and finalises
-  the run `failed` with a `scheduled_run_no_input`-tagged `error`
+- **No-usable-prompt cron/one_off rejected at create; fire-time guard is
+  defense-in-depth** (#1505 fire-time, #2244 create-time) — a `cron` or
+  `one_off` trigger whose `inputs` render no usable prompt (no `inputs`,
+  `inputs: {}`, or a whitespace-only `"prompt"`) is **rejected at create**
+  with a 422. The check lives in `ScheduledTriggerCreate`'s
+  discriminated-union validator (`_payload_yields_prompt`) and is
+  **payload-only** — it loads no agent definition, so it sidesteps the
+  layering objection that originally kept this fire-time-only: a cron that
+  fires every tick and a one_off that burns its single fire with no user
+  turn are deterministic failures the payload alone reveals. It also closes
+  the `inputs: {}` edge, which `_coerce_inputs` renders to the literal
+  `"{}"` — non-whitespace, so it slips past the fire-time guard and reaches
+  the model as a meaningless `"{}"` turn. `kind=event` is **exempt**: its
+  future payload-dispatch junction (`events/drain.py`, still a no-op at
+  HEAD) may legitimately derive the prompt from the matched event, so an
+  input-less event trigger stays creatable.
+
+  The fire-time guard is retained as defense-in-depth for the paths the
+  create check does not cover — an `event` trigger, or a row inserted
+  directly around the wire schema. At fire time `run_scheduled` detects the
+  empty prompt (`prompt_is_effectively_empty`) **before** the model call and
+  finalises the run `failed` with a `scheduled_run_no_input`-tagged `error`
   (`SCHEDULED_RUN_NO_INPUT_CLASS`), rather than letting it reach the
   provider as a system-prompt-only request with an empty `messages` array
   (every supported backend 400s on that). The scheduler logs

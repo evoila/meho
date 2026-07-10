@@ -322,25 +322,30 @@ const (
 
 // Defines values for TargetCreateProduct.
 const (
-	Argocd   TargetCreateProduct = "argocd"
-	Bind9    TargetCreateProduct = "bind9"
-	Fleet    TargetCreateProduct = "fleet"
-	Gcloud   TargetCreateProduct = "gcloud"
-	Gh       TargetCreateProduct = "gh"
-	Harbor   TargetCreateProduct = "harbor"
-	Hetzner  TargetCreateProduct = "hetzner"
-	Holodeck TargetCreateProduct = "holodeck"
-	K8s      TargetCreateProduct = "k8s"
-	Keycloak TargetCreateProduct = "keycloak"
-	Nsx      TargetCreateProduct = "nsx"
-	Pfsense  TargetCreateProduct = "pfsense"
-	Rabbitmq TargetCreateProduct = "rabbitmq"
-	Sddc     TargetCreateProduct = "sddc"
-	Vault    TargetCreateProduct = "vault"
-	Vcfa     TargetCreateProduct = "vcfa"
-	Vmware   TargetCreateProduct = "vmware"
-	Vrli     TargetCreateProduct = "vrli"
-	Vrops    TargetCreateProduct = "vrops"
+	Argocd     TargetCreateProduct = "argocd"
+	Bind9      TargetCreateProduct = "bind9"
+	Fleet      TargetCreateProduct = "fleet"
+	Gcloud     TargetCreateProduct = "gcloud"
+	Gh         TargetCreateProduct = "gh"
+	Harbor     TargetCreateProduct = "harbor"
+	Hetzner    TargetCreateProduct = "hetzner"
+	Holodeck   TargetCreateProduct = "holodeck"
+	K8s        TargetCreateProduct = "k8s"
+	Keycloak   TargetCreateProduct = "keycloak"
+	Loki       TargetCreateProduct = "loki"
+	Mongodb    TargetCreateProduct = "mongodb"
+	Nsx        TargetCreateProduct = "nsx"
+	Pfsense    TargetCreateProduct = "pfsense"
+	Postgres   TargetCreateProduct = "postgres"
+	Prometheus TargetCreateProduct = "prometheus"
+	Proxmox    TargetCreateProduct = "proxmox"
+	Rabbitmq   TargetCreateProduct = "rabbitmq"
+	Sddc       TargetCreateProduct = "sddc"
+	Vault      TargetCreateProduct = "vault"
+	Vcfa       TargetCreateProduct = "vcfa"
+	Vmware     TargetCreateProduct = "vmware"
+	Vrli       TargetCreateProduct = "vrli"
+	Vrops      TargetCreateProduct = "vrops"
 )
 
 // Defines values for TemplateSummaryStatus.
@@ -1427,6 +1432,11 @@ type BodyRetrievalUsageUiRetrievalUsagePost struct {
 
 // BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost defines model for Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post.
 type BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost struct {
+	Version *string `json:"version,omitempty"`
+}
+
+// BodyRunbooksDiscardUiRunbooksSlugDiscardPost defines model for Body_runbooks_discard_ui_runbooks__slug__discard_post.
+type BodyRunbooksDiscardUiRunbooksSlugDiscardPost struct {
 	Version *string `json:"version,omitempty"`
 }
 
@@ -3000,13 +3010,15 @@ type DecideRequestBody struct {
 
 // DecideResponseBody Response for a successful operator decision.
 //
-// The “dispatch_*“ fields are populated only when “/decide“
-// re-dispatched the approved op — i.e. an approved **direct** operator
-// op (no “run_id“) whose stored params drove a fresh execution
-// (#1503). They stay “None“ on a rejection and on an approved
-// **agent-run** request (“run_id“ set), where the in-process agent
-// runtime owns the re-dispatch and “/decide“ only records the
-// decision (avoiding a double execution).
+// The “dispatch_*“ fields are populated whenever “/decide“ attempted
+// the approved op's re-dispatch — for **every** approved request now, not
+// only direct operator ops (#2293). “dispatch_status“ is “"ok"“ when
+// “/decide“ won the exactly-one-resumer claim and executed (the direct
+// op, or the run-bound fallback when the in-process waiter was gone), or
+// “"already_resumed"“ when the in-process agent waiter won the claim
+// first (the run-bound waiter-alive case) — a benign "executed elsewhere"
+// that keeps the approver from double-dispatching. They stay “None“
+// only on a rejection.
 type DecideResponseBody struct {
 	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
 	Decision          string                             `json:"decision"`
@@ -4793,18 +4805,25 @@ type RunbookTemplateListResponse struct {
 // “"__scheduler__"“ to match the migration-time backstop the
 // ORM-level default sets, so a minimal create body still validates.
 //
-// *inputs* is optional and unvalidated here **by design**. Whether a
-// trigger needs a user prompt depends on the referenced agent
-// definition, which this pure wire-shape validator does not (and must
-// not) load -- the definition FK is checked one layer down in the
-// service. A no-inputs trigger is therefore *accepted* at create and the
-// no-usable-prompt case is handled at fire time: the scheduled-run seam
-// finalises the run “failed“ with a typed
-// :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` error
-// rather than letting it reach the provider as an empty-“messages“ 400
-// (#1505). This keeps a definition that legitimately needs no user turn
-// from being over-rejected at create while still surfacing the doomed
-// no-prompt fire as a typed, greppable failure.
+// *inputs* is the JSON payload rendered into the run's user-prompt string
+// at fire time (:func:`~meho_backplane.scheduler.loop._coerce_inputs`).
+// For “kind=cron“ and “kind=one_off“ it **must** render a non-empty
+// user turn: :meth:`_validate_discriminated_union` rejects an input-less
+// trigger -- and the “inputs: {}“ case, which would otherwise render the
+// literal “"{}"“ -- with a 422 at create. The check is payload-only
+// (:func:`_payload_yields_prompt`); it loads no agent definition, so it
+// does not resurrect the layering objection that kept #1505 fire-time-only
+// -- a cron that fires every tick and a one_off that burns its single fire
+// with no user turn are deterministic failures the wire shape can see
+// without extra I/O. “kind=event“ is **exempt**: its future
+// payload-dispatch junction may derive the prompt from the matched event,
+// so an input-less event trigger stays creatable.
+//
+// The fire-time typed guard remains as defense-in-depth
+// (:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`, #1505):
+// it still finalises a no-prompt fire “failed“ before the model call for
+// “event“ triggers and for any row inserted directly around this wire
+// schema. See “docs/codebase/scheduler.md“.
 //
 // *in_flight_policy* defaults to “fail_into_audit“ per the consumer
 // doc; operators wanting at-least-once semantics opt into “resume“.
@@ -4825,8 +4844,10 @@ type ScheduledTriggerCreate struct {
 	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
 	CronExpr          *string                 `json:"cron_expr"`
 	EventFilter       *map[string]interface{} `json:"event_filter"`
-	FireAt            *time.Time              `json:"fire_at"`
-	IdentitySub       *string                 `json:"identity_sub,omitempty"`
+
+	// FireAt One-off fire time (UTC); required for kind=one_off and must be null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	FireAt      *time.Time `json:"fire_at"`
+	IdentitySub *string    `json:"identity_sub,omitempty"`
 
 	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
 	//
@@ -4966,9 +4987,11 @@ type ScheduledTriggerRead struct {
 	CreatedBySub      string                  `json:"created_by_sub"`
 	CronExpr          *string                 `json:"cron_expr"`
 	EventFilter       *map[string]interface{} `json:"event_filter"`
-	FireAt            *time.Time              `json:"fire_at"`
-	Id                openapi_types.UUID      `json:"id"`
-	IdentitySub       string                  `json:"identity_sub"`
+
+	// FireAt Stored one-off fire time (UTC), echoed from create; null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	FireAt      *time.Time         `json:"fire_at"`
+	Id          openapi_types.UUID `json:"id"`
+	IdentitySub string             `json:"identity_sub"`
 
 	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
 	//
@@ -5024,9 +5047,13 @@ type ScheduledTriggerRead struct {
 	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
 	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
 	// unit-test time.
-	Kind        ScheduledTriggerKind `json:"kind"`
-	LastFiredAt *time.Time           `json:"last_fired_at"`
-	NextFireAt  *time.Time           `json:"next_fire_at"`
+	Kind ScheduledTriggerKind `json:"kind"`
+
+	// LastFiredAt Timestamp of the most recent fire (UTC), stamped with the scheduler tick that claimed the row -- not the trigger's fire_at / next_fire_at. Because fires are tick-aligned, successive last_fired_at values sit on the tick grid and can trail the requested time by up to one tick interval (SCHEDULER_TICK_INTERVAL_SECONDS, default 30 s); null until the first fire.
+	LastFiredAt *time.Time `json:"last_fired_at"`
+
+	// NextFireAt Next instant the trigger is eligible to fire (UTC) -- the column the tick loop scans; null for event triggers (dispatched on event arrival, not the clock). The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	NextFireAt *time.Time `json:"next_fire_at"`
 
 	// Status Closed lifecycle status of a :class:`ScheduledTrigger`.
 	//
@@ -7929,6 +7956,9 @@ type RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody = Bod
 // RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody defines body for RunbooksDeprecateUiRunbooksSlugDeprecatePost for application/x-www-form-urlencoded ContentType.
 type RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody = BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost
 
+// RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody defines body for RunbooksDiscardUiRunbooksSlugDiscardPost for application/x-www-form-urlencoded ContentType.
+type RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody = BodyRunbooksDiscardUiRunbooksSlugDiscardPost
+
 // RunbooksEditorUpdateUiRunbooksSlugEditPostFormdataRequestBody defines body for RunbooksEditorUpdateUiRunbooksSlugEditPost for application/x-www-form-urlencoded ContentType.
 type RunbooksEditorUpdateUiRunbooksSlugEditPostFormdataRequestBody = BodyRunbooksEditorUpdateUiRunbooksSlugEditPost
 
@@ -9940,6 +9970,11 @@ type ClientInterface interface {
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBody(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RunbooksDiscardUiRunbooksSlugDiscardPostWithBody request with any body
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// RunbooksEditorEditUiRunbooksSlugEditGet request
 	RunbooksEditorEditUiRunbooksSlugEditGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -15222,6 +15257,30 @@ func (c *Client) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithBody(ctx contex
 
 func (c *Client) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBody(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunbooksDeprecateUiRunbooksSlugDeprecatePostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(c.Server, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody(c.Server, slug, body)
 	if err != nil {
 		return nil, err
 	}
@@ -31816,6 +31875,53 @@ func NewRunbooksDeprecateUiRunbooksSlugDeprecatePostRequestWithBody(server strin
 	return req, nil
 }
 
+// NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody calls the generic RunbooksDiscardUiRunbooksSlugDiscardPost builder with application/x-www-form-urlencoded body
+func NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody(server string, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(server, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody generates requests for RunbooksDiscardUiRunbooksSlugDiscardPost with any type of body
+func NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(server string, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/%s/discard", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRunbooksEditorEditUiRunbooksSlugEditGetRequest generates requests for RunbooksEditorEditUiRunbooksSlugEditGet
 func NewRunbooksEditorEditUiRunbooksSlugEditGetRequest(server string, slug string) (*http.Request, error) {
 	var err error
@@ -34846,6 +34952,11 @@ type ClientWithResponsesInterface interface {
 
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse, error)
 
+	// RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse request with any body
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error)
+
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error)
+
 	// RunbooksEditorEditUiRunbooksSlugEditGetWithResponse request
 	RunbooksEditorEditUiRunbooksSlugEditGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*RunbooksEditorEditUiRunbooksSlugEditGetResponse, error)
 
@@ -37002,7 +37113,21 @@ type ShowTemplateApiV1RunbooksTemplatesSlugGetResponse struct {
 	HTTPResponse *http.Response
 	JSON200      *ShowTemplateResponse
 	JSON422      *HTTPValidationError
+	JSON500      *struct {
+		Detail struct {
+			Error  ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError `json:"error"`
+			Errors []struct {
+				Loc  []interface{} `json:"loc"`
+				Msg  string        `json:"msg"`
+				Type string        `json:"type"`
+			} `json:"errors"`
+			Message string `json:"message"`
+			Slug    string `json:"slug"`
+			Version *int   `json:"version"`
+		} `json:"detail"`
+	}
 }
+type ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError string
 
 // Status returns HTTPResponse.Status
 func (r ShowTemplateApiV1RunbooksTemplatesSlugGetResponse) Status() string {
@@ -41298,6 +41423,28 @@ func (r RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RunbooksDiscardUiRunbooksSlugDiscardPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksDiscardUiRunbooksSlugDiscardPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksDiscardUiRunbooksSlugDiscardPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -45765,6 +45912,23 @@ func (c *ClientWithResponses) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFo
 	return ParseRunbooksDeprecateUiRunbooksSlugDeprecatePostResponse(rsp)
 }
 
+// RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse request with arbitrary body returning *RunbooksDiscardUiRunbooksSlugDiscardPostResponse
+func (c *ClientWithResponses) RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	rsp, err := c.RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	rsp, err := c.RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp)
+}
+
 // RunbooksEditorEditUiRunbooksSlugEditGetWithResponse request returning *RunbooksEditorEditUiRunbooksSlugEditGetResponse
 func (c *ClientWithResponses) RunbooksEditorEditUiRunbooksSlugEditGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*RunbooksEditorEditUiRunbooksSlugEditGetResponse, error) {
 	rsp, err := c.RunbooksEditorEditUiRunbooksSlugEditGet(ctx, slug, reqEditors...)
@@ -49024,6 +49188,25 @@ func ParseShowTemplateApiV1RunbooksTemplatesSlugGetResponse(rsp *http.Response) 
 			return nil, err
 		}
 		response.JSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest struct {
+			Detail struct {
+				Error  ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError `json:"error"`
+				Errors []struct {
+					Loc  []interface{} `json:"loc"`
+					Msg  string        `json:"msg"`
+					Type string        `json:"type"`
+				} `json:"errors"`
+				Message string `json:"message"`
+				Slug    string `json:"slug"`
+				Version *int   `json:"version"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
 
 	}
 
@@ -54113,6 +54296,32 @@ func ParseRunbooksDeprecateUiRunbooksSlugDeprecatePostResponse(rsp *http.Respons
 	}
 
 	response := &RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse parses an HTTP response from a RunbooksDiscardUiRunbooksSlugDiscardPostWithResponse call
+func ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp *http.Response) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksDiscardUiRunbooksSlugDiscardPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

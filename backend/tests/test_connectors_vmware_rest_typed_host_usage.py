@@ -364,8 +364,8 @@ async def test_host_usage_coerces_numeric_string_memory_size() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_host_usage_op_is_the_registered_typed_op() -> None:
-    assert VMWARE_TYPED_OPS == (VMWARE_HOST_USAGE_OP,)
+def test_host_usage_op_is_a_registered_typed_op() -> None:
+    assert VMWARE_HOST_USAGE_OP in VMWARE_TYPED_OPS
     assert VMWARE_HOST_USAGE_OP.op_id == "vmware.host.usage"
     assert VMWARE_HOST_USAGE_OP.safety_level == "safe"
     assert VMWARE_HOST_USAGE_OP.requires_approval is False

@@ -45,7 +45,7 @@ skip-re-embed branch is being exercised on idempotent re-calls.
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
@@ -545,6 +545,14 @@ async def test_op_id_collision_across_calls_with_different_spec_sources_raises(
     msg = str(excinfo.value)
     assert "petstore.yaml" in msg
     assert "petstore-admin.yaml" in msg
+    # The message names its remediation (#2273): re-ingest under the
+    # original spec URI, or meho.connector.delete to clear crashed-job
+    # debris. str(exc) is what every transport carries -- the async job
+    # error field, the REST 400 message, the MCP -32602 message -- so
+    # naming the fix here covers all three.
+    assert excinfo.value.remediation
+    assert "original spec URI" in msg
+    assert "meho.connector.delete" in msg
 
     # No second encode call: the raise short-circuits the re-embed path.
     assert stub_embedding_service.encode_one.call_count == encode_calls_before
@@ -568,6 +576,141 @@ async def test_op_id_collision_across_calls_with_different_spec_sources_raises(
     assert "spec:petstore.yaml" in (surviving.tags or [])
     assert "spec:petstore-admin.yaml" not in (surviving.tags or [])
     assert surviving.updated_at == original_updated_at
+
+
+# ---------------------------------------------------------------------------
+# Single-commit-per-spec atomicity (#2273)
+# ---------------------------------------------------------------------------
+
+
+def _flaky_upsert_factory(
+    *, fail_on_call: int, should_fail: Callable[[], bool] | None = None
+) -> tuple[Callable[..., Any], Callable[[], int]]:
+    """Wrap the real ``upsert_one_operation`` to raise on the Nth invocation.
+
+    Returns the replacement coroutine (to monkeypatch onto the
+    ``register_ingested`` module namespace) plus a getter for the call
+    count so the test can assert how far into the batch the crash landed.
+    The wrapper delegates to the real helper on every other call, so the
+    earlier ops genuinely ``flush()`` -- proving the rollback discards
+    *flushed-but-uncommitted* rows, not merely un-flushed ones.
+    """
+    from meho_backplane.operations.ingest import register_ingested as _reg
+
+    real_upsert = _reg.upsert_one_operation
+    calls = 0
+
+    async def flaky_upsert(session: AsyncSession, ctx: Any, *, embedding_service: Any) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == fail_on_call and (should_fail is None or should_fail()):
+            raise RuntimeError("injected mid-batch crash")
+        return await real_upsert(session, ctx, embedding_service=embedding_service)
+
+    return flaky_upsert, lambda: calls
+
+
+@pytest.mark.asyncio
+async def test_mid_batch_crash_leaves_zero_persisted_rows(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crash at op N rolls the whole spec back -- zero rows persist (#2273).
+
+    Registration commits once per call, not per row, so a fault injected
+    partway through the batch leaves the already-upserted ops rolled back
+    rather than stranded as retry-blocking debris. Exercised on the
+    production helper-owned-session path (no ``session=`` passed): the
+    first op flushes into the uncommitted transaction, the second raises,
+    and the helper-owned session's context-manager exit rolls back.
+    """
+    from meho_backplane.operations.ingest import register_ingested as _reg
+
+    flaky_upsert, get_calls = _flaky_upsert_factory(fail_on_call=2)
+    monkeypatch.setattr(_reg, "upsert_one_operation", flaky_upsert)
+
+    operations = [
+        _proto("GET:/pets", path="/pets"),
+        _proto("GET:/owners", path="/owners"),
+        _proto("GET:/vets", path="/vets"),
+    ]
+    with pytest.raises(RuntimeError, match="injected mid-batch crash"):
+        await register_ingested_operations(
+            product="petstore",
+            version="1.0",
+            impl_id="petstore-rest",
+            spec_source="petstore.yaml",
+            operations=operations,
+            embedding_service=stub_embedding_service,
+        )
+    # op 0 upserted+flushed, op 1 raised, op 2 never reached.
+    assert get_calls() == 2
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == "petstore")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_reingest_same_uri_after_mid_batch_crash_succeeds(
+    stub_embedding_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A same-URI retry after a crashed ingest just works -- no debris, no delete.
+
+    The payoff of per-spec atomicity: because the crashed run persisted
+    nothing, the retry inserts cleanly with no ``OpIdCollision`` against
+    stranded rows and without a manual ``meho.connector.delete`` (#2273
+    acceptance criterion 2).
+    """
+    from meho_backplane.operations.ingest import register_ingested as _reg
+
+    fail = True
+    flaky_upsert, _ = _flaky_upsert_factory(fail_on_call=2, should_fail=lambda: fail)
+    monkeypatch.setattr(_reg, "upsert_one_operation", flaky_upsert)
+
+    operations = [
+        _proto("GET:/pets", path="/pets"),
+        _proto("GET:/owners", path="/owners"),
+    ]
+    common: dict[str, Any] = {
+        "product": "petstore",
+        "version": "1.0",
+        "impl_id": "petstore-rest",
+        # A concrete URI so the retry is genuinely a *same-URI* re-ingest.
+        "spec_source": "https://specs.example.test/petstore.yaml",
+        "embedding_service": stub_embedding_service,
+    }
+    with pytest.raises(RuntimeError, match="injected mid-batch crash"):
+        await register_ingested_operations(operations=operations, **common)
+
+    # Retry the identical spec under the identical URI: no debris to collide
+    # with, so it inserts every op cleanly.
+    fail = False
+    result = await register_ingested_operations(operations=operations, **common)
+    assert result.inserted_count == 2
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == "petstore")
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +901,67 @@ async def test_end_to_end_with_real_parsed_spec(
 
     # Connector resolvable in the v2 registry.
     assert ("petstore", "3.0", "petstore-rest") in all_connectors_v2()
+
+
+@pytest.mark.asyncio
+async def test_reingest_with_spec_prefixed_source_is_idempotent(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Re-ingesting a ``spec:``-labelled source through the parser skips, not collides (#2274).
+
+    The catalog shipped-spec on-ramp labels its source
+    ``spec:<resource>`` (#1975). The parser persists that label verbatim
+    as a row tag, and the upsert appends its own ``spec:<spec_source>``
+    marker on top -- so a catalog row ends up carrying *two* ``spec:``
+    tags. A first-match extractor read the verbatim tag (one ``spec:``
+    layer short of the real source) and every re-ingest then collided
+    with its own rows. The proto **must** come from :func:`parse_openapi`
+    *with* the ``spec:``-prefixed ``spec_source`` (the exact shape
+    ``IngestionPipelineService`` feeds it for a shipped spec): a
+    hand-built proto -- or a parse without ``spec_source`` -- lacks the
+    verbatim ``spec:<resource>`` tag and would not reproduce the shadow.
+    """
+    _fixtures = Path(__file__).parent / "fixtures" / "openapi"
+    _petstore_text = (_fixtures / "petstore_30.yaml").read_text()
+    # Mirror pipeline.py's parse call for a shipped spec: the uri *is* the
+    # ``spec:``-prefixed label, and the content is passed inline (no fetch).
+    _spec_uri = "spec:petstore_30.yaml"
+    operations = parse_openapi(_spec_uri, spec_source=_spec_uri, content=_petstore_text)
+
+    common_kwargs: dict[str, Any] = {
+        "product": "petstore",
+        "version": "3.0",
+        "impl_id": "petstore-rest",
+        "spec_source": _spec_uri,
+        "operations": operations,
+        "embedding_service": stub_embedding_service,
+    }
+
+    first_result = await register_ingested_operations(**common_kwargs)
+    assert first_result.inserted_count == len(operations) > 0
+
+    # The persisted row carries the doubled marker -- the exact condition
+    # that shadowed the first-match extractor. Assert it so this test
+    # stays anchored to the real bug regime if the persist path changes.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == "petstore")
+                )
+            )
+            .scalars()
+            .first()
+        )
+    assert row is not None
+    assert "spec:petstore_30.yaml" in row.tags  # verbatim parser tag
+    assert "spec:spec:petstore_30.yaml" in row.tags  # upsert marker
+
+    # Second ingest of the same catalog source is a no-op, not a 400.
+    second_result = await register_ingested_operations(**common_kwargs)
+    assert second_result.inserted_count == 0
+    assert second_result.skipped_count == len(operations)
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,54 @@
+# Regression fixture for #2272 — vendor specs that carry unquoted
+# ISO date / date-time `example:` values. Under stock PyYAML 1.1
+# implicit resolvers these scalars construct datetime.datetime /
+# datetime.date objects that crash the descriptor INSERT's json.dumps.
+# The ingest loader overrides the timestamp constructor to keep them as
+# the verbatim string the author wrote, so they persist unchanged.
+openapi: 3.0.3
+info:
+  title: timestamp-examples
+  version: '1.0'
+paths:
+  /events:
+    get:
+      summary: list events observed since a timestamp
+      parameters:
+        - name: since
+          in: query
+          required: false
+          description: only events at or after this instant
+          schema:
+            type: string
+            format: date-time
+            # Unquoted full timestamp — YAML 1.1 would type this datetime.
+            example: 2000-01-23T04:56:07.000+00:00
+        - name: on_date
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date
+            # Unquoted date-only — YAML 1.1 would type this date.
+            example: 2024-01-15
+      responses:
+        '200':
+          description: matching events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  observed_on:
+                    type: string
+                    format: date
+                    example: 2024-01-15
+                  observed_at:
+                    type: string
+                    format: date-time
+                    example: 2000-01-23T04:56:07.000+00:00
+                  # A quoted timestamp must keep round-tripping as a
+                  # string exactly as before (no regression).
+                  quoted_at:
+                    type: string
+                    format: date-time
+                    example: "2019-07-21T17:32:28Z"

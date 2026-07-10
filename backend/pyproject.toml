@@ -78,6 +78,15 @@ dependencies = [
     # so a slim wheel install doesn't fail at first ``encode`` call).
     # No stdlib alternative exists for RS256 signing.
     "pyjwt[crypto]>=2.13.0,<3",
+    # MongoDB wire-protocol driver for the read-only ``mongodb`` connector
+    # (#2237). Uses PyMongo's **native async API** (``AsyncMongoClient``,
+    # GA since PyMongo 4.13) rather than Motor: MongoDB deprecated Motor on
+    # 2025-05-14 in favour of the PyMongo Async API (Motor reaches
+    # end-of-life 2026-05-14), so a brand-new connector adopts the
+    # unified async client directly and pulls no separate ``motor`` dep.
+    # AsyncMongoClient runs commands off the event loop natively (no
+    # ``asyncio.to_thread`` wrapper needed).
+    "pymongo>=4.13,<5",
 ]
 
 [dependency-groups]
@@ -312,6 +321,15 @@ ignore_missing_imports = true
 # upstream ships stubs.
 [[tool.mypy.overrides]]
 module = ["asyncssh.*"]
+ignore_missing_imports = true
+
+# asyncpg ships no type stubs / ``py.typed`` marker. The postgres
+# connector (#2236) is the first to import it directly in the typed
+# tree — the app DB layer reaches asyncpg only via SQLAlchemy, so the
+# untyped surface never surfaced before. Drop this override if upstream
+# later ships stubs.
+[[tool.mypy.overrides]]
+module = ["asyncpg", "asyncpg.*"]
 ignore_missing_imports = true
 
 # pygments (G10.4-T1 #877) ships no ``py.typed`` marker as of 2.20.

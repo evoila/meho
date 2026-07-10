@@ -41,6 +41,7 @@ from meho_backplane.auth.jwt import keycloak_readiness_probe, verify_jwt
 from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.auth.vault import (
     VaultClientError,
+    VaultNotConfiguredError,
     VaultRoleDeniedError,
     VaultUnreachableError,
     vault_client_for_operator,
@@ -54,6 +55,7 @@ __all__ = [
     "Operator",
     "PrincipalKind",
     "VaultClientError",
+    "VaultNotConfiguredError",
     "VaultRoleDeniedError",
     "VaultUnreachableError",
     "keycloak_readiness_probe",

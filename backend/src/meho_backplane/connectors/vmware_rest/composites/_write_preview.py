@@ -50,17 +50,19 @@ Two preview depths, chosen per composite
 How preview reads execute
 =========================
 
-The handlers receive their ``dispatch_child`` from the dispatcher's
-composite branch; at park time the composite never runs, so the live-read
-builders construct :func:`_read_only_dispatch_child` — an adapter
-satisfying the same :class:`~meho_backplane.operations.composite.DispatchChild`
-protocol (which is what lets the resolution helpers be shared verbatim)
-but executing the sub-op **directly against the resolved connector**
-rather than through :func:`~meho_backplane.operations.dispatcher.dispatch`.
-See the adapter docstring for the three reasons (no policy-gate
-re-entry, no unparented audit rows, GET-only fail-closed guard); the
-k8s.apply dry-run (#1437), the argocd snapshot reads (#1452), and the
-vault capability probe (#1504) all run their preview I/O the same way —
+Post-#2256 the write handlers resolve their live-read helpers
+(:func:`._write._resolve_vm_list` / :func:`._write._resolve_cluster_hosts`)
+**directly on the connector session** rather than through
+``dispatch_child``. The live-read preview builders reuse those same
+helpers verbatim, passing the connector instance the dispatcher already
+resolved into *ctx* (:attr:`PreviewContext.connector_instance`). Because
+the helpers issue a plain ``GET`` on the connector session, the three
+properties the old park-time ``dispatch_child`` adapter enforced hold
+intrinsically: no policy-gate re-entry (a direct session call cannot
+re-enter the dispatcher), no unparented audit rows (a direct read writes
+none), and reads-only (the helpers only ever issue the listing ``GET``).
+The k8s.apply dry-run (#1437), the argocd snapshot reads (#1452), and the
+vault capability probe (#1504) run their preview I/O the same way —
 connector-level, un-dispatched.
 
 Redaction posture
@@ -84,11 +86,9 @@ unknown" from a genuinely small action.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from typing import Any
 
-from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _resolve_cluster_hosts,
     _resolve_vm_list,
@@ -98,146 +98,12 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     register_preview_builder,
 )
-from meho_backplane.operations.composite import DispatchChild
 
 #: Cap on the ``resolved`` entity list stored in the durable
 #: ``proposed_effect`` row. ``total_resolved`` always carries the uncapped
 #: count, so a reviewer of a 1000-VM bulk op sees the first 20 entities
 #: *and* the true blast-radius number without the row ballooning.
 _PREVIEW_RESOLVED_CAP = 20
-
-#: HTTP-verb prefix every preview sub-op must carry. Canonical L2 op_ids
-#: encode the method (``METHOD:/path``), so the prefix check is a
-#: structural read-only guard that holds for both ``ingested`` and
-#: ``typed`` descriptor rows.
-_READ_OP_ID_PREFIX = "GET:"
-
-
-async def _execute_leaf_read(
-    ctx: PreviewContext,
-    *,
-    connector_id: str,
-    op_id: str,
-    params: dict[str, Any],
-    effective_target: Any,
-) -> Any:
-    """Resolve + execute one leaf read directly via its source-kind branch.
-
-    Mirrors the dispatcher's own steps — resolve the enabled descriptor
-    row for ``(connector_id, op_id)``, then route by ``source_kind``:
-    ``ingested`` rows execute over the connector's HTTP transport,
-    ``typed`` rows import + invoke their module-level handler. Anything
-    else (composite sub-ops, unknown kinds) raises — a preview read must
-    be a leaf. Raises on every fault; the adapter wraps raises into
-    error-shaped :class:`OperationResult` values.
-    """
-    # Local imports keep the connector→operations import graph as thin
-    # as the established preview builders' (mirrors _k8s_apply_preview
-    # and get_dispatch_child's deferred resolution).
-    from meho_backplane.operations._branches import dispatch_ingested, dispatch_typed
-    from meho_backplane.operations._handler_resolve import import_handler
-    from meho_backplane.operations._lookup import lookup_descriptor, parse_connector_id
-
-    product, version, impl_id = parse_connector_id(connector_id)
-    descriptor = await lookup_descriptor(
-        tenant_id=ctx.operator.tenant_id,
-        product=product,
-        version=version,
-        impl_id=impl_id,
-        op_id=op_id,
-    )
-    if descriptor is None:
-        raise RuntimeError(f"unknown_op at preview time: {op_id}")
-
-    if descriptor.source_kind == "ingested":
-        if ctx.connector_instance is None:
-            raise RuntimeError("no connector instance resolved for ingested preview read")
-        return await dispatch_ingested(
-            connector=ctx.connector_instance,
-            descriptor=descriptor,
-            operator=ctx.operator,
-            target=effective_target,
-            params=params,
-        )
-    if descriptor.source_kind == "typed":
-        handler = import_handler(descriptor.handler_ref or "")
-        return await dispatch_typed(
-            handler=handler,
-            operator=ctx.operator,
-            target=effective_target,
-            params=params,
-        )
-    raise RuntimeError(f"preview cannot execute source_kind={descriptor.source_kind!r} sub-op")
-
-
-def _read_only_dispatch_child(ctx: PreviewContext) -> DispatchChild:
-    """Build a read-only ``DispatchChild`` for park-time preview resolution.
-
-    Satisfies the :class:`DispatchChild` protocol so the shared resolution
-    helpers in :mod:`._write` run unchanged, but executes the sub-op
-    directly against the connector resolved into *ctx* (via
-    :func:`_execute_leaf_read`) instead of routing through
-    :func:`~meho_backplane.operations.dispatcher.dispatch`:
-
-    * **No policy-gate re-entry.** A tenant policy that gates *reads*
-      could otherwise park (or deny) the preview's own sub-op from inside
-      the park of its parent — creating approval rows as a side effect of
-      creating an approval row. Direct execution cannot re-enter the gate.
-    * **No unparented audit rows.** At park time the ``approval.request``
-      audit row does not exist yet (it is written after the preview), so
-      a dispatched sub-op would land as a top-level row with no parent
-      linkage and distort the audit tree. The park's own request row
-      remains the audit anchor, exactly as for the k8s/argocd/vault
-      preview I/O.
-    * **Reads only, fail-closed.** Any op_id not carrying the ``GET:``
-      method prefix is refused with an error result before any lookup or
-      I/O — the approval park must never mutate vSphere state, even if a
-      future helper drifts.
-
-    Never raises: every fault returns an error-shaped
-    :class:`OperationResult` (the ``DispatchChild`` contract), which the
-    calling resolution helper surfaces as a raise and
-    :func:`~meho_backplane.operations._preview.build_proposed_effect`
-    swallows fail-soft.
-    """
-
-    async def _dispatch_read(
-        *,
-        connector_id: str,
-        op_id: str,
-        params: dict[str, Any],
-        target: Any = None,
-    ) -> OperationResult:
-        started = time.monotonic()
-
-        def _error(reason: str) -> OperationResult:
-            return OperationResult(
-                status="error",
-                op_id=op_id,
-                error=reason,
-                duration_ms=(time.monotonic() - started) * 1000.0,
-            )
-
-        if not op_id.startswith(_READ_OP_ID_PREFIX):
-            return _error(f"preview refuses non-read sub-op {op_id!r} (GET-only)")
-        try:
-            raw = await _execute_leaf_read(
-                ctx,
-                connector_id=connector_id,
-                op_id=op_id,
-                params=params,
-                effective_target=ctx.target if target is None else target,
-            )
-            return OperationResult(
-                status="ok",
-                op_id=op_id,
-                result=raw,
-                duration_ms=(time.monotonic() - started) * 1000.0,
-            )
-        except Exception as exc:
-            return _error(f"preview read failed: {exc}")
-
-    return _dispatch_read
 
 
 def _vm_identity(row: dict[str, Any]) -> dict[str, Any]:
@@ -275,11 +141,13 @@ async def _vm_power_bulk_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     action would hit. The per-VM power sub-ops never fire here.
     """
     action = ctx.params.get("action")
-    if not isinstance(action, str):
+    if not isinstance(action, str) or ctx.connector_instance is None:
         return None
     filter_dict: dict[str, Any] = dict(ctx.params.get("filter") or {})
     rows = await _resolve_vm_list(
-        dispatch_child=_read_only_dispatch_child(ctx),
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
         filter_dict=filter_dict,
     )
     return {
@@ -296,10 +164,12 @@ async def _host_evacuate_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     ``vm.migrate`` calls and the maintenance-enter never fire here.
     """
     host = ctx.params.get("host")
-    if not isinstance(host, str):
+    if not isinstance(host, str) or ctx.connector_instance is None:
         return None
     rows = await _resolve_vm_list(
-        dispatch_child=_read_only_dispatch_child(ctx),
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
         filter_dict={"hosts": [host]},
     )
     return {
@@ -319,10 +189,12 @@ async def _host_detach_from_vds_preview(ctx: PreviewContext) -> dict[str, Any] |
     host = ctx.params.get("host")
     dvs = ctx.params.get("dvs")
     fallback_network = ctx.params.get("fallback_network")
-    if not isinstance(host, str) or not isinstance(dvs, str):
+    if not isinstance(host, str) or not isinstance(dvs, str) or ctx.connector_instance is None:
         return None
     rows = await _resolve_vm_list(
-        dispatch_child=_read_only_dispatch_child(ctx),
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
         filter_dict={"hosts": [host]},
     )
     return {
@@ -340,10 +212,12 @@ async def _cluster_patch_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     per-host maintenance / patch sub-ops never fire here.
     """
     cluster = ctx.params.get("cluster")
-    if not isinstance(cluster, str):
+    if not isinstance(cluster, str) or ctx.connector_instance is None:
         return None
     rows = await _resolve_cluster_hosts(
-        dispatch_child=_read_only_dispatch_child(ctx),
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
         cluster_moid=cluster,
     )
     return {

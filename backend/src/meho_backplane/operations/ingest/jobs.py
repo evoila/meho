@@ -42,12 +42,13 @@ enough scrollback.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Final, Literal
 from uuid import UUID
 
 import structlog
@@ -71,6 +72,56 @@ _log = structlog.get_logger(__name__)
 #: (~handful of ingests per release window) while keeping the
 #: per-pod memory footprint trivial.
 _MAX_JOBS_RETAINED = 256
+
+#: Fallback wall-clock watchdog budget (seconds) for a single async
+#: ingest job. Matches the Anthropic-family agent-approval wait default
+#: (30 min): comfortably longer than a legitimate large-spec run (a
+#: 7.5 MB / 1275-op vmware spec is tens of seconds of CPU + DB) yet an
+#: order of magnitude below the ~30 min wall-clock a hung grouping call
+#: could otherwise reach on the Anthropic SDK's default 10-min-read,
+#: 2-retry ceiling. Past this budget the job body is cancelled and the
+#: row flips to ``failed`` (``error_class="TimeoutError"``) rather than
+#: sitting at ``running`` until a pod restart clears it.
+_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS: Final[float] = 1800.0
+
+
+def _load_ingest_job_timeout_seconds() -> float:
+    """Read the watchdog budget from ``INGEST_JOB_TIMEOUT_SECONDS``.
+
+    Env-overridable (a slow shared executor / very large fleet of specs
+    may want a longer ceiling) with a sane default. Parsed defensively —
+    a malformed or non-positive value falls back to
+    :data:`_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS` with a warning rather
+    than crashing the ingest package at import, because a timeout typo
+    should not take the whole backplane down on boot.
+    """
+    raw = os.environ.get("INGEST_JOB_TIMEOUT_SECONDS")
+    if raw is None:
+        return _DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        _log.warning(
+            "ingest_job_timeout_env_invalid",
+            raw=raw,
+            fallback_seconds=_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
+    if value <= 0:
+        _log.warning(
+            "ingest_job_timeout_env_non_positive",
+            value=value,
+            fallback_seconds=_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS,
+        )
+        return _DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
+    return value
+
+
+#: Resolved watchdog budget, read once at import from the environment.
+#: ``run_ingest_job`` reads this module global at call time (not as a
+#: default-arg snapshot) so a test can shrink it via the ``timeout_s``
+#: parameter without monkeypatching import-time state.
+_INGEST_JOB_TIMEOUT_SECONDS: float = _load_ingest_job_timeout_seconds()
 
 #: Snapshot of an ingest run's lifecycle. The status enum lives at
 #: module scope so the route layer + tests share one source of truth
@@ -397,79 +448,107 @@ async def run_ingest_job(
     pipeline_call: Callable[[], Awaitable[IngestionPipelineResult]],
     registry: IngestJobRegistry | None = None,
     dispatchability_check: DispatchabilityCheck | None = None,
+    timeout_s: float | None = None,
 ) -> None:
     """Drive *pipeline_call* off the request thread and reconcile the job row.
 
     Background-coroutine body for the fire-and-forget shape the
-    ``POST /api/v1/connectors/ingest`` route uses. The route
-    constructs the pipeline-invocation closure (so this helper stays
-    framework-agnostic), kicks the coroutine off with
-    :func:`asyncio.create_task`, and immediately returns the 202 + job
-    handle. This helper:
+    ``POST /api/v1/connectors/ingest`` route (and the MCP ingest tool)
+    use: the caller builds the pipeline closure, kicks this off with
+    :func:`asyncio.create_task`, and immediately returns 202 + a job
+    handle. This helper reconciles the run into the in-memory job row as
+    ``succeeded`` / ``degraded`` (see :func:`_reconcile_returned_result`)
+    or ``failed`` -- the latter on any exception, including the watchdog's
+    ``TimeoutError``. The exception is swallowed (no re-raise) except
+    ``SystemExit`` / ``KeyboardInterrupt``: the 202 already went out, so
+    re-raising would only log a noisy traceback for a routine
+    operator-facing failure.
 
-    1. Runs the closure under a structlog binding tagged with
-       ``ingest_job_id`` so the log output during the long-running
-       pass is correlatable with the polling responses.
-    2. On success, applies the dispatchability postcondition (see
-       below) and flips the job to ``succeeded`` (with the structured
-       :class:`IngestionPipelineResult`) only when it holds; otherwise
-       to ``degraded``.
-    3. On any exception, flips the job to ``failed`` and records the
-       exception class + capped message. The exception is swallowed
-       (no re-raise) -- the request that started the job has already
-       returned 202, and re-raising into the asyncio default exception
-       handler would log a noisy traceback for what is now a routine
-       operator-facing failure mode.
+    Terminal-state guarantee (#2275): an exception handler alone does not
+    cover a *never-completing await* -- a starved ``to_thread`` executor,
+    a DB acquire that never returns, or a grouping LLM call pending on the
+    SDK's default ~30-min ceiling -- which would strand the job at
+    ``running`` until a pod restart clears the in-memory registry. The
+    whole body (the pipeline call **and** the post-run dispatchability
+    probe, whose own hang would otherwise strand the job) runs inside
+    ``asyncio.timeout``, budget *timeout_s* or the module default
+    :data:`_INGEST_JOB_TIMEOUT_SECONDS` (env
+    ``INGEST_JOB_TIMEOUT_SECONDS``). At the deadline the body is cancelled
+    and re-raised as ``TimeoutError`` -> ``failed``. The guarantee is
+    job-state terminality, not thread reclamation: an already-running
+    ``to_thread`` OS thread cannot be cancelled and may linger.
 
-    Dispatchability postcondition (claude-rdc-hetzner-dc#1136)
-    ---------------------------------------------------------
-
-    A pipeline coroutine that returns without raising is **not**
-    sufficient evidence the ingest succeeded: an async ``--spec`` run
-    can persist rows under a product key the dispatch surface never
-    queries (the VCF-family long↔short split, now reconciled at
-    register-time) or skip every op against a prior run, leaving the
-    catalog row ``registered, 0 ops`` and ``search_operations`` returning
-    ``connector_not_ingested``. Flipping such a job to ``succeeded``
-    reports a green run that produced nothing callable.
-
-    The postcondition is: ``inserted_count > 0`` **and**
-    *dispatchability_check* (the route's ``connector_exists`` probe under
-    the parser-derived natural key) returns ``True``. When it fails the
-    job ends ``degraded`` carrying ``error_class=
-    "ingested_not_dispatchable"``, never a bare ``succeeded``.
-    *dispatchability_check* is ``None`` only for legacy callers / tests
-    that opt out of the probe; the production route always supplies one.
-
-    The structured failure logged at :func:`structlog.get_logger`
-    INFO level preserves the diagnostic for ops dashboards even
-    though the exception itself is swallowed.
+    ``ingest_job_id`` is bound into structlog *contextvars* for the run so
+    the configured ``merge_contextvars`` processor stamps it onto every
+    event emitted under the pipeline call -- the pipeline binds only its
+    own ``connector_id`` logger, so a plain ``_log.bind`` here would leave
+    a job-id-filtered grep blind to every pipeline event. See
+    ``docs/codebase/spec-ingestion.md`` for the full narrative.
     """
     if registry is None:
         registry = get_job_registry()
-    log = _log.bind(ingest_job_id=str(job_id))
-    try:
-        result = await pipeline_call()
-    except BaseException as exc:
-        log.info(
-            "ingest_job_failed",
-            error_class=type(exc).__name__,
-            error_message=str(exc)[:512],
-        )
-        await registry.fail(job_id, error=exc)
-        # Re-raise system-exit / keyboard-interrupt class exceptions
-        # so they aren't silently swallowed -- the rest are
-        # operator-facing failure modes routed via the registry above.
-        if isinstance(exc, (SystemExit, KeyboardInterrupt)):
-            raise
-        return
+    timeout_seconds = _INGEST_JOB_TIMEOUT_SECONDS if timeout_s is None else timeout_s
+    with structlog.contextvars.bound_contextvars(ingest_job_id=str(job_id)):
+        try:
+            # Watchdog: time-box the whole body -- the pipeline call AND
+            # the post-run dispatchability probe (a real DB read whose own
+            # hang would strand the job) -- so the row always reaches a
+            # terminal state. ``asyncio.timeout`` cancels a wedged await at
+            # the deadline and re-raises it as ``TimeoutError``, which the
+            # ``except`` below routes to ``failed``.
+            async with asyncio.timeout(timeout_seconds):
+                result = await pipeline_call()
+                await _reconcile_returned_result(
+                    job_id,
+                    result=result,
+                    registry=registry,
+                    dispatchability_check=dispatchability_check,
+                )
+        except BaseException as exc:
+            _log.info(
+                "ingest_job_failed",
+                error_class=type(exc).__name__,
+                error_message=str(exc)[:512],
+            )
+            await registry.fail(job_id, error=exc)
+            # Re-raise system-exit / keyboard-interrupt class exceptions
+            # so they aren't silently swallowed -- the rest (including the
+            # watchdog ``TimeoutError``) are operator-facing failure modes
+            # routed via the registry above.
+            if isinstance(exc, (SystemExit, KeyboardInterrupt)):
+                raise
+            return
 
+
+async def _reconcile_returned_result(
+    job_id: UUID,
+    *,
+    result: IngestionPipelineResult,
+    registry: IngestJobRegistry,
+    dispatchability_check: DispatchabilityCheck | None,
+) -> None:
+    """Flip a *returned* pipeline result to ``succeeded`` or ``degraded``.
+
+    Applies the dispatchability postcondition
+    (claude-rdc-hetzner-dc#1136): a coroutine that returned without
+    raising is **not** sufficient evidence the ingest is dispatchable --
+    an async ``--spec`` run can persist rows under a product key the
+    dispatch surface never queries (the VCF-family long<->short split,
+    reconciled at register-time) or skip every op against a prior run,
+    leaving the catalog row ``registered, 0 ops``. The job ends
+    ``succeeded`` only when ``inserted_count > 0`` **and**
+    *dispatchability_check* resolves the connector (or a benign idempotent
+    zero-insert re-run); otherwise ``degraded`` carrying
+    ``error_class="ingested_not_dispatchable"`` and the counts that (did
+    not) land. *dispatchability_check* is ``None`` only for legacy callers
+    / tests that opt out; the production route always supplies one.
+    """
     degraded_reason = await _dispatchability_failure_reason(
         result=result,
         dispatchability_check=dispatchability_check,
     )
     if degraded_reason is not None:
-        log.warning(
+        _log.warning(
             "ingest_job_degraded",
             connector_id=result.connector_id,
             inserted_count=result.ingestion.inserted_count,
@@ -483,8 +562,7 @@ async def run_ingest_job(
             error=degraded_reason,
         )
         return
-
-    log.info(
+    _log.info(
         "ingest_job_succeeded",
         connector_id=result.connector_id,
         inserted_count=result.ingestion.inserted_count,

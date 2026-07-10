@@ -110,20 +110,81 @@ def build_upsert_context(
     )
 
 
+def _normalize_spec_source(spec_source: str) -> str:
+    """Reduce a ``spec_source`` label to its prefix-free logical identity.
+
+    Cross-call dedup keys on the *logical* spec a row came from, not on
+    the exact rendering of its audit label. The catalog shipped-spec
+    on-ramp labels its source ``spec:<resource>`` (#1975), so the same
+    logical spec can reach the comparison carrying a different number of
+    leading ``spec:`` prefixes on each side -- e.g. a persisted marker
+    that round-trips ``spec:<resource>`` versus an incoming
+    ``spec:<resource>`` re-submission. Stripping the leading ``spec:``
+    layers off both sides makes those compare equal (idempotent
+    re-ingest) while leaving genuinely distinct sources apart:
+    ``file:///a.yaml`` never normalizes onto ``spec:b.yaml``.
+    """
+    while spec_source.startswith(_SPEC_TAG_PREFIX):
+        spec_source = spec_source[len(_SPEC_TAG_PREFIX) :]
+    return spec_source
+
+
 def _extract_persisted_spec_source(existing: EndpointDescriptor) -> str | None:
     """Recover the ``spec_source`` of an already-persisted row.
 
-    The synthetic ``f"spec:{spec_source}"`` marker is appended once
-    per row at first-register (and re-applied on the re-embed path),
-    so a well-formed row carries exactly one ``spec:`` tag. If the
-    tag is missing (older rows, hand-edited fixtures), return
-    ``None`` and let the caller skip the cross-call check rather
-    than raise a spurious collision.
+    ``build_upsert_context`` appends the synthetic ``f"spec:{spec_source}"``
+    marker as the row's **last** tag, so the marker is the authoritative
+    record of the source. The parser also persists the raw ``spec_source``
+    verbatim as a tag (:func:`parse_openapi`); for a catalog shipped-spec
+    source -- already ``spec:<resource>`` -- that verbatim tag is itself
+    ``spec:``-prefixed and sits *before* the marker. Scanning from the
+    end returns the marker instead of letting the verbatim tag shadow it:
+    a first-match scan recovered the verbatim tag's payload, one ``spec:``
+    layer short of the real source, so every catalog re-ingest then
+    collided with its own rows (#2274). If no ``spec:`` tag is present
+    (older rows, hand-edited fixtures) return ``None`` and let the caller
+    skip the cross-call check rather than raise a spurious collision.
     """
-    for tag in existing.tags or []:
+    for tag in reversed(existing.tags or []):
         if tag.startswith(_SPEC_TAG_PREFIX):
             return tag[len(_SPEC_TAG_PREFIX) :]
     return None
+
+
+def _check_cross_source_collision(existing: EndpointDescriptor, ctx: UpsertContext) -> None:
+    """Raise :exc:`OpIdCollision` when a persisted row came from a *different* spec.
+
+    A row already exists under this ``(product, version, impl_id, op_id)``
+    natural key. If a prior ingest wrote it under a different
+    ``spec_source``, silently re-embedding would overwrite that spec's
+    method / path / summary / schemas with this call's payload -- never
+    what the operator wants. Per Task #403 they must instead see a
+    structured exception naming both sources so they can rename one
+    ``op_id`` or skip the offending spec.
+
+    The equality keys on the *logical* spec identity, not the rendered
+    audit label. The catalog shipped-spec on-ramp labels its source
+    ``spec:<resource>`` (#1975), so the same spec can reach this guard
+    carrying a different number of leading ``spec:`` prefixes on each
+    side; :func:`_normalize_spec_source` collapses them so a same-spec
+    re-ingest stays a no-op instead of colliding with its own rows
+    (#2274). A missing marker (older rows, hand-edited fixtures) skips
+    the check. The raised exception carries the *raw* labels for
+    diagnostics.
+    """
+    existing_spec_source = _extract_persisted_spec_source(existing)
+    if existing_spec_source is None:
+        return
+    if _normalize_spec_source(existing_spec_source) == _normalize_spec_source(ctx.spec_source):
+        return
+    raise OpIdCollision(
+        op_ids=[ctx.proto.op_id],
+        product=ctx.product,
+        version=ctx.version,
+        impl_id=ctx.impl_id,
+        existing_spec_source=existing_spec_source,
+        incoming_spec_source=ctx.spec_source,
+    )
 
 
 async def _lookup_existing_descriptor(
@@ -230,26 +291,10 @@ async def upsert_one_operation(
     existing = await _lookup_existing_descriptor(session, ctx)
 
     if existing is not None:
-        # Cross-call op_id collision: the existing row was written by a
-        # prior register_ingested_operations() call under a *different*
-        # spec_source. Silently re-embedding would replace the prior
-        # spec's method / path / summary / description / schemas with
-        # this call's payload — never what the operator wants.
-        # Per Task #403 the operator must see a structured exception
-        # naming both spec sources so they can decide whether to rename
-        # one op_id or skip the offending spec. Same-spec_source
-        # re-ingest stays on the existing skip-re-embed / re-embed
-        # branches below; only a true spec_source mismatch fires.
-        existing_spec_source = _extract_persisted_spec_source(existing)
-        if existing_spec_source is not None and existing_spec_source != ctx.spec_source:
-            raise OpIdCollision(
-                op_ids=[ctx.proto.op_id],
-                product=ctx.product,
-                version=ctx.version,
-                impl_id=ctx.impl_id,
-                existing_spec_source=existing_spec_source,
-                incoming_spec_source=ctx.spec_source,
-            )
+        # Same-spec re-ingest falls through to the skip-re-embed /
+        # re-embed branches below; only a genuine cross-source op_id
+        # clash raises (see the helper for the normalization rationale).
+        _check_cross_source_collision(existing, ctx)
 
         existing_text = build_embedding_text(
             summary=existing.summary or "",

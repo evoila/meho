@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 15 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 13 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -21,11 +21,13 @@ the source_kind="composite" persistence.
 Mixed safety posture
 --------------------
 
-The 7 read composites (T5 / #508 shipped 5; #2080 adds
-``host.network_uplinks``; #2135 adds ``host.vsan_health``) pass
+The 5 read composites (T5 / #508) pass
 ``safety_level="safe"`` + ``requires_approval=False`` -- overrides of
-T4's ``dangerous`` / ``True`` defaults. The 8 write composites (T6 /
-#509) inherit the T4
+T4's ``dangerous`` / ``True`` defaults. (The former
+``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
+as typed ops in #2258; see
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 8 write
+composites (T6 / #509) inherit the T4
 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
 the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -38,12 +40,11 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
+from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
     event_tail_composite,
-    host_network_uplinks_composite,
-    host_vsan_health_composite,
     network_portgroup_audit_composite,
     performance_summary_composite,
 )
@@ -70,10 +71,6 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
     HOST_EVACUATE_RESPONSE_SCHEMA,
-    HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA,
-    HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA,
-    HOST_VSAN_HEALTH_PARAMETER_SCHEMA,
-    HOST_VSAN_HEALTH_RESPONSE_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA,
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
@@ -177,16 +174,8 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "parameters."
     ),
     "host": (
-        "Use for host-level reads and host-lifecycle write "
-        "composites. Read: host.network_uplinks -- per host, the "
-        "physical NICs (link state + speed) and their proxy-switch / "
-        "uplink association, the one read the plain REST surface "
-        "cannot reproduce; the right group for 'are we out of "
-        "physical switch ports?' / 'which pnics back this DVS "
-        "uplink?'. Read: host.vsan_health -- per cluster, the vSAN "
-        "health-test groups + overall status from the vSAN "
-        "health-service ('is vSAN healthy?' / 'which health group is "
-        "red?'), the govc vsan.health equivalent. Write (dangerous / "
+        "Use for host-lifecycle write "
+        "composites. Write (dangerous / "
         "approval-required): evacuate "
         "every VM off a host (recursive composite call into "
         "vm.migrate) then enter maintenance, or detach a host from a "
@@ -217,7 +206,11 @@ class _CompositeSpec(NamedTuple):
     """
 
     op_id: str
-    handler: Callable[..., Awaitable[dict[str, Any]]]
+    # Read composites return a plain aggregation dict; migrated write
+    # composites (#2256) may instead return an ``OperationResult`` verbatim
+    # when the direct-session governance seam parks/denies an internal write,
+    # so the handler contract widens to that union.
+    handler: Callable[..., Awaitable[dict[str, Any] | OperationResult]]
     summary: str
     description: str
     parameter_schema: dict[str, Any]
@@ -329,61 +322,6 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         response_schema=NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
         group_key="networking",
         tags=["composite", "read-only", "networking", "portgroup"],
-        safety_level="safe",
-        requires_approval=False,
-    ),
-    _CompositeSpec(
-        op_id="vmware.composite.host.network_uplinks",
-        handler=host_network_uplinks_composite,
-        summary="Per host, physical NIC link state + speed and their proxy-switch uplinks.",
-        description=(
-            "Lists hosts via 'GET:/vcenter/host', then per host reads "
-            "'config.network.pnic' + 'config.network.proxySwitch' via the "
-            "vi-json PropertyCollector "
-            "'POST:/PropertyCollector/{moId}/RetrievePropertiesEx'. "
-            "Aggregates one row per host: each physical NIC's device / "
-            "MAC / driver / link state (up when the WS-API linkSpeed is "
-            "present) / speed, plus each proxy switch (the host-side "
-            "backing of a DVS) with its uplink pnic device names. The "
-            "pnic link-state / uplink mapping is the one read the plain "
-            "vSphere Automation REST surface cannot reproduce -- it "
-            "drives physical switch-port-occupancy reasoning ('are we "
-            "out of switch ports?'). Read-only -- never mutates host "
-            "network configuration."
-        ),
-        parameter_schema=HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA,
-        response_schema=HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA,
-        group_key="host",
-        tags=["composite", "read-only", "host", "networking", "pnic"],
-        safety_level="safe",
-        requires_approval=False,
-    ),
-    _CompositeSpec(
-        op_id="vmware.composite.host.vsan_health",
-        handler=host_vsan_health_composite,
-        summary="Per cluster, vSAN health-test groups + overall health status.",
-        description=(
-            "Queries the vSAN health-service vmomi method "
-            "'POST:/VsanVcClusterHealthSystem/{moId}/"
-            "VsanQueryVcClusterHealthSummary' against the "
-            "'vsan-cluster-health-system' singleton, scoped to the "
-            "target cluster's MoRef. Returns the cluster-wide "
-            "'overall_health' colour plus the health-test 'groups' list "
-            "(each group with its own roll-up colour + per-check tests: "
-            "id / name / colour / short description). vSAN health is the "
-            "one read the plain vSphere Automation REST surface cannot "
-            "reproduce -- it lives on the dedicated '/vsanHealth' vmomi "
-            "endpoint -- so the composite is the 'govc vsan.health.*' "
-            "equivalent, driving cluster-health triage ('is vSAN "
-            "healthy?' / 'which health group is red?'). Best-effort: a "
-            "cluster with vSAN disabled or a rejected health-service "
-            "call returns null groups + a read_note rather than failing. "
-            "Read-only -- never mutates vSAN configuration."
-        ),
-        parameter_schema=HOST_VSAN_HEALTH_PARAMETER_SCHEMA,
-        response_schema=HOST_VSAN_HEALTH_RESPONSE_SCHEMA,
-        group_key="host",
-        tags=["composite", "read-only", "host", "vsan", "health"],
         safety_level="safe",
         requires_approval=False,
     ),
@@ -584,9 +522,9 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 15 composites total -- 7 read (T5 / #508 shipped 5;
-    #2080 adds ``host.network_uplinks``; #2135 adds
-    ``host.vsan_health``) + 8 write (T6 / #509).
+    Scope: 13 composites total -- 5 read (T5 / #508) + 8 write (T6 /
+    #509). (The former ``host.network_uplinks`` / ``host.vsan_health``
+    reads were re-shipped as typed ops in #2258.)
     Each composite's ``safety_level`` +
     ``requires_approval`` come from its :class:`_CompositeSpec` row:
     reads pass ``"safe"`` / ``False``; writes pass ``"dangerous"`` /

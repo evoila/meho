@@ -103,6 +103,39 @@ except AttributeError:  # pragma: no cover — PyYAML always ships SafeLoader
     _YamlLoader = yaml.SafeLoader
 
 
+class _SpecYamlLoader(_YamlLoader):  # type: ignore[misc]
+    """Spec loader that keeps YAML date/timestamp scalars as raw text.
+
+    Stock PyYAML applies the YAML 1.1 implicit ``timestamp`` resolver,
+    so an unquoted ``example: 2000-01-23T04:56:07.000+00:00`` in a
+    vendor spec constructs a :class:`datetime.datetime` (and a date-only
+    ``2024-01-15`` a :class:`datetime.date`). Those objects ride verbatim
+    into the ``parameter_schema`` / ``response_schema`` JSON columns and
+    then blow up stdlib ``json.dumps`` at ``session.flush()`` with
+    ``Object of type datetime is not JSON serializable``. OAS 3.1 limits
+    YAML tags to the JSON Schema ruleset, which excludes the timestamp
+    tag — the resolver is over-typing a value the author meant as a
+    string.
+
+    Returning the node's raw scalar text preserves the author's exact
+    spelling and keeps the subtree JSON-serializable. ``add_constructor``
+    copies the parent loader's constructor table onto this subclass
+    before mutating it (PyYAML copy-on-write), so the module-global
+    ``CSafeLoader`` / ``SafeLoader`` other call sites use (catalog,
+    kubeconfig, topology import) stay unmutated.
+    """
+
+
+# The implicit ``timestamp`` resolver is the only stock YAML 1.1 resolver
+# that yields a non-JSON-serializable Python object; hand back the node's
+# raw scalar text instead. Covers both the full-timestamp and date-only
+# shapes (both carry this tag) and leaves quoted strings untouched.
+_SpecYamlLoader.add_constructor(
+    "tag:yaml.org,2002:timestamp",
+    lambda loader, node: node.value,
+)
+
+
 # OpenAPI 3.0.x and 3.1.x are the two supported major.minor pairs.
 # Patch level (the third digit) is accepted as-is — semver-style
 # bugfix versions never change the parser's contract.
@@ -678,7 +711,7 @@ def _decode_spec(content: bytes) -> dict[str, Any]:
     if fmt == "json":
         parsed = json.loads(content)
     else:
-        parsed = yaml.load(io.BytesIO(content), Loader=_YamlLoader)
+        parsed = yaml.load(io.BytesIO(content), Loader=_SpecYamlLoader)
     if not isinstance(parsed, dict):
         raise InvalidSpecError(
             f"OpenAPI document must parse to a mapping, got {type(parsed).__name__}"
@@ -760,6 +793,30 @@ def _iter_operations(
             )
 
 
+def _assert_json_serializable(*, op_id: str, field: str, schema: object) -> None:
+    """Fail closed at parse time when a proto schema can't be JSON-encoded.
+
+    ``parameter_schema`` / ``response_schema`` are persisted verbatim
+    into the JSON(B) descriptor columns, so a value stdlib ``json.dumps``
+    rejects — a ``datetime`` from an unquoted YAML timestamp, ``bytes``
+    from a ``!!binary`` example — crashes ``session.flush()`` with an
+    opaque ``StatementError`` on the effectful ingest leg while the
+    parse-only ``dry_run`` leg green-lights the very same spec. Both legs
+    funnel through this proto-build boundary, so raising here makes them
+    fail identically, at parse time, with a structured
+    :class:`InvalidSchemaError` rather than a late DB-layer crash on one
+    leg and a false green on the other.
+    """
+    try:
+        json.dumps(schema)
+    except (TypeError, ValueError) as exc:
+        raise InvalidSchemaError(
+            f"{op_id}: {field} carries a value that is not JSON-serializable "
+            f"({exc}); quote scalar example values (dates, timestamps, binary) "
+            f"so they persist as the strings the spec author wrote"
+        ) from exc
+
+
 def _build_proto(
     *,
     method: str,
@@ -812,8 +869,13 @@ def _build_proto(
     if spec_source is not None:
         tags.append(spec_source)
 
+    op_id = f"{method}:{path}"
+    _assert_json_serializable(op_id=op_id, field="parameter_schema", schema=parameter_schema)
+    if response_schema is not None:
+        _assert_json_serializable(op_id=op_id, field="response_schema", schema=response_schema)
+
     return EndpointDescriptorProto(
-        op_id=f"{method}:{path}",
+        op_id=op_id,
         method=method,
         path=path,
         summary=_optional_string(operation.get("summary")),
@@ -1021,8 +1083,8 @@ def _build_param_property(
     sub-object (the common case) or — for header / cookie /
     form-style — via the legacy inline-type form. The schema form
     wins; the legacy form falls back to ``{"type": <type>}`` synthesis.
-    Description / example metadata is hoisted into the property
-    schema so the dispatcher's error messages stay informative.
+    The parameter's ``description`` is hoisted into the property schema
+    so the dispatcher's error messages stay informative.
 
     OpenAPI 3.1 (aligned with JSON Schema 2020-12) lets ``schema`` be
     a bare boolean: ``true`` accepts every value, ``false`` rejects

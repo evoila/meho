@@ -14,25 +14,34 @@ ingested here? enabled here? schema-matched here?) is the recurring defect
 class the Goal retires; making the sub-call directly through the
 connector's own session (Task #2251) is the compliant alternative.
 
-This module holds the enforcement. It is deliberately connector-agnostic:
-it knows nothing about github or vmware, only about the generic fact
-"``endpoint_descriptor`` row X is ``source_kind='ingested'``". Two entry
-points:
+This module holds the enforcement, plus the tiny registry the enforcement
+reads. It is deliberately connector-agnostic: it knows nothing about github
+or vmware, only about the generic fact "``endpoint_descriptor`` row X is
+``source_kind='ingested'``". Three parts:
 
+* :func:`register_composite_dispatch_surface` -- the declaration seam. A
+  connector that ships a composite which routes any sub-op through the
+  dispatcher (``dispatch_child``) registers, per composite op_id, the
+  ``connector_id`` + declared ``sub_op_ids`` so the sweep can check them.
+  A composite that dispatches every sub-op directly on the connector's own
+  session has no descriptor-routed surface to declare and registers
+  nothing -- that is the compliant shape the Goal migrated the shipped
+  composites to, which is why the production registry is empty. The seam
+  exists so a *future* code-shipped op that reintroduces ``dispatch_child``
+  routing is covered without touching this module.
 * :func:`assert_no_ingested_dispatch_dependency` -- the per-op primitive.
   Given a code-shipped op's declared ``sub_op_ids`` and its
   ``connector_id``, it resolves each raw sub-op against the descriptor
   table and raises :class:`IngestedDispatchDependencyError` naming the
   offending op + sub-op if any resolve to an ``ingested`` row.
 * :func:`assert_registered_composites_have_no_ingested_dispatch` -- the
-  platform-wide sweep. It walks every composite that declared its L2
-  dependency surface via
-  :func:`~meho_backplane.operations.composite_backing.register_composite_backing`
-  and applies the primitive to each. This is where github's
-  ``gh.composite.pr_status_summary`` is folded into the one shared check
-  (its bespoke import-time ``UnbackedEnabledCompositeError`` guard is
-  retired separately in #2259); any future connector that registers a
-  backing is covered without touching this module.
+  platform-wide sweep. It walks every composite that declared a dispatch
+  surface and applies the primitive to each. Any connector that registers a
+  surface is covered without touching this module. This is the one shared
+  check the Goal DoD asks for ("enforced by a registration-time invariant,
+  not per-connector guards"); github's retired import-time
+  ``UnbackedEnabledCompositeError`` guard and vmware's dispatch-time
+  preflight are both folded into it.
 
 Timing and fail-closed shape
 ----------------------------
@@ -56,14 +65,17 @@ sub-op *resolves to* in ``endpoint_descriptor``: a row present with
 ``source_kind='ingested'`` is the violation; a row with
 ``source_kind='composite'``/``'typed'`` (a registrar-guaranteed
 code-shipped op) is allowed, and a sub-op that resolves to *nothing*
-(absent on this deploy) is not this invariant's concern -- absence is the
-``composite_l2_missing`` failure class the retired apparatus handles.
-Composite-to-composite recursion sub-ops (``*.composite.*``) are skipped
-for the same reason the connector preflights skip them: they are
-guaranteed by the lifespan registrar and are never ingested primitives.
+(absent on this deploy) is not this invariant's concern -- absence means
+the op simply is not ingested here, which a direct-session composite is
+indifferent to. Composite-to-composite recursion sub-ops
+(``*.composite.*``) are skipped for the same reason the connector
+preflights skipped them: they are guaranteed by the lifespan registrar and
+are never ingested primitives.
 """
 
 from __future__ import annotations
+
+from typing import Final, NamedTuple
 
 import structlog
 from sqlalchemy import select
@@ -71,12 +83,15 @@ from sqlalchemy import select
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor
 from meho_backplane.operations._lookup import parse_connector_id
-from meho_backplane.operations.composite_backing import registered_composite_backings
 
 __all__ = [
+    "CompositeDispatchSurface",
     "IngestedDispatchDependencyError",
     "assert_no_ingested_dispatch_dependency",
     "assert_registered_composites_have_no_ingested_dispatch",
+    "register_composite_dispatch_surface",
+    "registered_composite_dispatch_surfaces",
+    "reset_composite_dispatch_surface_registry",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -84,11 +99,40 @@ _log = structlog.get_logger(__name__)
 #: Infix marking a composite-to-composite recursion sub-op
 #: (``gh.composite.*`` / ``vmware.composite.*``). Skipped by the walk for
 #: the same reason the connector preflights and the backing-listing marker
-#: skip it: such sub-ops resolve to registrar-guaranteed
+#: skipped it: such sub-ops resolve to registrar-guaranteed
 #: ``source_kind='composite'`` rows, never ingested primitives, so they can
 #: never be the cause of an ingested-dispatch violation. Raw-REST L2
 #: primitives are ``METHOD:/path`` strings and never contain it.
 _COMPOSITE_OP_INFIX = ".composite."
+
+
+class CompositeDispatchSurface(NamedTuple):
+    """The descriptor-routed sub-op surface of one code-shipped composite.
+
+    Registered by a connector for any composite that still routes a sub-op
+    through the dispatcher (``dispatch_child``), so the platform-wide sweep
+    can assert none of those sub-ops resolves to an ``ingested`` row.
+
+    Attributes
+    ----------
+    connector_id:
+        The connector the composite dispatches against (``"gh-rest-3"``),
+        parsed into ``(product, version, impl_id)`` for the descriptor probe.
+    sub_op_ids:
+        The declared sub-op ids the composite dispatches into the dispatcher
+        (not the ones it calls directly on the connector session).
+    """
+
+    connector_id: str
+    sub_op_ids: tuple[str, ...]
+
+
+#: Process-wide registry of composite op_id -> its declared descriptor-routed
+#: dispatch surface. Populated at connector import/registration time. Empty in
+#: production once every shipped composite dispatches its sub-ops directly on
+#: the connector session (Goal #2247); the seam persists so a future
+#: ``dispatch_child``-routed composite is swept without wiring here.
+_REGISTRY: Final[dict[str, CompositeDispatchSurface]] = {}
 
 
 class IngestedDispatchDependencyError(RuntimeError):
@@ -103,6 +147,59 @@ class IngestedDispatchDependencyError(RuntimeError):
     fails the boot closed with the offending op + its ingested sub-op so
     the regression cannot ship enabled-but-catalog-dependent.
     """
+
+
+def register_composite_dispatch_surface(
+    *,
+    composite_op_id: str,
+    connector_id: str,
+    sub_op_ids: tuple[str, ...],
+) -> None:
+    """Register a composite's descriptor-routed sub-op surface for the sweep.
+
+    Called once per descriptor-routing composite at connector import/
+    registration time. Idempotent: a re-registration with the same payload
+    is a no-op; a re-registration that *changes* the payload overwrites and
+    logs, so a copy-paste mistake (two composites sharing an op_id constant)
+    surfaces in the structured log rather than silently shadowing.
+
+    Parameters
+    ----------
+    composite_op_id:
+        The composite's own op_id -- the key the sweep iterates by.
+    connector_id, sub_op_ids:
+        See :class:`CompositeDispatchSurface`.
+    """
+    surface = CompositeDispatchSurface(connector_id=connector_id, sub_op_ids=sub_op_ids)
+    existing = _REGISTRY.get(composite_op_id)
+    if existing is not None and existing != surface:
+        _log.warning(
+            "composite_dispatch_surface_reregistered",
+            composite_op_id=composite_op_id,
+            previous_connector_id=existing.connector_id,
+            new_connector_id=connector_id,
+        )
+    _REGISTRY[composite_op_id] = surface
+
+
+def registered_composite_dispatch_surfaces() -> dict[str, CompositeDispatchSurface]:
+    """Return a snapshot copy of every registered composite dispatch surface.
+
+    A shallow copy of the process-wide registry keyed by composite op_id,
+    consumed by :func:`assert_registered_composites_have_no_ingested_dispatch`.
+    Returning a copy keeps the caller from mutating the live registry while
+    iterating.
+    """
+    return dict(_REGISTRY)
+
+
+def reset_composite_dispatch_surface_registry() -> None:
+    """Clear the registry. Test seam only -- never called in production.
+
+    Lets a unit test register a synthetic composite surface, exercise the
+    sweep, and tear the entry down without leaking into sibling tests.
+    """
+    _REGISTRY.clear()
 
 
 async def assert_no_ingested_dispatch_dependency(
@@ -131,8 +228,8 @@ async def assert_no_ingested_dispatch_dependency(
         The connector the op dispatches against (``"gh-rest-3"``), parsed
         into the descriptor natural-key triple.
     sub_op_ids:
-        The declared L2 sub-op ids the op dispatches into (the same tuple a
-        connector hands its preflight / backing registration).
+        The declared sub-op ids the op dispatches into (the same tuple a
+        connector hands its dispatch-surface registration).
 
     Raises
     ------
@@ -177,17 +274,16 @@ async def assert_no_ingested_dispatch_dependency(
 
 
 async def assert_registered_composites_have_no_ingested_dispatch() -> None:
-    """Sweep every registered composite backing for ingested-dispatch violations.
+    """Sweep every registered composite dispatch surface for ingested-dispatch violations.
 
     The platform-wide entry point, invoked at the tail of
     :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
-    once every connector has registered. Walks the composite-backing
-    registry -- each entry is a composite that declared its L2 dependency
-    surface via
-    :func:`~meho_backplane.operations.composite_backing.register_composite_backing`
-    -- and applies :func:`assert_no_ingested_dispatch_dependency` to each.
-    Connector-agnostic: a connector is covered the moment it registers a
-    backing, with no per-connector wiring here.
+    once every connector has registered. Walks the dispatch-surface registry
+    -- each entry is a composite that declared a descriptor-routed sub-op
+    surface via :func:`register_composite_dispatch_surface` -- and applies
+    :func:`assert_no_ingested_dispatch_dependency` to each. Connector-agnostic:
+    a connector is covered the moment it registers a surface, with no
+    per-connector wiring here.
 
     Raises
     ------
@@ -195,9 +291,9 @@ async def assert_registered_composites_have_no_ingested_dispatch() -> None:
         Propagated from the first composite whose declared sub-ops resolve
         to an ingested row -- a lifespan-crashing deploy bug.
     """
-    for composite_op_id, backing in registered_composite_backings().items():
+    for composite_op_id, surface in registered_composite_dispatch_surfaces().items():
         await assert_no_ingested_dispatch_dependency(
             op_id=composite_op_id,
-            connector_id=backing.connector_id,
-            sub_op_ids=backing.sub_op_ids,
+            connector_id=surface.connector_id,
+            sub_op_ids=surface.sub_op_ids,
         )

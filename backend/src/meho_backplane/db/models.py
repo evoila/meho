@@ -4216,6 +4216,20 @@ class ApprovalRequest(Base):
       the park → decide → execute chain into one replay subtree (#2086).
       NULL only on pre-0053 rows. Added by migration ``0053``.
 
+    * ``resumed_at`` -- ``timestamptz`` nullable. The exactly-one-resumer
+      claim (#2293): the UTC time the winning resumer claimed the single
+      post-approval execution, or NULL while unclaimed. Every dispatcher
+      of an approved op (the in-process agent waiter, the shared
+      :func:`resume_dispatch_after_approval` operator path, any future
+      resumer) must win the atomic claim
+      (:func:`~meho_backplane.operations.approval_queue.claim_resume` --
+      ``UPDATE ... SET resumed_at = now WHERE resumed_at IS NULL``) before
+      it re-dispatches ``_approved=True``; the winner (one row touched)
+      executes, a loser (zero rows) no-ops. Set exactly once, never
+      cleared (a one-way latch). NULL on pre-0055 rows means "never
+      resumed" -- the same claimable starting state a freshly-parked
+      request has. No FK, no index. Added by migration ``0055``.
+
     Indexes
     -------
 
@@ -4324,6 +4338,24 @@ class ApprovalRequest(Base):
     # Soft-FK to audit_log.id. Added by migration 0053.
     request_audit_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(),
+        nullable=True,
+        default=None,
+    )
+    # Exactly-one-resumer claim (#2293). UTC time the winning resumer
+    # claimed the single post-approval execution, or NULL while unclaimed.
+    # Every dispatcher of an approved op (the in-process agent waiter, the
+    # shared resume_dispatch_after_approval operator path, any future
+    # resumer) must win the atomic claim
+    # (claim_resume: UPDATE ... SET resumed_at = now WHERE resumed_at IS
+    # NULL) before it re-dispatches _approved=True: one row touched wins
+    # and executes; zero rows touched loses and no-ops. Set exactly once,
+    # never cleared -- a one-way latch, so a failed dispatch is not
+    # silently retried into a possible double write. NULL on pre-0055 rows
+    # means "never resumed", the same claimable starting state a
+    # freshly-parked request has. No FK, no index (read/written only by the
+    # primary-key-scoped conditional UPDATE). Added by migration 0055.
+    resumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
         nullable=True,
         default=None,
     )

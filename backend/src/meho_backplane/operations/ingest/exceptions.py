@@ -268,6 +268,12 @@ class OpIdCollision(ValueError):  # noqa: N818 -- Task #403 API contract pins th
         For cross-call collisions, the ``spec_source`` of the
         in-flight call (the call that just hit the collision).
         ``None`` for within-batch collisions.
+    remediation:
+        The operator-facing way out, branched on which raise site
+        fired (see :meth:`_build_remediation`). Folded into the
+        rendered message and surfaced as a structured field in
+        :func:`~meho_backplane.operations.ingest.error_envelopes.build_op_id_collision_detail`
+        so every transport names the fix, not just the fault (#2273).
 
     Inherits from :class:`ValueError` so callers that already catch
     parser-shaped errors via ``except ValueError`` keep working
@@ -292,16 +298,53 @@ class OpIdCollision(ValueError):  # noqa: N818 -- Task #403 API contract pins th
         self.impl_id = impl_id
         self.existing_spec_source = existing_spec_source
         self.incoming_spec_source = incoming_spec_source
+        is_cross_call = existing_spec_source is not None or incoming_spec_source is not None
         spec_suffix = ""
-        if existing_spec_source is not None or incoming_spec_source is not None:
+        if is_cross_call:
             spec_suffix = (
                 f" between spec_source={existing_spec_source!r} (persisted) "
                 f"and spec_source={incoming_spec_source!r} (incoming)"
             )
+        self.remediation = self._build_remediation(is_cross_call)
         super().__init__(
             f"op_id collision while ingesting into "
             f"({product!r}, {version!r}, {impl_id!r}): {self.op_ids!r}"
-            f"{spec_suffix}"
+            f"{spec_suffix}. {self.remediation} "
+            f"See docs/codebase/error-message-shape.md."
+        )
+
+    @staticmethod
+    def _build_remediation(is_cross_call: bool) -> str:
+        """Name the operator's way out, branched on which raise site fired.
+
+        Surfaced on ``remediation`` and folded into the message so all
+        three transports (REST 400 ``detail``, MCP ``-32602`` ``data``,
+        async-job ``error``) tell the operator what to do, not just what
+        broke (#2273). The two raise sites have genuinely different fixes:
+
+        * **Cross-call** -- the incoming spec collides with rows a prior
+          call persisted, the shape a crashed ingest leaves behind when
+          the retry presents the same spec under a *different* URI. Names
+          both remedies: re-run under the **original** spec URI (a
+          same-URI re-ingest updates the rows in place instead of
+          colliding), or clear the stranded rows with the
+          ``meho.connector.delete`` MCP tool (omit ``tenant_id`` for the
+          built-in/global scope) and retry.
+        * **Within-batch** -- two ops in one spec share an ``op_id``;
+          the spec itself has to change (rename one op or split it) since
+          no single row can hold both.
+        """
+        if is_cross_call:
+            return (
+                "Re-run the ingest with the original spec URI -- a same-URI "
+                "re-ingest updates the persisted rows in place instead of "
+                "colliding. If the rows are debris from a crashed ingest, "
+                "clear them first with the meho.connector.delete MCP tool "
+                "(omit tenant_id for the built-in/global scope), then retry."
+            )
+        return (
+            "Two operations in this spec share an op_id; rename one or split "
+            "the spec so every op_id is unique within a single ingest."
         )
 
 

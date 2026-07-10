@@ -27,6 +27,12 @@ The pipeline is broken into work items per Initiative #389:
   registry on first ingest of a `(product, version, impl_id)` triple;
   the shim raises `NotImplementedError` on `auth_headers` / `execute`
   until a per-G3.x Initiative replaces it with a hand-coded subclass.
+  Commits **once per register call** — the whole spec is one unit of
+  work, so a crash mid-batch rolls the helper-owned session back to
+  zero rows instead of stranding retry-blocking debris (#2273); the
+  embed pass runs inside that transaction, and the process-local
+  auto-shim (not part of the DB transaction) survives the rollback as
+  an idempotent zero-op stub.
 * **T3 — LLM-summarised grouping** (`ingest/llm_groups.py` +
   `ingest/_llm_grouping_internals.py` + `ingest/prompts/`). Two-pass
   LLM run: (1) propose 8–15 groups from the full op list, (2) assign
@@ -1103,6 +1109,56 @@ open to `succeeded` (a transient DB blip must not strand or degrade a
 completed pipeline). Regression coverage:
 `tests/test_operations_ingest_jobs.py`.
 
+#### Watchdog: a job always reaches a terminal state (#2275)
+
+The dispatchability postcondition and the `except BaseException`
+boundary only guarantee terminality for a pipeline that *returns or
+raises*. A pipeline that **never completes an await** — a starved
+`asyncio.to_thread` executor, a DB connection that never acquires, or a
+grouping LLM call pending on the Anthropic SDK's default 10-min-read ×
+2-retry ceiling (~30 min wall-clock) — left the job at `running` until a
+pod restart cleared the in-memory registry, while the identical *sync*
+request returned a clean 4xx. `run_ingest_job` now time-boxes the whole
+body — the pipeline call **and** the post-run dispatchability probe (a
+real `connector_exists` DB read whose own hang would strand the job if
+only the pipeline call were wrapped) — inside
+`async with asyncio.timeout(_INGEST_JOB_TIMEOUT_SECONDS)`. At the
+deadline the body is cancelled and `asyncio.timeout` re-raises
+`TimeoutError`, which the existing `except` routes to `failed`
+(`error_class="TimeoutError"`). The budget defaults to 30 min and is
+env-overridable via `INGEST_JOB_TIMEOUT_SECONDS` (parsed defensively — a
+malformed value falls back to the default with a warning rather than
+crashing the package at import). The guarantee is scoped precisely to
+the *job leg*: cancellation cannot interrupt an already-running
+`to_thread` OS thread (Python exposes no thread cancellation), so the
+status flips but that thread may linger until it returns.
+
+Two supporting bounds close the same wedge:
+
+* **LLM client bounds.** `build_anthropic_ingest_llm_client`
+  (`ingest/anthropic_client.py`) constructs the grouping
+  `AsyncAnthropic` with an explicit `timeout` + `max_retries`
+  (`_INGEST_LLM_TIMEOUT_SECONDS` = 120 s, `_INGEST_LLM_MAX_RETRIES` = 1)
+  instead of the SDK defaults, so a hung grouping call fails the request
+  fast rather than silently consuming the watchdog budget. The
+  fail-closed 503 contract for a missing key (#1386) is unchanged.
+* **Job-id log correlation.** `run_ingest_job` binds `ingest_job_id`
+  into structlog *contextvars* (`bound_contextvars`), not just a local
+  `_log.bind`. The pipeline binds its own `connector_id` logger and never
+  sees the job id, so before this a job-id-filtered log grep was
+  structurally blind to every pipeline event; the configured
+  `merge_contextvars` processor (`logging.py`) now stamps `ingest_job_id`
+  onto `ingestion_pipeline_start` &c. A future wedge is diagnosable from
+  those events plus a `py-spy` dump against the named
+  `ingest-job-<uuid>` task.
+
+Regression coverage: `tests/test_operations_ingest_jobs.py`
+(`test_wedged_pipeline_times_out_to_failed`,
+`test_wedged_dispatchability_probe_times_out_to_failed`,
+`test_pipeline_log_event_carries_ingest_job_id`) and
+`tests/test_operations_ingest_anthropic_client.py`
+(`test_factory_constructs_client_with_explicit_timeout_and_retries`).
+
 If `load_catalog()` raises `CatalogError` at listing time (only
 possible mid-test-monkeypatch or mid-reload — startup parse failures
 crash the lifespan), the helper degrades to the manual-mode
@@ -1310,6 +1366,26 @@ The function is synchronous because callers are CLI / one-shot
 ingestion endpoints that have no in-flight event loop concern. It
 also keeps the surface trivially testable.
 
+**YAML scalar typing (#2272).** The YAML leg decodes with
+`_SpecYamlLoader`, a `CSafeLoader` / `SafeLoader` subclass that overrides
+the YAML 1.1 implicit `timestamp` resolver to hand back the scalar's raw
+text. Without it an unquoted `example: 2000-01-23T04:56:07.000+00:00`
+constructs a `datetime` (and a date-only `2024-01-15` a `date`) that
+rides verbatim into the `parameter_schema` / `response_schema` JSON(B)
+columns and crashes `session.flush()` with `Object of type datetime is
+not JSON serializable` (the engine sets no `json_serializer`, so stdlib
+`json.dumps` runs). OAS 3.1 limits YAML tags to the JSON Schema ruleset,
+which excludes the timestamp tag, so the resolver was over-typing a value
+the author meant as a string. `add_constructor` copies the constructor
+table onto the subclass (PyYAML copy-on-write), leaving the
+`yaml.safe_load` sites elsewhere (catalog / kubeconfig / topology import)
+on the stock resolver. As defence-in-depth, `_build_proto` asserts each
+schema is JSON-serializable at the proto-build boundary both the real and
+`dry_run` legs share, so any non-encodable value (a `!!binary` example,
+say) fails identically — a structured `invalid_schema` 400 at parse time
+— instead of crashing the real INSERT while `dry_run=true` green-lights
+the same spec.
+
 `read_spec_info_version(spec_path_or_uri)` is the companion helper
 the G0.9-T8 cross-check uses. It runs the same load / decode /
 version-gate steps but returns the spec's `info.version` string
@@ -1374,7 +1450,7 @@ parse_openapi
 │  ├─ content present       # docs:/file:// bytes uploaded by CLI; no fetch, no guard (#102)
 │  ├─ docs:<...> + no content rejected with UnsupportedSpecError (#1535)
 │  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
-├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON
+├─ _decode_spec            # YAML via _SpecYamlLoader (timestamp→str, #2272), stdlib JSON
 ├─ _validate_openapi_version
 └─ _iter_operations
    └─ _build_proto         # per (method, path) verb under paths
@@ -1382,7 +1458,8 @@ parse_openapi
       │  ├─ _resolve_shallow_ref      # $ref → #/components/schemas/X
       │  ├─ _build_param_property     # one property per path/query/header
       │  └─ _build_body_property      # requestBody under "body" key
-      └─ _extract_response_schema     # picks 200 > 201 > 202 > ... > 2XX
+      ├─ _extract_response_schema     # picks 200 > 201 > 202 > ... > 2XX
+      └─ _assert_json_serializable    # fail-closed: param/response schema must JSON-encode (#2272)
 ```
 
 `_resolve_shallow_ref` is the load-bearing helper. It inlines exactly
@@ -1676,13 +1753,6 @@ CI / unit tests inject a deterministic stub via
 `IngestionPipelineService(..., llm_client_factory=...)` (or
 `set_llm_client_factory(...)`) so the grouping pass stays hermetic.
 
-The `composite_l2_missing` error envelope
-(`operations/_errors.py:result_composite_l2_missing`) surfaces a
-catalog-ingest command as the escape hatch from a missing L2 sub-op;
-that escape hatch now completes the ingest when the key is set, and
-its envelope text names the `ANTHROPIC_API_KEY` requirement (and the
-503 a keyless deploy still gets) so operators know the prerequisite.
-
 **Out of scope (#1386).** The grouping pass talks to Anthropic
 directly rather than routing through the G11.5 per-tenant model
 resolver (Bedrock / vLLM / VCF PAIF, egress-aware). Ingest grouping is
@@ -1811,6 +1881,13 @@ Both delegate to `ReviewService.delete_connector`
 * **`$ref` drill-down rejected.** Refs that walk into a component's
   sub-tree (`#/components/schemas/X/properties/y`,
   `#/components/parameters/X/schema`) raise `InvalidSchemaError`.
+* **Non-crashing YAML 1.1 over-typings kept as-is.** The implicit
+  `timestamp` resolver is normalised to text (#2272), but other YAML 1.1
+  implicit resolutions in `example:` values — `on`/`off`/`yes`/`no` →
+  bool, sexagesimal `1:30` → `90` — still resolve per YAML 1.1 because
+  they stay JSON-serializable and so never break the descriptor INSERT.
+  A silent-fidelity nit only; file separately if a real spec surfaces a
+  wrong value.
 
 ## References
 

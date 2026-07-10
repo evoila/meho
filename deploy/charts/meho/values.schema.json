@@ -261,6 +261,10 @@
           "type": "string",
           "minLength": 1,
           "description": "Comma-separated IPs / CIDRs uvicorn trusts as upstream proxies for `X-Forwarded-Proto` / `X-Forwarded-For` parsing (rendered into the `FORWARDED_ALLOW_IPS` env var; uvicorn reads it natively). Fixes the HTTPS→HTTP redirect downgrade behind a TLS-terminating Ingress (Issue #730, Signal #3, RDC dogfood 2026-05-20). Default `127.0.0.1` matches uvicorn's secure default and fails-closed in-cluster (the Ingress controller's pod IP is never the loopback). Operators MUST override for production with the Ingress controller's pod CIDR (e.g. `10.42.0.0/16` for the RKE2 default). `*` disables the allow-list and is acceptable only for ephemeral CI / single-tenant labs where every connecting peer is the cluster's own proxy. See `docs/cross-repo/reverse-proxy-contract.md`."
+        },
+        "targetSsrfAllowlist": {
+          "type": "string",
+          "description": "Target-destination SSRF allowlist exemptions, rendered into the `MEHO_TARGET_SSRF_ALLOWLIST` env var the backplane guard reads per request (`backend/src/meho_backplane/targets/ssrf_guard.py`; v0.20.0, PR #2191). Comma-separated CIDR ranges (`10.0.0.0/8`), bare IPs (`192.168.7.10`), and/or hostname literals (`vcenter.lab.internal`); whitespace around commas is ignored. Default `\"\"` keeps the default-deny guard fully on — deliberately absent from `config.required` and carrying no `minLength` so the empty default validates on every install (copying the adjacent `forwardedAllowIps` `minLength: 1` would break it). MEHO is on-prem, so a deploy that registers appliances on RFC 1918 space MUST allowlist those ranges (e.g. `10.0.0.0/8,192.168.0.0/16`); a scoped opt-in, never a global off-switch. Value shape is validated at the backend — a malformed CIDR fails loudly at runtime naming the offending token. See CHANGELOG v0.20.0 (\"Deployment impact — action likely required\") and `docs/codebase/target-ssrf-guard.md`."
         }
       }
     },

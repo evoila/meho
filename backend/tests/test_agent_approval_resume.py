@@ -677,3 +677,91 @@ async def test_wait_skips_malformed_entry(monkeypatch: pytest.MonkeyPatch) -> No
         timeout_seconds=2.0,
     )
     assert decision == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Exactly-one-resumer claim — the waiter loses the race (#2293)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resume_no_ops_when_operator_surface_already_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The in-process waiter no-ops when an operator surface won the claim.
+
+    #2293 double-dispatch polarity, agent side: the request is approved and
+    an operator approval surface has already won the exactly-one-resumer
+    claim (and re-dispatched). When the agent waiter then observes the
+    ``approval.approved`` broadcast, it must lose the claim and surface a
+    benign ``already_resumed`` envelope to the agent — **without** calling
+    ``call_operation_with_approval`` a second time (the write must not run
+    twice).
+    """
+    import meho_backplane.operations.meta_tools as meta_tools_module
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import (
+        claim_resume,
+        create_pending_request,
+    )
+
+    requester = _make_operator(sub="agent-double-dispatch")
+    params = {"x": 7}
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        request = await create_pending_request(
+            s,
+            operator=requester,
+            connector_id="apprestest-1.x",
+            op_id="apprestest.op",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+            run_id=uuid.uuid4(),  # a run-bound request (the waiter is its resumer)
+        )
+        await s.commit()
+    approval_request_id = request.id
+
+    # An operator surface won the claim first (and re-dispatched).
+    assert await claim_resume(approval_request_id) is True
+
+    # If the waiter's guard regressed and it re-dispatched anyway, this spy
+    # would fire — a second execution of the approved op.
+    redispatched = 0
+
+    async def _spy_call_with_approval(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal redispatched
+        redispatched += 1
+        raise AssertionError("the waiter must not re-dispatch after losing the claim")
+
+    monkeypatch.setattr(meta_tools_module, "call_operation_with_approval", _spy_call_with_approval)
+
+    _stub_broadcast_client_with_decision(
+        monkeypatch=monkeypatch,
+        decision_entry=_build_decision_entry(
+            approval_request_id=approval_request_id,
+            decision="approved",
+        ),
+    )
+
+    awaiting_envelope: dict[str, Any] = {
+        "status": "awaiting_approval",
+        "op_id": "apprestest.op",
+        "extras": {"approval_request_id": str(approval_request_id)},
+    }
+    resumed = await resume_or_surface_awaiting_approval(
+        operator=requester,
+        call_arguments={
+            "connector_id": "apprestest-1.x",
+            "op_id": "apprestest.op",
+            "params": params,
+            "target": None,
+        },
+        awaiting_envelope=awaiting_envelope,
+        timeout_seconds=2.0,
+    )
+
+    assert resumed["status"] == "already_resumed", resumed
+    assert resumed["extras"]["decision"] == "approved"
+    assert resumed["extras"]["error_code"] == "already_resumed"
+    assert redispatched == 0

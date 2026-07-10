@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: file-size — pre-existing 7-composite handler module
-# (>1200 lines); #2253 migrated the sub-call mechanism in place (direct
-# session, no ingested sub-ops) without adding a new handler. Splitting
-# the module is separate refactor work, out of scope here.
+# code-quality-allow: file-size — pre-existing multi-composite handler
+# module; #2253 migrated the sub-call mechanism in place (direct session,
+# no ingested sub-ops) and #2258 removed the two host reads
+# (network_uplinks / vsan_health, now typed ops), leaving 5 composites.
+# Splitting the module is separate refactor work, out of scope here.
 
-"""Read-only ``vmware.composite.*`` handler functions (7 composites).
+"""Read-only ``vmware.composite.*`` handler functions (5 composites).
 
 Each handler is a module-level ``async def`` that takes the dispatcher's
 composite-branch keyword args ``(operator, target, params, connector)``
@@ -34,7 +35,7 @@ each sub-op against an ``ingested`` ``endpoint_descriptor`` row. That
 coupled every read composite to a per-deploy vCenter-catalog ingest:
 until an operator ran ``meho connector ingest --catalog vmware/9.0`` the
 ``GET:/vcenter/datastore`` / ``POST:/PropertyCollector/...`` sub-ops had
-no descriptor row and the composite failed with ``composite_l2_missing``
+no descriptor row and the composite could not dispatch them
 (consumer signal 20, ``claude-rdc-hetzner-dc#697``). The two-world op
 model (Goal #2247) removes that coupling: the handler receives the
 resolved connector instance (the ``connector`` kwarg the #2251 substrate
@@ -86,8 +87,10 @@ the composite parent, whose ``str(exc)`` already carries the upstream
 status code + offending URL. Optional enrichment legs (per-datastore
 VM placement, per-host property read, vSAN health) degrade best-effort
 instead -- they catch the transport error, null the enriched fields,
-and record a ``read_note`` / ``enrichment_note`` rather than sinking
-the whole aggregation.
+and record an ``enrichment_note`` rather than sinking the whole
+aggregation. (The former per-host ``network_uplinks`` and per-cluster
+``vsan_health`` best-effort reads were re-shipped as typed ops in #2258;
+see :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
 
 Op_id contract for sub-ops
 --------------------------
@@ -133,8 +136,6 @@ __all__ = [
     "cluster_drs_recommendations_composite",
     "datastore_usage_composite",
     "event_tail_composite",
-    "host_network_uplinks_composite",
-    "host_vsan_health_composite",
     "network_portgroup_audit_composite",
     "performance_summary_composite",
 ]
@@ -173,35 +174,6 @@ _OP_LIST_DVS = "GET:/vcenter/network/distributed-switches"
 # the handler note).
 _OP_LIST_NETWORK = "GET:/vcenter/network"
 _NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
-# Host listing (vCenter Automation REST) + per-host property read
-# (vi-json). The pnic link-state / uplink mapping the operator wants
-# lives on the Web-Services-API ``HostSystem.config.network`` object,
-# not the plain REST host summary -- so the composite lists hosts via
-# the REST resource and then reads ``config.network.pnic`` +
-# ``config.network.proxySwitch`` per host through the PropertyCollector
-# ``RetrievePropertiesEx`` vi-json method (moId ``propertyCollector``,
-# the canonical singleton).
-_OP_LIST_HOSTS = "GET:/vcenter/host"
-_OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
-_PROPERTY_COLLECTOR_MOID = "propertyCollector"
-_HOST_SYSTEM_MO_TYPE = "HostSystem"
-_HOST_NET_PROP_PNIC = "config.network.pnic"
-_HOST_NET_PROP_PROXYSWITCH = "config.network.proxySwitch"
-# vSAN health is a health-service-only read: the plain vSphere
-# Automation REST surface exposes no vSAN health resource. It is served
-# by the dedicated ``/vsanHealth`` vmomi endpoint, whose
-# ``VsanVcClusterHealthSystem`` managed object (the singleton moId
-# ``vsan-cluster-health-system``) answers
-# ``VsanQueryVcClusterHealthSummary`` at cluster grain -- the ``govc
-# vsan.health.*`` equivalent. The method takes the target cluster's
-# MoRef and returns a ``VsanClusterHealthSummary`` carrying an
-# ``overallHealth`` colour plus a ``groups`` list of health-test groups
-# (each group -> ``groupTests`` list of individual checks).
-_OP_VSAN_QUERY_HEALTH_SUMMARY = (
-    "POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary"
-)
-_VSAN_CLUSTER_HEALTH_SYSTEM_MOID = "vsan-cluster-health-system"
-_CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
 
 # Per-composite sub-op-id tuples. Each tuple lists the raw-REST /
 # vi-json sub-ops the composite issues directly on the connector
@@ -231,11 +203,6 @@ _SUB_OPS_NETWORK_PORTGROUP_AUDIT: tuple[str, ...] = (
     _OP_LIST_NETWORK,
     _OP_LIST_VMS,
 )
-_SUB_OPS_HOST_NETWORK_UPLINKS: tuple[str, ...] = (
-    _OP_LIST_HOSTS,
-    _OP_RETRIEVE_PROPERTIES,
-)
-_SUB_OPS_HOST_VSAN_HEALTH: tuple[str, ...] = (_OP_VSAN_QUERY_HEALTH_SUMMARY,)
 
 
 def _unwrap_value(payload: Any) -> Any:
@@ -750,367 +717,3 @@ async def network_portgroup_audit_composite(
             }
         )
     return {"portgroups": aggregated}
-
-
-def _pnic_device_from_key(pnic_key: str) -> str:
-    """Recover the device name from a WS-API physical-NIC key.
-
-    ``HostProxySwitch.pnic`` lists the uplink physical NICs as their
-    WS-API keys (``key-vim.host.PhysicalNic-vmnic3``), not their device
-    names. The device name is the trailing segment after the last
-    ``-``; when the string doesn't carry that shape (e.g. a bare device
-    name from a simulator) it is returned verbatim.
-    """
-    _, _, tail = pnic_key.rpartition("-")
-    return tail or pnic_key
-
-
-def _parse_pnic(pnic: dict[str, Any]) -> dict[str, Any]:
-    """Flatten one WS-API ``PhysicalNic`` into the operator-facing row.
-
-    ``linkSpeed`` (a ``PhysicalNicLinkInfo``) is present only when the
-    link is up -- the API omits it on a down link -- so its presence is
-    the link-state signal (``link_up``), and its ``speedMb`` / ``duplex``
-    fields carry the speed. Absent link -> ``speed_mb`` / ``duplex``
-    are ``None``.
-    """
-    link_speed = pnic.get("linkSpeed")
-    link_up = isinstance(link_speed, dict)
-    speed_mb = link_speed.get("speedMb") if isinstance(link_speed, dict) else None
-    duplex = link_speed.get("duplex") if isinstance(link_speed, dict) else None
-    return {
-        "device": pnic.get("device"),
-        "mac": pnic.get("mac"),
-        "driver": pnic.get("driver"),
-        "link_up": link_up,
-        "speed_mb": speed_mb,
-        "duplex": duplex,
-    }
-
-
-def _parse_proxy_switch(proxy_switch: dict[str, Any]) -> dict[str, Any]:
-    """Flatten one WS-API ``HostProxySwitch`` into the operator-facing row.
-
-    The proxy switch is the host-side backing of a DVS. Its ``pnic``
-    field lists the uplink physical NICs as WS-API keys; the row
-    surfaces them as device names so the operator can read which
-    physical ports back each uplink.
-    """
-    raw_uplinks = proxy_switch.get("pnic")
-    uplink_pnics: list[str] = []
-    if isinstance(raw_uplinks, list):
-        uplink_pnics = [_pnic_device_from_key(key) for key in raw_uplinks if isinstance(key, str)]
-    return {
-        "key": proxy_switch.get("key"),
-        "dvs_name": proxy_switch.get("dvsName"),
-        "dvs_uuid": proxy_switch.get("dvsUuid"),
-        "uplink_pnics": uplink_pnics,
-    }
-
-
-def _extract_host_network_props(retrieve_result: Any) -> tuple[list[Any], list[Any]]:
-    """Pull ``config.network.pnic`` + ``config.network.proxySwitch`` from RetrievePropertiesEx.
-
-    ``RetrievePropertiesEx`` returns a ``RetrieveResult`` whose
-    ``objects`` list carries one ``ObjectContent`` per queried object,
-    each with a ``propSet`` list of ``{name, val}`` pairs. For the
-    single-host query the composite issues, the first object's propSet
-    holds the two requested property paths. Returns the raw pnic and
-    proxySwitch lists (empty when absent).
-    """
-    payload = _unwrap_value(retrieve_result)
-    # RetrievePropertiesEx wraps the objects under ``objects``; a bare
-    # list (some simulators / the legacy RetrieveProperties shape) is
-    # tolerated too.
-    if isinstance(payload, dict):
-        objects = payload.get("objects", [])
-    elif isinstance(payload, list):
-        objects = payload
-    else:
-        objects = []
-    prop_by_name: dict[str, Any] = {}
-    for obj in objects:
-        if not isinstance(obj, dict):
-            continue
-        for prop in obj.get("propSet", []) or []:
-            if isinstance(prop, dict) and isinstance(prop.get("name"), str):
-                prop_by_name[prop["name"]] = prop.get("val")
-    pnics = prop_by_name.get(_HOST_NET_PROP_PNIC)
-    proxy_switches = prop_by_name.get(_HOST_NET_PROP_PROXYSWITCH)
-    return (
-        pnics if isinstance(pnics, list) else [],
-        proxy_switches if isinstance(proxy_switches, list) else [],
-    )
-
-
-def _build_retrieve_properties_body(host_moid: str) -> dict[str, Any]:
-    """Build the ``RetrievePropertiesEx`` request body for one host's network config.
-
-    A single ``PropertyFilterSpec`` scoped directly to the host object
-    (no ContainerView / TraversalSpec) requesting the two network
-    config property paths. The ``propertyCollector`` singleton moId
-    rides the request path (:data:`_OP_RETRIEVE_PROPERTIES`), so the
-    body is just the ``specSet`` + ``options`` method arguments -- the
-    VI-JSON ``RetrievePropertiesExRequestType`` shape the
-    ``vmware.host.usage`` typed op sends.
-    """
-    return {
-        "specSet": [
-            {
-                "propSet": [
-                    {
-                        "type": _HOST_SYSTEM_MO_TYPE,
-                        "pathSet": [
-                            _HOST_NET_PROP_PNIC,
-                            _HOST_NET_PROP_PROXYSWITCH,
-                        ],
-                    }
-                ],
-                "objectSet": [{"obj": {"type": _HOST_SYSTEM_MO_TYPE, "value": host_moid}}],
-            }
-        ],
-        "options": {},
-    }
-
-
-async def _build_host_uplink_row(
-    connector: VmwareRestConnector,
-    target: Any,
-    operator: Operator,
-    host_id: str,
-    host_name: Any,
-) -> dict[str, Any]:
-    """Build one host row: identity + best-effort pnic / proxy-switch detail.
-
-    The per-host WS-API property read is best-effort -- the host is
-    already identified by the REST listing, so a failed vi-json
-    ``RetrievePropertiesEx`` call nulls the network detail and records
-    why (``read_note``) rather than sinking the whole composite.
-    """
-    row: dict[str, Any] = {"id": host_id, "name": host_name}
-    try:
-        props_result = await _read_sub_op(
-            connector,
-            target,
-            operator,
-            _OP_RETRIEVE_PROPERTIES,
-            path_params={"moId": _PROPERTY_COLLECTOR_MOID},
-            body=_build_retrieve_properties_body(host_id),
-        )
-    except httpx.HTTPError as exc:
-        row["pnics"] = None
-        row["proxy_switches"] = None
-        row["read_note"] = (
-            f"host-network property read skipped: sub-op "
-            f"{_OP_RETRIEVE_PROPERTIES!r} failed with {type(exc).__name__}: {exc}"
-        )
-        return row
-    raw_pnics, raw_proxy_switches = _extract_host_network_props(props_result)
-    row["pnics"] = [_parse_pnic(p) for p in raw_pnics if isinstance(p, dict)]
-    row["proxy_switches"] = [
-        _parse_proxy_switch(ps) for ps in raw_proxy_switches if isinstance(ps, dict)
-    ]
-    return row
-
-
-async def host_network_uplinks_composite(
-    *,
-    operator: Operator,
-    target: Any,
-    params: dict[str, Any],
-    connector: VmwareRestConnector,
-) -> dict[str, Any]:
-    """Per host: physical NICs (link state + speed) and their proxy-switch uplinks.
-
-    Op-id: ``vmware.composite.host.network_uplinks``.
-
-    Sub-ops read directly on the connector session:
-
-    1. ``GET:/vcenter/host`` -- list every host (optionally narrowed via
-       ``filter_hosts``). Load-bearing: a failure here sinks the
-       composite.
-    2. Per host: ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx``
-       requesting ``config.network.pnic`` +
-       ``config.network.proxySwitch`` on that single HostSystem object.
-       This leg is **best-effort**: the plain REST host listing already
-       identifies the host, so when the WS-API property read errors (a
-       host that rejects the vi-json call, a transient auth expiry) the
-       row is still returned with ``pnics`` / ``proxy_switches`` set to
-       ``null`` and a ``read_note`` recording why, rather than failing
-       the whole composite.
-
-    The pnic link-state / uplink mapping is the one read that the plain
-    vSphere Automation REST surface cannot reproduce: pnic link state,
-    speed, and proxy-switch uplink association are Web-Services-API
-    ``HostNetworkInfo`` properties, so the composite reaches them via
-    the PropertyCollector vi-json method. This is what drives physical
-    switch-port-occupancy reasoning ("are we out of switch ports?").
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{"hosts": [{"id": ..., "name": ..., "pnics": [...],
-        "proxy_switches": [...]}, ...]}``. Each pnic row carries
-        ``device`` / ``mac`` / ``driver`` / ``link_up`` / ``speed_mb`` /
-        ``duplex``; each proxy-switch row carries ``key`` / ``dvs_name``
-        / ``dvs_uuid`` / ``uplink_pnics`` (physical-NIC device names).
-        When the per-host property read is skipped, ``pnics`` and
-        ``proxy_switches`` are ``None`` and the row carries a
-        ``read_note``.
-    """
-    filter_hosts: list[str] = list(params.get("filter_hosts") or [])
-
-    listing_query: dict[str, Any] = {}
-    if filter_hosts:
-        listing_query["filter.hosts"] = filter_hosts
-
-    listing = await _read_sub_op(connector, target, operator, _OP_LIST_HOSTS, query=listing_query)
-    entries = _unwrap_value(listing)
-    if not isinstance(entries, list):
-        raise RuntimeError(
-            f"host_network_uplinks: expected list from {_OP_LIST_HOSTS!r}, "
-            f"got {type(entries).__name__}"
-        )
-
-    aggregated: list[dict[str, Any]] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            continue
-        host_id = entry.get("host")
-        if not isinstance(host_id, str):
-            # vSphere REST returns the moid under ``host``; absence is an
-            # upstream malformation -- skip rather than abort.
-            continue
-        aggregated.append(
-            await _build_host_uplink_row(connector, target, operator, host_id, entry.get("name"))
-        )
-    return {"hosts": aggregated}
-
-
-def _parse_vsan_health_test(test: dict[str, Any]) -> dict[str, Any]:
-    """Flatten one WS-API ``VsanClusterHealthTest`` into the operator-facing row.
-
-    A single health check inside a group: ``testId`` /``testName`` /
-    ``testHealth`` (the ``green`` / ``yellow`` / ``red`` colour) plus the
-    short human-readable description. The vSAN health-service owns the
-    inner colour vocabulary; the composite passes it through verbatim.
-    """
-    return {
-        "test_id": test.get("testId"),
-        "test_name": test.get("testName"),
-        "test_health": test.get("testHealth"),
-        "test_short_description": test.get("testShortDescription"),
-    }
-
-
-def _parse_vsan_health_group(group: dict[str, Any]) -> dict[str, Any]:
-    """Flatten one WS-API ``VsanClusterHealthGroup`` into the operator-facing row.
-
-    A group buckets related health checks (network, physical disk,
-    cluster, data, …). ``groupHealth`` is the group-level roll-up
-    colour; ``groupTests`` is the per-check list flattened via
-    :func:`_parse_vsan_health_test`. A missing / non-list ``groupTests``
-    degrades to an empty list rather than raising -- the group-level
-    colour is still meaningful on its own.
-    """
-    raw_tests = group.get("groupTests")
-    tests = (
-        [_parse_vsan_health_test(t) for t in raw_tests if isinstance(t, dict)]
-        if isinstance(raw_tests, list)
-        else []
-    )
-    return {
-        "group_id": group.get("groupId"),
-        "group_name": group.get("groupName"),
-        "group_health": group.get("groupHealth"),
-        "tests": tests,
-    }
-
-
-def _build_vsan_query_health_body(cluster_moid: str) -> dict[str, Any]:
-    """Build the ``VsanQueryVcClusterHealthSummary`` request body for one cluster.
-
-    The ``vsan-cluster-health-system`` singleton moId rides the request
-    path (:data:`_OP_VSAN_QUERY_HEALTH_SUMMARY`); the body carries the
-    method's ``cluster`` argument -- the target cluster's MoRef (a
-    ``ClusterComputeResource``). Every other parameter of the method
-    (``includeObjUuids`` / ``fields`` / …) is optional and left to the
-    health service's defaults so the read returns the full summary.
-    """
-    return {
-        "cluster": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid},
-    }
-
-
-async def host_vsan_health_composite(
-    *,
-    operator: Operator,
-    target: Any,
-    params: dict[str, Any],
-    connector: VmwareRestConnector,
-) -> dict[str, Any]:
-    """Per cluster: vSAN health-test groups + overall health status.
-
-    Op-id: ``vmware.composite.host.vsan_health``.
-
-    Sub-op read directly on the connector session:
-
-    1. ``POST:/VsanVcClusterHealthSystem/{moId}/VsanQueryVcClusterHealthSummary``
-       against the ``vsan-cluster-health-system`` singleton, scoped to
-       the target cluster's MoRef. This leg is **best-effort**: the
-       cluster is already identified by the ``cluster`` param, so when
-       the health-service read errors (a cluster with vSAN disabled, a
-       ``/vsanHealth`` endpoint that rejects the vi-json call, a
-       transient auth expiry) the summary is returned with ``groups`` /
-       ``overall_health`` set to ``null`` and a ``read_note`` recording
-       why, rather than propagating the transport error.
-
-    vSAN health is the one read the plain vSphere Automation REST
-    surface cannot reproduce: the health-test-group / overall-status
-    roll-up lives on the ``/vsanHealth`` vmomi service, so the composite
-    reaches it via the ``VsanVcClusterHealthSystem`` managed object --
-    the ``govc vsan.health.*`` equivalent. It drives cluster-health
-    triage ('is vSAN healthy?' / 'which health group is red?').
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{"cluster": <moid>, "overall_health": <colour|null>,
-        "groups": [{"group_id": ..., "group_name": ...,
-        "group_health": ..., "tests": [{"test_id": ...,
-        "test_name": ..., "test_health": ...,
-        "test_short_description": ...}, ...]}, ...]}``. When the
-        best-effort health-service read is skipped, ``overall_health``
-        and ``groups`` are ``null`` and the payload carries a
-        ``read_note``.
-    """
-    cluster_moid = params["cluster"]
-
-    out: dict[str, Any] = {"cluster": cluster_moid}
-    try:
-        health_result = await _read_sub_op(
-            connector,
-            target,
-            operator,
-            _OP_VSAN_QUERY_HEALTH_SUMMARY,
-            path_params={"moId": _VSAN_CLUSTER_HEALTH_SYSTEM_MOID},
-            body=_build_vsan_query_health_body(cluster_moid),
-        )
-    except httpx.HTTPError as exc:
-        out["overall_health"] = None
-        out["groups"] = None
-        out["read_note"] = (
-            f"vsan health-service read skipped: sub-op "
-            f"{_OP_VSAN_QUERY_HEALTH_SUMMARY!r} failed with {type(exc).__name__}: {exc}"
-        )
-        return out
-    summary = _unwrap_value(health_result)
-    raw_groups = summary.get("groups") if isinstance(summary, dict) else None
-    overall = summary.get("overallHealth") if isinstance(summary, dict) else None
-    out["overall_health"] = overall
-    out["groups"] = (
-        [_parse_vsan_health_group(g) for g in raw_groups if isinstance(g, dict)]
-        if isinstance(raw_groups, list)
-        else []
-    )
-    return out

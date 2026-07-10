@@ -169,6 +169,9 @@ _INGEST_TEST_PUBLIC_IP = "93.184.216.34"
 _SPEC_HOST = "specs.example.test"
 _SPEC_BASE = f"https://{_SPEC_HOST}"
 
+# On-disk OpenAPI fixtures served through the respx HTTPS mock.
+_OPENAPI_FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
+
 # All test hostnames that must resolve to a public IP via the mock.
 _INGEST_TEST_HOSTS = frozenset(
     {
@@ -2192,6 +2195,47 @@ paths:
     assert body["grouping"] is None
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_ingest_non_serializable_example_fails_identically_on_both_legs(
+    client: TestClient, dry_run: bool
+) -> None:
+    """A spec whose proto isn't JSON-serializable fails the same on both legs (#2272).
+
+    Before the proto-build serializability guard, the effectful ingest
+    leg crashed at ``session.flush()`` with an opaque ``StatementError``
+    while the parse-only ``dry_run`` leg green-lit the identical spec —
+    a false green. Both legs now surface the same structured
+    ``invalid_schema`` 400 at parse time. The fixture carries a
+    ``!!binary`` example (``bytes``) so it stays non-serializable
+    independently of the timestamp loader fix.
+    """
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(
+            mock_router,
+            _OPENAPI_FIXTURES / "nonserializable_example_30.yaml",
+            path="nonserializable-example.yaml",
+        )
+        request_body: dict[str, Any] = {
+            "product": "blobsvc",
+            "version": "1.0",
+            "impl_id": "blobsvc-rest",
+            "specs": [{"uri": spec_url}],
+        }
+        if dry_run:
+            request_body["dry_run"] = True
+        else:
+            request_body["async"] = False
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json=request_body,
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["detail"] == "invalid_schema"
+
+
 def test_ingest_happy_path_runs_full_pipeline(
     client: TestClient,
     tmp_path: Any,
@@ -2483,6 +2527,79 @@ paths:
         )
         rows = result.scalars().all()
     assert {row.tenant_id for row in rows} == {tenant_a}
+
+
+@pytest.mark.asyncio
+async def test_ingest_yaml_timestamp_examples_persist_as_strings(
+    client: TestClient,
+) -> None:
+    """A YAML spec with unquoted date/timestamp examples ingests + persists verbatim (#2272).
+
+    The descriptor INSERT used to crash with ``StatementError: Object of
+    type datetime is not JSON serializable`` because YAML 1.1 typed the
+    unquoted ``example:`` scalars as ``datetime`` / ``date``. The ingest
+    loader now keeps them as the author's raw strings, so the row lands
+    and the persisted ``parameter_schema`` / ``response_schema`` carry the
+    exact strings the spec author wrote.
+    """
+    propose_json = (
+        '[{"group_key": "events", "name": "Events", '
+        '"when_to_use": "Use these operations to inspect events."}]'
+    )
+    assign_json = '{"GET:/events": "events"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(
+            mock_router,
+            _OPENAPI_FIXTURES / "timestamp_examples_30.yaml",
+            path="timestamp-examples.yaml",
+        )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "tsexample",
+                "version": "1.0",
+                "impl_id": "tsexample-rest",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ingestion"]["inserted_count"] == 1
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor).where(EndpointDescriptor.product == "tsexample"),
+        )
+        rows = result.scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+
+    since = row.parameter_schema["properties"]["since"]
+    assert since["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert isinstance(since["example"], str)
+    assert row.parameter_schema["properties"]["on_date"]["example"] == "2024-01-15"
+
+    assert row.response_schema is not None
+    resp_props = row.response_schema["properties"]
+    assert resp_props["observed_on"]["example"] == "2024-01-15"
+    assert resp_props["observed_at"]["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert resp_props["quoted_at"]["example"] == "2019-07-21T17:32:28Z"
 
 
 def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:
@@ -2782,6 +2899,46 @@ def test_ingest_spec_error_family_returns_structured_400(
         )
     assert response.status_code == 400, response.text
     assert response.json()["detail"] == builder(exc)
+
+
+def test_ingest_op_id_collision_400_detail_names_remediation(client: TestClient) -> None:
+    """#2273 — the REST 400 ``detail`` names the collision's remediation.
+
+    A cross-call ``OpIdCollision`` (the shape a crashed ingest's stranded
+    debris leaves) surfaces on the wire with a structured ``remediation``
+    field and a ``message`` that names both remedies: re-ingest under the
+    original spec URI, or ``meho.connector.delete`` to clear the debris.
+    """
+    exc = OpIdCollision(
+        op_ids=["GET:/api/items"],
+        product="test",
+        version="1.0",
+        impl_id="test-impl",
+        existing_spec_source="https://specs.example.test/a.yaml",
+        incoming_spec_source="file:///tmp/a.yaml",
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch.object(IngestionPipelineService, "ingest", AsyncMock(side_effect=exc)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "test",
+                "version": "1.0",
+                "impl_id": "test-impl",
+                "specs": [{"uri": "https://specs.example.test/never-fetched.yaml"}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "original spec URI" in detail["remediation"]
+    assert "meho.connector.delete" in detail["remediation"]
+    assert "meho.connector.delete" in detail["message"]
 
 
 def test_ingest_vcenter_9_under_label_8_returns_422(client: TestClient, tmp_path: Any) -> None:
@@ -3520,6 +3677,78 @@ def test_ingest_catalog_entry_shipped_spec_loads_content_and_ingests(
     # The _fixture_minimal.yaml spec carries exactly one operation.
     assert body["ingestion"]["inserted_count"] == 1
     assert body["ingestion"]["connector_id"] == "shippedt1-rest-1.0"
+
+
+def test_ingest_catalog_entry_shipped_spec_reingest_is_idempotent(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2274: a second non-dry-run catalog ingest skips its own rows, not 400.
+
+    The catalog shipped-spec route labels its source ``spec:<resource>``;
+    the parser persists that verbatim as a tag and the upsert appends its
+    own ``spec:<spec_source>`` marker, so the row carries two ``spec:``
+    tags. A first-match extractor recovered the shadowing verbatim tag
+    (one ``spec:`` layer short of the real source) and the second ingest
+    of the same catalog entry collided with its own rows -- a 400
+    ``op_id_collision`` that made the unbacked-composite remediation loop
+    (which prints exactly this command) circular. The persisted-then-
+    re-ingested, non-dry-run catalog leg is the path CI never covered.
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "shippedt1",
+                "version": "1.0",
+                "impl_id": "shippedt1-rest",
+                "requires_connector_class": "ProfiledRestConnector_shippedt1",
+                "upstream": None,
+                "spec_resource": "_fixture_minimal.yaml",
+                "profile_resource": "_fixture_minimal.yaml",
+            },
+        ],
+    )
+    # _fixture_minimal.yaml carries exactly one op (``GET /things``); the
+    # deterministic grouping stub only needs to place that one op.
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=(
+                '[{"group_key": "things", "name": "Things", '
+                '"when_to_use": "Use these operations to work with things."}]'
+            ),
+            assign_response='{"GET:/things": "things"}',
+        ),
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        # No upstream mock — the shipped spec is served inline from
+        # package data; any fetch attempt would raise an unmocked request.
+        first = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "async": False},
+            headers=_authed(token),
+        )
+        second = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "async": False},
+            headers=_authed(token),
+        )
+    assert first.status_code == 200, first.text
+    assert first.json()["ingestion"]["inserted_count"] == 1
+    # The re-ingest is idempotent: success with nothing inserted, not a
+    # 400 op_id_collision against the rows the first call just wrote.
+    assert second.status_code == 200, second.text
+    second_ingestion = second.json()["ingestion"]
+    assert second_ingestion["inserted_count"] == 0
+    assert second_ingestion["skipped_count"] == 1
 
 
 def test_ingest_catalog_entry_unknown_returns_structured_422(

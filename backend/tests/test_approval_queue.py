@@ -2043,37 +2043,26 @@ async def test_mcp_approve_redispatches_direct_op_with_stored_params(
     clear_registry()
 
 
-@pytest.mark.asyncio
-async def test_decide_approve_does_not_redispatch_agent_run_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An agent-run request approved via ``/decide`` is NOT re-dispatched (#1503, AC3).
-
-    The in-process agent runtime resumes an agent-run op off the
-    ``approval.approved`` broadcast. ``/decide`` re-dispatching it too
-    would execute the op twice. For a request with ``run_id`` set,
-    ``/decide`` must record the decision only and leave the
-    ``dispatch_*`` fields empty — the must-not-regress guard.
-    """
-    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
-    from meho_backplane.connectors.registry import clear_registry
-    from meho_backplane.operations import reset_dispatcher_caches
-
+async def _park_agent_run_request(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
+    """Register the recording op + commit an agent-run (run_id set) parked row."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
 
     _RECORDED_EXECUTIONS.clear()
+    from meho_backplane.operations import reset_dispatcher_caches
+
     reset_dispatcher_caches()
+    from meho_backplane.connectors.registry import clear_registry
+
     clear_registry()
     await _register_recording_requires_approval_op(monkeypatch)
 
-    # Park an agent-run request directly (run_id set) — the realistic
-    # shape the agent runtime parks via the contextvar.
+    # Park an agent-run request directly (run_id set) — the realistic shape
+    # the agent runtime parks via the contextvar.
     requester = _make_operator(sub="agent-run-sub", principal_kind=PrincipalKind.AGENT)
     params = {"path": "secret/agent"}
-    run_id = uuid.uuid4()
     async with get_sessionmaker()() as s:
         pending = await create_pending_request(
             s,
@@ -2083,10 +2072,30 @@ async def test_decide_approve_does_not_redispatch_agent_run_request(
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
-            run_id=run_id,
+            run_id=uuid.uuid4(),
         )
         await s.commit()
-    approval_request_id = pending.id
+    return pending.id
+
+
+@pytest.mark.asyncio
+async def test_decide_redispatches_agent_run_request_when_claim_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/decide re-dispatches an agent-run approval on a free claim (#2293).
+
+    The waiter-gone fallback (AC3). Before #2293, ``/decide`` skipped
+    re-dispatch whenever ``run_id`` was set, assuming the in-process agent
+    waiter would resume — so an approval whose waiter had died (timeout,
+    pod restart, run cancelled) committed the decision but executed
+    nothing. With the exactly-one-resumer claim free, ``/decide`` now wins
+    it and executes the op exactly once, closing that silent-skip seam.
+    """
+    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
+    from meho_backplane.connectors.registry import clear_registry
+    from meho_backplane.operations import reset_dispatcher_caches
+
+    approval_request_id = await _park_agent_run_request(monkeypatch)
 
     reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
     response = await decide_approval_request(
@@ -2096,10 +2105,46 @@ async def test_decide_approve_does_not_redispatch_agent_run_request(
     )
 
     assert response.decision == "approved"
-    # No inline re-dispatch — the agent runtime owns that path.
-    assert response.dispatch_status is None
-    assert response.dispatch_op_id is None
-    assert _RECORDED_EXECUTIONS == [], "agent-run op must NOT execute from /decide"
+    assert response.dispatch_status == "ok"
+    assert response.dispatch_op_id == "rectest.write"
+    assert len(_RECORDED_EXECUTIONS) == 1, "agent-run op must execute once via the /decide fallback"
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_decide_agent_run_request_no_ops_when_claim_already_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/decide no-ops (no second execution) when the waiter already claimed (#2293).
+
+    The waiter-alive dedup polarity (AC2): the in-process agent waiter has
+    already won the exactly-one-resumer claim and executed the approved op.
+    ``/decide`` for the same run-bound request then loses the claim and
+    reports ``dispatch_status="already_resumed"`` — the op must NOT execute
+    a second time (no double-dispatch of the approved write).
+    """
+    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
+    from meho_backplane.connectors.registry import clear_registry
+    from meho_backplane.operations import reset_dispatcher_caches
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    approval_request_id = await _park_agent_run_request(monkeypatch)
+
+    # The in-process waiter won the claim first (and executed the op).
+    assert await claim_resume(approval_request_id) is True
+
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    response = await decide_approval_request(
+        approval_request_id,
+        DecideRequestBody(decision="approved"),
+        operator=reviewer,
+    )
+
+    assert response.decision == "approved"
+    assert response.dispatch_status == "already_resumed"
+    assert _RECORDED_EXECUTIONS == [], "no second execution once the claim is taken"
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2547,3 +2592,148 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
 
     reset_dispatcher_caches()
     clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# Exactly-one-resumer claim (#2293)
+# ---------------------------------------------------------------------------
+
+
+async def _commit_pending(
+    *,
+    operator: Operator,
+    op_id: str = "vault.kv.write",
+    connector_id: str = "vault-1.x",
+    params: dict[str, Any] | None = None,
+    run_id: uuid.UUID | None = None,
+) -> ApprovalRequest:
+    """Insert + commit a pending request so a fresh session can claim it."""
+    call_params = params if params is not None else {"key": "value"}
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        request = await create_pending_request(
+            s,
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=None,
+            params=call_params,
+            params_hash=compute_params_hash(call_params),
+            run_id=run_id,
+        )
+        await s.commit()
+    return request
+
+
+async def _reload_resumed_at(request_id: uuid.UUID) -> datetime | None:
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        return row.resumed_at
+
+
+@pytest.mark.asyncio
+async def test_claim_resume_wins_once_then_loses() -> None:
+    """The conditional-UPDATE claim is won by exactly one caller (#2293).
+
+    First :func:`claim_resume` on a fresh (``resumed_at IS NULL``) request
+    wins (returns True) and stamps ``resumed_at``; every subsequent claim
+    on the same row loses (returns False) and leaves the stamp untouched.
+    This is the sequential proof of the exactly-once latch; the concurrent
+    proof lives in the Postgres integration suite.
+    """
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    operator = _make_operator(sub="agent-claim")
+    request = await _commit_pending(operator=operator)
+
+    assert await _reload_resumed_at(request.id) is None
+
+    first = await claim_resume(request.id)
+    assert first is True, "the first resumer must win the free claim"
+    stamped = await _reload_resumed_at(request.id)
+    assert stamped is not None, "winning the claim must stamp resumed_at"
+
+    second = await claim_resume(request.id)
+    assert second is False, "a second resumer must lose the taken claim"
+    # The stamp is a one-way latch — the loser never overwrites it.
+    assert await _reload_resumed_at(request.id) == stamped
+
+
+@pytest.mark.asyncio
+async def test_resume_dispatch_after_approval_noops_when_claim_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumer that lost the claim returns already_resumed, never dispatches.
+
+    #2293 AC4: a second resumer arriving after the claim is taken no-ops
+    cleanly — ``resume_dispatch_after_approval`` returns the benign
+    ``already_resumed`` result and does **not** call the dispatcher (no
+    second execution of the approved write).
+    """
+    import meho_backplane.operations.dispatcher as dispatcher_module
+    from meho_backplane.operations.approval_queue import (
+        claim_resume,
+        resume_dispatch_after_approval,
+    )
+
+    operator = _make_operator(sub="agent-noop")
+    request = await _commit_pending(operator=operator)
+
+    # Simulate the winning resumer (e.g. the in-process waiter) having
+    # already taken the claim.
+    assert await claim_resume(request.id) is True
+
+    dispatch_calls = 0
+
+    async def _spy_dispatch(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        raise AssertionError("dispatch must not run for a lost claim")
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _spy_dispatch)
+
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    result = await resume_dispatch_after_approval(operator=reviewer, request=request)
+
+    assert result.status == "already_resumed"
+    assert result.error is None
+    assert result.extras["approval_request_id"] == str(request.id)
+    assert dispatch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_dispatch_after_approval_wins_free_claim_and_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the claim is free the resumer wins it, stamps it, and dispatches.
+
+    The waiter-gone fallback polarity (#2293 AC3) at the service layer:
+    with no prior claim, ``resume_dispatch_after_approval`` wins the
+    conditional UPDATE (``resumed_at`` transitions NULL → set) and proceeds
+    to the single ``dispatch(..., _approved=True)``.
+    """
+    import meho_backplane.operations.dispatcher as dispatcher_module
+    from meho_backplane.connectors.schemas import OperationResult
+    from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
+
+    operator = _make_operator(sub="agent-win")
+    request = await _commit_pending(operator=operator)
+    assert await _reload_resumed_at(request.id) is None
+
+    dispatch_calls = 0
+
+    async def _ok_dispatch(*_args: Any, **kwargs: Any) -> OperationResult:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        assert kwargs.get("_approved") is True, "resume must bypass the gate"
+        return OperationResult(status="ok", op_id=kwargs["op_id"], duration_ms=0.1)
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _ok_dispatch)
+
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    result = await resume_dispatch_after_approval(operator=reviewer, request=request)
+
+    assert result.status == "ok"
+    assert dispatch_calls == 1
+    assert await _reload_resumed_at(request.id) is not None

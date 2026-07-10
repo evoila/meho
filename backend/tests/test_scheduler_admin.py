@@ -259,6 +259,7 @@ def test_create_schema_accepts_valid_cron() -> None:
         kind=ScheduledTriggerKind.CRON,
         agent_definition_id=uuid4(),
         cron_expr="0 9 * * *",
+        inputs={"prompt": "scheduled run"},
         timezone="Europe/Sarajevo",
     )
     assert body.kind == ScheduledTriggerKind.CRON
@@ -272,6 +273,95 @@ def test_create_schema_accepts_valid_event() -> None:
         event_filter={"connector_id": "vmware-rest-9.0", "op_class": "alert"},
     )
     assert body.event_filter == {"connector_id": "vmware-rest-9.0", "op_class": "alert"}
+
+
+def test_create_schema_rejects_cron_without_inputs() -> None:
+    """A cron trigger with no inputs renders no prompt -> 422 at create (#2244)."""
+    with pytest.raises(ValueError, match="non-empty user prompt"):
+        ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.CRON,
+            agent_definition_id=uuid4(),
+            cron_expr="*/5 * * * *",
+        )
+
+
+def test_create_schema_rejects_one_off_without_inputs() -> None:
+    """A one-off trigger with no inputs renders no prompt -> 422 at create (#2244)."""
+    with pytest.raises(ValueError, match="non-empty user prompt"):
+        ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.ONE_OFF,
+            agent_definition_id=uuid4(),
+            fire_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+
+
+def test_create_schema_rejects_cron_with_empty_inputs_dict() -> None:
+    """``inputs: {}`` renders the literal ``"{}"`` at fire time; reject it at create.
+
+    The empty dict slips past the fire-time whitespace guard (``_coerce_inputs``
+    renders it to ``"{}"``), so the create-time check must close it at the
+    schema layer (#2244 AC3).
+    """
+    with pytest.raises(ValueError, match="non-empty user prompt"):
+        ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.CRON,
+            agent_definition_id=uuid4(),
+            cron_expr="*/5 * * * *",
+            inputs={},
+        )
+
+
+def test_create_schema_rejects_one_off_with_whitespace_prompt() -> None:
+    """A whitespace-only ``prompt`` renders no usable user turn -> 422 (#2244)."""
+    with pytest.raises(ValueError, match="non-empty user prompt"):
+        ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.ONE_OFF,
+            agent_definition_id=uuid4(),
+            fire_at=datetime.now(UTC) + timedelta(hours=1),
+            inputs={"prompt": "   "},
+        )
+
+
+def test_create_schema_accepts_event_without_inputs() -> None:
+    """``kind=event`` stays creatable input-less -- it is exempt (#2244 AC1).
+
+    An event trigger's future payload-dispatch junction may derive the prompt
+    from the matched event, so the create-time prompt check does not apply.
+    """
+    body = ScheduledTriggerCreate(
+        kind=ScheduledTriggerKind.EVENT,
+        agent_definition_id=uuid4(),
+        event_filter={"type": "connector.fingerprint.changed"},
+        inputs=None,
+    )
+    assert body.inputs is None
+
+
+def test_create_schema_accepts_cron_with_prompt_inputs() -> None:
+    """A cron trigger with a non-empty ``prompt`` string is accepted (#2244)."""
+    body = ScheduledTriggerCreate(
+        kind=ScheduledTriggerKind.CRON,
+        agent_definition_id=uuid4(),
+        cron_expr="0 9 * * *",
+        inputs={"prompt": "summarise overnight alerts"},
+    )
+    assert body.inputs == {"prompt": "summarise overnight alerts"}
+
+
+def test_create_schema_accepts_cron_with_non_prompt_dict_inputs() -> None:
+    """A non-empty dict without a ``prompt`` key is a usable payload (#2244).
+
+    ``_coerce_inputs`` JSON-dumps such a dict into a non-empty user turn (the
+    shape the shipped ``examples/*/scheduler.cron.json`` triggers use), so the
+    create-time check accepts it.
+    """
+    body = ScheduledTriggerCreate(
+        kind=ScheduledTriggerKind.CRON,
+        agent_definition_id=uuid4(),
+        cron_expr="0 9 * * *",
+        inputs={"instructions": "triage the latest broadcast events"},
+    )
+    assert body.inputs == {"instructions": "triage the latest broadcast events"}
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +380,7 @@ async def test_service_create_cron_trigger() -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
             timezone="UTC",
         ),
     )
@@ -312,6 +403,7 @@ async def test_service_create_one_off_trigger() -> None:
             kind=ScheduledTriggerKind.ONE_OFF,
             agent_definition_id=def_id,
             fire_at=when,
+            inputs={"prompt": "scheduled run"},
         ),
     )
     assert entry.kind == ScheduledTriggerKind.ONE_OFF
@@ -355,6 +447,7 @@ async def test_service_create_rejects_unknown_agent_definition() -> None:
                 kind=ScheduledTriggerKind.CRON,
                 agent_definition_id=bogus,
                 cron_expr="*/5 * * * *",
+                inputs={"prompt": "scheduled run"},
             ),
         )
 
@@ -370,6 +463,7 @@ async def test_service_list_filters_kind_and_status() -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id,
             cron_expr="*/10 * * * *",
+            inputs={"prompt": "scheduled run"},
         ),
     )
     one_off = await service.create(
@@ -379,6 +473,7 @@ async def test_service_list_filters_kind_and_status() -> None:
             kind=ScheduledTriggerKind.ONE_OFF,
             agent_definition_id=def_id,
             fire_at=datetime.now(UTC) + timedelta(hours=1),
+            inputs={"prompt": "scheduled run"},
         ),
     )
     cron_only = await service.list_(_TENANT_A, kind="cron")
@@ -401,6 +496,7 @@ async def test_service_create_persists_work_ref() -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
             work_ref="gh:evoila/meho#13",
         ),
     )
@@ -419,6 +515,7 @@ async def test_service_list_filters_work_ref() -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
             work_ref="gh:evoila/meho#13",
         ),
     )
@@ -429,6 +526,7 @@ async def test_service_list_filters_work_ref() -> None:
             kind=ScheduledTriggerKind.ONE_OFF,
             agent_definition_id=def_id,
             fire_at=datetime.now(UTC) + timedelta(hours=1),
+            inputs={"prompt": "scheduled run"},
         ),
     )
     matched = await service.list_(_TENANT_A, work_ref="gh:evoila/meho#13")
@@ -452,6 +550,7 @@ async def test_service_cancel_active_trigger() -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
         ),
     )
     cancelled = await service.cancel(_TENANT_A, entry.id)
@@ -476,6 +575,7 @@ async def test_service_cancel_rejects_terminal_fired_one_off() -> None:
             kind=ScheduledTriggerKind.ONE_OFF,
             agent_definition_id=def_id,
             fire_at=datetime.now(UTC) + timedelta(hours=1),
+            inputs={"prompt": "scheduled run"},
         ),
     )
     # Force terminal-fired state out of band.
@@ -521,6 +621,7 @@ async def test_service_cancel_idempotent_under_concurrent_race(
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
         ),
     )
 
@@ -588,6 +689,7 @@ async def test_service_cancel_rowcount_zero_with_fired_status_returns_false(
             kind=ScheduledTriggerKind.ONE_OFF,
             agent_definition_id=def_id,
             fire_at=datetime.now(UTC) + timedelta(hours=1),
+            inputs={"prompt": "scheduled run"},
         ),
     )
 
@@ -627,6 +729,7 @@ async def test_service_returns_none_across_tenant_boundary() -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id_b,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
         ),
     )
     # Tenant A probes tenant B's trigger id.
@@ -660,6 +763,7 @@ async def test_rest_create_list_cancel_round_trip(client: TestClient) -> None:
                 "kind": "cron",
                 "agent_definition_id": str(def_id),
                 "cron_expr": "*/5 * * * *",
+                "inputs": {"prompt": "scheduled run"},
             },
             headers=headers,
         )
@@ -715,6 +819,7 @@ async def test_rest_operator_can_list_but_not_create(client: TestClient) -> None
                 "kind": "cron",
                 "agent_definition_id": str(def_id),
                 "cron_expr": "0 9 * * *",
+                "inputs": {"prompt": "scheduled run"},
             },
             headers=admin_headers,
         )
@@ -732,6 +837,7 @@ async def test_rest_operator_can_list_but_not_create(client: TestClient) -> None
                 "kind": "cron",
                 "agent_definition_id": str(def_id),
                 "cron_expr": "0 10 * * *",
+                "inputs": {"prompt": "scheduled run"},
             },
             headers=op_headers,
         )
@@ -833,6 +939,7 @@ async def test_rest_cross_tenant_cancel_returns_404(client: TestClient) -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id_b,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
         ),
     )
     with respx.mock as r:
@@ -858,6 +965,7 @@ async def test_rest_unknown_agent_definition_returns_422(client: TestClient) -> 
                 "kind": "cron",
                 "agent_definition_id": str(bogus),
                 "cron_expr": "*/5 * * * *",
+                "inputs": {"prompt": "scheduled run"},
             },
             headers=headers,
         )
@@ -899,6 +1007,7 @@ async def test_rest_audit_row_is_written_on_create(client: TestClient) -> None:
                 "kind": "cron",
                 "agent_definition_id": str(def_id),
                 "cron_expr": "*/5 * * * *",
+                "inputs": {"prompt": "scheduled run"},
             },
             headers=headers,
         )
@@ -946,10 +1055,35 @@ async def test_mcp_create_dispatches_to_service() -> None:
             "kind": "cron",
             "agent_definition_id": str(def_id),
             "cron_expr": "*/5 * * * *",
+            "inputs": {"prompt": "scheduled run"},
         },
     )
     assert "trigger_id" in result
     assert result["trigger"]["kind"] == "cron"
+
+
+@pytest.mark.asyncio
+async def test_mcp_create_rejects_cron_without_inputs() -> None:
+    """meho.scheduler.create surfaces the input-less-cron 422 as invalid-params (#2244)."""
+    from meho_backplane.mcp.server import McpInvalidParamsError
+    from meho_backplane.mcp.tools.scheduler import _create_handler  # type: ignore[attr-defined]
+
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="mcp-noinput-bot")
+    operator = Operator(
+        sub="mcp-admin",
+        raw_jwt="dummy",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    with pytest.raises(McpInvalidParamsError, match="non-empty user prompt"):
+        await _create_handler(
+            operator,
+            {
+                "kind": "cron",
+                "agent_definition_id": str(def_id),
+                "cron_expr": "*/5 * * * *",
+            },
+        )
 
 
 @pytest.mark.asyncio
@@ -967,6 +1101,7 @@ async def test_mcp_cancel_returns_not_found_for_cross_tenant() -> None:
             kind=ScheduledTriggerKind.CRON,
             agent_definition_id=def_id_b,
             cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
         ),
     )
     operator_a = Operator(
@@ -1023,6 +1158,7 @@ async def test_durability_trigger_survives_scheduler_restart(
             kind=ScheduledTriggerKind.ONE_OFF,
             agent_definition_id=def_id,
             fire_at=past,
+            inputs={"prompt": "scheduled run"},
         ),
     )
     assert entry.next_fire_at is not None

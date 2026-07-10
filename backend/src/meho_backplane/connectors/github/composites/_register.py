@@ -62,22 +62,8 @@ from meho_backplane.operations.typed_register import register_composite_operatio
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
-    "UnbackedEnabledCompositeError",
     "register_github_composite_operations",
 ]
-
-
-class UnbackedEnabledCompositeError(RuntimeError):
-    """An enabled gh-rest composite dispatched raw L2 sub-ops with no backing.
-
-    Retained (not deleted) at #2255: ``gh.composite.pr_status_summary``
-    migrated to direct connector-session dispatch, so it no longer
-    dispatches ingested L2 rows and no longer needs a
-    ``composite_backing`` entry -- this module stops registering /
-    asserting one. The class itself is kept because the platform-level
-    registration-time invariant (#2252) supersedes this gh-only guard;
-    the guard's full removal is task #2259.
-    """
 
 
 # Natural-key shorthand. Every gh-rest composite registers against the

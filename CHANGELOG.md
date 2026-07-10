@@ -90,6 +90,214 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — async ingest jobs always reach a terminal state (watchdog + bounded LLM client + job-id log binding) (#2275)
+
+- **A wedged async connector ingest can no longer sit at `status=running`
+  forever** (#2275). An ingest job whose pipeline hit a *never-completing
+  await* — a starved `to_thread` executor, a DB connection that never
+  acquires, or a grouping LLM call pending on the Anthropic SDK's default
+  10-min-read × 2-retry ceiling (~30 min wall-clock) — was stranded at
+  `running` until a pod restart cleared the in-memory registry, even
+  though the identical *sync* request returned a clean 400. (The
+  exception boundary was already maximal — an `OpIdCollision`-raising
+  pipeline does flip to `failed` — so the earlier "widen the try/except"
+  framing was a no-op; the real defect was the missing watchdog.)
+  `run_ingest_job` now time-boxes the whole job body — the pipeline call
+  **and** the post-run dispatchability probe — inside
+  `asyncio.timeout`; at the deadline the job flips to `failed` with
+  `error_class="TimeoutError"`. The budget defaults to 30 min and is
+  env-overridable via `INGEST_JOB_TIMEOUT_SECONDS`. Cancellation cannot
+  interrupt an already-running `to_thread` OS thread, so the guarantee is
+  job-state terminality, not thread reclamation.
+- **The grouping LLM client is now constructed with an explicit request
+  timeout + retry ceiling** (120 s × 1 retry) instead of the SDK
+  defaults, so a hung grouping call fails fast rather than consuming the
+  watchdog budget; the fail-closed 503 contract for a missing
+  `ANTHROPIC_API_KEY` (#1386) is unchanged.
+- **Pipeline log events now carry `ingest_job_id`.** The job id is bound
+  via structlog `contextvars` (not just the job coroutine's own logger),
+  so the configured `merge_contextvars` processor stamps it onto pipeline
+  events (`ingestion_pipeline_start` &c.) — a job-id-filtered log grep is
+  no longer blind to the pipeline. No schema or route change. (#2275)
+
+### Added — first-class Helm chart value for the target-SSRF allowlist (#2240)
+
+- **The target-destination SSRF allowlist is now a typed Helm chart
+  value** (#2240). v0.20.0 shipped the default-deny target-destination
+  SSRF guard whose only opt-out is the `MEHO_TARGET_SSRF_ALLOWLIST` env
+  var ("Deployment impact — action likely required"), but the chart had
+  no surface for it: operators had to reach for the untyped `extraEnv`
+  escape hatch, which `values.schema.json` does not validate and
+  `helm show values` does not surface. A new `config.targetSsrfAllowlist`
+  value (schema-typed optional string, default `""`) now renders into
+  `MEHO_TARGET_SSRF_ALLOWLIST` on the backplane ConfigMap — injected
+  into the container via the existing `envFrom.configMapRef` — so a
+  scoped allowlist (e.g. `"10.0.0.0/8,192.168.0.0/16"` for a deploy that
+  registers on-prem appliances on RFC 1918 space) is a first-class,
+  `helm show values`-discoverable setting. The default `""` is a genuine
+  no-op that keeps the guard fully on (default-deny), so existing
+  installs are unchanged. Chart-only — the guard itself is untouched.
+  (#2240)
+
+### Changed — scheduler `fire_at` tick-quantization latency documented on the API schema (#2245)
+
+- **The scheduler's fire-time latency window is now part of the API contract,
+  not just an internal doc** (#2245). `ScheduledTriggerCreate.fire_at` and
+  `ScheduledTriggerRead.{fire_at,next_fire_at,last_fired_at}` gained OpenAPI
+  field descriptions stating that a requested fire time is a **floor, not an
+  exact dispatch instant**: the loop scans on a fixed grid every
+  `SCHEDULER_TICK_INTERVAL_SECONDS` (default 30 s, env-tunable 1–3600 s) and
+  fires on the first tick at or after the requested time, so dispatch can trail
+  it by up to one whole tick interval — and `last_fired_at` reads back
+  tick-aligned because it is stamped with the claiming tick, not the requested
+  time. This is the contract behind an operator-reported "~28 s delay" that was
+  pure grid quantization, not failure fallout (no backoff constant exists;
+  per-fire failure isolation already shipped in PR #1509 / v0.11.0). SLA-
+  sensitive deployments can lower the tick interval (floor 1 s) per deployment.
+  Consumer doc (`docs/codebase/scheduler.md`) and the generated CLI client
+  regenerated from the new descriptions; **no behavioral change**. (#2245)
+
+### Fixed — crashed ingest no longer strands retry-blocking descriptor debris; `op_id_collision` names its remedy
+
+- **A crashed connector ingest now leaves zero persisted operations for the
+  failed spec, and the `op_id_collision` error names how to recover** (#2273).
+  Registration committed the `endpoint_descriptor` rows one-per-operation, so
+  an ingest that failed partway (e.g. the #2272 YAML crash) left the
+  already-processed ops committed as debris; a retry that presented the same
+  spec under a *different* URI then aborted with a 400 `op_id_collision`
+  against that debris — with no hint of the way out. Registration now commits
+  **once per spec** (a single unit of work), so a mid-batch failure rolls back
+  to zero rows and the retry inserts cleanly. When a genuine cross-call
+  collision does fire, the error — on all three transports (REST 400 `detail`,
+  MCP `-32602` `data`, async-job `error`) — now names both remedies: re-ingest
+  under the **original** spec URI (a same-URI re-ingest updates in place), or
+  clear stranded debris with the `meho.connector.delete` MCP tool (`tenant_id`
+  omitted for the global scope). The embedding pass now runs inside one
+  transaction per spec (a large spec holds it open for tens of seconds — an
+  accepted correctness-first trade-off). No schema or route change. (#2273)
+
+### Fixed — shared modal controller ignores htmx's detached pre-swap target
+
+- **The app-shell modal controller no longer calls ``showModal()`` on a
+  disconnected dialog after an ``outerHTML`` swap** (#2242). htmx 2.0.9
+  dispatches ``htmx:afterSwap`` with ``detail.target`` still pointing at the
+  PRE-swap element, which an ``outerHTML`` swap already detached — the runbook
+  run driver's abort / reassign / advance forms target ``#runbook-run-step``
+  with ``hx-swap="outerHTML"``. The shared controller scanned that stale
+  subtree and reopened the old, closed descendant dialog (the admin-only
+  reassign dialog on the abort repro; the assignee's advance dialog on every
+  Advance click), throwing an uncaught ``InvalidStateError`` into the console.
+  A one-line ``isConnected`` guard on the scan root skips a detached root and
+  is behaviour-preserving for the console's ``innerHTML``-into-a-stable-
+  container auto-open pattern, which always delivers a connected root. Console
+  noise only; the abort / advance actions were always functional.
+
+### Fixed — exactly-one-resumer claim for run-bound approvals (#2293)
+
+- **A run-bound approval now executes its gated op exactly once — no silent
+  non-execution, no double dispatch** (#2293). Two opposite seams are closed
+  by one `approval_request.resumed_at` claim column (migration `0055`): a
+  single conditional `UPDATE ... WHERE resumed_at IS NULL` that every
+  resumer of an approved op must win before it re-dispatches `_approved=True`
+  (the in-process agent waiter, the shared `resume_dispatch_after_approval`
+  operator path, any future resumer). Before this, REST `/decide` and the
+  MCP by-id approve *skipped* re-dispatch whenever `run_id` was set, assuming
+  the in-process broadcast waiter (#1117) would resume — so when the waiter
+  was gone (wait-timeout, pod restart, run cancelled) the approval committed,
+  the audit said "approved", and **nothing ran**; meanwhile REST `/approve`
+  and the UI approve re-dispatched unconditionally, so with the waiter alive
+  one approval could dispatch an approval-gated **write twice**. `/decide`
+  and MCP now fall back to a server-side re-dispatch when the claim is free
+  (covering waiter-gone), while the same claim blocks the `/approve` / UI
+  double-dispatch when the waiter is alive; a resumer that loses the claim
+  no-ops cleanly (`dispatch_status="already_resumed"`, HTTP 200). Exactly one
+  execution audit row per approval, still stamped with the requester sub. No
+  route/schema change beyond the migration. (#2293)
+
+### Added — Discard verb on draft runbooks in the operator console
+
+- **A `tenant_admin` can now discard an unwanted draft runbook template from
+  the operator console** (`/ui/runbooks/<slug>`) — the draft close-out leg the
+  engine's Discard verb (#2127) already exposed on REST/MCP but the UI had no
+  affordance for. A draft's action row gains a **Discard** button behind the
+  standard confirm dialog; confirming deletes the draft and `HX-Redirect`s back
+  to the catalog. Discard is draft-only: a published / deprecated version is
+  retired via **Deprecate** (preserving lifecycle history), and Deprecate stays
+  hidden on drafts — deprecate-on-draft is engine-illegal (`draft → published →
+  deprecated` is one-directional). (#2241)
+
+### Fixed — catalog re-ingest is idempotent instead of colliding with its own rows
+
+- **A second `meho connector ingest --catalog <product>/<version>` on the
+  same deploy now returns an idempotent skip instead of a 400
+  `op_id_collision` against the rows the first ingest just wrote** (#2274).
+  The catalog shipped-spec on-ramp labels its source `spec:<resource>`;
+  the parser then persists that label verbatim as a row tag while the
+  upsert appends its own `spec:<spec_source>` marker, so a catalog row
+  carries two `spec:` tags. The cross-source collision guard recovered the
+  persisted source from the *first* matching tag — the verbatim one, one
+  `spec:` layer short of the real source — so every re-ingest mismatched
+  its own rows and aborted the batch, making the unbacked-composite
+  remediation loop (which prints exactly that command) circular. The guard
+  now reads the authoritative *last* (marker) tag and compares on the
+  prefix-normalized logical spec identity; genuine cross-source `op_id`
+  clashes (`file:///a.yaml` vs `spec:b.yaml`) still fire, and the
+  structured exception still carries the raw persisted/incoming labels for
+  diagnostics. Compare-time fix only — no data migration, no schema
+  change. (#2274)
+
+### Fixed — vendor YAML date/timestamp `example:` values no longer crash spec ingest
+
+- **Ingesting a YAML OpenAPI spec whose schema `example:` fields carry
+  unquoted ISO dates or timestamps no longer crashes the descriptor
+  INSERT** with `StatementError: Object of type datetime is not JSON
+  serializable` (#2272). Stock PyYAML applied the YAML 1.1 implicit
+  `timestamp` resolver, turning an unquoted `2000-01-23T04:56:07.000+00:00`
+  into a `datetime` (and `2024-01-15` into a `date`) that the JSON(B)
+  descriptor columns cannot encode; the spec-ingest loader now keeps such
+  scalars as the verbatim string the author wrote (OAS 3.1 limits YAML
+  tags to the JSON Schema ruleset, which excludes the timestamp tag).
+  Ingest also gained a fail-closed serializability check at the shared
+  proto-build boundary, so `dry_run=true` now rejects a non-encodable
+  spec with the same structured `invalid_schema` 400 the real run raises
+  instead of green-lighting it. Scoped to spec ingest — no engine-wide
+  serializer change. (#2272)
+
+### Removed — the L2 composite failure-coping apparatus (two-world op model)
+
+- **The dispatch-time L2 pre-flight and its structured errors are deleted, not
+  guarded** (#2259). Now that every code-shipped composite dispatches its
+  sub-ops directly on the connector session (#2253/#2255/#2256), nothing
+  depends on ingested catalog rows, so the whole coping apparatus is retired:
+  vmware's `preflight_l2_dependencies` + the `composite_l2_missing` /
+  `composite_l2_disabled` error codes (and their `CompositeL2Dependency*`
+  exceptions), github's import-time `UnbackedEnabledCompositeError` load guard
+  and its `composite_backing` registry, and the `unbacked` / `next_step`
+  markers `search_operations` attached to composite hits. The platform-wide
+  registration-time invariant (#2252) is the sole remaining check: a
+  code-shipped op whose declared `dispatch_child` sub-op resolves to an
+  ingested row still fails the boot closed. Part of the two-world op model
+  (Goal #2247, Initiative #2248). Operator-visible change: the
+  `composite_l2_missing` / `composite_l2_disabled` error envelopes and the
+  `unbacked=true` search-hit flag no longer appear — composites simply work on
+  a fresh boot with zero catalog ingest.
+
+### Changed — vmware `host.vsan_health` + `host.network_uplinks` re-shipped as typed ops
+
+- **`vmware.host.vsan_health` and `vmware.host.network_uplinks` are now
+  `source_kind="typed"` bound-method ops, and the two composites
+  (`vmware.composite.host.vsan_health` / `vmware.composite.host.network_uplinks`)
+  are removed** (#2258): both now read directly on the connector session via
+  `RetrievePropertiesEx` / `VsanQueryVcClusterHealthSummary`, mounted through
+  `mount_op_path`, in the `vmware.host.usage` (#2257) mould — one row per
+  host/cluster, working on a fresh boot with **zero catalog ingest**. Output
+  is byte-for-byte compatible with the composite versions, including the
+  per-host / per-cluster best-effort `read_note` on a partial failure. The
+  registered vmware composite total drops 15→13 (7→5 read); the two reads
+  keep `safety_level="safe"` / `requires_approval=False`. Part of the
+  two-world op model (Goal #2247, Initiative #2250). No new auth model —
+  `vmware-rest-9.0` stays State 2.
+
 ### Added — GCP Secret Manager backend Phase 2 (per-operator Workload Identity Federation)
 
 - The `gsm` credential backend now supports a **per-operator** read path via

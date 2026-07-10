@@ -130,7 +130,7 @@ import inspect
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from sqlalchemy import insert, select
@@ -149,6 +149,9 @@ from meho_backplane.operations.embed import (
 )
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors import OperationResult
 
 __all__ = [
     "CompositeOpHandler",
@@ -477,8 +480,12 @@ type TypedOpHandler = Callable[..., Awaitable[dict[str, Any]]]
 #: handler exposes a ``dispatch_child`` and/or a ``connector`` parameter
 #: -- the sub-call-capability distinction from typed handlers (#2251
 #: added the direct-session ``connector`` seam alongside
-#: ``dispatch_child``).
-type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any]]]
+#: ``dispatch_child``). The result type widens to ``dict | OperationResult``
+#: (#2256): a migrated write composite may return an ``OperationResult``
+#: verbatim when its direct-session governance seam parks/denies an internal
+#: write, and the dispatcher passes a handler-returned ``OperationResult``
+#: straight through.
+type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResult]]
 
 
 # Bounded enum for ``safety_level`` -- mirrors the DB CHECK constraint
@@ -525,7 +532,7 @@ class HandlerSignatureError(ValueError):
     """
 
 
-def derive_handler_ref(handler: TypedOpHandler) -> str:
+def derive_handler_ref(handler: TypedOpHandler | CompositeOpHandler) -> str:
     """Derive the dotted Python path the dispatcher will import at dispatch time.
 
     Module-level functions resolve to ``f"{module}.{qualname}"`` --

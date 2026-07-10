@@ -29,12 +29,18 @@ side of the same task).
 
 from __future__ import annotations
 
+import asyncio
+import time
+
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
 from meho_backplane.operations.ingest import (
     IngestionPipelineResult,
     IngestJob,
     IngestJobRegistry,
+    OpIdCollision,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.jobs import INGESTED_NOT_DISPATCHABLE
@@ -244,6 +250,158 @@ async def test_raising_pipeline_still_fails() -> None:
     assert stored.error is not None and "spec parse blew up" in stored.error
     assert stored.result is None
     assert probe_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_wedged_pipeline_times_out_to_failed() -> None:
+    """A never-returning ``pipeline_call`` is watchdog-failed, not left ``running``.
+
+    The terminal-state guarantee (#2275): an await that never resolves
+    (a starved ``to_thread`` executor, a hung DB acquire, a grouping LLM
+    call pending on the SDK's ~30-min ceiling) must not strand the job at
+    ``running`` until a pod restart clears the in-memory registry. With a
+    test-shrunk budget the job flips to ``failed`` carrying
+    ``error_class="TimeoutError"`` well within the budget.
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    async def _never_returns() -> IngestionPipelineResult:
+        await asyncio.Event().wait()  # blocks forever until cancelled
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    started = time.monotonic()
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=_never_returns,
+        registry=registry,
+        timeout_s=0.05,
+    )
+    elapsed = time.monotonic() - started
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "TimeoutError"
+    assert stored.ended_at is not None
+    assert stored.result is None
+    # Terminated promptly on the shrunk budget -- nowhere near the 30-min default.
+    assert elapsed < 5.0
+
+
+@pytest.mark.asyncio
+async def test_wedged_dispatchability_probe_times_out_to_failed() -> None:
+    """A hang in the *post-run* dispatchability probe also terminates the job.
+
+    The watchdog wraps the whole body, not just ``pipeline_call``: the
+    dispatchability probe is a real DB read (``connector_exists``) whose
+    own hang would strand the job if only the pipeline call were guarded.
+    A probe that never returns flips the job to ``failed`` /
+    ``TimeoutError``. Note the probe *hangs* rather than raises, so
+    ``_dispatchability_failure_reason``'s fail-open ``except Exception``
+    does not swallow the cancellation (``CancelledError`` is a
+    ``BaseException``, outside ``Exception``).
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+    result = _pipeline_result(inserted_count=5)
+
+    async def _hanging_probe(_result: IngestionPipelineResult) -> bool:
+        await asyncio.Event().wait()  # blocks forever until cancelled
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    started = time.monotonic()
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=lambda: _async_return(result),
+        registry=registry,
+        dispatchability_check=_hanging_probe,
+        timeout_s=0.05,
+    )
+    elapsed = time.monotonic() - started
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "TimeoutError"
+    # The pipeline returned, but the job is failed (not succeeded/degraded)
+    # because the probe never produced a dispatchability verdict.
+    assert stored.result is None
+    assert elapsed < 5.0
+
+
+@pytest.mark.asyncio
+async def test_pipeline_log_event_carries_ingest_job_id() -> None:
+    """A pipeline log event carries ``ingest_job_id`` via the contextvar binding.
+
+    ``run_ingest_job`` binds the job id into structlog contextvars, so the
+    configured ``merge_contextvars`` processor stamps it onto events
+    emitted by *other* loggers under the pipeline call -- not just
+    jobs.py's own lines. This is what lets a job-id-filtered log grep see
+    ``ingestion_pipeline_start`` &c. ``capture_logs`` clears the configured
+    processor chain, so ``merge_contextvars`` is re-supplied to mirror the
+    production chain (``logging.py``).
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+    result = _pipeline_result(inserted_count=5)
+
+    async def _pipeline_that_logs() -> IngestionPipelineResult:
+        # Mirror the real pipeline: emit from a freshly-bound logger that
+        # carries ``connector_id`` but has never seen the job id.
+        structlog.get_logger("test.pipeline").bind(connector_id="vrli-rest-9.0").info(
+            "ingestion_pipeline_start",
+        )
+        return result
+
+    async def _check(_result: IngestionPipelineResult) -> bool:
+        return True
+
+    with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
+        await run_ingest_job(
+            job.job_id,
+            pipeline_call=_pipeline_that_logs,
+            registry=registry,
+            dispatchability_check=_check,
+        )
+
+    starts = [entry for entry in logs if entry.get("event") == "ingestion_pipeline_start"]
+    assert starts, "pipeline start event was not captured"
+    assert starts[0]["ingest_job_id"] == str(job.job_id)
+    # The binding must not leak past the run: the contextvar is unbound.
+    assert "ingest_job_id" not in structlog.contextvars.get_contextvars()
+
+
+@pytest.mark.asyncio
+async def test_op_id_collision_job_error_names_remediation() -> None:
+    """#2273 — the async-job ``error`` field carries the collision remediation.
+
+    The background path loses the structured HTTP ``detail`` shape (no route
+    context to raise into) and records only ``str(exc)``. Folding the
+    remediation into the exception message is therefore what makes the
+    async job's polling response name the fix -- re-ingest under the
+    original spec URI, or ``meho.connector.delete`` to clear crashed-job
+    debris -- not just the fault.
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    async def _raise() -> IngestionPipelineResult:
+        raise OpIdCollision(
+            op_ids=["GET:/api/items"],
+            product="test",
+            version="1.0",
+            impl_id="test-impl",
+            existing_spec_source="https://specs.example.test/a.yaml",
+            incoming_spec_source="file:///tmp/a.yaml",
+        )
+
+    await run_ingest_job(job.job_id, pipeline_call=_raise, registry=registry)
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "OpIdCollision"
+    assert stored.error is not None
+    assert "original spec URI" in stored.error
+    assert "meho.connector.delete" in stored.error
 
 
 @pytest.mark.asyncio

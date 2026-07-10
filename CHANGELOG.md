@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
+
+- The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,
+  `clusters`, `hosts`, `vcenters`, `nsxt-clusters`, `credentials`, `tasks`,
+  `system`, `vcf-services`, `sddc-managers`, `license-keys` — is now first-class
+  **typed** ops (`source_kind="typed"`, `sddc.*` op-ids) that dispatch on a fresh
+  boot with zero catalog ingest, on the post-#2290 `session_login_token` token
+  session, with one-shot 401 recovery via the #2067 `invalidate_session` seam.
+- `sddc.credential.list` (`GET /v1/credentials`) is gated as a credential-read:
+  `requires_approval=True` routes it through the policy-gate approval queue (not
+  dispatchable without operator approval), its op-id classifies as
+  `credential_read` so audit/broadcast rows collapse to aggregate-only, and the
+  handler scrubs every secret-keyed value at the connector boundary — no
+  credential material rides the result.
+- `core_ops.py` ingested-row curation is repointed for the converted ops: the 5
+  overlapping reads leave the curated set (now 4 non-audited browse-breadth reads:
+  release, domain detail, network-pools, bundles); the ingested VCF catalog stays
+  browsable as profiled-dispatch breadth under its own `METHOD:path` op_ids — two
+  surfaces, no resolver shadowing (#2262 invariant holds).
+
 ### Connectors — vRLI events query converted to a typed op on the connector session (#2295)
 
 - The vRLI (VCF Operations for Logs) events query is now a

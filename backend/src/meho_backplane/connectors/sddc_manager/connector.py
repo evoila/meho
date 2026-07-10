@@ -67,6 +67,24 @@ field when present (VCF 9.x may surface it explicitly), otherwise ``None``.
 fingerprint GET authenticates via the token session (SDDC Manager has no
 unauthenticated version endpoint), so it goes through
 :meth:`_get_json_with_session_retry`.
+
+Operations
+----------
+
+The audited 12-read lab-audit set (#2306) ships as **typed** ops
+(``source_kind="typed"``) via the bound-method shims below, registered
+through :mod:`meho_backplane.connectors.sddc_manager.typed_ops`; they
+dispatch on a fresh boot with zero catalog ingest. ``sddc.credential.list``
+(``GET /v1/credentials``) is credential-read gated
+(``requires_approval=True`` + ``credential_read`` classification +
+boundary redaction). The four non-audited curated reads (release,
+domain detail, network-pools, bundles) stay as ingested-row curation in
+:mod:`meho_backplane.connectors.sddc_manager.core_ops`; the wider ingested
+375-op VCF catalog stays browsable as profiled-dispatch breadth (#2271)
+under its own ``METHOD:path`` op_ids — two surfaces, no resolver shadowing
+(#1750/#1798 class), because typed ops never resolve through
+``endpoint_descriptor`` rows (#2262). The G0.6 :meth:`execute` shim remains
+for ABC compatibility.
 """
 
 from __future__ import annotations
@@ -513,6 +531,111 @@ class SddcManagerConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    # Typed read ops (#2306): thin bound-method shims delegating to
+    # ``sddc_manager.typed_reads`` bodies (kept in a sibling module for the
+    # file-length budget). All read-only; a raw 401 (SDDC Manager's
+    # expired-token signal) propagates to the dispatcher's #2067 arm, which
+    # calls the public :meth:`invalidate_session` hook and re-dispatches
+    # once. ``credential_list`` is the credential-read-gated op
+    # (requires_approval=True + credential_read classification + boundary
+    # redaction); the rest are safe reads.
+
+    async def domain_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.domain.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_domain_list_impl
+
+        return await sddc_domain_list_impl(self, operator, target, params)
+
+    async def domain_status(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.domain.status`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_domain_status_impl
+
+        return await sddc_domain_status_impl(self, operator, target, params)
+
+    async def cluster_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.cluster.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_cluster_list_impl
+
+        return await sddc_cluster_list_impl(self, operator, target, params)
+
+    async def host_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.host.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_host_list_impl
+
+        return await sddc_host_list_impl(self, operator, target, params)
+
+    async def vcenter_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.vcenter.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_vcenter_list_impl
+
+        return await sddc_vcenter_list_impl(self, operator, target, params)
+
+    async def nsxt_cluster_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.nsxt_cluster.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_nsxt_cluster_list_impl
+
+        return await sddc_nsxt_cluster_list_impl(self, operator, target, params)
+
+    async def credential_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.credential.list`` shim (#2306) — credential-read gated + redacted."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_credential_list_impl
+
+        return await sddc_credential_list_impl(self, operator, target, params)
+
+    async def task_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.task.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_task_list_impl
+
+        return await sddc_task_list_impl(self, operator, target, params)
+
+    async def system_info(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.system.info`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_system_info_impl
+
+        return await sddc_system_info_impl(self, operator, target, params)
+
+    async def vcf_service_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.vcf_service.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_vcf_service_list_impl
+
+        return await sddc_vcf_service_list_impl(self, operator, target, params)
+
+    async def manager_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.manager.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_manager_list_impl
+
+        return await sddc_manager_list_impl(self, operator, target, params)
+
+    async def license_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.license.list`` shim (#2306)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_license_list_impl
+
+        return await sddc_license_list_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool.

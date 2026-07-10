@@ -177,10 +177,13 @@ class TestClassifyOp:
         [
             ("vault.kv.read", "credential_read"),
             ("vault.kv.list", "credential_read"),
+            # SDDC Manager's typed GET /v1/credentials read (#2306) — the
+            # nested-infra credential inventory (system of record).
+            ("sddc.credential.list", "credential_read"),
         ],
     )
     def test_credential_read_allowlist(self, op_id: str, expected: str) -> None:
-        """Exact-match allowlist — decision #3 names these two."""
+        """Exact-match allowlist — decision #3 names these; #2306 adds the SDDC read."""
         assert classify_op(op_id) == expected
 
     @pytest.mark.parametrize(

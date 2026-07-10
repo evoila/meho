@@ -3639,6 +3639,78 @@ def test_ingest_catalog_entry_shipped_spec_loads_content_and_ingests(
     assert body["ingestion"]["connector_id"] == "shippedt1-rest-1.0"
 
 
+def test_ingest_catalog_entry_shipped_spec_reingest_is_idempotent(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2274: a second non-dry-run catalog ingest skips its own rows, not 400.
+
+    The catalog shipped-spec route labels its source ``spec:<resource>``;
+    the parser persists that verbatim as a tag and the upsert appends its
+    own ``spec:<spec_source>`` marker, so the row carries two ``spec:``
+    tags. A first-match extractor recovered the shadowing verbatim tag
+    (one ``spec:`` layer short of the real source) and the second ingest
+    of the same catalog entry collided with its own rows -- a 400
+    ``op_id_collision`` that made the unbacked-composite remediation loop
+    (which prints exactly this command) circular. The persisted-then-
+    re-ingested, non-dry-run catalog leg is the path CI never covered.
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "shippedt1",
+                "version": "1.0",
+                "impl_id": "shippedt1-rest",
+                "requires_connector_class": "ProfiledRestConnector_shippedt1",
+                "upstream": None,
+                "spec_resource": "_fixture_minimal.yaml",
+                "profile_resource": "_fixture_minimal.yaml",
+            },
+        ],
+    )
+    # _fixture_minimal.yaml carries exactly one op (``GET /things``); the
+    # deterministic grouping stub only needs to place that one op.
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=(
+                '[{"group_key": "things", "name": "Things", '
+                '"when_to_use": "Use these operations to work with things."}]'
+            ),
+            assign_response='{"GET:/things": "things"}',
+        ),
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        # No upstream mock — the shipped spec is served inline from
+        # package data; any fetch attempt would raise an unmocked request.
+        first = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "async": False},
+            headers=_authed(token),
+        )
+        second = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "async": False},
+            headers=_authed(token),
+        )
+    assert first.status_code == 200, first.text
+    assert first.json()["ingestion"]["inserted_count"] == 1
+    # The re-ingest is idempotent: success with nothing inserted, not a
+    # 400 op_id_collision against the rows the first call just wrote.
+    assert second.status_code == 200, second.text
+    second_ingestion = second.json()["ingestion"]
+    assert second_ingestion["inserted_count"] == 0
+    assert second_ingestion["skipped_count"] == 1
+
+
 def test_ingest_catalog_entry_unknown_returns_structured_422(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

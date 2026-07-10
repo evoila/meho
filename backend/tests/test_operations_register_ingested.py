@@ -760,6 +760,67 @@ async def test_end_to_end_with_real_parsed_spec(
     assert ("petstore", "3.0", "petstore-rest") in all_connectors_v2()
 
 
+@pytest.mark.asyncio
+async def test_reingest_with_spec_prefixed_source_is_idempotent(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Re-ingesting a ``spec:``-labelled source through the parser skips, not collides (#2274).
+
+    The catalog shipped-spec on-ramp labels its source
+    ``spec:<resource>`` (#1975). The parser persists that label verbatim
+    as a row tag, and the upsert appends its own ``spec:<spec_source>``
+    marker on top -- so a catalog row ends up carrying *two* ``spec:``
+    tags. A first-match extractor read the verbatim tag (one ``spec:``
+    layer short of the real source) and every re-ingest then collided
+    with its own rows. The proto **must** come from :func:`parse_openapi`
+    *with* the ``spec:``-prefixed ``spec_source`` (the exact shape
+    ``IngestionPipelineService`` feeds it for a shipped spec): a
+    hand-built proto -- or a parse without ``spec_source`` -- lacks the
+    verbatim ``spec:<resource>`` tag and would not reproduce the shadow.
+    """
+    _fixtures = Path(__file__).parent / "fixtures" / "openapi"
+    _petstore_text = (_fixtures / "petstore_30.yaml").read_text()
+    # Mirror pipeline.py's parse call for a shipped spec: the uri *is* the
+    # ``spec:``-prefixed label, and the content is passed inline (no fetch).
+    _spec_uri = "spec:petstore_30.yaml"
+    operations = parse_openapi(_spec_uri, spec_source=_spec_uri, content=_petstore_text)
+
+    common_kwargs: dict[str, Any] = {
+        "product": "petstore",
+        "version": "3.0",
+        "impl_id": "petstore-rest",
+        "spec_source": _spec_uri,
+        "operations": operations,
+        "embedding_service": stub_embedding_service,
+    }
+
+    first_result = await register_ingested_operations(**common_kwargs)
+    assert first_result.inserted_count == len(operations) > 0
+
+    # The persisted row carries the doubled marker -- the exact condition
+    # that shadowed the first-match extractor. Assert it so this test
+    # stays anchored to the real bug regime if the persist path changes.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.product == "petstore")
+                )
+            )
+            .scalars()
+            .first()
+        )
+    assert row is not None
+    assert "spec:petstore_30.yaml" in row.tags  # verbatim parser tag
+    assert "spec:spec:petstore_30.yaml" in row.tags  # upsert marker
+
+    # Second ingest of the same catalog source is a no-op, not a 400.
+    second_result = await register_ingested_operations(**common_kwargs)
+    assert second_result.inserted_count == 0
+    assert second_result.skipped_count == len(operations)
+
+
 # ---------------------------------------------------------------------------
 # Caller-owned session
 # ---------------------------------------------------------------------------

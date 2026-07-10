@@ -20,7 +20,10 @@ resources that make up a running backplane:
 - Service — ClusterIP front-door for the Deployment, target port `http`.
 - Ingress — TLS-enabled external entry with cert-manager annotations.
 - ConfigMap — non-secret env (Keycloak URLs, Vault address, pool sizes,
-  `FORWARDED_ALLOW_IPS` for the uvicorn proxy-header trust list).
+  `FORWARDED_ALLOW_IPS` for the uvicorn proxy-header trust list, and
+  `MEHO_TARGET_SSRF_ALLOWLIST` — the operator-scoped opt-out for the
+  target-destination SSRF guard, set via `config.targetSsrfAllowlist`
+  (v0.20.0; see `docs/codebase/target-ssrf-guard.md`)).
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
   Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.

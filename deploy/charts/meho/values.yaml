@@ -282,6 +282,28 @@ config:
   # `docs/cross-repo/reverse-proxy-contract.md` for the operator-
   # side trust contract.
   forwardedAllowIps: "127.0.0.1"
+  # -- Target-destination SSRF allowlist (v0.20.0, PR #2191). The
+  # backplane refuses to register or dial a target whose host is (or
+  # resolves to) a non-public address — loopback, RFC 1918, link-local,
+  # `169.254.169.254` (cloud metadata), CGNAT, the IPv6 analogues —
+  # classic server-side request forgery protection. This value is the
+  # operator's scoped opt-out: it renders into the
+  # `MEHO_TARGET_SSRF_ALLOWLIST` env var the guard reads per request
+  # (`backend/src/meho_backplane/targets/ssrf_guard.py`), NOT via
+  # settings.py. Comma-separated exemptions: CIDR ranges (`10.0.0.0/8`),
+  # bare IPs (`192.168.7.10`), and/or hostname literals
+  # (`vcenter.lab.internal`); whitespace around commas is ignored.
+  #
+  # Default `""` keeps the guard fully on (default-deny) — a genuine
+  # no-op render. MEHO is on-prem: registering appliances on private
+  # space is the normal case, so a deploy that manages LAN targets MUST
+  # allowlist the ranges those appliances live on, e.g.
+  # `"10.0.0.0/8,192.168.0.0/16"`. A scoped opt-in is the intended
+  # posture, never a global off-switch; a malformed CIDR fails loudly at
+  # runtime naming the offending token. See CHANGELOG v0.20.0
+  # ("Deployment impact — action likely required") and
+  # `docs/codebase/target-ssrf-guard.md`.
+  targetSsrfAllowlist: ""
 
 # Memory layer (G5.2 #374). The backplane ships an in-process
 # memory-expiry sweeper that runs in the FastAPI lifespan and removes

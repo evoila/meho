@@ -27,6 +27,12 @@ The pipeline is broken into work items per Initiative #389:
   registry on first ingest of a `(product, version, impl_id)` triple;
   the shim raises `NotImplementedError` on `auth_headers` / `execute`
   until a per-G3.x Initiative replaces it with a hand-coded subclass.
+  Commits **once per register call** — the whole spec is one unit of
+  work, so a crash mid-batch rolls the helper-owned session back to
+  zero rows instead of stranding retry-blocking debris (#2273); the
+  embed pass runs inside that transaction, and the process-local
+  auto-shim (not part of the DB transaction) survives the rollback as
+  an idempotent zero-op stub.
 * **T3 — LLM-summarised grouping** (`ingest/llm_groups.py` +
   `ingest/_llm_grouping_internals.py` + `ingest/prompts/`). Two-pass
   LLM run: (1) propose 8–15 groups from the full op list, (2) assign

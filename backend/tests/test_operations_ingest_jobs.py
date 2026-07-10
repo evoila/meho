@@ -35,6 +35,7 @@ from meho_backplane.operations.ingest import (
     IngestionPipelineResult,
     IngestJob,
     IngestJobRegistry,
+    OpIdCollision,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.jobs import INGESTED_NOT_DISPATCHABLE
@@ -244,6 +245,40 @@ async def test_raising_pipeline_still_fails() -> None:
     assert stored.error is not None and "spec parse blew up" in stored.error
     assert stored.result is None
     assert probe_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_op_id_collision_job_error_names_remediation() -> None:
+    """#2273 — the async-job ``error`` field carries the collision remediation.
+
+    The background path loses the structured HTTP ``detail`` shape (no route
+    context to raise into) and records only ``str(exc)``. Folding the
+    remediation into the exception message is therefore what makes the
+    async job's polling response name the fix -- re-ingest under the
+    original spec URI, or ``meho.connector.delete`` to clear crashed-job
+    debris -- not just the fault.
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    async def _raise() -> IngestionPipelineResult:
+        raise OpIdCollision(
+            op_ids=["GET:/api/items"],
+            product="test",
+            version="1.0",
+            impl_id="test-impl",
+            existing_spec_source="https://specs.example.test/a.yaml",
+            incoming_spec_source="file:///tmp/a.yaml",
+        )
+
+    await run_ingest_job(job.job_id, pipeline_call=_raise, registry=registry)
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "OpIdCollision"
+    assert stored.error is not None
+    assert "original spec URI" in stored.error
+    assert "meho.connector.delete" in stored.error
 
 
 @pytest.mark.asyncio

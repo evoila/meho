@@ -102,6 +102,22 @@ connector-related release-notes line.
   `module.ClassName.method` handler resolution (`operations/_handler_resolve`)
   is unchanged; typed reads still register and dispatch `source_kind="typed"`.
 
+### Added — vm.power single-VM gated write verbs (incl. guest-shutdown)
+
+- New `vmware.composite.vm.power` write composite acts on **one** VM for
+  one-off incident actions (a hung appliance) — the single-VM ergonomics the
+  fan-out `vm.power.bulk` is clumsy for. Five verbs: `on` / `off` / `reset`
+  hit the hard `POST:/vcenter/vm/{vm}/power` endpoint; `guest_shutdown` /
+  `guest_reboot` hit the Tools-mediated `POST:/vcenter/vm/{vm}/guest/power`
+  for a clean in-guest transition. A soft verb against a VM whose VMware
+  Tools are not running fails **typed** (`status="tools_unavailable"`,
+  echoing the Tools state) instead of hanging, so the operator can fall back
+  to a hard `off`. Approval-gated per row (`dangerous` +
+  `requires_approval=True`) on the shipped write mold (#2256/#2254); the
+  park-time preview echoes the VM, verb, and a `power_kind` (`hard` vs
+  Tools-soft `guest`) so the approver sees the soft-vs-hard blast radius.
+  `vm.power.bulk` is unchanged. (#2301)
+
 ### Added — typed vSphere incident reads (vm.info/object.collect/tasks.recent)
 
 - **Three new `source_kind="typed"` vmware-rest reads for incident

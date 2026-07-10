@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 13 composites land before
+``endpoint_descriptor`` upserts for the 14 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -29,11 +29,13 @@ Scope:
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 8 write composites (G3.1-T6 / #509) -- inherit T4's
-  ``safety_level="dangerous"`` + ``requires_approval=True`` defaults.
-  The 8 cover every state-mutating workflow Goal #214 names as
+* 9 write composites (G3.1-T6 / #509, plus single-VM ``vm.power`` /
+  #2301) -- inherit T4's ``safety_level="dangerous"`` +
+  ``requires_approval=True`` defaults.
+  They cover every state-mutating workflow Goal #214 names as
   required for govc-wrapper retirement: ``vm.create``, ``vm.clone``,
-  ``vm.snapshot.revert``, ``vm.migrate``, ``vm.power.bulk``,
+  ``vm.snapshot.revert``, ``vm.migrate``, ``vm.power`` (single VM,
+  incl. Tools soft shutdown), ``vm.power.bulk``,
   ``host.evacuate`` (first recursive composite),
   ``host.detach_from_vds``, ``cluster.patch``.
 """
@@ -56,6 +58,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_create_composite,
     vm_migrate_composite,
     vm_power_bulk_composite,
+    vm_power_composite,
     vm_snapshot_revert_composite,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
@@ -66,7 +69,7 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
 
-# Side-effect import: registers the 8 write composites' park-time
+# Side-effect import: registers the 9 write composites' park-time
 # ``proposed_effect`` preview builders (#1608) onto the per-op hook in
 # :mod:`meho_backplane.operations._preview` — mirrors how
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
@@ -86,5 +89,6 @@ __all__ = [
     "vm_create_composite",
     "vm_migrate_composite",
     "vm_power_bulk_composite",
+    "vm_power_composite",
     "vm_snapshot_revert_composite",
 ]

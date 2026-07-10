@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — `session_login_token` named auth scheme (#2287)
+
+- **A new vetted member of the closed auth-scheme catalog covers the
+  JSON-body-login → response-body-token → `Bearer` flow** (#2287). An
+  `ExecutionProfile` may now declare `auth.scheme: session_login_token`
+  (with `secret_fields: [username, password]`): the harness POSTs a JSON
+  `{username, password}` credential body to the login endpoint, reads the
+  token out of the response body's `accessToken` field, and sends it as
+  `Authorization: Bearer <token>` on subsequent requests. SDDC Manager's
+  `POST /v1/tokens` — whose HTTP Basic surface the appliance rejects — is
+  the first member of the shape. Like the other session schemes it caches
+  until a downstream expiry status (default `{401}`) triggers a full
+  re-login; there is no refresh-token leg. Every mechanic is a
+  code-reviewed per-scheme constant, not a profile knob — a future product
+  with a different login path or token field enters as its own catalog
+  member, preserving the no-DSL line (#1177). No shipped connector profile
+  selects it yet (`sddc_manager` still ships `basic`); flipping a profile
+  onto it is a separate task.
+
 ### Fixed — non-finite `INGEST_JOB_TIMEOUT_SECONDS` can no longer defeat the ingest-job watchdog; the budget is now a chart value (#2318)
 
 - **`INGEST_JOB_TIMEOUT_SECONDS=inf` (or `nan`) no longer silently

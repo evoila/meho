@@ -141,6 +141,15 @@ config:
   # `docs/cross-repo/reverse-proxy-contract.md` for the per-cluster
   # recommended values and the diagnostic walk.
   forwardedAllowIps: "10.42.0.0/16"
+  # Target-destination SSRF allowlist (v0.20.0, PR #2191). The default-
+  # deny guard refuses to register or dial a target on non-public space,
+  # but the RDC lab registers on-prem appliances on RFC 1918 ranges as a
+  # matter of course — so scope-open the guard to those ranges or every
+  # target create / dispatch is refused. Comma-separated CIDRs / bare
+  # IPs / hostname literals; a malformed CIDR fails loudly at runtime.
+  # Leave `""` on a chassis-only lab that dials no private-range targets.
+  # See `docs/codebase/target-ssrf-guard.md`.
+  targetSsrfAllowlist: "10.0.0.0/8,192.168.0.0/16"
 
 postgres:
   # Cluster-internal Postgres on rke2-infra (per Goal #11 cross-repo deps).

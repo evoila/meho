@@ -54,6 +54,8 @@ func newIngestCmd() *cobra.Command {
 		compatible        []string
 		catalog           string
 		tenantID          string
+		authScheme        string
+		authSecretFields  []string
 		dryRun            bool
 		noWait            bool
 		jsonOut           bool
@@ -104,7 +106,18 @@ func newIngestCmd() *cobra.Command {
 			"tenant) — the request then leaves tenant_id unset, the\n" +
 			"omit-equals-global semantics the REST and MCP surfaces share.\n" +
 			"Pass your OWN tenant UUID for a tenant-curated ingest; the\n" +
-			"backplane rejects any other tenant's UUID with HTTP 403.",
+			"backplane rejects any other tenant's UUID with HTTP 403.\n\n" +
+			"--auth-scheme (manual mode) selects a named auth scheme from the\n" +
+			"closed catalog so the connector is stamped DISPATCHABLE (a profiled\n" +
+			"connector), still staged behind review/enable — never auto-enabled.\n" +
+			"Without it, an arbitrary spec ingests a non-dispatchable shim. The\n" +
+			"allowed values are: basic, static_header, session_login,\n" +
+			"session_login_basic, session_login_token, oauth2_mint. There is no\n" +
+			"free-form auth config (no login URL/template/token path) — selection\n" +
+			"only. --auth-secret-field overrides the secret-field NAMES the scheme\n" +
+			"reads at dispatch (never the values — those stay in the target's\n" +
+			"secret_ref); omit for the per-scheme defaults. Both are mutually\n" +
+			"exclusive with --catalog (a catalog row binds its own profile).",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -117,6 +130,8 @@ func newIngestCmd() *cobra.Command {
 				Compatible:        compatible,
 				Catalog:           catalog,
 				TenantID:          tenantID,
+				AuthScheme:        authScheme,
+				AuthSecretFields:  authSecretFields,
 				DryRun:            dryRun,
 				NoWait:            noWait,
 				JSONOut:           jsonOut,
@@ -145,6 +160,16 @@ func newIngestCmd() *cobra.Command {
 		"write scope for the ingested rows (works with both modes): omit for the built-in / "+
 			"global scope (tenant_id left unset — visible to every tenant); pass your own "+
 			"tenant UUID for a tenant-curated ingest (another tenant's UUID is rejected with HTTP 403)")
+	cmd.Flags().StringVar(&authScheme, "auth-scheme", "",
+		"manual mode: select a named auth scheme (closed catalog) so the connector is stamped "+
+			"DISPATCHABLE (a profiled connector, still staged behind review) instead of a "+
+			"non-dispatchable shim. One of: basic, static_header, session_login, session_login_basic, "+
+			"session_login_token, oauth2_mint. Selection only — no free-form auth config. Mutually "+
+			"exclusive with --catalog")
+	cmd.Flags().StringArrayVar(&authSecretFields, "auth-secret-field", nil,
+		"manual mode: override a secret-field NAME the --auth-scheme reads at dispatch (never the "+
+			"value — that stays in the target's secret_ref); repeat for multiple. Omit for the "+
+			"per-scheme defaults. Requires --auth-scheme")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
 		"parse and plan without writing to the DB; the response carries an IngestionResult with counts but no GroupingResult")
 	cmd.Flags().BoolVar(&noWait, "no-wait", false,
@@ -165,6 +190,8 @@ type ingestOptions struct {
 	Compatible        []string
 	Catalog           string
 	TenantID          string
+	AuthScheme        string
+	AuthSecretFields  []string
 	DryRun            bool
 	NoWait            bool
 	JSONOut           bool
@@ -282,6 +309,22 @@ func buildIngestRequest(opts ingestOptions) (api.IngestRequest, error) {
 		compatible := append([]string(nil), opts.Compatible...)
 		body.SpecInfoVersionsCompatible = &compatible
 	}
+	if opts.AuthScheme != "" {
+		// Non-catalog on-ramp (#2289): selecting a named auth scheme stamps
+		// a dispatchable profiled connector (still review-gated) instead of a
+		// bare shim. Catalog mode returns above, so this only rides the
+		// manual shape. The closed-set / reserved-scheme rejection is the
+		// backend's (a 422 naming the allowed members) — the CLI forwards the
+		// operator's selection verbatim as the typed enum.
+		scheme := api.IngestRequestAuthScheme(opts.AuthScheme)
+		body.AuthScheme = &scheme
+	}
+	if len(opts.AuthSecretFields) > 0 {
+		// NAMES only — the credential values are resolved from the target's
+		// secret_ref at dispatch, never carried in the request.
+		fields := append([]string(nil), opts.AuthSecretFields...)
+		body.AuthSecretFields = &fields
+	}
 	return body, nil
 }
 
@@ -299,12 +342,24 @@ func validateIngestMode(opts ingestOptions) error {
 			"--no-wait cannot be combined with --dry-run: dry runs always execute " +
 				"synchronously (the backplane returns the parse plan inline)")
 	}
+	if len(opts.AuthSecretFields) > 0 && opts.AuthScheme == "" {
+		// Naming the secret fields without selecting a scheme is a caller-side
+		// bug — there is no extractor to read them (mirrors the backend 422).
+		return errors.New(
+			"--auth-secret-field requires --auth-scheme (the field names are read " +
+				"by the selected scheme's extractor)")
+	}
 	manualSet := opts.Product != "" || opts.Version != "" || opts.ImplID != "" || len(opts.Specs) > 0
 	if opts.Catalog != "" {
 		if manualSet {
 			return errors.New(
 				"--catalog cannot be combined with --product/--version/--impl/--spec; " +
 					"use catalog mode OR manual mode, not both")
+		}
+		if opts.AuthScheme != "" {
+			return errors.New(
+				"--auth-scheme cannot be combined with --catalog; a catalog row binds its " +
+					"own profile (use --auth-scheme only with the manual --product/--version/--impl/--spec shape)")
 		}
 		return nil
 	}

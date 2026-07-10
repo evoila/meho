@@ -99,9 +99,9 @@ Operations
 The audited read set (#2302) ships as **typed** ops
 (``source_kind="typed"``) via the bound-method shims below, registered
 through :mod:`meho_backplane.connectors.nsx.typed_ops`; they dispatch on
-a fresh boot with zero catalog ingest. The remaining curated reads stay
-as ingested-row curation in
-:mod:`meho_backplane.connectors.nsx.core_ops`. The G0.6 :meth:`execute`
+a fresh boot with zero catalog ingest. The remaining reads stay as
+ingested browse breadth, enable-able through the generic review flow
+(``ReviewService.enable_reads``). The G0.6 :meth:`execute`
 shim remains for ABC compatibility.
 """
 

@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Removed — retired the ingested-curation apparatus in the six VMware-family connectors (T7 · #2358)
+
+- Deleted the hand-curated ingested-enable apparatus (`core_ops.py` /
+  `vcf_automation/_core_data.py`) from all six VMware-family connectors —
+  `sddc_manager`, `vcf_fleet`, `vcf_operations`, `vcf_logs`, `nsx`,
+  `vcf_automation` — dropping ~6.5k lines of dead code with **zero production
+  callers**: the `*_CORE_OPS` flip-lists, `*_CORE_GROUPS`, path classifiers
+  (`classify_*_op`), and appliers (`apply_*_core_curation`) were only ever
+  invoked by tests. The audited operational reads are already typed ops
+  (T1–T6, #2295/#2302–#2306); the remaining 33 declined ops stay browsable as
+  `source_kind="ingested"` breadth and are enabled through the generic review
+  flow (`ReviewService.enable_reads` / MCP `meho.connector.enable_reads` / REST
+  `POST /api/v1/connectors/{id}/enable-reads`). No REST/schema change — no
+  OpenAPI snapshot delta. The `(product, version, impl_id, connector_id)`
+  identity constants each package re-exports are preserved (relocated into the
+  package `__init__.py`), so `from meho_backplane.connectors.<pkg> import
+  <PROD>_CONNECTOR_ID` still resolves.
+
 ### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
 
 - The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,

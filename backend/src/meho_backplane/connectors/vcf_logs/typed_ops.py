@@ -5,11 +5,11 @@
 
 vRLI shipped its read surface as a **generic-ingested** catalog: the
 ``endpoint_descriptor`` rows land via ``meho connector ingest`` against
-``vcf-logs-9.0/openapi.yaml`` and
-:func:`~meho_backplane.connectors.vcf_logs.core_ops.apply_vrli_core_curation`
-flips a curated subset to ``is_enabled=True``. That model makes op
-correctness depend on mutable per-deploy catalog state — the #2247 failure
-class Initiative #2266 retires for the VCF family.
+``vcf-logs-9.0/openapi.yaml`` and an operator enables the read-class
+subset through the generic review flow (``ReviewService.enable_reads``).
+That model makes op correctness depend on mutable per-deploy catalog
+state — the #2247 failure class Initiative #2266 retires for the VCF
+family.
 
 ``vrli.event.query`` is vRLI's first **typed** op (``source_kind="typed"``):
 a bound method on :class:`VcfLogsConnector` that issues the events query

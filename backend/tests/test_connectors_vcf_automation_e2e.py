@@ -76,8 +76,6 @@ from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_automation import (
     VCFA_CONNECTOR_ID,
-    VCFA_CORE_GROUPS,
-    VCFA_CORE_OPS,
     VCFA_IMPL_ID,
     VCFA_PRODUCT,
     VCFA_VERSION,
@@ -386,8 +384,39 @@ async def _vcfa_credentials_loader(_target: object, _operator: Operator) -> dict
     return {"username": "svc-meho", "password": "vcfa-e2e-password"}
 
 
+#: Ingested browse-breadth seed data for the VCFA dispatch E2E — the six
+#: ``source_kind="ingested"`` read ops (and their five dual-plane groups)
+#: declined from typed conversion on #2305 but kept browsable. Relocated here
+#: from the retired ``vcf_automation._core_data`` / ``core_ops`` curation
+#: modules (#2358): this is test-only fixture material describing the
+#: ``EndpointDescriptor`` rows this E2E seeds and mocks. ``(group_key, name,
+#: when_to_use)``.
+_VCFA_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("provider-orgs", "VCFA Provider Organizations", "Provider-plane organization detail."),
+    ("provider-regions", "VCFA Provider Regions", "Provider-plane region detail."),
+    ("provider-users", "VCFA Provider Users", "Provider-plane user inventory."),
+    ("tenant-deployments", "VCFA Tenant Deployments", "Tenant-plane deployment list + detail."),
+    ("tenant-blueprints", "VCFA Tenant Blueprints", "Tenant-plane blueprint inventory."),
+)
+
+#: ``(op_id, group_key)`` for each ingested browse-breadth VCFA read op. The
+#: ``tenant-deployments`` group carries two ops (list + get by id).
+_VCFA_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/cloudapi/1.0.0/orgs/{id}", "provider-orgs"),
+    ("GET:/cloudapi/1.0.0/regions/{id}", "provider-regions"),
+    ("GET:/cloudapi/1.0.0/users", "provider-users"),
+    ("GET:/iaas/api/deployments", "tenant-deployments"),
+    ("GET:/iaas/api/deployments/{id}", "tenant-deployments"),
+    ("GET:/iaas/api/blueprints", "tenant-blueprints"),
+)
+
+#: Op ids this VCFA E2E parametrizes over (relocated from
+#: ``tuple(op.op_id for op in VCFA_CORE_OPS)``).
+VCFA_SEED_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _VCFA_SEED_OPS)
+
+
 async def _insert_vcfa_descriptors() -> None:
-    """Seed the 11 curated VCFA core ops + their 8 groups as enabled rows.
+    """Seed the 6 ingested VCFA browse-breadth ops + their 5 dual-plane groups.
 
     Every row carries ``product=VCFA_PRODUCT="vcfa"`` (what
     :func:`parse_connector_id("vcfa-rest-9.0")` derives) and the
@@ -400,40 +429,40 @@ async def _insert_vcfa_descriptors() -> None:
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
     async with sessionmaker() as session:
-        for group in VCFA_CORE_GROUPS:
+        for group_key, name, when_to_use in _VCFA_SEED_GROUPS:
             group_row = OperationGroup(
                 tenant_id=None,
                 product=VCFA_PRODUCT,
                 version=VCFA_VERSION,
                 impl_id=VCFA_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
+                group_key=group_key,
+                name=name,
+                when_to_use=when_to_use,
                 review_status="enabled",
             )
             session.add(group_row)
             await session.flush()
-            group_ids[group.group_key] = group_row.id
+            group_ids[group_key] = group_row.id
 
-        for op in VCFA_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _VCFA_SEED_OPS:
+            method, path = op_id.split(":", 1)
             spec_tag = "spec:iaas" if path.startswith("/iaas/api/") else "spec:cloudapi"
             descriptor = EndpointDescriptor(
                 tenant_id=None,
                 product=VCFA_PRODUCT,
                 version=VCFA_VERSION,
                 impl_id=VCFA_IMPL_ID,
-                op_id=op.op_id,
+                op_id=op_id,
                 source_kind="ingested",
                 method=method,
                 path=path,
                 handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"VCFA core op {op.op_id} (curated read).",
-                description=f"VCFA core op {op.op_id} (curated read).",
+                group_id=group_ids[group_key],
+                summary=f"VCFA ingested read op {op_id}.",
+                description=f"VCFA ingested read op {op_id}.",
                 parameter_schema=_param_schema_for(path),
                 response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
+                llm_instructions=None,
                 safety_level="safe",
                 requires_approval=False,
                 is_enabled=True,
@@ -569,7 +598,7 @@ async def vcfa_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VcfaE2EB
     """Dispatcher-ready VCFA setup over a respx-mocked dual-plane appliance.
 
     Lifecycle:
-    1. Insert :data:`VCFA_CORE_OPS` descriptors + groups into the
+    1. Insert :data:`_VCFA_SEED_OPS` descriptors + groups into the
        per-test SQLite DB.
     2. Seed a :class:`Target` row carrying :data:`_FINGERPRINT` so the
        resolver binds :class:`VcfAutomationConnector`. The target's
@@ -610,8 +639,8 @@ async def vcfa_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VcfaE2EB
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VCFA_CORE_OPS)
-assert len(_OP_IDS) == 6, f"Expected 6 curated VCFA ops, got {len(_OP_IDS)}: {_OP_IDS}"
+_OP_IDS: tuple[str, ...] = VCFA_SEED_OP_IDS
+assert len(_OP_IDS) == 6, f"Expected 6 ingested VCFA browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -619,10 +648,10 @@ async def test_vcfa_e2e_all_ops_dispatch_ok(
     op_id: str,
     vcfa_e2e_canary: _VcfaE2EBundle,
 ) -> None:
-    """All 11 VCFA core ops dispatch and return ``status='ok'``.
+    """All 6 ingested VCFA browse ops dispatch and return ``status='ok'``.
 
     Exercises acceptance criterion (a) -- both planes are covered
-    because :data:`VCFA_CORE_OPS` spans 6 provider + 5 tenant ops.
+    because :data:`_VCFA_SEED_OPS` spans provider (cloudapi) + tenant (iaas) ops.
     Each plane establishes its own bespoke session on first dispatch;
     subsequent dispatches re-use the cached per-plane token.
     """

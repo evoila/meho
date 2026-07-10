@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""VCF-9 NSX 9.x ingest + dispatch + curation tests (#1530).
+"""VCF-9 NSX 9.x ingest + dispatch + enable-reads tests (#1530).
 
 NSX-T 4.x was renumbered onto the VCF train at VCF 9.0 — a live
 appliance reports NSX 9.0.x and the vendor spec carries ``info.version``
@@ -22,11 +22,11 @@ This module pins the three legs of the fix:
 * **Runtime dispatch** —
   :func:`~meho_backplane.connectors.resolver.resolve_connector` binds a
   9.x-fingerprinted NSX target to :class:`NsxConnector`.
-* **Core-op curation** —
-  :func:`~meho_backplane.connectors.nsx.apply_nsx_core_curation` resolves
-  the connector_id the ingest actually landed under (e.g.
+* **Read enablement** —
+  :meth:`~meho_backplane.operations.ingest.service.ReviewService.enable_reads`
+  resolves the connector_id the ingest actually landed under (e.g.
   ``nsx-rest-9.1.0.0`` from an operator-supplied 9.x label), not the
-  hard-coded 4.2 slug it used before.
+  hard-coded 4.2 slug the retired curation apparatus used before (#2358).
 
 SQLite via the autouse ``_default_database_url`` conftest fixture; no
 ``pg_engine`` required. Runs in the ``meho-runners-ci`` lane alongside the
@@ -43,12 +43,9 @@ import pytest
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.nsx import (
     NSX_CONNECTOR_ID,
-    NSX_CORE_GROUPS,
-    NSX_CORE_OPS,
     NSX_IMPL_ID,
     NSX_PRODUCT,
     NsxConnector,
-    apply_nsx_core_curation,
 )
 from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.db.engine import get_sessionmaker
@@ -68,6 +65,31 @@ _VCF9_LABEL = "9.1.0.0"
 _VCF9_CONNECTOR_ID = f"{NSX_IMPL_ID}-{_VCF9_LABEL}"
 
 _TEST_TENANT = uuid.UUID("9f000000-0000-0000-0000-0000000009f0")
+
+#: The five ingested NSX browse-breadth read ops ``(op_id, group_key)`` an
+#: operator ingests + enables under a VCF-9 9.x label. Kept local so this
+#: ingest test stays self-contained; mirrors
+#: :data:`tests.acceptance._nsx_canary_fixtures._NSX_SEED_OPS`. All are ``GET``
+#: so :meth:`ReviewService.enable_reads` flips every one. (The hand-curated
+#: NSX apparatus was retired in #2358.)
+_NSX_9X_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/api/v1/transport-nodes", "manager-transport-nodes"),
+    ("GET:/policy/api/v1/infra/segments", "policy-segments"),
+    ("GET:/policy/api/v1/infra/tier-0s", "policy-tier0"),
+    ("GET:/policy/api/v1/infra/domains/{domain-id}/security-policies", "policy-firewall"),
+    (
+        "GET:/policy/api/v1/infra/domains/{domain-id}/security-policies/{security-policy-id}/rules",
+        "policy-firewall",
+    ),
+)
+
+#: Distinct group keys the seed ops reference (two firewall ops share one).
+_NSX_9X_SEED_GROUP_KEYS: tuple[str, ...] = (
+    "manager-transport-nodes",
+    "policy-segments",
+    "policy-tier0",
+    "policy-firewall",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -171,21 +193,21 @@ def test_resolver_dispatches_nsx_9x_target_to_nsx_connector(version: str) -> Non
 
 
 # ---------------------------------------------------------------------------
-# Leg 3 — core-op curation resolves the ingest's connector_id
+# Leg 3 — enable-reads resolves the ingest's connector_id
 # ---------------------------------------------------------------------------
 
 
 async def _seed_groups_and_ops(*, connector_version: str) -> None:
-    """Seed the 9 curated NSX ops + groups under a given version label.
+    """Seed the 5 ingested NSX browse-breadth ops + groups under a version label.
 
     Mirrors the G0.7 ingest default: ``review_status='staged'`` groups,
     ``is_enabled=False`` / ``source_kind='ingested'`` ops, scoped to the
-    operator tenant so the curation's audit-log path stays isolated.
+    operator tenant so the enable-reads audit-log path stays isolated.
     """
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, uuid.UUID] = {}
     async with sessionmaker() as session:
-        for group in NSX_CORE_GROUPS:
+        for group_key in _NSX_9X_SEED_GROUP_KEYS:
             group_id = uuid.uuid4()
             session.add(
                 OperationGroup(
@@ -194,28 +216,28 @@ async def _seed_groups_and_ops(*, connector_version: str) -> None:
                     product=NSX_PRODUCT,
                     version=connector_version,
                     impl_id=NSX_IMPL_ID,
-                    group_key=group.group_key,
-                    name=f"PLACEHOLDER {group.group_key}",
-                    when_to_use=f"PLACEHOLDER when_to_use {group.group_key}",
+                    group_key=group_key,
+                    name=f"PLACEHOLDER {group_key}",
+                    when_to_use=f"PLACEHOLDER when_to_use {group_key}",
                     review_status="staged",
                 ),
             )
-            group_ids[group.group_key] = group_id
+            group_ids[group_key] = group_id
 
-        for op in NSX_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _NSX_9X_SEED_OPS:
+            method, path = op_id.split(":", 1)
             session.add(
                 EndpointDescriptor(
                     tenant_id=_TEST_TENANT,
                     product=NSX_PRODUCT,
                     version=connector_version,
                     impl_id=NSX_IMPL_ID,
-                    op_id=op.op_id,
+                    op_id=op_id,
                     source_kind="ingested",
                     method=method,
                     path=path,
-                    group_id=group_ids[op.group_key],
-                    summary=f"ingested op {op.op_id}",
+                    group_id=group_ids[group_key],
+                    summary=f"ingested op {op_id}",
                     is_enabled=False,
                 ),
             )
@@ -246,28 +268,34 @@ async def _enabled_state(*, connector_version: str) -> dict[str, bool]:
 
 
 @pytest.mark.asyncio
-async def test_curation_resolves_operator_supplied_9x_connector_id() -> None:
-    """``apply_nsx_core_curation`` curates ops under the ingest's 9.x id.
+async def test_enable_reads_resolves_operator_supplied_9x_connector_id() -> None:
+    """``ReviewService.enable_reads`` enables reads under the ingest's 9.x id.
 
     Ingested rows land under the **operator-supplied** ``version`` label,
     so a VCF-9 spec ingested as ``version=9.1.0.0`` produces
     ``connector_id="nsx-rest-9.1.0.0"`` — not the class pin's
-    ``nsx-rest-9.0``. Passing that id to the parameterised helper (#1530)
-    enables exactly the 9 curated ops the ingest landed.
+    ``nsx-rest-9.0``. Passing that id to the scope-aware
+    :meth:`ReviewService.enable_reads` (#1530 resolution, #1749 bulk
+    read-enable) flips every seeded ``GET`` browse-breadth op the ingest
+    landed to ``is_enabled=True`` — the generic path that replaced the
+    retired NSX curation apparatus (#2358).
     """
     await _seed_groups_and_ops(connector_version=_VCF9_LABEL)
 
-    await apply_nsx_core_curation(
-        ReviewService(_make_operator()),
+    enabled = await ReviewService(_make_operator()).enable_reads(
+        _VCF9_CONNECTOR_ID,
         tenant_id=_TEST_TENANT,
-        connector_id=_VCF9_CONNECTOR_ID,
+    )
+
+    seed_op_ids = {op_id for op_id, _ in _NSX_9X_SEED_OPS}
+    assert enabled == len(seed_op_ids), (
+        f"enable_reads should flip all {len(seed_op_ids)} seeded GET ops; got {enabled}"
     )
 
     state = await _enabled_state(connector_version=_VCF9_LABEL)
-    core_op_ids = {op.op_id for op in NSX_CORE_OPS}
     assert state, "expected the seeded 9.x ops to be present"
-    assert all(state[op_id] for op_id in core_op_ids), (
-        f"every curated 9.x core op should be enabled after curation; got {state}"
+    assert all(state[op_id] for op_id in seed_op_ids), (
+        f"every seeded 9.x browse op should be enabled after enable_reads; got {state}"
     )
 
 

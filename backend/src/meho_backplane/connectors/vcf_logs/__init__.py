@@ -30,28 +30,30 @@ against ``vcf-logs-9.0/openapi.yaml``. This Task ships only the
 skeleton.
 """
 
+from typing import Final
+
 from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_logs.connector import VcfLogsConnector
-from meho_backplane.connectors.vcf_logs.core_ops import (
-    VRLI_CONNECTOR_ID,
-    VRLI_CORE_GROUPS,
-    VRLI_CORE_OPS,
-    VRLI_IMPL_ID,
-    VRLI_PATH_RULES,
-    VRLI_PRODUCT,
-    VRLI_VERSION,
-    VrliCoreGroup,
-    VrliCoreOp,
-    apply_vrli_core_curation,
-    classify_vrli_op,
-)
 from meho_backplane.connectors.vcf_logs.profile import VRLI_EXECUTION_PROFILE
 from meho_backplane.connectors.vcf_logs.session import (
     VcfCredentialsLoader,
     VcfLogsTargetLike,
     load_credentials_from_vault,
 )
+
+#: Endpoint-descriptor identity for the vRLI connector. ``VRLI_PRODUCT`` is
+#: the dispatch-canonical token :func:`parse_connector_id` derives from the
+#: ``vrli-rest`` impl_id (G0.26-T4 #1798 aligned the class ``product`` to it);
+#: :class:`VcfLogsConnector` pins the same triple as class attributes. Kept
+#: here (relocated from the retired ``core_ops`` curation module, #2358) so
+#: acceptance / typed-read tests that seed ``EndpointDescriptor`` rows can
+#: import a single source of truth for the ``(product, version, impl_id)``
+#: triple and the derived ``connector_id`` slug.
+VRLI_PRODUCT: Final[str] = "vrli"
+VRLI_VERSION: Final[str] = "9.0"
+VRLI_IMPL_ID: Final[str] = "vrli-rest"
+VRLI_CONNECTOR_ID: Final[str] = f"{VRLI_IMPL_ID}-{VRLI_VERSION}"
 
 register_connector_v2(
     product="vrli",
@@ -92,11 +94,8 @@ register_typed_op_registrar(register_vrli_typed_operations)
 
 __all__ = [
     "VRLI_CONNECTOR_ID",
-    "VRLI_CORE_GROUPS",
-    "VRLI_CORE_OPS",
     "VRLI_EXECUTION_PROFILE",
     "VRLI_IMPL_ID",
-    "VRLI_PATH_RULES",
     "VRLI_PRODUCT",
     "VRLI_TYPED_OPS",
     "VRLI_VERSION",
@@ -104,10 +103,6 @@ __all__ = [
     "VcfCredentialsLoader",
     "VcfLogsConnector",
     "VcfLogsTargetLike",
-    "VrliCoreGroup",
-    "VrliCoreOp",
-    "apply_vrli_core_curation",
-    "classify_vrli_op",
     "load_credentials_from_vault",
     "register_vrli_typed_operations",
 ]

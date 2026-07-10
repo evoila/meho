@@ -61,7 +61,6 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_operations import (
     VROPS_CONNECTOR_ID,
-    VROPS_CORE_OPS,
     VROPS_IMPL_ID,
     VROPS_VERSION,
     VcfOperationsConnector,
@@ -76,6 +75,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vrops_canary_fixtures import (
     VROPS_CANARY_BASE_URL,
+    VROPS_CANARY_CORE_OP_IDS,
     VROPS_CANARY_FINGERPRINT,
     VROPS_CANARY_OPERATOR_TENANT,
     VROPS_CANARY_RESOURCES,
@@ -221,7 +221,7 @@ async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator
 
     Lifecycle:
     1. Insert the 8 curated
-       :data:`~meho_backplane.connectors.vcf_operations.VROPS_CORE_OPS`
+       :data:`~tests.acceptance._vrops_canary_fixtures._VROPS_SEED_OPS`
        descriptors + their 7 groups into the per-test SQLite DB.
     2. Seed a :class:`Target` row carrying
        :data:`VROPS_CANARY_FINGERPRINT` so the resolver binds
@@ -257,10 +257,10 @@ async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VROPS_CORE_OPS)
+_OP_IDS: tuple[str, ...] = VROPS_CANARY_CORE_OP_IDS
 # 6 ingested-browse ops after #2303 moved liveness/alerts/resources-query to
 # the typed surface (tests/test_connectors_vcf_operations_typed_reads.py).
-assert len(_OP_IDS) == 6, f"Expected 6 curated vROps ops, got {len(_OP_IDS)}: {_OP_IDS}"
+assert len(_OP_IDS) == 6, f"Expected 6 ingested vROps browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)

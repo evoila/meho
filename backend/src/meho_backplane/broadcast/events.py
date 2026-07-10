@@ -85,6 +85,12 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
     {
         "vault.kv.read",
         "vault.kv.list",
+        # SDDC Manager is the system of record for nested-infra credentials;
+        # its typed ``GET /v1/credentials`` read returns live account secrets
+        # (#2306). Classified credential_read so audit + broadcast payloads
+        # collapse to aggregate-only, on top of the op's requires_approval
+        # gate and the connector-boundary secret scrub.
+        "sddc.credential.list",
     }
 )
 

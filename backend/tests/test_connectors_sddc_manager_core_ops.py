@@ -7,12 +7,12 @@ Covers :mod:`meho_backplane.connectors.sddc_manager.core_ops`:
 
 * :func:`classify_sddc_op` — path-prefix classifier rules.
 * :func:`apply_sddc_core_curation` — the operator-review-time
-  substrate call that flips ``review_status='enabled'`` on the 8
-  curated groups, lands ``llm_instructions`` on the 9 curated ops,
+  substrate call that flips ``review_status='enabled'`` on the 4
+  curated groups, lands ``llm_instructions`` on the 4 curated ops,
   and explicitly disables non-core ops in curated groups via the
   audit-log-driven operator-override exclusion so the
   :meth:`enable_group` cascade skips them. The load-bearing
-  assertion is "9 ops dispatchable, every other op in curated
+  assertion is "4 ops dispatchable, every other op in curated
   groups stays ``is_enabled=False``".
 
 Test harness mirrors :mod:`tests.test_connectors_nsx_core_ops`:
@@ -236,7 +236,7 @@ def test_classify_sddc_op_maps_paths_to_expected_group_keys(
 
 @pytest.mark.asyncio
 async def test_apply_curation_enables_groups_and_lands_llm_instructions() -> None:
-    """All 8 curated groups end ``enabled``; all 9 core ops carry the curated blob."""
+    """All 4 curated groups end ``enabled``; all 4 core ops carry the curated blob."""
     tenant_id = _TEST_TENANT
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)
     operator = _make_operator(tenant_id=tenant_id)
@@ -259,8 +259,8 @@ async def test_apply_curation_keeps_non_core_ops_disabled_via_override_path() ->
     """Non-core ops in curated groups stay ``is_enabled=False`` after enable_group cascade.
 
     Seeds 2 extra non-core ops per curated group, runs the helper, and
-    asserts only the 9 curated ops flip to ``is_enabled=True`` while the
-    16 non-core ops (8 groups times 2 extras) stay ``False``.
+    asserts only the 4 curated ops flip to ``is_enabled=True`` while the
+    8 non-core ops (4 groups times 2 extras) stay ``False``.
     """
     tenant_id = _TEST_TENANT
     await _seed_curated_groups_and_ops(tenant_id=tenant_id, extra_ops_per_group=2)

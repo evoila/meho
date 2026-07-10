@@ -70,8 +70,11 @@ __all__ = [
     "VMWARE_HOST_NETWORK_UPLINKS_OP",
     "VMWARE_HOST_USAGE_OP",
     "VMWARE_HOST_VSAN_HEALTH_OP",
+    "VMWARE_OBJECT_COLLECT_OP",
+    "VMWARE_TASKS_RECENT_OP",
     "VMWARE_TYPED_OPS",
     "VMWARE_TYPED_WHEN_TO_USE_BY_GROUP",
+    "VMWARE_VM_INFO_OP",
     "VmwareTypedOp",
     "host_usage_impl",
     "register_vmware_typed_operations",
@@ -384,6 +387,21 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (  
     HOST_VSAN_HEALTH_WHEN_TO_USE,
     VMWARE_HOST_VSAN_HEALTH_OP,
 )
+from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (  # noqa: E402
+    OBJECT_COLLECT_GROUP_KEY,
+    OBJECT_COLLECT_WHEN_TO_USE,
+    VMWARE_OBJECT_COLLECT_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (  # noqa: E402
+    TASKS_RECENT_GROUP_KEY,
+    TASKS_RECENT_WHEN_TO_USE,
+    VMWARE_TASKS_RECENT_OP,
+)
+from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import (  # noqa: E402
+    VM_INFO_GROUP_KEY,
+    VM_INFO_WHEN_TO_USE,
+    VMWARE_VM_INFO_OP,
+)
 
 #: Curated ``when_to_use`` blurb per typed-op group.
 #: ``register_typed_operation`` requires a non-empty string whenever
@@ -402,6 +420,9 @@ VMWARE_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     ),
     HOST_NETWORK_UPLINKS_GROUP_KEY: HOST_NETWORK_UPLINKS_WHEN_TO_USE,
     HOST_VSAN_HEALTH_GROUP_KEY: HOST_VSAN_HEALTH_WHEN_TO_USE,
+    VM_INFO_GROUP_KEY: VM_INFO_WHEN_TO_USE,
+    OBJECT_COLLECT_GROUP_KEY: OBJECT_COLLECT_WHEN_TO_USE,
+    TASKS_RECENT_GROUP_KEY: TASKS_RECENT_WHEN_TO_USE,
 }
 
 VMWARE_HOST_USAGE_OP = VmwareTypedOp(
@@ -471,14 +492,18 @@ VMWARE_HOST_USAGE_OP = VmwareTypedOp(
 )
 
 #: The typed ops :class:`VmwareRestConnector` registers at lifespan
-#: startup: ``vmware.host.usage`` (#2257) plus ``host.network_uplinks`` +
-#: ``host.vsan_health`` (#2258, re-shipped from the former composites).
-#: The tuple shape lets future typed reads join without touching the
-#: registrar.
+#: startup: ``vmware.host.usage`` (#2257); ``host.network_uplinks`` +
+#: ``host.vsan_health`` (#2258, re-shipped from the former composites);
+#: and the incident-survival reads ``vm.info`` + ``object.collect`` +
+#: ``tasks.recent`` (#2300). The tuple shape lets future typed reads join
+#: without touching the registrar.
 VMWARE_TYPED_OPS: tuple[VmwareTypedOp, ...] = (
     VMWARE_HOST_USAGE_OP,
     VMWARE_HOST_NETWORK_UPLINKS_OP,
     VMWARE_HOST_VSAN_HEALTH_OP,
+    VMWARE_VM_INFO_OP,
+    VMWARE_OBJECT_COLLECT_OP,
+    VMWARE_TASKS_RECENT_OP,
 )
 
 

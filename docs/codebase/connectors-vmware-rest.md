@@ -149,6 +149,45 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   enough — `overallCpuUsage` / `overallMemoryUsage` live on the WS-API
   `HostSystem`, not the REST resource. It establishes the vmware typed-op
   pattern future per-host/per-VM typed reads reuse.
+- **Incident-survival typed reads** (`#2300`) — three more
+  `source_kind="typed"` bound-method reads in sibling modules, each
+  registered through `VMWARE_TYPED_OPS` (so no registrar change) and
+  working on a fresh boot with zero catalog ingest:
+  - **`vmware.vm.info`** (`typed_ops_vm_info.py`, handler `vm_info`) —
+    single-VM incident triage. Addressed by `vm` moid or `name`
+    (`oneOf` in the schema; a `name` is resolved via
+    `GET /vcenter/vm?filter.names=`, and an unknown / ambiguous name
+    raises). One PropertyCollector read of the `VirtualMachine`'s
+    `runtime.powerState`, `guest.ipAddress` / `guest.hostName` /
+    `guest.toolsStatus` / `guest.toolsRunningStatus`,
+    `guestHeartbeatStatus`, and `storage.perDatastoreUsage`. Unlike
+    `host.usage`'s per-host best-effort leg, this single-object read is
+    **load-bearing** (a failure propagates). The "poweredOn but no
+    guest IP" hung-appliance shape is representable in one call — the
+    plain REST VM detail reports configuration, not these live guest
+    signals.
+  - **`vmware.object.collect`** (`typed_ops_object_collect.py`, handler
+    `object_collect`) — the **bounded generic** escape hatch: read a
+    caller-specified property-path list off one `(type, moid)` object.
+    Bounded by construction (keeping the `#1177` dumb-substrate line):
+    a single `objectSet` entry with **no `TraversalSpec`** (cannot walk
+    the inventory), and the size / shape cap lives entirely in
+    `parameter_schema` — at most 64 paths, each a dotted vim identifier
+    ≤16 segments deep, wildcards / array-indices rejected by pattern.
+    An oversized / malformed request fails `validate_params` in the
+    dispatcher and returns a structured `invalid_params` result before
+    any read is issued. Returns `{properties: {path: val}, missing:
+    [path]}`, surfacing the `ObjectContent.missingSet`.
+  - **`vmware.tasks.recent`** (`typed_ops_tasks_recent.py`, handler
+    `tasks_recent`) — recent vCenter Task objects for change-window
+    monitoring (distinct from `event.tail`, which reads the *event*
+    log). Two PropertyCollector reads: `TaskManager.recentTask` for the
+    Task MoRefs, then `Task.info` on those MoRefs (capped by the
+    optional `max_tasks`, default 50, in a single round trip). Each row
+    carries operation (`descriptionId`), target entity + type + name,
+    state (`queued`/`running`/`success`/`error`), progress, cancelled
+    flag, the queue/start/complete timestamps, and the localized error
+    message when a task faulted.
 - **`register_vmware_typed_operations`** (`typed_ops.py`) — async
   registrar wrapper queued onto `run_typed_op_registrars` (via
   `register_typed_op_registrar` in the package `__init__`, alongside the

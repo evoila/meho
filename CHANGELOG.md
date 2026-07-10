@@ -106,6 +106,47 @@ connector-related release-notes line.
   Tools-soft `guest`) so the approver sees the soft-vs-hard blast radius.
   `vm.power.bulk` is unchanged. (#2301)
 
+### Added — typed vSphere incident reads (vm.info/object.collect/tasks.recent)
+
+- **Three new `source_kind="typed"` vmware-rest reads for incident
+  survival** (#2300), each a bound method on `VmwareRestConnector` that
+  reads directly on the connector session via PropertyCollector — no
+  `dispatch_child`, no ingested descriptor, so they dispatch on a fresh
+  boot with zero catalog ingest:
+  - **`vmware.vm.info`** — one VM's live triage signals (power state,
+    guest IP, VMware Tools status/running, guest heartbeat, per-datastore
+    usage) addressed by moid or name. The "poweredOn but no guest IP"
+    hung-appliance shape is representable in one call — data the plain
+    vCenter REST VM detail (configuration only) cannot supply.
+  - **`vmware.object.collect`** — a bounded generic PropertyCollector
+    read of a caller-specified property set off one `(type, moid)`
+    object. Bounded by construction (one object, no traversal, ≤64 paths
+    each ≤16 segments deep); oversized/malformed requests return a
+    structured `invalid_params` error before any read is issued.
+  - **`vmware.tasks.recent`** — recent vCenter Task objects (operation,
+    entity, state, progress, queued/started/completed times) for
+    change-window monitoring, distinct from `event.tail`'s event-log read.
+
+### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
+
+- The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,
+  `clusters`, `hosts`, `vcenters`, `nsxt-clusters`, `credentials`, `tasks`,
+  `system`, `vcf-services`, `sddc-managers`, `license-keys` — is now first-class
+  **typed** ops (`source_kind="typed"`, `sddc.*` op-ids) that dispatch on a fresh
+  boot with zero catalog ingest, on the post-#2290 `session_login_token` token
+  session, with one-shot 401 recovery via the #2067 `invalidate_session` seam.
+- `sddc.credential.list` (`GET /v1/credentials`) is gated as a credential-read:
+  `requires_approval=True` routes it through the policy-gate approval queue (not
+  dispatchable without operator approval), its op-id classifies as
+  `credential_read` so audit/broadcast rows collapse to aggregate-only, and the
+  handler scrubs every secret-keyed value at the connector boundary — no
+  credential material rides the result.
+- `core_ops.py` ingested-row curation is repointed for the converted ops: the 5
+  overlapping reads leave the curated set (now 4 non-audited browse-breadth reads:
+  release, domain detail, network-pools, bundles); the ingested VCF catalog stays
+  browsable as profiled-dispatch breadth under its own `METHOD:path` op_ids — two
+  surfaces, no resolver shadowing (#2262 invariant holds).
+
 ### Connectors — vRLI events query converted to a typed op on the connector session (#2295)
 
 - The vRLI (VCF Operations for Logs) events query is now a

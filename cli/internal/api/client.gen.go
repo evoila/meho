@@ -4843,8 +4843,10 @@ type ScheduledTriggerCreate struct {
 	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
 	CronExpr          *string                 `json:"cron_expr"`
 	EventFilter       *map[string]interface{} `json:"event_filter"`
-	FireAt            *time.Time              `json:"fire_at"`
-	IdentitySub       *string                 `json:"identity_sub,omitempty"`
+
+	// FireAt One-off fire time (UTC); required for kind=one_off and must be null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	FireAt      *time.Time `json:"fire_at"`
+	IdentitySub *string    `json:"identity_sub,omitempty"`
 
 	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
 	//
@@ -4984,9 +4986,11 @@ type ScheduledTriggerRead struct {
 	CreatedBySub      string                  `json:"created_by_sub"`
 	CronExpr          *string                 `json:"cron_expr"`
 	EventFilter       *map[string]interface{} `json:"event_filter"`
-	FireAt            *time.Time              `json:"fire_at"`
-	Id                openapi_types.UUID      `json:"id"`
-	IdentitySub       string                  `json:"identity_sub"`
+
+	// FireAt Stored one-off fire time (UTC), echoed from create; null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	FireAt      *time.Time         `json:"fire_at"`
+	Id          openapi_types.UUID `json:"id"`
+	IdentitySub string             `json:"identity_sub"`
 
 	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
 	//
@@ -5042,9 +5046,13 @@ type ScheduledTriggerRead struct {
 	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
 	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
 	// unit-test time.
-	Kind        ScheduledTriggerKind `json:"kind"`
-	LastFiredAt *time.Time           `json:"last_fired_at"`
-	NextFireAt  *time.Time           `json:"next_fire_at"`
+	Kind ScheduledTriggerKind `json:"kind"`
+
+	// LastFiredAt Timestamp of the most recent fire (UTC), stamped with the scheduler tick that claimed the row -- not the trigger's fire_at / next_fire_at. Because fires are tick-aligned, successive last_fired_at values sit on the tick grid and can trail the requested time by up to one tick interval (SCHEDULER_TICK_INTERVAL_SECONDS, default 30 s); null until the first fire.
+	LastFiredAt *time.Time `json:"last_fired_at"`
+
+	// NextFireAt Next instant the trigger is eligible to fire (UTC) -- the column the tick loop scans; null for event triggers (dispatched on event arrival, not the clock). The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	NextFireAt *time.Time `json:"next_fire_at"`
 
 	// Status Closed lifecycle status of a :class:`ScheduledTrigger`.
 	//

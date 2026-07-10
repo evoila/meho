@@ -59,6 +59,23 @@ _IDENTITY_SUB_MAX_LENGTH = 256
 #: applies (:class:`~meho_backplane.api.v1.audit_models`).
 _WORK_REF_MAX_LENGTH = 256
 
+#: Shared wire-description fragment naming the scheduler's tick-quantization
+#: latency contract, surfaced on the timestamp fields so REST / MCP / CLI
+#: consumers can plan SLAs against the grid. The loop scans on a fixed cadence
+#: every ``SCHEDULER_TICK_INTERVAL_SECONDS`` and claims rows whose
+#: ``next_fire_at`` is at or before the tick instant
+#: (:func:`~meho_backplane.scheduler.repository.claim_due_triggers`), so a
+#: requested time is a floor, not an exact dispatch instant: a fire lands on the
+#: first tick at or after it, worst-case one whole interval later. See
+#: ``docs/codebase/scheduler.md``.
+_TICK_LATENCY_NOTE = (
+    "The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS "
+    "(default 30 s, env-tunable 1-3600 s) and fires on the first tick at or "
+    "after this time -- so it is a floor, not an exact dispatch instant, and "
+    "actual dispatch can trail it by up to one tick interval. SLA-sensitive "
+    "deployments lower the tick interval (floor 1 s) per deployment."
+)
+
 
 def _payload_yields_prompt(inputs: dict[str, object] | None) -> bool:
     """Return ``True`` when *inputs* renders a non-empty user prompt.
@@ -178,7 +195,15 @@ class ScheduledTriggerCreate(BaseModel):
     kind: ScheduledTriggerKind
     agent_definition_id: uuid.UUID
     cron_expr: Annotated[str | None, Field(max_length=_CRON_EXPR_MAX_LENGTH)] = None
-    fire_at: datetime | None = None
+    fire_at: Annotated[
+        datetime | None,
+        Field(
+            description=(
+                "One-off fire time (UTC); required for kind=one_off and must be "
+                "null for cron / event triggers. " + _TICK_LATENCY_NOTE
+            ),
+        ),
+    ] = None
     event_filter: dict[str, object] | None = None
     timezone: Annotated[str, Field(max_length=_TIMEZONE_MAX_LENGTH)] = "UTC"
     inputs: dict[str, object] | None = None
@@ -247,12 +272,42 @@ class ScheduledTriggerRead(BaseModel):
     kind: ScheduledTriggerKind
     cron_expr: str | None
     timezone: str
-    fire_at: datetime | None
+    fire_at: Annotated[
+        datetime | None,
+        Field(
+            description=(
+                "Stored one-off fire time (UTC), echoed from create; null for "
+                "cron / event triggers. " + _TICK_LATENCY_NOTE
+            ),
+        ),
+    ]
     event_filter: dict[str, object] | None
     status: ScheduledTriggerStatus
     in_flight_policy: ScheduledTriggerInFlightPolicy
-    next_fire_at: datetime | None
-    last_fired_at: datetime | None
+    next_fire_at: Annotated[
+        datetime | None,
+        Field(
+            description=(
+                "Next instant the trigger is eligible to fire (UTC) -- the column "
+                "the tick loop scans; null for event triggers (dispatched on event "
+                "arrival, not the clock). " + _TICK_LATENCY_NOTE
+            ),
+        ),
+    ]
+    last_fired_at: Annotated[
+        datetime | None,
+        Field(
+            description=(
+                "Timestamp of the most recent fire (UTC), stamped with the "
+                "scheduler tick that claimed the row -- not the trigger's fire_at "
+                "/ next_fire_at. Because fires are tick-aligned, successive "
+                "last_fired_at values sit on the tick grid and can trail the "
+                "requested time by up to one tick interval "
+                "(SCHEDULER_TICK_INTERVAL_SECONDS, default 30 s); null until the "
+                "first fire."
+            ),
+        ),
+    ]
     inputs: dict[str, object] | None
     identity_sub: str
     created_by_sub: str

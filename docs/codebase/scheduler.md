@@ -333,6 +333,33 @@ lock — see "Known issues / limitations" (#1502).
 | `SCHEDULER_ENABLED` | `true` | Lifespan skips starting the loop when `false`. Operators with an external orchestrator can opt out. |
 | `SCHEDULER_TICK_INTERVAL_SECONDS` | `30` | Cadence of the scan-for-due loop. Floor 1 s, ceiling 3600 s. 30 s is the consumer-doc-accepted granularity (cron's finest field is a minute). |
 
+## Fire-time latency contract (#2245)
+
+`fire_at` / `next_fire_at` are a **floor, not an exact dispatch time**. The
+loop scans on a fixed grid every `SCHEDULER_TICK_INTERVAL_SECONDS` (default
+30 s) and claims rows whose `next_fire_at <=` the tick instant, so a trigger
+fires on the **first tick at or after** its requested time and dispatch can
+trail that time by **up to one whole tick interval** (worst case).
+`last_fired_at` is stamped with the *claiming tick instant*, not with
+`fire_at`/`next_fire_at`, so two consecutive fires read back exactly
+tick-aligned. That quantization — not failure fallout — is what produced the
+reported "~28 s post-failure delay" (#2245): a `fire_at` that lands just after
+a tick waits nearly a full interval for the next one. The window is designed
+and bounded; there is **no backoff constant**, and per-fire failure isolation
+already exists (PR #1509, v0.11.0), so a failed fire does not shift the grid
+for the next trigger.
+
+The window is now part of the **API contract**, not just this internal doc:
+`ScheduledTriggerCreate.fire_at` and
+`ScheduledTriggerRead.{fire_at,next_fire_at,last_fired_at}` carry it in their
+OpenAPI field `description` (`scheduler/schemas.py`), so consumers can plan
+SLAs against it directly from the generated client/spec.
+
+**Tuning knob.** An SLA-sensitive deployment that needs tighter fire
+resolution lowers `SCHEDULER_TICK_INTERVAL_SECONDS` per deployment (floor
+1 s, e.g. via the chart's `extraEnv`); worst-case latency drops to the chosen
+interval at the cost of one extra scan query per elapsed tick.
+
 ## Known issues / limitations
 
 - **One-off resolution is "to the second"** — `next_fire_at <= now`
@@ -341,7 +368,9 @@ lock — see "Known issues / limitations" (#1502).
   `[12:00:00, 12:00:30]`. Cron has the same semantics: `0 12 * * *`
   fires in `[12:00:00, 12:00:30]`. Tightening this needs a smaller tick;
   the loop is bounded by `_CLAIM_BATCH_LIMIT=50` rows per tick to keep
-  per-tick wall-clock cost low.
+  per-tick wall-clock cost low. The `[fire_at, fire_at + tick]` window is
+  the API-level **fire-time latency contract** above (#2245) — now carried
+  on the schema field descriptions, not only here.
 - **Catch-up policy is "one fire on resume"** — a long outage does not
   replay every missed cron instant. The consumer doc accepts this; an
   operator who needs "fire-every-N-runs" semantics writes that into the

@@ -20,9 +20,9 @@ import (
 // the spec + future fix; the docstring + the verb's long help warn
 // operators to use `vcf-fleet datacenter list` as the reachability
 // probe in 9.0.
-const aboutOpID = "GET:/lcm/lcops/api/v2/about"
+const aboutOpID = "fleet.about"
 
-// newAboutCmd returns `meho vcf-fleet about` → GET:/lcm/lcops/api/v2/about.
+// newAboutCmd returns `meho vcf-fleet about` → fleet.about.
 func newAboutCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -32,7 +32,7 @@ func newAboutCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "about",
 		Short: "Show vRSLCM appliance identity (apiVersion + productVersion + build)",
-		Long: "about dispatches GET:/lcm/lcops/api/v2/about against\n" +
+		Long: "about dispatches fleet.about against\n" +
 			"connector_id=\"fleet-rest-9.0\" and renders the appliance identity.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"KNOWN ISSUE (VCF 9.0): the /about endpoint returns HTTP 500. The\n" +

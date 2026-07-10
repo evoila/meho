@@ -20,10 +20,10 @@ import (
 // shapes, so `--plane` is required (no implicit default — the wrong
 // plane would silently dispatch a different op_id).
 //
-// Provider plane → `GET:/cloudapi/1.0.0/site` — site identity (name,
-// description, restName, productVersion).
-// Tenant plane → `GET:/iaas/api/about` — supported API versions +
-// latestApiVersion.
+// Provider plane → `vcfa.provider.health` (GET:/cloudapi/1.0.0/site) —
+// site identity (name, description, restName, productVersion).
+// Tenant plane → `vcfa.tenant.about` (GET:/iaas/api/about) — supported
+// API versions + latestApiVersion.
 func newAboutCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -35,8 +35,8 @@ func newAboutCmd() *cobra.Command {
 		Short: "Show VCFA appliance identity (plane-specific)",
 		Long: "about dispatches the per-plane VCFA self-describe endpoint\n" +
 			"against connector_id=\"vcfa-rest-9.0\":\n\n" +
-			"  --plane provider → GET:/cloudapi/1.0.0/site\n" +
-			"  --plane tenant   → GET:/iaas/api/about\n\n" +
+			"  --plane provider → vcfa.provider.health\n" +
+			"  --plane tenant   → vcfa.tenant.about\n\n" +
 			"Both endpoints authenticate per their plane (provider Basic\n" +
 			"→ JWT; tenant JSON-body login → bearer); the connector picks\n" +
 			"the right token based on the op_id's path family. --json\n" +
@@ -81,9 +81,9 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 // place to read off.
 func aboutOpForPlane(plane string) string {
 	if plane == PlaneTenant {
-		return "GET:/iaas/api/about"
+		return "vcfa.tenant.about"
 	}
-	return "GET:/cloudapi/1.0.0/site"
+	return "vcfa.provider.health"
 }
 
 func printAbout(w io.Writer, plane string, r *CallResult) {

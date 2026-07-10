@@ -26,7 +26,7 @@ func newAlertCmd() *cobra.Command {
 }
 
 // newAlertListCmd returns `meho vcf-operations alert list` →
-// GET:/suite-api/api/alerts.
+// vrops.alert.list.
 //
 // --params is the escape hatch for filter query parameters
 // (“activeOnly“ / “alertCriticality“ / “alertStatus“ /
@@ -41,7 +41,7 @@ func newAlertListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List vROps alerts (currently firing or recently resolved)",
-		Long: "list dispatches GET:/suite-api/api/alerts against\n" +
+		Long: "list dispatches vrops.alert.list against\n" +
 			"connector_id=\"vrops-rest-9.0\". Renders alertId / alertDefinitionName /\n" +
 			"resourceId / status; --json emits the full envelope.\n\n" +
 			"Filter via --params with one of the documented query parameters\n" +
@@ -77,7 +77,7 @@ func runAlertList(cmd *cobra.Command, targetName, paramsFlag string, jsonOut boo
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), jsonOut)
 	}
-	const opID = "GET:/suite-api/api/alerts"
+	const opID = "vrops.alert.list"
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -86,13 +86,13 @@ func runAlertList(cmd *cobra.Command, targetName, paramsFlag string, jsonOut boo
 }
 
 func printAlertList(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/suite-api/api/alerts — status=%s (%.0fms)\n",
+	fmt.Fprintf(w, "%s vrops.alert.list — status=%s (%.0fms)\n",
 		ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return
 	}
-	entries, err := decodeVropsListResult(r.Result, vropsListKeysByOp["GET:/suite-api/api/alerts"])
+	entries, err := decodeVropsListResult(r.Result, vropsListKeysByOp["vrops.alert.list"])
 	if err != nil {
 		fallbackResultRender(w, r)
 		return

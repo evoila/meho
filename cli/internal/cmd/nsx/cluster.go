@@ -24,7 +24,7 @@ func newClusterCmd() *cobra.Command {
 	return cmd
 }
 
-// newClusterStatusCmd returns `meho nsx cluster status` → GET:/api/v1/cluster/status.
+// newClusterStatusCmd returns `meho nsx cluster status` → nsx.cluster.status.
 func newClusterStatusCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -34,7 +34,7 @@ func newClusterStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show NSX management cluster health",
-		Long: "status dispatches GET:/api/v1/cluster/status against connector_id=\n" +
+		Long: "status dispatches nsx.cluster.status against connector_id=\n" +
 			"\"nsx-rest-4.2\". Renders the overall mgmt_cluster_status and\n" +
 			"control_cluster_status fields; --json emits the full envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
@@ -59,15 +59,15 @@ func runClusterStatus(cmd *cobra.Command, targetName string, jsonOut bool, backp
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v1/cluster/status", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "nsx.cluster.status", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/api/v1/cluster/status", r, jsonOut, printClusterStatus)
+	return conn.Render(cmd, "nsx.cluster.status", r, jsonOut, printClusterStatus)
 }
 
 func printClusterStatus(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/api/v1/cluster/status — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s nsx.cluster.status — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

@@ -14,7 +14,7 @@ import (
 )
 
 // newAboutCmd returns `meho vcf-operations about` →
-// GET:/suite-api/api/versions/current.
+// vrops.liveness.
 //
 // Renders the vROps appliance's releaseName / buildNumber /
 // humanlyReadableReleaseName identity fields; --json emits the raw
@@ -28,7 +28,7 @@ func newAboutCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "about",
 		Short: "Show vROps appliance release name and build number",
-		Long: "about dispatches GET:/suite-api/api/versions/current against\n" +
+		Long: "about dispatches vrops.liveness against\n" +
 			"connector_id=\"vrops-rest-9.0\" and renders the appliance's\n" +
 			"releaseName / buildNumber / humanlyReadableReleaseName fields.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
@@ -59,7 +59,7 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	const opID = "GET:/suite-api/api/versions/current"
+	const opID = "vrops.liveness"
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -68,7 +68,7 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 }
 
 func printAbout(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/suite-api/api/versions/current — status=%s (%.0fms)\n",
+	fmt.Fprintf(w, "%s vrops.liveness — status=%s (%.0fms)\n",
 		ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

@@ -40,7 +40,7 @@ func newRegionListCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runProviderListVerb(cmd,
-				"GET:/cloudapi/1.0.0/regions",
+				"vcfa.provider.region.list",
 				targetName, jsonOut, backplaneOverride,
 				printRegionList,
 			)
@@ -77,7 +77,7 @@ func newRegionGetCmd() *cobra.Command {
 }
 
 func printRegionList(w io.Writer, r *CallResult) {
-	const opID = "GET:/cloudapi/1.0.0/regions"
+	const opID = "vcfa.provider.region.list"
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

@@ -444,10 +444,14 @@ func TestDispatchOpEmptyTargetSendsNullTarget(t *testing.T) {
 	}
 }
 
-// TestQueryThreadsTimeRangeAndLimit — Goal #214 G3.6 DoD L184 — the
-// --time-range flag maps to params.timestamp_window; --limit maps to
-// params.limit; constraints positional lands in params.constraints.
-func TestQueryThreadsTimeRangeAndLimit(t *testing.T) {
+// TestQueryDispatchesTypedOpWithSchemaParams — post-#2266 the verb
+// dispatches the typed op vrli.event.query, whose closed
+// parameter_schema accepts only constraints (string, rendered into the
+// request path by build_event_query_path) and limit (integer). The
+// verb must send exactly those keys: no timestamp_window (the legacy
+// param the closed schema would reject with additionalProperties:false)
+// and limit as a JSON number, not a string.
+func TestQueryDispatchesTypedOpWithSchemaParams(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"POST /api/v1/operations/call": func(w http.ResponseWriter, r *http.Request) {
 			var body callRequestBody
@@ -456,17 +460,21 @@ func TestQueryThreadsTimeRangeAndLimit(t *testing.T) {
 				w.WriteHeader(400)
 				return
 			}
-			if body.OpID != "GET:/api/v2/events/{constraints}" {
-				t.Errorf("op_id: got %q", body.OpID)
+			if body.OpID != "vrli.event.query" {
+				t.Errorf("op_id: got %q want vrli.event.query", body.OpID)
 			}
 			if got, _ := body.Params["constraints"].(string); got != "text/CONTAINS+error" {
 				t.Errorf("constraints: got %q", got)
 			}
-			if got, _ := body.Params["timestamp_window"].(string); got != "24h" {
-				t.Errorf("timestamp_window: got %q", got)
+			// limit is a JSON number on the wire (schema type integer);
+			// encoding/json decodes it into float64 in a map[string]any.
+			if got, ok := body.Params["limit"].(float64); !ok || got != 100 {
+				t.Errorf("limit: got %v (%T) want 100 (number)", body.Params["limit"], body.Params["limit"])
 			}
-			if got, _ := body.Params["limit"].(string); got != "100" {
-				t.Errorf("limit: got %q", got)
+			// The closed schema rejects unknown keys — the verb must not
+			// send the retired timestamp_window param.
+			if _, present := body.Params["timestamp_window"]; present {
+				t.Errorf("timestamp_window must not be sent to the typed op; params=%v", body.Params)
 			}
 			writeJSON(t, w, 200, CallResult{Status: "ok", OpID: body.OpID})
 		},
@@ -477,7 +485,6 @@ func TestQueryThreadsTimeRangeAndLimit(t *testing.T) {
 	cmd := newQueryCmd()
 	cmd.SetArgs([]string{"text/CONTAINS+error",
 		"--target", "rdc-vrli",
-		"--time-range", "24h",
 		"--limit", "100",
 		"--backplane", srv.URL,
 	})

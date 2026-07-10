@@ -140,7 +140,7 @@ These are restated here because they keep slipping out of conversations:
    `when_to_use` strings → `meho connector enable vmware-rest-9.0`
 3. Agent calls `search_operations(connector_id="vmware-rest-9.0", query="list VMs in cluster")`
    and dispatches via `call_operation(...)`
-4. Agent successfully executes the 13 composites end-to-end against vcsim or a
+4. Agent successfully executes the 14 composites end-to-end against vcsim or a
    real lab vCenter (`vmware.composite.host.evacuate` and friends)
 5. Agent calls `search_knowledge(...)` and `add_to_knowledge(...)` against the
    tenant KB seeded from the consumer's 44-entry `kb/` shelf

@@ -8,11 +8,12 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 15 hand-authored composites
-that orchestrate cross-spec workflows: 7 read composites
-(G3.1-T5 / `#508` shipped 5; `#2080` added `host.network_uplinks`;
-`#2135` added `host.vsan_health`) and 8 write composites
-(G3.1-T6 / `#509`). The
+vSphere 8.5+ / ESXi 8.5+ targets, plus 14 hand-authored composites
+that orchestrate cross-spec workflows: 5 read composites
+(G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
+`host.vsan_health` / `#2135` reads were later re-shipped as typed ops
+in `#2258`) and 9 write composites (G3.1-T6 / `#509`, plus the
+single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -67,11 +68,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — eight module-level
+- **Write composites** (`composites/_write.py`) — nine module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
-  `vm_power_bulk_composite`, `host_evacuate_composite`,
-  `host_detach_from_vds_composite`, `cluster_patch_composite`). Since
+  `vm_power_composite`, `vm_power_bulk_composite`,
+  `host_evacuate_composite`, `host_detach_from_vds_composite`,
+  `cluster_patch_composite`). Since
   `#2256` each accepts `(operator, target, params, connector)` and
   issues its raw-REST sub-ops **directly on the resolved connector
   session** — `connector._get_json` (`_read_sub_op`) for the resolution
@@ -114,8 +116,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   the direct session under the same governance seam.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 15
-  `_CompositeSpec` rows (7 read + 8 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 14
+  `_CompositeSpec` rows (5 read + 9 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -126,8 +128,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   binds to the resolved connector instance and calls directly — no
   `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
   therefore works on a **fresh boot with zero catalog ingest** — the same
-  direct-session property the 7 read composites (`#2253`) and, since
-  `#2256`, the 8 write composites now share. The only `dispatch_child`
+  direct-session property the 5 read composites (`#2253`) and, since
+  `#2256`, the 9 write composites now share. The only `dispatch_child`
   leg left on the whole vmware surface is the `host.evacuate` →
   `vm.migrate` composite→composite recursion (a registrar-guaranteed
   `source_kind="composite"` row, not an ingested primitive, `#2248`). The metadata
@@ -200,9 +202,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 15 `vmware.composite.*` rows with
-   `source_kind="composite"` (7 reads with `safety_level="safe"` +
-   `requires_approval=False`; 8 writes with `safety_level="dangerous"`
+   queued registrar and upserts: the 14 `vmware.composite.*` rows with
+   `source_kind="composite"` (5 reads with `safety_level="safe"` +
+   `requires_approval=False`; 9 writes with `safety_level="dangerous"`
    + `requires_approval=True`), plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -273,7 +275,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 15 composites (7 reads + 8 writes) land as `source_kind="composite"`
+The 14 composites (5 reads + 9 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -385,6 +387,7 @@ enum) are:
 | `vm.clone` | `completed`, `pending`, `timeout` |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found` |
 | `vm.migrate` | `migrated`, `no_recommendation` |
+| `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted` |
 | `host.detach_from_vds` | `detached`, `incomplete` |
@@ -448,7 +451,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 8 write composites ship `requires_approval=True`, so a human/agent
+All 9 write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -471,6 +474,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
+| `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
 
 The live-read previews resolve the same entity set the approved
 dispatch would act on, through the **same shared helpers** the handlers
@@ -479,7 +483,7 @@ use at dispatch time (`_write._resolve_vm_list` /
 sites. The `resolved` list is capped at 20 entries
 (`_PREVIEW_RESOLVED_CAP`), identity-only per row (`vm`/`host`, `name`,
 `power_state`); `total_resolved` always carries the uncapped count. The
-four param-echo composites name their full blast radius in params, so
+five param-echo composites name their full blast radius in params, so
 no read can change what the preview says; `vm.migrate` deliberately
 does **not** pre-resolve a DRS recommendation (point-in-time output
 would mislead the reviewer — the preview says
@@ -562,9 +566,12 @@ they never park.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
-- **All 15 composites shipped** — T5 (#508) ships 5 read, #2080 adds a 6th read,
-  #2135 adds a 7th read (`host.vsan_health`); T6 (#509) ships the 8 write
-  composites. The "All hand-authored composites land as endpoint_descriptor rows with
+- **All hand-authored composites shipped** — T5 (#508) ships 5 read;
+  #2080 + #2135 add two more reads (`host.network_uplinks` /
+  `host.vsan_health`, later re-shipped as typed ops in #2258); T6
+  (#509) ships 8 write composites, and #2301 adds a 9th (single-VM
+  `vm.power`, incl. Tools soft shutdown) — 14 composites today. The
+  "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.
 - **`vm.clone` task polling is wall-clock bounded** — the composite
@@ -606,7 +613,7 @@ they never park.
   "GET:/vcenter/network/distributed-portgroup"` has the identical
   unresolvable spelling. #1602 is scoped to the read
   `network.portgroup.audit` composite only; the write-side fix plus a
-  reconcile guard over the 8 write composites' `_SUB_OPS_*` against the
+  reconcile guard over the 9 write composites' `_SUB_OPS_*` against the
   real pinned spec (the existing
   `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
   synthesises its fixture *from* the constants, so it cannot catch a

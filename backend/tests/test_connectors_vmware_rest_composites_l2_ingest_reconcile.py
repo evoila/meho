@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""op_id reconciliation between the 8 write composites and the ingest pipeline.
+"""op_id reconciliation between the 9 write composites and the ingest pipeline.
 
 G3.16-T1 (#1414). The 8 vmware-rest write composites each declare the L2
 sub-ops they dispatch into via ``_SUB_OPS_*`` tuples in
@@ -74,7 +74,7 @@ _GETADDRINFO_PATCH = patch(
 
 
 def _required_raw_sub_op_ids() -> set[str]:
-    """Union of every ``_SUB_OPS_*`` op_id across the 8 write composites.
+    """Union of every ``_SUB_OPS_*`` op_id across the 9 write composites.
 
     Excludes composite-to-composite references (``vmware.composite.*``):
     those are not ``endpoint_descriptor`` rows and the pre-flight walk
@@ -94,7 +94,7 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Eight ``_SUB_OPS_*`` module constants today, one per write composite.
+    Nine ``_SUB_OPS_*`` module constants today, one per write composite.
     Pinning the exact set means a renamed or dropped constant can't
     silently shrink the reconciled set to a vacuous pass.
     """
@@ -106,6 +106,7 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_VM_CLONE",
         "_SUB_OPS_VM_CREATE",
         "_SUB_OPS_VM_MIGRATE",
+        "_SUB_OPS_VM_POWER",
         "_SUB_OPS_VM_POWER_BULK",
         "_SUB_OPS_VM_SNAPSHOT_REVERT",
     ]

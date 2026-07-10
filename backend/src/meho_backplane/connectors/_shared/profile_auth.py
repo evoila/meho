@@ -466,6 +466,52 @@ def _extract_session_login_basic_token(payload: Any) -> SessionToken | None:
     return None
 
 
+# -- session_login_token (SDDC Manager: json login -> body .accessToken -> Bearer) --
+
+#: SDDC Manager's token-issue endpoint. The connector POSTs the JSON
+#: credential body and reads ``accessToken`` out of the response, then sends
+#: it as ``Authorization: Bearer <token>`` on subsequent requests. Grounded
+#: in SDDC Manager's ``POST /v1/tokens`` (Broadcom KBs 435716/387124/372387),
+#: whose HTTP Basic surface is rejected — the appliance is token-only. This
+#: is the first member of the shape; a future product with a different login
+#: path / token field enters as its own scheme member (a small PR), never a
+#: profile knob (the #1177 / #1969 no-DSL line).
+_SDDC_TOKEN_PATH = "/v1/tokens"
+
+
+def _session_login_token_body(_auth: AuthSpec, secret: Mapping[str, str]) -> dict[str, str]:
+    """Build the ``{username, password}`` JSON login body.
+
+    The wire keys (``username`` / ``password``) are SDDC Manager's
+    ``POST /v1/tokens`` request contract; the values come from the secret
+    bundle the profile declared. Unlike vRLI's ``session_login`` there is no
+    ``provider`` field — the token endpoint takes the credential pair alone.
+    """
+    return {
+        "username": _require_field(secret, "username", scheme="session_login_token"),
+        "password": _require_field(secret, "password", scheme="session_login_token"),
+    }
+
+
+def _extract_access_token(payload: Any) -> SessionToken | None:
+    """Read ``accessToken`` out of the SDDC Manager token response body.
+
+    SDDC Manager returns ``{"accessToken": "<jwt>", "refreshToken": {...}}``.
+    The session is recovered by a full re-login on a downstream expiry status
+    — there is no refresh-token leg (the parent initiative Non-goal) — so
+    ``ttl_seconds`` is ``None`` and the harness caches the token until an
+    expiry status invalidates it. Returns ``None`` for a missing /
+    non-string / empty ``accessToken`` (or a non-object body) so the harness
+    raises the consistent target-named error.
+    """
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get("accessToken")
+    if not isinstance(value, str) or not value:
+        return None
+    return SessionToken(token=value, ttl_seconds=None)
+
+
 # -- oauth2_mint (keycloak: form client-credentials grant -> Bearer) --------
 
 #: Keycloak's token endpoint path. The admin-realm segment in the typed
@@ -548,6 +594,17 @@ SESSION_SCHEME_SPECS: dict[str, SessionSchemeSpec] = {
         token_header=_VCENTER_SESSION_HEADER,
         token_value_kind="raw",
         legacy_fallback=_VCENTER_LEGACY_FALLBACK,
+    ),
+    "session_login_token": SessionSchemeSpec(
+        login_path=lambda _auth: _SDDC_TOKEN_PATH,
+        login_credentials="body",
+        encoding="json",
+        build_body=_session_login_token_body,
+        build_login_auth=_no_login_auth,
+        request_headers={"Content-Type": "application/json", "Accept": "application/json"},
+        extract_token=_extract_access_token,
+        token_header="Authorization",
+        token_value_kind="bearer",
     ),
     "oauth2_mint": SessionSchemeSpec(
         login_path=lambda _auth: _OAUTH2_TOKEN_PATH,

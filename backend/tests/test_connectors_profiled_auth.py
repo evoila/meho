@@ -74,6 +74,7 @@ def _profile(scheme: str, **auth_overrides: object) -> ExecutionProfile:
         "static_header": {"secret_fields": ("token",), "value_kind": "bearer"},
         "session_login": {"secret_fields": ("username", "password")},
         "session_login_basic": {"secret_fields": ("username", "password")},
+        "session_login_token": {"secret_fields": ("username", "password")},
         "oauth2_mint": {"secret_fields": ("client_id", "client_secret")},
     }[scheme]
     auth_kwargs: dict[str, object] = {"scheme": scheme, **defaults}
@@ -246,6 +247,156 @@ async def test_session_login_missing_token_raises_naming_scheme_and_target() -> 
 
     assert "session_login" in str(exc.value)
     await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# session_login_token (SDDC Manager parity) — json login -> .accessToken -> Bearer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_login_token_mints_token_via_json_post_and_returns_bearer() -> None:
+    """``session_login_token`` POSTs a JSON creds body and returns Bearer <accessToken>.
+
+    SDDC Manager shape: ``POST /v1/tokens`` with ``{username, password}`` (no
+    ``provider``), ``accessToken`` read out of the response body, and no
+    Basic/Authorization header on the login POST (the appliance rejects Basic).
+    """
+    connector = _connector("session_login_token", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="sddc", host="sddc.invalid")
+
+    async with respx.mock(base_url="https://sddc.invalid") as mock:
+        route = mock.post("/v1/tokens").respond(
+            200, json={"accessToken": "acc-xyz", "refreshToken": {"id": "r-1"}}
+        )
+        headers = await connector.auth_headers(target, operator=_operator())
+
+    assert headers == {"Authorization": "Bearer acc-xyz"}
+    request = route.calls[0].request
+    assert request.headers.get("content-type", "").startswith("application/json")
+    import json
+
+    assert json.loads(request.read().decode()) == {"username": "svc", "password": "pw"}
+    # The login POST must NOT carry a stale/Basic Authorization header.
+    assert "authorization" not in {k.lower() for k in request.headers}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_token_caches_token_single_flight() -> None:
+    """A second call reuses the cached session — exactly one login POST."""
+    connector = _connector("session_login_token", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="sddc", host="sddc.invalid")
+
+    async with respx.mock(base_url="https://sddc.invalid") as mock:
+        route = mock.post("/v1/tokens").respond(200, json={"accessToken": "acc-cached"})
+        h1 = await connector.auth_headers(target, operator=_operator())
+        h2 = await connector.auth_headers(target, operator=_operator())
+
+    assert h1 == h2 == {"Authorization": "Bearer acc-cached"}
+    assert route.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_token_does_not_proactively_expire_on_ttl() -> None:
+    """A session_login_token token has no proactive TTL — caches until invalidated.
+
+    SDDC Manager's session is recovered by a full re-login on a downstream
+    expiry status (no refresh leg), so the cache entry carries
+    ``expires_at=None`` and stays fresh regardless of the clock.
+    """
+    connector = _connector("session_login_token", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="sddc", host="sddc.invalid")
+
+    async with respx.mock(base_url="https://sddc.invalid") as mock:
+        mock.post("/v1/tokens").respond(200, json={"accessToken": "acc-1"})
+        await connector.auth_headers(target, operator=_operator())
+
+    cached = connector._session_tokens[target_cache_key(target)]
+    assert cached.expires_at is None
+    assert cached.is_fresh(time.monotonic() + 10_000) is True
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_token_missing_token_raises_naming_scheme_and_target() -> None:
+    """A 2xx login with no accessToken raises ProfileAuthError naming the target."""
+    connector = _connector("session_login_token", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="sddc", host="sddc.invalid")
+
+    async with respx.mock(base_url="https://sddc.invalid") as mock:
+        mock.post("/v1/tokens").respond(200, json={"refreshToken": {"id": "r-1"}})
+        with pytest.raises(ProfileAuthError, match=r"sddc") as exc:
+            await connector.auth_headers(target, operator=_operator())
+
+    assert "session_login_token" in str(exc.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_login_token_invalidate_then_relogin_round_trip() -> None:
+    """Invalidate → re-login mints a fresh token through the session harness.
+
+    The #2067 dispatch-path hook (``invalidate_session``) evicts the cached
+    token; the next ``auth_headers`` single-flight re-establishes it with a
+    second login POST. Pins AC: cache evicted + fresh re-login round-trip.
+    """
+    connector = _connector("session_login_token", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="sddc", host="sddc.invalid")
+    key = target_cache_key(target)
+
+    async with respx.mock(base_url="https://sddc.invalid") as mock:
+        route = mock.post("/v1/tokens").respond(200, json={"accessToken": "acc-fresh"})
+        first = await connector.auth_headers(target, operator=_operator())
+        assert first == {"Authorization": "Bearer acc-fresh"}
+        assert key in connector._session_tokens
+
+        await connector.invalidate_session(target)
+        assert key not in connector._session_tokens
+
+        second = await connector.auth_headers(target, operator=_operator())
+
+    assert second == {"Authorization": "Bearer acc-fresh"}
+    assert route.call_count == 2
+    await connector.aclose()
+
+
+def test_session_login_token_build_body_and_extract_token_directly() -> None:
+    """Unit-level cover of the scheme's build_body + extract_token + spec shape.
+
+    ``build_body`` returns the ``{username, password}`` JSON pair with no
+    ``provider`` (unlike vRLI); the login carries no HTTP Basic auth;
+    ``extract_token`` reads ``accessToken`` into a no-TTL token and rejects
+    every unusable body; the scheme carries no legacy fallback.
+    """
+    from meho_backplane.connectors._shared.profile_auth import SESSION_SCHEME_SPECS
+
+    spec = SESSION_SCHEME_SPECS["session_login_token"]
+    auth = AuthSpec(scheme="session_login_token", secret_fields=("username", "password"))
+    secret = {"username": "svc", "password": "pw"}
+
+    assert spec.build_body(auth, secret) == {"username": "svc", "password": "pw"}
+    assert spec.build_login_auth(auth, secret) is None
+    assert spec.login_path(auth) == "/v1/tokens"
+    assert spec.login_credentials == "body"
+    assert spec.encoding == "json"
+    assert spec.token_header == "Authorization"
+    assert spec.token_value_kind == "bearer"
+    assert spec.legacy_fallback is None
+
+    minted = spec.extract_token({"accessToken": "acc-1", "refreshToken": {"id": "r"}})
+    assert minted is not None
+    assert minted.token == "acc-1"
+    assert minted.ttl_seconds is None
+
+    # No usable token → None (harness then raises the target-named error).
+    assert spec.extract_token({}) is None
+    assert spec.extract_token({"accessToken": ""}) is None
+    assert spec.extract_token({"accessToken": 123}) is None
+    assert spec.extract_token("acc-1") is None
+    assert spec.extract_token([]) is None
+    assert spec.extract_token(None) is None
 
 
 # ---------------------------------------------------------------------------

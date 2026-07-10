@@ -34,7 +34,7 @@ func newDomainListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List VCF domains (management + workload)",
-		Long: "list dispatches GET:/v1/domains against connector_id=\"sddc-rest-9.0\".\n\n" +
+		Long: "list dispatches sddc.domain.list against connector_id=\"sddc-rest-9.0\".\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example:       "  meho sddc-manager domain list --target rdc-sddc-manager",
 		Args:          cobra.NoArgs,
@@ -56,17 +56,17 @@ func runDomainList(cmd *cobra.Command, targetName string, jsonOut bool, backplan
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/domains", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "sddc.domain.list", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/v1/domains", r, jsonOut, printDomainList)
+	return conn.Render(cmd, "sddc.domain.list", r, jsonOut, printDomainList)
 }
 
 func printDomainList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		conn.PrintGeneric(w, "GET:/v1/domains", r)
+		conn.PrintGeneric(w, "sddc.domain.list", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF domains (%d)\n", len(entries))

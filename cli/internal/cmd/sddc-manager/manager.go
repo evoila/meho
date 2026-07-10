@@ -33,7 +33,7 @@ func newManagerListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List SDDC Manager appliances (FQDN, IP, version, management domain)",
-		Long: "list dispatches GET:/v1/sddc-managers against connector_id=\"sddc-rest-9.0\".\n\n" +
+		Long: "list dispatches sddc.manager.list against connector_id=\"sddc-rest-9.0\".\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example: "  meho sddc-manager manager list --target rdc-sddc-manager\n" +
 			"  meho sddc-manager manager list --target rdc-sddc-manager --json",
@@ -56,17 +56,17 @@ func runManagerList(cmd *cobra.Command, targetName string, jsonOut bool, backpla
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/sddc-managers", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "sddc.manager.list", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/v1/sddc-managers", r, jsonOut, printManagerList)
+	return conn.Render(cmd, "sddc.manager.list", r, jsonOut, printManagerList)
 }
 
 func printManagerList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		conn.PrintGeneric(w, "GET:/v1/sddc-managers", r)
+		conn.PrintGeneric(w, "sddc.manager.list", r)
 		return
 	}
 	fmt.Fprintf(w, "sddc-manager appliances (%d)\n", len(entries))

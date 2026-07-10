@@ -125,6 +125,7 @@ from meho_backplane.operations.ingest.payload import (
     ConnectorReviewGroup,
     ConnectorReviewOp,
     ConnectorReviewPayload,
+    ConnectorReviewProvenance,
 )
 from meho_backplane.operations.ingest.pipeline import (
     IngestionPipelineResult,
@@ -155,6 +156,7 @@ __all__ = [
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
+    "ConnectorReviewProvenance",
     "ConnectorScopeCandidate",
     "ConnectorSpecCatalog",
     "ConnectorSpecEntry",

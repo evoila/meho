@@ -123,7 +123,9 @@ from meho_backplane.operations.ingest.payload import (
     ConnectorReviewGroup,
     ConnectorReviewOp,
     ConnectorReviewPayload,
+    ConnectorReviewProvenance,
 )
+from meho_backplane.operations.ingest.spec_provenance import load_spec_provenance
 
 if TYPE_CHECKING:
     from meho_backplane.connectors.base import Connector
@@ -511,6 +513,17 @@ class ReviewService:
         # ``ungrouped_op_count`` is the reconciling remainder:
         # ``total_op_count + ungrouped_op_count == listing.operation_count``.
         all_op_count = await count_ops_in_scope(session, scope)
+        # #2291: durable per-spec provenance for this connector scope,
+        # ordered by ``uri``. Empty for connectors ingested before the
+        # provenance table landed — the surfaces render that gap rather
+        # than fabricating a record.
+        provenance_rows = await load_spec_provenance(
+            session,
+            tenant_id=scope.tenant_id,
+            product=scope.product,
+            version=scope.version,
+            impl_id=scope.impl_id,
+        )
         return ConnectorReviewPayload(
             connector_id=connector_id,
             product=scope.product,
@@ -522,6 +535,16 @@ class ReviewService:
             ungrouped_op_count=max(all_op_count - grouped_op_count, 0),
             kind=kind,
             dispatchable=dispatchable,
+            provenance=[
+                ConnectorReviewProvenance(
+                    uri=row.uri,
+                    sha256=row.sha256,
+                    origin=row.origin,
+                    operator_sub=row.operator_sub,
+                    ingested_at=row.ingested_at,
+                )
+                for row in provenance_rows
+            ],
         )
 
     # -- public write API: edits ------------------------------------------

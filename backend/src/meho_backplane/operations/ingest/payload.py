@@ -18,6 +18,7 @@ would be a programming bug, not a feature.
 
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict
@@ -28,7 +29,42 @@ __all__ = [
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
+    "ConnectorReviewProvenance",
 ]
+
+
+class ConnectorReviewProvenance(BaseModel):
+    """Provenance for one spec ingested under this connector (#2291).
+
+    Surfaces the durable
+    :class:`~meho_backplane.db.models.SpecProvenance` record so an
+    operator reviewing a connector can tell a vendor artifact from a
+    hand-mutated one before enabling reads:
+
+    * ``uri`` — the audit label as presented at ingest
+      (``spec:`` / ``https://`` / ``file:///`` / ``docs:`` form).
+    * ``sha256`` — hex digest over the raw spec bytes. Two ingests of
+      the *same* label with different digests mean the content changed.
+    * ``origin`` — ``fetched`` (https GET) vs ``inline`` (operator
+      upload) vs ``shipped`` (MEHO-authored catalog data). An inline
+      upload labelled with a vendor URL is thus distinguishable from a
+      genuine fetch of that URL.
+    * ``operator_sub`` — who ingested it (``None`` for boot-time
+      shipped ingests with no operator).
+    * ``ingested_at`` — when the provenance row was last written.
+
+    Connectors ingested before this table landed have no provenance
+    rows; the surfaces render that as "unknown (pre-provenance)" rather
+    than a fabricated record.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    uri: str
+    sha256: str
+    origin: str
+    operator_sub: str | None
+    ingested_at: datetime
 
 
 class ConnectorReviewOp(BaseModel):
@@ -131,3 +167,9 @@ class ConnectorReviewPayload(BaseModel):
     ungrouped_op_count: int = 0
     kind: ConnectorAuthoringKind = "ingested-shim"
     dispatchable: bool = False
+    # #2291: one entry per spec ingested under this connector scope,
+    # ordered by ``uri``. Empty for connectors ingested before the
+    # provenance table landed (surfaces render "unknown (pre-provenance)").
+    # Additive with a default so existing construction call sites keep
+    # working; the service always sets it from the persisted rows.
+    provenance: list[ConnectorReviewProvenance] = []

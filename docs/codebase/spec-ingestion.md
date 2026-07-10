@@ -1480,6 +1480,47 @@ version-gate steps but returns the spec's `info.version` string
 pipeline can fail the spec-vs-label check in milliseconds rather
 than after spending CPU on a 2,000-op spec walk.
 
+### Spec provenance persistence (#2291)
+
+`parse_openapi_with_provenance(spec_path_or_uri, *, spec_source=None,
+content=None)` is the register phase's variant of `parse_openapi`: it
+returns the same proto list **plus** a `ParsedSpecProvenance` (a frozen
+dataclass with `uri`, `sha256`, `origin`). The bytes are loaded exactly
+once — the `sha256` is taken over the **raw bytes** (fetched body or
+uploaded content) at the `_load_spec_bytes` trust boundary, before any
+YAML/JSON decode, so it reflects exactly what arrived rather than a
+re-serialised dict. `classify_spec_origin(uri, content)` derives the
+origin from what the ingest request already carries — no threading from
+the REST/MCP/CLI entry points:
+
+- `content is None` → `fetched` (the https GET path).
+- `content` set **and** `uri` starts with `spec:` → `shipped` (the
+  catalog on-ramp uploads MEHO-authored package data under
+  `uri="spec:<resource>"`, #1975).
+- `content` set under any other label → `inline` (an operator upload).
+
+The register phase (`IngestionPipeline._register_one_spec`) upserts one
+`spec_provenance` row per accepted spec after its descriptor rows land —
+in its **own** transaction, because provenance is record-and-surface
+metadata and must not roll back the operations it describes. The row is
+keyed on `(tenant_id, product, version, impl_id, uri)` (two partial
+unique indexes, `tenant_id IS NULL` = global, mirroring the descriptor
+scope split), so re-ingesting the same spec updates the row in place
+(new `sha256` + `ingested_at`, no duplicate) and different content under
+the same label changes the stored digest. `upsert_spec_provenance` /
+`load_spec_provenance` live in `ingest/spec_provenance.py`; the
+`SpecProvenance` model is in `db/models.py` (Alembic `0056`).
+
+The review service reads the rows back via `load_spec_provenance` and
+attaches them to `ConnectorReviewPayload.provenance` (a list of
+`ConnectorReviewProvenance`), which `GET
+/api/v1/connectors/{id}/review`, `meho connector review`, and the review
+drawer surface. A connector ingested before the table landed has no
+rows; the surfaces render that as "unknown (pre-provenance)" rather than
+fabricating a record. This is a spec-level table by design: a single
+spec fans out to hundreds of descriptor rows, so per-descriptor
+provenance columns would be the wrong shape.
+
 ## Security: SSRF and local-file guard (G0.16-T8, #95)
 
 `_load_spec_bytes` (the fetch sink shared by `parse_openapi` and

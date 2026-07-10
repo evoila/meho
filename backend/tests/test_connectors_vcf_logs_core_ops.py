@@ -16,11 +16,12 @@ Covers :mod:`meho_backplane.connectors.vcf_logs.core_ops`:
   non-empty string values.
 * :func:`apply_vrli_core_curation` — the operator-review-time
   substrate call that flips ``review_status='enabled'`` on the 5
-  curated groups, lands ``llm_instructions`` on the 7 curated ops,
+  curated groups, lands ``llm_instructions`` on the curated ops,
   and explicitly disables non-core ops via the audit-log-driven
-  operator-override exclusion. The load-bearing assertion is "7
-  ops dispatchable, every other op in curated groups stays
-  ``is_enabled=False``".
+  operator-override exclusion. The load-bearing assertion is "the
+  curated ingested ops dispatchable, every other op in curated groups
+  stays ``is_enabled=False``". Since #2295 the raw events query is the
+  ``vrli.event.query`` typed op, not one of these ingested rows.
 
 Test harness mirrors :mod:`tests.test_connectors_harbor_core_ops`
 and :mod:`tests.test_connectors_nsx_core_ops`: SQLite via the
@@ -109,7 +110,7 @@ def _make_operator(*, tenant_id: uuid.UUID) -> Operator:
     ids=str,
 )
 def test_classify_vrli_op_returns_correct_group(op_id: str, expected_group: str) -> None:
-    """classify_vrli_op returns the curated group_key for all 7 core ops."""
+    """classify_vrli_op returns the curated group_key for each curated family."""
     assert classify_vrli_op(op_id) == expected_group
 
 
@@ -154,10 +155,35 @@ def test_classify_vrli_op_rejects_write_methods_on_curated_paths() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_vrli_core_ops_has_seven_entries() -> None:
-    """The read-only v0.5 core enables exactly 7 ops per #369 DoD."""
-    assert len(VRLI_CORE_OPS) == 7, (
-        f"VRLI_CORE_OPS should carry 7 entries (v0.5 read core); got {len(VRLI_CORE_OPS)}"
+def test_vrli_core_ops_has_six_entries() -> None:
+    """The curated ingested core carries 6 ops after #2295.
+
+    The read-only v0.5 core was 7 ops; #2295 converted the events query to the
+    ``vrli.event.query`` typed op and dropped it from this ingested curation,
+    leaving 6 (version, aggregated-events, fields, hosts, content-pack-list,
+    alerts). The other six are declined from typed conversion (unused in the
+    adopter's real operations; the ingested canonical spec covers the browse
+    case).
+    """
+    assert len(VRLI_CORE_OPS) == 6, (
+        f"VRLI_CORE_OPS should carry 6 entries (events query moved to a typed "
+        f"op in #2295); got {len(VRLI_CORE_OPS)}"
+    )
+
+
+def test_vrli_core_ops_no_longer_curates_the_events_query_op() -> None:
+    """The raw events query is NOT an ingested-curated row (it's the typed op).
+
+    AC #4 / #2262: ``vcf_logs/core_ops.py`` no longer flips an ingested row
+    for the events query. A grep-equivalent: no VRLI_CORE_OPS entry targets the
+    ``/api/v2/events/`` path (aggregated-events is a distinct path).
+    """
+    events_query_ids = [
+        op.op_id for op in VRLI_CORE_OPS if op.op_id.split(":", 1)[-1].startswith("/api/v2/events/")
+    ]
+    assert not events_query_ids, (
+        f"the events query must not be an ingested-curated op after #2295; "
+        f"found {events_query_ids!r} still in VRLI_CORE_OPS"
     )
 
 
@@ -192,28 +218,19 @@ def test_vrli_core_groups_when_to_use_all_populated() -> None:
         assert group.name and group.name.strip(), f"group {group.group_key!r} has empty name"
 
 
-def test_vrli_core_groups_event_query_op_is_jsonflux_handle_shaped() -> None:
-    """The event-query op's llm_instructions advertise the JSONFlux handle shape.
+def test_vrli_core_ops_events_query_group_still_present() -> None:
+    """The vrli-events group survives the events-query op's move to typed.
 
-    Per #834 acceptance criteria, ``vrli.event.query`` returns a
-    JSONFlux result handle (event result sets are large by nature).
-    The agent learns this from the op's ``output_shape`` /
-    ``next_step`` text — assert the operator-reviewed copy mentions
-    the handle so the LLM knows to drill via
-    ``result_describe`` / ``result_query`` rather than expecting an
-    inline payload.
+    ``aggregated-events`` still classifies to ``vrli-events``, so the group is
+    still carried by both :data:`VRLI_CORE_GROUPS` and at least one ingested
+    core op — the JSONFlux-handle-shape assertion for the raw events query
+    itself now lives with the typed op
+    (``tests.test_connectors_vcf_logs_typed_event_query``).
     """
-    event_query_op = next(
-        op for op in VRLI_CORE_OPS if op.op_id == "GET:/api/v2/events/{constraints}"
-    )
-    output_shape = str(event_query_op.llm_instructions["output_shape"]).lower()
-    next_step = str(event_query_op.llm_instructions["next_step"]).lower()
-    combined = f"{output_shape} {next_step}"
-    assert "handle" in combined or "jsonflux" in combined, (
-        f"vrli.event.query llm_instructions should mention the JSONFlux handle "
-        f"so the agent reads results via result_describe / result_query; "
-        f"got output_shape={event_query_op.llm_instructions['output_shape']!r}, "
-        f"next_step={event_query_op.llm_instructions['next_step']!r}"
+    group_keys_in_core = {op.group_key for op in VRLI_CORE_OPS}
+    assert "vrli-events" in group_keys_in_core, (
+        "vrli-events group must still be covered by an ingested core op "
+        "(aggregated-events) after the events query moved to a typed op"
     )
 
 
@@ -325,8 +342,8 @@ async def _seed_curated_groups_and_ops(
     return group_ids
 
 
-async def test_apply_vrli_core_curation_enables_exactly_7_ops() -> None:
-    """apply_vrli_core_curation enables exactly the 7 core ops."""
+async def test_apply_vrli_core_curation_enables_exactly_the_core_ops() -> None:
+    """apply_vrli_core_curation enables exactly the curated core ops."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)
@@ -387,7 +404,7 @@ async def test_apply_vrli_core_curation_disables_non_core_ops_in_curated_groups(
 
 
 async def test_apply_vrli_core_curation_sets_llm_instructions_on_all_core_ops() -> None:
-    """llm_instructions is populated on all 7 core ops after curation."""
+    """llm_instructions is populated on all curated core ops after curation."""
     tenant_id = uuid.uuid4()
     operator = _make_operator(tenant_id=tenant_id)
     await _seed_curated_groups_and_ops(tenant_id=tenant_id)

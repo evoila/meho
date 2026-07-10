@@ -3,15 +3,43 @@
 ## Overview
 
 The `nsx` connector is the hand-rolled `HttpConnector` subclass that
-dispatches ingested NSX REST operations under the
+dispatches NSX REST operations under the
 `(product="nsx", version="9.0", impl_id="nsx-rest")` registry triple.
 G3.5-T1 (#613) shipped the skeleton -- session-cookie / XSRF auth,
-fingerprint, probe, and the G0.6 dispatch shim. G3.5-T2 (#614) adds
-the **operator-review curation substrate**: the 9 read-only core
-ops + per-op `llm_instructions` blobs + group-level `when_to_use`
-hints + the `apply_nsx_core_curation` helper that the operator
-review step calls against the G0.7-ingested connector. CLI verbs +
-MCP review + recorded-fixture E2E arrive in G3.5-T3 (#615).
+fingerprint, probe, and the G0.6 dispatch shim. G3.5-T2 (#614) added
+the **operator-review curation substrate**: per-op `llm_instructions`
+blobs + group-level `when_to_use` hints + the `apply_nsx_core_curation`
+helper that the operator review step calls against the G0.7-ingested
+connector. CLI verbs + MCP review + recorded-fixture E2E arrive in
+G3.5-T3 (#615).
+
+**Audited reads are typed ops (#2302).** The audited operational read
+set -- node/cluster status+version, backup config+status,
+transport-zones list, tier-1 list, and alarms -- is registered as
+**typed** ops (`source_kind="typed"`, `typed_ops.py` metadata +
+`typed_reads.py` bodies + bound-method shims on `NsxConnector`), so it
+dispatches on a fresh boot with **zero catalog ingest** (avoiding the
+#2247 per-deploy catalog-state failure class). The remaining reads
+(transport-node listing, segments, tier-0 gateways, distributed-firewall
+policies + rules) stay as ingested-row curation in `core_ops.py` so the
+wider ingested breadth remains browsable. `nsx.backup.config` is
+first-class for the disk-fill incident class (Broadcom KB 442696 shape):
+it surfaces `backup_enabled` + `passphrase_configured` + the
+`backup_schedule` / `remote_file_server` retention-relevant fields, and
+scrubs the backup passphrase + any nested SFTP credential at the boundary
+(the default redaction policy masks `password`/`secret` but not
+`passphrase`). `tier-1 gateway create` (a write) is out of scope -- the
+first write on a read-only connector is its own approval-gated G3.x
+write-surface initiative.
+
+**Session recovery (#2067).** `NsxConnector.invalidate_session(target)`
+is the public duck-typed hook the generic dispatch path calls on an
+auth-class status (NSX's 401) before re-dispatching once. The typed reads
+issue `_get_json` directly, so a raw 401 propagates to the dispatcher's
+#2067 recovery arm, which evicts the cached session and re-dispatches --
+the same seam the vmware-rest / vcf-logs connectors expose. The internal
+`_get_json_with_session_retry` helper still serves the fingerprint /
+probe path (which the dispatcher does not drive).
 
 **VCF-9 version renumber (#1530).** NSX-T 4.x was renumbered onto the
 VCF train at VCF 9.0 -- a live VCF-9 appliance reports NSX 9.0.x and

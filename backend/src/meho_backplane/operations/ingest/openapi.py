@@ -63,6 +63,14 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 import yaml
+from jsonschema.exceptions import ValidationError as _JsonSchemaValidationError
+from jsonschema.exceptions import best_match as _best_schema_error
+from openapi_spec_validator.schemas import (
+    openapi_v30_schema_validator as _oas30_schema_validator,
+)
+from openapi_spec_validator.schemas import (
+    openapi_v31_schema_validator as _oas31_schema_validator,
+)
 
 from meho_backplane.operations._rfc6570 import split_path_operator
 from meho_backplane.operations.ingest.exceptions import (
@@ -427,9 +435,10 @@ def parse_openapi(
 
     Raises:
         InvalidSpecError: Document is not a mapping, lacks ``paths``,
-            the URI scheme is not ``https``, or the resolved
-            destination is a private/loopback/link-local/reserved
-            address.
+            fails structural (metaschema) validation against the
+            OpenAPI 3.0/3.1 Specification schema, the URI scheme is
+            not ``https``, or the resolved destination is a
+            private/loopback/link-local/reserved address.
         UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, or the
             document references a cross-document ``$ref``.
         UpstreamNotSpecError: HTTP fetch succeeded (2xx) but the
@@ -493,6 +502,7 @@ def _project_spec_bytes_to_protos(
     """
     spec = _decode_spec(spec_bytes)
     _validate_openapi_version(spec)
+    _validate_openapi_structure(spec)
 
     paths = spec.get("paths")
     if paths is None:
@@ -850,6 +860,54 @@ def _validate_openapi_version(spec: dict[str, Any]) -> None:
         raise UnsupportedSpecError(
             f"OpenAPI version {raw_version!r} is not supported (expected 3.0.x or 3.1.x)"
         )
+
+
+def _validate_openapi_structure(spec: dict[str, Any]) -> None:
+    """Refuse a 3.x document that violates the official OpenAPI metaschema.
+
+    Runs *after* :func:`_validate_openapi_version`, so the version string
+    is already known to be ``3.0.x`` / ``3.1.x`` and the matching
+    metaschema can be selected (3.1 carries the jsonSchemaDialect-aware
+    2020-12 schema; 3.0 the draft-04-based one). Validation is
+    **metaschema-only**: the document is checked against the JSON Schema
+    that defines a legal OpenAPI object, not the library's optional
+    semantic add-ons (duplicate-operationId, unresolvable-path-parameter,
+    extra-parameter). Those add-ons routinely flag legal-but-untidy vendor
+    specs, and this gate's job is structural validity, not a linter — a
+    published 950-operation spec must not be refused because two operations
+    share a tag or an operation omits an ``operationId``.
+
+    The first (most-relevant) violation is surfaced via
+    :func:`jsonschema.exceptions.best_match` so the operator gets one
+    actionable location instead of a wall of cascading errors, named by
+    its JSON path (e.g. ``$.paths['/pets'].get.responses``). Raised as
+    :class:`InvalidSpecError` — the version-independent structural-fault
+    family — so it flows through the existing ``invalid_spec`` envelope on
+    every transport (REST 400, MCP ``-32602``, async-job ``error``) with
+    no new typed field. Because the gate lives at parse, the ``dry_run``
+    and effectful ingest legs refuse an invalid spec identically.
+
+    The parser's deliberate tolerant-skip of *sub-document* junk
+    (non-dict path items / operations, empty path items) is unaffected:
+    those shapes are still legal per the metaschema and are handled
+    downstream in :func:`_iter_operations`; only genuine metaschema
+    violations (``paths`` as a list, a non-object ``responses``, a missing
+    required field) are refused here.
+    """
+    validator = (
+        _oas31_schema_validator
+        if spec.get("openapi", "").startswith("3.1")
+        else _oas30_schema_validator
+    )
+    error: _JsonSchemaValidationError | None = _best_schema_error(validator.iter_errors(spec))
+    if error is None:
+        return
+    raise InvalidSpecError(
+        f"OpenAPI document fails structural (metaschema) validation at "
+        f"{error.json_path}: {error.message}. Fix the document so it conforms "
+        f"to the OpenAPI Specification schema for its declared version, then "
+        f"re-ingest. See docs/codebase/error-message-shape.md."
+    )
 
 
 def _iter_operations(

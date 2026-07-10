@@ -67,9 +67,9 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vcf_fleet_canary_fixtures import (
     FLEET_CANARY_BASE_URL,
-    FLEET_CANARY_ENVIRONMENTS,
     FLEET_CANARY_FINGERPRINT,
     FLEET_CANARY_OPERATOR_TENANT,
+    FLEET_CANARY_REQUESTS,
     FLEET_FORCE_HANDLE_LIST_OP_ID,
     FLEET_TARGET_NAME,
     _fleet_credentials_loader,
@@ -227,7 +227,7 @@ async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2
     3. Resolve + cache the connector instance; replace its
        :class:`CredentialsCache` so no Vault read fires.
     4. Activate a respx router for :data:`FLEET_CANARY_BASE_URL` and
-       register the 8 read-op routes.
+       register the Fleet read-op routes.
     """
     await _insert_fleet_descriptors()
     seeded_target = await _seed_target()
@@ -255,7 +255,7 @@ async def fleet_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_FleetE2
 # ---------------------------------------------------------------------------
 
 _OP_IDS: tuple[str, ...] = tuple(op.op_id for op in FLEET_CORE_OPS)
-assert len(_OP_IDS) == 8, f"Expected 8 curated Fleet ops, got {len(_OP_IDS)}: {_OP_IDS}"
+assert len(_OP_IDS) == 6, f"Expected 6 curated Fleet ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -263,7 +263,7 @@ async def test_fleet_e2e_all_ops_dispatch_ok(
     op_id: str,
     fleet_e2e_canary: _FleetE2EBundle,
 ) -> None:
-    """All 8 Fleet core ops dispatch through the full dispatcher and return status='ok'.
+    """All ingested Fleet core ops dispatch through the full dispatcher, status='ok'.
 
     HTTP Basic auth is computed by the connector's stub credentials
     loader on first dispatch (then cached); no session-establish step
@@ -327,12 +327,14 @@ async def test_fleet_e2e_credentials_cached_after_first_dispatch(
     )
 
     # Second dispatch must NOT reload credentials — cache entry survives.
+    # Uses a still-ingested op (request list); environments moved to the
+    # typed surface (T4 · #2304) and no longer dispatches via this path.
     creds_before = dict(instance._creds._cache)  # type: ignore[attr-defined]
     result2 = await call_operation(
         _OPERATOR,
         {
             "connector_id": FLEET_CONNECTOR_ID,
-            "op_id": "GET:/lcm/lcops/api/v2/environments",
+            "op_id": "GET:/lcm/request/api/v2/requests",
             "target": {"name": target_name},
             "params": {},
         },
@@ -414,27 +416,29 @@ async def test_fleet_e2e_dispatch_writes_audit_row(
     )
 
 
-async def test_fleet_e2e_jsonflux_handle_populated_for_environment_list(
+async def test_fleet_e2e_jsonflux_handle_populated_for_request_list(
     fleet_e2e_canary: _FleetE2EBundle,
 ) -> None:
-    """Environment list dispatched with the real JsonFluxReducer returns a populated handle.
+    """Request list dispatched with the real JsonFluxReducer returns a populated handle.
 
     Exercises acceptance criterion (c): the JSONFlux dispatcher seam
     threads the reducer's :class:`ResultHandle` onto
-    :class:`OperationResult`. Environment listing is the largest Fleet
-    read surface in real deployments — busy appliances commonly manage
-    dozens of environments — so the handle-path coverage lands here.
+    :class:`OperationResult`. Lifecycle-request listing is the largest
+    *ingested* Fleet read surface in real deployments — busy appliances
+    accumulate thousands of historical requests — so the ingested-path
+    handle coverage lands here. (Environment listing, formerly used here,
+    is a typed op now — T4 · #2304.)
 
     Assertions mirror the NSX / SDDC Manager JSONFlux handle tests:
 
     * ``status == 'ok'``.
     * ``handle`` is non-None and carries a valid UUID4 ``handle_id``.
-    * ``handle.total_rows`` matches the seeded environment count.
+    * ``handle.total_rows`` matches the seeded request count.
     * ``handle.sample_rows`` is populated (≥1 row).
     * ``result['row_count']`` equals ``handle.total_rows`` (the
       reducer's summary inlined on the envelope).
     """
-    expected_rows = len(FLEET_CANARY_ENVIRONMENTS)
+    expected_rows = len(FLEET_CANARY_REQUESTS)
 
     set_default_reducer(JsonFluxReducer(row_threshold=0))
     try:
@@ -463,13 +467,13 @@ async def test_fleet_e2e_jsonflux_handle_populated_for_environment_list(
     uuid.UUID(handle["handle_id"])
 
     assert handle["total_rows"] == expected_rows, (
-        f"Expected {expected_rows} environment rows from FLEET_CANARY_ENVIRONMENTS; "
+        f"Expected {expected_rows} request rows from FLEET_CANARY_REQUESTS; "
         f"got handle.total_rows={handle['total_rows']}"
     )
 
     sample_rows = handle.get("sample_rows")
     assert sample_rows, (
-        f"Expected ≥1 sample row from the seeded Fleet environment list; "
+        f"Expected ≥1 sample row from the seeded Fleet request list; "
         f"got sample_rows={sample_rows!r}"
     )
 

@@ -105,6 +105,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 import structlog
@@ -132,6 +133,12 @@ from meho_backplane.connectors.vcf_operations.session import (
 __all__ = ["VcfOperationsConnector"]
 
 _log = structlog.get_logger(__name__)
+
+#: Spec-relative paths the typed read ops (#2303) hit on the connector's
+#: HTTP Basic (+ optional auth-source) session.
+_VERSIONS_CURRENT_PATH = "/suite-api/api/versions/current"
+_ALERTS_PATH = "/suite-api/api/alerts"
+_RESOURCES_QUERY_PATH = "/suite-api/api/resources/query"
 
 
 class VcfOperationsConnector(HttpConnector):
@@ -261,6 +268,49 @@ class VcfOperationsConnector(HttpConnector):
             extra_headers=extra_headers,
         )
 
+    async def _post_json(
+        self,
+        target: VcfOperationsTargetLike,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Thread the auth-source (and caller) query params onto a non-idempotent request.
+
+        The base :meth:`HttpConnector._post_json` neither routes through
+        :meth:`_request_json` (so the auth-source merge there is bypassed)
+        nor accepts a ``params`` mapping. vROps still needs
+        ``?auth-source=<value>`` on **every** authenticated request when the
+        target federates identity, so this override merges the per-target
+        auth-source contribution (:meth:`_auth_query_params`) with any
+        caller-supplied ``params`` and encodes them onto the URL before
+        delegating to the base implementation. Caller params win on a key
+        clash — the same precedence the :meth:`_request_json` override
+        documents. ``doseq=True`` so a list value (a repeated query param)
+        serialises to repeated ``key=a&key=b`` pairs rather than a bracketed
+        string.
+        """
+        merged: dict[str, Any] = dict(self._auth_query_params(target))
+        if params:
+            merged.update({key: value for key, value in params.items() if value is not None})
+        if merged:
+            separator = "&" if "?" in path else "?"
+            path = f"{path}{separator}{urlencode(merged, doseq=True)}"
+        return await super()._post_json(
+            target,
+            path,
+            operator=operator,
+            verb=verb,
+            json=json,
+            data=data,
+            extra_headers=extra_headers,
+        )
+
     async def fingerprint(
         self,
         target: VcfOperationsTargetLike,
@@ -376,6 +426,98 @@ class VcfOperationsConnector(HttpConnector):
             op_id=op_id,
             target=target,
             params=params,
+        )
+
+    # ------------------------------------------------------------------
+    # Typed read ops (Initiative #2266 T3, #2303)
+    #
+    # Each handler is a thin read directly on the connector's HTTP Basic
+    # (+ optional auth-source) session — no dispatch_child, no ingested
+    # descriptor — so the op works on a fresh boot with zero catalog
+    # ingest (the #2262 invariant). The dispatcher binds these bound
+    # methods to the per-process connector instance and threads
+    # ``operator`` / ``target`` / ``params`` by name (see
+    # :func:`~meho_backplane.operations._branches.dispatch_typed`). The op
+    # metadata + registrar live in
+    # :mod:`meho_backplane.connectors.vcf_operations.typed_ops`.
+    # ------------------------------------------------------------------
+
+    async def liveness(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.liveness`` — ``GET /suite-api/api/versions/current``.
+
+        Reachability + identity probe. Returns the appliance's
+        ``releaseName`` / ``buildNumber`` (and ``humanlyReadableReleaseName``
+        when present) — the same surface :meth:`fingerprint` reads, exposed
+        as an agent-callable typed op. The auth-source query param is merged
+        by the :meth:`_request_json` override.
+        """
+        del params  # schema declares the param object empty
+        return await self._get_json(target, _VERSIONS_CURRENT_PATH, operator=operator)
+
+    async def alert_list(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.alert.list`` — ``GET /suite-api/api/alerts``.
+
+        Optional ``activeOnly`` / ``alertCriticality`` / ``alertStatus`` /
+        ``resourceId`` filters and ``page`` / ``pageSize`` pagination ride as
+        query params (auth-source merged by the :meth:`_request_json`
+        override). ``resourceId`` is a list — httpx serialises it to repeated
+        ``resourceId=a&resourceId=b`` pairs.
+        """
+        query: dict[str, Any] = {}
+        for key in ("activeOnly", "alertCriticality", "alertStatus", "page", "pageSize"):
+            value = params.get(key)
+            if value is not None:
+                query[key] = value
+        resource_ids = [rid for rid in (params.get("resourceId") or []) if isinstance(rid, str)]
+        if resource_ids:
+            query["resourceId"] = resource_ids
+        return await self._get_json(target, _ALERTS_PATH, operator=operator, params=query or None)
+
+    async def resource_query(
+        self,
+        operator: Operator,
+        target: VcfOperationsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrops.resource.query`` — ``POST /suite-api/api/resources/query``.
+
+        A body-shaped POST: the ``ResourceQuerySpec`` fields
+        (:data:`~meho_backplane.connectors.vcf_operations.typed_ops.VROPS_RESOURCE_QUERY_BODY_FIELDS`)
+        form the JSON request body; ``page`` / ``pageSize`` ride as query
+        params. The auth-source query param is merged by the
+        :meth:`_post_json` override (the base ``_post_json`` bypasses the
+        ``_request_json`` auth-source seam).
+        """
+        from meho_backplane.connectors.vcf_operations.typed_ops import (
+            VROPS_RESOURCE_QUERY_BODY_FIELDS,
+        )
+
+        body: dict[str, Any] = {}
+        for key in VROPS_RESOURCE_QUERY_BODY_FIELDS:
+            value = params.get(key)
+            if value is not None:
+                body[key] = value
+        query: dict[str, Any] = {}
+        for key in ("page", "pageSize"):
+            value = params.get(key)
+            if value is not None:
+                query[key] = value
+        return await self._post_json(
+            target,
+            _RESOURCES_QUERY_PATH,
+            operator=operator,
+            json=body,
+            params=query or None,
         )
 
     async def aclose(self) -> None:

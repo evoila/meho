@@ -7,11 +7,12 @@ This module is the vRLI sibling of :mod:`tests.acceptance._nsx_canary_fixtures`.
 The acceptance + E2E modules under :mod:`tests` share the same plumbing: a
 registered :class:`~meho_backplane.connectors.vcf_logs.VcfLogsConnector`
 instance with a stub credentials loader (so no Vault read fires), a probed
-:class:`~meho_backplane.db.models.Target` row, the 7 curated
+:class:`~meho_backplane.db.models.Target` row, the curated ingested
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.vcf_logs.core_ops.VRLI_CORE_OPS`, and a
-:mod:`respx`-mocked vRLI REST surface answering the session-create POST
-plus every read op the connector dispatches against.
+:data:`~meho_backplane.connectors.vcf_logs.core_ops.VRLI_CORE_OPS` plus the
+``vrli.event.query`` typed row (#2295), and a :mod:`respx`-mocked vRLI REST
+surface answering the session-create POST plus every read op the connector
+dispatches against.
 
 The vRLI delta relative to NSX
 -------------------------------
@@ -24,12 +25,14 @@ The vRLI delta relative to NSX
   401 from a downstream call; a second 401 raises ``RuntimeError`` naming
   the target. The contract lives on
   :meth:`VcfLogsConnector._get_json_with_session_retry`.
-* **Path-template ops**: two of the 7 curated ops carry ``{constraints}``
-  in their path — the dispatcher's ``_substitute_path`` fills it via the
-  ``x-meho-param-loc='path'`` extension key on the parameter_schema. The
-  fixture seeds the descriptors with that key + an empty-string default,
-  so dispatch_ingested substitutes an empty trailing segment when the
-  caller passes ``constraints=""``.
+* **Path-template ops**: the ingested ``aggregated-events`` op carries
+  ``{constraints}`` in its path — the dispatcher's ``_substitute_path`` fills
+  it via the ``x-meho-param-loc='path'`` extension key on the
+  parameter_schema. The fixture seeds the descriptor with that key + an
+  empty-string default, so dispatch_ingested substitutes an empty trailing
+  segment when the caller passes ``constraints=""``. The raw events query is
+  the ``vrli.event.query`` typed op since #2295; it builds the constraint
+  sub-path in the handler, not via ``_substitute_path``.
 """
 
 from __future__ import annotations
@@ -58,6 +61,7 @@ from meho_backplane.connectors.vcf_logs import (
     VcfLogsConnector,
 )
 from meho_backplane.connectors.vcf_logs.session import VcfLogsTargetLike
+from meho_backplane.connectors.vcf_logs.typed_ops import VRLI_EVENT_QUERY_OP
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Target
 from meho_backplane.operations import reset_dispatcher_caches
@@ -72,6 +76,7 @@ __all__ = [
     "VRLI_CANARY_OPERATOR_TENANT",
     "VRLI_CANARY_SESSION_ID",
     "VRLI_CANARY_SESSION_REFRESH_ID",
+    "VRLI_EVENT_QUERY_HANDLER_REF",
     "VRLI_FORCE_HANDLE_LIST_OP_ID",
     "VRLI_RESERVED_CONSTRAINT_OP_ID",
     "VRLI_RESERVED_CONSTRAINT_VALUE",
@@ -80,6 +85,7 @@ __all__ = [
     "IngestedVrliCanary",
     "_insert_vrli_descriptors",
     "_insert_vrli_reserved_constraint_descriptor",
+    "_insert_vrli_typed_event_query_descriptor",
     "_register_vrli_reserved_constraint_route",
     "_register_vrli_routes",
     "_vrli_credentials_loader",
@@ -130,13 +136,23 @@ VRLI_CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
     extras={"release_name": "VMware Aria Operations for Logs 9.0", "patch": "0"},
 ).model_dump(mode="json")
 
-#: The list op the JSONFlux force-handle test dispatches. Picked because
-#: events.query is the explicit DoD acceptance criterion ("vcf-logs query
-#: E2E asserts the JSONFlux handle path") — the path is templated so the
-#: param_schema seeding doubles as proof the dispatcher substitutes the
-#: ``{constraints}`` segment correctly even when the caller passes empty
-#: constraints.
-VRLI_FORCE_HANDLE_LIST_OP_ID: str = "GET:/api/v2/events/{constraints}"
+#: The list op the JSONFlux force-handle test dispatches. Since #2295 this is
+#: the ``vrli.event.query`` **typed** op (``source_kind="typed"``): events.query
+#: is the explicit DoD acceptance criterion ("vcf-logs query E2E asserts the
+#: JSONFlux handle path"), and the conversion means the handle path is now
+#: exercised on the typed dispatch surface — the connector-agnostic reducer
+#: wraps the typed handler's ``{events: [...]}`` envelope the same way it wrapped
+#: the ingested row's response.
+VRLI_FORCE_HANDLE_LIST_OP_ID: str = VRLI_EVENT_QUERY_OP.op_id
+
+#: Dotted handler path the seeded typed ``vrli.event.query`` descriptor carries
+#: so the dispatcher's ``import_handler`` walk resolves the bound method and
+#: binds it to the connector instance. Built from the op's ``handler_attr`` so
+#: it can't drift from the real method name.
+VRLI_EVENT_QUERY_HANDLER_REF: str = (
+    f"meho_backplane.connectors.vcf_logs.connector.VcfLogsConnector."
+    f"{VRLI_EVENT_QUERY_OP.handler_attr}"
+)
 
 #: Synthetic event listing — 11 rows so the force-handle reducer sees a
 #: populated set with a sample-row slice. Fields match the vRLI event
@@ -200,28 +216,34 @@ _VRLI_CANARY_ALERTS: dict[str, object] = {
     ],
 }
 
-#: Path-template params for the two events ops whose URLs carry the
+#: Path-template params for the ingested ops whose URLs carry the
 #: ``{constraints}`` placeholder. The dispatcher's ``_substitute_path``
 #: fills it; the respx routes are registered against the substituted
 #: URLs (vRLI accepts an empty trailing path segment as "no extra
-#: constraint", matching the wrapper's posture).
+#: constraint", matching the wrapper's posture). Only aggregated-events
+#: remains ingested here — the raw events query is the ``vrli.event.query``
+#: typed op since #2295 (it takes the same ``constraints`` param).
 VRLI_CONSTRAINT_OP_PARAMS: dict[str, dict[str, object]] = {
-    "GET:/api/v2/events/{constraints}": {"constraints": ""},
     "GET:/api/v2/aggregated-events/{constraints}": {"constraints": ""},
 }
 
 
 async def _insert_vrli_descriptors() -> None:
-    """Seed the 7 curated vRLI core ops + their groups as enabled rows.
+    """Seed the curated vRLI core ops + the typed events op + their groups.
 
     One :class:`OperationGroup` per entry in :data:`VRLI_CORE_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor` per
     entry in :data:`VRLI_CORE_OPS` (``is_enabled=True``,
-    ``source_kind='ingested'``, ``handler_ref=None``).
+    ``source_kind='ingested'``, ``handler_ref=None``), plus the
+    ``vrli.event.query`` **typed** row (``source_kind='typed'``,
+    ``handler_ref`` set) so a ``call_operation`` dispatch of the events query
+    resolves to the bound method on the connector (#2295).
 
-    Multiple ops can share the same group (e.g. ``GET:/api/v2/events``
-    and ``GET:/api/v2/aggregated-events`` both map to ``vrli-events``);
-    the helper coalesces shared group_keys into one inserted group row.
+    Multiple ops can share the same group (e.g. the ingested
+    ``aggregated-events`` op and the typed ``vrli.event.query`` op both map to
+    ``vrli-events``); the helper coalesces shared group_keys into one inserted
+    group row. This is the integration double the typed-registration trap warns
+    about: without the typed row the events dispatch would 404 at lookup.
     """
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
@@ -265,6 +287,74 @@ async def _insert_vrli_descriptors() -> None:
                 tags=["spec:vcf-logs-9.0/openapi.yaml"],
             )
             session.add(descriptor)
+
+        # The typed events op (#2295). ``method`` / ``path`` are NULL for a
+        # typed row (the handler owns the transport call); the dispatcher
+        # resolves ``handler_ref`` and binds it to the connector instance.
+        session.add(
+            EndpointDescriptor(
+                tenant_id=None,
+                product=VRLI_PRODUCT,
+                version=VRLI_VERSION,
+                impl_id=VRLI_IMPL_ID,
+                op_id=VRLI_EVENT_QUERY_OP.op_id,
+                source_kind="typed",
+                method=None,
+                path=None,
+                handler_ref=VRLI_EVENT_QUERY_HANDLER_REF,
+                group_id=group_ids[VRLI_EVENT_QUERY_OP.group_key],
+                summary=VRLI_EVENT_QUERY_OP.summary,
+                description=VRLI_EVENT_QUERY_OP.description,
+                parameter_schema=VRLI_EVENT_QUERY_OP.parameter_schema,
+                response_schema=VRLI_EVENT_QUERY_OP.response_schema,
+                llm_instructions=VRLI_EVENT_QUERY_OP.llm_instructions,
+                safety_level=VRLI_EVENT_QUERY_OP.safety_level,
+                requires_approval=VRLI_EVENT_QUERY_OP.requires_approval,
+                is_enabled=True,
+                tags=list(VRLI_EVENT_QUERY_OP.tags),
+            )
+        )
+        await session.commit()
+
+
+async def _insert_vrli_typed_event_query_descriptor() -> None:
+    """Seed only the ``vrli.event.query`` typed descriptor (reuses vrli-events).
+
+    For tests that want the typed events op available on top of a setup that
+    seeded the ingested groups some other way. Requires the ``vrli-events``
+    :class:`OperationGroup` to exist already (``_insert_vrli_descriptors``
+    creates it); look it up and attach the typed row.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        group_row = (
+            await session.execute(
+                select(OperationGroup).where(OperationGroup.group_key == "vrli-events")
+            )
+        ).scalar_one()
+        session.add(
+            EndpointDescriptor(
+                tenant_id=None,
+                product=VRLI_PRODUCT,
+                version=VRLI_VERSION,
+                impl_id=VRLI_IMPL_ID,
+                op_id=VRLI_EVENT_QUERY_OP.op_id,
+                source_kind="typed",
+                method=None,
+                path=None,
+                handler_ref=VRLI_EVENT_QUERY_HANDLER_REF,
+                group_id=group_row.id,
+                summary=VRLI_EVENT_QUERY_OP.summary,
+                description=VRLI_EVENT_QUERY_OP.description,
+                parameter_schema=VRLI_EVENT_QUERY_OP.parameter_schema,
+                response_schema=VRLI_EVENT_QUERY_OP.response_schema,
+                llm_instructions=VRLI_EVENT_QUERY_OP.llm_instructions,
+                safety_level=VRLI_EVENT_QUERY_OP.safety_level,
+                requires_approval=VRLI_EVENT_QUERY_OP.requires_approval,
+                is_enabled=True,
+                tags=list(VRLI_EVENT_QUERY_OP.tags),
+            )
+        )
         await session.commit()
 
 
@@ -304,7 +394,7 @@ async def _vrli_credentials_loader(
 
 
 def _register_vrli_routes(mock: respx.MockRouter) -> None:
-    """Register the vRLI session-establish + 7 read-op routes on *mock*.
+    """Register the vRLI session-establish + read-op routes on *mock*.
 
     The session-create route answers with a JSON body carrying
     ``{"sessionId": ..., "ttl": 1800}``; the connector's
@@ -312,11 +402,12 @@ def _register_vrli_routes(mock: respx.MockRouter) -> None:
     subsequent route returns a pre-seeded JSON body matching the rough
     shape vRLI returns for that path family.
 
-    The templated ``{constraints}`` ops register against the empty
-    trailing-segment substitution (``/api/v2/events`` and
-    ``/api/v2/aggregated-events`` — no trailing slash, because the
-    dispatcher's ``_substitute_path`` collapses ``{constraints}`` →
-    ``""`` and strips the leading ``/``).
+    The ingested ``aggregated-events`` op registers against the empty
+    trailing-segment substitution (``/api/v2/aggregated-events`` — no
+    trailing slash, because the dispatcher's ``_substitute_path`` collapses
+    ``{constraints}`` → ``""`` and strips the leading ``/``). The typed
+    ``vrli.event.query`` op builds ``/api/v2/events/`` in the handler for an
+    empty constraint (the trailing slash is the ``_EVENTS_PATH_PREFIX``).
     """
     # Session establish.
     mock.post("/api/v2/sessions").respond(
@@ -332,11 +423,10 @@ def _register_vrli_routes(mock: respx.MockRouter) -> None:
             "buildNumber": "21761695",
         },
     )
-    # vrli.event.query — the dispatcher's ``_substitute_path`` lands the
-    # empty-string ``{constraints}`` value as the trailing path segment,
-    # so the URL on the wire is ``/api/v2/events/`` (with the slash).
-    # vRLI accepts the trailing-slash form as "no extra constraint",
-    # matching the wrapper's posture.
+    # vrli.event.query (typed, #2295) — the handler builds ``/api/v2/events/``
+    # for an empty constraint, so the URL on the wire is ``/api/v2/events/``
+    # (with the slash). vRLI accepts the trailing-slash form as "no extra
+    # constraint", matching the wrapper's posture.
     mock.get("/api/v2/events/").respond(200, json=VRLI_CANARY_EVENTS)
     # vrli.aggregated.query — same trailing-slash shape.
     mock.get("/api/v2/aggregated-events/").respond(200, json=_VRLI_CANARY_AGGREGATED)

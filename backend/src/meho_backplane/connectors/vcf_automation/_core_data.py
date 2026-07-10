@@ -1,7 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Curated VCFA core-ops data tables -- the 8 groups + 11 ops + classifier rules.
+"""Curated VCFA core-ops data tables -- the 5 groups + 6 ops + classifier rules.
+
+Since T5 (#2305) the audited read set (org/region list, provider health
+via ``/cloudapi/1.0.0/site``, ``/iaas/api/projects`` list, and the
+tenant ``/iaas/api/about`` probe) is served by ``source_kind="typed"``
+ops in :mod:`.typed_ops`, not by ingested-curation here. What remains in
+these tables is the still-curated ingested browse surface: the two
+get-by-id provider ops, the provider users list, and the tenant
+deployment/blueprint browse ops.
 
 Split out from :mod:`.core_ops` to keep the public module within the
 file-size budget. The contents here are pure data + the classifier
@@ -116,14 +124,17 @@ class VcfaCoreOp:
 #: -- but the tenant rules are listed first defensively so a future
 #: provider-side ``/iaas`` (unlikely, but possible) wouldn't shadow
 #: them.
+#:
+#: The audited read set (site/about, orgs list, regions list, projects
+#: list) was converted to ``source_kind="typed"`` ops in
+#: :mod:`.typed_ops` (T5 #2305); those paths carry no ingested-curation
+#: rule any more (the ``orgs`` / ``regions`` rules stay only for the
+#: still-curated get-by-id ops that share the collection prefix).
 VCFA_PATH_RULES: Final[tuple[tuple[str, str], ...]] = (
     # Tenant plane -- /iaas/api/* family.
-    ("/iaas/api/about", "tenant-about"),
-    ("/iaas/api/projects", "tenant-projects"),
     ("/iaas/api/deployments", "tenant-deployments"),
     ("/iaas/api/blueprints", "tenant-blueprints"),
     # Provider plane -- /cloudapi/1.0.0/* family.
-    ("/cloudapi/1.0.0/site", "provider-site"),
     ("/cloudapi/1.0.0/orgs", "provider-orgs"),
     ("/cloudapi/1.0.0/regions", "provider-regions"),
     ("/cloudapi/1.0.0/users", "provider-users"),
@@ -173,26 +184,13 @@ def _instructions(
     }
 
 
-#: Operator-reviewed ``when_to_use`` hints for the 8 VCFA groups
-#: (4 provider + 4 tenant). Every hint names its plane explicitly
-#: so the agent's group-selection step routes correctly across the
-#: dual-plane surface.
+#: Operator-reviewed ``when_to_use`` hints for the 5 curated VCFA groups
+#: (3 provider + 2 tenant) left as ingested-curation after the audited
+#: read set was converted to typed ops (:mod:`.typed_ops`, T5 #2305).
+#: Every hint names its plane explicitly so the agent's group-selection
+#: step routes correctly across the dual-plane surface.
 VCFA_CORE_GROUPS: Final[tuple[VcfaCoreGroup, ...]] = (
-    # ----- Provider plane (4 groups, 6 ops) -----
-    VcfaCoreGroup(
-        group_key="provider-site",
-        plane="provider",
-        name="VCFA Provider (site)",
-        when_to_use=(
-            "Use this group on the VCFA **provider plane** to read appliance-level "
-            "site identity: site name, configured organization count, and VCFA "
-            "appliance version. The probe surface the agent calls before any "
-            "heavier provider read or when confirming which VCFA instance the "
-            "target points at. Provider-plane ops authenticate with the "
-            "``admin@System`` (or equivalent) Basic-auth session and never "
-            "succeed against the tenant token."
-        ),
-    ),
+    # ----- Provider plane (3 groups, 3 ops) -----
     VcfaCoreGroup(
         group_key="provider-orgs",
         plane="provider",
@@ -232,33 +230,7 @@ VCFA_CORE_GROUPS: Final[tuple[VcfaCoreGroup, ...]] = (
             "v0.5 read core."
         ),
     ),
-    # ----- Tenant plane (4 groups, 5 ops) -----
-    VcfaCoreGroup(
-        group_key="tenant-about",
-        plane="tenant",
-        name="VCFA Tenant (about)",
-        when_to_use=(
-            "Use this group on the VCFA **tenant plane** to read the IaaS API "
-            "self-describe surface -- supported API versions and the latest "
-            "tenant API version. The probe surface the agent calls before any "
-            "tenant catalog read or when confirming tenant-plane reachability. "
-            "Tenant-plane ops authenticate with the tenant org login (``POST "
-            "/iaas/api/login``) and never succeed against the provider JWT."
-        ),
-    ),
-    VcfaCoreGroup(
-        group_key="tenant-projects",
-        plane="tenant",
-        name="VCFA Tenant Projects",
-        when_to_use=(
-            "Use this group on the VCFA **tenant plane** to list projects "
-            "within the tenant organization. Projects are the deployment-scoping "
-            "construct: every deployment belongs to exactly one project, and "
-            "blueprint access controls reference project membership. Use to "
-            "answer 'what projects exist in this org' or to pick the "
-            "project_id filter for a follow-up deployment list."
-        ),
-    ),
+    # ----- Tenant plane (2 groups, 3 ops) -----
     VcfaCoreGroup(
         group_key="tenant-deployments",
         plane="tenant",
@@ -290,63 +262,16 @@ VCFA_CORE_GROUPS: Final[tuple[VcfaCoreGroup, ...]] = (
 )
 
 
-#: The 11 curated read-only VCFA core ops (6 provider + 5 tenant).
-#: Paths cross-checked against the VCF Automation 9.0 API surface:
-#: the cloudapi family at
+#: The 6 curated read-only VCFA core ops (3 provider + 3 tenant) left as
+#: ingested-curation after the audited read set (site/about, orgs list,
+#: regions list, projects list) was converted to ``source_kind="typed"``
+#: ops in :mod:`.typed_ops` (T5 #2305). Paths cross-checked against the
+#: VCF Automation 9.0 API surface: the cloudapi family at
 #: https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-0/administration-sdks-cli-and-tools/about-the-vcf-automation-api.html
 #: and the tenant-plane IaaS family at
 #: https://developer.broadcom.com/xapis/vm-apps-org-provisioning-service/latest/.
 VCFA_CORE_OPS: Final[tuple[VcfaCoreOp, ...]] = (
-    # ----- Provider plane (6 ops) -----
-    VcfaCoreOp(
-        op_id="GET:/cloudapi/1.0.0/site",
-        group_key="provider-site",
-        plane="provider",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to read VCFA appliance site identity on the provider "
-                "plane: site name, configured organization count, and VCFA "
-                "appliance version. Useful as a pre-flight probe before "
-                "heavier provider reads or to confirm which VCFA instance the "
-                "target points at."
-            ),
-            output_shape=(
-                "Object with id, name, description, restName, and product "
-                "version fields plus a links collection. The product version "
-                "string identifies the VCFA appliance build."
-            ),
-            next_step=(
-                "Confirm the product version is in the supported range, then "
-                "proceed to vcfa.provider.org.list for the org inventory or "
-                "vcfa.provider.vdc.list for the region inventory."
-            ),
-        ),
-    ),
-    VcfaCoreOp(
-        op_id="GET:/cloudapi/1.0.0/orgs",
-        group_key="provider-orgs",
-        plane="provider",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call on the provider plane to list organizations on this "
-                "VCFA appliance. Returns the cross-tenant view (every tenant "
-                "appears here) -- the system administrator's inventory entry "
-                "point. Supports pagination via 'page' and 'pageSize' query "
-                "parameters."
-            ),
-            output_shape=(
-                "Object with a 'values' array of organization entries; each "
-                "entry carries id, name, displayName, description, isEnabled, "
-                "and orgVdcCount. The 'resultTotal' field reports the global "
-                "count for pagination."
-            ),
-            next_step=(
-                "Pick an org id for vcfa.provider.org.get to read its full "
-                "detail, or switch planes to tenant-side ops for per-org "
-                "project / deployment / blueprint reads."
-            ),
-        ),
-    ),
+    # ----- Provider plane (3 ops) -----
     VcfaCoreOp(
         op_id="GET:/cloudapi/1.0.0/orgs/{id}",
         group_key="provider-orgs",
@@ -369,31 +294,6 @@ VCFA_CORE_OPS: Final[tuple[VcfaCoreOp, ...]] = (
                 "If counts indicate the org has active workloads, switch "
                 "planes to vcfa.tenant.deployment.list (authenticated against "
                 "the same org's tenant token) for the catalog view."
-            ),
-        ),
-    ),
-    VcfaCoreOp(
-        op_id="GET:/cloudapi/1.0.0/regions",
-        group_key="provider-regions",
-        plane="provider",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call on the provider plane to list VCFA regions -- the VCFA 9 "
-                "evolution of the vCloud-Director provider VDC concept. Each "
-                "region maps to one NSX domain plus a collection of "
-                "supervisors backed by one or more VCF workload domains. Use "
-                "to answer 'what compute capacity does this VCFA appliance "
-                "offer'."
-            ),
-            output_shape=(
-                "Object with a 'values' array of region entries; each entry "
-                "carries id, name, description, nsxManager, supervisors, and "
-                "isEnabled. The 'resultTotal' field reports the global count "
-                "for pagination."
-            ),
-            next_step=(
-                "Pick a region id for vcfa.provider.vdc.get for the full "
-                "detail (capacity counters, configured storage policies)."
             ),
         ),
     ),
@@ -449,54 +349,7 @@ VCFA_CORE_OPS: Final[tuple[VcfaCoreOp, ...]] = (
             ),
         ),
     ),
-    # ----- Tenant plane (5 ops) -----
-    VcfaCoreOp(
-        op_id="GET:/iaas/api/about",
-        group_key="tenant-about",
-        plane="tenant",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call on the tenant plane to read the IaaS API self-describe "
-                "surface: supportedApis list and latestApiVersion. Useful as "
-                "a probe before any tenant catalog read or to confirm "
-                "tenant-plane reachability and version negotiation."
-            ),
-            output_shape=(
-                "Object with supportedApis[] (each carrying apiVersion + a "
-                "documentation URL) and latestApiVersion (string)."
-            ),
-            next_step=(
-                "Confirm latestApiVersion is in the connector's supported "
-                "range, then proceed to vcfa.tenant.project.list or "
-                "vcfa.tenant.deployment.list for the catalog view."
-            ),
-        ),
-    ),
-    VcfaCoreOp(
-        op_id="GET:/iaas/api/projects",
-        group_key="tenant-projects",
-        plane="tenant",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call on the tenant plane to list projects within the tenant "
-                "organization. Projects are the deployment-scoping construct "
-                "-- every deployment belongs to exactly one project. Supports "
-                "OData-like filtering via $filter, $orderby, $top, $skip."
-            ),
-            output_shape=(
-                "Object with a 'content' array of project entries; each "
-                "entry carries id, name, description, organizationId, "
-                "administrators[], members[], and operationTimeout. Page "
-                "metadata in totalElements + totalPages."
-            ),
-            next_step=(
-                "Pick a project id as the $filter argument for "
-                "vcfa.tenant.deployment.list (filter syntax: "
-                "$filter=projectId eq '<id>') to scope the deployment view "
-                "to one project."
-            ),
-        ),
-    ),
+    # ----- Tenant plane (3 ops) -----
     VcfaCoreOp(
         op_id="GET:/iaas/api/deployments",
         group_key="tenant-deployments",

@@ -2901,6 +2901,46 @@ def test_ingest_spec_error_family_returns_structured_400(
     assert response.json()["detail"] == builder(exc)
 
 
+def test_ingest_op_id_collision_400_detail_names_remediation(client: TestClient) -> None:
+    """#2273 — the REST 400 ``detail`` names the collision's remediation.
+
+    A cross-call ``OpIdCollision`` (the shape a crashed ingest's stranded
+    debris leaves) surfaces on the wire with a structured ``remediation``
+    field and a ``message`` that names both remedies: re-ingest under the
+    original spec URI, or ``meho.connector.delete`` to clear the debris.
+    """
+    exc = OpIdCollision(
+        op_ids=["GET:/api/items"],
+        product="test",
+        version="1.0",
+        impl_id="test-impl",
+        existing_spec_source="https://specs.example.test/a.yaml",
+        incoming_spec_source="file:///tmp/a.yaml",
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch.object(IngestionPipelineService, "ingest", AsyncMock(side_effect=exc)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "test",
+                "version": "1.0",
+                "impl_id": "test-impl",
+                "specs": [{"uri": "https://specs.example.test/never-fetched.yaml"}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "original spec URI" in detail["remediation"]
+    assert "meho.connector.delete" in detail["remediation"]
+    assert "meho.connector.delete" in detail["message"]
+
+
 def test_ingest_vcenter_9_under_label_8_returns_422(client: TestClient, tmp_path: Any) -> None:
     """G0.9-T8 regression — operator labels a vCenter-9 spec as ``version=8.0``.
 

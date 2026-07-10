@@ -108,6 +108,11 @@ connector-related release-notes line.
   composite read + write sub-call seams and the two typed-op listing legs —
   not per call site. Adds a modern-mount mock that 400s the prefixed form so
   the vcsim-only test gap is closed; no new op_ids, no OpenAPI change (#2298).
+- Also routes `vm.info`'s name→moid listing leg (which entered via the
+  `origin/main` merge of #2354, predating the seam) through `adapt_op_query`,
+  so its `filter.names` param is likewise keyed off the mount flavor instead
+  of 400'ing on a modern `/api` vCenter 8.x; pinned with modern/legacy mount
+  tests mirroring `host.usage` (#2298).
 ### Added — vm.power single-VM gated write verbs (incl. guest-shutdown)
 
 - New `vmware.composite.vm.power` write composite acts on **one** VM for

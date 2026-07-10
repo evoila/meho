@@ -209,7 +209,12 @@ async def _resolve_vm_moid_by_name(
     target: VsphereTargetLike,
     name: str,
 ) -> str:
-    """Resolve a VM name to its moid via ``GET /vcenter/vm?filter.names=``.
+    """Resolve a VM name to its moid via ``GET /vcenter/vm`` (name filter).
+
+    The listing filter param is keyed off the target's live mount flavor
+    (#2298): modern ``/api`` vCenter 8.x wants the bare ``names`` name and
+    400s the legacy ``filter.names`` prefixed form; the ``/rest`` mount
+    (and ``vmware/vcsim``) requires the prefix.
 
     Raises :exc:`RuntimeError` when the name resolves to zero VMs
     (unknown) or more than one (ambiguous) -- the caller must then
@@ -217,8 +222,12 @@ async def _resolve_vm_moid_by_name(
     contract the composite listing enrichment uses.
     """
     list_path = await connector.mount_op_path(target, _LIST_VMS_PATH, operator)
+    # Key the ``filter.names`` param off the mount flavor (#2298): the
+    # session is warm from the mount_op_path call above, so adapt_op_query
+    # resolves the flavor without an extra round-trip.
+    listing_query = await connector.adapt_op_query(target, {"filter.names": [name]}, operator)
     listing = await connector._get_json(
-        target, list_path, operator=operator, params={"filter.names": [name]}
+        target, list_path, operator=operator, params=listing_query
     )
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
@@ -254,9 +263,11 @@ async def vm_info_impl(
     Reads, directly on the connector session (no ``dispatch_child``, no
     ingested descriptor):
 
-    1. When addressed by ``name``: ``GET /vcenter/vm`` (mounted) with
-       ``filter.names`` to resolve the name to a moid. Skipped when the
-       caller supplies ``vm`` directly.
+    1. When addressed by ``name``: ``GET /vcenter/vm`` (mounted) with the
+       name filter param keyed off the mount flavor (bare ``names`` on
+       modern ``/api``, ``filter.names`` on legacy ``/rest``; #2298) to
+       resolve the name to a moid. Skipped when the caller supplies ``vm``
+       directly.
     2. ``POST .../PropertyCollector/propertyCollector/RetrievePropertiesEx``
        (mounted) reading the VirtualMachine's runtime power state, guest
        IP / hostname / Tools status, heartbeat, and per-datastore usage.

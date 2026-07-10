@@ -61,6 +61,12 @@ from meho_backplane.connectors.vcf_operations.session import (
     VcfOperationsTargetLike,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.vcf_operations.typed_ops import (
+    VROPS_TYPED_OPS,
+    VropsTypedOp,
+    register_vcf_operations_typed_operations,
+)
+from meho_backplane.operations.typed_register import register_typed_op_registrar
 
 register_connector_v2(
     product="vrops",
@@ -82,6 +88,12 @@ register_connector_v2(
     cls=VcfOperationsConnector,
 )
 
+# Queue the typed-op upsert (the audited vROps read set, #2303) onto the
+# lifespan-driven registrar list. The runner (``run_typed_op_registrars``)
+# iterates after ``_eager_import_connectors`` so the descriptor rows land
+# before the first dispatch. Mirrors the argocd / vmware registrar wiring.
+register_typed_op_registrar(register_vcf_operations_typed_operations)
+
 __all__ = [
     "VROPS_CONNECTOR_ID",
     "VROPS_CORE_GROUPS",
@@ -89,13 +101,16 @@ __all__ = [
     "VROPS_IMPL_ID",
     "VROPS_PATH_RULES",
     "VROPS_PRODUCT",
+    "VROPS_TYPED_OPS",
     "VROPS_VERSION",
     "VcfOperationsConnector",
     "VcfOperationsCredentialsLoader",
     "VcfOperationsTargetLike",
     "VropsCoreGroup",
     "VropsCoreOp",
+    "VropsTypedOp",
     "apply_vrops_core_curation",
     "classify_vrops_op",
     "load_credentials_from_vault",
+    "register_vcf_operations_typed_operations",
 ]

@@ -79,7 +79,24 @@
   // descendant of a container target and we must not double-drive it.
   document.body.addEventListener("htmx:afterSwap", function (event) {
     var root = (event.detail && event.detail.target) || event.target;
-    if (!root || typeof root.querySelectorAll !== "function") {
+    // htmx 2.0.9 dispatches ``htmx:afterSwap`` with ``detail.target`` still
+    // referencing the PRE-swap element. An ``outerHTML`` swap (e.g. the
+    // runbook run driver's abort / reassign / advance forms, which target
+    // ``#runbook-run-step`` with ``hx-swap="outerHTML"``) has already replaced
+    // and DETACHED that element, so ``detail.target`` is now disconnected from
+    // the document. Scanning its stale subtree would find the old, closed
+    // descendant dialogs and call ``showModal()`` on a dialog that is no longer
+    // connected -- which throws ``InvalidStateError``. Bail on a detached root:
+    // the freshly swapped-in replacement ships its own dialogs closed and
+    // button-driven, so there is nothing here to auto-open. This handler's
+    // auto-open pattern always swaps modal fragments via ``innerHTML`` into a
+    // STABLE container, whose ``detail.target`` stays connected, so the
+    // ``isConnected`` check is a no-op for it.
+    if (
+      !root ||
+      typeof root.querySelectorAll !== "function" ||
+      !root.isConnected
+    ) {
       return;
     }
     var dialogs = root.querySelectorAll("dialog.modal");

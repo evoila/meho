@@ -625,6 +625,12 @@ async def test_inline_op_id_collision_maps_to_invalid_params(
     assert err.data["product"] == "vmware"
     assert err.data["existing_spec_source"] == "spec:vcenter.yaml"
     assert err.data["incoming_spec_source"] == "spec:vi-json.yaml"
+    # #2273 — the MCP -32602 data + message both name the remediation:
+    # re-ingest under the original URI, or meho.connector.delete to clear
+    # crashed-job debris.
+    assert "original spec URI" in err.data["remediation"]
+    assert "meho.connector.delete" in err.data["remediation"]
+    assert "meho.connector.delete" in str(err)
 
 
 async def test_inline_upstream_not_spec_maps_to_invalid_params(

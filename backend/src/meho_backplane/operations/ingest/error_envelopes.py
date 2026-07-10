@@ -457,6 +457,8 @@ def build_op_id_collision_detail(exc: OpIdCollision) -> dict[str, Any]:
     ``incoming_spec_source`` are present only for the cross-call branch
     (``None`` for within-batch collisions); they are surfaced so the
     agent can see which two specs fight over the ``op_id``.
+    ``remediation`` carries the raise-site-specific way out verbatim so
+    an agent can act on it without re-parsing the message tail (#2273).
     """
     return {
         "detail": "op_id_collision",
@@ -466,6 +468,7 @@ def build_op_id_collision_detail(exc: OpIdCollision) -> dict[str, Any]:
         "impl_id": exc.impl_id,
         "existing_spec_source": exc.existing_spec_source,
         "incoming_spec_source": exc.incoming_spec_source,
+        "remediation": exc.remediation,
         "message": str(exc),
     }
 

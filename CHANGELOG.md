@@ -108,6 +108,41 @@ connector-related release-notes line.
   Consumer doc (`docs/codebase/scheduler.md`) and the generated CLI client
   regenerated from the new descriptions; **no behavioral change**. (#2245)
 
+### Fixed — crashed ingest no longer strands retry-blocking descriptor debris; `op_id_collision` names its remedy
+
+- **A crashed connector ingest now leaves zero persisted operations for the
+  failed spec, and the `op_id_collision` error names how to recover** (#2273).
+  Registration committed the `endpoint_descriptor` rows one-per-operation, so
+  an ingest that failed partway (e.g. the #2272 YAML crash) left the
+  already-processed ops committed as debris; a retry that presented the same
+  spec under a *different* URI then aborted with a 400 `op_id_collision`
+  against that debris — with no hint of the way out. Registration now commits
+  **once per spec** (a single unit of work), so a mid-batch failure rolls back
+  to zero rows and the retry inserts cleanly. When a genuine cross-call
+  collision does fire, the error — on all three transports (REST 400 `detail`,
+  MCP `-32602` `data`, async-job `error`) — now names both remedies: re-ingest
+  under the **original** spec URI (a same-URI re-ingest updates in place), or
+  clear stranded debris with the `meho.connector.delete` MCP tool (`tenant_id`
+  omitted for the global scope). The embedding pass now runs inside one
+  transaction per spec (a large spec holds it open for tens of seconds — an
+  accepted correctness-first trade-off). No schema or route change. (#2273)
+
+### Fixed — shared modal controller ignores htmx's detached pre-swap target
+
+- **The app-shell modal controller no longer calls ``showModal()`` on a
+  disconnected dialog after an ``outerHTML`` swap** (#2242). htmx 2.0.9
+  dispatches ``htmx:afterSwap`` with ``detail.target`` still pointing at the
+  PRE-swap element, which an ``outerHTML`` swap already detached — the runbook
+  run driver's abort / reassign / advance forms target ``#runbook-run-step``
+  with ``hx-swap="outerHTML"``. The shared controller scanned that stale
+  subtree and reopened the old, closed descendant dialog (the admin-only
+  reassign dialog on the abort repro; the assignee's advance dialog on every
+  Advance click), throwing an uncaught ``InvalidStateError`` into the console.
+  A one-line ``isConnected`` guard on the scan root skips a detached root and
+  is behaviour-preserving for the console's ``innerHTML``-into-a-stable-
+  container auto-open pattern, which always delivers a connected root. Console
+  noise only; the abort / advance actions were always functional.
+
 ### Fixed — exactly-one-resumer claim for run-bound approvals (#2293)
 
 - **A run-bound approval now executes its gated op exactly once — no silent

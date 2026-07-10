@@ -47,11 +47,11 @@ async def test_dispatch_smoke_sddc_core_op_returns_ok(
 ) -> None:
     """Each curated SDDC Manager core op dispatches over respx and returns ``status='ok'``.
 
-    HTTP Basic auth is computed by the connector on each request (no
-    session establish); the connector's stub credentials loader returns a
-    static pair. Asserting only ``status='ok'`` keeps the smoke focused
-    on the dispatch leg — payload shape is the JSONFlux force-handle
-    test's job.
+    The connector mints a session token at ``POST /v1/tokens`` (the
+    ``session_login_token`` scheme) and sends it as ``Authorization: Bearer``
+    on each request; the connector's stub credentials loader returns a static
+    pair. Asserting only ``status='ok'`` keeps the smoke focused on the
+    dispatch leg — payload shape is the JSONFlux force-handle test's job.
     """
     params = SMOKE_PARAMS.get(op_id, {})
     result = await call_operation(

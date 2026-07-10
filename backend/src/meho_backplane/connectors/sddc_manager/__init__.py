@@ -45,6 +45,7 @@ from meho_backplane.connectors.sddc_manager.core_ops import (
     apply_sddc_core_curation,
     classify_sddc_op,
 )
+from meho_backplane.connectors.sddc_manager.profile import SDDC_EXECUTION_PROFILE
 from meho_backplane.connectors.sddc_manager.session import (
     SddcCredentialsLoader,
     SddcTargetLike,
@@ -76,6 +77,7 @@ __all__ = [
     "SDDC_CONNECTOR_ID",
     "SDDC_CORE_GROUPS",
     "SDDC_CORE_OPS",
+    "SDDC_EXECUTION_PROFILE",
     "SDDC_IMPL_ID",
     "SDDC_PATH_RULES",
     "SDDC_PRODUCT",

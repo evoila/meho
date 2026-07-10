@@ -8,9 +8,10 @@ Covers all four acceptance criteria from Issue #618:
 (a) All 9 curated SDDC Manager read ops dispatch through the full
     ``call_operation`` stack against a respx-mocked SDDC Manager
     appliance and return ``status='ok'``.
-(b) HTTP Basic auth path: no 401-retry for SDDC Manager — Basic
-    credentials are stateless. The connector's stub credentials loader
-    is verified to be called (once, then cached) on the first dispatch.
+(b) Token-session auth path: the connector mints a session token at
+    ``POST /v1/tokens`` and reuses it. The connector's stub credentials
+    loader is verified to be called (once, then cached) on the first
+    dispatch.
 (c) Audit rows: each dispatch inserts an ``AuditLog`` row carrying
     ``method='DISPATCH'``, a non-null ``target_id``, and a
     ``payload["params_hash"]`` key.
@@ -230,9 +231,9 @@ async def test_sddc_e2e_all_ops_dispatch_ok(
 ) -> None:
     """All 9 SDDC Manager core ops dispatch through the full dispatcher and return status='ok'.
 
-    HTTP Basic auth is computed by the connector's stub credentials loader on
-    first dispatch (then cached); no session-establish step is needed because
-    Basic auth is stateless on the SDDC Manager side.
+    The connector mints a session token at ``POST /v1/tokens`` from the stub
+    credentials loader on first dispatch (then caches both the credentials and
+    the token), and sends it as ``Authorization: Bearer`` on each op request.
     """
     params = _DOMAIN_INFO_OP_PARAMS.get(op_id, {})
     result = await call_operation(
@@ -257,8 +258,9 @@ async def test_sddc_e2e_credentials_cached_after_first_dispatch(
 
     Verifies acceptance criterion (b): the SDDC Manager connector's per-target
     credential cache starts empty, gets populated on the first dispatch, and is
-    not re-filled on the second dispatch to the same target. HTTP Basic is
-    stateless server-side — no session revoke or re-login needed.
+    not re-filled on the second dispatch to the same target (the minted session
+    token is likewise cached, so the second dispatch neither re-loads
+    credentials nor re-mints the token).
     """
     instance = sddc_e2e_canary.connector_instance
     target_name = sddc_e2e_canary.target_name

@@ -13,9 +13,11 @@ with a stub credentials loader (so no Vault read is required), a probed
 :mod:`respx`-mocked SDDC Manager REST surface answering each of the 9 curated
 read ops.
 
-SDDC Manager uses HTTP Basic auth on every request — no session establish
-or XSRF-token dance is needed. The stub credentials loader bypasses the
-Vault-backed loader; the respx router matches requests by path (Basic auth
+SDDC Manager is token-only: the connector establishes a session at
+``POST /v1/tokens`` (the ``session_login_token`` scheme, #2290) and sends the
+minted ``accessToken`` as ``Authorization: Bearer`` on every subsequent
+request. The stub credentials loader bypasses the Vault-backed loader; the
+respx router registers the token-mint route plus each op path (the Bearer
 header is not asserted by default).
 
 Why a minimal direct-insert path (not full G0.7 canary ingest)
@@ -373,16 +375,25 @@ async def _sddc_credentials_loader(_target: object, _operator: Operator) -> dict
     return {"username": "sddc-canary-svc", "password": "sddc-canary-pw"}
 
 
-def _register_sddc_routes(mock: respx.MockRouter) -> None:
-    """Register the 9 SDDC Manager read-op routes on *mock*.
+#: The synthetic ``accessToken`` the mocked ``POST /v1/tokens`` mints. Opaque
+#: to the dispatch leg — the tests assert only that requests carry a Bearer
+#: header, not the token value.
+SDDC_CANARY_ACCESS_TOKEN: str = "sddc-canary-access-token"
 
-    SDDC Manager uses HTTP Basic on every request — no session establish
-    call is needed. Each route returns a pre-seeded JSON body matching
-    the rough shape SDDC Manager returns for that path family.
+
+def _register_sddc_routes(mock: respx.MockRouter) -> None:
+    """Register the session-mint route + the 9 SDDC Manager read-op routes on *mock*.
+
+    SDDC Manager is token-only: the connector first POSTs ``/v1/tokens`` to
+    mint an ``accessToken`` (the ``session_login_token`` scheme, #2290), then
+    sends it as ``Authorization: Bearer`` on each op request. Each route returns
+    a pre-seeded JSON body matching the rough shape SDDC Manager returns for
+    that path family.
 
     The ``GET:/v1/domains/{id}`` route is registered for the specific
     ``domain-mgmt`` id the dispatch smoke test uses as its path parameter.
     """
+    mock.post("/v1/tokens").respond(200, json={"accessToken": SDDC_CANARY_ACCESS_TOKEN})
     mock.get("/v1/releases/system").respond(200, json=SDDC_CANARY_RELEASE)
     mock.get("/v1/sddc-managers").respond(200, json=SDDC_CANARY_MANAGERS)
     mock.get("/v1/domains").respond(200, json=SDDC_CANARY_DOMAINS)

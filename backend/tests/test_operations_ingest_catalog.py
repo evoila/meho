@@ -478,7 +478,13 @@ def test_validate_shipped_artifacts_passes_for_shipped_catalog() -> None:
             "session_login_basic",
             9,
         ),
-        ("sddc", "sddc_manager_minimal.yaml", "sddc_manager_minimal.yaml", "basic", 9),
+        (
+            "sddc",
+            "sddc_manager_minimal.yaml",
+            "sddc_manager_minimal.yaml",
+            "session_login_token",
+            9,
+        ),
     ],
 )
 def test_shipped_vmware_sddc_rows_are_profile_backed(
@@ -537,7 +543,7 @@ def test_shipped_vmware_sddc_specs_parse_with_the_ingest_parser(
     ("profile_resource", "expected_scheme"),
     [
         ("vmware_rest_minimal.yaml", "session_login_basic"),
-        ("sddc_manager_minimal.yaml", "basic"),
+        ("sddc_manager_minimal.yaml", "session_login_token"),
     ],
 )
 def test_shipped_vmware_sddc_profiles_validate_with_named_scheme(

@@ -3,12 +3,21 @@
 
 """Runbooks UI lifecycle controls: publish / deprecate handler bodies + wiring.
 
-Initiative #1381 (G10.6 Runbooks UI), Task #1384 (T3). The ``tenant_admin``
-lifecycle half of the ``/ui/runbooks*`` surface -- the publish / deprecate
-actions that drive a template through its state machine
-(``draft --publish--> published --deprecate--> deprecated``) over the same
-service the REST surface (:mod:`meho_backplane.api.v1.runbook_templates`) and
-the CLI (``meho runbook publish-template`` / ``deprecate-template``) use.
+Initiative #1381 (G10.6 Runbooks UI), Task #1384 (T3); the draft close-out
+leg (discard) added under Task #2241. The ``tenant_admin`` lifecycle half of
+the ``/ui/runbooks*`` surface -- the publish / deprecate actions that drive a
+template through its state machine
+(``draft --publish--> published --deprecate--> deprecated``), plus the
+discard action that deletes an unwanted draft outright, over the same service
+the REST surface (:mod:`meho_backplane.api.v1.runbook_templates`) and the CLI
+(``meho runbook publish-template`` / ``deprecate-template``) use.
+
+The lifecycle is one-directional: a draft can only be *published* or
+*discarded*, never deprecated (the engine raises ``TemplateNotPublishedError``
+-> 400 for deprecate-on-draft). Discard is the draft's terminal-delete leg --
+the row is removed, not transitioned -- so only a ``draft`` is discardable; a
+``published`` / ``deprecated`` version is retired via deprecate (preserving
+lifecycle history), and discarding one raises ``TemplateNotDraftError`` -> 400.
 
 Route inventory (all ``require_ui_admin``-gated):
 
@@ -18,6 +27,12 @@ Route inventory (all ``require_ui_admin``-gated):
 * ``POST /ui/runbooks/{slug}/deprecate``  -> :meth:`RunbookTemplateService.deprecate`
   (mirrors REST ``POST /api/v1/runbooks/templates/{slug}/deprecate`` -- 200
   idempotent / 400 not-published / 404).
+* ``POST /ui/runbooks/{slug}/discard``    -> :meth:`RunbookTemplateService.discard`
+  (mirrors REST ``POST /api/v1/runbooks/templates/{slug}/discard`` -- deletes
+  the draft; 400 not-draft / 404). Unlike publish / deprecate the success path
+  has no fragment to re-render (the row is gone), so it returns an empty
+  ``204`` carrying ``HX-Redirect: /ui/runbooks`` to send the operator back to
+  the catalog; the typed-400 not-draft path re-renders the inline alert.
 
 Both target the **specific** ``version`` carried by the detail / list view the
 control was rendered into (the form posts a ``version`` field), so a stale
@@ -85,6 +100,7 @@ from fastapi.responses import HTMLResponse
 
 from meho_backplane.runbooks.schemas import (
     DeprecateTemplateRequest,
+    DiscardTemplateRequest,
     PublishTemplateRequest,
     ShowTemplateResponse,
 )
@@ -203,6 +219,30 @@ async def _deprecate(session: UISessionContext, slug: str, version: int) -> _Act
     return _ActionOutcome(template=template, error_message=None)
 
 
+async def _discard(session: UISessionContext, slug: str, version: int) -> _ActionOutcome | None:
+    """Delete ``(slug, version)`` draft; ``None`` on success, alert on typed 400.
+
+    The success case has no fragment to re-render -- the row is deleted, so the
+    caller emits an ``HX-Redirect`` to the catalog instead of a re-rendered
+    action row (a re-render would 404 on the now-absent version). Returns
+    ``None`` to signal that redirect path. A non-draft version raises
+    :class:`TemplateNotDraftError` (a ``published`` / ``deprecated`` version is
+    retired via :func:`_deprecate`, never erased) -> inline ``alert-error``
+    with the badge left on its current state; a missing / cross-tenant
+    ``(slug, version)`` is 404 (the detail page is stale -- reload).
+    """
+    try:
+        await RunbookTemplateService().discard(
+            session.tenant_id, DiscardTemplateRequest(slug=slug, version=version)
+        )
+    except TemplateNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="runbook_template_not_found") from exc
+    except TemplateNotDraftError as exc:
+        template = await _resolve_template(session, slug, version)
+        return _ActionOutcome(template=template, error_message=str(exc))
+    return None
+
+
 def _is_catalog_row_action(request: Request) -> bool:
     """Return ``True`` when this POST was dispatched from the catalog row.
 
@@ -297,17 +337,17 @@ def _parse_version(raw: str) -> int:
 
 
 def register_lifecycle_routes(router: APIRouter) -> None:
-    """Register the ``require_ui_admin``-gated publish / deprecate routes.
+    """Register the ``require_ui_admin``-gated publish / deprecate / discard routes.
 
-    The T3 (#1384) lifecycle surface: the publish + deprecate POST handlers.
-    Called by
+    The T3 (#1384) lifecycle surface: the publish + deprecate POST handlers,
+    plus the discard (draft close-out) handler added under #2241. Called by
     :func:`meho_backplane.ui.routes.runbooks.routes.build_runbooks_router`
     after the read + editor routes so the literal segments are registered
     BEFORE ``/ui/runbooks/{slug}`` (FastAPI is first-match-wins -- the
-    ``{slug}`` catch-all would otherwise swallow ``publish`` / ``deprecate``).
-    Every route declares ``_require_admin``: the server is the single source of
-    truth for the privilege; an ``operator`` gets 403 at the dependency, before
-    the handler body runs.
+    ``{slug}`` catch-all would otherwise swallow ``publish`` / ``deprecate`` /
+    ``discard``). Every route declares ``_require_admin``: the server is the
+    single source of truth for the privilege; an ``operator`` gets 403 at the
+    dependency, before the handler body runs.
     """
 
     @router.post("/ui/runbooks/{slug}/publish", response_class=HTMLResponse)
@@ -332,4 +372,30 @@ def register_lifecycle_routes(router: APIRouter) -> None:
         """Deprecate ``(slug, version)`` (published -> deprecated); admin only."""
         parsed = _parse_version(version)
         outcome = await _deprecate(session, slug.strip(), parsed)
+        return await _render_actions_fragment(request, session, outcome)
+
+    @router.post("/ui/runbooks/{slug}/discard", response_class=HTMLResponse)
+    async def runbooks_discard(
+        slug: str,
+        request: Request,
+        session: UISessionContext = _require_admin,
+        version: str = Form(default="", max_length=_MAX_VERSION_FIELD_LENGTH),
+    ) -> HTMLResponse:
+        """Discard (delete) ``(slug, version)`` draft; admin only.
+
+        On success the draft row is deleted, so there is no fragment to
+        re-render -- return an empty ``204`` carrying ``HX-Redirect:
+        /ui/runbooks`` so HTMX navigates back to the catalog (HTMX honours the
+        redirect header before the 204-no-swap rule). A non-draft version
+        re-renders the inline ``alert-error`` fragment instead (the engine
+        rejects discard-on-non-draft), so a stale detail page surfaces the
+        typed-400 rather than silently navigating away.
+        """
+        parsed = _parse_version(version)
+        outcome = await _discard(session, slug.strip(), parsed)
+        if outcome is None:
+            return HTMLResponse(
+                status_code=204,
+                headers={"HX-Redirect": "/ui/runbooks"},
+            )
         return await _render_actions_fragment(request, session, outcome)

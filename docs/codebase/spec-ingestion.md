@@ -628,6 +628,83 @@ enable — not the stamp — is what cleared the review gate and made the op
 callable. Both advisories decorate a write that already landed; neither
 blocks it.
 
+**Boot-time stamping (#2288).** `record_profile_stamp` had no production
+caller until #2288 — shipped profile-backed rows were boot-validated
+package data that never became connector classes.
+`stamp_catalog_profiled_connectors()` (`ingest/boot_stamp.py`) is the
+production wiring: the lifespan calls it once, immediately after
+`validate_shipped_artifacts()`, so every catalog row carrying a
+`profile_resource` registers a `ProfiledRestConnector` (synthesised from
+the already-validated profile by `synthesise_profiled_class`) under the
+built-in (`tenant_id=None`) scope. It runs as a synthetic
+`system:boot-profile-stamp` operator and does **no** network I/O (it only
+re-parses the package-data bytes the boot validator already read). The
+result: a fresh deploy has profiled connector classes registered and
+resolvable for every profile-backed row, with dispatch still behind the
+per-op review gate above (stamping never enables an op).
+
+The path is idempotent and gated by construction: a `(product, version,
+impl_id)` triple already served by a hand-coded class (vmware's
+`VmwareRestConnector`, sddc's `SddcManagerConnector`) — or an already-
+stamped profiled class — no-ops (logged at debug, not an error), because
+`record_profile_stamp` refuses to overwrite an occupied triple. The
+synthesised class's triple is derived from the connector_id
+(`parse_connector_id`), not the catalog's raw `product`, so it agrees with
+the registry key `record_profile_stamp` lands it under even when the raw
+product does not round-trip (the `_fixture` mechanism row parses to
+`fixture`). A malformed profile has already crashed the lifespan at
+`validate_shipped_artifacts()`; the stamp path re-parses with the same
+model, so it stays fail-closed as a second line of defence.
+
+### Operator-selectable auth scheme on a non-catalog ingest (#2289)
+
+Boot stamping (above) makes a *shipped* profile-backed catalog row
+dispatchable. `#2289` is the **non-catalog on-ramp**: an operator ingesting an
+arbitrary spec may *select* a named auth scheme at creation time, and the
+register phase synthesises a minimal `ExecutionProfile` and stamps the same
+`ProfiledRestConnector` under the triple — so a hand-authored spec becomes
+dispatchable without a hand-coded connector class.
+
+The selection is exposed on all three surfaces as two optional fields:
+
+* REST — `IngestRequest.auth_scheme` (+ `auth_secret_fields`) in
+  `ingest/api_schemas.py`.
+* MCP — the `auth_scheme` / `auth_secret_fields` properties on the
+  `meho.connector.ingest` tool schema (`mcp/tools/connector_ingest.py`).
+* CLI — `meho connector ingest --auth-scheme <name> [--auth-secret-field
+  <name> ...]` (`cli/internal/cmd/connector/ingest.go`).
+
+`auth_scheme` is a member of the **closed** `AuthSchemeName` catalog
+(`connectors/profile.py`): `basic`, `static_header`, `session_login`,
+`session_login_basic`, `session_login_token`, `oauth2_mint`. The Pydantic
+`Literal` rejects an unknown value **and every reserved typed-only shape**
+(`github_app_jwt`, `kubeconfig`, `cookie_jar_session`, …) with a 422 closed-set
+error naming the allowed members, at the API boundary.
+
+**The boundary (Initiative #2271, grounded in #1177 / Goal #1964 Non-goals) is
+selection only.** The operator picks *which* vetted scheme (and optionally the
+NAMES of the secret-bundle keys it reads); there is **no** free-form auth
+config — no login URL, body template, token JSONPath, or header name. The login
+path, request body shape, and token extractor for each scheme are vetted Python
+selected by the scheme name in `_shared/profile_auth.py::SESSION_SCHEME_SPECS`.
+Adding a new auth shape is a scheme PR (a new `Literal` member + a reviewed
+extractor + coverage-trace update), never a request knob. The secret *values*
+are never carried in the ingest request — `auth_secret_fields` is field NAMES
+only, resolved from the target's `secret_ref` by the broker at dispatch.
+
+Wiring: `IngestionPipelineService.ingest(auth_scheme=…, auth_secret_fields=…)`
+builds the profile via `ingest/ingest_profile.py::build_ingest_execution_profile`
+(per-scheme secret-field defaults in `DEFAULT_SECRET_FIELDS`; conservative
+fingerprint/`delegate`-probe/`none`-pagination defaults, since a non-catalog
+ingest names no version endpoint). The register phase then skips the bare shim
+(`register_ingested_operations(register_shim=False)`) so the triple is free, and
+`_stamp_profiled_connector` stamps the synthesised class through the same
+`record_profile_stamp` seam boot stamping uses. **Stamping never enables an
+op** — the `review_status='staged'` gate (#1971) stays the interlock, so the
+connector lands dispatchable-but-unreviewed (`kind="profiled-but-unreviewed"`)
+and the operator clears the gate per-op via the normal review/enable flow.
+Omitting `auth_scheme` keeps the historical bare-shim behaviour byte-identical.
+
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 
 The enable-time advisory above surfaces the connector tier only at the
@@ -1126,9 +1203,19 @@ only the pipeline call were wrapped) — inside
 deadline the body is cancelled and `asyncio.timeout` re-raises
 `TimeoutError`, which the existing `except` routes to `failed`
 (`error_class="TimeoutError"`). The budget defaults to 30 min and is
-env-overridable via `INGEST_JOB_TIMEOUT_SECONDS` (parsed defensively — a
-malformed value falls back to the default with a warning rather than
-crashing the package at import). The guarantee is scoped precisely to
+env-overridable via `INGEST_JOB_TIMEOUT_SECONDS` — surfaced as the typed
+Helm value `config.ingestJobTimeoutSeconds` (#2318), rendered onto the
+backplane ConfigMap only when set so the default deploy inherits the
+30-min default silently rather than an empty `float("")` that would warn
+every boot. The value is parsed defensively: a malformed, non-finite
+(`inf` / `nan`), or non-positive budget falls back to the default with a
+warning rather than crashing the package at import. The non-finite guard
+is load-bearing, not padding — `float("inf")` / `float("nan")` raise no
+`ValueError` and slip past a bare `value <= 0` check (`inf <= 0` is
+`False`; every `nan` comparison is `False`), and `asyncio.timeout(inf)`
+schedules no deadline, so without the `math.isfinite` guard a
+misconfigured budget would silently re-open this very wedge (#2318). The
+guarantee is scoped precisely to
 the *job leg*: cancellation cannot interrupt an already-running
 `to_thread` OS thread (Python exposes no thread cancellation), so the
 status flips but that thread may linger until it returns.
@@ -1360,7 +1447,9 @@ for the operator-facing framing.
 The only public entry point for the full walk. Resolves the input
 (file path or `http(s)://` URL via `httpx`), sniffs YAML vs JSON via
 `detect_spec_format`, decodes, validates the OpenAPI version
-(3.0.x / 3.1.x), and walks `paths`. Returns a list.
+(3.0.x / 3.1.x), validates the document against the official OpenAPI
+metaschema (`_validate_openapi_structure`), and walks `paths`. Returns a
+list.
 
 The function is synchronous because callers are CLI / one-shot
 ingestion endpoints that have no in-flight event loop concern. It
@@ -1386,12 +1475,88 @@ say) fails identically — a structured `invalid_schema` 400 at parse time
 — instead of crashing the real INSERT while `dry_run=true` green-lights
 the same spec.
 
+**Structural (metaschema) gate (#2292).** Immediately after the version
+gate, `_validate_openapi_structure` validates the decoded document
+against the official OpenAPI metaschema — the 2020-12-based schema for a
+`3.1.x` document, the draft-04-based schema for `3.0.x` — via
+`openapi-spec-validator`'s pre-built schema validators
+(`openapi_v30_schema_validator` / `openapi_v31_schema_validator`).
+Validation is **metaschema-only**: the library's optional semantic
+add-ons (duplicate-`operationId`, unresolvable-path-parameter,
+extra-parameter) are *not* run, because they routinely flag
+legal-but-untidy vendor specs and this gate judges structure, not style.
+The first (most-relevant) violation is selected with
+`jsonschema.exceptions.best_match` and surfaced as `InvalidSpecError`
+naming the failing JSON path (e.g. `$.paths['/pets'].get.responses`) plus
+the house remediation anchor, so it flows through the existing
+`invalid_spec` envelope on every transport (REST 400, MCP `-32602`,
+async-job `error`) with no new typed field. Because the gate lives at
+parse, a metaschema-invalid document is refused identically on the
+`dry_run` and effectful legs — it can never partially ingest into
+catalog rows of unknown quality. The gate is deliberately narrower than
+"validate everything": the metaschema does not resolve `$ref` targets
+(so cross-document `$ref` rejection stays with the ref resolver
+downstream) and it permits a `3.1` document with `webhooks`/`components`
+but no `paths`, which meho's own `no 'paths' key` check — sitting behind
+the gate — still rejects because meho ingests only path operations. The
+parser's tolerant-skip of sub-document junk (a path item with no verbs,
+a non-dict path item) is unaffected: those shapes are legal per the
+metaschema and are handled in `_iter_operations`.
+
+Boot-time impact: the same gated parser runs in
+`validate_shipped_artifacts` (`catalog.py`, called at `main.py`
+startup), so every shipped package-data spec and catalog `spec_resource`
+must be metaschema-valid or the backplane crashes on start — the guard
+that keeps a malformed shipped artifact from 500-ing the first ingest
+that touches it (Initiative #1966 boot-validation precedent).
+
 `read_spec_info_version(spec_path_or_uri)` is the companion helper
 the G0.9-T8 cross-check uses. It runs the same load / decode /
 version-gate steps but returns the spec's `info.version` string
 (or `None` when absent) without walking `paths` — so the
 pipeline can fail the spec-vs-label check in milliseconds rather
 than after spending CPU on a 2,000-op spec walk.
+
+### Spec provenance persistence (#2291)
+
+`parse_openapi_with_provenance(spec_path_or_uri, *, spec_source=None,
+content=None)` is the register phase's variant of `parse_openapi`: it
+returns the same proto list **plus** a `ParsedSpecProvenance` (a frozen
+dataclass with `uri`, `sha256`, `origin`). The bytes are loaded exactly
+once — the `sha256` is taken over the **raw bytes** (fetched body or
+uploaded content) at the `_load_spec_bytes` trust boundary, before any
+YAML/JSON decode, so it reflects exactly what arrived rather than a
+re-serialised dict. `classify_spec_origin(uri, content)` derives the
+origin from what the ingest request already carries — no threading from
+the REST/MCP/CLI entry points:
+
+- `content is None` → `fetched` (the https GET path).
+- `content` set **and** `uri` starts with `spec:` → `shipped` (the
+  catalog on-ramp uploads MEHO-authored package data under
+  `uri="spec:<resource>"`, #1975).
+- `content` set under any other label → `inline` (an operator upload).
+
+The register phase (`IngestionPipeline._register_one_spec`) upserts one
+`spec_provenance` row per accepted spec after its descriptor rows land —
+in its **own** transaction, because provenance is record-and-surface
+metadata and must not roll back the operations it describes. The row is
+keyed on `(tenant_id, product, version, impl_id, uri)` (two partial
+unique indexes, `tenant_id IS NULL` = global, mirroring the descriptor
+scope split), so re-ingesting the same spec updates the row in place
+(new `sha256` + `ingested_at`, no duplicate) and different content under
+the same label changes the stored digest. `upsert_spec_provenance` /
+`load_spec_provenance` live in `ingest/spec_provenance.py`; the
+`SpecProvenance` model is in `db/models.py` (Alembic `0056`).
+
+The review service reads the rows back via `load_spec_provenance` and
+attaches them to `ConnectorReviewPayload.provenance` (a list of
+`ConnectorReviewProvenance`), which `GET
+/api/v1/connectors/{id}/review`, `meho connector review`, and the review
+drawer surface. A connector ingested before the table landed has no
+rows; the surfaces render that as "unknown (pre-provenance)" rather than
+fabricating a record. This is a spec-level table by design: a single
+spec fans out to hundreds of descriptor rows, so per-descriptor
+provenance columns would be the wrong shape.
 
 ## Security: SSRF and local-file guard (G0.16-T8, #95)
 
@@ -1452,6 +1617,7 @@ parse_openapi
 │  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
 ├─ _decode_spec            # YAML via _SpecYamlLoader (timestamp→str, #2272), stdlib JSON
 ├─ _validate_openapi_version
+├─ _validate_openapi_structure  # metaschema gate: refuse invalid 3.x w/ JSON-pointer (#2292)
 └─ _iter_operations
    └─ _build_proto         # per (method, path) verb under paths
       ├─ _build_parameter_schema

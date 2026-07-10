@@ -1,26 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for :class:`SddcManagerConnector` auth + fingerprint/probe (G3.5-T4 #616).
+"""Unit tests for :class:`SddcManagerConnector` auth + fingerprint/probe.
 
-Exercises HTTP Basic auth with sso_realm handling (default + override),
-per-target credential isolation, the auth_model boundary gate, and the
-fingerprint/probe shape against a mocked ``GET /v1/sddc-managers`` endpoint.
-
-Auth divergence from the NSX/vSphere precedents: no session token is
-established — HTTP Basic is sent on every request via
-``Authorization: Basic <base64(username@realm:password)>``. Credentials are
-cached per target so Vault is only queried once per target per connector
-instance lifetime.
+Exercises the ``session_login_token`` auth flow (#2290): the connector
+POSTs ``{username, password}`` to ``/v1/tokens``, reads ``accessToken`` out
+of the response, and sends it as ``Authorization: Bearer <accessToken>`` on
+every subsequent request — SDDC Manager rejects HTTP Basic outright. Covers
+per-target credential + token isolation, the system-operator cache bypass
+(#1008), the auth_model boundary gate, single re-login on a downstream 401,
+and the fingerprint/probe shape against a mocked ``GET /v1/sddc-managers``.
 """
 
 from __future__ import annotations
 
-import base64
-from collections.abc import Iterator
+import json
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import respx
 
@@ -31,6 +30,7 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -41,6 +41,8 @@ from meho_backplane.connectors.sddc_manager import (
     SddcManagerConnector,
     SddcTargetLike,
 )
+
+_TOKEN_PATH = "/v1/tokens"
 
 
 def _make_operator(raw_jwt: str = "") -> Operator:
@@ -77,7 +79,6 @@ def _clean_sddc_registry() -> Iterator[None]:
 
 # ---------------------------------------------------------------------------
 # Target stub — satisfies SddcTargetLike Protocol structurally.
-# Replaced by the real Target model when G0.3 (#224) lands.
 # ---------------------------------------------------------------------------
 
 
@@ -88,7 +89,6 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
-    sso_realm: str = field(default="vsphere.local")
     # Tenant-unique cache key components (#1642). Distinct ``id`` per
     # instance so two stub targets never collapse onto one cache entry.
     id: UUID = field(default_factory=uuid4)
@@ -119,12 +119,21 @@ def _make_connector() -> SddcManagerConnector:
     return SddcManagerConnector(credentials_loader=_stub_loader)
 
 
-def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
-    """Decode an ``Authorization: Basic <b64>`` header into (username, password)."""
-    assert authorization_header.startswith("Basic ")
-    decoded = base64.b64decode(authorization_header[6:]).decode()
-    username, _, password = decoded.partition(":")
-    return username, password
+def _mint_from_username(
+    token_prefix: str = "tok",
+) -> Callable[[httpx.Request], httpx.Response]:
+    """respx side-effect minting ``<prefix>-<login-body-username>`` as the token.
+
+    Lets a single ``/v1/tokens`` route return a token that varies with the
+    posted credential body, so per-target / per-tenant token distinctness can
+    be asserted from one router.
+    """
+
+    def _mint(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        return httpx.Response(200, json={"accessToken": f"{token_prefix}-{body['username']}"})
+
+    return _mint
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +172,6 @@ def test_default_credentials_loader_delegates_to_shared_basic_loader() -> None:
     """
     import asyncio
 
-    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.sddc_manager.session import load_credentials_from_vault
 
     async def _check() -> None:
@@ -175,52 +183,36 @@ def test_default_credentials_loader_delegates_to_shared_basic_loader() -> None:
 
 
 # ---------------------------------------------------------------------------
-# HTTP Basic auth — happy paths
+# session_login_token auth — happy paths
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_auth_headers_sends_basic_auth_with_default_sso_realm() -> None:
-    """auth_headers() produces Authorization: Basic with sso_realm=vsphere.local default.
+async def test_auth_headers_mints_and_sends_bearer_token() -> None:
+    """auth_headers() POSTs /v1/tokens and returns Authorization: Bearer <accessToken>.
 
-    The username in the Basic auth header must be ``svc-meho@vsphere.local``,
-    not bare ``svc-meho``. This is the load-bearing sso_realm contract.
-
-    auth_headers() does not make any HTTP calls — it computes the header from
-    cached credentials — so no respx mock is needed here.
+    No request ever carries HTTP Basic — the appliance rejects it.
     """
     connector = _make_connector()
-    headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert "Authorization" in headers
-    assert headers["Authorization"].startswith("Basic ")
-    username, password = _decode_basic_auth(headers["Authorization"])
-    assert username == "svc-meho@vsphere.local"
-    assert password == "stub-password"
+    assert headers == {"Authorization": "Bearer tok-abc"}
+    assert token_route.call_count == 1
+    # The login POST carried the JSON credential body — no Basic header.
+    login_request = token_route.calls[0].request
+    assert login_request.headers.get("authorization") is None
+    assert json.loads(login_request.content) == {
+        "username": "svc-meho",
+        "password": "stub-password",
+    }
     await connector.aclose()
 
 
 @pytest.mark.asyncio
-async def test_auth_headers_honors_explicit_sso_realm_override() -> None:
-    """A target with a custom sso_realm has that realm reflected in the Basic auth header."""
-    target = _StubTarget(
-        name="sddc-custom",
-        host="sddc-custom.test.invalid",
-        port=443,
-        secret_ref="sddc/custom",
-        sso_realm="corp.example.com",
-    )
-    connector = _make_connector()
-
-    headers = await connector.auth_headers(target, operator=_make_operator())
-    username, _ = _decode_basic_auth(headers["Authorization"])
-    assert username == "svc-meho@corp.example.com"
-    await connector.aclose()
-
-
-@pytest.mark.asyncio
-async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
-    """Second auth_headers call against the same target does NOT re-invoke the loader."""
+async def test_auth_headers_reuses_cached_token_across_calls() -> None:
+    """Second auth_headers call reuses the cached token — no re-mint, no re-load."""
     call_count = 0
 
     async def _counting_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
@@ -229,11 +221,14 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
         return {"username": "svc-meho", "password": "stub-password"}
 
     connector = SddcManagerConnector(credentials_loader=_counting_loader)
-    h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert h1 == h2
+    assert h1 == h2 == {"Authorization": "Bearer tok-abc"}
     assert call_count == 1
+    assert token_route.call_count == 1
     await connector.aclose()
 
 
@@ -244,11 +239,11 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
 
 @pytest.mark.asyncio
 async def test_warm_cache_not_served_to_system_operator_runs_loader() -> None:
-    """A warm cache primed by a real operator is NOT served to the system operator.
+    """A warm session primed by a real operator is NOT served to the system operator.
 
     The system/operator-less caller (``synthesise_system_operator``) must
     re-run the loader so its fail-closed behaviour applies — it can never
-    borrow warm credentials a real operator resolved (#1008). Keyed off
+    borrow a warm credential/token a real operator resolved (#1008). Keyed off
     ``SYSTEM_OPERATOR_SUB``, not ``raw_jwt`` (the system operator carries a
     non-empty placeholder JWT since #980).
     """
@@ -259,10 +254,12 @@ async def test_warm_cache_not_served_to_system_operator_runs_loader() -> None:
         return {"username": "svc-meho", "password": "stub-password"}
 
     connector = SddcManagerConnector(credentials_loader=_counting_loader)
-    # Real operator warms the cache (cold load).
-    await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    # System operator must re-run the loader rather than reuse the warm cache.
-    await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        # Real operator warms the cache (cold load + mint).
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        # System operator must re-run the loader rather than reuse the warm cache.
+        await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())
 
     assert call_log == ["test-operator", SYSTEM_OPERATOR_SUB]
     await connector.aclose()
@@ -288,9 +285,11 @@ async def test_system_operator_fails_closed_against_warm_cache() -> None:
         return {"username": "svc-meho", "password": "stub-password"}
 
     connector = SddcManagerConnector(credentials_loader=_failing_for_system_loader)
-    await connector.auth_headers(_TARGET_A, operator=_make_operator())  # warm the cache
-    with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
-        await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())  # warm the cache
+        with pytest.raises(VaultCredentialsReadError, match=r"system-initiated"):
+            await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())
     await connector.aclose()
 
 
@@ -311,17 +310,19 @@ async def test_real_operator_reuse_unchanged_after_system_operator_call() -> Non
         return {"username": "svc-meho", "password": "stub-password"}
 
     connector = SddcManagerConnector(credentials_loader=_counting_loader)
-    await connector.auth_headers(_TARGET_A, operator=_make_operator())  # cold real load
-    await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())  # bypass
-    await connector.auth_headers(_TARGET_A, operator=_make_operator())  # warm real reuse
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())  # cold real load
+        await connector.auth_headers(_TARGET_A, operator=synthesise_system_operator())  # bypass
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())  # warm real reuse
 
     assert real_calls == 1
     await connector.aclose()
 
 
 @pytest.mark.asyncio
-async def test_per_target_isolation_keeps_credentials_separate() -> None:
-    """Two targets get two distinct credential cache entries; no cross-target leakage."""
+async def test_per_target_isolation_keeps_tokens_separate() -> None:
+    """Two targets get two distinct credential + token cache entries; no leakage."""
     call_log: list[str] = []
 
     async def _tracking_loader(target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
@@ -329,27 +330,27 @@ async def test_per_target_isolation_keeps_credentials_separate() -> None:
         return {"username": f"svc-{target.name}", "password": "pass"}
 
     connector = SddcManagerConnector(credentials_loader=_tracking_loader)
-    h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
+    async with respx.mock(assert_all_called=False) as mock:
+        mock.post("https://sddc-a.test.invalid/v1/tokens").mock(side_effect=_mint_from_username())
+        mock.post("https://sddc-b.test.invalid/v1/tokens").mock(side_effect=_mint_from_username())
+        h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
 
-    username_a, _ = _decode_basic_auth(h_a["Authorization"])
-    username_b, _ = _decode_basic_auth(h_b["Authorization"])
-    assert username_a == "svc-sddc-a@vsphere.local"
-    assert username_b == "svc-sddc-b@vsphere.local"
+    assert h_a == {"Authorization": "Bearer tok-svc-sddc-a"}
+    assert h_b == {"Authorization": "Bearer tok-svc-sddc-b"}
     # Loader called exactly once per distinct target.
     assert call_log == ["sddc-a", "sddc-b"]
     await connector.aclose()
 
 
 @pytest.mark.asyncio
-async def test_same_name_targets_in_different_tenants_get_distinct_credentials() -> None:
-    """Same-named targets in DIFFERENT tenants never share a cached credential.
+async def test_same_name_targets_in_different_tenants_get_distinct_tokens() -> None:
+    """Same-named targets in DIFFERENT tenants never share a cached credential/token.
 
-    Regression guard for #1642: the credential cache used to key on
-    ``target.name`` alone, so two same-named targets in different tenants
-    collapsed onto one entry and one tenant could be served another
-    tenant's cached credential. The cache keys on the tenant-unique
-    ``(tenant_id, id)`` tuple instead.
+    Regression guard for #1642/#1672/#1684: the caches key on the
+    tenant-unique ``(tenant_id, id)`` tuple, so two same-named targets in
+    different tenants get distinct credential + token entries and one tenant
+    can never be served another tenant's cached token.
     """
     load_count = 0
 
@@ -376,30 +377,61 @@ async def test_same_name_targets_in_different_tenants_get_distinct_credentials()
     )
 
     connector = SddcManagerConnector(credentials_loader=_counting_loader)
-    h_one = await connector.auth_headers(tenant_one, operator=_make_operator())
-    h_two = await connector.auth_headers(tenant_two, operator=_make_operator())
+    async with respx.mock(base_url="https://sddc-shared.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).mock(side_effect=_mint_from_username())
+        h_one = await connector.auth_headers(tenant_one, operator=_make_operator())
+        h_two = await connector.auth_headers(tenant_two, operator=_make_operator())
 
-    user_one, _ = _decode_basic_auth(h_one["Authorization"])
-    user_two, _ = _decode_basic_auth(h_two["Authorization"])
-    # Each tenant triggered its own load -- no cross-tenant cache hit.
-    assert load_count == 2
-    assert user_one == f"svc-{tenant_one.tenant_id}@vsphere.local"
-    assert user_two == f"svc-{tenant_two.tenant_id}@vsphere.local"
-    assert user_one != user_two
-    assert connector._creds_cache.keys() == {
-        target_cache_key(tenant_one),
-        target_cache_key(tenant_two),
-    }
+        # Each tenant triggered its own load + mint — no cross-tenant cache hit.
+        assert load_count == 2
+        assert h_one == {"Authorization": f"Bearer tok-svc-{tenant_one.tenant_id}"}
+        assert h_two == {"Authorization": f"Bearer tok-svc-{tenant_two.tenant_id}"}
+        assert h_one != h_two
+        assert connector._creds_cache.keys() == {
+            target_cache_key(tenant_one),
+            target_cache_key(tenant_two),
+        }
+        assert connector._session_tokens.keys() == {
+            target_cache_key(tenant_one),
+            target_cache_key(tenant_two),
+        }
 
-    # Same-tenant re-fetch is a cache HIT -- behaviour unchanged.
-    h_one_again = await connector.auth_headers(tenant_one, operator=_make_operator())
-    assert h_one_again == h_one
-    assert load_count == 2
+        # Same-tenant re-fetch is a cache HIT — behaviour unchanged.
+        h_one_again = await connector.auth_headers(tenant_one, operator=_make_operator())
+        assert h_one_again == h_one
+        assert load_count == 2
     await connector.aclose()
 
 
 # ---------------------------------------------------------------------------
-# Credential loading failure modes
+# Session-login failure modes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_non_2xx_raises_session_login_error_naming_target() -> None:
+    """A non-2xx from /v1/tokens surfaces a SessionLoginError naming the target."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(401, json={"message": "bad credentials"})
+        with pytest.raises(SessionLoginError, match=r"sddc-a"):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_login_without_access_token_raises_session_login_error() -> None:
+    """A 2xx body carrying no accessToken surfaces a SessionLoginError."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"refreshToken": {"id": "r"}})
+        with pytest.raises(SessionLoginError, match=r"sddc-a"):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# Credential loading failure modes (raised before the login POST)
 # ---------------------------------------------------------------------------
 
 
@@ -434,7 +466,7 @@ async def test_loader_missing_username_key_raises_runtime_error_naming_target() 
 
 
 # ---------------------------------------------------------------------------
-# Auth model gating
+# Auth model gating (rejected before any login POST fires)
 # ---------------------------------------------------------------------------
 
 
@@ -473,8 +505,10 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
         auth_model=None,
     )
     connector = _make_connector()
-    headers = await connector.auth_headers(target, operator=_make_operator())
-    assert headers["Authorization"].startswith("Basic ")
+    async with respx.mock(base_url="https://sddc.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        headers = await connector.auth_headers(target, operator=_make_operator())
+    assert headers == {"Authorization": "Bearer tok-abc"}
     await connector.aclose()
 
 
@@ -489,8 +523,33 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()
-    headers = await connector.auth_headers(target, operator=_make_operator())
-    assert headers["Authorization"].startswith("Basic ")
+    async with respx.mock(base_url="https://sddc.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        headers = await connector.auth_headers(target, operator=_make_operator())
+    assert headers == {"Authorization": "Bearer tok-abc"}
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# invalidate_session — the #2067 dispatch-path seam
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invalidate_session_evicts_token_and_re_mints_on_next_call() -> None:
+    """invalidate_session drops the cached token; the next call re-establishes it."""
+    connector = _make_connector()
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        assert target_cache_key(_TARGET_A) in connector._session_tokens
+        assert token_route.call_count == 1
+
+        await connector.invalidate_session(_TARGET_A)
+        assert target_cache_key(_TARGET_A) not in connector._session_tokens
+
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        assert token_route.call_count == 2
     await connector.aclose()
 
 
@@ -501,11 +560,12 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
 
 @pytest.mark.asyncio
 async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
-    """fingerprint() against a respx-mocked GET /v1/sddc-managers returns canonical shape."""
+    """fingerprint() authenticates via the token flow then reads GET /v1/sddc-managers."""
     connector = _make_connector()
 
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
-        mock.get("/v1/sddc-managers").respond(
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        managers_route = mock.get("/v1/sddc-managers").respond(
             200,
             json={
                 "elements": [
@@ -532,24 +592,64 @@ async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
     assert fp.extras["management_domain_id"] == "domain-uuid-1"
     assert fp.extras["id"] == "sddc-uuid-1"
     assert fp.extras["fqdn"] == "sddc-a.test.invalid"
+    # The inventory GET carried the minted Bearer token — never HTTP Basic.
+    inv_auth = managers_route.calls[0].request.headers.get("authorization")
+    assert inv_auth == "Bearer tok-abc"
     await connector.aclose()
 
 
 @pytest.mark.asyncio
-async def test_fingerprint_unreachable_returns_reachable_false_with_structured_error() -> None:
-    """Transport/status failure returns reachable=False with extras['error']."""
+async def test_fingerprint_recovers_once_from_a_401_then_reports_reachable() -> None:
+    """A single 401 on the inventory GET recovers via one re-login; a second 401 fails.
+
+    The helper-level ``_get_json_with_session_retry`` evicts the token, re-mints,
+    and retries the GET once. Here the retry succeeds, so the fingerprint is
+    reachable.
+    """
+    connector = _make_connector()
+    inventory = {
+        "elements": [
+            {
+                "id": "x",
+                "fqdn": "sddc-a.test.invalid",
+                "version": "9.0.0.0",
+                "domain": {"name": "M"},
+            }
+        ]
+    }
+    calls = {"n": 0}
+
+    def _inv(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(401, json={"message": "token expired"})
+        return httpx.Response(200, json=inventory)
+
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        token_route = mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        mock.get("/v1/sddc-managers").mock(side_effect=_inv)
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.reachable is True
+    assert fp.version == "9.0.0.0"
+    # One initial mint + one re-mint after the 401 eviction.
+    assert token_route.call_count == 2
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_unreachable_returns_reachable_false_on_persistent_401() -> None:
+    """A persistent 401 (re-login also 401s) returns reachable=False with a structured error."""
     connector = _make_connector()
 
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         mock.get("/v1/sddc-managers").respond(401, json={"message": "Unauthorized"})
         fp = await connector.fingerprint(_TARGET_A)
 
-    assert fp.vendor == "vmware"
-    assert fp.product == "sddc"
     assert fp.reachable is False
     assert fp.probe_method == "GET /v1/sddc-managers"
-    error = fp.extras["error"]
-    assert "HTTPStatusError" in error or "401" in error
+    assert "401" in fp.extras["error"]
     await connector.aclose()
 
 
@@ -559,6 +659,7 @@ async def test_fingerprint_empty_elements_returns_reachable_true_with_no_version
     connector = _make_connector()
 
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         mock.get("/v1/sddc-managers").respond(
             200,
             json={"elements": [], "pageMetadata": {"totalElements": 0}},
@@ -577,6 +678,7 @@ async def test_probe_returns_ok_true_when_reachable() -> None:
     connector = _make_connector()
 
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         mock.get("/v1/sddc-managers").respond(
             200,
             json={
@@ -603,6 +705,7 @@ async def test_probe_returns_ok_false_with_reason_when_unreachable() -> None:
     connector = _make_connector()
 
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         mock.get("/v1/sddc-managers").respond(401)
         result = await connector.probe(_TARGET_A)
 
@@ -612,28 +715,33 @@ async def test_probe_returns_ok_false_with_reason_when_unreachable() -> None:
 
 
 # ---------------------------------------------------------------------------
-# aclose — credential cache clear + pool tear-down
+# aclose — credential + token cache clear + pool tear-down
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_aclose_clears_credential_cache_and_pool() -> None:
-    """aclose() clears the in-memory credential cache and tears down the httpx pool."""
+async def test_aclose_clears_caches_and_pool() -> None:
+    """aclose() clears the in-memory credential + token caches and tears down the pool."""
     connector = _make_connector()
-    await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
     assert target_cache_key(_TARGET_A) in connector._creds_cache
+    assert target_cache_key(_TARGET_A) in connector._session_tokens
     await connector.aclose()
     assert connector._creds_cache == {}
+    assert connector._session_tokens == {}
     assert connector._clients == {}
 
 
 @pytest.mark.asyncio
-async def test_aclose_with_no_cached_credentials_is_a_noop() -> None:
-    """A fresh connector with no credentials established closes cleanly."""
+async def test_aclose_with_no_cached_state_is_a_noop() -> None:
+    """A fresh connector with no session established closes cleanly."""
     connector = _make_connector()
     await connector.aclose()
     assert connector._clients == {}
     assert connector._creds_cache == {}
+    assert connector._session_tokens == {}
 
 
 # ---------------------------------------------------------------------------
@@ -645,18 +753,10 @@ async def test_aclose_with_no_cached_credentials_is_a_noop() -> None:
 async def test_fingerprint_forwards_route_operator_to_credentials_loader() -> None:
     """G0.16-T4 (#1306) probe-vs-dispatch convergence regression for sddc-manager.
 
-    Pre-#1306 the probe route called ``cls().fingerprint(target)``
-    without an operator; the connector synthesised a system operator
-    whose placeholder ``raw_jwt`` is not a compact-JWS. Vault's
-    JWT/OIDC auth method rejected it before the per-target read,
-    surfacing as ``vault OIDC malformed jwt: must have three parts``
-    on the v0.8.0 dogfood's ``vcf9-sddc`` probe.
-
-    Post-#1306 the probe route forwards its operator — the same code
-    path the dispatch surface uses. Test pins:
+    Post-#1306 the probe route forwards its operator — the same code path the
+    dispatch surface uses. Test pins:
     1. The credentials loader receives the route operator.
-    2. The forwarded JWT has the compact-JWS shape (≥3 dot-separated
-       parts).
+    2. The forwarded JWT has the compact-JWS shape (≥3 dot-separated parts).
     """
     captured: list[Operator] = []
 
@@ -679,6 +779,7 @@ async def test_fingerprint_forwards_route_operator_to_credentials_loader() -> No
     )
 
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         mock.get("/v1/sddc-managers").respond(
             200,
             json={
@@ -707,9 +808,7 @@ async def test_fingerprint_forwards_route_operator_to_credentials_loader() -> No
 
 @pytest.mark.asyncio
 async def test_fingerprint_without_operator_falls_back_to_system_operator() -> None:
-    """``fingerprint(target)`` without ``operator`` synthesises the
-    system operator (the system-call carve-out).
-    """
+    """``fingerprint(target)`` without ``operator`` synthesises the system operator."""
     captured: list[Operator] = []
 
     async def _capturing_loader(
@@ -722,6 +821,7 @@ async def test_fingerprint_without_operator_falls_back_to_system_operator() -> N
     connector = SddcManagerConnector(credentials_loader=_capturing_loader)
 
     async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
         mock.get("/v1/sddc-managers").respond(
             200,
             json={"elements": [], "pageMetadata": {}},

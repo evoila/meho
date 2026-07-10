@@ -111,6 +111,247 @@ connector-related release-notes line.
     entity, state, progress, queued/started/completed times) for
     change-window monitoring, distinct from `event.tail`'s event-log read.
 
+### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
+
+- The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,
+  `clusters`, `hosts`, `vcenters`, `nsxt-clusters`, `credentials`, `tasks`,
+  `system`, `vcf-services`, `sddc-managers`, `license-keys` — is now first-class
+  **typed** ops (`source_kind="typed"`, `sddc.*` op-ids) that dispatch on a fresh
+  boot with zero catalog ingest, on the post-#2290 `session_login_token` token
+  session, with one-shot 401 recovery via the #2067 `invalidate_session` seam.
+- `sddc.credential.list` (`GET /v1/credentials`) is gated as a credential-read:
+  `requires_approval=True` routes it through the policy-gate approval queue (not
+  dispatchable without operator approval), its op-id classifies as
+  `credential_read` so audit/broadcast rows collapse to aggregate-only, and the
+  handler scrubs every secret-keyed value at the connector boundary — no
+  credential material rides the result.
+- `core_ops.py` ingested-row curation is repointed for the converted ops: the 5
+  overlapping reads leave the curated set (now 4 non-audited browse-breadth reads:
+  release, domain detail, network-pools, bundles); the ingested VCF catalog stays
+  browsable as profiled-dispatch breadth under its own `METHOD:path` op_ids — two
+  surfaces, no resolver shadowing (#2262 invariant holds).
+
+### Connectors — vRLI events query converted to a typed op on the connector session (#2295)
+
+- The vRLI (VCF Operations for Logs) events query is now a
+  `source_kind="typed"` op — `vrli.event.query`, a bound method on
+  `VcfLogsConnector` that issues `GET /api/v2/events/<constraints>` (with an
+  optional `limit`) directly on the connector's authenticated session and
+  recovers a 440/401 session expiry with one re-login + retry (the #1909/#1135
+  soak scenario). It works on a fresh boot with **zero catalog ingest**, so
+  the op no longer depends on per-deploy `endpoint_descriptor` state (the
+  #2247 failure class Initiative #2266 retires for the VCF family). The
+  reserved-expansion constraint sub-path (`text/CONTAINS error/...`) is
+  rendered with literal slashes so it reaches the appliance intact
+  (#2003/#2066). `vcf_logs/core_ops.py` no longer flips an ingested row for
+  the events query; the other six curated ops stay ingested (declined from
+  typed conversion — unused in the adopter's real operations, and the
+  ingested canonical spec covers the browse case). First conversion in
+  Initiative #2266; the hand-edited production-overlay retirement is a
+  follow-up RDC-team coordination step. (#2295)
+
+### Added — vROps typed reads (liveness, alerts, resource query) (#2303)
+
+- The vROps (`vcf-operations`) connector's audited read set now dispatches
+  as **typed** ops (`source_kind="typed"`) directly on its hand-rolled HTTP
+  Basic (+ optional `auth-source`) session, so they work on a fresh boot
+  with **zero catalog ingest** (no per-deploy spec ingestion or operator
+  review): `vrops.liveness` (`GET /suite-api/api/versions/current` — the
+  documented reachability surface; the adopter's `casa/health` names a
+  private/undocumented CaSA API), `vrops.alert.list`
+  (`GET /suite-api/api/alerts` alert triage), and `vrops.resource.query`
+  (a body-shaped `POST /suite-api/api/resources/query` with a typed
+  `ResourceQuerySpec` request body). All three are read-only, `safe`, no
+  approval. The two converted GET reads are removed from the `core_ops.py`
+  ingested curation so the ingested twin is never flipped alongside the
+  typed op (the #2262 no-shadow invariant); the remaining 6 ingested-browse
+  ops stay curated as breadth until the Initiative #2266 T7 apparatus
+  retirement. Unconverted curated ops (resource list/get, alert
+  definitions, symptoms, recommendations, super metrics) are declined from
+  typed conversion — not in the adopter's audited operational set. (#2303)
+
+### Added — NSX typed reads on the cookie+XSRF session (audited set) (#2302)
+
+- The audited NSX operational read set is now first-class **typed** ops
+  (`source_kind="typed"`) that dispatch on a fresh boot with **zero
+  catalog ingest** (no per-deploy curation state, the #2247 failure
+  class): `nsx.node.status` + `nsx.cluster.status` (manager/cluster
+  status+version), `nsx.backup.config` + `nsx.backup.status`,
+  `nsx.transport_zone.list`, `nsx.tier1.list`, and `nsx.alarm.list`
+  (optional status/feature/severity filters). `nsx.backup.config` is
+  first-class for the backup disk-fill incident class (Broadcom KB 442696
+  shape): it surfaces `backup_enabled`, `passphrase_configured`, and the
+  retention-relevant `backup_schedule` / `remote_file_server` fields, and
+  scrubs the backup passphrase + any nested SFTP credential at the
+  connector boundary (the default redaction policy masks
+  `password`/`secret` but not `passphrase`). These reads recover from
+  session expiry through the #2067 dispatcher seam — `NsxConnector` now
+  exposes the public `invalidate_session` hook, so a 401 evicts the cached
+  cookie+XSRF session and re-dispatches once, no restart. The remaining
+  reads (transport-node listing, segments, tier-0 gateways,
+  distributed-firewall policies + rules) stay as ingested-row curation in
+  `core_ops.py` so the wider ingested breadth is still browsable; the
+  converted ops are no longer flipped by `apply_nsx_core_curation`. `tier-1
+  gateway create` (a write) is out of scope. (#2302)
+
+### Connectors — VCFA typed reads on the dual-plane session (#2305)
+
+- The audited VCF Automation read set — provider org list / region list /
+  health (`/cloudapi/1.0.0/site`) and tenant `/iaas/api/projects` + `about`
+  — is now served by first-class `source_kind="typed"` operations
+  (`vcfa.provider.org.list` / `region.list` / `health`,
+  `vcfa.tenant.project.list` / `about`) that dispatch through the
+  connector's own dual-plane session with **zero catalog state**. VCFA
+  ships no vendor OpenAPI spec, so the prior ingested-curation path was
+  dispatch-inert on a real deploy; typed conversion is the only working
+  read surface. Each op declares the auth plane it rides (provider vs
+  tenant), cross-checked against the request path at import time. The
+  remaining `core_ops` ingested-curation surface is trimmed to the 6-op
+  browse remainder; `org create` (a write) stays out of scope (#2305).
+
+### Changed — Fleet typed reads on the LCM-local Basic session (#2304)
+
+- VCF Fleet's audited read set — the **about/health probe** (`fleet.about`)
+  and the **component inventory** ("what's deployed", `fleet.environment.list`)
+  — now dispatches as `source_kind="typed"` off the connector's existing
+  HTTP Basic (LCM-local) session, registered in code at lifespan startup.
+  These ops work on a fresh boot with **zero catalog ingest**, removing the
+  Fleet operational surface's dependence on ingesting the crash-prone
+  vRSLCM-derived Fleet OpenAPI spec (the #2272 datetime-crash artifact). The
+  remaining six curated ops (datacenter/vcenter list, environment detail,
+  product list, request list/detail) are declined from typed conversion —
+  outside the adopter's audited set — and stay as browsable ingested breadth
+  until the curation apparatus is retired (T7); their ingested `/about` and
+  `/environments` duplicates no longer curate, so they cannot shadow the
+  typed ops. (#2304)
+
+### Added — structural OpenAPI 3.x metaschema gate on spec ingest (#2292)
+
+- Spec ingest now validates a decoded OpenAPI 3.0/3.1 document against the
+  official OpenAPI metaschema (via `openapi-spec-validator`), immediately
+  after the existing version check. A metaschema-invalid document — `paths`
+  as a list, an operation with a non-object `responses`, a missing required
+  field — is refused with a structured `invalid_spec` error naming the
+  failing JSON path (e.g. `$.paths['/pets'].get.responses`) and a
+  remediation line, on every transport (REST 400, MCP `-32602`, async-job
+  `error`). Because the gate lives at parse, `dry_run` and the real ingest
+  refuse an invalid spec identically, so a structurally broken document can
+  no longer partially ingest into catalog rows of unknown quality.
+  Validation is metaschema-only (no `operationId`/parameter semantic
+  add-ons) so legal vendor specs — and every shipped package-data spec, at
+  boot — keep ingesting; Swagger 2.0 still gets its dedicated conversion
+  remedy, and the parser's tolerant-skip of sub-document junk is unchanged.
+  (#2292)
+
+### Added — persisted spec provenance at ingest (sha256 + origin + operator/timestamp, surfaced in review) (#2291)
+
+- Every accepted spec ingest now writes a durable, non-spoofable
+  provenance row to a new `spec_provenance` table (Alembic `0056`): the
+  `sha256` over the **raw spec bytes** (hashed at the fetch/upload trust
+  boundary before any decode), the audit `uri` as presented, the
+  `origin` (`fetched` https GET · `inline` operator upload · `shipped`
+  MEHO-authored catalog data), the ingesting operator, and a timestamp,
+  scoped like the descriptor rows (`tenant_id IS NULL` = global). Before
+  this, the only provenance was a spoofable `spec:<uri>` tag — an
+  operator's hand-mutated inline upload labelled with a vendor's https
+  URL persisted identically to a genuine fetch of that URL, and the
+  fetched-vs-inline bit was never persisted. Re-ingesting the same spec
+  updates the row in place (new `sha256` + timestamp), so different
+  content under the same label is detectable. Provenance is surfaced on
+  the connector review REST payload (`ConnectorReviewPayload.provenance`)
+  and rendered by `meho connector review`; connectors ingested before
+  this landed read as "unknown (pre-provenance)". Record-and-surface
+  only — no refusal policy, and the `file:///` / `docs:` inline on-ramp
+  stays fully functional. (#2270 / #2291)
+
+### Changed — SDDC Manager auth rebuilt on the `session_login_token` profile scheme (#2290)
+
+- Flip the shipped `sddc_manager_minimal.yaml` profile from the false
+  `basic` scheme to `session_login_token`, and rebuild `SddcManagerConnector`
+  auth atop it: the connector now establishes a session at
+  `POST /v1/tokens` (JSON `{username, password}` → `accessToken`) and sends
+  `Authorization: Bearer <accessToken>` on every request — SDDC Manager
+  rejects HTTP Basic outright (live 401; Broadcom KBs 435716/387124/372387),
+  so the ingested sddc catalog was never dispatchable before. Session
+  mechanics are derived from the shared `session_login_token` scheme spec
+  (single source with a profile-stamped connector), with per-`(tenant_id,
+  target.id)` token isolation, single-flight establish, and one-shot 401
+  recovery through the #2067 dispatcher seam (`invalidate_session` hook) —
+  no restart. The hand-rolled class stays the resolution winner, preserving
+  the #1750/#1798 product-shadowing invariant. Removed the false
+  `username@sso_realm` Basic decoration. (#2271 / #2290)
+
+### Added — operator-selectable auth scheme on non-catalog ingest (#2289)
+
+- `meho connector ingest --auth-scheme <name>` (and the REST
+  `IngestRequest.auth_scheme` / MCP `meho.connector.ingest` fields) let an
+  operator select a named auth scheme from the **closed** catalog (`basic`,
+  `static_header`, `session_login`, `session_login_basic`,
+  `session_login_token`, `oauth2_mint`) when ingesting an arbitrary spec. The
+  register phase then synthesises a minimal `ExecutionProfile` and stamps a
+  **dispatchable** `ProfiledRestConnector` instead of the non-dispatchable
+  bare shim — staged behind the normal review/enable gate (#1971), never
+  auto-enabled. Optional `--auth-secret-field` overrides the secret-field
+  NAMES the scheme reads at dispatch; values stay in the target's
+  `secret_ref` and never ride the request. Selection only — no free-form auth
+  config (login URL / template / token path), and reserved typed-only schemes
+  are rejected at the API boundary with a closed-set 422. Omitting the flag
+  keeps today's bare-shim behaviour unchanged. (#2271 / #2289)
+
+### Added — profiled-connector boot registration (shipped ExecutionProfiles become dispatchable at boot) (#2288)
+
+- Wire `record_profile_stamp` into production: at boot, immediately after
+  the shipped-artifact validator, every catalog row carrying a
+  `profile_resource` registers a `ProfiledRestConnector` synthesised from
+  its reviewed `ExecutionProfile`, so a shipped profile is dispatchable
+  from a fresh deploy instead of inert package data. Idempotent and gated —
+  a triple already served by a hand-coded class (vmware/sddc) no-ops, and
+  stamping never enables an op (the #1971 review gate stays the interlock).
+  Runs as a system operator with no network I/O. (#2271 / #2288)
+
+### Added — `session_login_token` named auth scheme (#2287)
+
+- **A new vetted member of the closed auth-scheme catalog covers the
+  JSON-body-login → response-body-token → `Bearer` flow** (#2287). An
+  `ExecutionProfile` may now declare `auth.scheme: session_login_token`
+  (with `secret_fields: [username, password]`): the harness POSTs a JSON
+  `{username, password}` credential body to the login endpoint, reads the
+  token out of the response body's `accessToken` field, and sends it as
+  `Authorization: Bearer <token>` on subsequent requests. SDDC Manager's
+  `POST /v1/tokens` — whose HTTP Basic surface the appliance rejects — is
+  the first member of the shape. Like the other session schemes it caches
+  until a downstream expiry status (default `{401}`) triggers a full
+  re-login; there is no refresh-token leg. Every mechanic is a
+  code-reviewed per-scheme constant, not a profile knob — a future product
+  with a different login path or token field enters as its own catalog
+  member, preserving the no-DSL line (#1177). No shipped connector profile
+  selects it yet (`sddc_manager` still ships `basic`); flipping a profile
+  onto it is a separate task.
+
+### Fixed — non-finite `INGEST_JOB_TIMEOUT_SECONDS` can no longer defeat the ingest-job watchdog; the budget is now a chart value (#2318)
+
+- **`INGEST_JOB_TIMEOUT_SECONDS=inf` (or `nan`) no longer silently
+  disables the async ingest-job watchdog** (#2318, hardens #2275). The
+  env loader's only sanity check was `value <= 0`, which a non-finite
+  float slips past (`inf <= 0` is `False`; every `nan` comparison is
+  `False`), so the value flowed straight into `asyncio.timeout(...)` —
+  where `inf` schedules no deadline and `nan` is ill-defined —
+  re-opening the exact "job wedged at `status=running` forever" hole
+  #2275 was built to close. The loader now rejects non-finite values
+  with `math.isfinite`, logs a warning, and falls back to the 1800 s
+  default, so a misconfigured budget can never disable the watchdog.
+- **The ingest-job watchdog budget is now a first-class Helm chart
+  value** (#2318). `config.ingestJobTimeoutSeconds` (schema-typed
+  optional string) renders `INGEST_JOB_TIMEOUT_SECONDS` on the backplane
+  ConfigMap — injected via the existing `envFrom.configMapRef` — so an
+  operator who needs a longer ceiling for a slow shared executor or a
+  large spec fleet no longer has to reach for the untyped `extraEnv`
+  escape hatch. Rendered only when set: the default `""` omits the env
+  so the backend's own 30-min default applies silently (unlike the
+  always-render-`""` SSRF-allowlist pattern, an empty numeric env would
+  hit `float("")` and warn on every boot). Existing installs are
+  unchanged. (#2318)
+
 ### Fixed — async ingest jobs always reach a terminal state (watchdog + bounded LLM client + job-id log binding) (#2275)
 
 - **A wedged async connector ingest can no longer sit at `status=running`

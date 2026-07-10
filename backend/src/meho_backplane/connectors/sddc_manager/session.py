@@ -4,10 +4,10 @@
 """Credential loading for the sddc-manager connector.
 
 The hand-rolled :class:`~meho_backplane.connectors.sddc_manager.connector.SddcManagerConnector`
-reads service-account credentials from the target's Vault path and sends
-them as HTTP Basic auth on every request — no session token is established;
-the ``Authorization: Basic`` header is recomputed from the cached credentials
-on each call.
+reads service-account credentials from the target's Vault path and exchanges
+them for a session token at ``POST /v1/tokens`` (the ``session_login_token``
+scheme), sending it as ``Authorization: Bearer <accessToken>`` on every
+subsequent request — SDDC Manager rejects HTTP Basic outright.
 
 The credential fetch (Vault path → ``{"username": ..., "password": ...}``
 dict) is split out behind a narrow :class:`SddcCredentialsLoader` callable
@@ -30,11 +30,9 @@ This is the rubric **State 2** wiring (`shared_service_account` only) per
 The :class:`SddcTargetLike` Protocol captures the minimum target shape the
 connector reads: ``name`` (for the per-target credential cache key), ``host``,
 ``port`` (forwarded to :meth:`HttpConnector._base_url`), ``secret_ref`` (the
-Vault path the loader resolves), ``auth_model`` (checked at the boundary),
-and ``sso_realm`` (the SSO domain appended to the username in the Basic auth
-header, defaulting to ``"vsphere.local"``). The concrete ``Target`` model in
-:mod:`meho_backplane.targets` (G0.3 #224 — closed) satisfies this Protocol
-structurally; no edits here.
+Vault path the loader resolves), and ``auth_model`` (checked at the boundary).
+The concrete ``Target`` model in :mod:`meho_backplane.targets` (G0.3 #224 —
+closed) satisfies this Protocol structurally; no edits here.
 """
 
 from __future__ import annotations
@@ -57,9 +55,8 @@ class SessionCredentials(Protocol):
     """The dict shape :class:`SddcCredentialsLoader` returns.
 
     Captured as a Protocol so the type checker can flag a loader that
-    forgets a key. The two values map to the Basic auth components the
-    connector sends on every SDDC Manager API request; nothing else is
-    read.
+    forgets a key. The two values are the credential pair the connector POSTs
+    to ``/v1/tokens`` to establish the session token; nothing else is read.
     """
 
     username: str
@@ -86,11 +83,6 @@ class SddcTargetLike(Protocol):
     443 and :meth:`HttpConnector._base_url` already handles the
     ``port is None or 443`` case correctly.
 
-    ``sso_realm`` is the vSphere SSO domain appended to ``username`` when
-    constructing the Basic auth header (``username@sso_realm``). Defaults
-    to ``"vsphere.local"`` per the consumer wrapper contract; operators
-    managing a custom domain override this at the target level.
-
     ``id`` / ``tenant_id`` form the tenant-unique ``(tenant_id, id)``
     cache key (:func:`~meho_backplane.connectors._shared.cache_key.target_cache_key`)
     the credential + HTTP-client caches use, so two same-named targets in
@@ -104,7 +96,6 @@ class SddcTargetLike(Protocol):
     port: int | None
     secret_ref: str | None
     auth_model: str | None
-    sso_realm: str
 
 
 SddcCredentialsLoader = Callable[[SddcTargetLike, Operator], Awaitable[dict[str, str]]]
@@ -112,8 +103,9 @@ SddcCredentialsLoader = Callable[[SddcTargetLike, Operator], Awaitable[dict[str,
 
 Returns ``{"username": ..., "password": ...}``. The connector's
 :meth:`SddcManagerConnector._load_credentials` invokes the loader
-exactly once per target (first-use), caching the resulting dict under
-``target.name``. The return type is the looser ``dict[str, str]`` (not
+exactly once per target (first-use), caching the resulting dict under the
+tenant-unique ``(tenant_id, id)`` key (#1642). The return type is the looser
+``dict[str, str]`` (not
 :class:`SessionCredentials`) because Python :class:`Protocol` instances
 aren't runtime-constructible without a matching class — production code
 returns a plain dict and the connector reads ``creds["username"]`` /
@@ -136,8 +128,9 @@ async def load_credentials_from_vault(
     Reads ``target.secret_ref`` as a KV-v2 secret **under the operator's
     identity** (the operator's validated Keycloak JWT is forwarded to
     Vault's JWT/OIDC auth method) and returns the service-account
-    ``{"username": ..., "password": ...}`` pair the connector sends as
-    HTTP Basic auth on every SDDC Manager API call. Delegates to the
+    ``{"username": ..., "password": ...}`` pair the connector exchanges for a
+    session token at ``POST /v1/tokens`` (the ``session_login_token`` scheme).
+    Delegates to the
     shared
     :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
     helper (G3.9-T2 #941) so the read, the no-secret-in-logs discipline,

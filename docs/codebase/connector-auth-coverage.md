@@ -26,7 +26,7 @@ naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 | # | Connector | File (auth method) | Mechanism | Secret field names | Returns | Catalog verdict |
 |---|-----------|--------------------|-----------|--------------------|---------|-----------------|
 | 1 | harbor | `harbor/connector.py` `auth_headers` | HTTP Basic `base64(user:pass)` → `Authorization: Basic` | `username`, `password` | `dict[str,str]` | **`basic`** |
-| 2 | sddc_manager | `sddc_manager/connector.py` `auth_headers` | HTTP Basic `base64(user@sso_realm:pass)` | `username`, `password` | `dict[str,str]` | **`basic`** |
+| 2 | sddc_manager | `sddc_manager/connector.py` `auth_headers` | Session login `POST /v1/tokens` (JSON `{username,password}`) → `accessToken` → cached Bearer; re-login once on `401` (HTTP Basic rejected by the appliance) | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login_token`** |
 | 3 | vcf_fleet | `vcf_fleet/connector.py` (`_shared/vcf_auth.basic_auth_header`) | HTTP Basic (shared helper) | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 4 | vcf_operations | `vcf_operations/connector.py` `auth_headers` | HTTP Basic + optional `?auth-source=` query | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 5 | hetzner_robot | `hetzner_robot/connector.py` `_basic_auth_header` | HTTP Basic (hard-fail on first 401, IP-block guard) | `username`, `password` | `dict[str,str]` | **`basic`** |
@@ -52,13 +52,20 @@ naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 Six connectors (five if `vcf_operations`'s query-param merge is counted as
 `basic` with a transport quirk) fit a named scheme:
 
-- **`basic`** — harbor, sddc_manager, vcf_fleet, vcf_operations, hetzner_robot
+- **`basic`** — harbor, vcf_fleet, vcf_operations, hetzner_robot
 - **`static_header`** — argocd
 - **`oauth2_mint`** — keycloak
 - **`session_login`** — vcf_logs (vRLI: JSON creds body → `sessionId` → Bearer)
 - **`session_login_basic`** — vmware_rest (vCenter: HTTP Basic login, no body
   → token from a raw JSON-string body or the legacy `{"value": "<tok>"}`
   object body → `vmware-api-session-id` header; #2025, legacy shape #2047)
+- **`session_login_token`** — sddc_manager (SDDC Manager: JSON creds body
+  `{username, password}` → response-body `accessToken` field → Bearer). First
+  member of this shape; the appliance's HTTP Basic surface is rejected —
+  token-only. Grounded in `POST /v1/tokens` live evidence (#2287). The shipped
+  `sddc_manager_minimal.yaml` profile selects it and the typed
+  `SddcManagerConnector` derives its session from the same scheme (#2290, row 2
+  above).
 
 Eight stay **reserved/typed** — github, gcloud, vault, kubernetes, nsx,
 vcf_automation — because their auth is stateful, asymmetric-crypto, or
@@ -100,7 +107,8 @@ against the typed connectors the row was grounded on:
   the header from the secret bundle on every call (Basic `base64(user:pass)`;
   bearer-wrapped or raw pre-issued token per `value_kind`). No token cache,
   no login round-trip.
-- **`session_login` (vRLI) / `session_login_basic` (vCenter) / `oauth2_mint`
+- **`session_login` (vRLI) / `session_login_basic` (vCenter) /
+  `session_login_token` (SDDC Manager shape) / `oauth2_mint`
   (keycloak)** — *session-stateful*. The per-target lock / token cache (keyed
   `(tenant_id, id)`) / single-flight / TTL-or-expiry refresh / empty-`raw_jwt`
   fail-closed harness lives **once** in `ProfiledRestConnector` (it was
@@ -111,10 +119,12 @@ against the typed connectors the row was grounded on:
   extractor, and how the established token is applied (`Bearer` in
   `Authorization` for vRLI / keycloak, raw in `vmware-api-session-id` for
   vCenter) — are `SessionSchemeSpec` entries in `SESSION_SCHEME_SPECS`,
-  selected by `profile.auth.scheme`. `session_login` / `session_login_basic`
-  cache until a downstream re-login (idle-expiry, `ttl_seconds=None`);
-  `oauth2_mint` re-mints once the monotonic clock passes the margin-adjusted
-  `expires_in`. `session_login_basic` carries the vetted vCenter
+  selected by `profile.auth.scheme`. `session_login` / `session_login_basic` /
+  `session_login_token` cache until a downstream re-login (idle-expiry,
+  `ttl_seconds=None`); `session_login_token` reads `accessToken` out of SDDC
+  Manager's `POST /v1/tokens` response and sends it as `Bearer` (no refresh
+  leg — a full re-login recovers expiry). `oauth2_mint` re-mints once the
+  monotonic clock passes the margin-adjusted `expires_in`. `session_login_basic` carries the vetted vCenter
   modern→legacy session fallback (#2031): the harness POSTs the modern
   `/api/session` first and, on **HTTP 404 only** (401/403/5xx are auth/server
   failures, not "endpoint absent"), retries the legacy

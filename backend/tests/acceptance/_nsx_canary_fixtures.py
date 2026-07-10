@@ -7,7 +7,7 @@ Two NSX acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.nsx.NsxConnector` instance with a
 stub session loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 9 curated
+:class:`~meho_backplane.db.models.Target` row, the curated
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
 :data:`~meho_backplane.connectors.nsx.core_ops.NSX_CORE_OPS`, and a
 :mod:`respx`-mocked NSX REST surface answering both the session-
@@ -25,7 +25,7 @@ PR body for #614); until the NSX specs are wired to the meho-runners
 pool, the dispatch leg can still be exercised against a minimal
 direct-insert path.
 
-This module inserts the 9 curated NSX-core
+This module inserts the curated NSX-core
 :class:`EndpointDescriptor` rows with hand-authored ``method`` /
 ``path`` triples (sourced from :mod:`meho_backplane.connectors.nsx.core_ops`),
 seeds one enabled :class:`OperationGroup` per curated group_key,
@@ -217,7 +217,7 @@ class IngestedNsxCanary:
 
 
 async def _insert_nsx_descriptors() -> None:
-    """Seed the 9 curated NSX core ops + their groups as enabled rows.
+    """Seed the curated NSX core ops + their groups as enabled rows.
 
     One :class:`OperationGroup` per entry in
     :data:`~meho_backplane.connectors.nsx.core_ops.NSX_CORE_GROUPS`
@@ -483,7 +483,7 @@ async def ingested_nsx_canary(
     Setup steps mirror :func:`tests.acceptance._canary_fixtures.ingested_canary_vcsim`:
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
-       rows for the 9 curated NSX core ops.
+       rows for the curated NSX core ops.
     2. Seed a :class:`Target` carrying the :data:`NSX_CANARY_FINGERPRINT`
        so the resolver binds :class:`NsxConnector` (version 9.0 fits
        its ``">=4.0,<10.0"`` advertisement).

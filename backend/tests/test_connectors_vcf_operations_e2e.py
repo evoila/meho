@@ -258,7 +258,9 @@ async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator
 # ---------------------------------------------------------------------------
 
 _OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VROPS_CORE_OPS)
-assert len(_OP_IDS) == 8, f"Expected 8 curated vROps ops, got {len(_OP_IDS)}: {_OP_IDS}"
+# 6 ingested-browse ops after #2303 moved liveness/alerts/resources-query to
+# the typed surface (tests/test_connectors_vcf_operations_typed_reads.py).
+assert len(_OP_IDS) == 6, f"Expected 6 curated vROps ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -322,7 +324,10 @@ async def test_vcf_operations_e2e_credentials_cached_after_first_dispatch(
         _OPERATOR,
         {
             "connector_id": VROPS_CONNECTOR_ID,
-            "op_id": "GET:/suite-api/api/versions/current",
+            # versions/current + alerts moved to the typed surface (#2303),
+            # so they are no longer seeded as ingested rows here; use another
+            # curated ingested op to exercise the cold credential load.
+            "op_id": "GET:/suite-api/api/alertdefinitions",
             "target": {"name": target_name},
             "params": {},
         },

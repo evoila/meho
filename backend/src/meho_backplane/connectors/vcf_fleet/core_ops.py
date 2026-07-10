@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""VCF Fleet 9.0 (vRSLCM-derived) read-only v0.5 core — curated subset.
+"""VCF Fleet 9.0 (vRSLCM-derived) read-only core — ingested-curation subset.
 
-This module names the **8 read-only Fleet operations** the G3.6 v0.5 ship
-enables out of the much larger vRSLCM LCM REST corpus the G0.7
-spec-ingestion pipeline lands under ``connector_id="fleet-rest-9.0"``.
-The curation is two-layered:
+This module names the **6 read-only Fleet operations** that stay as
+``is_enabled`` curation over **ingested** ``endpoint_descriptor`` rows
+(the G0.7 spec-ingestion pipeline lands them under
+``connector_id="fleet-rest-9.0"``). The curation is two-layered:
 
 * :data:`FLEET_CORE_GROUPS` — the operator-reviewed ``when_to_use``
   hint per LLM-grouping pass output group. Each entry's ``group_key``
@@ -14,7 +14,7 @@ The curation is two-layered:
   ops; the ``when_to_use`` is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`FLEET_CORE_OPS` — the 8 ``EndpointDescriptor.op_id`` strings
+* :data:`FLEET_CORE_OPS` — the 6 ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -23,43 +23,45 @@ The curation is two-layered:
   ``is_enabled=False`` (the G0.7 ingestion default for
   ``source_kind='ingested'`` rows).
 
-Per Initiative #369 and CLAUDE.md postulates 1-2, Fleet is **fully
-generic-ingested**: the underlying ops are not registered in code,
-they live in the ``endpoint_descriptor`` table. This module only
-carries the **operator-review metadata** the substrate uses at the
-review step — the actual curation is applied through
-:func:`apply_fleet_core_curation` against an existing ingested
-connector.
+Typed conversion (T4 · #2304, Initiative #2266)
+-----------------------------------------------
 
-The 8 ops (paths cross-checked against vRSLCM REST API 1.3.0 at
+The G3.6 ship curated **8** ops; the adopter's #2294 audit (row 21)
+found only two of Fleet's ops in real use — the **about/health probe**
+and the **component inventory read ("what's deployed")**. Those two
+were converted to **typed** ops (``source_kind="typed"``) in
+:mod:`meho_backplane.connectors.vcf_fleet.typed_ops`, so they dispatch
+off the connector's hand-rolled HTTP Basic session with no dependence on
+ingesting the crash-prone Fleet LCM spec (the #2272 datetime-crash
+artifact). They are therefore **removed** from :data:`FLEET_CORE_OPS`
+here — the ingested duplicate must not shadow the typed op. The
+``fleet-about`` curation group is gone entirely (its only op moved to
+typed); ``fleet-environment`` stays because ``fleet.environment.get``
+(declined from typed conversion, not in the audited set) still lives
+there. The remaining six ops below are the **declined** set — outside
+the audited surface, kept as ingested breadth until T7 retires the
+curation apparatus. See #2304 for the per-op decline rationale.
+
+The 6 remaining ingested-curated ops (paths cross-checked against
+vRSLCM REST API 1.3.0 at
 https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager/latest/):
 
-1. ``GET:/lcm/lcops/api/v2/about`` — ``fleet.about`` — vRSLCM
-   appliance identity. **Note:** Fleet's first-party ``/about``
-   endpoint returns HTTP 500 in VCF 9.0 builds (see the
-   :class:`~meho_backplane.connectors.vcf_fleet.connector.VcfFleetConnector`
-   docstring for the known-issue inventory). The op is curated for
-   parity with the spec; the ``llm_instructions.next_step`` tells
-   the agent to fall back to ``fleet.datacenter.list`` as the
-   reachability probe in 9.0.
-2. ``GET:/lcm/lcops/api/v2/datacenters`` — ``fleet.datacenter.list``
+1. ``GET:/lcm/lcops/api/v2/datacenters`` — ``fleet.datacenter.list``
    — datacenter inventory. The wrapper-verified probe endpoint;
    guaranteed to work in 9.0 because the connector's own probe uses
-   it.
-3. ``GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters``
+   it (so no agent-facing typed probe duplicate is warranted).
+2. ``GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters``
    — ``fleet.vcenter.list`` — vCenters registered under a datacenter.
-4. ``GET:/lcm/lcops/api/v2/environments`` — ``fleet.environment.list``
-   — environment inventory (the primary Fleet entry point — every
-   product deploy lives under an environment).
-5. ``GET:/lcm/lcops/api/v2/environments/{environmentId}`` —
+3. ``GET:/lcm/lcops/api/v2/environments/{environmentId}`` —
    ``fleet.environment.get`` — per-environment detail including
-   products, status, and metadata.
-6. ``GET:/lcm/lcops/api/v2/environments/{environmentId}/products`` —
+   products, status, and metadata (``fleet.environment.list`` is now
+   typed; the deep per-environment read stays ingested breadth).
+4. ``GET:/lcm/lcops/api/v2/environments/{environmentId}/products`` —
    ``fleet.product.list`` — products deployed under an environment.
-7. ``GET:/lcm/request/api/v2/requests`` — ``fleet.request.list`` —
+5. ``GET:/lcm/request/api/v2/requests`` — ``fleet.request.list`` —
    lifecycle requests (deploy / patch / upgrade) the appliance has
    processed; the LCM workflow-status surface.
-8. ``GET:/lcm/request/api/v2/requests/{requestId}`` —
+6. ``GET:/lcm/request/api/v2/requests/{requestId}`` —
    ``fleet.request.get`` — per-request detail including state
    (``INPROGRESS`` / ``COMPLETED`` / ``FAILED``), output map, and
    error cause.
@@ -85,7 +87,7 @@ Curation application
 --------------------
 
 :func:`apply_fleet_core_curation` is the operator-review-time
-substrate call that makes exactly the 8 curated ops dispatchable.
+substrate call that makes exactly the 6 curated ops dispatchable.
 Mirrors :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
 verbatim, threading the "enable group but pin non-core ops
 disabled" needle via the audit-log-driven operator-override
@@ -217,7 +219,9 @@ class FleetCoreOp:
 #: ingested op_ids (which also carry the literal template var names)
 #: resolve correctly.
 FLEET_PATH_RULES: Final[tuple[tuple[str, str], ...]] = (
-    ("/lcm/lcops/api/v2/about", "fleet-about"),
+    # ``/about`` is no longer classified — ``fleet.about`` was converted
+    # to a typed op (T4 · #2304), so an ingested ``/about`` row classifies
+    # to ``"none"`` and stays disabled (it must not shadow the typed op).
     # Deeper paths under datacenters must precede the datacenters root.
     (
         "/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters",
@@ -266,23 +270,14 @@ def classify_fleet_op(op_id: str) -> str:
     return "none"
 
 
-#: Operator-reviewed ``when_to_use`` hints for the 6 Fleet groups
-#: the read-only v0.5 core spans. Every hint is one complete sentence
-#: the agent reads verbatim — vague hints poison
-#: ``search_operations`` ranking.
+#: Operator-reviewed ``when_to_use`` hints for the 5 Fleet groups
+#: the ingested-curation core spans (``fleet-about`` moved to typed).
+#: Every hint is one complete sentence the agent reads verbatim —
+#: vague hints poison ``search_operations`` ranking.
 FLEET_CORE_GROUPS: Final[tuple[FleetCoreGroup, ...]] = (
-    FleetCoreGroup(
-        group_key="fleet-about",
-        name="VCF Fleet (about)",
-        when_to_use=(
-            "Use this group to read the VCF Fleet (vRSLCM) appliance's "
-            "identity: API version, build, product version. WARNING: in "
-            "VCF 9.0 builds the /about endpoint returns HTTP 500 — use "
-            "fleet.datacenter.list as the reachability probe instead, "
-            "and cross-source the product version from SDDC Manager's "
-            "/v1/vcf-services entry until the 9.0 regression is fixed."
-        ),
-    ),
+    # ``fleet-about`` was removed — its only op (``fleet.about``) was
+    # converted to a typed op (T4 · #2304); the appliance-identity
+    # ``when_to_use`` now lives in ``FLEET_TYPED_WHEN_TO_USE_BY_GROUP``.
     FleetCoreGroup(
         group_key="fleet-datacenter",
         name="VCF Fleet Datacenters",
@@ -364,43 +359,19 @@ def _instructions(
     }
 
 
-#: The 8 curated read-only Fleet core ops. Each entry carries the
-#: op_id (``GET:/path`` form), the curated group assignment, and the
-#: operator-reviewed ``llm_instructions`` blob.
+#: The 6 curated read-only Fleet core ops (the declined set — outside
+#: the #2304 audited surface; ``fleet.about`` + ``fleet.environment.list``
+#: are now typed). Each entry carries the op_id (``GET:/path`` form), the
+#: curated group assignment, and the operator-reviewed
+#: ``llm_instructions`` blob.
 #:
 #: Paths cross-checked against vRSLCM REST API 1.3.0 at
 #: https://developer.broadcom.com/xapis/vrealize-suite-lifecycle-manager/latest/.
 FLEET_CORE_OPS: Final[tuple[FleetCoreOp, ...]] = (
-    FleetCoreOp(
-        op_id="GET:/lcm/lcops/api/v2/about",
-        group_key="fleet-about",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to read the vRSLCM appliance's identity — API "
-                "version, build, product version — when confirming "
-                "which Fleet instance the target points at. KNOWN "
-                "REGRESSION: in VCF 9.0 builds this endpoint returns "
-                "HTTP 500. When the call fails with a 500, do not "
-                "retry; fall back to fleet.datacenter.list as the "
-                "appliance reachability probe."
-            ),
-            output_shape=(
-                "On success: object with apiVersion, productVersion, "
-                "buildNumber, releaseDate keys. On 500 (the 9.0 "
-                "regression): a connector_error OperationResult with "
-                "the response body's `errorCode` and `errorMessage` "
-                "fields surfaced in extras."
-            ),
-            next_step=(
-                "If the call returned 200, proceed with the intended "
-                "Fleet operation. If it returned 500 (VCF 9.0), call "
-                "fleet.datacenter.list — it doubles as a reachability "
-                "probe and exposes the Lcm-API-Version response header "
-                "(read via fingerprint, not call_operation, in the "
-                "current substrate)."
-            ),
-        ),
-    ),
+    # ``GET:/lcm/lcops/api/v2/about`` (fleet.about) and
+    # ``GET:/lcm/lcops/api/v2/environments`` (fleet.environment.list) were
+    # converted to typed ops (T4 · #2304) and are intentionally absent from
+    # the ingested-curation set so the ingested rows never shadow them.
     FleetCoreOp(
         op_id="GET:/lcm/lcops/api/v2/datacenters",
         group_key="fleet-datacenter",
@@ -459,36 +430,6 @@ FLEET_CORE_OPS: Final[tuple[FleetCoreOp, ...]] = (
                 "may need to add it. Use the vCenter's vmid for any "
                 "follow-up data-collection trigger (POST surface — "
                 "out of v0.5 scope)."
-            ),
-        ),
-    ),
-    FleetCoreOp(
-        op_id="GET:/lcm/lcops/api/v2/environments",
-        group_key="fleet-environment",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to list all Fleet-managed environments. An "
-                "environment is the unit Fleet uses to group one or "
-                "more product deployments (e.g. a vRA environment with "
-                "vRA + vIDM + Postgres nodes). The primary entry point "
-                "for any Fleet inventory workflow. Large appliances "
-                "managing many environments return a JSONFlux handle "
-                "carrying a bounded inline sample plus a ``fetch_more`` "
-                "envelope (no handle read-back tool exists in this version)."
-            ),
-            output_shape=(
-                "Array of Environment objects; each carries "
-                "environmentId, environmentName, environmentDescription, "
-                "environmentStatus (DEPLOY_SUCCESSFUL / DEPLOY_FAILED / "
-                "...), and a products[] sub-array with product summaries."
-            ),
-            next_step=(
-                "Pick an environmentId and pass it to "
-                "fleet.environment.get for the full per-environment "
-                "detail, or to fleet.product.list to enumerate its "
-                "products and their versions. Cross-reference status "
-                "against the fleet-request surface when an environment "
-                "looks stuck (open requests against it may explain why)."
             ),
         ),
     ),
@@ -623,55 +564,34 @@ async def apply_fleet_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 8-op read core against an ingested Fleet connector.
+    """Apply the curated 6-op read core against an ingested Fleet connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 8 ops in :data:`FLEET_CORE_OPS` are dispatchable
+    the 6 ops in :data:`FLEET_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
-    ``is_enabled=False``. The 6 curated groups land
+    ``is_enabled=False``; the 5 curated groups land
     ``review_status='enabled'`` so the agent's
     :func:`~meho_backplane.operations.meta_tools.search_operations`
-    surfaces the core ops; non-curated groups are left untouched
-    (``review_status='staged'`` from the G0.7 ingest default).
+    surfaces the core ops (non-curated groups stay ``'staged'``).
 
-    The substrate doesn't expose "enable only ops X, Y, Z under
-    group G": :meth:`ReviewService.enable_group`'s cascade flips
-    ``is_enabled=True`` on every child op in the group. The helper
-    works around this via the audit-log-driven operator-override
-    exclusion — the same mechanism
+    :meth:`ReviewService.enable_group`'s cascade would enable *every*
+    child op in a group, so the helper first writes an
+    ``is_enabled=False`` operator-override audit row (via
+    :meth:`ReviewService.edit_op`) for each non-core op — the cascade
+    then skips those — before landing each group's reviewed ``name`` +
+    ``when_to_use`` (:meth:`edit_group`), enabling the group
+    (:meth:`enable_group`), and landing the per-op ``llm_instructions``
+    (:meth:`edit_op`). Same mechanism as
     :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
-    and :func:`~meho_backplane.connectors.nsx.core_ops.apply_nsx_core_curation`
-    established:
+    and :func:`~meho_backplane.connectors.nsx.core_ops.apply_nsx_core_curation`.
 
-    1. :meth:`ReviewService.get_review_payload` loads the current
-       state of every curated group and its child ops.
-    2. For each child op in a curated group that **isn't** in the
-       :data:`FLEET_CORE_OPS` allow-list,
-       :meth:`ReviewService.edit_op` with ``is_enabled=False``
-       writes the operator-override audit row. The follow-on
-       :meth:`enable_group` cascade detects these rows and skips
-       them.
-    3. :meth:`ReviewService.edit_group` lands the operator-reviewed
-       ``name`` + ``when_to_use`` on each curated group.
-    4. :meth:`ReviewService.enable_group` flips
-       ``review_status='enabled'`` and cascades ``is_enabled=True``
-       to the curated child ops (operator-overridden non-core ops
-       are skipped).
-    5. :meth:`ReviewService.edit_op` lands the curated
-       ``llm_instructions`` blob per entry in :data:`FLEET_CORE_OPS`.
-
-    Re-running is safe but not idempotent at the audit layer:
-    :meth:`enable_group` short-circuits on groups already in
-    ``review_status='enabled'`` (no audit row), but
-    :meth:`edit_group` and :meth:`edit_op` always emit one audit
-    row per call. The intended posture is a one-shot curation step
-    after ingest; re-runs produce redundant ``meho.connector.edit_*``
-    audit rows but never corrupt state.
-
-    Raises :class:`~meho_backplane.operations.ingest.ConnectorNotFoundError`
-    if no groups exist for ``fleet-rest-9.0`` under *tenant_id* (the
-    operator must run ``meho connector ingest`` against the Fleet
-    LCM spec before this helper applies).
+    Re-running is safe but emits redundant ``meho.connector.edit_*``
+    audit rows (``edit_group`` / ``edit_op`` always audit; only
+    ``enable_group`` short-circuits on an already-enabled group) — the
+    intended posture is a one-shot curation step after ingest. Raises
+    :class:`~meho_backplane.operations.ingest.ConnectorNotFoundError` if
+    no groups exist for ``fleet-rest-9.0`` under *tenant_id* (the
+    operator must ``meho connector ingest`` the Fleet LCM spec first).
     """
     payload = await review_service.get_review_payload(
         FLEET_CONNECTOR_ID,

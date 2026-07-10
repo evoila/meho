@@ -17,8 +17,11 @@ spelling resolves this hand-rolled connector rather than an auto-shim
 This is one of the four VCF management-plane connectors landing under
 Initiative #369 (G3.6). The wave is generic-ingested via G0.7 — this
 Task ships only the **skeleton** (auth + fingerprint + probe + the
-G0.6 dispatch shim). Operations arrive in #834 via spec ingestion of
-`vcf-logs-9.0/openapi.yaml`.
+G0.6 dispatch shim). Most operations arrive in #834 via spec ingestion of
+`vcf-logs-9.0/openapi.yaml`; the headline events query is the exception —
+since #2295 it is the `vrli.event.query` **typed** op registered in code
+(see Key types), dispatched on the connector session with zero catalog
+ingest as the first conversion in Initiative #2266.
 
 The connector imports its auth scaffolding from the shared
 `connectors/_shared/vcf_auth.py` module (#841 G3.6-T13) — vRLI is the
@@ -68,13 +71,25 @@ typed and profiled paths is proven in
   model satisfies it structurally once the column lands.
 - **`VRLI_CORE_OPS` / `VRLI_CORE_GROUPS` / `apply_vrli_core_curation`** —
   `connectors/vcf_logs/core_ops.py` (#834 G3.6-T5). The
-  operator-review metadata + driver for the read-only v0.5 core
-  (7 ops across 5 groups: `vrli.about`, `vrli.event.query`,
+  operator-review metadata + driver for the curated ingested read core.
+  Since #2295 this carries **6** ops across 5 groups (`vrli.about`,
   `vrli.aggregated.query`, `vrli.field.list`, `vrli.host.list`,
-  `vrli.content.pack.list`, `vrli.alert.list`). The path-prefix
-  classifier `classify_vrli_op` rejects non-`GET` methods so write
-  ops never land under a curated group — same shape Harbor + NSX
-  use.
+  `vrli.content.pack.list`, `vrli.alert.list`) — the raw events query
+  moved to a typed op (below). The path-prefix classifier
+  `classify_vrli_op` rejects non-`GET` methods so write ops never land
+  under a curated group — same shape Harbor + NSX use.
+- **`VRLI_EVENT_QUERY_OP` / `event_query_impl` / `register_vrli_typed_operations`** —
+  `connectors/vcf_logs/typed_ops.py` (#2295). vRLI's first
+  `source_kind="typed"` op, `vrli.event.query`: a bound method on the
+  connector (`VcfLogsConnector.event_query`) that issues
+  `GET /api/v2/events/<constraints>` (optional `limit`) directly on the
+  connector session via `_get_json_with_session_retry`. Registered at
+  lifespan through the typed-op registrar (queued in the package
+  `__init__`), so it dispatches with **zero catalog ingest** — no
+  `endpoint_descriptor` ingested row. `build_event_query_path` renders the
+  reserved-expansion constraint sub-path with literal slashes (#2003/#2066).
+  Mirrors `vmware_rest/typed_ops.py` (`vmware.host.usage`, #2257) and
+  `argocd/ops.py`.
 - **Re-exports of the shared module**: `VcfCredentialsLoader`,
   `load_credentials_from_vault` (default stub),
   `SessionLoginError` — callers should import these from
@@ -168,6 +183,14 @@ into the dispatcher's auth-class arm: the connector exposes a public
 dispatched vRLI GET recovers the same way a direct
 `_get_json_with_session_retry` call does. The helper is retained for its
 direct callers and shares the one `_invalidate_session` eviction.
+
+Since #2295 the typed `vrli.event.query` op is one of those direct callers:
+its handler routes through `_get_json_with_session_retry`, so it recovers a
+440/401 via the helper's own re-login + retry-once rather than the #2067
+dispatch-path seam (a typed handler owns its transport call, so the
+dispatch-path `invalidate_session` hook does not wrap it). The remaining six
+curated read ops still dispatch as `source_kind='ingested'` and rely on the
+#2067 dispatch-path recovery.
 
 ### Fingerprint + probe
 
@@ -300,8 +323,14 @@ External: `httpx>=0.27` (Bearer header + `AsyncClient`), `structlog`
   [`docs/cross-repo/vcf-logs-onboarding.md`](../cross-repo/vcf-logs-onboarding.md).
 - End-to-end recorded-fixture coverage (G3.6-T6 #838):
   [`backend/tests/test_connectors_vcf_logs_e2e.py`](../../backend/tests/test_connectors_vcf_logs_e2e.py)
-  — exercises all 7 ops through the full dispatcher, the
+  — exercises the 6 ingested ops through the full dispatcher, the
   session-establish + session-expiry retry-once (440 and 401) +
   second-expiry-fails paths via `_get_json_with_session_retry`, the
-  audit-row contract, and the JSONFlux handle path on
+  audit-row contract, and the JSONFlux handle path on the typed
   `vrli.event.query`.
+- Typed events-query coverage (#2295):
+  [`backend/tests/test_connectors_vcf_logs_typed_event_query.py`](../../backend/tests/test_connectors_vcf_logs_typed_event_query.py)
+  — dispatch-level `source_kind="typed"` dispatch on a fresh boot, the
+  440 recovery on the typed path, the reserved-constraint literal-slash
+  wire path, the `limit` query param, and the registration invariant
+  (no ingested events row).

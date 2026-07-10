@@ -21286,6 +21286,14 @@
             "type": "boolean",
             "title": "Dispatchable",
             "default": false
+          },
+          "provenance": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewProvenance"
+            },
+            "type": "array",
+            "title": "Provenance",
+            "default": []
           }
         },
         "type": "object",
@@ -21300,6 +21308,42 @@
         ],
         "title": "ConnectorReviewPayload",
         "description": "Top-level review payload returned by :meth:`ReviewService.get_review_payload`.\n\n``connector_id`` is the operator-facing string the request\ntargeted (echoed back verbatim for round-trip clarity).\n``product`` / ``version`` / ``impl_id`` are the parsed triple\nderived via\n:func:`~meho_backplane.operations.ingest.parser.parse_connector_id`;\nthe CLI / API layers surface them in operator output so the\nconvention is self-documenting. ``tenant_id`` is the scope the\npayload was queried under (``None`` for built-in).\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014\nprojected from the v2 resolver's\n:data:`~meho_backplane.connectors.base.ShimKind` tier for this\nconnector's ``(product, version)`` crossed with the review-gate\nstate, and ``dispatchable`` is its boolean roll-up (``True`` for\ntyped / profiled). They mirror the same-named fields on\n:class:`~meho_backplane.operations.ingest.api_schemas.ConnectorListItem`\nso the list and review surfaces agree on how a connector reads.\nBoth default to the bare-shim reading\n(``kind=\"ingested-shim\"``, ``dispatchable=False``) so existing\nconstruction call sites keep working; the service always sets them\nexplicitly. The per-scheme auth detail is deliberately **not**\nsurfaced here yet \u2014 deferred until #1969 freezes the\n:class:`~meho_backplane.connectors.schemas.ExecutionProfile` schema\n(the Goal flags secret-handling sensitivity). See\n:data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`."
+      },
+      "ConnectorReviewProvenance": {
+        "properties": {
+          "uri": {
+            "type": "string",
+            "title": "Uri"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "operator_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Operator Sub"
+          },
+          "ingested_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ingested At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "uri",
+          "sha256",
+          "origin",
+          "operator_sub",
+          "ingested_at"
+        ],
+        "title": "ConnectorReviewProvenance",
+        "description": "Provenance for one spec ingested under this connector (#2291).\n\nSurfaces the durable\n:class:`~meho_backplane.db.models.SpecProvenance` record so an\noperator reviewing a connector can tell a vendor artifact from a\nhand-mutated one before enabling reads:\n\n* ``uri`` \u2014 the audit label as presented at ingest\n  (``spec:`` / ``https://`` / ``file:///`` / ``docs:`` form).\n* ``sha256`` \u2014 hex digest over the raw spec bytes. Two ingests of\n  the *same* label with different digests mean the content changed.\n* ``origin`` \u2014 ``fetched`` (https GET) vs ``inline`` (operator\n  upload) vs ``shipped`` (MEHO-authored catalog data). An inline\n  upload labelled with a vendor URL is thus distinguishable from a\n  genuine fetch of that URL.\n* ``operator_sub`` \u2014 who ingested it (``None`` for boot-time\n  shipped ingests with no operator).\n* ``ingested_at`` \u2014 when the provenance row was last written.\n\nConnectors ingested before this table landed have no provenance\nrows; the surfaces render that as \"unknown (pre-provenance)\" rather\nthan a fabricated record."
       },
       "ConnectorSpecEntry": {
         "properties": {
@@ -22887,6 +22931,30 @@
             "maxItems": 16,
             "nullable": true,
             "title": "Spec Info Versions Compatible"
+          },
+          "auth_scheme": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "static_header",
+              "session_login",
+              "session_login_basic",
+              "session_login_token",
+              "oauth2_mint"
+            ],
+            "nullable": true,
+            "title": "Auth Scheme",
+            "description": "Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config \u2014 selection only. Mutually exclusive with catalog_entry."
+          },
+          "auth_secret_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "nullable": true,
+            "title": "Auth Secret Fields",
+            "description": "Optional override of the secret-field NAMES the auth_scheme reads at dispatch (never the values \u2014 those stay in the target's secret_ref). Omit for the per-scheme defaults. Requires auth_scheme."
           },
           "dry_run": {
             "type": "boolean",
@@ -25527,6 +25595,7 @@
               "postgres",
               "prometheus",
               "proxmox",
+              "rabbitmq",
               "sddc",
               "vault",
               "vcfa",

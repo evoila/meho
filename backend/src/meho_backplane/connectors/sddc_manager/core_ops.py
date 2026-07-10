@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""SDDC Manager 9.0 read-only v0.2 core — curated operator-enabled subset.
+"""SDDC Manager read-only core — curated operator-enabled subset (browse breadth).
 
-This module names the **9 read-only SDDC Manager operations** the G3.5
-SDDC Manager v0.2 ship enables out of the much larger VCF API corpus the
-G0.7 spec-ingestion pipeline lands under
-``connector_id="sddc-rest-9.0"``. The curation is two-layered:
+This module names the **4 read-only SDDC Manager operations** left as
+ingested-row curation after the audited 12-read lab-audit set (domains
+list + status, clusters, hosts, vcenters, nsxt-clusters, credentials,
+tasks, system, vcf-services, sddc-managers, license-keys) was promoted to
+first-class **typed** ops in
+:mod:`meho_backplane.connectors.sddc_manager.typed_ops` (#2306). The
+curated set here keeps the wider ingested breadth browsable (the SDDC
+Manager software release, per-domain detail, network pools, and LCM
+bundles) out of the much larger VCF API corpus the G0.7 spec-ingestion
+pipeline lands under ``connector_id="sddc-rest-9.0"``. The curation is
+two-layered:
 
 * :data:`SDDC_CORE_GROUPS` — the operator-reviewed ``when_to_use``
   hint per LLM-grouping pass output group. Each entry's ``group_key``
@@ -15,7 +22,7 @@ G0.7 spec-ingestion pipeline lands under
   is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`SDDC_CORE_OPS` — the 9 ``EndpointDescriptor.op_id`` strings
+* :data:`SDDC_CORE_OPS` — the 4 ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -48,7 +55,7 @@ triple carry ``product="sddc"``; operators pass ``--product sddc`` when driving
 the product via ``parse_connector_id`` so the same constant is consistent
 across the ingestion, review, and dispatch legs.
 
-The 9 ops (paths cross-checked against VCF / SDDC Manager API 9.0 at
+The 4 ops (paths cross-checked against VCF / SDDC Manager API 9.0 at
 https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/):
 
 1. ``GET:/v1/releases/system`` — ``sddc.about`` — SDDC Manager software
@@ -56,44 +63,42 @@ https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/):
    operator reads to confirm the VCF build under management; exposing it
    as an agent-callable op lets the agent run a sanity probe before heavier
    inventory reads.
-2. ``GET:/v1/sddc-managers`` — ``sddc.manager.list`` — list of SDDC Manager
-   appliances (FQDN, IP, version, management domain). The primary read for
-   "which SDDC Manager appliance manages this VCF stack."
-3. ``GET:/v1/domains`` — ``sddc.domain.list`` — management + workload
-   domains under this SDDC Manager.
-4. ``GET:/v1/domains/{id}`` — ``sddc.domain.info`` — full domain detail
+2. ``GET:/v1/domains/{id}`` — ``sddc.domain.info`` — full domain detail
    including associated vCenter(s), NSX-T cluster, clusters, and hosts.
-5. ``GET:/v1/clusters`` — ``sddc.cluster.list`` — cluster inventory across
-   all or one domain (``?domainId=`` filter).
-6. ``GET:/v1/hosts`` — ``sddc.host.list`` — ESXi host inventory across all
-   or one domain or cluster (``?domainId=`` / ``?clusterId=`` filter).
-7. ``GET:/v1/network-pools`` — ``sddc.network_pool.list`` — network pools
+3. ``GET:/v1/network-pools`` — ``sddc.network_pool.list`` — network pools
    defining the IP ranges and VLANs provisioned to new hosts at commission
    time.
-8. ``GET:/v1/bundles`` — ``sddc.bundle.list`` — LCM bundle inventory (VCF
+4. ``GET:/v1/bundles`` — ``sddc.bundle.list`` — LCM bundle inventory (VCF
    update packages, async patches). Read-only; lifecycle writes stay
    ``staged`` per Initiative #368.
-9. ``GET:/v1/tasks`` — ``sddc.workflow.list`` — in-flight and recently
-   completed VCF workflow tasks. The SDDC Manager API surface uses the term
-   ``tasks``; the issue body calls this surface ``sddc.workflow.list`` for
-   operator clarity.
+
+The audited operational reads — domains list + status, clusters, hosts,
+vcenters, nsxt-clusters, credentials, tasks, system, vcf-services,
+sddc-managers, and license-keys — are **not** curated here: #2306 promoted
+them to first-class typed ops (``source_kind="typed"``,
+:mod:`meho_backplane.connectors.sddc_manager.typed_ops`) that dispatch on a
+fresh boot with zero catalog state. Their ingested rows still exist and
+stay browsable; this module simply no longer flips them to
+``is_enabled=True``. :data:`SDDC_PATH_RULES` retains the full ``/v1/``
+taxonomy so the ingested breadth keeps its group organisation.
 
 Path families and group_keys
 -----------------------------
 
-Every SDDC Manager REST path begins with ``/v1/``. The 9 curated ops
-span 8 distinct top-level resource families:
-``releases``, ``sddc-managers``, ``domains``, ``clusters``, ``hosts``,
-``network-pools``, ``bundles``, ``tasks``. :data:`SDDC_PATH_RULES`
-mirrors that taxonomy so an operator reviewing the connector sees the
-read-core ops fall into the expected 8 groups. The ``sddc-domains``
-group carries two ops (list + detail).
+Every SDDC Manager REST path begins with ``/v1/``. :data:`SDDC_PATH_RULES`
+retains the full taxonomy (``releases``, ``sddc-managers``, ``domains``,
+``clusters``, ``hosts``, ``network-pools``, ``bundles``, ``tasks``) so the
+ingested breadth keeps its group organisation even though only 4 of those
+families carry a curated read now. The 4 curated ops span 4 groups
+(``sddc-releases``, ``sddc-domains``, ``sddc-network-pools``,
+``sddc-bundles``); the ``sddc-domains`` group carries the domain-detail
+read (its list companion moved to the typed surface).
 
 Curation application
 --------------------
 
 :func:`apply_sddc_core_curation` is the operator-review-time substrate
-call that makes exactly the 9 curated ops dispatchable and leaves every
+call that makes exactly the 4 curated ops dispatchable and leaves every
 other ingested op disabled. The substrate has no "enable only ops X, Y, Z
 under group G" verb — :meth:`ReviewService.enable_group` cascades
 ``is_enabled=True`` to every child op. The helper threads this needle via
@@ -228,11 +233,11 @@ def classify_sddc_op(op_id: str) -> str:
     return "none"
 
 
-#: Operator-reviewed ``when_to_use`` hints for the 8 SDDC Manager groups
-#: the read-only v0.2 core spans. Two ops share the ``sddc-domains`` group
-#: (list + detail); every other group carries exactly one op. Every hint is
-#: one complete sentence the agent reads verbatim — vague hints poison
-#: ``search_operations`` ranking, per the ai_engineering pack.
+#: Operator-reviewed ``when_to_use`` hints for the 4 SDDC Manager groups
+#: the browse-breadth curated core spans (the audited operational groups
+#: moved to typed ops in #2306). Each group carries exactly one op. Every
+#: hint is one complete sentence the agent reads verbatim — vague hints
+#: poison ``search_operations`` ranking, per the ai_engineering pack.
 SDDC_CORE_GROUPS: Final[tuple[SddcCoreGroup, ...]] = (
     SddcCoreGroup(
         group_key="sddc-releases",
@@ -245,42 +250,13 @@ SDDC_CORE_GROUPS: Final[tuple[SddcCoreGroup, ...]] = (
         ),
     ),
     SddcCoreGroup(
-        group_key="sddc-managers",
-        name="SDDC Manager (appliance)",
-        when_to_use=(
-            "Use this group to list SDDC Manager appliances — their FQDN, IP "
-            "address, version, and the management domain they belong to. The "
-            "primary read for 'which SDDC Manager appliance manages this VCF "
-            "stack' questions."
-        ),
-    ),
-    SddcCoreGroup(
         group_key="sddc-domains",
         name="VCF Domains",
         when_to_use=(
-            "Use this group to list or inspect VCF domains (management and "
-            "workload). The entry point for any domain-scoped cluster, host, or "
-            "network-pool query, and for mapping which vCenter or NSX-T cluster "
-            "belongs to a given domain."
-        ),
-    ),
-    SddcCoreGroup(
-        group_key="sddc-clusters",
-        name="VCF Clusters",
-        when_to_use=(
-            "Use this group to list vSphere clusters across all or one VCF "
-            "domain. The primary inventory read for 'how many clusters exist', "
-            "'what datastore type does a cluster use', or 'which hosts are in "
-            "cluster X' questions."
-        ),
-    ),
-    SddcCoreGroup(
-        group_key="sddc-hosts",
-        name="VCF Hosts",
-        when_to_use=(
-            "Use this group to enumerate ESXi hosts across all VCF domains, or "
-            "filter to a specific domain or cluster. The primary read for host "
-            "count, FQDN, ESXi version, and assignment status questions."
+            "Use this group to inspect a single VCF domain in detail — its "
+            "associated vCenter(s), NSX-T cluster, clusters, and hosts. The "
+            "domain listing itself is the typed sddc.domain.list op; this "
+            "group's curated read is the per-domain detail."
         ),
     ),
     SddcCoreGroup(
@@ -300,16 +276,6 @@ SDDC_CORE_GROUPS: Final[tuple[SddcCoreGroup, ...]] = (
             "VCF update packages, component updates, and async patches. Read-only; "
             "use when answering 'which updates are available' or 'is the VCF stack "
             "compliant with the latest release'."
-        ),
-    ),
-    SddcCoreGroup(
-        group_key="sddc-tasks",
-        name="VCF Workflows (Tasks)",
-        when_to_use=(
-            "Use this group to list in-flight or recently completed VCF workflow "
-            "tasks. Use when answering 'what operations are running against this "
-            "VCF stack' or monitoring a domain-expand, host-commission, or "
-            "update-apply workflow."
         ),
     ),
 )
@@ -334,9 +300,12 @@ def _instructions(
     }
 
 
-#: The 9 curated read-only SDDC Manager core ops. Each entry carries the
+#: The 4 curated read-only SDDC Manager core ops. Each entry carries the
 #: op_id (``GET:/path`` form), the curated group assignment, and the
-#: operator-reviewed ``llm_instructions`` blob.
+#: operator-reviewed ``llm_instructions`` blob. The audited operational
+#: reads moved to typed ops in #2306
+#: (:mod:`meho_backplane.connectors.sddc_manager.typed_ops`); these four
+#: keep the wider ingested breadth browsable.
 #:
 #: Paths sourced against VCF / SDDC Manager API 9.0 at
 #: https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/.
@@ -357,54 +326,9 @@ SDDC_CORE_OPS: Final[tuple[SddcCoreOp, ...]] = (
                 "(each entry carries componentType and componentVersion)."
             ),
             next_step=(
-                "If the release looks current, proceed to domain or cluster "
-                "reads; if behind, surface the version to the operator for an "
-                "LCM update check via sddc.bundle.list."
-            ),
-        ),
-    ),
-    SddcCoreOp(
-        op_id="GET:/v1/sddc-managers",
-        group_key="sddc-managers",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to list SDDC Manager appliances — their FQDN, IP address, "
-                "version, and the management domain they belong to. The primary "
-                "read for 'which SDDC Manager manages this VCF stack' questions, "
-                "or when you need the appliance FQDN before making further "
-                "targeted calls."
-            ),
-            output_shape=(
-                "Paginated envelope with elements[] and pageMetadata; each "
-                "element carries id, fqdn, ipAddress, version, and a domain "
-                "object with id and name."
-            ),
-            next_step=(
-                "Cross-reference the management domain name against sddc.domain.list "
-                "for domain-scoped queries, or use the FQDN when targeting a "
-                "specific appliance."
-            ),
-        ),
-    ),
-    SddcCoreOp(
-        op_id="GET:/v1/domains",
-        group_key="sddc-domains",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to list all VCF domains managed by this SDDC Manager — "
-                "the management domain and any workload domains. The entry point "
-                "for domain-scoped cluster, host, or network-pool queries and for "
-                "mapping which vCenter or NSX-T cluster belongs to a given domain."
-            ),
-            output_shape=(
-                "Paginated envelope with elements[] and pageMetadata; each domain "
-                "carries id, name, type (MANAGEMENT or WORKLOAD), and references "
-                "to associated vcenters and nsxtCluster."
-            ),
-            next_step=(
-                "Pick a domain id for sddc.domain.info to get the full detail "
-                "including vCenter FQDN and NSX-T cluster, or pass domainId as a "
-                "filter to sddc.cluster.list / sddc.host.list."
+                "If the release looks current, proceed to the typed domain / "
+                "cluster reads; if behind, surface the version to the operator "
+                "for an LCM update check via sddc.bundle.list."
             ),
         ),
     ),
@@ -427,53 +351,6 @@ SDDC_CORE_OPS: Final[tuple[SddcCoreOp, ...]] = (
                 "Cross-reference vcenters[].fqdn against the vSphere connector "
                 "for VM reads, or use cluster ids for targeted sddc.cluster.list "
                 "or sddc.host.list queries."
-            ),
-        ),
-    ),
-    SddcCoreOp(
-        op_id="GET:/v1/clusters",
-        group_key="sddc-clusters",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to list vSphere clusters across all VCF domains, or filter "
-                "to a specific domain by passing domainId as a query parameter. "
-                "The primary inventory read for cluster count, datastore type, "
-                "and host membership questions."
-            ),
-            output_shape=(
-                "Paginated envelope with elements[] and pageMetadata; each cluster "
-                "carries id, name, primaryDatastoreType, domainId, and a hosts[] "
-                "array of host references."
-            ),
-            next_step=(
-                "Cross-reference domainId against the domain listing for "
-                "context, or use cluster ids to filter sddc.host.list to the "
-                "specific cluster's hosts."
-            ),
-        ),
-    ),
-    SddcCoreOp(
-        op_id="GET:/v1/hosts",
-        group_key="sddc-hosts",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to enumerate ESXi hosts across all VCF domains, or filter "
-                "by domainId or clusterId query parameters. The primary inventory "
-                "read for host count, FQDN, ESXi version, IP addresses, and "
-                "assignment status. Large VCF deployments may return dozens or "
-                "hundreds of hosts — use the JSONFlux handle path for big sets."
-            ),
-            output_shape=(
-                "Paginated envelope with elements[] and pageMetadata; each host "
-                "carries id, fqdn, esxiVersion, ipAddresses[], domain.id, "
-                "cluster.id, networkPool.id, and status "
-                "(ASSIGNED or UNASSIGNED_USEABLE)."
-            ),
-            next_step=(
-                "Cross-reference cluster.id against sddc.cluster.list, or use "
-                "fqdn when targeting a specific host for vSphere reads. For "
-                "hosts in UNASSIGNED_USEABLE status, surface them to the operator "
-                "as available for domain expansion."
             ),
         ),
     ),
@@ -525,32 +402,6 @@ SDDC_CORE_OPS: Final[tuple[SddcCoreOp, ...]] = (
             ),
         ),
     ),
-    SddcCoreOp(
-        op_id="GET:/v1/tasks",
-        group_key="sddc-tasks",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to list in-flight or recently completed VCF workflow tasks "
-                "(SDDC Manager calls these 'tasks'; the operator-facing name is "
-                "sddc.workflow.list). Use when answering 'what operations are "
-                "running against this VCF stack', monitoring a domain-expand or "
-                "host-commission operation, or triaging a workflow that failed. "
-                "Supports status filtering via the status query parameter "
-                "(Successful, Failed, In_Progress, Pending, Cancelled)."
-            ),
-            output_shape=(
-                "Task objects with id, name, status, type, creationTimestamp, "
-                "completionTimestamp, subtasks[] (nested task tree), and "
-                "errors[] (message + remediation hints for failed tasks)."
-            ),
-            next_step=(
-                "For a failed task, surface errors[].message and "
-                "errors[].remediationMessage to the operator. For an "
-                "in-progress task, poll via this op or wait for the status "
-                "to transition before proceeding with the next workflow step."
-            ),
-        ),
-    ),
 )
 
 
@@ -559,46 +410,32 @@ async def apply_sddc_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 9-op read core against an ingested SDDC Manager connector.
+    """Apply the curated 4-op read core against an ingested SDDC Manager connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 9 ops in :data:`SDDC_CORE_OPS` are dispatchable
+    the 4 ops in :data:`SDDC_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
-    ``is_enabled=False``. The 8 curated groups land
+    ``is_enabled=False``. The 4 curated groups land
     ``review_status='enabled'`` so the agent's
     :func:`~meho_backplane.operations.meta_tools.search_operations`
     surfaces the core ops; non-curated groups are left untouched
     (``review_status='staged'`` from the G0.7 ingest default).
 
-    The substrate doesn't expose "enable only ops X, Y, Z under
-    group G": :meth:`ReviewService.enable_group`'s cascade flips
-    ``is_enabled=True`` on every child op in the group. The helper
-    works around this via the audit-log-driven operator-override
-    exclusion:
+    The substrate doesn't expose "enable only ops X, Y, Z under group G":
+    :meth:`ReviewService.enable_group`'s cascade flips ``is_enabled=True``
+    on every child op. The helper works around this via the
+    audit-log-driven operator-override exclusion: (1) ``get_review_payload``
+    loads each curated group's ops; (2) every non-core op in a curated group
+    gets an ``edit_op(is_enabled=False)`` override row the ``enable_group``
+    cascade then skips; (3) ``edit_group`` lands the reviewed name +
+    when_to_use; (4) ``enable_group`` flips ``review_status='enabled'`` and
+    cascades ``is_enabled=True`` to the curated ops; (5) ``edit_op`` lands
+    each curated ``llm_instructions`` blob. Same pattern as
+    :func:`~meho_backplane.connectors.nsx.core_ops.apply_nsx_core_curation`.
 
-    1. :meth:`ReviewService.get_review_payload` loads the current
-       state of every curated group and its child ops.
-    2. For each child op in a curated group that **isn't** in the
-       :data:`SDDC_CORE_OPS` allow-list,
-       :meth:`ReviewService.edit_op` with ``is_enabled=False``
-       writes the operator-override audit row. The follow-on
-       :meth:`enable_group` cascade detects these rows and skips
-       them.
-    3. :meth:`ReviewService.edit_group` lands the operator-reviewed
-       ``name`` + ``when_to_use`` on each curated group.
-    4. :meth:`ReviewService.enable_group` flips
-       ``review_status='enabled'`` and cascades ``is_enabled=True``
-       to the curated child ops (operator-overridden non-core ops
-       are skipped).
-    5. :meth:`ReviewService.edit_op` lands the curated
-       ``llm_instructions`` blob per entry in :data:`SDDC_CORE_OPS`.
-
-    Re-running is safe but not idempotent at the audit layer.
-    :meth:`enable_group` short-circuits on groups already in
-    ``review_status='enabled'`` (no audit row), but
-    :meth:`edit_group` and :meth:`edit_op` always emit one audit
-    row per call — even when the incoming value equals the
-    persisted one.
+    Re-running is safe but not idempotent at the audit layer:
+    ``enable_group`` short-circuits on already-enabled groups, but
+    ``edit_group`` / ``edit_op`` always emit one audit row per call.
 
     Raises :class:`~meho_backplane.operations.ingest.ConnectorNotFoundError`
     if no groups exist for ``sddc-rest-9.0`` under *tenant_id* (the

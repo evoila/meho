@@ -9,17 +9,17 @@ non-injected) credential loader:
     dispatch(...)
       -> _resolve_connector_instance -> SddcManagerConnector()   # default loader
       -> dispatch_ingested -> _request_json -> auth_headers
-      -> _load_credentials -> load_credentials_from_vault        # the live loader
+      -> _session_token -> _load_credentials -> load_credentials_from_vault
       -> load_basic_credentials (#941)                           # operator-context Vault read
-      -> GET <op path> (HTTP Basic auth w/ username@sso_realm)
+      -> POST /v1/tokens (session mint) -> GET <op path> (Bearer accessToken)
       -> OperationResult(status="ok")
 
-SDDC Manager differs from nsx/vmware in that there is no session
-establish call — HTTP Basic auth rides every request. The username is
-formatted as ``username@sso_realm`` (default ``vsphere.local``) before
-the base64 encode; the password is the Vault-read value verbatim. The
-credential read still goes through the shared operator-context Vault
-helper.
+SDDC Manager is token-only (#2290): the connector exchanges the
+Vault-read credential pair for a session token at ``POST /v1/tokens``
+(the ``session_login_token`` scheme) and sends it as
+``Authorization: Bearer <accessToken>`` on the op request — the
+appliance rejects HTTP Basic. The credential read still goes through the
+shared operator-context Vault helper.
 
 The two "real" leaves are stubbed at their boundaries so the gate runs
 in the **secret-free unit lane** (``pytest -n auto`` /
@@ -189,7 +189,6 @@ class _CredReadTarget:
         self.port = 443
         self.secret_ref = "targets/op-credread/sddc-credread"
         self.auth_model = "shared_service_account"
-        self.sso_realm = "vsphere.local"
 
 
 def _make_operator() -> Operator:
@@ -261,6 +260,7 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     operator = _make_operator()
 
     async with respx.mock(base_url=_SDDC_BASE_URL, assert_all_called=False) as mock:
+        token_route = mock.post("/v1/tokens").respond(200, json={"accessToken": "credread-tok"})
         op_route = mock.get("/v1/sddc-managers").respond(200, json=_OP_RESPONSE)
 
         result = await dispatch(
@@ -279,10 +279,12 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     # The default loader actually read Vault under the operator's identity.
     assert fake.auth.jwt.login_calls[-1]["jwt"] == "op.credread.sddc.jwt"
     assert fake.secrets.kv.v2.read_calls[-1]["path"] == target.secret_ref
-    # The read op hit the mocked SDDC Manager with HTTP Basic auth.
+    # The connector minted a session token, then the read op hit SDDC Manager
+    # with the Bearer token — never HTTP Basic.
+    assert token_route.called and token_route.call_count == 1
     assert op_route.called and op_route.call_count == 1
     sent_auth = op_route.calls[0].request.headers.get("authorization")
-    assert sent_auth is not None and sent_auth.startswith("Basic ")
+    assert sent_auth == "Bearer credread-tok"
     # One audit + one broadcast for the dispatched op.
     assert len(captured_events) == 1
 
@@ -307,6 +309,7 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
 
     with capture_logs() as captured:
         async with respx.mock(base_url=_SDDC_BASE_URL, assert_all_called=False) as mock:
+            mock.post("/v1/tokens").respond(200, json={"accessToken": "credread-tok"})
             mock.get("/v1/sddc-managers").respond(200, json=_OP_RESPONSE)
 
             result = await dispatch(

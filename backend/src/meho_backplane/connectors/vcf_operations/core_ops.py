@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""vROps 9.0 read-only v0.5 core — curated operator-enabled subset.
+"""vROps 9.0 read-only v0.5 core — curated ingested-browse subset.
 
-This module names the **8 read-only vROps operations** the G3.6
-vcf-operations v0.5 ship enables out of the much larger vROps
-``/suite-api`` corpus the G0.7 spec-ingestion pipeline lands under
-``connector_id="vrops-rest-9.0"``. The curation is two-layered:
+This module names the **6 read-only vROps operations** the vcf-operations
+ship keeps as ``is_enabled`` curation over ingested rows out of the much
+larger vROps ``/suite-api`` corpus the G0.7 spec-ingestion pipeline lands
+under ``connector_id="vrops-rest-9.0"``. The curation is two-layered:
 
 * :data:`VROPS_CORE_GROUPS` — the operator-reviewed ``when_to_use``
   hint per LLM-grouping pass output group. Each entry's ``group_key``
@@ -14,7 +14,7 @@ vcf-operations v0.5 ship enables out of the much larger vROps
   ops; the ``when_to_use`` is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`VROPS_CORE_OPS` — the 8 ``EndpointDescriptor.op_id`` strings
+* :data:`VROPS_CORE_OPS` — the 6 ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -23,36 +23,40 @@ vcf-operations v0.5 ship enables out of the much larger vROps
   ``is_enabled=False`` (the G0.7 ingestion default for
   ``source_kind='ingested'`` rows).
 
-Per Initiative #369 and CLAUDE.md postulates 1-2, vROps is **fully
-generic-ingested**: the underlying ops are not registered in code,
-they live in the ``endpoint_descriptor`` table. This module only
-carries the **operator-review metadata** the substrate uses at the
-review step — the actual curation is applied through
-:func:`apply_vrops_core_curation` against an existing ingested
-connector.
+Converted to typed ops (Initiative #2266 T3, #2303)
+---------------------------------------------------
 
-The 8 ops (paths cross-checked against the Broadcom vROps suite-api
-docs at https://developer.broadcom.com/xapis/vrealize-operations-manager-api/latest/):
+The adopter's *audited* read set — the appliance liveness probe
+(``GET:/suite-api/api/versions/current``, formerly ``vrops.about``) and
+the alert list (``GET:/suite-api/api/alerts``, formerly ``vrops.alert.list``)
+— is now shipped as **typed** ops (``vrops.liveness`` / ``vrops.alert.list``)
+in :mod:`meho_backplane.connectors.vcf_operations.typed_ops`, dispatched
+directly on the connector's hand-rolled session with zero catalog ingest.
+The audited ``POST:/suite-api/api/resources/query`` lookup lands there too
+as ``vrops.resource.query``. Those two GET rows are therefore **removed
+from this curation** so the ingested twin is never flipped alongside the
+typed op (the #2262 no-shadow invariant). The remaining 6 ops below stay
+ingested-curated so the ingested breadth catalog keeps covering the
+browse case; retiring the whole apparatus is Initiative #2266 T7.
 
-1. ``GET:/suite-api/api/versions/current`` — ``vrops.about`` — appliance
-   version + build (the same surface :meth:`VcfOperationsConnector.fingerprint`
-   already consumes; exposing it as an operator-callable op lets the agent
-   run a sanity probe before any heavier read).
-2. ``GET:/suite-api/api/resources`` — ``vrops.resource.list`` — resource
+The 6 remaining curated ops (paths cross-checked against the Broadcom
+vROps suite-api docs at
+https://developer.broadcom.com/xapis/vrealize-operations-manager-api/latest/):
+
+1. ``GET:/suite-api/api/resources`` — ``vrops.resource.list`` — resource
    inventory filterable by ``resourceKind``, ``name``, or ``adapterKind``.
-3. ``GET:/suite-api/api/resources/{id}`` — ``vrops.resource.get`` — full
+   (The typed ``vrops.resource.query`` POST is the richer counterpart.)
+2. ``GET:/suite-api/api/resources/{id}`` — ``vrops.resource.get`` — full
    detail for one resource by id, including identifiers and credential
    refs (no secret values).
-4. ``GET:/suite-api/api/alerts`` — ``vrops.alert.list`` — current and
-   historical alerts (filter by ``activeOnly``, ``alertCriticality``).
-5. ``GET:/suite-api/api/alertdefinitions`` — ``vrops.alertdefinition.list``
+3. ``GET:/suite-api/api/alertdefinitions`` — ``vrops.alertdefinition.list``
    — the configured alert definitions (the policy surface the alert
    list rolls up against).
-6. ``GET:/suite-api/api/symptoms`` — ``vrops.symptom.list`` — currently
+4. ``GET:/suite-api/api/symptoms`` — ``vrops.symptom.list`` — currently
    firing symptoms; the per-condition signal that rolls up into alerts.
-7. ``GET:/suite-api/api/recommendations`` — ``vrops.recommendation.list``
+5. ``GET:/suite-api/api/recommendations`` — ``vrops.recommendation.list``
    — operator-facing remediation hints attached to alerts / symptoms.
-8. ``GET:/suite-api/api/supermetrics`` — ``vrops.supermetric.list`` —
+6. ``GET:/suite-api/api/supermetrics`` — ``vrops.supermetric.list`` —
    user-defined metric formulae, useful when answering "which metric
    formula was used to compute X".
 
@@ -83,7 +87,7 @@ Curation application
 --------------------
 
 :func:`apply_vrops_core_curation` is the operator-review-time
-substrate call that makes exactly the 8 curated ops dispatchable.
+substrate call that makes exactly the 6 curated ops dispatchable.
 Mirrors :func:`apply_nsx_core_curation` and
 :func:`apply_harbor_core_curation` verbatim, threading the
 "enable group but pin non-core ops disabled" needle via the
@@ -240,21 +244,12 @@ def classify_vrops_op(op_id: str) -> str:
     return "none"
 
 
-#: Operator-reviewed ``when_to_use`` hints for the 7 vROps groups
-#: the read-only v0.5 core spans. Every hint is one complete sentence
+#: Operator-reviewed ``when_to_use`` hints for the 5 vROps groups
+#: the ingested-browse core spans (the liveness + alerts groups moved
+#: to the typed surface in #2303). Every hint is one complete sentence
 #: the agent reads verbatim — vague hints poison
 #: ``search_operations`` ranking, per the ai_engineering pack.
 VROPS_CORE_GROUPS: Final[tuple[VropsCoreGroup, ...]] = (
-    VropsCoreGroup(
-        group_key="vrops-system",
-        name="vROps (system / about)",
-        when_to_use=(
-            "Use this group to read the vROps appliance's own identity — "
-            "release name and build number. The probe surface the agent "
-            "calls before any heavier inventory read, or when confirming "
-            "which vROps instance the target points at."
-        ),
-    ),
     VropsCoreGroup(
         group_key="vrops-resources",
         name="vROps Resources",
@@ -265,17 +260,6 @@ VROPS_CORE_GROUPS: Final[tuple[VropsCoreGroup, ...]] = (
             "any vROps workflow; filter by resourceKind, adapterKind, or "
             "name to narrow large fleets. Drill into one resource by id "
             "for credential references and full identifiers."
-        ),
-    ),
-    VropsCoreGroup(
-        group_key="vrops-alerts",
-        name="vROps Alerts",
-        when_to_use=(
-            "Use this group to list currently firing or recently resolved "
-            "alerts. Filter by activeOnly to focus on the open set, or by "
-            "alertCriticality for severity-scoped views. Each alert ties "
-            "back to an alert definition via alertDefinitionId and to a "
-            "resource via resourceId."
         ),
     ),
     VropsCoreGroup(
@@ -345,36 +329,13 @@ def _instructions(
     }
 
 
-#: The 8 curated read-only vROps core ops. Each entry carries the
+#: The 6 curated read-only vROps ingested-browse ops. Each entry carries the
 #: op_id (``GET:/path`` form), the curated group assignment, and the
 #: operator-reviewed ``llm_instructions`` blob.
 #:
 #: Paths cross-checked against the vROps suite-api docs at
 #: https://developer.broadcom.com/xapis/vrealize-operations-manager-api/latest/.
 VROPS_CORE_OPS: Final[tuple[VropsCoreOp, ...]] = (
-    VropsCoreOp(
-        op_id="GET:/suite-api/api/versions/current",
-        group_key="vrops-system",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to read the vROps appliance identity: release name "
-                "and build number. Useful as a pre-flight probe before "
-                "heavier inventory reads, or to confirm which vROps "
-                "instance the target points at. The same endpoint the "
-                "connector's fingerprint surface consumes."
-            ),
-            output_shape=(
-                "Object with releaseName (e.g. '9.0.0.1.23456789'), "
-                "buildNumber (int), and optionally "
-                "humanlyReadableReleaseName when the appliance emits it."
-            ),
-            next_step=(
-                "If the version looks healthy, proceed to "
-                "vrops.resource.list for the inventory entry point, or "
-                "vrops.alert.list for the operational signal surface."
-            ),
-        ),
-    ),
     VropsCoreOp(
         op_id="GET:/suite-api/api/resources",
         group_key="vrops-resources",
@@ -427,35 +388,6 @@ VROPS_CORE_OPS: Final[tuple[VropsCoreOp, ...]] = (
                 "vrops.alert.list (?resourceId=<uuid>) to find "
                 "alerts firing on it, or with vrops.symptom.list to "
                 "see the underlying signal layer."
-            ),
-        ),
-    ),
-    VropsCoreOp(
-        op_id="GET:/suite-api/api/alerts",
-        group_key="vrops-alerts",
-        llm_instructions=_instructions(
-            when_to_call=(
-                "Call to list currently firing or recently resolved "
-                "alerts. Accepts activeOnly (bool, default false), "
-                "alertCriticality (CRITICAL / IMMEDIATE / WARNING / "
-                "INFORMATION / UNKNOWN), alertStatus (ACTIVE / CANCELED "
-                "/ SUSPENDED / UPDATED), and resourceId (UUID) query "
-                "parameters. Supports pagination via page + pageSize; "
-                "large alert sets return a JSONFlux handle."
-            ),
-            output_shape=(
-                "Object with alerts[]; each entry carries alertId (UUID), "
-                "alertDefinitionId, alertDefinitionName, alertLevel "
-                "(0..5), alertImpact, resourceId, startTimeUTC, "
-                "cancelTimeUTC, status, and controlState. Also returns "
-                "pageInfo and links."
-            ),
-            next_step=(
-                "Surface the high-criticality alerts to the operator; "
-                "cross-reference alertDefinitionId with "
-                "vrops.alertdefinition.list for policy context, "
-                "resourceId with vrops.resource.get for affected-object "
-                "detail."
             ),
         ),
     ),
@@ -565,51 +497,34 @@ async def apply_vrops_core_curation(
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 8-op read core against an ingested vROps connector.
+    """Apply the curated 6-op read core against an ingested vROps connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 8 ops in :data:`VROPS_CORE_OPS` are dispatchable
+    the 6 ops in :data:`VROPS_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
-    ``is_enabled=False``. The 7 curated groups land
-    ``review_status='enabled'`` so the agent's
-    :func:`~meho_backplane.operations.meta_tools.search_operations`
-    surfaces the core ops; non-curated groups are left untouched
-    (``review_status='staged'`` from the G0.7 ingest default).
+    ``is_enabled=False``. The 5 curated groups land
+    ``review_status='enabled'`` so the agent's ``search_operations``
+    surfaces them; non-curated groups stay ``review_status='staged'``.
 
-    The substrate doesn't expose "enable only ops X, Y, Z under
-    group G": :meth:`ReviewService.enable_group`'s cascade flips
-    ``is_enabled=True`` on every child op in the group. The helper
-    works around this via the audit-log-driven operator-override
-    exclusion — the same mechanism
-    :func:`~meho_backplane.connectors.nsx.core_ops.apply_nsx_core_curation`
-    and :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
-    established:
+    The substrate doesn't expose "enable only ops X, Y, Z under group
+    G": :meth:`ReviewService.enable_group`'s cascade flips
+    ``is_enabled=True`` on every child op in the group. The helper works
+    around this via the audit-log-driven operator-override exclusion —
+    the same mechanism ``apply_nsx_core_curation`` /
+    ``apply_harbor_core_curation`` established: (1) load the review
+    payload; (2) ``edit_op(is_enabled=False)`` every non-core child of a
+    curated group (writing the override audit row the cascade then
+    skips); (3) ``edit_group`` lands each group's ``name`` +
+    ``when_to_use``; (4) ``enable_group`` cascades ``is_enabled=True`` to
+    the curated children; (5) ``edit_op`` lands each core op's
+    ``llm_instructions``.
 
-    1. :meth:`ReviewService.get_review_payload` loads the current
-       state of every curated group and its child ops.
-    2. For each child op in a curated group that **isn't** in the
-       :data:`VROPS_CORE_OPS` allow-list,
-       :meth:`ReviewService.edit_op` with ``is_enabled=False``
-       writes the operator-override audit row. The follow-on
-       :meth:`enable_group` cascade detects these rows and skips
-       them.
-    3. :meth:`ReviewService.edit_group` lands the operator-reviewed
-       ``name`` + ``when_to_use`` on each curated group.
-    4. :meth:`ReviewService.enable_group` flips
-       ``review_status='enabled'`` and cascades ``is_enabled=True``
-       to the curated child ops (operator-overridden non-core ops
-       are skipped).
-    5. :meth:`ReviewService.edit_op` lands the curated
-       ``llm_instructions`` blob per entry in :data:`VROPS_CORE_OPS`.
-
-    Re-running is safe but not idempotent at the audit layer.
-    :meth:`enable_group` short-circuits on groups already in
-    ``review_status='enabled'`` (no audit row), but
-    :meth:`edit_group` and :meth:`edit_op` always emit one audit
-    row per call — even when the incoming value equals the
-    persisted one. The intended posture is a one-shot curation step
-    after ingest; re-runs produce redundant
-    ``meho.connector.edit_*`` audit rows but never corrupt state.
+    Re-running is safe but not idempotent at the audit layer:
+    ``enable_group`` short-circuits on already-enabled groups, but
+    ``edit_group`` / ``edit_op`` emit an audit row per call even when the
+    value is unchanged. The intended posture is a one-shot curation step
+    after ingest; re-runs produce redundant audit rows but never corrupt
+    state.
 
     Raises :class:`~meho_backplane.operations.ingest.ConnectorNotFoundError`
     if no groups exist for ``vrops-rest-9.0`` under *tenant_id* (the

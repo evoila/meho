@@ -186,6 +186,16 @@ const (
 	IngestJobStatusResponseStatusSucceeded IngestJobStatusResponseStatus = "succeeded"
 )
 
+// Defines values for IngestRequestAuthScheme.
+const (
+	Basic             IngestRequestAuthScheme = "basic"
+	Oauth2Mint        IngestRequestAuthScheme = "oauth2_mint"
+	SessionLogin      IngestRequestAuthScheme = "session_login"
+	SessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
+	SessionLoginToken IngestRequestAuthScheme = "session_login_token"
+	StaticHeader      IngestRequestAuthScheme = "static_header"
+)
+
 // Defines values for KindFilterValue.
 const (
 	KindFilterValueCron   KindFilterValue = "cron"
@@ -339,6 +349,7 @@ const (
 	Postgres   TargetCreateProduct = "postgres"
 	Prometheus TargetCreateProduct = "prometheus"
 	Proxmox    TargetCreateProduct = "proxmox"
+	Rabbitmq   TargetCreateProduct = "rabbitmq"
 	Sddc       TargetCreateProduct = "sddc"
 	Vault      TargetCreateProduct = "vault"
 	Vcfa       TargetCreateProduct = "vcfa"
@@ -2560,20 +2571,51 @@ type ConnectorReviewOp struct {
 // (the Goal flags secret-handling sensitivity). See
 // :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
 type ConnectorReviewPayload struct {
-	ConnectorId      string                      `json:"connector_id"`
-	Dispatchable     *bool                       `json:"dispatchable,omitempty"`
-	Groups           []ConnectorReviewGroup      `json:"groups"`
-	ImplId           string                      `json:"impl_id"`
-	Kind             *ConnectorReviewPayloadKind `json:"kind,omitempty"`
-	Product          string                      `json:"product"`
-	TenantId         *openapi_types.UUID         `json:"tenant_id"`
-	TotalOpCount     int                         `json:"total_op_count"`
-	UngroupedOpCount *int                        `json:"ungrouped_op_count,omitempty"`
-	Version          string                      `json:"version"`
+	ConnectorId      string                       `json:"connector_id"`
+	Dispatchable     *bool                        `json:"dispatchable,omitempty"`
+	Groups           []ConnectorReviewGroup       `json:"groups"`
+	ImplId           string                       `json:"impl_id"`
+	Kind             *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
+	Product          string                       `json:"product"`
+	Provenance       *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
+	TenantId         *openapi_types.UUID          `json:"tenant_id"`
+	TotalOpCount     int                          `json:"total_op_count"`
+	UngroupedOpCount *int                         `json:"ungrouped_op_count,omitempty"`
+	Version          string                       `json:"version"`
 }
 
 // ConnectorReviewPayloadKind defines model for ConnectorReviewPayload.Kind.
 type ConnectorReviewPayloadKind string
+
+// ConnectorReviewProvenance Provenance for one spec ingested under this connector (#2291).
+//
+// Surfaces the durable
+// :class:`~meho_backplane.db.models.SpecProvenance` record so an
+// operator reviewing a connector can tell a vendor artifact from a
+// hand-mutated one before enabling reads:
+//
+//   - “uri“ — the audit label as presented at ingest
+//     (“spec:“ / “https://“ / “file:///“ / “docs:“ form).
+//   - “sha256“ — hex digest over the raw spec bytes. Two ingests of
+//     the *same* label with different digests mean the content changed.
+//   - “origin“ — “fetched“ (https GET) vs “inline“ (operator
+//     upload) vs “shipped“ (MEHO-authored catalog data). An inline
+//     upload labelled with a vendor URL is thus distinguishable from a
+//     genuine fetch of that URL.
+//   - “operator_sub“ — who ingested it (“None“ for boot-time
+//     shipped ingests with no operator).
+//   - “ingested_at“ — when the provenance row was last written.
+//
+// Connectors ingested before this table landed have no provenance
+// rows; the surfaces render that as "unknown (pre-provenance)" rather
+// than a fabricated record.
+type ConnectorReviewProvenance struct {
+	IngestedAt  time.Time `json:"ingested_at"`
+	OperatorSub *string   `json:"operator_sub"`
+	Origin      string    `json:"origin"`
+	Sha256      string    `json:"sha256"`
+	Uri         string    `json:"uri"`
+}
 
 // ConnectorSpecEntry One curated “(product, version)“ -> spec-source mapping.
 //
@@ -3794,7 +3836,13 @@ type IngestKbRequest struct {
 // and the operator only finds out at review-time.
 type IngestRequest struct {
 	// Async Run the pipeline off the request thread (202 + job handle); set to false for the legacy blocking response. Ignored when dry_run=true.
-	Async                      *bool         `json:"async,omitempty"`
+	Async *bool `json:"async,omitempty"`
+
+	// AuthScheme Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config — selection only. Mutually exclusive with catalog_entry.
+	AuthScheme *IngestRequestAuthScheme `json:"auth_scheme"`
+
+	// AuthSecretFields Optional override of the secret-field NAMES the auth_scheme reads at dispatch (never the values — those stay in the target's secret_ref). Omit for the per-scheme defaults. Requires auth_scheme.
+	AuthSecretFields           *[]string     `json:"auth_secret_fields"`
 	BaseUrl                    *string       `json:"base_url"`
 	CatalogEntry               *string       `json:"catalog_entry"`
 	DryRun                     *bool         `json:"dry_run,omitempty"`
@@ -3807,6 +3855,9 @@ type IngestRequest struct {
 	TenantId *openapi_types.UUID `json:"tenant_id"`
 	Version  *string             `json:"version"`
 }
+
+// IngestRequestAuthScheme Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config — selection only. Mutually exclusive with catalog_entry.
+type IngestRequestAuthScheme string
 
 // IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
 //

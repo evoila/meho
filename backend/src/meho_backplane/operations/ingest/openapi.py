@@ -50,17 +50,27 @@ collision; T1 produces what the spec literally says.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import ipaddress
 import json
 import re
 import socket
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
 import httpx
 import yaml
+from jsonschema.exceptions import ValidationError as _JsonSchemaValidationError
+from jsonschema.exceptions import best_match as _best_schema_error
+from openapi_spec_validator.schemas import (
+    openapi_v30_schema_validator as _oas30_schema_validator,
+)
+from openapi_spec_validator.schemas import (
+    openapi_v31_schema_validator as _oas31_schema_validator,
+)
 
 from meho_backplane.operations._rfc6570 import split_path_operator
 from meho_backplane.operations.ingest.exceptions import (
@@ -86,12 +96,71 @@ from meho_backplane.operations.ingest.schemas import (
 __all__ = [
     "InvalidSchemaError",
     "InvalidSpecError",
+    "ParsedSpecProvenance",
     "UnsupportedSpecError",
     "UpstreamNotSpecError",
+    "classify_spec_origin",
     "detect_spec_format",
     "parse_openapi",
+    "parse_openapi_with_provenance",
     "read_spec_info_version",
 ]
+
+#: Prefix of the audit label the catalog shipped-spec on-ramp assigns
+#: (``spec:<resource>``, #1975). Combined with the presence of inline
+#: ``content`` it distinguishes a MEHO-authored shipped ingest from an
+#: operator's inline upload — see :func:`classify_spec_origin`.
+_SHIPPED_SPEC_URI_PREFIX = "spec:"
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSpecProvenance:
+    """Provenance facts captured while a spec's raw bytes are loaded.
+
+    Emitted by :func:`parse_openapi_with_provenance` so the ingest
+    pipeline can persist a durable, non-spoofable record of what was
+    ingested (#2291):
+
+    * ``uri`` — the audit label exactly as presented (the value passed
+      as ``spec_path_or_uri``); ``spec:`` / ``https://`` / ``file:///``
+      / ``docs:`` form preserved.
+    * ``sha256`` — hex digest over the raw spec bytes (fetched body or
+      uploaded content), computed before any decode so a hand-mutated
+      upload and a genuine fetch of the same label are distinguishable.
+    * ``origin`` — ``fetched`` | ``inline`` | ``shipped`` per
+      :func:`classify_spec_origin`.
+    """
+
+    uri: str
+    sha256: str
+    origin: str
+
+
+def classify_spec_origin(spec_path_or_uri: str, content: str | None) -> str:
+    """Classify how a spec's bytes reached the backplane.
+
+    Three origins, derived from what the ingest request already carries
+    (no extra threading from the REST/MCP/CLI entry points):
+
+    * ``fetched`` — no inline ``content``; the bytes came from the
+      ``https`` GET in :func:`_fetch_spec_bytes`.
+    * ``shipped`` — inline ``content`` **and** a ``spec:`` audit label:
+      the MEHO-authored catalog on-ramp uploads shipped package data
+      under ``uri=f"spec:{resource}"`` (#1975), which is categorically
+      different from an operator's hand-mutated upload.
+    * ``inline`` — inline ``content`` under any other label
+      (``file:///`` / ``docs:`` / a vendor ``https`` URL reused as the
+      label): an operator-uploaded spec.
+
+    The ``spec:`` label is a MEHO-internal convention the catalog route
+    assigns, not operator input on the inline on-ramp, so it is a sound
+    discriminator for record-and-surface provenance.
+    """
+    if content is None:
+        return "fetched"
+    if spec_path_or_uri.startswith(_SHIPPED_SPEC_URI_PREFIX):
+        return "shipped"
+    return "inline"
 
 
 try:
@@ -366,9 +435,10 @@ def parse_openapi(
 
     Raises:
         InvalidSpecError: Document is not a mapping, lacks ``paths``,
-            the URI scheme is not ``https``, or the resolved
-            destination is a private/loopback/link-local/reserved
-            address.
+            fails structural (metaschema) validation against the
+            OpenAPI 3.0/3.1 Specification schema, the URI scheme is
+            not ``https``, or the resolved destination is a
+            private/loopback/link-local/reserved address.
         UnsupportedSpecError: Spec version is not 3.0.x / 3.1.x, or the
             document references a cross-document ``$ref``.
         UpstreamNotSpecError: HTTP fetch succeeded (2xx) but the
@@ -384,8 +454,55 @@ def parse_openapi(
         httpx.HTTPError: HTTP fetch failure for URL inputs.
     """
     spec_bytes = _load_spec_bytes(spec_path_or_uri, content=content)
+    return _project_spec_bytes_to_protos(spec_bytes, spec_source=spec_source)
+
+
+def parse_openapi_with_provenance(
+    spec_path_or_uri: str,
+    *,
+    spec_source: str | None = None,
+    content: str | None = None,
+) -> tuple[list[EndpointDescriptorProto], ParsedSpecProvenance]:
+    """Parse a spec and return its operations **plus** its provenance.
+
+    Same contract as :func:`parse_openapi` for the operations list; the
+    second return value is a :class:`ParsedSpecProvenance` capturing the
+    audit label, the ``sha256`` over the **raw bytes** (hashed at the
+    trust boundary before any YAML/JSON decode, so it reflects exactly
+    what arrived), and the ``fetched`` / ``inline`` / ``shipped`` origin.
+
+    The register phase (#2291) calls this instead of :func:`parse_openapi`
+    so it can persist a durable provenance row alongside the descriptor
+    upserts. The bytes are loaded exactly once — no second fetch — so a
+    remote spec is not pulled twice.
+
+    Raises the same exceptions as :func:`parse_openapi`.
+    """
+    spec_bytes = _load_spec_bytes(spec_path_or_uri, content=content)
+    provenance = ParsedSpecProvenance(
+        uri=spec_path_or_uri,
+        sha256=hashlib.sha256(spec_bytes).hexdigest(),
+        origin=classify_spec_origin(spec_path_or_uri, content),
+    )
+    protos = _project_spec_bytes_to_protos(spec_bytes, spec_source=spec_source)
+    return protos, provenance
+
+
+def _project_spec_bytes_to_protos(
+    spec_bytes: bytes,
+    *,
+    spec_source: str | None,
+) -> list[EndpointDescriptorProto]:
+    """Decode + validate + project raw spec bytes into descriptor protos.
+
+    The shared core of :func:`parse_openapi` and
+    :func:`parse_openapi_with_provenance`: everything after the raw
+    bytes are in hand (so the sha256 can be taken over those same bytes
+    before this runs).
+    """
     spec = _decode_spec(spec_bytes)
     _validate_openapi_version(spec)
+    _validate_openapi_structure(spec)
 
     paths = spec.get("paths")
     if paths is None:
@@ -743,6 +860,54 @@ def _validate_openapi_version(spec: dict[str, Any]) -> None:
         raise UnsupportedSpecError(
             f"OpenAPI version {raw_version!r} is not supported (expected 3.0.x or 3.1.x)"
         )
+
+
+def _validate_openapi_structure(spec: dict[str, Any]) -> None:
+    """Refuse a 3.x document that violates the official OpenAPI metaschema.
+
+    Runs *after* :func:`_validate_openapi_version`, so the version string
+    is already known to be ``3.0.x`` / ``3.1.x`` and the matching
+    metaschema can be selected (3.1 carries the jsonSchemaDialect-aware
+    2020-12 schema; 3.0 the draft-04-based one). Validation is
+    **metaschema-only**: the document is checked against the JSON Schema
+    that defines a legal OpenAPI object, not the library's optional
+    semantic add-ons (duplicate-operationId, unresolvable-path-parameter,
+    extra-parameter). Those add-ons routinely flag legal-but-untidy vendor
+    specs, and this gate's job is structural validity, not a linter — a
+    published 950-operation spec must not be refused because two operations
+    share a tag or an operation omits an ``operationId``.
+
+    The first (most-relevant) violation is surfaced via
+    :func:`jsonschema.exceptions.best_match` so the operator gets one
+    actionable location instead of a wall of cascading errors, named by
+    its JSON path (e.g. ``$.paths['/pets'].get.responses``). Raised as
+    :class:`InvalidSpecError` — the version-independent structural-fault
+    family — so it flows through the existing ``invalid_spec`` envelope on
+    every transport (REST 400, MCP ``-32602``, async-job ``error``) with
+    no new typed field. Because the gate lives at parse, the ``dry_run``
+    and effectful ingest legs refuse an invalid spec identically.
+
+    The parser's deliberate tolerant-skip of *sub-document* junk
+    (non-dict path items / operations, empty path items) is unaffected:
+    those shapes are still legal per the metaschema and are handled
+    downstream in :func:`_iter_operations`; only genuine metaschema
+    violations (``paths`` as a list, a non-object ``responses``, a missing
+    required field) are refused here.
+    """
+    validator = (
+        _oas31_schema_validator
+        if spec.get("openapi", "").startswith("3.1")
+        else _oas30_schema_validator
+    )
+    error: _JsonSchemaValidationError | None = _best_schema_error(validator.iter_errors(spec))
+    if error is None:
+        return
+    raise InvalidSpecError(
+        f"OpenAPI document fails structural (metaschema) validation at "
+        f"{error.json_path}: {error.message}. Fix the document so it conforms "
+        f"to the OpenAPI Specification schema for its declared version, then "
+        f"re-ingest. See docs/codebase/error-message-shape.md."
+    )
 
 
 def _iter_operations(

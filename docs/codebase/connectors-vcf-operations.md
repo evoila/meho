@@ -165,11 +165,47 @@ dispatcher through this shim; post-G0.6 callers (the
 `meho vcf-operations …` CLI verbs added in #837) construct a real
 `Operator` and call `dispatch` themselves.
 
-Until G3.6-T2 (#833) ingests the vROps OpenAPI spec, no operations exist
-in the `endpoint_descriptor` table for the `vrops-rest-9.0` connector_id
-— every `execute(..., op_id, ...)` call resolves to "unknown operation"
-at the dispatcher layer. This is the correct behaviour for a
-registered-but-empty connector at this Task's stage.
+The connector exposes two operation surfaces: a **typed** read set
+(below) that works with zero catalog ingest, plus the **ingested**
+`/suite-api` breadth catalog curated in `core_ops.py`.
+
+### Typed read operations (#2303, Initiative #2266 T3)
+
+The adopter's *audited* vROps read set (audit #2294) ships as **typed**
+ops (`source_kind="typed"`) in `typed_ops.py`, dispatched directly on the
+connector's Basic (+ `auth-source`) session — no ingested descriptor row,
+so they work on a fresh boot with zero catalog ingest (the #2262
+no-shadow invariant). Handlers are bound methods on
+`VcfOperationsConnector`; a module-level `register_vcf_operations_typed_operations`
+registrar is queued via `register_typed_op_registrar` in the package
+`__init__` and run by the lifespan.
+
+- **`vrops.liveness`** — `GET /suite-api/api/versions/current`. Appliance
+  liveness + identity (release/build); the same surface `probe()` uses.
+  The adopter named the probe `casa/health`, but the CaSA API is
+  private/undocumented, so the documented version surface is the grounded
+  liveness op. Supersedes the former curated `vrops.about`.
+- **`vrops.alert.list`** — `GET /suite-api/api/alerts`. Alert triage,
+  filtered by `activeOnly` / `alertCriticality` / `alertStatus` /
+  `resourceId` with pagination. Supersedes the curated
+  `GET:/suite-api/api/alerts` ingested row.
+- **`vrops.resource.query`** — `POST /suite-api/api/resources/query`. A
+  body-shaped POST carrying a typed `ResourceQuerySpec` subset (match on
+  `resourceKind` / `name` / `regex` / `adapterKind` / state / status /
+  health / parent / `statKey`), paginated via `page` / `pageSize` query
+  params.
+
+All three are `safety_level="safe"`, `requires_approval=False`,
+read-only. The `auth-source` query param rides both the GET path (the
+`_request_json` override) and the body POST (a `_post_json` override that
+threads auth-source + pagination onto the URL, since the base
+`_post_json` bypasses the `_request_json` seam and takes no params).
+
+The two converted GET reads are **removed** from the `core_ops.py`
+ingested curation so their ingested twin is never flipped alongside the
+typed op; the remaining 6 ingested-browse ops (resource list/get, alert
+definitions, symptoms, recommendations, super metrics) stay curated as
+browse breadth until Initiative #2266 T7 retires the apparatus.
 
 ### Shutdown
 
@@ -216,10 +252,11 @@ client.
   `CredentialsCache.invalidate(target)`. Until the admin endpoint for
   rotation lands, the workaround is to restart the backplane process
   (which clears the cache on `aclose`).
-- **No operations yet** — the connector is registered but no
-  `endpoint_descriptor` rows exist; dispatch against any `op_id`
-  resolves to "unknown operation" until G3.6-T2 (#833) ingests the
-  vROps `/suite-api` OpenAPI spec.
+- **Ingested-curation retirement pending** — the 6 remaining
+  `core_ops.py` ingested-browse ops still depend on per-deploy catalog
+  state (an ingest of the vROps `/suite-api` spec + operator review); the
+  typed reads above do not. Retiring the whole ingested-curation
+  apparatus is Initiative #2266 T7.
 
 ## References
 

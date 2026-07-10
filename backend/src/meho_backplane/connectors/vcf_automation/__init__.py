@@ -57,6 +57,35 @@ from meho_backplane.connectors.vcf_automation.session import (
     VcfAutomationTargetLike,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.vcf_automation.typed_ops import (
+    VCFA_TYPED_OPS,
+    VCFA_TYPED_WHEN_TO_USE_BY_GROUP,
+    VcfaTypedOp,
+)
+from meho_backplane.operations.typed_register import register_typed_op_registrar
+from meho_backplane.retrieval.embedding import EmbeddingService
+
+
+async def register_vcfa_typed_operations(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Module-level registrar wrapper for ``VcfAutomationConnector.register_typed_operations``.
+
+    The canonical typed-op registration pattern is a module-level
+    ``async def register_xxx_typed_operations`` queued onto
+    :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
+    via :func:`register_typed_op_registrar`. The VCFA op walk is a
+    classmethod on the connector (so the test suite can drive it without
+    lifespan plumbing); this wrapper is the seam the standard registrar
+    mechanism calls. The ``embedding_service`` kwarg is accepted-and-
+    discarded — the runner passes it to every registrar, and
+    :meth:`VcfAutomationConnector.register_typed_operations` resolves the
+    process-wide singleton via ``register_typed_operation``'s fallback.
+    """
+    del embedding_service  # runner-compatibility kwarg; singleton resolved downstream
+    await VcfAutomationConnector.register_typed_operations()
+
 
 register_connector_v2(
     product="vcfa",
@@ -78,6 +107,13 @@ register_connector_v2(
     cls=VcfAutomationConnector,
 )
 
+# Queue the typed-op upsert onto the lifespan-driven registrar list. The
+# runner (``run_typed_op_registrars``) iterates after
+# ``_eager_import_connectors`` so the five typed read descriptors land
+# before the first dispatch — no ingested catalog state required (VCFA
+# ships no vendor spec; typed conversion is the only working read path).
+register_typed_op_registrar(register_vcfa_typed_operations)
+
 __all__ = [
     "VCFA_CONNECTOR_ID",
     "VCFA_CORE_GROUPS",
@@ -85,6 +121,8 @@ __all__ = [
     "VCFA_IMPL_ID",
     "VCFA_PATH_RULES",
     "VCFA_PRODUCT",
+    "VCFA_TYPED_OPS",
+    "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
     "VCFA_VERSION",
     "SessionCredentials",
     "VcfAutomationConfigurationError",
@@ -93,7 +131,9 @@ __all__ = [
     "VcfAutomationTargetLike",
     "VcfaCoreGroup",
     "VcfaCoreOp",
+    "VcfaTypedOp",
     "apply_vcfa_core_curation",
     "classify_vcfa_op",
     "load_credentials_from_vault",
+    "register_vcfa_typed_operations",
 ]

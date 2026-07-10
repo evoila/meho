@@ -108,6 +108,27 @@ connector-related release-notes line.
   remedy, and the parser's tolerant-skip of sub-document junk is unchanged.
   (#2292)
 
+### Added — persisted spec provenance at ingest (sha256 + origin + operator/timestamp, surfaced in review) (#2291)
+
+- Every accepted spec ingest now writes a durable, non-spoofable
+  provenance row to a new `spec_provenance` table (Alembic `0056`): the
+  `sha256` over the **raw spec bytes** (hashed at the fetch/upload trust
+  boundary before any decode), the audit `uri` as presented, the
+  `origin` (`fetched` https GET · `inline` operator upload · `shipped`
+  MEHO-authored catalog data), the ingesting operator, and a timestamp,
+  scoped like the descriptor rows (`tenant_id IS NULL` = global). Before
+  this, the only provenance was a spoofable `spec:<uri>` tag — an
+  operator's hand-mutated inline upload labelled with a vendor's https
+  URL persisted identically to a genuine fetch of that URL, and the
+  fetched-vs-inline bit was never persisted. Re-ingesting the same spec
+  updates the row in place (new `sha256` + timestamp), so different
+  content under the same label is detectable. Provenance is surfaced on
+  the connector review REST payload (`ConnectorReviewPayload.provenance`)
+  and rendered by `meho connector review`; connectors ingested before
+  this landed read as "unknown (pre-provenance)". Record-and-surface
+  only — no refusal policy, and the `file:///` / `docs:` inline on-ramp
+  stays fully functional. (#2270 / #2291)
+
 ### Changed — SDDC Manager auth rebuilt on the `session_login_token` profile scheme (#2290)
 
 - Flip the shipped `sddc_manager_minimal.yaml` profile from the false

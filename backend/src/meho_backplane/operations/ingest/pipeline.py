@@ -116,6 +116,7 @@ from meho_backplane.operations.ingest.llm_groups import (
 )
 from meho_backplane.operations.ingest.openapi import (
     parse_openapi,
+    parse_openapi_with_provenance,
     read_spec_info_version,
 )
 from meho_backplane.operations.ingest.register_ingested import (
@@ -123,6 +124,7 @@ from meho_backplane.operations.ingest.register_ingested import (
     register_ingested_operations,
 )
 from meho_backplane.operations.ingest.service import ReviewService
+from meho_backplane.operations.ingest.spec_provenance import upsert_spec_provenance
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
@@ -915,7 +917,12 @@ class IngestionPipelineService:
 
         Each spec is parsed and registered separately so the per-spec
         :func:`register_ingested_operations` call attaches its own
-        ``spec:<uri>`` tag to the row. The aggregated counts roll up
+        ``spec:<uri>`` tag to the row. After a spec's descriptor rows
+        land, its durable provenance (#2291) — sha256 over the raw
+        bytes, ``fetched`` / ``inline`` / ``shipped`` origin, operator,
+        timestamp — is upserted via :func:`upsert_spec_provenance`,
+        keyed on ``(triple, uri, scope)`` so a re-ingest updates the row
+        rather than duplicating it. The aggregated counts roll up
         every spec's individual result. ``connector_registered`` is
         ``True`` when ANY spec triggered the auto-shim registration —
         on a fresh connector the first spec flips it, subsequent
@@ -939,25 +946,14 @@ class IngestionPipelineService:
         connector_registered = False
 
         for spec in specs:
-            # G0.16-T1 (#1303): same thread-pool offload as the
-            # dry-run path -- the synchronous parser is the worst
-            # event-loop-blocking offender on real vendor specs
-            # (vmware/9.0 ingest blocked the loop for ~30 s before
-            # this hop). ``register_ingested_operations`` is already
-            # an async coroutine that yields on every DB write so
-            # it doesn't need the same treatment.
-            protos = await asyncio.to_thread(
-                parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
-            )
-            partial = await register_ingested_operations(
+            partial = await self._register_one_spec(
+                spec,
                 product=product,
                 version=version,
                 impl_id=impl_id,
-                spec_source=spec.uri,
-                operations=protos,
                 base_url=base_url,
                 tenant_id=tenant_id,
-                embedding_service=self._embedding_service,
+                sessionmaker=sessionmaker,
                 register_shim=register_shim,
             )
             aggregated_inserted += partial.inserted_count
@@ -985,6 +981,64 @@ class IngestionPipelineService:
             connector_registered=connector_registered,
             operations_grouped=False,
         )
+
+    async def _register_one_spec(
+        self,
+        spec: SpecSource,
+        *,
+        product: str,
+        version: str,
+        impl_id: str,
+        base_url: str | None,
+        tenant_id: UUID | None,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        register_shim: bool,
+    ) -> IngestionResult:
+        """Parse one spec, upsert its descriptor rows, persist its provenance.
+
+        G0.16-T1 (#1303): the synchronous parser is offloaded to a
+        thread pool -- it is the worst event-loop-blocking offender on
+        real vendor specs (vmware/9.0 ingest blocked the loop for ~30 s
+        before this hop). ``register_ingested_operations`` is already an
+        async coroutine that yields on every DB write, so it needs no
+        such treatment.
+
+        After the descriptor rows land, the spec's durable provenance
+        (#2291) — sha256 over the raw bytes + ``fetched`` / ``inline`` /
+        ``shipped`` origin + operator + timestamp — is upserted in its
+        own transaction (keyed on ``(triple, uri, scope)``). Provenance
+        is record-and-surface metadata and must not roll back the
+        operations it describes, hence the separate write.
+        """
+        protos, provenance = await asyncio.to_thread(
+            parse_openapi_with_provenance,
+            spec.uri,
+            spec_source=spec.uri,
+            content=spec.content,
+        )
+        partial = await register_ingested_operations(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            spec_source=spec.uri,
+            operations=protos,
+            base_url=base_url,
+            tenant_id=tenant_id,
+            embedding_service=self._embedding_service,
+            register_shim=register_shim,
+        )
+        await upsert_spec_provenance(
+            sessionmaker,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            uri=provenance.uri,
+            sha256=provenance.sha256,
+            origin=provenance.origin,
+            operator_sub=self._operator.sub,
+        )
+        return partial
 
     async def _stamp_profiled_connector(
         self,

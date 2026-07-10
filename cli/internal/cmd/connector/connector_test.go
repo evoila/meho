@@ -1138,6 +1138,48 @@ func TestPrintReviewTableHappyPath(t *testing.T) {
 	}
 }
 
+// TestPrintReviewTableRendersProvenance — the review render surfaces
+// per-spec provenance (#2291): the fetched/inline/shipped origin, the
+// audit uri, a sha256 prefix, and the operator, so an operator can tell
+// a vendor artifact from a hand-mutated one before enabling reads.
+func TestPrintReviewTableRendersProvenance(t *testing.T) {
+	operator := "user:alice"
+	r := &api.ConnectorReviewPayload{
+		ConnectorId: "vmware-rest-9.0",
+		Product:     "vmware",
+		Version:     "9.0",
+		ImplId:      "vmware-rest",
+		Provenance: &[]api.ConnectorReviewProvenance{
+			{
+				Uri:         "https://developer.broadcom.com/vcenter.yaml",
+				Sha256:      "deadbeefdeadbeefdeadbeefdeadbeef",
+				Origin:      "fetched",
+				OperatorSub: &operator,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"provenance", "fetched", "deadbeef", "user:alice", "vcenter.yaml"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing provenance token %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintReviewTableProvenanceUnknown — a connector ingested before
+// the provenance table landed (nil/empty Provenance) says so explicitly
+// rather than rendering a blank section.
+func TestPrintReviewTableProvenanceUnknown(t *testing.T) {
+	r := &api.ConnectorReviewPayload{ConnectorId: "k8s-1.x", Provenance: nil}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	if !strings.Contains(buf.String(), "pre-provenance") {
+		t.Errorf("expected pre-provenance note; got:\n%s", buf.String())
+	}
+}
+
 // TestPrintReviewTableEmptyGroups — zero-group connector renders
 // the explanation line and shows "(empty)" rollup.
 func TestPrintReviewTableEmptyGroups(t *testing.T) {

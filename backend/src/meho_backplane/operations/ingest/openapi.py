@@ -50,12 +50,14 @@ collision; T1 produces what the spec literally says.
 
 from __future__ import annotations
 
+import hashlib
 import io
 import ipaddress
 import json
 import re
 import socket
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Any, cast
 from urllib.parse import urljoin, urlparse
 
@@ -94,12 +96,71 @@ from meho_backplane.operations.ingest.schemas import (
 __all__ = [
     "InvalidSchemaError",
     "InvalidSpecError",
+    "ParsedSpecProvenance",
     "UnsupportedSpecError",
     "UpstreamNotSpecError",
+    "classify_spec_origin",
     "detect_spec_format",
     "parse_openapi",
+    "parse_openapi_with_provenance",
     "read_spec_info_version",
 ]
+
+#: Prefix of the audit label the catalog shipped-spec on-ramp assigns
+#: (``spec:<resource>``, #1975). Combined with the presence of inline
+#: ``content`` it distinguishes a MEHO-authored shipped ingest from an
+#: operator's inline upload — see :func:`classify_spec_origin`.
+_SHIPPED_SPEC_URI_PREFIX = "spec:"
+
+
+@dataclass(frozen=True, slots=True)
+class ParsedSpecProvenance:
+    """Provenance facts captured while a spec's raw bytes are loaded.
+
+    Emitted by :func:`parse_openapi_with_provenance` so the ingest
+    pipeline can persist a durable, non-spoofable record of what was
+    ingested (#2291):
+
+    * ``uri`` — the audit label exactly as presented (the value passed
+      as ``spec_path_or_uri``); ``spec:`` / ``https://`` / ``file:///``
+      / ``docs:`` form preserved.
+    * ``sha256`` — hex digest over the raw spec bytes (fetched body or
+      uploaded content), computed before any decode so a hand-mutated
+      upload and a genuine fetch of the same label are distinguishable.
+    * ``origin`` — ``fetched`` | ``inline`` | ``shipped`` per
+      :func:`classify_spec_origin`.
+    """
+
+    uri: str
+    sha256: str
+    origin: str
+
+
+def classify_spec_origin(spec_path_or_uri: str, content: str | None) -> str:
+    """Classify how a spec's bytes reached the backplane.
+
+    Three origins, derived from what the ingest request already carries
+    (no extra threading from the REST/MCP/CLI entry points):
+
+    * ``fetched`` — no inline ``content``; the bytes came from the
+      ``https`` GET in :func:`_fetch_spec_bytes`.
+    * ``shipped`` — inline ``content`` **and** a ``spec:`` audit label:
+      the MEHO-authored catalog on-ramp uploads shipped package data
+      under ``uri=f"spec:{resource}"`` (#1975), which is categorically
+      different from an operator's hand-mutated upload.
+    * ``inline`` — inline ``content`` under any other label
+      (``file:///`` / ``docs:`` / a vendor ``https`` URL reused as the
+      label): an operator-uploaded spec.
+
+    The ``spec:`` label is a MEHO-internal convention the catalog route
+    assigns, not operator input on the inline on-ramp, so it is a sound
+    discriminator for record-and-surface provenance.
+    """
+    if content is None:
+        return "fetched"
+    if spec_path_or_uri.startswith(_SHIPPED_SPEC_URI_PREFIX):
+        return "shipped"
+    return "inline"
 
 
 try:
@@ -393,6 +454,52 @@ def parse_openapi(
         httpx.HTTPError: HTTP fetch failure for URL inputs.
     """
     spec_bytes = _load_spec_bytes(spec_path_or_uri, content=content)
+    return _project_spec_bytes_to_protos(spec_bytes, spec_source=spec_source)
+
+
+def parse_openapi_with_provenance(
+    spec_path_or_uri: str,
+    *,
+    spec_source: str | None = None,
+    content: str | None = None,
+) -> tuple[list[EndpointDescriptorProto], ParsedSpecProvenance]:
+    """Parse a spec and return its operations **plus** its provenance.
+
+    Same contract as :func:`parse_openapi` for the operations list; the
+    second return value is a :class:`ParsedSpecProvenance` capturing the
+    audit label, the ``sha256`` over the **raw bytes** (hashed at the
+    trust boundary before any YAML/JSON decode, so it reflects exactly
+    what arrived), and the ``fetched`` / ``inline`` / ``shipped`` origin.
+
+    The register phase (#2291) calls this instead of :func:`parse_openapi`
+    so it can persist a durable provenance row alongside the descriptor
+    upserts. The bytes are loaded exactly once — no second fetch — so a
+    remote spec is not pulled twice.
+
+    Raises the same exceptions as :func:`parse_openapi`.
+    """
+    spec_bytes = _load_spec_bytes(spec_path_or_uri, content=content)
+    provenance = ParsedSpecProvenance(
+        uri=spec_path_or_uri,
+        sha256=hashlib.sha256(spec_bytes).hexdigest(),
+        origin=classify_spec_origin(spec_path_or_uri, content),
+    )
+    protos = _project_spec_bytes_to_protos(spec_bytes, spec_source=spec_source)
+    return protos, provenance
+
+
+def _project_spec_bytes_to_protos(
+    spec_bytes: bytes,
+    *,
+    spec_source: str | None,
+) -> list[EndpointDescriptorProto]:
+    """Decode + validate + project raw spec bytes into descriptor protos.
+
+    The shared core of :func:`parse_openapi` and
+    :func:`parse_openapi_with_provenance`: everything after the raw
+    bytes are in hand (so the sha256 can be taken over those same bytes
+    before this runs).
+    """
     spec = _decode_spec(spec_bytes)
     _validate_openapi_version(spec)
     _validate_openapi_structure(spec)

@@ -113,6 +113,35 @@ connector-related release-notes line.
   so its `filter.names` param is likewise keyed off the mount flavor instead
   of 400'ing on a modern `/api` vCenter 8.x; pinned with modern/legacy mount
   tests mirroring `host.usage` (#2298).
+### Removed — retired the ingested-curation apparatus in the six VMware-family connectors (T7 · #2358)
+
+- Deleted the hand-curated ingested-enable apparatus (`core_ops.py` /
+  `vcf_automation/_core_data.py`) from all six VMware-family connectors —
+  `sddc_manager`, `vcf_fleet`, `vcf_operations`, `vcf_logs`, `nsx`,
+  `vcf_automation` — dropping ~6.5k lines of dead code with **zero production
+  callers**: the `*_CORE_OPS` flip-lists, `*_CORE_GROUPS`, path classifiers
+  (`classify_*_op`), and appliers (`apply_*_core_curation`) were only ever
+  invoked by tests. The audited operational reads are already typed ops
+  (T1–T6, #2295/#2302–#2306); the remaining 33 declined ops stay browsable as
+  `source_kind="ingested"` breadth and are enabled through the generic review
+  flow (`ReviewService.enable_reads` / MCP `meho.connector.enable_reads` / REST
+  `POST /api/v1/connectors/{id}/enable-reads`). No REST/schema change — no
+  OpenAPI snapshot delta. The `(product, version, impl_id, connector_id)`
+  identity constants each package re-exports are preserved (relocated into the
+  package `__init__.py`), so `from meho_backplane.connectors.<pkg> import
+  <PROD>_CONNECTOR_ID` still resolves.
+### Changed — nsx/connector.py split under the file-size budget (#2356)
+
+- `nsx/connector.py` dropped from 600 to ~562 lines, back under the
+  `code-quality.py` file-size ceiling (block limit 600), with zero behaviour
+  change. The pure module-level `_is_acceptable_auth_model` predicate moved to
+  `nsx/session.py` as the public `is_acceptable_auth_model` (imported back at the
+  `auth_headers` boundary), and the module docstring was trimmed to the house
+  norm. The seven typed-read shims (`node_status`…`alarm_list`) stay bound
+  methods on `NsxConnector` with their exact names so the dispatcher's
+  `module.ClassName.method` handler resolution (`operations/_handler_resolve`)
+  is unchanged; typed reads still register and dispatch `source_kind="typed"`.
+
 ### Added — vm.power single-VM gated write verbs (incl. guest-shutdown)
 
 - New `vmware.composite.vm.power` write composite acts on **one** VM for

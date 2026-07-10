@@ -12,8 +12,7 @@
 The audited SDDC Manager read set (the #2294 12-read lab-audit surface) is
 registered as typed ops (``source_kind="typed"``) so it dispatches on a
 fresh boot with **zero catalog ingest** -- the #2247 failure class the
-ingested-row curation in
-:mod:`meho_backplane.connectors.sddc_manager.core_ops` was subject to
+older ingested-row enablement was subject to
 (per-deploy catalog state). The op bodies live in
 :mod:`meho_backplane.connectors.sddc_manager.typed_reads`; thin
 bound-method shims on
@@ -28,15 +27,16 @@ The dataclass + tuple + module-level registrar shape mirrors
 Two surfaces, no resolver shadowing (#1750/#1798 class)
 ------------------------------------------------------
 
-The typed curated set here is the **documented operational surface**; the
+The typed set here is the **documented operational surface**; the
 ingested 375-op VCF catalog stays as profiled-dispatch breadth (#2271)
-under its own ``METHOD:path`` op_ids. The two never collide: a typed op
-carries a dotted op-id (``sddc.domain.list``) and a code ``handler_ref``,
-so it resolves through :func:`~meho_backplane.operations._branches.dispatch_typed`
+under its own ``METHOD:path`` op_ids, enable-able through the generic
+review flow (``ReviewService.enable_reads``). The two never collide: a
+typed op carries a dotted op-id (``sddc.domain.list``) and a code
+``handler_ref``, so it resolves through
+:func:`~meho_backplane.operations._branches.dispatch_typed`
 and never through an ``endpoint_descriptor`` ingested row (#2262). The
-converted reads are removed from the ``core_ops.py`` ingested curation;
-the four non-audited curated reads (releases/system, domain detail,
-network-pools, bundles) stay ingested-curated there.
+four non-audited reads (releases/system, domain detail, network-pools,
+bundles) remain ingested browse breadth.
 
 Credential-read gating (``sddc.credential.list``)
 -------------------------------------------------

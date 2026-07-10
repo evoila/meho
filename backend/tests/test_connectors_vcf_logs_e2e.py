@@ -72,7 +72,6 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_logs import (
     VRLI_CONNECTOR_ID,
-    VRLI_CORE_OPS,
     VRLI_IMPL_ID,
     VRLI_VERSION,
     VcfLogsConnector,
@@ -87,6 +86,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vrli_canary_fixtures import (
     VRLI_CANARY_BASE_URL,
+    VRLI_CANARY_CORE_OP_IDS,
     VRLI_CANARY_EVENTS,
     VRLI_CANARY_FINGERPRINT,
     VRLI_CANARY_OPERATOR_TENANT,
@@ -506,9 +506,9 @@ async def vrli_e2e_440_persists(
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VRLI_CORE_OPS)
+_OP_IDS: tuple[str, ...] = VRLI_CANARY_CORE_OP_IDS
 assert len(_OP_IDS) == 6, (
-    f"Expected 6 curated ingested vRLI ops after #2295 (events query is now the "
+    f"Expected 6 ingested vRLI browse-breadth ops after #2295 (events query is now the "
     f"vrli.event.query typed op), got {len(_OP_IDS)}: {_OP_IDS}"
 )
 

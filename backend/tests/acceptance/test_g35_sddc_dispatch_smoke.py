@@ -5,7 +5,7 @@
 
 Closes the substrate-proves-out half of the SDDC Manager v0.2 ship for
 Initiative #368: each entry in
-:data:`~meho_backplane.connectors.sddc_manager.core_ops.SDDC_CORE_OPS` is
+:data:`~tests.acceptance._sddc_canary_fixtures.SDDC_CANARY_CORE_OP_IDS` is
 dispatched against a respx-mocked SDDC Manager appliance and the dispatcher
 returns a structured :class:`~meho_backplane.connectors.schemas.OperationResult`
 for every one.
@@ -16,7 +16,7 @@ record/replay fixture pattern (a known limitation; documented in the
 Initiative DoD). The full env-gated spec-canary ingest is a follow-up to
 this Task (planned for G3.5-T6 #618); until then, the dispatch leg is
 exercised directly against the curated descriptor set the
-:data:`SDDC_CORE_OPS` constants describe.
+:data:`SDDC_CANARY_CORE_OP_IDS` constants describe.
 
 Skip conditions: no Postgres — the ``pg_engine`` fixture skips when the
 integration database isn't reachable.
@@ -26,11 +26,13 @@ from __future__ import annotations
 
 import pytest
 
-from meho_backplane.connectors.sddc_manager import SDDC_CORE_OPS
 from meho_backplane.operations.meta_tools import call_operation
-from tests.acceptance._sddc_canary_fixtures import IngestedSddcCanary
+from tests.acceptance._sddc_canary_fixtures import (
+    SDDC_CANARY_CORE_OP_IDS,
+    IngestedSddcCanary,
+)
 
-SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in SDDC_CORE_OPS)
+SMOKE_OP_IDS: tuple[str, ...] = SDDC_CANARY_CORE_OP_IDS
 
 #: Per-op parameter map. Only ``GET:/v1/domains/{id}`` carries a path
 #: template (``{id}``) that needs substitution. The smoke passes

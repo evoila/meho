@@ -7,12 +7,11 @@ This module is the vRLI sibling of :mod:`tests.acceptance._nsx_canary_fixtures`.
 The acceptance + E2E modules under :mod:`tests` share the same plumbing: a
 registered :class:`~meho_backplane.connectors.vcf_logs.VcfLogsConnector`
 instance with a stub credentials loader (so no Vault read fires), a probed
-:class:`~meho_backplane.db.models.Target` row, the curated ingested
+:class:`~meho_backplane.db.models.Target` row, the ingested browse-breadth
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.vcf_logs.core_ops.VRLI_CORE_OPS` plus the
-``vrli.event.query`` typed row (#2295), and a :mod:`respx`-mocked vRLI REST
-surface answering the session-create POST plus every read op the connector
-dispatches against.
+:data:`_VRLI_SEED_OPS` plus the ``vrli.event.query`` typed row (#2295), and
+a :mod:`respx`-mocked vRLI REST surface answering the session-create POST
+plus every read op the connector dispatches against.
 
 The vRLI delta relative to NSX
 -------------------------------
@@ -53,8 +52,6 @@ from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_logs import (
     VRLI_CONNECTOR_ID,
-    VRLI_CORE_GROUPS,
-    VRLI_CORE_OPS,
     VRLI_IMPL_ID,
     VRLI_PRODUCT,
     VRLI_VERSION,
@@ -71,6 +68,7 @@ _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 
 __all__ = [
     "VRLI_CANARY_BASE_URL",
+    "VRLI_CANARY_CORE_OP_IDS",
     "VRLI_CANARY_EVENTS",
     "VRLI_CANARY_FINGERPRINT",
     "VRLI_CANARY_OPERATOR_TENANT",
@@ -227,13 +225,45 @@ VRLI_CONSTRAINT_OP_PARAMS: dict[str, dict[str, object]] = {
     "GET:/api/v2/aggregated-events/{constraints}": {"constraints": ""},
 }
 
+#: Ingested browse-breadth seed data for the vRLI dispatch canary — the six
+#: ``source_kind="ingested"`` read ops (and their five groups) declined from
+#: typed conversion on #2295 but kept browsable. Relocated here from the retired
+#: ``vcf_logs.core_ops`` curation apparatus (#2358): this is test-only fixture
+#: material describing the ``EndpointDescriptor`` rows the dispatch tests seed
+#: and mock, no longer a production module. ``(group_key, name, when_to_use)``.
+_VRLI_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
+    (
+        "vrli-system",
+        "vRLI (system + indexer catalog)",
+        "Appliance version + indexer field catalog.",
+    ),
+    ("vrli-events", "vRLI Event Queries", "Raw event search + group-by aggregation."),
+    ("vrli-inventory", "vRLI Hosts", "Hosts currently reporting log events."),
+    ("vrli-content", "vRLI Content Packs", "Installed content packs."),
+    ("vrli-alerts", "vRLI Alert Definitions", "Configured alert definitions."),
+)
+
+#: ``(op_id, group_key)`` for each ingested browse-breadth vRLI read op.
+_VRLI_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/api/v2/version", "vrli-system"),
+    ("GET:/api/v2/aggregated-events/{constraints}", "vrli-events"),
+    ("GET:/api/v2/fields", "vrli-system"),
+    ("GET:/api/v2/hosts", "vrli-inventory"),
+    ("GET:/api/v2/content/contentpack/list", "vrli-content"),
+    ("GET:/api/v2/alerts", "vrli-alerts"),
+)
+
+#: Op ids the vRLI dispatch/e2e tests parametrize over (relocated from
+#: ``tuple(op.op_id for op in VRLI_CORE_OPS)``).
+VRLI_CANARY_CORE_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _VRLI_SEED_OPS)
+
 
 async def _insert_vrli_descriptors() -> None:
-    """Seed the curated vRLI core ops + the typed events op + their groups.
+    """Seed the ingested vRLI browse-breadth ops + the typed events op + their groups.
 
-    One :class:`OperationGroup` per entry in :data:`VRLI_CORE_GROUPS`
+    One :class:`OperationGroup` per entry in :data:`_VRLI_SEED_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor` per
-    entry in :data:`VRLI_CORE_OPS` (``is_enabled=True``,
+    entry in :data:`_VRLI_SEED_OPS` (``is_enabled=True``,
     ``source_kind='ingested'``, ``handler_ref=None``), plus the
     ``vrli.event.query`` **typed** row (``source_kind='typed'``,
     ``handler_ref`` set) so a ``call_operation`` dispatch of the events query
@@ -248,39 +278,39 @@ async def _insert_vrli_descriptors() -> None:
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
     async with sessionmaker() as session:
-        for group in VRLI_CORE_GROUPS:
+        for group_key, name, when_to_use in _VRLI_SEED_GROUPS:
             group_row = OperationGroup(
                 tenant_id=None,
                 product=VRLI_PRODUCT,
                 version=VRLI_VERSION,
                 impl_id=VRLI_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
+                group_key=group_key,
+                name=name,
+                when_to_use=when_to_use,
                 review_status="enabled",
             )
             session.add(group_row)
             await session.flush()
-            group_ids[group.group_key] = group_row.id
+            group_ids[group_key] = group_row.id
 
-        for op in VRLI_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _VRLI_SEED_OPS:
+            method, path = op_id.split(":", 1)
             descriptor = EndpointDescriptor(
                 tenant_id=None,
                 product=VRLI_PRODUCT,
                 version=VRLI_VERSION,
                 impl_id=VRLI_IMPL_ID,
-                op_id=op.op_id,
+                op_id=op_id,
                 source_kind="ingested",
                 method=method,
                 path=path,
                 handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"vRLI core op {op.op_id} (curated read).",
-                description=f"vRLI core op {op.op_id} (curated read).",
+                group_id=group_ids[group_key],
+                summary=f"vRLI ingested read op {op_id}.",
+                description=f"vRLI ingested read op {op_id}.",
                 parameter_schema=_param_schema_for(path),
                 response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
+                llm_instructions=None,
                 safety_level="safe",
                 requires_approval=False,
                 is_enabled=True,
@@ -442,9 +472,9 @@ def _register_vrli_routes(mock: respx.MockRouter) -> None:
 #: A non-curated reserved-expansion events op the #2003 canary seeds
 #: directly. Its path uses RFC6570 reserved expansion ``{+constraints}``
 #: so the slash-delimited constraint chain stays literal on the wire —
-#: the exact vRLI constraint-query shape the curated empty-constraint op
-#: cannot exercise. Kept off :data:`VRLI_CORE_OPS` so the curated 7-op
-#: set (and every test keyed on its op_ids) is untouched.
+#: the exact vRLI constraint-query shape the empty-constraint op cannot
+#: exercise. Kept off :data:`_VRLI_SEED_OPS` so the browse-breadth set
+#: (and every test keyed on its op_ids) is untouched.
 VRLI_RESERVED_CONSTRAINT_OP_ID: str = "GET:/api/v2/events/{+constraints}"
 
 #: A non-empty constraint carrying reserved structural chars: the

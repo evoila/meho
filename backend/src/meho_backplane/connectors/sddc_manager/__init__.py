@@ -28,28 +28,18 @@ this module is the only registration path.
 Operations span two surfaces. The audited 12-read lab-audit set (#2306)
 ships as first-class **typed** ops in :mod:`.typed_ops` / :mod:`.typed_reads`
 (``source_kind="typed"``), dispatchable on a fresh boot with zero catalog
-ingest. The four non-audited curated reads (release, domain detail,
-network-pools, bundles) stay as ingested-row curation in :mod:`.core_ops`;
-the wider VCF API catalog arrives via G0.7 spec ingestion against the
-``endpoint_descriptor`` table and stays browsable as profiled-dispatch
-breadth (#2271).
+ingest. The four non-audited reads (release, domain detail, network-pools,
+bundles) and the wider VCF API catalog arrive via G0.7 spec ingestion
+against the ``endpoint_descriptor`` table and stay browsable as
+profiled-dispatch breadth, enable-able through the generic review flow
+(``ReviewService.enable_reads``) — the hand-curated ingested-enable
+apparatus was retired in #2358 (T7 of #2266).
 """
+
+from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.sddc_manager.connector import SddcManagerConnector
-from meho_backplane.connectors.sddc_manager.core_ops import (
-    SDDC_CONNECTOR_ID,
-    SDDC_CORE_GROUPS,
-    SDDC_CORE_OPS,
-    SDDC_IMPL_ID,
-    SDDC_PATH_RULES,
-    SDDC_PRODUCT,
-    SDDC_VERSION,
-    SddcCoreGroup,
-    SddcCoreOp,
-    apply_sddc_core_curation,
-    classify_sddc_op,
-)
 from meho_backplane.connectors.sddc_manager.profile import SDDC_EXECUTION_PROFILE
 from meho_backplane.connectors.sddc_manager.session import (
     SddcCredentialsLoader,
@@ -63,6 +53,18 @@ from meho_backplane.connectors.sddc_manager.typed_ops import (
     register_sddc_typed_operations,
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+#: Endpoint-descriptor identity for the SDDC Manager connector — the
+#: dispatch-canonical ``(product, version, impl_id)`` triple
+#: :func:`parse_connector_id` derives from ``"sddc-rest-9.0"``, plus the
+#: derived ``connector_id`` slug. :class:`SddcManagerConnector` pins the same
+#: triple as class attributes. Relocated from the retired ``core_ops``
+#: curation module (#2358) so acceptance / typed-read tests that seed
+#: ``EndpointDescriptor`` rows import one source of truth.
+SDDC_PRODUCT: Final[str] = "sddc"
+SDDC_VERSION: Final[str] = "9.0"
+SDDC_IMPL_ID: Final[str] = "sddc-rest"
+SDDC_CONNECTOR_ID: Final[str] = f"{SDDC_IMPL_ID}-{SDDC_VERSION}"
 
 register_connector_v2(
     product="sddc",
@@ -92,23 +94,16 @@ register_typed_op_registrar(register_sddc_typed_operations)
 
 __all__ = [
     "SDDC_CONNECTOR_ID",
-    "SDDC_CORE_GROUPS",
-    "SDDC_CORE_OPS",
     "SDDC_EXECUTION_PROFILE",
     "SDDC_IMPL_ID",
-    "SDDC_PATH_RULES",
     "SDDC_PRODUCT",
     "SDDC_TYPED_OPS",
     "SDDC_VERSION",
-    "SddcCoreGroup",
-    "SddcCoreOp",
     "SddcCredentialsLoader",
     "SddcManagerConnector",
     "SddcTargetLike",
     "SddcTypedOp",
     "SessionCredentials",
-    "apply_sddc_core_curation",
-    "classify_sddc_op",
     "load_credentials_from_vault",
     "register_sddc_typed_operations",
 ]

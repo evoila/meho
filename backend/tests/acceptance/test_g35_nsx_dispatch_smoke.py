@@ -5,7 +5,7 @@
 
 Closes the substrate-proves-out half of the NSX v0.2 ship for
 Initiative #368: each entry in
-:data:`~meho_backplane.connectors.nsx.core_ops.NSX_CORE_OPS` is
+:data:`~tests.acceptance._nsx_canary_fixtures.NSX_CANARY_CORE_OP_IDS` is
 dispatched against a respx-mocked NSX manager and the dispatcher
 returns a structured :class:`~meho_backplane.connectors.schemas.OperationResult`
 for every one.
@@ -16,7 +16,7 @@ follow-up to this Task — it requires the NSX spec-shelf wired to
 the meho-runners pool, the same env-gated pattern
 :mod:`tests.acceptance._vcenter_spec` codifies for vSphere. Until
 then, the dispatch leg is exercised directly against the curated
-descriptor set the :data:`NSX_CORE_OPS` constants describe — same
+descriptor set the :data:`NSX_CANARY_CORE_OP_IDS` constants describe — same
 posture :mod:`tests.acceptance.test_vmware_rest_dispatch_smoke`
 took for vSphere before #515 wired vcsim.
 
@@ -40,18 +40,20 @@ from __future__ import annotations
 
 import pytest
 
-from meho_backplane.connectors.nsx import NSX_CORE_OPS
 from meho_backplane.operations.meta_tools import call_operation
-from tests.acceptance._nsx_canary_fixtures import IngestedNsxCanary
+from tests.acceptance._nsx_canary_fixtures import (
+    NSX_CANARY_CORE_OP_IDS,
+    IngestedNsxCanary,
+)
 
 #: Op ids the smoke test dispatches. Sourced from
-#: :data:`~meho_backplane.connectors.nsx.NSX_CORE_OPS`; two of them
-#: carry path templates (``{domain-id}`` /
+#: :data:`~tests.acceptance._nsx_canary_fixtures.NSX_CANARY_CORE_OP_IDS`; two
+#: of them carry path templates (``{domain-id}`` /
 #: ``{security-policy-id}``) that need substitution at dispatch
 #: time. The smoke supplies ``domain-id=default`` and
 #: ``security-policy-id=policy-app-tier`` so the substituted URLs
 #: hit the registered respx routes.
-SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in NSX_CORE_OPS)
+SMOKE_OP_IDS: tuple[str, ...] = NSX_CANARY_CORE_OP_IDS
 
 #: Per-op parameter map. Op ids without ``{var}`` templates get an
 #: empty dict (the respx route matches by literal path); the two

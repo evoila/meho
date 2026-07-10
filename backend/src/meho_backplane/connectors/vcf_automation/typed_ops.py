@@ -6,11 +6,11 @@
 VCF Automation ships **no vendor OpenAPI spec at all** — the provider
 (management) plane publishes no machine-readable artifact and the tenant
 plane ships only Swagger 2.0 fragments the ingest parser rejects by
-decision (#2090). The G3.6 curated ``core_ops`` set (``core_ops.py`` /
-``_core_data.py``) therefore describes ``is_enabled`` curation over
-ingested rows that, absent an ingest, never actually exist: the curated
-op ids are dispatch-inert on a real deploy. Typed conversion is the only
-path to a *working* VCFA read surface.
+decision (#2090). The now-retired G3.6 curated core (#2358) therefore
+described ``is_enabled`` curation over ingested rows that, absent an
+ingest, never actually exist: those curated op ids were dispatch-inert
+on a real deploy. Typed conversion is the only path to a *working* VCFA
+read surface.
 
 This module converts the **audited read set** (evoila/meho#2294 row 22:
 "org/region list + provider health"; the VCFA follow-up: "org/region
@@ -56,8 +56,7 @@ reads identically to that sibling. Handler methods live on the connector
 against a ``module.ClassName.method`` dotted path.
 
 Endpoint + response-field facts are pinned to the VCF Automation 9.0 API
-references cross-checked in :mod:`._core_data`: the cloudapi provider
-family at
+references: the cloudapi provider family at
 https://techdocs.broadcom.com/us/en/vmware-cis/vcf/vcf-9-0-and-later/9-0/administration-sdks-cli-and-tools/about-the-vcf-automation-api.html
 and the tenant IaaS family at
 https://developer.broadcom.com/xapis/vm-apps-org-provisioning-service/latest/.
@@ -133,9 +132,9 @@ class VcfaTypedOp:
 #: registrar looks each op's ``group_key`` up here. Two groups, one per
 #: plane — every blurb names its plane so the agent's group-selection
 #: step never collapses a tenant question onto the provider group (or
-#: vice versa). Group keys are deliberately distinct from the curated
-#: ``_core_data`` group keys (``provider-orgs`` etc.) so the typed
-#: OperationGroup rows never collide with a curated group's row on the
+#: vice versa). Group keys are deliberately distinct from the ingested
+#: browse-group keys (``provider-orgs`` etc.) so the typed OperationGroup
+#: rows never collide with an ingested group's row on the
 #: ``(product, version, impl_id, group_key)`` natural key.
 VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
     "vcfa-provider-reads": (

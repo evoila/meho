@@ -23,33 +23,22 @@ Operations for this connector arrive via G0.7 dual-plane spec ingestion
 -- both the provider plane (``vcf-automation-9.0/cloudapi.yaml``) and
 the tenant plane (``vcf-automation-9.0/iaas.yaml``) are ingested under
 this single connector with ``spec_source`` tags distinguishing them,
-same shape as vSphere's ``vcenter.yaml`` + ``vi-json.yaml``. The
-operator-review-time curation helper :func:`apply_vcfa_core_curation`
-(G3.6-T11 #836) lands the read-only v0.5 core: 6 provider-plane ops
-under 4 groups (``provider-site``, ``provider-orgs``,
-``provider-regions``, ``provider-users``) plus 5 tenant-plane ops
-under 4 groups (``tenant-about``, ``tenant-projects``,
-``tenant-deployments``, ``tenant-blueprints``). The skeleton was
-shipped at G3.6-T10 (#832).
+same shape as vSphere's ``vcenter.yaml`` + ``vi-json.yaml``. The audited
+read set ships as first-class **typed** ops (:mod:`.typed_ops`,
+``source_kind="typed"``, T5 · #2305), dispatchable on a fresh boot with
+zero catalog ingest; the wider ingested catalog stays browsable as
+profiled-dispatch breadth, enable-able through the generic review flow
+(``ReviewService.enable_reads``). The skeleton was shipped at G3.6-T10
+(#832); the hand-curated ingested-enable apparatus was retired in #2358
+(T7 of #2266).
 """
+
+from typing import Final
 
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_automation.connector import (
     VcfAutomationConfigurationError,
     VcfAutomationConnector,
-)
-from meho_backplane.connectors.vcf_automation.core_ops import (
-    VCFA_CONNECTOR_ID,
-    VCFA_CORE_GROUPS,
-    VCFA_CORE_OPS,
-    VCFA_IMPL_ID,
-    VCFA_PATH_RULES,
-    VCFA_PRODUCT,
-    VCFA_VERSION,
-    VcfaCoreGroup,
-    VcfaCoreOp,
-    apply_vcfa_core_curation,
-    classify_vcfa_op,
 )
 from meho_backplane.connectors.vcf_automation.session import (
     SessionCredentials,
@@ -64,6 +53,18 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
 )
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 from meho_backplane.retrieval.embedding import EmbeddingService
+
+#: Endpoint-descriptor identity for the VCFA connector — the dispatch-canonical
+#: ``(product, version, impl_id)`` triple :func:`parse_connector_id` derives
+#: from ``"vcfa-rest-9.0"``, plus the derived ``connector_id`` slug.
+#: :class:`VcfAutomationConnector` pins the same triple as class attributes.
+#: Relocated from the retired ``_core_data`` / ``core_ops`` curation modules
+#: (#2358) so acceptance / typed-read tests that seed ``EndpointDescriptor``
+#: rows import one source of truth.
+VCFA_PRODUCT: Final[str] = "vcfa"
+VCFA_VERSION: Final[str] = "9.0"
+VCFA_IMPL_ID: Final[str] = "vcfa-rest"
+VCFA_CONNECTOR_ID: Final[str] = f"{VCFA_IMPL_ID}-{VCFA_VERSION}"
 
 
 async def register_vcfa_typed_operations(
@@ -116,10 +117,7 @@ register_typed_op_registrar(register_vcfa_typed_operations)
 
 __all__ = [
     "VCFA_CONNECTOR_ID",
-    "VCFA_CORE_GROUPS",
-    "VCFA_CORE_OPS",
     "VCFA_IMPL_ID",
-    "VCFA_PATH_RULES",
     "VCFA_PRODUCT",
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
@@ -129,11 +127,7 @@ __all__ = [
     "VcfAutomationConnector",
     "VcfAutomationCredentialsLoader",
     "VcfAutomationTargetLike",
-    "VcfaCoreGroup",
-    "VcfaCoreOp",
     "VcfaTypedOp",
-    "apply_vcfa_core_curation",
-    "classify_vcfa_op",
     "load_credentials_from_vault",
     "register_vcfa_typed_operations",
 ]

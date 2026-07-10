@@ -7,11 +7,10 @@ Two vROps acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.vcf_operations.VcfOperationsConnector`
 instance with a stub credentials loader (so no Vault read is required),
-a probed :class:`~meho_backplane.db.models.Target` row, the 8 curated
-:class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.vcf_operations.core_ops.VROPS_CORE_OPS`,
-and a :mod:`respx`-mocked vROps REST surface answering each of the 8
-curated read ops.
+a probed :class:`~meho_backplane.db.models.Target` row, the 6 ingested
+browse-breadth :class:`~meho_backplane.db.models.EndpointDescriptor` rows
+from :data:`_VROPS_SEED_OPS`, and a :mod:`respx`-mocked vROps REST surface
+answering each of the 6 read ops.
 
 vROps uses HTTP Basic on every request — no session establish call is
 needed. The stub credentials loader bypasses the Vault-backed loader;
@@ -62,8 +61,6 @@ from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_operations import (
     VROPS_CONNECTOR_ID,
-    VROPS_CORE_GROUPS,
-    VROPS_CORE_OPS,
     VROPS_IMPL_ID,
     VROPS_PRODUCT,
     VROPS_VERSION,
@@ -81,6 +78,7 @@ __all__ = [
     "VROPS_CANARY_ALERTDEFS",
     "VROPS_CANARY_ALERTS",
     "VROPS_CANARY_BASE_URL",
+    "VROPS_CANARY_CORE_OP_IDS",
     "VROPS_CANARY_FINGERPRINT",
     "VROPS_CANARY_OPERATOR_TENANT",
     "VROPS_CANARY_RECOMMENDATIONS",
@@ -327,14 +325,42 @@ class IngestedVropsCanary:
     base_url: str
 
 
-async def _insert_vrops_descriptors() -> None:
-    """Seed the 8 curated vROps core ops + their groups as enabled rows.
+#: Ingested browse-breadth seed data for the vROps dispatch canary — the six
+#: ``source_kind="ingested"`` read ops (and their five groups) declined from
+#: typed conversion on #2303 but kept browsable. Relocated here from the
+#: retired ``vcf_operations.core_ops`` curation apparatus (#2358): this is
+#: test-only fixture material describing the ``EndpointDescriptor`` rows the
+#: dispatch tests seed and mock. ``(group_key, name, when_to_use)``.
+_VROPS_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("vrops-resources", "vROps Resources", "Monitored resource inventory."),
+    ("vrops-alert-definitions", "vROps Alert Definitions", "Configured alert definitions."),
+    ("vrops-symptoms", "vROps Symptoms", "Symptom definitions."),
+    ("vrops-recommendations", "vROps Recommendations", "Remediation recommendations."),
+    ("vrops-supermetrics", "vROps Super Metrics", "Super-metric definitions."),
+)
 
-    One :class:`OperationGroup` per entry in
-    :data:`~meho_backplane.connectors.vcf_operations.core_ops.VROPS_CORE_GROUPS`
+#: ``(op_id, group_key)`` for each ingested browse-breadth vROps read op. The
+#: ``vrops-resources`` group carries two ops (list + get by id).
+_VROPS_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/suite-api/api/resources", "vrops-resources"),
+    ("GET:/suite-api/api/resources/{id}", "vrops-resources"),
+    ("GET:/suite-api/api/alertdefinitions", "vrops-alert-definitions"),
+    ("GET:/suite-api/api/symptoms", "vrops-symptoms"),
+    ("GET:/suite-api/api/recommendations", "vrops-recommendations"),
+    ("GET:/suite-api/api/supermetrics", "vrops-supermetrics"),
+)
+
+#: Op ids the vROps dispatch/e2e/smoke tests parametrize over (relocated from
+#: ``tuple(op.op_id for op in VROPS_CORE_OPS)``).
+VROPS_CANARY_CORE_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _VROPS_SEED_OPS)
+
+
+async def _insert_vrops_descriptors() -> None:
+    """Seed the 6 ingested vROps browse-breadth ops + their groups as enabled rows.
+
+    One :class:`OperationGroup` per entry in :data:`_VROPS_SEED_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor` per
-    entry in
-    :data:`~meho_backplane.connectors.vcf_operations.core_ops.VROPS_CORE_OPS`
+    entry in :data:`_VROPS_SEED_OPS`
     (``is_enabled=True``, ``source_kind='ingested'``, ``handler_ref=None``).
 
     The ``vrops-resources`` group carries two ops (list + get by id);
@@ -344,39 +370,39 @@ async def _insert_vrops_descriptors() -> None:
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
     async with sessionmaker() as session:
-        for group in VROPS_CORE_GROUPS:
+        for group_key, name, when_to_use in _VROPS_SEED_GROUPS:
             group_row = OperationGroup(
                 tenant_id=None,
                 product=VROPS_PRODUCT,
                 version=VROPS_VERSION,
                 impl_id=VROPS_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
+                group_key=group_key,
+                name=name,
+                when_to_use=when_to_use,
                 review_status="enabled",
             )
             session.add(group_row)
             await session.flush()
-            group_ids[group.group_key] = group_row.id
+            group_ids[group_key] = group_row.id
 
-        for op in VROPS_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _VROPS_SEED_OPS:
+            method, path = op_id.split(":", 1)
             descriptor = EndpointDescriptor(
                 tenant_id=None,
                 product=VROPS_PRODUCT,
                 version=VROPS_VERSION,
                 impl_id=VROPS_IMPL_ID,
-                op_id=op.op_id,
+                op_id=op_id,
                 source_kind="ingested",
                 method=method,
                 path=path,
                 handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"vROps core op {op.op_id} (curated read).",
-                description=f"vROps core op {op.op_id} (curated read).",
+                group_id=group_ids[group_key],
+                summary=f"vROps ingested read op {op_id}.",
+                description=f"vROps ingested read op {op_id}.",
                 parameter_schema=_param_schema_for(path),
                 response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
+                llm_instructions=None,
                 safety_level="safe",
                 requires_approval=False,
                 is_enabled=True,

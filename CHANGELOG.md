@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — nsx/connector.py split under the file-size budget (#2356)
+
+- `nsx/connector.py` dropped from 600 to ~562 lines, back under the
+  `code-quality.py` file-size ceiling (block limit 600), with zero behaviour
+  change. The pure module-level `_is_acceptable_auth_model` predicate moved to
+  `nsx/session.py` as the public `is_acceptable_auth_model` (imported back at the
+  `auth_headers` boundary), and the module docstring was trimmed to the house
+  norm. The seven typed-read shims (`node_status`…`alarm_list`) stay bound
+  methods on `NsxConnector` with their exact names so the dispatcher's
+  `module.ClassName.method` handler resolution (`operations/_handler_resolve`)
+  is unchanged; typed reads still register and dispatch `source_kind="typed"`.
+
 ### Added — vm.power single-VM gated write verbs (incl. guest-shutdown)
 
 - New `vmware.composite.vm.power` write composite acts on **one** VM for

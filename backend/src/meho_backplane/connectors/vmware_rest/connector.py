@@ -82,6 +82,7 @@ fall back to v0.2 default" sentinel.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -103,6 +104,8 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.connectors.vmware_rest._mount import (
     SESSION_PATH_LEGACY,
     SESSION_PATH_MODERN,
+    adapt_filter_params,
+    api_mount_for_session_path,
     mounted_path,
 )
 from meho_backplane.connectors.vmware_rest.session import (
@@ -326,6 +329,39 @@ class VmwareRestConnector(HttpConnector):
         await self._session_token(target, operator)
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         return mounted_path(session_path, path)
+
+    async def adapt_op_query(
+        self,
+        target: VsphereTargetLike,
+        query: Mapping[str, Any] | None,
+        operator: Operator,
+    ) -> dict[str, Any] | None:
+        """Key a ``filter.*`` query bucket off *target*'s live mount flavor.
+
+        The composite sub-call seam (:func:`._read._read_sub_op`) and the
+        typed-op listing legs (:func:`.typed_ops.host_usage_impl`,
+        :func:`.typed_ops_host_network_uplinks.host_network_uplinks_impl`)
+        author their query params in the legacy ``/rest`` style
+        (``filter.datastores``, ``filter.hosts``, ...). Modern ``/api``
+        vCenter 8.x returns HTTP 400 for that prefixed form and expects the
+        bare parameter name; the legacy ``/rest`` mount (and ``vmware/vcsim``)
+        requires the prefix. Resolve the live mount the same way
+        :meth:`mount_op_path` does — off the established session — and
+        delegate the pure key rewrite to :func:`._mount.adapt_filter_params`.
+
+        The session establish is idempotent + cached (mirrors
+        :meth:`mount_op_path`), so calling this right after a
+        ``mount_op_path`` at the same call site costs nothing on the warm
+        path; ``operator`` is forwarded so a cold-cache establish
+        authenticates under the dispatch op's identity. Empty / ``None``
+        query short-circuits to ``None`` (no session establish needed) so
+        an unfiltered listing stays a bare, param-less GET.
+        """
+        if not query:
+            return None
+        await self._session_token(target, operator)
+        session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
+        return adapt_filter_params(api_mount_for_session_path(session_path), query)
 
     async def _session_token(self, target: VsphereTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, establishing one on first use.

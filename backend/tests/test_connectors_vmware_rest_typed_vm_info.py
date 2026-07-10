@@ -28,6 +28,7 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.typed_ops import (
     VMWARE_TYPED_OPS,
@@ -84,6 +85,17 @@ class _FakeConnector:
         del target, operator
         self.mount_calls.append(path)
         return f"{self._mount_prefix}{path}"
+
+    async def adapt_op_query(
+        self,
+        target: Any,
+        query: Any,
+        operator: Operator,
+    ) -> dict[str, Any] | None:
+        del target, operator
+        # Exercise the real mount-flavor adaptation against this fake's
+        # mount prefix so the recorded query matches the wire form.
+        return adapt_filter_params(self._mount_prefix, query)
 
     async def _get_json(
         self,
@@ -205,13 +217,42 @@ async def test_vm_info_by_name_resolves_then_reads() -> None:
 
     out = await vm_info_impl(conn, _make_operator(), _Target(), {"name": "web-01"})
 
-    # The listing GET forwarded the name as filter.names, mounted onto /api.
-    assert conn.get_calls[0] == ("/api/vcenter/vm", {"filter.names": ["web-01"]})
+    # The listing GET forwarded the name filter mounted onto /api; the
+    # modern mount takes the bare ``names`` key (#2298).
+    assert conn.get_calls[0] == ("/api/vcenter/vm", {"names": ["web-01"]})
     # Then the PropertyCollector read used the resolved moid.
     body = conn.post_calls[0][1]
     assert body["specSet"][0]["objectSet"][0]["obj"]["value"] == "vm-7"
     assert out["vm"] == "vm-7"
     assert out["guest_ip"] == "10.0.0.5"
+
+
+@pytest.mark.asyncio
+async def test_vm_info_name_filter_bare_on_modern_mount() -> None:
+    """On the modern ``/api`` mount the name filter is sent bare (#2298)."""
+    conn = _FakeConnector(
+        listing=[{"vm": "vm-7", "name": "web-01"}],
+        props_result=_vm_retrieve_result("vm-7", {"name": "web-01"}),
+        mount_prefix="/api",
+    )
+
+    await vm_info_impl(conn, _make_operator(), _Target(), {"name": "web-01"})
+
+    assert conn.get_calls[0] == ("/api/vcenter/vm", {"names": ["web-01"]})
+
+
+@pytest.mark.asyncio
+async def test_vm_info_name_filter_prefixed_on_legacy_mount() -> None:
+    """On the legacy/vcsim ``/rest`` mount the name filter keeps the prefix (#2298)."""
+    conn = _FakeConnector(
+        listing=[{"vm": "vm-7", "name": "web-01"}],
+        props_result=_vm_retrieve_result("vm-7", {"name": "web-01"}),
+        mount_prefix="/rest",
+    )
+
+    await vm_info_impl(conn, _make_operator(), _Target(), {"name": "web-01"})
+
+    assert conn.get_calls[0] == ("/rest/vcenter/vm", {"filter.names": ["web-01"]})
 
 
 @pytest.mark.asyncio

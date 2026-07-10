@@ -52,6 +52,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
+from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import register_vmware_composite_operations
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import ApprovalRequest, ApprovalRequestStatus, EndpointDescriptor
@@ -203,6 +204,12 @@ class _RecordingVmwareConnector:
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
 
     def _spec(self, path: str) -> str:
         return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path

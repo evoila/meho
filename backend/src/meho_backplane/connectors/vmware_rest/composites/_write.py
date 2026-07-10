@@ -316,17 +316,23 @@ async def _read_sub_op(
     path onto the target's live ``/api`` / ``/rest`` prefix, and dispatches
     through :meth:`~meho_backplane.connectors.adapters.http.HttpConnector._get_json`
     (tenacity-retried, idempotent) with the remainder params as the query
-    bucket. Read sub-ops carry no governance gate -- they are the safe
-    resolution reads the write composites build their request bodies from.
-    Transport / status failures raise :exc:`httpx.HTTPError`; load-bearing
-    callers let it propagate (the dispatcher wraps it as ``connector_error``
-    for the composite parent).
+    bucket. The query bucket is authored in the legacy ``filter.*`` style
+    and keyed off the mount flavor by
+    :meth:`VmwareRestConnector.adapt_op_query` (#2298) — bare param names
+    on modern ``/api`` (which 400s the prefixed form), ``filter.*`` on
+    legacy ``/rest`` — so the write composites' resolution listings behave
+    the same as the read composites'. Read sub-ops carry no governance
+    gate -- they are the safe resolution reads the write composites build
+    their request bodies from. Transport / status failures raise
+    :exc:`httpx.HTTPError`; load-bearing callers let it propagate (the
+    dispatcher wraps it as ``connector_error`` for the composite parent).
     """
     method, path, query = _split_sub_op(op_id, params or {})
     if method != "GET":
         raise RuntimeError(f"_read_sub_op called with non-GET op_id {op_id!r}")
     mounted = await connector.mount_op_path(target, path, operator)
-    return await connector._get_json(target, mounted, operator=operator, params=query or None)
+    adapted = await connector.adapt_op_query(target, query, operator)
+    return await connector._get_json(target, mounted, operator=operator, params=adapted)
 
 
 async def _write_sub_op(

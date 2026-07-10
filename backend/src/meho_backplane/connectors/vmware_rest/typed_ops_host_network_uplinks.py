@@ -249,9 +249,10 @@ async def host_network_uplinks_impl(
     filter_hosts = [h for h in (params.get("filter_hosts") or []) if isinstance(h, str)]
     list_path = await connector.mount_op_path(target, _LIST_HOSTS_PATH, operator)
     listing_params: dict[str, Any] = {"filter.hosts": filter_hosts} if filter_hosts else {}
-    listing = await connector._get_json(
-        target, list_path, operator=operator, params=listing_params or None
-    )
+    # Key the ``filter.hosts`` param off the mount flavor (#2298): modern
+    # ``/api`` wants the bare ``hosts`` name and 400s the prefixed form.
+    listing_query = await connector.adapt_op_query(target, listing_params, operator)
+    listing = await connector._get_json(target, list_path, operator=operator, params=listing_query)
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
         raise RuntimeError(
@@ -294,8 +295,8 @@ _PARAMETER_SCHEMA: dict[str, Any] = {
             "description": (
                 "Optional list of host managed-object IDs (e.g. 'host-42'). "
                 "When supplied, only these hosts are surfaced; the listing "
-                "forwards them as 'filter.hosts'. Empty / absent returns every "
-                "host the operator can see."
+                "narrows to them via the mount's host filter param. Empty / "
+                "absent returns every host the operator can see."
             ),
         },
     },

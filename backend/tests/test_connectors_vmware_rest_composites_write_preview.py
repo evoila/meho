@@ -47,6 +47,7 @@ from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.vmware_rest import VmwareRestConnector
+from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import (
     _write_preview,
     register_vmware_composite_operations,
@@ -186,6 +187,12 @@ class _RecordingConnector:
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
 
     def _spec(self, path: str) -> str:
         return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
@@ -456,8 +463,9 @@ async def test_power_bulk_park_carries_action_filter_and_resolved_set(
         },
         "safety_level": "dangerous",
     }
-    # The filter reached the listing read in the handler's wire shape.
-    assert recorder.read_calls == [("/vcenter/vm", {"filter.names": ["web-*"]})]
+    # The filter reached the listing read in the handler's wire shape;
+    # bare param name on the modern /api mount (#2298).
+    assert recorder.read_calls == [("/vcenter/vm", {"names": ["web-*"]})]
 
 
 async def test_power_bulk_park_issues_only_the_listing_read(
@@ -563,7 +571,7 @@ async def test_host_evacuate_park_resolves_vm_set_on_host(
         "safety_level": "dangerous",
     }
     # Only the listing read fired — no recursive migrate, no maintenance.
-    assert recorder.read_calls == [("/vcenter/vm", {"filter.hosts": ["host-1"]})]
+    assert recorder.read_calls == [("/vcenter/vm", {"hosts": ["host-1"]})]
 
 
 async def test_host_detach_from_vds_park_resolves_vm_set_on_host(

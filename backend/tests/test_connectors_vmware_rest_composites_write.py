@@ -45,6 +45,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_patch_composite,
@@ -103,6 +104,12 @@ class _RecordingConnector:
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         self.mount_calls.append(path)
         return f"{self._mount_prefix}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._mount_prefix, query)
 
     async def _get_json(
         self,
@@ -251,8 +258,8 @@ async def test_vm_create_happy_path_direct_session(gate: _GateRecorder) -> None:
         ("PATCH", "/api/vcenter/vm/vm-99/network"),
         ("POST", "/api/vcenter/vm/vm-99/power?action=start"),
     ]
-    # Folder GET forwards the name filter as a query param.
-    assert conn.calls[0]["query"] == {"filter.names": ["Prod"]}
+    # Folder GET forwards the name filter as a query param; bare on /api (#2298).
+    assert conn.calls[0]["query"] == {"names": ["Prod"]}
     # Create body carries the spec; folder moid resolved in.
     assert conn.calls[1]["body"]["spec"]["placement"]["folder"] == "folder-7"
     # NIC PATCH body is the spec; vm rides the path, not the body.
@@ -601,8 +608,8 @@ async def test_vm_power_bulk_happy_path(gate: _GateRecorder) -> None:
     assert out["summary"] == {"ok": 3, "error": 0}
     assert {r["vm"] for r in out["results"]} == {"vm-1", "vm-2", "vm-3"}
     assert out["aborted_on_failure"] is False
-    # Filter forwarded as filter.power_states query on the listing GET.
-    assert conn.calls[0]["query"] == {"filter.power_states": ["POWERED_OFF"]}
+    # Filter forwarded as the bare power_states query on the listing GET (/api, #2298).
+    assert conn.calls[0]["query"] == {"power_states": ["POWERED_OFF"]}
     # Every per-VM power write was gated.
     assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}/power?action=start"] * 3
 

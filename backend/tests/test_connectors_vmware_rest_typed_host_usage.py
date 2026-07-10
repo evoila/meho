@@ -28,6 +28,7 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest.typed_ops import (
     VMWARE_HOST_USAGE_OP,
@@ -91,6 +92,14 @@ class _FakeConnector:
         del target, operator
         self.mount_calls.append(path)
         return f"{self._mount_prefix}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        # Exercise the real mount-flavor adaptation against this fake's
+        # mount prefix so the recorded query matches the wire form.
+        return adapt_filter_params(self._mount_prefix, query)
 
     async def _get_json(
         self,
@@ -240,10 +249,26 @@ async def test_host_usage_resolves_mount_once_not_per_host() -> None:
 
 
 @pytest.mark.asyncio
-async def test_host_usage_filter_hosts_flows_into_listing_query() -> None:
+async def test_host_usage_filter_hosts_bare_on_modern_mount() -> None:
+    """On the modern ``/api`` mount the host filter is sent bare (#2298)."""
     conn = _FakeConnector(
         listing=[{"host": "host-1", "name": "esx-1"}],
         props_by_host={"host-1": _retrieve_result("host-1", _QS_FULL, _HW_FULL, False)},
+        mount_prefix="/api",
+    )
+
+    await host_usage_impl(conn, _make_operator(), _Target(), {"filter_hosts": ["host-1", "host-2"]})
+
+    assert conn.get_calls[0][1] == {"hosts": ["host-1", "host-2"]}
+
+
+@pytest.mark.asyncio
+async def test_host_usage_filter_hosts_prefixed_on_legacy_mount() -> None:
+    """On the legacy/vcsim ``/rest`` mount the filter keeps the prefix (#2298)."""
+    conn = _FakeConnector(
+        listing=[{"host": "host-1", "name": "esx-1"}],
+        props_by_host={"host-1": _retrieve_result("host-1", _QS_FULL, _HW_FULL, False)},
+        mount_prefix="/rest",
     )
 
     await host_usage_impl(conn, _make_operator(), _Target(), {"filter_hosts": ["host-1", "host-2"]})

@@ -249,8 +249,12 @@ async def _read_sub_op(
     ``path_params`` substitutes the ``{var}`` placeholders (vCenter moids
     are bare ``[A-Za-z0-9-]`` tokens, so a plain ``str.format`` matches the
     RFC6570 simple-expansion the ingested path did). ``query`` is the
-    GET query-string bucket (``filter.*``); ``body`` is the vi-json POST
-    method-argument object (moid excluded -- it rides the path).
+    GET query-string bucket, authored in the legacy ``filter.*`` style;
+    :meth:`VmwareRestConnector.adapt_op_query` keys it off the target's
+    live mount before dispatch (modern ``/api`` strips the ``filter.``
+    prefix — which it 400s — legacy ``/rest`` keeps it). ``body`` is the
+    vi-json POST method-argument object (moid excluded -- it rides the
+    path).
 
     Returns the raw parsed JSON (``value``-envelope handling stays with
     the caller's :func:`_unwrap_value`). Transport / status failures raise
@@ -263,7 +267,8 @@ async def _read_sub_op(
     path = path_template.format(**path_params) if path_params else path_template
     mounted = await connector.mount_op_path(target, path, operator)
     if method == "GET":
-        return await connector._get_json(target, mounted, operator=operator, params=query or None)
+        params = await connector.adapt_op_query(target, query, operator)
+        return await connector._get_json(target, mounted, operator=operator, params=params)
     return await connector._post_json(target, mounted, operator=operator, json=body)
 
 
@@ -483,17 +488,20 @@ async def datastore_usage_composite(
        a. ``GET:/vcenter/datastore/{datastore}`` -- detailed capacity /
           free / type / accessible flag (load-bearing: a failure here
           sinks the composite).
-       b. ``GET:/vcenter/vm`` with ``filter.datastores`` -- VMs whose
+       b. ``GET:/vcenter/vm`` filtered by datastore -- VMs whose
           working directory sits on this datastore. Drives the
-          ``vm_count`` + ``vm_names`` aggregation. This leg is
-          **best-effort** (#1908): the capacity/free/type read -- the
-          data the "which datastores are filling up?" use case needs --
-          is already done by the time it runs, so when the VM lookup
-          errors (e.g. a vCenter that rejects the ``filter.datastores``
-          query with a 400) the row is still returned with
-          ``vm_count`` / ``vm_names`` set to ``null`` and an
-          ``enrichment_note`` recording why, rather than failing the
-          whole composite.
+          ``vm_count`` + ``vm_names`` aggregation. The datastore filter
+          is authored as ``filter.datastores`` and keyed off the mount
+          flavor at the sub-call seam (bare ``datastores`` on modern
+          ``/api``, ``filter.datastores`` on legacy ``/rest``); before
+          #2298 it was sent prefixed on every mount, so real vCenter 8.x
+          400'd this leg on every row. It is also **best-effort**
+          (#1908): the capacity/free/type read -- the data the "which
+          datastores are filling up?" use case needs -- is already done
+          by the time it runs, so any residual VM-lookup error still
+          returns the row with ``vm_count`` / ``vm_names`` set to
+          ``null`` and an ``enrichment_note`` recording why, rather than
+          failing the whole composite.
 
     Sequential dispatch is intentional: each datastore's detail call
     inherits the prior call's authentication state, and the audit
@@ -571,10 +579,13 @@ async def datastore_usage_composite(
 
         # VM-placement enrichment is best-effort (#1908). The
         # capacity/free/type read above already satisfies the
-        # storage-usage use case, so a failure on the optional VM lookup
-        # (e.g. a vCenter that 400s the ``filter.datastores`` query)
-        # nulls vm_count/vm_names and records why, rather than
+        # storage-usage use case, so any residual failure on the optional
+        # VM lookup nulls vm_count/vm_names and records why, rather than
         # propagating the transport error and sinking every datastore row.
+        # The datastore filter is keyed off the mount flavor in
+        # ``_read_sub_op`` (#2298); the pre-#2298 unconditional
+        # ``filter.datastores`` was itself what 400'd this leg on modern
+        # ``/api`` vCenter, not an environmental vCenter quirk.
         try:
             vms_raw = await _read_sub_op(
                 connector, target, operator, _OP_LIST_VMS, query={"filter.datastores": [ds_id]}

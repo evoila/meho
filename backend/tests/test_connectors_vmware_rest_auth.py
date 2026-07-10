@@ -368,6 +368,56 @@ async def test_invalidate_session_evicts_only_the_targets_slot() -> None:
     assert connector._session_tokens == {key_b: "token-for-b"}
 
 
+# ---------------------------------------------------------------------------
+# adapt_op_query — mount-flavor filter-param keying (#2298)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_adapt_op_query_strips_filter_prefix_on_modern_mount() -> None:
+    """On a modern ``/api`` session the ``filter.`` prefix is stripped (#2298).
+
+    Real vCenter 8.x 400s ``filter.datastores`` and wants the bare
+    ``datastores``; the seam keys the param style off the established mount.
+    """
+    connector = _make_connector()
+    key = target_cache_key(_TARGET_A)
+    connector._session_tokens[key] = "tok"
+    connector._session_paths[key] = "/api/session"
+
+    adapted = await connector.adapt_op_query(
+        _TARGET_A, {"filter.datastores": ["ds-1"], "filter.names": ["n"]}, _make_operator()
+    )
+
+    assert adapted == {"datastores": ["ds-1"], "names": ["n"]}
+
+
+@pytest.mark.asyncio
+async def test_adapt_op_query_keeps_filter_prefix_on_legacy_mount() -> None:
+    """On a legacy ``/rest`` session (vcsim) the ``filter.`` prefix is kept (#2298)."""
+    connector = _make_connector()
+    key = target_cache_key(_TARGET_A)
+    connector._session_tokens[key] = "tok"
+    connector._session_paths[key] = "/rest/com/vmware/cis/session"
+
+    adapted = await connector.adapt_op_query(
+        _TARGET_A, {"filter.hosts": ["host-1"]}, _make_operator()
+    )
+
+    assert adapted == {"filter.hosts": ["host-1"]}
+
+
+@pytest.mark.asyncio
+async def test_adapt_op_query_empty_short_circuits_to_none() -> None:
+    """An empty / ``None`` query returns ``None`` without a session establish (#2298)."""
+    connector = _make_connector()
+
+    assert await connector.adapt_op_query(_TARGET_A, {}, _make_operator()) is None
+    assert await connector.adapt_op_query(_TARGET_A, None, _make_operator()) is None
+    # No session was established for the short-circuit path.
+    assert connector._session_tokens == {}
+
+
 @pytest.mark.asyncio
 async def test_invalidate_then_auth_headers_re_establishes_session() -> None:
     """After ``invalidate_session``, the next ``auth_headers`` re-logs-in.

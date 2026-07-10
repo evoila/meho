@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — SDDC Manager auth rebuilt on the `session_login_token` profile scheme (#2290)
+
+- Flip the shipped `sddc_manager_minimal.yaml` profile from the false
+  `basic` scheme to `session_login_token`, and rebuild `SddcManagerConnector`
+  auth atop it: the connector now establishes a session at
+  `POST /v1/tokens` (JSON `{username, password}` → `accessToken`) and sends
+  `Authorization: Bearer <accessToken>` on every request — SDDC Manager
+  rejects HTTP Basic outright (live 401; Broadcom KBs 435716/387124/372387),
+  so the ingested sddc catalog was never dispatchable before. Session
+  mechanics are derived from the shared `session_login_token` scheme spec
+  (single source with a profile-stamped connector), with per-`(tenant_id,
+  target.id)` token isolation, single-flight establish, and one-shot 401
+  recovery through the #2067 dispatcher seam (`invalidate_session` hook) —
+  no restart. The hand-rolled class stays the resolution winner, preserving
+  the #1750/#1798 product-shadowing invariant. Removed the false
+  `username@sso_realm` Basic decoration. (#2271 / #2290)
+
 ### Added — operator-selectable auth scheme on non-catalog ingest (#2289)
 
 - `meho connector ingest --auth-scheme <name>` (and the REST

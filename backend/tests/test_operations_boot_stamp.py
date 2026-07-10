@@ -185,7 +185,7 @@ async def test_boot_stamp_shipped_catalog_registers_every_profile_row() -> None:
 
     Runs the real ``load_profile_resource`` + ``ExecutionProfile`` parse +
     class synthesis for the shipped vmware (``session_login_basic``), sddc
-    (``basic``) and fixture (``basic``) profiles. With a cleared registry no
+    (``session_login_token``) and fixture (``basic``) profiles. With a cleared registry no
     triple is occupied, so every profile row registers a profiled class.
     """
     expected = sum(1 for e in load_catalog().entries if e.profile_resource is not None)

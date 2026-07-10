@@ -4,11 +4,16 @@
 # ExecutionProfile for the `sddc/9.0` profile-backed catalog row
 # (#1964 T2 #1976). Pairs with operations/ingest/specs/sddc_manager_minimal.yaml.
 #
-# AUTH. `basic` — the SDDC Manager API authenticates with HTTP Basic
-# (username/password from the per-target secret bundle), matching the
-# vetted classification in docs/codebase/connector-auth-coverage.md and the
-# typed SddcManagerConnector.auth_headers. No DSL: the scheme names a vetted
-# extractor (#1969); the profile carries only the secret-field names.
+# AUTH. `session_login_token` — the SDDC Manager API is token-only: it
+# authenticates by POSTing the `{username, password}` JSON credential body to
+# `/v1/tokens`, reading `accessToken` out of the response, and sending it as
+# `Authorization: Bearer <accessToken>` on every subsequent request. The
+# appliance rejects HTTP Basic outright (live 401; Broadcom KBs
+# 435716/387124/372387). This matches the vetted classification in
+# docs/codebase/connector-auth-coverage.md and the typed
+# SddcManagerConnector, which derives its session from this same scheme
+# (#2290). No DSL: the scheme names a vetted extractor (#1969/#2287); the
+# profile carries only the secret-field names.
 #
 # FINGERPRINT. `/v1/releases/system` returns a top-level `version` string,
 # so it satisfies the FingerprintSpec literal-top-level-key constraint
@@ -30,7 +35,7 @@
 product: sddc
 version: "9.0"
 auth:
-  scheme: basic
+  scheme: session_login_token
   secret_fields:
     - username
     - password

@@ -26,7 +26,7 @@ naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 | # | Connector | File (auth method) | Mechanism | Secret field names | Returns | Catalog verdict |
 |---|-----------|--------------------|-----------|--------------------|---------|-----------------|
 | 1 | harbor | `harbor/connector.py` `auth_headers` | HTTP Basic `base64(user:pass)` → `Authorization: Basic` | `username`, `password` | `dict[str,str]` | **`basic`** |
-| 2 | sddc_manager | `sddc_manager/connector.py` `auth_headers` | HTTP Basic `base64(user@sso_realm:pass)` | `username`, `password` | `dict[str,str]` | **`basic`** |
+| 2 | sddc_manager | `sddc_manager/connector.py` `auth_headers` | Session login `POST /v1/tokens` (JSON `{username,password}`) → `accessToken` → cached Bearer; re-login once on `401` (HTTP Basic rejected by the appliance) | `username`, `password` | `dict[str,str]` (Bearer) | **`session_login_token`** |
 | 3 | vcf_fleet | `vcf_fleet/connector.py` (`_shared/vcf_auth.basic_auth_header`) | HTTP Basic (shared helper) | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 4 | vcf_operations | `vcf_operations/connector.py` `auth_headers` | HTTP Basic + optional `?auth-source=` query | `username`, `password` | `dict[str,str]` | **`basic`** |
 | 5 | hetzner_robot | `hetzner_robot/connector.py` `_basic_auth_header` | HTTP Basic (hard-fail on first 401, IP-block guard) | `username`, `password` | `dict[str,str]` | **`basic`** |
@@ -52,19 +52,20 @@ naming one raises `ReservedAuthSchemeError` ("author a typed connector").
 Six connectors (five if `vcf_operations`'s query-param merge is counted as
 `basic` with a transport quirk) fit a named scheme:
 
-- **`basic`** — harbor, sddc_manager, vcf_fleet, vcf_operations, hetzner_robot
+- **`basic`** — harbor, vcf_fleet, vcf_operations, hetzner_robot
 - **`static_header`** — argocd
 - **`oauth2_mint`** — keycloak
 - **`session_login`** — vcf_logs (vRLI: JSON creds body → `sessionId` → Bearer)
 - **`session_login_basic`** — vmware_rest (vCenter: HTTP Basic login, no body
   → token from a raw JSON-string body or the legacy `{"value": "<tok>"}`
   object body → `vmware-api-session-id` header; #2025, legacy shape #2047)
-- **`session_login_token`** — SDDC Manager shape (JSON creds body
+- **`session_login_token`** — sddc_manager (SDDC Manager: JSON creds body
   `{username, password}` → response-body `accessToken` field → Bearer). First
   member of this shape; the appliance's HTTP Basic surface is rejected —
-  token-only. Grounded in `POST /v1/tokens` live evidence (#2287). No shipped
-  profile selects it yet: `sddc_manager` still ships `basic` (row 2 above), and
-  flipping it onto this scheme is a separate task.
+  token-only. Grounded in `POST /v1/tokens` live evidence (#2287). The shipped
+  `sddc_manager_minimal.yaml` profile selects it and the typed
+  `SddcManagerConnector` derives its session from the same scheme (#2290, row 2
+  above).
 
 Eight stay **reserved/typed** — github, gcloud, vault, kubernetes, nsx,
 vcf_automation — because their auth is stateful, asymmetric-crypto, or

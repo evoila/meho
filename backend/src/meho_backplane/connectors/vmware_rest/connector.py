@@ -712,6 +712,92 @@ class VmwareRestConnector(HttpConnector):
 
         return await host_vsan_health_impl(self, operator, target, params)
 
+    async def vm_info(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.info`` -- single-VM power / guest IP / Tools / heartbeat / usage.
+
+        A ``source_kind="typed"`` incident-triage read (#2300): the
+        dispatcher binds this method to the connector instance and invokes
+        it with ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`).
+        Reads the VirtualMachine managed object's ``runtime.powerState``,
+        ``guest.*``, ``guestHeartbeatStatus``, and
+        ``storage.perDatastoreUsage`` via PropertyCollector directly on the
+        connector session -- no ``dispatch_child``, no ingested descriptor
+        -- so it works on a fresh boot with zero catalog ingest. Addresses
+        the VM by ``vm`` moid or ``name``.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_info.vm_info_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns a single flat row.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import vm_info_impl
+
+        return await vm_info_impl(self, operator, target, params)
+
+    async def object_collect(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.object.collect`` -- bounded generic PropertyCollector read.
+
+        A ``source_kind="typed"`` op (#2300): the dispatcher binds this
+        method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        the caller-specified property paths off a single ``(type, moid)``
+        object via PropertyCollector directly on the connector session --
+        no ``dispatch_child``, no ingested descriptor -- so it works on a
+        fresh boot with zero catalog ingest. Bounded by ``parameter_schema``
+        (one object, no traversal, <=64 paths); an oversized request is a
+        structured ``invalid_params`` error before the read is issued.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_object_collect.object_collect_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{type, moid, properties, missing}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (
+            object_collect_impl,
+        )
+
+        return await object_collect_impl(self, operator, target, params)
+
+    async def tasks_recent(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.tasks.recent`` -- recent vCenter Task objects.
+
+        A ``source_kind="typed"`` op (#2300): the dispatcher binds this
+        method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        ``TaskManager.recentTask`` then ``Task.info`` via PropertyCollector
+        directly on the connector session -- no ``dispatch_child``, no
+        ingested descriptor -- so it works on a fresh boot with zero
+        catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent.tasks_recent_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{"tasks": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
+            tasks_recent_impl,
+        )
+
+        return await tasks_recent_impl(self, operator, target, params)
+
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.
 

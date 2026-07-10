@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — typed vSphere incident reads (vm.info/object.collect/tasks.recent)
+
+- **Three new `source_kind="typed"` vmware-rest reads for incident
+  survival** (#2300), each a bound method on `VmwareRestConnector` that
+  reads directly on the connector session via PropertyCollector — no
+  `dispatch_child`, no ingested descriptor, so they dispatch on a fresh
+  boot with zero catalog ingest:
+  - **`vmware.vm.info`** — one VM's live triage signals (power state,
+    guest IP, VMware Tools status/running, guest heartbeat, per-datastore
+    usage) addressed by moid or name. The "poweredOn but no guest IP"
+    hung-appliance shape is representable in one call — data the plain
+    vCenter REST VM detail (configuration only) cannot supply.
+  - **`vmware.object.collect`** — a bounded generic PropertyCollector
+    read of a caller-specified property set off one `(type, moid)`
+    object. Bounded by construction (one object, no traversal, ≤64 paths
+    each ≤16 segments deep); oversized/malformed requests return a
+    structured `invalid_params` error before any read is issued.
+  - **`vmware.tasks.recent`** — recent vCenter Task objects (operation,
+    entity, state, progress, queued/started/completed times) for
+    change-window monitoring, distinct from `event.tail`'s event-log read.
+
 ### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
 
 - The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,

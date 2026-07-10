@@ -73,6 +73,23 @@ register_connector_v2(
     cls=VcfLogsConnector,
 )
 
+# Queue the typed-op upsert onto the lifespan-driven registrar list (#2295).
+# ``vrli.event.query`` is vRLI's first ``source_kind="typed"`` op -- a
+# bound-method read on the connector session, independent of the
+# generic-ingested catalog path, so it registers via its own registrar the
+# same way vmware's and argocd's typed reads do. Imported after the connector
+# registration above so the registrar's ``getattr(VcfLogsConnector, ...)``
+# handler resolution sees the fully-defined class.
+from meho_backplane.connectors.vcf_logs.typed_ops import (  # noqa: E402
+    VRLI_TYPED_OPS,
+    register_vrli_typed_operations,
+)
+from meho_backplane.operations.typed_register import (  # noqa: E402
+    register_typed_op_registrar,
+)
+
+register_typed_op_registrar(register_vrli_typed_operations)
+
 __all__ = [
     "VRLI_CONNECTOR_ID",
     "VRLI_CORE_GROUPS",
@@ -81,6 +98,7 @@ __all__ = [
     "VRLI_IMPL_ID",
     "VRLI_PATH_RULES",
     "VRLI_PRODUCT",
+    "VRLI_TYPED_OPS",
     "VRLI_VERSION",
     "SessionLoginError",
     "VcfCredentialsLoader",
@@ -91,4 +109,5 @@ __all__ = [
     "apply_vrli_core_curation",
     "classify_vrli_op",
     "load_credentials_from_vault",
+    "register_vrli_typed_operations",
 ]

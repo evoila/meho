@@ -2571,20 +2571,51 @@ type ConnectorReviewOp struct {
 // (the Goal flags secret-handling sensitivity). See
 // :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
 type ConnectorReviewPayload struct {
-	ConnectorId      string                      `json:"connector_id"`
-	Dispatchable     *bool                       `json:"dispatchable,omitempty"`
-	Groups           []ConnectorReviewGroup      `json:"groups"`
-	ImplId           string                      `json:"impl_id"`
-	Kind             *ConnectorReviewPayloadKind `json:"kind,omitempty"`
-	Product          string                      `json:"product"`
-	TenantId         *openapi_types.UUID         `json:"tenant_id"`
-	TotalOpCount     int                         `json:"total_op_count"`
-	UngroupedOpCount *int                        `json:"ungrouped_op_count,omitempty"`
-	Version          string                      `json:"version"`
+	ConnectorId      string                       `json:"connector_id"`
+	Dispatchable     *bool                        `json:"dispatchable,omitempty"`
+	Groups           []ConnectorReviewGroup       `json:"groups"`
+	ImplId           string                       `json:"impl_id"`
+	Kind             *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
+	Product          string                       `json:"product"`
+	Provenance       *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
+	TenantId         *openapi_types.UUID          `json:"tenant_id"`
+	TotalOpCount     int                          `json:"total_op_count"`
+	UngroupedOpCount *int                         `json:"ungrouped_op_count,omitempty"`
+	Version          string                       `json:"version"`
 }
 
 // ConnectorReviewPayloadKind defines model for ConnectorReviewPayload.Kind.
 type ConnectorReviewPayloadKind string
+
+// ConnectorReviewProvenance Provenance for one spec ingested under this connector (#2291).
+//
+// Surfaces the durable
+// :class:`~meho_backplane.db.models.SpecProvenance` record so an
+// operator reviewing a connector can tell a vendor artifact from a
+// hand-mutated one before enabling reads:
+//
+//   - “uri“ — the audit label as presented at ingest
+//     (“spec:“ / “https://“ / “file:///“ / “docs:“ form).
+//   - “sha256“ — hex digest over the raw spec bytes. Two ingests of
+//     the *same* label with different digests mean the content changed.
+//   - “origin“ — “fetched“ (https GET) vs “inline“ (operator
+//     upload) vs “shipped“ (MEHO-authored catalog data). An inline
+//     upload labelled with a vendor URL is thus distinguishable from a
+//     genuine fetch of that URL.
+//   - “operator_sub“ — who ingested it (“None“ for boot-time
+//     shipped ingests with no operator).
+//   - “ingested_at“ — when the provenance row was last written.
+//
+// Connectors ingested before this table landed have no provenance
+// rows; the surfaces render that as "unknown (pre-provenance)" rather
+// than a fabricated record.
+type ConnectorReviewProvenance struct {
+	IngestedAt  time.Time `json:"ingested_at"`
+	OperatorSub *string   `json:"operator_sub"`
+	Origin      string    `json:"origin"`
+	Sha256      string    `json:"sha256"`
+	Uri         string    `json:"uri"`
+}
 
 // ConnectorSpecEntry One curated “(product, version)“ -> spec-source mapping.
 //

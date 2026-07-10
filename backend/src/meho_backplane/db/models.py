@@ -282,6 +282,7 @@ __all__ = [
     "RunbookRun",
     "RunbookRunStepState",
     "RunbookTemplate",
+    "SpecProvenance",
     "Target",
     "Tenant",
     "TenantConvention",
@@ -1565,6 +1566,101 @@ class EndpointDescriptor(Base):
         sa.CheckConstraint(
             "safety_level IN ('safe', 'caution', 'dangerous')",
             name="ck_endpoint_descriptor_safety_level",
+        ),
+    )
+
+
+class SpecProvenance(Base):
+    """One row per accepted spec ingest — durable, non-spoofable provenance.
+
+    A single spec fans out to hundreds of :class:`EndpointDescriptor`
+    rows, so provenance lives at the spec level rather than as per-row
+    columns (#2291). Before this table the only per-row provenance was
+    the spoofable ``spec:<uri>`` tag: an operator's hand-mutated inline
+    upload labelled with a vendor's ``https`` URL persisted identically
+    to a genuine fetch of that URL, so nothing downstream could tell a
+    vendor artifact from a mutation.
+
+    Columns:
+
+    * ``uri`` — the audit label exactly as the operator presented it
+      (``spec:`` / ``https://`` / ``file:///`` / ``docs:`` form
+      preserved). It is *not* a trust signal on its own; ``origin`` +
+      ``sha256`` are.
+    * ``sha256`` — hex digest over the **raw spec bytes** (fetched body
+      or uploaded content), computed at the ``_load_spec_bytes`` trust
+      boundary before any YAML/JSON decode. Different content under the
+      same ``uri`` changes this digest.
+    * ``origin`` — how the bytes reached the backplane:
+      ``fetched`` (https GET), ``inline`` (operator-uploaded content),
+      or ``shipped`` (MEHO-authored catalog package data). This is the
+      fetched-vs-inline bit that was never persisted before.
+    * ``operator_sub`` — the ingesting operator's subject claim
+      (nullable for boot-time shipped ingests with no operator).
+    * ``ingested_at`` — UTC time the provenance row was last written;
+      refreshed on re-ingest so it tracks the latest accepted ingest.
+
+    Scope mirrors :class:`EndpointDescriptor`: ``tenant_id IS NULL`` is
+    a built-in/global ingest, non-null is tenant-scoped. The natural key
+    is ``(tenant_id, product, version, impl_id, uri)`` enforced by two
+    partial unique indexes (NULL != NULL under SQL UNIQUE, so global and
+    tenant rows need separate partial indexes — same shape the
+    descriptor table uses). Re-ingesting the same spec under the same
+    key updates the row in place (new ``sha256`` + ``ingested_at``)
+    rather than accumulating duplicates.
+    """
+
+    __tablename__ = "spec_provenance"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
+        nullable=True,
+        default=None,
+    )
+    product: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    impl_id: Mapped[str] = mapped_column(Text, nullable=False)
+    uri: Mapped[str] = mapped_column(Text, nullable=False)
+    sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    operator_sub: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    ingested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "spec_provenance_global_idx",
+            "product",
+            "version",
+            "impl_id",
+            "uri",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NULL"),
+            sqlite_where=sa.text("tenant_id IS NULL"),
+        ),
+        Index(
+            "spec_provenance_tenant_idx",
+            "tenant_id",
+            "product",
+            "version",
+            "impl_id",
+            "uri",
+            unique=True,
+            postgresql_where=sa.text("tenant_id IS NOT NULL"),
+            sqlite_where=sa.text("tenant_id IS NOT NULL"),
+        ),
+        sa.CheckConstraint(
+            "origin IN ('fetched', 'inline', 'shipped')",
+            name="ck_spec_provenance_origin",
         ),
     )
 

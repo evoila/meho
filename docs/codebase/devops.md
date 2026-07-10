@@ -23,7 +23,11 @@ resources that make up a running backplane:
   `FORWARDED_ALLOW_IPS` for the uvicorn proxy-header trust list, and
   `MEHO_TARGET_SSRF_ALLOWLIST` — the operator-scoped opt-out for the
   target-destination SSRF guard, set via `config.targetSsrfAllowlist`
-  (v0.20.0; see `docs/codebase/target-ssrf-guard.md`)).
+  (v0.20.0; see `docs/codebase/target-ssrf-guard.md`), and
+  `INGEST_JOB_TIMEOUT_SECONDS` — the async ingest-job watchdog budget
+  override, set via `config.ingestJobTimeoutSeconds` (rendered only when
+  non-empty so the default deploy inherits the backend's 30-min ceiling;
+  #2318, see `docs/codebase/spec-ingestion.md`)).
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
   Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.
@@ -371,6 +375,7 @@ them).
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
+| `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 
 ### `values.schema.json` typed contract
 

@@ -30,6 +30,7 @@ side of the same task).
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 
 import pytest
@@ -41,6 +42,7 @@ from meho_backplane.operations.ingest import (
     IngestJob,
     IngestJobRegistry,
     OpIdCollision,
+    jobs,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.jobs import INGESTED_NOT_DISPATCHABLE
@@ -325,6 +327,122 @@ async def test_wedged_dispatchability_probe_times_out_to_failed() -> None:
     # The pipeline returned, but the job is failed (not succeeded/degraded)
     # because the probe never produced a dispatchability verdict.
     assert stored.result is None
+    assert elapsed < 5.0
+
+
+# --- Watchdog budget env loader (#2318) -----------------------------------
+#
+# ``_load_ingest_job_timeout_seconds`` parses ``INGEST_JOB_TIMEOUT_SECONDS``
+# into the finite, positive budget ``asyncio.timeout`` receives. A
+# non-finite (``inf`` / ``nan``), non-positive, or malformed value must fall
+# back to the 1800 s default with a warning — a misconfigured budget can
+# never disable the #2275 watchdog by handing ``asyncio.timeout`` a deadline
+# it never schedules.
+
+
+def test_load_timeout_env_unset_returns_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset env var yields the 1800 s default with no warning."""
+    monkeypatch.delenv("INGEST_JOB_TIMEOUT_SECONDS", raising=False)
+    with capture_logs() as logs:
+        budget = jobs._load_ingest_job_timeout_seconds()
+    assert budget == jobs._DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
+    assert not [e for e in logs if e.get("log_level") == "warning"]
+
+
+def test_load_timeout_env_finite_positive_honored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finite positive override is honored verbatim, with no warning."""
+    monkeypatch.setenv("INGEST_JOB_TIMEOUT_SECONDS", "3600")
+    with capture_logs() as logs:
+        budget = jobs._load_ingest_job_timeout_seconds()
+    assert budget == 3600.0
+    assert not [e for e in logs if e.get("log_level") == "warning"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "event"),
+    [
+        ("inf", "ingest_job_timeout_env_out_of_range"),
+        ("Infinity", "ingest_job_timeout_env_out_of_range"),
+        ("-inf", "ingest_job_timeout_env_out_of_range"),
+        ("nan", "ingest_job_timeout_env_out_of_range"),
+        ("0", "ingest_job_timeout_env_out_of_range"),
+        ("0.0", "ingest_job_timeout_env_out_of_range"),
+        ("-30", "ingest_job_timeout_env_out_of_range"),
+        ("abc", "ingest_job_timeout_env_invalid"),
+        ("", "ingest_job_timeout_env_invalid"),
+    ],
+)
+def test_load_timeout_env_rejected_values_fall_back(
+    raw: str,
+    event: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-finite, non-positive, and malformed values fall back with a warning.
+
+    ``inf`` / ``-inf`` / ``nan`` parse as floats (no ``ValueError``) but are
+    rejected by the ``math.isfinite`` guard; ``0`` / ``0.0`` / negatives by
+    the ``<= 0`` guard — both route to ``ingest_job_timeout_env_out_of_range``.
+    Empty and non-numeric strings raise ``ValueError`` →
+    ``ingest_job_timeout_env_invalid``. Every case returns the finite 1800 s
+    default so the watchdog stays armed.
+    """
+    monkeypatch.setenv("INGEST_JOB_TIMEOUT_SECONDS", raw)
+    with capture_logs() as logs:
+        budget = jobs._load_ingest_job_timeout_seconds()
+    assert budget == jobs._DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
+    assert math.isfinite(budget)
+    warnings = [e for e in logs if e.get("log_level") == "warning"]
+    assert [w["event"] for w in warnings] == [event]
+
+
+@pytest.mark.asyncio
+async def test_inf_env_sanitized_so_watchdog_still_fires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``INGEST_JOB_TIMEOUT_SECONDS=inf`` sanitizes to a finite budget, so a wedged job still fails.
+
+    The correctness bug #2318 closes: ``inf`` slips past a bare ``value <= 0``
+    guard, and ``asyncio.timeout(inf)`` schedules no deadline — a wedged job
+    would sit at ``running`` forever, re-opening the exact hole the #2275
+    watchdog closed. With the ``math.isfinite`` guard ``inf`` falls back to
+    the finite default, which is what ``asyncio.timeout`` receives, so the job
+    flips to ``failed`` / ``TimeoutError``. The default is shrunk here so the
+    finite fallback is observable in-test rather than 30 min later.
+    """
+    monkeypatch.setenv("INGEST_JOB_TIMEOUT_SECONDS", "inf")
+    monkeypatch.setattr(jobs, "_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS", 0.05)
+    # Re-resolve the module budget from the (inf) env through the guard,
+    # exactly as import time does — the sanitized value is finite, not inf.
+    budget = jobs._load_ingest_job_timeout_seconds()
+    assert math.isfinite(budget)
+    monkeypatch.setattr(jobs, "_INGEST_JOB_TIMEOUT_SECONDS", budget)
+
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    async def _never_returns() -> IngestionPipelineResult:
+        await asyncio.Event().wait()  # blocks forever until cancelled
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    started = time.monotonic()
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=_never_returns,
+        registry=registry,
+        # timeout_s=None → run_ingest_job reads the sanitized module budget,
+        # the production path (not the per-call test override).
+    )
+    elapsed = time.monotonic() - started
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "TimeoutError"
+    assert stored.ended_at is not None
+    # Fired on the finite fallback, nowhere near `inf`.
     assert elapsed < 5.0
 
 

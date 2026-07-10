@@ -252,8 +252,16 @@ async def test_resume_dispatches_when_no_target_was_pinned(
     was pinned at request time. An approval whose request had no target
     (tenant-wide op) must reach ``dispatch`` with ``target=None`` as
     before — the hardening must not regress that path.
+
+    The request is a **real committed row** (not a stand-in) so the
+    exactly-one-resumer claim (#2293, a conditional UPDATE by id) can be
+    won before the dispatch — a bare in-memory namespace would match zero
+    rows and short-circuit as ``already_resumed``.
     """
     from meho_backplane.api.v1 import approvals as approvals_module
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._validate import compute_params_hash
+    from meho_backplane.operations.approval_queue import create_pending_request
 
     operator = Operator(
         sub="op-resume-test",
@@ -264,16 +272,18 @@ async def test_resume_dispatches_when_no_target_was_pinned(
         tenant_role=TenantRole.OPERATOR,
         principal_kind=PrincipalKind.USER,
     )
-    request = SimpleNamespace(
-        id=uuid.uuid4(),
-        target_id=None,
-        op_id="some.tenant_wide.op",
-        connector_id="some-1.x",
-        params={"k": "v"},
-        work_ref=None,
-        agent_session_id=None,
-        request_audit_id=None,
-    )
+    params = {"k": "v"}
+    async with get_sessionmaker()() as session:
+        request = await create_pending_request(
+            session,
+            operator=operator,
+            connector_id="some-1.x",
+            op_id="some.tenant_wide.op",
+            target=None,
+            params=params,
+            params_hash=compute_params_hash(params),
+        )
+        await session.commit()
 
     seen: dict[str, Any] = {}
 
@@ -287,8 +297,8 @@ async def test_resume_dispatches_when_no_target_was_pinned(
 
     result = await approvals_module._resume_dispatch_after_approval(
         operator=operator,
-        request=request,  # type: ignore[arg-type]
-        params={"k": "v"},
+        request=request,
+        params=params,
     )
 
     assert result.status == "ok"

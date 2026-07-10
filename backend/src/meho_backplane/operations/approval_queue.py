@@ -74,10 +74,10 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -94,7 +94,7 @@ from meho_backplane.operations._audit import (
     resolve_agent_session_id,
     work_ref_var,
 )
-from meho_backplane.operations._errors import result_denied
+from meho_backplane.operations._errors import result_already_resumed, result_denied
 from meho_backplane.operations._validate import compute_params_hash
 
 __all__ = [
@@ -105,6 +105,7 @@ __all__ = [
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "approve_request",
+    "claim_resume",
     "create_pending_request",
     "expire_stale_requests",
     "get_request",
@@ -631,6 +632,67 @@ async def reject_request(
     return request
 
 
+async def claim_resume(
+    request_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Win the exactly-one-resumer claim for *request_id* (#2293, G0.30).
+
+    A single conditional ``UPDATE approval_request SET resumed_at = :now
+    WHERE id = :request_id AND resumed_at IS NULL`` -- the atomic claim
+    every resumer of an approved op must win before it re-dispatches
+    ``dispatch(..., _approved=True)``: the in-process agent waiter
+    (:mod:`meho_backplane.agent.approval_wait`), the shared
+    :func:`resume_dispatch_after_approval` operator path (REST ``/approve``
+    + ``/decide``, MCP by-id approve, UI approve), and any future resumer.
+    Returns ``True`` when this caller set ``resumed_at`` (one row touched)
+    and therefore owns the single execution; ``False`` when another
+    resumer already claimed it (zero rows touched) and this caller must
+    no-op cleanly.
+
+    Why a conditional ``UPDATE`` rather than a Python ``if`` + edit (the
+    same reasoning as :func:`~meho_backplane.operations.agent_run.extend_lease`'s
+    lease claim): a read-then-write would race a concurrent resumer -- the
+    agent waiter woken by the ``approval.approved`` broadcast vs. the
+    operator surface that published it -- with both reading
+    ``resumed_at IS NULL`` and both dispatching the write. The predicate
+    and the write commit together in one statement, so at most one resumer
+    wins even across processes / pods: a concurrent claim blocks on the
+    row lock, then re-evaluates the predicate after commit and loses. No
+    advisory locks.
+
+    Runs in its **own committed transaction** so the latch is durable the
+    instant it is won -- the decision commit and the re-dispatch happen in
+    separate sessions, and the claim must be visible to a racing resumer
+    independently of either. The column is a one-way latch (never cleared),
+    so a dispatch that fails after a won claim is not silently retried into
+    a possible double write; the residual expiry follow-up (out of scope
+    here) makes such a void approval visibly "expired".
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    stamp = now or _now()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        # ``session.execute()`` on an ``UPDATE`` returns a ``CursorResult``
+        # (carrying the DBAPI ``rowcount``) at runtime; the static stub is
+        # the generic ``Result`` so mypy needs the cast to read ``rowcount``.
+        # ``synchronize_session=False`` -- no ORM identity map to keep in
+        # step, this is a bare claim probe. Read ``rowcount`` before the
+        # commit closes the cursor.
+        raw_result = await session.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id)
+            .where(ApprovalRequest.resumed_at.is_(None))
+            .values(resumed_at=stamp)
+            .execution_options(synchronize_session=False)
+        )
+        won = cast(CursorResult[Any], raw_result).rowcount == 1
+        await session.commit()
+    return won
+
+
 async def resume_dispatch_after_approval(
     *,
     operator: Operator,
@@ -678,43 +740,103 @@ async def resume_dispatch_after_approval(
     the re-dispatch would re-queue (a human/service principal now routes
     ``requires_approval`` to ``needs-approval`` per G11.7-T1; an agent
     re-hits ``needs-approval``), so the approved op would never execute.
+
+    Exactly-one-resumer claim (#2293): every operator surface routes
+    through here, and for a run-bound request the in-process agent waiter
+    (:mod:`meho_backplane.agent.approval_wait`) also resumes off the
+    ``approval.approved`` broadcast. Both must win :func:`claim_resume`
+    before dispatching, so the approved op executes exactly once: this
+    path wins the claim right before :func:`dispatch` (after the
+    fail-closed checks, so a refused resume never burns the claim) and, if
+    a racing resumer already claimed it, returns a benign
+    ``already_resumed`` result instead of re-dispatching the write. This
+    is what lets ``/decide`` + MCP fall back to a server-side re-dispatch
+    when the claim is free (covering waiter-gone -- timeout / restart /
+    cancel) while the claim blocks the ``/approve`` / UI double-dispatch
+    when the waiter is alive.
     """
     effective_params = params if params is not None else request.params
     if effective_params is None:
-        # Pre-0036 row (params not stored) approved via a surface that
-        # carries no params (/decide, MCP by-id). Nothing to re-dispatch.
-        _log.warning(
-            "approval_resume_params_unavailable",
-            approval_request_id=str(request.id),
-            op_id=request.op_id,
-            connector_id=request.connector_id,
-            operator_sub=operator.sub,
-        )
-        return result_denied(
-            request.op_id,
-            (
-                f"approval request {request.id} has no stored params "
-                "(parked before migration 0036); re-dispatch refused — "
-                "approve via REST /approve with the original params instead"
-            ),
-            0.0,
-        )
+        return _resume_pre0036_denied(operator, request)
 
     resolved_target, denied = await _rehydrate_resume_target(operator, request)
     if denied is not None:
         return denied
 
+    # Exactly-one-resumer claim (#2293): win the atomic conditional UPDATE
+    # right before executing -- after the fail-closed checks above, so a
+    # refused resume (pre-0036 params gap, unresolvable target) never burns
+    # the claim and leaves the op un-executable. A lost claim means another
+    # resumer already executed the approved op (the in-process agent waiter
+    # woken by the same approval.approved broadcast, or a racing operator
+    # surface), so no-op with a benign already_resumed result rather than
+    # double-dispatching the approved write.
+    if not await claim_resume(request.id):
+        _log.info(
+            "approval_resume_already_claimed",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            operator_sub=operator.sub,
+        )
+        return result_already_resumed(request.op_id, request.id, 0.0)
+
+    return await _dispatch_resume_with_bound_context(
+        operator=operator,
+        request=request,
+        resolved_target=resolved_target,
+        effective_params=effective_params,
+    )
+
+
+def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
+    """Fail-closed result for a pre-0036 row with no stored params to re-dispatch.
+
+    A row parked before migration 0036 has ``params IS NULL`` and is
+    approved via a surface that carries no params (/decide, MCP by-id), so
+    there is nothing to re-dispatch — refuse rather than dispatch an empty
+    call. Reached before the claim, so it never burns it. Extracted to keep
+    :func:`resume_dispatch_after_approval` under the function-size budget.
+    """
+    _log.warning(
+        "approval_resume_params_unavailable",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
+        operator_sub=operator.sub,
+    )
+    return result_denied(
+        request.op_id,
+        (
+            f"approval request {request.id} has no stored params "
+            "(parked before migration 0036); re-dispatch refused — "
+            "approve via REST /approve with the original params instead"
+        ),
+        0.0,
+    )
+
+
+async def _dispatch_resume_with_bound_context(
+    *,
+    operator: Operator,
+    request: ApprovalRequest,
+    resolved_target: Any,
+    effective_params: dict[str, Any],
+) -> Any:
+    """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
+
+    The decision surfaces run on a fresh task whose vars are unset, so the
+    executed op's audit row would otherwise lose everything the parked
+    request carried. Three row-sourced, token-reset bindings: ``work_ref``
+    (#1659, the authorising ticket), ``agent_session_id`` (#2086, anchors
+    the row in the requester's replay tree), and ``parent_audit_id`` (#2086,
+    back-links it to the parking row). The in-process agent-run resume keeps
+    its own bound vars and does not call this helper; pre-0053 NULLs bind
+    ``None``, the vars' defaults. Only reached after the exactly-one-resumer
+    claim is won (#2293), so it dispatches exactly once.
+    """
     from meho_backplane.operations.dispatcher import dispatch
 
-    # Re-bind the request's stored context for the re-dispatch: the
-    # decision surfaces run on a fresh task whose vars are unset, so the
-    # executed op's audit row would otherwise lose everything the parked
-    # request carried. Three row-sourced, token-reset bindings:
-    # ``work_ref`` (#1659, the authorising ticket), ``agent_session_id``
-    # (#2086, anchors the row in the requester's replay tree), and
-    # ``parent_audit_id`` (#2086, back-links it to the parking row). The
-    # in-process agent-run resume keeps its own bound vars and does not
-    # call this helper; pre-0053 NULLs bind ``None``, the vars' defaults.
     work_ref_token = work_ref_var.set(request.work_ref)
     session_token = agent_session_id_var.set(request.agent_session_id)
     parent_token = parent_audit_id_var.set(request.request_audit_id)

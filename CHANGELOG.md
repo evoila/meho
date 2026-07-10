@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — exactly-one-resumer claim for run-bound approvals (#2293)
+
+- **A run-bound approval now executes its gated op exactly once — no silent
+  non-execution, no double dispatch** (#2293). Two opposite seams are closed
+  by one `approval_request.resumed_at` claim column (migration `0055`): a
+  single conditional `UPDATE ... WHERE resumed_at IS NULL` that every
+  resumer of an approved op must win before it re-dispatches `_approved=True`
+  (the in-process agent waiter, the shared `resume_dispatch_after_approval`
+  operator path, any future resumer). Before this, REST `/decide` and the
+  MCP by-id approve *skipped* re-dispatch whenever `run_id` was set, assuming
+  the in-process broadcast waiter (#1117) would resume — so when the waiter
+  was gone (wait-timeout, pod restart, run cancelled) the approval committed,
+  the audit said "approved", and **nothing ran**; meanwhile REST `/approve`
+  and the UI approve re-dispatched unconditionally, so with the waiter alive
+  one approval could dispatch an approval-gated **write twice**. `/decide`
+  and MCP now fall back to a server-side re-dispatch when the claim is free
+  (covering waiter-gone), while the same claim blocks the `/approve` / UI
+  double-dispatch when the waiter is alive; a resumer that loses the claim
+  no-ops cleanly (`dispatch_status="already_resumed"`, HTTP 200). Exactly one
+  execution audit row per approval, still stamped with the requester sub. No
+  route/schema change beyond the migration. (#2293)
+
 ### Fixed — vendor YAML date/timestamp `example:` values no longer crash spec ingest
 
 - **Ingesting a YAML OpenAPI spec whose schema `example:` fields carry

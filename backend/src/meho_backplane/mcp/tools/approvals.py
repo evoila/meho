@@ -409,30 +409,32 @@ async def _approve_handler(
 
     result = _row_to_dict(row)
 
-    # Direct operator op (no agent run): the approve drives the execute
-    # (#1503). The committed approval is the authorization; the stored
-    # params re-hydrate the dispatch. Agent-run requests (run_id set) are
-    # resumed in-process by the agent runtime off the approval.approved
-    # broadcast — re-dispatching here too would double-execute, so this
-    # MCP tool only records the decision for them (its historical shape).
-    if row.run_id is None:
-        dispatch_result = await resume_dispatch_after_approval(
-            operator=operator, request=row, params=None
-        )
-        _log.info(
-            "approval_request_redispatched",
-            approval_request_id=str(request_id),
-            op_id=row.op_id,
-            dispatch_status=dispatch_result.status,
-            operator_sub=operator.sub,
-            via="mcp",
-        )
-        result["dispatch"] = {
-            "status": dispatch_result.status,
-            "op_id": dispatch_result.op_id,
-            "result": dispatch_result.result,
-            "error": dispatch_result.error,
-        }
+    # Every approval drives the execute (#1503, #2293): the committed
+    # approval is the authorization; the stored params re-hydrate the
+    # dispatch. The exactly-one-resumer claim inside
+    # resume_dispatch_after_approval arbitrates against the in-process
+    # agent waiter for a run-bound request — this MCP path executes only
+    # when the claim is free (the waiter had died: wait-timeout, pod
+    # restart, run cancelled), else it no-ops with status
+    # "already_resumed". The old run_id-is-not-None skip was the source of
+    # the silent-non-execution seam when the waiter was gone.
+    dispatch_result = await resume_dispatch_after_approval(
+        operator=operator, request=row, params=None
+    )
+    _log.info(
+        "approval_request_redispatched",
+        approval_request_id=str(request_id),
+        op_id=row.op_id,
+        dispatch_status=dispatch_result.status,
+        operator_sub=operator.sub,
+        via="mcp",
+    )
+    result["dispatch"] = {
+        "status": dispatch_result.status,
+        "op_id": dispatch_result.op_id,
+        "result": dispatch_result.result,
+        "error": dispatch_result.error,
+    }
 
     return result
 
@@ -441,15 +443,16 @@ register_mcp_tool(
     definition=ToolDefinition(
         name="meho.approvals.approve",
         description=(
-            "Approve a pending approval request (G11.2-T5 / #818; #1503). "
-            "Operator-level. Flips the request to 'approved', writes the "
-            "decision audit row, and announces approval_decided on the "
-            "broadcast feed. For a direct operator op (no agent run) the "
-            "approve then re-dispatches the op using the params stored at "
-            "park time, so the approved write lands exactly once; the "
-            "dispatch outcome is returned under `dispatch`. For an "
-            "agent-run request the in-process agent runtime resumes the "
-            "op off the broadcast, so this tool only records the decision. "
+            "Approve a pending approval request (G11.2-T5 / #818; #1503; "
+            "#2293). Operator-level. Flips the request to 'approved', writes "
+            "the decision audit row, and announces approval_decided on the "
+            "broadcast feed. It then re-dispatches the op using the params "
+            "stored at park time and returns the outcome under `dispatch`. "
+            "The exactly-one-resumer claim makes this safe for an agent-run "
+            "request: `dispatch.status` is 'ok' when this approve executed "
+            "it (a direct op, or the fallback when the in-process agent "
+            "waiter was gone), or 'already_resumed' when the live waiter "
+            "executed it first — so the approved write lands exactly once. "
             "Only pending requests may be approved; any other status "
             "returns approval_request_not_pending. Pass either "
             "`approval_request_id` (canonical name; G0.18-T5 #1358) or the "

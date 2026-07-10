@@ -574,3 +574,158 @@ class _SpyEndpoint:
 def test_spy_endpoint_satisfies_secret_endpoint_protocol() -> None:
     """The spy is a structural ``SecretEndpoint`` — the protocol the broker uses."""
     assert isinstance(_SpyEndpoint(), SecretEndpoint)
+
+
+# ---------------------------------------------------------------------------
+# Exactly-one-resumer claim — run-bound /decide fallback + dedup (#2293)
+# ---------------------------------------------------------------------------
+
+
+async def _park_run_bound_move(*, requester_sub: str) -> uuid.UUID:
+    """Commit a run-bound (``run_id`` set) parked ``secret.move`` request.
+
+    Mirrors what an agent-run park writes (run_id populated), so the
+    ``/decide`` route exercises the #2293 relaxed guard rather than the
+    direct-operator branch.
+    """
+    from meho_backplane.operations.approval_queue import create_pending_request
+
+    requester = _make_operator(sub=requester_sub, principal_kind=PrincipalKind.AGENT)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        request = await create_pending_request(
+            session,
+            operator=requester,
+            connector_id="secret-broker-1.x",
+            op_id="secret.move",
+            target=None,
+            params=_MOVE_PARAMS,
+            params_hash=compute_params_hash(_MOVE_PARAMS),
+            run_id=uuid.uuid4(),
+        )
+        await session.commit()
+    return request.id
+
+
+def _decide_approved(request_id: uuid.UUID, *, decider_sub: str) -> dict[str, Any]:
+    """Approve *request_id* over HTTP ``/decide`` as a distinct operator."""
+    key = make_rsa_keypair("kid-decider-2293")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        token = mint_token(
+            key,
+            sub=decider_sub,
+            tenant_role=TenantRole.OPERATOR.value,
+            tenant_id=str(_TENANT_ID),
+        )
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/approvals/{request_id}/decide",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"decision": "approved"},
+            )
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.mark.asyncio
+async def test_decide_redispatches_run_bound_move_when_claim_free(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_secret_broker_op: None,
+) -> None:
+    """/decide re-dispatches a run-bound approval when the claim is free (#2293).
+
+    AC3 (waiter-gone fallback): before #2293, ``/decide`` skipped
+    re-dispatch whenever ``run_id`` was set, so an approval whose in-process
+    waiter had died committed the decision but executed nothing. With the
+    exactly-one-resumer claim free, ``/decide`` now wins it and executes the
+    move exactly once — ``write_secret`` fires once, closing the silent-skip
+    seam.
+    """
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    request_id = await _park_run_bound_move(requester_sub="agent:requester")
+
+    body = _decide_approved(request_id, decider_sub="operator:decider")
+
+    assert body["dispatch_status"] == "ok", body
+    assert len(fake.secrets.kv.v2.put_calls) == 1
+    assert fake.secrets.kv.v2.put_calls[0]["secret"] == {"password": _SECRET_VALUE}
+
+
+@pytest.mark.asyncio
+async def test_decide_run_bound_no_ops_when_waiter_already_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_secret_broker_op: None,
+) -> None:
+    """/decide no-ops (no second write) when the waiter already won the claim.
+
+    AC2 (waiter-alive dedup): the in-process agent waiter has already won
+    the exactly-one-resumer claim and executed the approved move. ``/decide``
+    for the same run-bound request then loses the claim and returns
+    ``dispatch_status="already_resumed"`` — ``write_secret`` must not fire a
+    second time.
+    """
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    request_id = await _park_run_bound_move(requester_sub="agent:requester")
+
+    # The in-process waiter won the claim first (and executed the op).
+    assert await claim_resume(request_id) is True
+
+    body = _decide_approved(request_id, decider_sub="operator:decider")
+
+    assert body["dispatch_status"] == "already_resumed", body
+    # No second execution of the approved credential move.
+    assert fake.secrets.kv.v2.put_calls == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_approve_redispatches_run_bound_move_when_claim_free(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_secret_broker_op: None,
+    captured_broadcasts: list[BroadcastEvent],
+) -> None:
+    """MCP by-id approve re-dispatches a run-bound approval on a free claim (#2293).
+
+    The MCP ``meho.approvals.approve`` twin of the ``/decide`` waiter-gone
+    fallback: the run_id-is-not-None skip is gone, so the approve wins the
+    free exactly-one-resumer claim and executes the move once, returning the
+    outcome under ``dispatch``.
+    """
+    from meho_backplane.mcp.tools.approvals import _approve_handler
+
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    request_id = await _park_run_bound_move(requester_sub="agent:requester")
+
+    decider = _make_operator(sub="operator:mcp-decider")
+    result = await _approve_handler(decider, {"approval_request_id": str(request_id)})
+
+    assert result["dispatch"]["status"] == "ok", result
+    assert len(fake.secrets.kv.v2.put_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_mcp_approve_run_bound_no_ops_when_waiter_already_claimed(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_secret_broker_op: None,
+    captured_broadcasts: list[BroadcastEvent],
+) -> None:
+    """MCP approve no-ops (no second write) when the waiter already claimed (#2293).
+
+    Waiter-alive dedup on the MCP surface: the in-process waiter has already
+    won the claim and executed the move, so the MCP approve loses the claim
+    and reports ``dispatch.status="already_resumed"`` with no second write.
+    """
+    from meho_backplane.mcp.tools.approvals import _approve_handler
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    fake = install_fake_client(monkeypatch, secret={"password": _SECRET_VALUE})
+    request_id = await _park_run_bound_move(requester_sub="agent:requester")
+    assert await claim_resume(request_id) is True
+
+    decider = _make_operator(sub="operator:mcp-decider")
+    result = await _approve_handler(decider, {"approval_request_id": str(request_id)})
+
+    assert result["dispatch"]["status"] == "already_resumed", result
+    assert fake.secrets.kv.v2.put_calls == []

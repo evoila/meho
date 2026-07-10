@@ -87,6 +87,12 @@ dependencies = [
     # AsyncMongoClient runs commands off the event loop natively (no
     # ``asyncio.to_thread`` wrapper needed).
     "pymongo>=4.13,<5",
+    # Structural (metaschema) gate on OpenAPI 3.0/3.1 spec ingest (#2292):
+    # validates a decoded document against the official OAS metaschema so a
+    # metaschema-invalid spec is refused at parse (dry-run and effectful
+    # legs alike) instead of partially ingesting. Builds on the existing
+    # ``jsonschema`` dependency; used metaschema-only (no semantic add-ons).
+    "openapi-spec-validator>=0.9.0",
 ]
 
 [dependency-groups]

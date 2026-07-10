@@ -10,9 +10,12 @@ SQLite-backed test module (no Docker dependency; runs in the
 
 Acceptance contract:
 
-(a) **Both planes dispatch** -- all 11 curated VCFA core ops
-    (6 provider + 5 tenant) dispatch through ``call_operation``
+(a) **Both planes dispatch** -- all 6 curated VCFA core ops
+    (3 provider + 3 tenant) dispatch through ``call_operation``
     against a respx-mocked VCFA appliance and return ``status='ok'``.
+    (The audited read set — org/region list, provider health, tenant
+    projects/about — moved to typed ops in T5 #2305; that surface is
+    covered by ``test_connectors_vcf_automation_typed_reads.py``.)
     Each plane carries its bespoke auth flow (provider Basic ->
     ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` JWT; tenant JSON body ->
     ``{"token": ...}``); the connector picks the right token by path
@@ -121,6 +124,14 @@ _OPERATOR = Operator(
 # The op_id the JSONFlux force-handle test dispatches. ``deployments``
 # is the largest tenant payload by design (per #840 acceptance d).
 _FORCE_HANDLE_OP_ID = "GET:/iaas/api/deployments"
+
+# Per-plane representative ops for the auth-flow / audit / bearer tests.
+# The audited read set (site/about/orgs-list/regions-list/projects) moved
+# to typed ops (T5 #2305), so the ingested-curation E2E picks a remaining
+# curated op per plane: provider ``users`` and tenant ``blueprints`` (both
+# param-less list ops, one per auth plane).
+_PROVIDER_REPR_OP_ID = "GET:/cloudapi/1.0.0/users"
+_TENANT_REPR_OP_ID = "GET:/iaas/api/blueprints"
 
 # Path-template params for the two get-by-id ops (substitution at
 # dispatch time). Maps op_id -> the {id} value the route registers
@@ -600,7 +611,7 @@ async def vcfa_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VcfaE2EB
 # ---------------------------------------------------------------------------
 
 _OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VCFA_CORE_OPS)
-assert len(_OP_IDS) == 11, f"Expected 11 curated VCFA ops, got {len(_OP_IDS)}: {_OP_IDS}"
+assert len(_OP_IDS) == 6, f"Expected 6 curated VCFA ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -655,7 +666,7 @@ async def test_vcfa_e2e_provider_login_fires_once_per_target(
         _OPERATOR,
         {
             "connector_id": VCFA_CONNECTOR_ID,
-            "op_id": "GET:/cloudapi/1.0.0/site",
+            "op_id": _PROVIDER_REPR_OP_ID,
             "target": {"name": target_name},
             "params": {},
         },
@@ -685,7 +696,7 @@ async def test_vcfa_e2e_tenant_login_fires_once_per_target(
         _OPERATOR,
         {
             "connector_id": VCFA_CONNECTOR_ID,
-            "op_id": "GET:/iaas/api/about",
+            "op_id": _TENANT_REPR_OP_ID,
             "target": {"name": target_name},
             "params": {},
         },
@@ -704,7 +715,7 @@ async def test_vcfa_e2e_dispatch_writes_audit_row(
 
     Exercises acceptance criterion (c).
     """
-    op_id = "GET:/cloudapi/1.0.0/site"
+    op_id = _PROVIDER_REPR_OP_ID
     sessionmaker = get_sessionmaker()
 
     async def _count_dispatch_rows() -> int:
@@ -835,7 +846,7 @@ async def test_vcfa_e2e_per_call_fqdn_override_threads_to_connector(
                 _OPERATOR,
                 {
                     "connector_id": VCFA_CONNECTOR_ID,
-                    "op_id": "GET:/cloudapi/1.0.0/site",
+                    "op_id": _PROVIDER_REPR_OP_ID,
                     "target": {"name": VCFA_E2E_TARGET_NAME, "fqdn": VCFA_E2E_FQDN},
                     "params": {},
                 },
@@ -881,7 +892,7 @@ async def test_vcfa_e2e_ip_host_without_fqdn_surfaces_descriptive_error(
             _OPERATOR,
             {
                 "connector_id": VCFA_CONNECTOR_ID,
-                "op_id": "GET:/cloudapi/1.0.0/site",
+                "op_id": _PROVIDER_REPR_OP_ID,
                 "target": {"name": VCFA_E2E_TARGET_NAME},
                 "params": {},
             },
@@ -926,10 +937,11 @@ async def test_vcfa_e2e_provider_request_carries_bearer_jwt(
     instance = _resolve_connector()
 
     captured: dict[str, str] = {}
+    repr_path = "/cloudapi/1.0.0/users"
 
-    def _site_responder(request: httpx.Request) -> httpx.Response:
+    def _users_responder(request: httpx.Request) -> httpx.Response:
         captured[request.url.path] = request.headers.get("Authorization", "")
-        return httpx.Response(200, json=_PROVIDER_SITE)
+        return httpx.Response(200, json=_PROVIDER_USERS)
 
     try:
         async with respx.mock(
@@ -941,21 +953,21 @@ async def test_vcfa_e2e_provider_request_carries_bearer_jwt(
                 200,
                 headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _PROVIDER_JWT},
             )
-            mock.get("/cloudapi/1.0.0/site").mock(side_effect=_site_responder)
+            mock.get(repr_path).mock(side_effect=_users_responder)
 
             result = await call_operation(
                 _OPERATOR,
                 {
                     "connector_id": VCFA_CONNECTOR_ID,
-                    "op_id": "GET:/cloudapi/1.0.0/site",
+                    "op_id": _PROVIDER_REPR_OP_ID,
                     "target": {"name": VCFA_E2E_TARGET_NAME},
                     "params": {},
                 },
             )
             assert result["status"] == "ok"
-            assert captured.get("/cloudapi/1.0.0/site") == f"Bearer {_PROVIDER_JWT}", (
+            assert captured.get(repr_path) == f"Bearer {_PROVIDER_JWT}", (
                 "Provider-plane GET must carry the provider JWT as Bearer; "
-                f"got Authorization={captured.get('/cloudapi/1.0.0/site')!r}"
+                f"got Authorization={captured.get(repr_path)!r}"
             )
     finally:
         await instance.aclose()

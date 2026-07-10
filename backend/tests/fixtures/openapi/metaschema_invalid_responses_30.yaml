@@ -1,0 +1,16 @@
+# A structurally invalid OpenAPI 3.0 document: the operation's
+# ``responses`` is a list, but the OpenAPI metaschema requires a
+# Responses Object (a mapping). Every other part of the document is
+# well-formed, so the only reason to refuse it is the metaschema gate
+# (the version check and the ``paths``-is-a-mapping check both pass).
+openapi: "3.0.3"
+info:
+  title: Metaschema-invalid fixture
+  version: "1.0.0"
+paths:
+  /widgets:
+    get:
+      operationId: listWidgets
+      responses:
+        - "200"
+        - description: ok

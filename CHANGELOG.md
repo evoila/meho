@@ -102,6 +102,26 @@ connector-related release-notes line.
   hidden on drafts — deprecate-on-draft is engine-illegal (`draft → published →
   deprecated` is one-directional). (#2241)
 
+### Fixed — catalog re-ingest is idempotent instead of colliding with its own rows
+
+- **A second `meho connector ingest --catalog <product>/<version>` on the
+  same deploy now returns an idempotent skip instead of a 400
+  `op_id_collision` against the rows the first ingest just wrote** (#2274).
+  The catalog shipped-spec on-ramp labels its source `spec:<resource>`;
+  the parser then persists that label verbatim as a row tag while the
+  upsert appends its own `spec:<spec_source>` marker, so a catalog row
+  carries two `spec:` tags. The cross-source collision guard recovered the
+  persisted source from the *first* matching tag — the verbatim one, one
+  `spec:` layer short of the real source — so every re-ingest mismatched
+  its own rows and aborted the batch, making the unbacked-composite
+  remediation loop (which prints exactly that command) circular. The guard
+  now reads the authoritative *last* (marker) tag and compares on the
+  prefix-normalized logical spec identity; genuine cross-source `op_id`
+  clashes (`file:///a.yaml` vs `spec:b.yaml`) still fire, and the
+  structured exception still carries the raw persisted/incoming labels for
+  diagnostics. Compare-time fix only — no data migration, no schema
+  change. (#2274)
+
 ### Fixed — vendor YAML date/timestamp `example:` values no longer crash spec ingest
 
 - **Ingesting a YAML OpenAPI spec whose schema `example:` fields carry

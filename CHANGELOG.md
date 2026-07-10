@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — vCenter filtered listings key `filter.*` params off the mount flavor (modern `/api` no longer 400s) (#2298)
+
+- Filtered vCenter listings sent legacy `/rest`-style `filter.`-prefixed
+  query params (`filter.datastores`, `filter.hosts`, `filter.types`, …) on
+  **every** mount. Real vCenter 8.x serves the modern `/api` surface, which
+  addresses those FilterSpec fields by their bare name and returns HTTP 400
+  for the prefixed form — so `datastore.usage`'s VM-placement enrichment
+  400'd on every row, `network.portgroup.audit` was structurally broken, and
+  the typed `host.usage` / `host.network_uplinks` listings 400'd whenever a
+  host filter was supplied. Unfiltered listings were unaffected (which is why
+  the gap slipped past CI).
+- One shared adaptation helper (`VmwareRestConnector.adapt_op_query`,
+  delegating to `_mount.adapt_filter_params`) now keys the param style off
+  the target's established mount at the transport seam: bare names on modern
+  `/api`, `filter.`-prefixed on legacy `/rest` / vcsim. Applied once at the
+  composite read + write sub-call seams and the two typed-op listing legs —
+  not per call site. Adds a modern-mount mock that 400s the prefixed form so
+  the vcsim-only test gap is closed; no new op_ids, no OpenAPI change (#2298).
+
 ### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
 
 - The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,

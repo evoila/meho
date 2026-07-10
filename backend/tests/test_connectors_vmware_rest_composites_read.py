@@ -41,6 +41,7 @@ import httpx
 import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites._read import (
     cluster_drs_recommendations_composite,
     datastore_usage_composite,
@@ -99,6 +100,14 @@ class _RecordingConnector:
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         self.mount_calls.append(path)
         return f"{self._mount_prefix}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        # Exercise the real mount-flavor adaptation against this fake's
+        # mount prefix so the recorded query matches the wire form.
+        return adapt_filter_params(self._mount_prefix, query)
 
     async def _get_json(
         self,
@@ -491,9 +500,10 @@ async def test_datastore_usage_three_ops_per_datastore_aggregates_correctly() ->
     assert conn.calls[0]["query"] is None
     # Per-DS detail call embeds the datastore moid in the mounted path.
     assert conn.calls[1]["path"] == "/api/vcenter/datastore/datastore-1"
-    # Per-DS VM call uses ``filter.datastores`` with the moid.
+    # Per-DS VM call filters by datastore; on the modern /api mount the
+    # param is sent bare (#2298), not ``filter.datastores``.
     assert conn.calls[2]["path"] == "/api/vcenter/vm"
-    assert conn.calls[2]["query"] == {"filter.datastores": ["datastore-1"]}
+    assert conn.calls[2]["query"] == {"datastores": ["datastore-1"]}
     # Final aggregated shape.
     assert out == {
         "datastores": [
@@ -583,7 +593,7 @@ async def test_datastore_usage_detail_capacity_wins_over_list_row() -> None:
 
 @pytest.mark.asyncio
 async def test_datastore_usage_filter_names_passes_through_to_listing() -> None:
-    """``filter_names`` flows into the listing sub-op as ``filter.names``."""
+    """``filter_names`` flows into the listing sub-op; bare ``names`` on /api (#2298)."""
     conn = _RecordingConnector([[]])
     await datastore_usage_composite(
         operator=_make_operator(),
@@ -591,7 +601,25 @@ async def test_datastore_usage_filter_names_passes_through_to_listing() -> None:
         params={"filter_names": ["ds-prod-1", "ds-prod-2"]},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert conn.calls[0]["query"] == {"filter.names": ["ds-prod-1", "ds-prod-2"]}
+    assert conn.calls[0]["query"] == {"names": ["ds-prod-1", "ds-prod-2"]}
+
+
+@pytest.mark.asyncio
+async def test_datastore_usage_filter_params_keep_prefix_on_legacy_mount() -> None:
+    """On the legacy/vcsim ``/rest`` mount, filter params keep the ``filter.`` prefix (#2298)."""
+    listing = [{"datastore": "datastore-1", "name": "ds-1", "type": "VMFS", "capacity": 10}]
+    sequence = [listing, {"capacity": 10, "free_space": 4}, [{"name": "vm-a"}]]
+    conn = _RecordingConnector(sequence, mount_prefix="/rest")
+    await datastore_usage_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"filter_names": ["ds-prod-1"]},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # Listing keeps ``filter.names``; per-DS VM leg keeps ``filter.datastores``.
+    assert conn.calls[0]["path"] == "/rest/vcenter/datastore"
+    assert conn.calls[0]["query"] == {"filter.names": ["ds-prod-1"]}
+    assert conn.calls[2]["query"] == {"filter.datastores": ["datastore-1"]}
 
 
 @pytest.mark.asyncio
@@ -757,13 +785,14 @@ async def test_network_portgroup_audit_reads_three_phases() -> None:
     assert len(conn.calls) == 4
     assert conn.calls[0]["path"] == "/api/vcenter/network/distributed-switches"
     # Portgroups come from the generic network resource, type-filtered.
+    # On the modern /api mount the filter params are sent bare (#2298).
     assert conn.calls[1]["path"] == "/api/vcenter/network"
-    assert conn.calls[1]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
-    # Per-PG VM call uses ``filter.networks`` and the default power-state filter.
+    assert conn.calls[1]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
+    # Per-PG VM call filters by network + power state, bare on /api.
     assert conn.calls[2]["path"] == "/api/vcenter/vm"
     assert conn.calls[2]["query"] == {
-        "filter.networks": ["pg-1"],
-        "filter.power_states": ["POWERED_ON"],
+        "networks": ["pg-1"],
+        "power_states": ["POWERED_ON"],
     }
     assert out["portgroups"] == [
         {
@@ -798,9 +827,9 @@ async def test_network_portgroup_audit_filter_dvs_scopes_dvs_listing_only() -> N
         params={"filter_dvs": "dvs-prod"},
         connector=conn,  # type: ignore[arg-type]
     )
-    assert conn.calls[0]["query"] == {"filter.vdses": ["dvs-prod"]}
-    # Portgroup call is type-filtered only -- no ``filter.vdses``.
-    assert conn.calls[1]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
+    assert conn.calls[0]["query"] == {"vdses": ["dvs-prod"]}
+    # Portgroup call is type-filtered only -- no vdses filter.
+    assert conn.calls[1]["query"] == {"types": ["DISTRIBUTED_PORTGROUP"]}
 
 
 @pytest.mark.asyncio
@@ -819,8 +848,8 @@ async def test_network_portgroup_audit_include_disconnected_drops_power_filter()
         connector=conn,  # type: ignore[arg-type]
     )
     vm_call = conn.calls[2]
-    assert "filter.networks" in vm_call["query"]
-    assert "filter.power_states" not in vm_call["query"]
+    assert "networks" in vm_call["query"]
+    assert "power_states" not in vm_call["query"]
 
 
 # ---------------------------------------------------------------------------
@@ -852,6 +881,35 @@ async def test_read_sub_ops_route_through_legacy_rest_mount() -> None:
     assert all(c["path"].startswith("/rest/") for c in conn.calls)
     assert conn.calls[0]["path"] == "/rest/vcenter/datastore"
     assert out["datastores"][0]["id"] == "datastore-1"
+
+
+@pytest.mark.asyncio
+async def test_portgroup_audit_keeps_filter_prefix_on_legacy_mount() -> None:
+    """Legacy/vcsim ``/rest`` portgroup audit keeps the ``filter.*`` param style (#2298).
+
+    Regression pin for the mount-flavor split: the same request that sends
+    bare params on modern ``/api`` must still send ``filter.types`` /
+    ``filter.networks`` / ``filter.power_states`` on the legacy mount vcsim
+    serves, or the existing vcsim fixtures break.
+    """
+    dvs_listing = [{"vds": "dvs-1", "name": "DVS-A"}]
+    pg_listing = [{"network": "pg-1", "name": "PG-A", "type": "DISTRIBUTED_PORTGROUP"}]
+    conn = _RecordingConnector(
+        [dvs_listing, pg_listing, [{"name": "vm-a"}]],
+        mount_prefix="/rest",
+    )
+    await network_portgroup_audit_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"filter_dvs": "dvs-1"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.calls[0]["query"] == {"filter.vdses": ["dvs-1"]}
+    assert conn.calls[1]["query"] == {"filter.types": ["DISTRIBUTED_PORTGROUP"]}
+    assert conn.calls[2]["query"] == {
+        "filter.networks": ["pg-1"],
+        "filter.power_states": ["POWERED_ON"],
+    }
 
 
 @pytest.mark.asyncio

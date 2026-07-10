@@ -39,6 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_create_composite,
     vm_migrate_composite,
@@ -120,6 +121,12 @@ class _RecordingConnector:
 
     async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
         return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params("/api", query)
 
     async def _get_json(
         self, target: Any, path: str, *, operator: Operator, params: Any = None

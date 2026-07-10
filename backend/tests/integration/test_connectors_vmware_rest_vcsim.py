@@ -387,21 +387,41 @@ _DATASTORE_DETAIL: dict[str, dict[str, Any]] = {
 }
 
 
-def _register_datastore_composite_routes(mock: respx.MockRouter, *, mount: str) -> None:
+def _register_datastore_composite_routes(
+    mock: respx.MockRouter, *, mount: str, reject_prefixed_filter: bool = False
+) -> None:
     """Register the datastore-usage composite's sub-op surface under *mount*.
 
     The composite issues, directly on the session (no ingested descriptor,
     no dispatch_child): the datastore listing, one per-datastore detail
-    GET, and one per-datastore VM-placement GET (``filter.datastores``).
+    GET, and one per-datastore VM-placement GET filtered by datastore.
     All are mounted onto ``mount`` (``/api`` modern or ``/rest`` legacy) by
     ``mount_op_path``.
+
+    When *reject_prefixed_filter* is set (modern ``/api``), the VM route
+    mimics real vCenter 8.x: it returns HTTP 400 for the legacy
+    ``filter.``-prefixed query and 200 only for the bare param name. This
+    is the regression guard for #2298 — before the fix the composite sent
+    ``filter.datastores`` on every mount and 400'd this leg on real
+    vCenter, which the path-only respx route previously masked.
     """
     mock.get(f"{mount}/vcenter/datastore").respond(200, json=_DATASTORE_LISTING)
     for ds_id, detail in _DATASTORE_DETAIL.items():
         mock.get(f"{mount}/vcenter/datastore/{ds_id}").respond(200, json=detail)
-    # A single VM-placement stub serves every per-datastore ``filter.datastores``
-    # query; the composite only counts names, so one VM per datastore is enough.
-    mock.get(f"{mount}/vcenter/vm").respond(200, json=[{"name": "vm-x"}])
+    if reject_prefixed_filter:
+
+        def _vm_route(request: httpx.Request) -> httpx.Response:
+            # Modern /api addresses the FilterSpec field by its bare name
+            # and 400s the legacy ``filter.``-prefixed form.
+            if "filter." in request.url.query.decode():
+                return httpx.Response(400, json={"messages": ["unknown query parameter"]})
+            return httpx.Response(200, json=[{"name": "vm-x"}])
+
+        mock.get(f"{mount}/vcenter/vm").mock(side_effect=_vm_route)
+    else:
+        # A single VM-placement stub serves every per-datastore query; the
+        # composite only counts names, so one VM per datastore is enough.
+        mock.get(f"{mount}/vcenter/vm").respond(200, json=[{"name": "vm-x"}])
 
 
 @pytest.mark.asyncio
@@ -431,7 +451,7 @@ async def test_datastore_usage_composite_over_modern_mount(
         assert_all_mocked=False,
     ) as mock:
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
-        _register_datastore_composite_routes(mock, mount="/api")
+        _register_datastore_composite_routes(mock, mount="/api", reject_prefixed_filter=True)
         mock.delete("/api/session").respond(204)
         try:
             out = await datastore_usage_composite(
@@ -447,8 +467,13 @@ async def test_datastore_usage_composite_over_modern_mount(
     assert [r["id"] for r in rows] == ["datastore-11", "datastore-22"]
     assert rows[0]["capacity"] == 1000
     assert rows[0]["free_space"] == 400
+    # VM-placement enrichment populated on every row: the bare-param query
+    # the fix (#2298) sends is accepted (no 400 -> no enrichment_note skip).
     assert rows[0]["vm_count"] == 1
     assert rows[0]["vm_names"] == ["vm-x"]
+    assert "enrichment_note" not in rows[0]
+    assert rows[1]["vm_count"] == 1
+    assert "enrichment_note" not in rows[1]
 
 
 @pytest.mark.asyncio

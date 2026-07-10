@@ -332,9 +332,10 @@ async def host_usage_impl(
     filter_hosts = [h for h in (params.get("filter_hosts") or []) if isinstance(h, str)]
     list_path = await connector.mount_op_path(target, _LIST_HOSTS_PATH, operator)
     listing_params: dict[str, Any] = {"filter.hosts": filter_hosts} if filter_hosts else {}
-    listing = await connector._get_json(
-        target, list_path, operator=operator, params=listing_params or None
-    )
+    # Key the ``filter.hosts`` param off the mount flavor (#2298): modern
+    # ``/api`` wants the bare ``hosts`` name and 400s the prefixed form.
+    listing_query = await connector.adapt_op_query(target, listing_params, operator)
+    listing = await connector._get_json(target, list_path, operator=operator, params=listing_query)
     entries = _unwrap_value(listing)
     if not isinstance(entries, list):
         raise RuntimeError(

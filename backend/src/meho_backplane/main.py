@@ -130,6 +130,7 @@ from meho_backplane.operations import run_typed_op_registrars, set_default_reduc
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
+    stamp_catalog_profiled_connectors,
     validate_catalog_registry_coverage,
     validate_shipped_artifacts,
 )
@@ -361,6 +362,14 @@ async def _run_lifespan_startup() -> None:
     # Shipped spec/profile dry-run parse (#1964 T1 #1975): a malformed
     # packaged spec_resource / profile_resource crashes boot. See the fn.
     validate_shipped_artifacts()
+    # Boot-time ExecutionProfile stamping (#2288): register a
+    # ProfiledRestConnector for every catalog row carrying a profile_resource
+    # so a shipped, reviewed profile is dispatchable from boot instead of
+    # inert package data. Idempotent + gated — a triple already served by a
+    # hand-coded class (vmware/sddc) no-ops, and stamping never enables an op
+    # (the #1971 review gate stays the interlock). Runs after the dry-run
+    # validator above, so it only ever sees well-formed profiles.
+    await stamp_catalog_profiled_connectors()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)

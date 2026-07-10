@@ -51,6 +51,8 @@ from meho_backplane.operations.ingest._internals import (
     OP_PROFILE_STAMP,
     enable_time_auto_shim_warnings,
 )
+from meho_backplane.operations.ingest.boot_stamp import stamp_catalog_profiled_connectors
+from meho_backplane.operations.ingest.catalog import ConnectorSpecCatalog, ConnectorSpecEntry
 from meho_backplane.operations.ingest.connector_registration import (
     ensure_connector_class_registered,
     resolved_profiled_connector_class,
@@ -476,3 +478,148 @@ def test_enable_time_warnings_empty_for_no_connector() -> None:
 
     scope = ConnectorScope(product="ghost", version="9.9", impl_id="ghost-rest", tenant_id=None)
     assert enable_time_auto_shim_warnings("ghost-rest-9.9", "GET:/x", scope) == []
+
+
+# ---------------------------------------------------------------------------
+# The #1971 invariant at the boot trigger (#2288) — boot stamping registers a
+# dispatchable connector but must NEVER auto-enable an op.
+# ---------------------------------------------------------------------------
+
+_FIXTURE_PRODUCT = "fixture"
+_FIXTURE_VERSION = "1.0"
+_FIXTURE_IMPL_ID = "fixture-rest"
+
+
+async def _seed_staged_fixture_connector(*, tenant_id: uuid.UUID, ops: int = 3) -> None:
+    """Seed a staged (disabled-ops) group under the built-in fixture triple."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        group_id = uuid.uuid4()
+        session.add(
+            OperationGroup(
+                id=group_id,
+                tenant_id=tenant_id,
+                product=_FIXTURE_PRODUCT,
+                version=_FIXTURE_VERSION,
+                impl_id=_FIXTURE_IMPL_ID,
+                group_key="group-0",
+                name="Group 0",
+                when_to_use="Use group 0.",
+                review_status="staged",
+            )
+        )
+        for i in range(ops):
+            session.add(
+                EndpointDescriptor(
+                    tenant_id=tenant_id,
+                    product=_FIXTURE_PRODUCT,
+                    version=_FIXTURE_VERSION,
+                    impl_id=_FIXTURE_IMPL_ID,
+                    op_id=f"GET:/things/{i}",
+                    source_kind="ingested",
+                    method="GET",
+                    path=f"/things/{i}",
+                    group_id=group_id,
+                    summary=f"Operation {i}",
+                    is_enabled=False,
+                )
+            )
+        await session.commit()
+
+
+async def _fixture_ops_and_groups(*, tenant_id: uuid.UUID) -> tuple[dict[str, bool], list[str]]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        ops = (
+            (
+                await session.execute(
+                    select(EndpointDescriptor).where(
+                        EndpointDescriptor.tenant_id == tenant_id,
+                        EndpointDescriptor.product == _FIXTURE_PRODUCT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        groups = (
+            (
+                await session.execute(
+                    select(OperationGroup).where(
+                        OperationGroup.tenant_id == tenant_id,
+                        OperationGroup.product == _FIXTURE_PRODUCT,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return {o.op_id: o.is_enabled for o in ops}, [g.review_status for g in groups]
+
+
+@pytest.mark.asyncio
+async def test_boot_stamp_registers_but_never_enables_ops() -> None:
+    """AC2 (#2288): the boot trigger makes the connector dispatchable, not enabled.
+
+    Running :func:`stamp_catalog_profiled_connectors` over a profile-backed
+    catalog row registers a ``ProfiledRestConnector`` under the row's triple
+    (dispatchable) while every seeded op stays ``is_enabled=False`` and every
+    group stays ``review_status='staged'`` — the #1971 review-gate interlock,
+    preserved end to end through the production boot path.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_staged_fixture_connector(tenant_id=tenant_id)
+    catalog = ConnectorSpecCatalog(
+        entries=(
+            ConnectorSpecEntry.model_validate(
+                {
+                    "product": "_fixture",
+                    "version": "1.0",
+                    "impl_id": "fixture-rest",
+                    "requires_connector_class": "ProfiledRestConnector_fixture_1_0",
+                    "upstream": None,
+                    "spec_resource": "_fixture_minimal.yaml",
+                    "profile_resource": "_fixture_minimal.yaml",
+                }
+            ),
+        )
+    )
+
+    registered = await stamp_catalog_profiled_connectors(catalog)
+
+    # The connector is now dispatchable ...
+    assert registered == 1
+    stamped_cls = all_connectors_v2()[(_FIXTURE_PRODUCT, _FIXTURE_VERSION, _FIXTURE_IMPL_ID)]
+    assert issubclass(stamped_cls, ProfiledRestConnector)
+    # ... but NOT a single op was enabled and no group left 'staged'.
+    ops, groups = await _fixture_ops_and_groups(tenant_id=tenant_id)
+    assert ops  # the seed landed
+    assert all(enabled is False for enabled in ops.values())
+    assert groups == ["staged"]
+
+
+@pytest.mark.asyncio
+async def test_boot_stamp_writes_one_profile_stamp_audit_row() -> None:
+    """The boot trigger records the dispatchability change as a single audit row."""
+    catalog = ConnectorSpecCatalog(
+        entries=(
+            ConnectorSpecEntry.model_validate(
+                {
+                    "product": "_fixture",
+                    "version": "1.0",
+                    "impl_id": "fixture-rest",
+                    "requires_connector_class": "ProfiledRestConnector_fixture_1_0",
+                    "upstream": None,
+                    "spec_resource": "_fixture_minimal.yaml",
+                    "profile_resource": "_fixture_minimal.yaml",
+                }
+            ),
+        )
+    )
+
+    await stamp_catalog_profiled_connectors(catalog)
+
+    assert await _count_audit_rows(op_id=OP_PROFILE_STAMP) == 1
+    row = await _latest_audit_row(op_id=OP_PROFILE_STAMP)
+    assert row.payload["product"] == _FIXTURE_PRODUCT
+    assert row.payload["connector_class"] == "ProfiledRestConnector_fixture_1_0"

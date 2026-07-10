@@ -37,6 +37,9 @@ from meho_backplane.operations.ingest.api_schemas import (
     IngestResponse,
     SpecSource,
 )
+from meho_backplane.operations.ingest.boot_stamp import (
+    stamp_catalog_profiled_connectors,
+)
 from meho_backplane.operations.ingest.catalog import (
     CatalogError,
     CatalogListResponse,
@@ -231,6 +234,7 @@ __all__ = [
     "reset_job_registry_for_tests",
     "run_ingest_job",
     "run_llm_grouping",
+    "stamp_catalog_profiled_connectors",
     "strip_code_fences",
     "validate_catalog_registry_coverage",
     "validate_shipped_artifacts",

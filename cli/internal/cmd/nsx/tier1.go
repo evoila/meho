@@ -24,7 +24,7 @@ func newTier1Cmd() *cobra.Command {
 	return cmd
 }
 
-// newTier1ListCmd returns `meho nsx tier1 list` → GET:/policy/api/v1/infra/tier-1s.
+// newTier1ListCmd returns `meho nsx tier1 list` → nsx.tier1.list.
 func newTier1ListCmd() *cobra.Command {
 	var (
 		targetName        string
@@ -34,7 +34,7 @@ func newTier1ListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List NSX tier-1 (per-tenant) gateways",
-		Long: "list dispatches GET:/policy/api/v1/infra/tier-1s against\n" +
+		Long: "list dispatches nsx.tier1.list against\n" +
 			"connector_id=\"nsx-rest-4.2\". Renders id / display_name / tier0_path\n" +
 			"for human eyes; --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call.",
@@ -59,7 +59,7 @@ func runTier1List(cmd *cobra.Command, targetName string, jsonOut bool, backplane
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	const opID = "GET:/policy/api/v1/infra/tier-1s"
+	const opID = "nsx.tier1.list"
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -68,7 +68,7 @@ func runTier1List(cmd *cobra.Command, targetName string, jsonOut bool, backplane
 }
 
 func printTier1List(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/policy/api/v1/infra/tier-1s — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s nsx.tier1.list — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

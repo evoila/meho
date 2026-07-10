@@ -13,7 +13,7 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-const tzOpID = "GET:/policy/api/v1/infra/sites/default/enforcement-points/default/transport-zones"
+const tzOpID = "nsx.transport_zone.list"
 
 // newTransportZoneCmd returns `meho nsx transport-zone` parent command.
 func newTransportZoneCmd() *cobra.Command {

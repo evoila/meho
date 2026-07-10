@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	environmentListOpID = "GET:/lcm/lcops/api/v2/environments"
+	environmentListOpID = "fleet.environment.list"
 	environmentGetOpID  = "GET:/lcm/lcops/api/v2/environments/{environmentId}"
 )
 
@@ -40,7 +40,7 @@ func newEnvironmentListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List Fleet-managed environments (the primary inventory unit)",
-		Long: "list dispatches GET:/lcm/lcops/api/v2/environments against\n" +
+		Long: "list dispatches fleet.environment.list against\n" +
 			"connector_id=\"fleet-rest-9.0\". Each environment groups one or more\n" +
 			"product deployments. Large appliances may return a JSONFlux handle\n" +
 			"through the shared HandleStore — use result_describe / result_query\n" +

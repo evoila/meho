@@ -35,7 +35,7 @@ func newHostListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List ESXi hosts across all or one VCF domain or cluster",
-		Long: "list dispatches GET:/v1/hosts against connector_id=\"sddc-rest-9.0\".\n" +
+		Long: "list dispatches sddc.host.list against connector_id=\"sddc-rest-9.0\".\n" +
 			"Pass --domain or --cluster to filter. Large deployments may return\n" +
 			"hundreds of rows — use --json for machine-readable output.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
@@ -72,17 +72,17 @@ func runHostList(cmd *cobra.Command, targetName, domainID, clusterID string, jso
 			params["clusterId"] = clusterID
 		}
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/hosts", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "sddc.host.list", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/v1/hosts", r, jsonOut, printHostList)
+	return conn.Render(cmd, "sddc.host.list", r, jsonOut, printHostList)
 }
 
 func printHostList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		conn.PrintGeneric(w, "GET:/v1/hosts", r)
+		conn.PrintGeneric(w, "sddc.host.list", r)
 		return
 	}
 	fmt.Fprintf(w, "ESXi hosts (%d)\n", len(entries))

@@ -35,7 +35,7 @@ func newOrgListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List provider-plane organizations on a VCFA appliance",
-		Long: "list dispatches GET:/cloudapi/1.0.0/orgs against\n" +
+		Long: "list dispatches vcfa.provider.org.list against\n" +
 			"connector_id=\"vcfa-rest-9.0\" on the provider plane.\n" +
 			"--plane provider is implicit; passing --plane tenant\n" +
 			"errors early.",
@@ -45,7 +45,7 @@ func newOrgListCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runProviderListVerb(cmd,
-				"GET:/cloudapi/1.0.0/orgs",
+				"vcfa.provider.org.list",
 				targetName, jsonOut, backplaneOverride,
 				printOrgList,
 			)
@@ -85,7 +85,7 @@ func newOrgGetCmd() *cobra.Command {
 }
 
 func printOrgList(w io.Writer, r *CallResult) {
-	const opID = "GET:/cloudapi/1.0.0/orgs"
+	const opID = "vcfa.provider.org.list"
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

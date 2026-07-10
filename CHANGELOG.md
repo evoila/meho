@@ -113,6 +113,25 @@ connector-related release-notes line.
   so its `filter.names` param is likewise keyed off the mount flavor instead
   of 400'ing on a modern `/api` vCenter 8.x; pinned with modern/legacy mount
   tests mirroring `host.usage` (#2298).
+### Fixed — VMware-family CLI verbs repointed to typed op_ids (#2355)
+
+- The 19 VMware-REST-family CLI verbs whose backend reads were converted to typed
+  ops in #2266 now dispatch the **dotted** typed op_ids (`vrops.liveness`,
+  `nsx.node.status`, `sddc.domain.list`, `fleet.about`, `vcfa.provider.org.list`,
+  `vrli.event.query`, …) instead of the legacy `METHOD:/path` op_ids. On a fresh
+  boot with zero catalog ingest — the state #2266 makes canonical — the legacy
+  op_ids no longer resolve, so `meho vcf-operations|vcf-fleet|vcf-automation|
+  sddc-manager|nsx|vcf-logs …` verbs were dead-ends; the repoint restores them.
+- `meho vcf-logs query` now aligns with `vrli.event.query`'s closed
+  `parameter_schema`: it sends `limit` as an integer (was a string) and no longer
+  sends `timestamp_window` (the schema accepts only `constraints` + `limit`, so
+  the retired param would trip `additionalProperties:false`). The `--time-range`
+  flag is removed — compose any time-range constraint into the `constraints`
+  expression, which the typed op renders into the request path.
+- Unconverted verbs and the flagged method/semantic-mismatch verbs
+  (`vcf-operations resource list/get`, `sddc-manager domain info`/`about`,
+  `nsx node list`) keep their legacy op_ids until their typed ops land.
+
 ### Removed — retired the ingested-curation apparatus in the six VMware-family connectors (T7 · #2358)
 
 - Deleted the hand-curated ingested-enable apparatus (`core_ops.py` /

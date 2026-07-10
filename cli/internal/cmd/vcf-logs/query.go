@@ -6,7 +6,6 @@ package vcflogs
 import (
 	"fmt"
 	"io"
-	"strconv"
 
 	"github.com/spf13/cobra"
 
@@ -14,47 +13,46 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// newQueryCmd returns `meho vcf-logs query <constraints>` →
-// GET:/api/v2/events/{constraints}.
+// newQueryCmd returns `meho vcf-logs query <constraints>` → the typed
+// op vrli.event.query.
 //
 // The headline read surface of vRLI: event-query against a
-// constraints expression. The `{constraints}` path segment is
-// vRLI's URI-segment encoding of field/operator/value tuples
-// (e.g. `text/CONTAINS+error/hostname/CONTAINS+vcsa`); the CLI
-// passes the operator-supplied expression through verbatim as
-// `params.constraints` and lets the dispatcher's
-// “_substitute_path“ thread it into the path template.
+// constraints expression. The constraints value is vRLI's
+// slash-delimited encoding of field/operator/value tuples plus any
+// time-range constraint (e.g. `text/CONTAINS error/timestamp/GT <ms>`);
+// the CLI passes the operator-supplied expression through verbatim as
+// `params.constraints` and the typed handler renders it into the
+// /api/v2/events/<constraints> path via build_event_query_path.
 //
-// --time-range honours the Goal #214 G3.6 vRLI DoD line — the flag
-// maps to “params.timestamp_window“ which the backend converts
-// to the vRLI event-query timestamp constraint (default behaviour
-// is the appliance's "all-time" window, matching the wrapper).
-// --limit caps the result-set size via the query param.
+// --limit caps the result-set size and is sent as the integer
+// `params.limit` the typed op's closed parameter_schema requires
+// (the schema accepts only constraints + limit; a time window is
+// composed into the constraints chain, not a separate param).
 func newQueryCmd() *cobra.Command {
 	var (
 		targetName        string
-		timeRange         string
 		limit             int
 		jsonOut           bool
 		backplaneOverride string
 	)
 	cmd := &cobra.Command{
 		Use:   "query [constraints]",
-		Short: "Run a vRLI event query (constraints, optional time range, optional limit)",
-		Long: "query dispatches GET:/api/v2/events/{constraints} against connector_id=\n" +
+		Short: "Run a vRLI event query (constraints, optional limit)",
+		Long: "query dispatches the typed op vrli.event.query against connector_id=\n" +
 			"\"vrli-rest-9.0\". The constraints positional argument carries vRLI's\n" +
-			"URI-segment-encoded constraint expression (e.g. text/CONTAINS+error+timestamp/GT+12345);\n" +
+			"slash-delimited constraint expression (e.g. text/CONTAINS+error/timestamp/GT+12345);\n" +
 			"empty constraints (no positional argument) is allowed and the appliance returns\n" +
-			"the unconstrained set bounded by --time-range / --limit.\n\n" +
-			"--time-range threads to params.timestamp_window — the backend rewrites this into\n" +
-			"the vRLI timestamp constraint on the event-query path. --limit caps the result\n" +
-			"set via query-string.\n\n" +
+			"the unconstrained set bounded by --limit. Compose any time-range constraint\n" +
+			"directly into the constraints expression (the typed op's parameter_schema\n" +
+			"accepts only constraints + limit).\n\n" +
+			"--limit caps the result set and is sent as the integer params.limit the typed\n" +
+			"op requires.\n\n" +
 			"Result sets are JSONFlux-handle-shaped (typically large); the human-rendered\n" +
 			"output prints a summary plus the handle id when the dispatcher reduces the\n" +
 			"payload into a ResultHandle. --json emits the full OperationResult envelope.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
-		Example: "  meho vcf-logs query --target rdc-vrli --time-range 1h\n" +
-			"  meho vcf-logs query \"text/CONTAINS+error\" --target rdc-vrli --time-range 24h --limit 100\n" +
+		Example: "  meho vcf-logs query --target rdc-vrli\n" +
+			"  meho vcf-logs query \"text/CONTAINS+error\" --target rdc-vrli --limit 100\n" +
 			"  meho vcf-logs query --target rdc-vrli --json | jq .result",
 		Args:          cobra.MaximumNArgs(1),
 		SilenceUsage:  true,
@@ -64,12 +62,10 @@ func newQueryCmd() *cobra.Command {
 			if len(args) == 1 {
 				constraints = args[0]
 			}
-			return runQuery(cmd, constraints, targetName, timeRange, limit, jsonOut, backplaneOverride)
+			return runQuery(cmd, constraints, targetName, limit, jsonOut, backplaneOverride)
 		},
 	}
 	cmd.Flags().StringVar(&targetName, "target", "", "vRLI target slug")
-	cmd.Flags().StringVar(&timeRange, "time-range", "",
-		"event-query time window (e.g. 5m, 1h, 24h, 7d); empty = appliance default")
 	cmd.Flags().IntVar(&limit, "limit", 0, "max events to return (0 = appliance default)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit the full OperationResult envelope as JSON")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -79,7 +75,7 @@ func newQueryCmd() *cobra.Command {
 
 func runQuery(
 	cmd *cobra.Command,
-	constraints, targetName, timeRange string,
+	constraints, targetName string,
 	limit int,
 	jsonOut bool,
 	backplaneOverride string,
@@ -94,18 +90,17 @@ func runQuery(
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
 	params := map[string]any{}
-	// Constraints is path-template substitution; the dispatcher's
-	// _substitute_path consumes the empty-string when no positional was
-	// supplied (vRLI treats an empty trailing segment as no extra
-	// constraint).
+	// The typed op vrli.event.query owns a closed parameter_schema
+	// (constraints + limit, additionalProperties:false). constraints is
+	// rendered into the request path by the handler's
+	// build_event_query_path; an empty string reaches the base
+	// /api/v2/events/ (all events). limit is sent as an integer — the
+	// schema types it as integer, so a string would fail validation.
 	params["constraints"] = constraints
-	if timeRange != "" {
-		params["timestamp_window"] = timeRange
-	}
 	if limit > 0 {
-		params["limit"] = strconv.Itoa(limit)
+		params["limit"] = limit
 	}
-	const opID = "GET:/api/v2/events/{constraints}"
+	const opID = "vrli.event.query"
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
@@ -114,7 +109,7 @@ func runQuery(
 }
 
 func printQuery(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/api/v2/events/{constraints} — status=%s (%.0fms)\n",
+	fmt.Fprintf(w, "%s vrli.event.query — status=%s (%.0fms)\n",
 		ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

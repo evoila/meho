@@ -93,7 +93,7 @@ type vropsEntry = map[string]any
 // regardless of which list op they are handling.
 var vropsListKeysByOp = map[string]string{
 	"GET:/suite-api/api/resources":        "resourceList",
-	"GET:/suite-api/api/alerts":           "alerts",
+	"vrops.alert.list":                    "alerts",
 	"GET:/suite-api/api/alertdefinitions": "alertDefinitions",
 	"GET:/suite-api/api/symptoms":         "symptoms",
 	"GET:/suite-api/api/recommendations":  "recommendations",

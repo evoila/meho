@@ -40,7 +40,7 @@ func newProjectListCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runTenantListVerb(cmd,
-				"GET:/iaas/api/projects",
+				"vcfa.tenant.project.list",
 				targetName, jsonOut, backplaneOverride,
 				printProjectList,
 			)
@@ -51,7 +51,7 @@ func newProjectListCmd() *cobra.Command {
 }
 
 func printProjectList(w io.Writer, r *CallResult) {
-	const opID = "GET:/iaas/api/projects"
+	const opID = "vcfa.tenant.project.list"
 	fmt.Fprintf(w, "%s %s — status=%s (%.0fms)\n", ConnectorID, opID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

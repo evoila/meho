@@ -34,7 +34,7 @@ func newClusterListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List vSphere clusters across all or one VCF domain",
-		Long: "list dispatches GET:/v1/clusters against connector_id=\"sddc-rest-9.0\".\n" +
+		Long: "list dispatches sddc.cluster.list against connector_id=\"sddc-rest-9.0\".\n" +
 			"Pass --domain to filter to a specific domain.\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example: "  meho sddc-manager cluster list --target rdc-sddc-manager\n" +
@@ -63,17 +63,17 @@ func runClusterList(cmd *cobra.Command, targetName, domainID string, jsonOut boo
 	if domainID != "" {
 		params = map[string]any{"domainId": domainID}
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/clusters", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "sddc.cluster.list", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/v1/clusters", r, jsonOut, printClusterList)
+	return conn.Render(cmd, "sddc.cluster.list", r, jsonOut, printClusterList)
 }
 
 func printClusterList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		conn.PrintGeneric(w, "GET:/v1/clusters", r)
+		conn.PrintGeneric(w, "sddc.cluster.list", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF clusters (%d)\n", len(entries))

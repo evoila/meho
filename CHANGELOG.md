@@ -109,6 +109,22 @@ connector-related release-notes line.
   transaction per spec (a large spec holds it open for tens of seconds — an
   accepted correctness-first trade-off). No schema or route change. (#2273)
 
+### Fixed — shared modal controller ignores htmx's detached pre-swap target
+
+- **The app-shell modal controller no longer calls ``showModal()`` on a
+  disconnected dialog after an ``outerHTML`` swap** (#2242). htmx 2.0.9
+  dispatches ``htmx:afterSwap`` with ``detail.target`` still pointing at the
+  PRE-swap element, which an ``outerHTML`` swap already detached — the runbook
+  run driver's abort / reassign / advance forms target ``#runbook-run-step``
+  with ``hx-swap="outerHTML"``. The shared controller scanned that stale
+  subtree and reopened the old, closed descendant dialog (the admin-only
+  reassign dialog on the abort repro; the assignee's advance dialog on every
+  Advance click), throwing an uncaught ``InvalidStateError`` into the console.
+  A one-line ``isConnected`` guard on the scan root skips a detached root and
+  is behaviour-preserving for the console's ``innerHTML``-into-a-stable-
+  container auto-open pattern, which always delivers a connected root. Console
+  noise only; the abort / advance actions were always functional.
+
 ### Fixed — exactly-one-resumer claim for run-bound approvals (#2293)
 
 - **A run-bound approval now executes its gated op exactly once — no silent

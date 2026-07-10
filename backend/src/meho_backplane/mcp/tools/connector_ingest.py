@@ -108,6 +108,7 @@ import structlog
 
 from meho_backplane.api.v1.connectors_ingest import get_llm_client_factory
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.profile import NAMED_AUTH_SCHEMES
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.mcp.tools._connector_shared import (
@@ -171,6 +172,13 @@ def _build_ingest_request(arguments: dict[str, Any]) -> IngestRequest:
         specs=[SpecSource(uri=spec["uri"]) for spec in arguments["specs"]],
         base_url=arguments.get("base_url"),
         dry_run=bool(arguments.get("dry_run", False)),
+        # #2289: an operator-selected named auth scheme (+ optional secret-field
+        # NAMES) stamps a dispatchable profiled connector instead of the bare
+        # shim. Left unset (the common path) keeps the bare-shim behaviour. The
+        # closed-set / reserved-scheme rejection happens in the IngestRequest
+        # Literal below, surfacing as a -32602 invalid_params on a bad value.
+        auth_scheme=arguments.get("auth_scheme"),
+        auth_secret_fields=arguments.get("auth_secret_fields"),
     )
     assert request.product is not None
     assert request.version is not None
@@ -305,6 +313,12 @@ async def _run_inline_ingest(
             base_url=request.base_url,
             tenant_id=tenant_id,
             dry_run=request.dry_run,
+            auth_scheme=request.auth_scheme,
+            auth_secret_fields=(
+                tuple(request.auth_secret_fields)
+                if request.auth_secret_fields is not None
+                else None
+            ),
         )
     except SPEC_ERROR_TYPES as exc:
         # The whole typed SpecError sibling set maps onto JSON-RPC -32602
@@ -384,6 +398,12 @@ async def _spawn_async_ingest(
             base_url=request.base_url,
             tenant_id=tenant_id,
             dry_run=False,
+            auth_scheme=request.auth_scheme,
+            auth_secret_fields=(
+                tuple(request.auth_secret_fields)
+                if request.auth_secret_fields is not None
+                else None
+            ),
         )
 
     # ``asyncio.create_task`` (not the request itself) so the work
@@ -554,6 +574,31 @@ register_mcp_tool(
                     },
                 },
                 "base_url": {"type": ["string", "null"], "maxLength": 2048},
+                "auth_scheme": {
+                    "type": ["string", "null"],
+                    "enum": [*sorted(NAMED_AUTH_SCHEMES), None],
+                    "description": (
+                        "Optional named auth scheme (closed catalog) for a "
+                        "non-catalog ingest. When set, the connector is stamped "
+                        "as a dispatchable profiled connector — staged behind "
+                        "the review/enable gate, never auto-enabled — instead of "
+                        "a non-dispatchable bare shim. Selection only: there is "
+                        "no free-form auth config, and reserved typed-only "
+                        "schemes are not selectable. Omit for the historical "
+                        "bare-shim behaviour."
+                    ),
+                },
+                "auth_secret_fields": {
+                    "type": ["array", "null"],
+                    "maxItems": 8,
+                    "items": {"type": "string", "minLength": 1},
+                    "description": (
+                        "Optional override of the secret-field NAMES the "
+                        "auth_scheme reads at dispatch (never the values — those "
+                        "stay in the target's secret_ref). Omit for the "
+                        "per-scheme defaults. Requires auth_scheme."
+                    ),
+                },
                 "dry_run": {"type": "boolean", "default": False},
                 "async": {
                     "type": "boolean",

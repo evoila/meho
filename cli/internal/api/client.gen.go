@@ -186,6 +186,16 @@ const (
 	IngestJobStatusResponseStatusSucceeded IngestJobStatusResponseStatus = "succeeded"
 )
 
+// Defines values for IngestRequestAuthScheme.
+const (
+	Basic             IngestRequestAuthScheme = "basic"
+	Oauth2Mint        IngestRequestAuthScheme = "oauth2_mint"
+	SessionLogin      IngestRequestAuthScheme = "session_login"
+	SessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
+	SessionLoginToken IngestRequestAuthScheme = "session_login_token"
+	StaticHeader      IngestRequestAuthScheme = "static_header"
+)
+
 // Defines values for KindFilterValue.
 const (
 	KindFilterValueCron   KindFilterValue = "cron"
@@ -3795,7 +3805,13 @@ type IngestKbRequest struct {
 // and the operator only finds out at review-time.
 type IngestRequest struct {
 	// Async Run the pipeline off the request thread (202 + job handle); set to false for the legacy blocking response. Ignored when dry_run=true.
-	Async                      *bool         `json:"async,omitempty"`
+	Async *bool `json:"async,omitempty"`
+
+	// AuthScheme Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config — selection only. Mutually exclusive with catalog_entry.
+	AuthScheme *IngestRequestAuthScheme `json:"auth_scheme"`
+
+	// AuthSecretFields Optional override of the secret-field NAMES the auth_scheme reads at dispatch (never the values — those stay in the target's secret_ref). Omit for the per-scheme defaults. Requires auth_scheme.
+	AuthSecretFields           *[]string     `json:"auth_secret_fields"`
 	BaseUrl                    *string       `json:"base_url"`
 	CatalogEntry               *string       `json:"catalog_entry"`
 	DryRun                     *bool         `json:"dry_run,omitempty"`
@@ -3808,6 +3824,9 @@ type IngestRequest struct {
 	TenantId *openapi_types.UUID `json:"tenant_id"`
 	Version  *string             `json:"version"`
 }
+
+// IngestRequestAuthScheme Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config — selection only. Mutually exclusive with catalog_entry.
+type IngestRequestAuthScheme string
 
 // IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
 //

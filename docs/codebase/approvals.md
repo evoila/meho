@@ -696,14 +696,32 @@ re-hydrate later. Two columns on `approval_request` (migration `0053`):
 `approval_queue._write_audit_row` reads both off the row (never the
 approver's contextvars): the request row anchors on the session with no
 parent (chain root); decision rows anchor on the same session and
-parent-link to `request_audit_id`. `resume_dispatch_after_approval`
-re-binds `agent_session_id_var` + `parent_audit_id_var` (token-scoped,
-alongside `work_ref_var`) around the `dispatch(..., _approved=True)`, so
-the executed op's DISPATCH row anchors in the originating session and
-back-links to the parking row. Net result: >= 3 session-anchored rows
-per approved chain, tree shape `approval.request` → {`approval.decision`,
-`<op_id>`}. Pre-0053 rows keep NULLs and simply stay out of replay (the
-pre-fix behaviour).
+parent-link to `request_audit_id`.
+
+The executed-dispatch row must also carry `parent_audit_id` for the
+chain to replay as one subtree, and both resume paths bind it:
+
+- **Operator surfaces** (REST `/approve` + `/decide`, MCP, UI) —
+  `resume_dispatch_after_approval` →
+  `_dispatch_resume_with_bound_context` re-binds `agent_session_id_var`
+  \+ `parent_audit_id_var` (token-scoped, alongside `work_ref_var`)
+  around the `dispatch(..., _approved=True)`, because the approver runs
+  on a fresh task whose contextvars are unset.
+- **In-process agent-run resume** (#2323, completing #2086) — the
+  broadcast-driven agent waiter
+  (`agent/approval_wait.py::_resume_approved_or_already_resumed`)
+  re-dispatches on the agent's *own* task, where `agent_session_id_var`
+  is still bound but `parent_audit_id_var` holds the original top-level
+  value (`None` for a plain tool call). It loads the parked row's
+  `request_audit_id` (tenant-isolated `get_request`) and binds
+  `parent_audit_id_var` around `call_operation_with_approval`, so the
+  agent-run chain no longer orphans its executed dispatch as a second
+  root.
+
+Net result on either path: >= 3 session-anchored rows per approved
+chain, tree shape `approval.request` → {`approval.decision`, `<op_id>`}.
+Pre-0053 rows keep NULLs and simply stay out of replay (the pre-fix
+behaviour).
 
 ## MCP elicitation URL-mode (forward-looking)
 

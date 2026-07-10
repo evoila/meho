@@ -521,6 +521,191 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
     clear_registry()
 
 
+async def test_resume_stamps_parent_audit_id_so_chain_replays_as_one_subtree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2323 (completing #2086): the agent-resumed dispatch back-links to the request.
+
+    The in-process agent waiter re-dispatches on the agent's own task, where
+    ``parent_audit_id_var`` still carries the original top-level value
+    (``None`` for a plain tool call). Before the fix the executed DISPATCH
+    row therefore emitted ``parent_audit_id = NULL`` and replayed as a
+    *second root*, breaking the one-subtree invariant #2086 established.
+
+    This drives the full agent decide-path resume with an ``agent_session_id``
+    bound (as a real agent run has), then asserts:
+
+    1. The executed DISPATCH row's ``parent_audit_id`` equals the parking
+       ``approval.request`` row's audit id (the same anchor the decision row
+       parents to).
+    2. The chain has exactly one null-parent row — the ``approval.request``
+       root — not two.
+    3. ``replay_session`` reconstructs one subtree: the request row as root
+       with the decision and the executed dispatch as its children.
+    """
+    import meho_backplane.operations._audit as audit_module
+    from meho_backplane.audit_query.replay import replay_session
+    from meho_backplane.connectors.base import Connector
+    from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+    from meho_backplane.connectors.schemas import FingerprintResult, ProbeResult
+    from meho_backplane.operations import (
+        dispatch,
+        register_typed_operation,
+        reset_dispatcher_caches,
+    )
+    from meho_backplane.operations._audit import agent_session_id_var, parent_audit_id_var
+    from meho_backplane.operations.approval_queue import approve_request
+
+    async def _capture(event: Any) -> None:
+        pass
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+    class _OkConnector(Connector):
+        product = "appres2test"
+        version = "1.x"
+        impl_id = "appres2test"
+        priority = 10
+
+        async def fingerprint(self, host: str, port: int | None) -> FingerprintResult:
+            return FingerprintResult(
+                probe=ProbeResult(reachable=True, probe_method="none"),
+                product="appres2test",
+                version="1.x",
+            )
+
+        async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+            raise NotImplementedError
+
+        async def execute(  # type: ignore[override]
+            self, target: Any, op_id: str, params: dict[str, Any]
+        ) -> Any:
+            raise NotImplementedError
+
+    register_connector_v2(product="appres2test", version="", impl_id="", cls=_OkConnector)
+
+    stub_emb = AsyncMock()
+    stub_emb.encode_one.return_value = [0.1] * 384
+    stub_emb.encode.return_value = [[0.1] * 384]
+    stub_emb.dimension = 384
+
+    await register_typed_operation(
+        product="appres2test",
+        version="1.x",
+        impl_id="appres2test",
+        op_id="appres2test.op",
+        handler=_approval_resume_test_handler,
+        summary="Test op requiring approval.",
+        description="Test.",
+        parameter_schema={"type": "object"},
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_emb,
+    )
+
+    operator = _make_operator(sub="agent-lineage-requester")
+    call_arguments: dict[str, Any] = {
+        "connector_id": "appres2test-1.x",
+        "op_id": "appres2test.op",
+        "params": {"x": 7},
+        "target": None,
+    }
+
+    # Step 1: park the op under a bound agent session — exactly what
+    # AgentInvoker sets around a run, so the parked row (and every resumed
+    # row) anchors in the session and replay can reconstruct the chain.
+    session_id = uuid.uuid4()
+    session_token = agent_session_id_var.set(session_id)
+    try:
+        first = await dispatch(
+            operator=operator,
+            connector_id="appres2test-1.x",
+            op_id="appres2test.op",
+            target=None,
+            params=call_arguments["params"],
+        )
+    finally:
+        agent_session_id_var.reset(session_token)
+    assert first.status == "awaiting_approval"
+    approval_request_id = uuid.UUID(first.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        from meho_backplane.db.models import ApprovalRequest
+
+        parked = await s.get(ApprovalRequest, approval_request_id)
+        assert parked is not None
+        assert parked.agent_session_id == session_id
+        assert parked.request_audit_id is not None
+        request_audit_id = parked.request_audit_id
+
+    # Step 2: a distinct human operator approves via the /decide path.
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=None)
+        await s.commit()
+    assert row.status == "approved"
+
+    # Step 3: drive the agent resume with the session re-bound (as the
+    # agent's own task still carries it while it awaits the decision).
+    _stub_broadcast_client_with_decision(
+        monkeypatch=monkeypatch,
+        decision_entry=_build_decision_entry(
+            approval_request_id=approval_request_id,
+            decision="approved",
+        ),
+    )
+    awaiting_envelope = first.model_dump(mode="json")
+    session_token = agent_session_id_var.set(session_id)
+    try:
+        resumed = await resume_or_surface_awaiting_approval(
+            operator=operator,
+            call_arguments=call_arguments,
+            awaiting_envelope=awaiting_envelope,
+            timeout_seconds=2.0,
+        )
+    finally:
+        agent_session_id_var.reset(session_token)
+    assert resumed["status"] == "ok", f"expected ok, got {resumed!r}"
+    # The bind is token-scoped: the var is back to its default after resume.
+    assert parent_audit_id_var.get() is None
+
+    async with get_sessionmaker()() as fresh:
+        dispatch_row = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.method == "DISPATCH")))
+            .scalars()
+            .one()
+        )
+        # (1) the executed dispatch back-links to the parking request row.
+        assert dispatch_row.parent_audit_id == request_audit_id
+        assert dispatch_row.agent_session_id == session_id
+
+        # (2) exactly one null-parent row across the chain — the request root.
+        anchored = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.agent_session_id == session_id)))
+            .scalars()
+            .all()
+        )
+        assert len(anchored) >= 3
+        null_parents = [r for r in anchored if r.parent_audit_id is None]
+        assert len(null_parents) == 1
+        assert null_parents[0].path == "approval.request"
+
+        # (3) replay renders one subtree, not two roots.
+        forest = await replay_session(session_id, tenant_id=_TENANT_ID, session=fresh)
+
+    assert len(forest) == 1
+    chain_root = forest[0]
+    assert chain_root.path == "approval.request"
+    child_paths = sorted(child.path for child in chain_root.children)
+    assert child_paths == ["appres2test.op", "approval.decision"]
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
 async def test_resume_surfaces_rejection_to_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

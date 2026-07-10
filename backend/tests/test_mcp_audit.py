@@ -40,6 +40,7 @@ from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS, INVALID_REQUEST
 from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.operations.ingest.boot_stamp import BOOT_STAMP_OPERATOR_SUB
 from meho_backplane.settings import get_settings
 from tests.mcp_test_fixtures import (
     build_operator,
@@ -52,11 +53,23 @@ from tests.mcp_test_fixtures import (
 
 
 async def _audit_rows() -> list[AuditLog]:
-    """Read every ``audit_log`` row, ordered by ``occurred_at``."""
+    """Read every MCP-request ``audit_log`` row, ordered by ``occurred_at``.
+
+    Excludes the ``system:boot-profile-stamp`` row that
+    :func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`
+    writes at lifespan startup (#2288): the ``client_with_operator`` fixture
+    enters ``TestClient(app)`` as a context manager to run the FastAPI
+    lifespan, so every app-booting test in this module baselines one such
+    stamp row. It is infrastructure noise unrelated to the MCP request under
+    test, so scoping it out here keeps each test's row-count assertion about
+    the audit rows the request itself produced.
+    """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         result = await session.execute(
-            select(AuditLog).order_by(AuditLog.occurred_at),
+            select(AuditLog)
+            .where(AuditLog.operator_sub != BOOT_STAMP_OPERATOR_SUB)
+            .order_by(AuditLog.occurred_at),
         )
         return list(result.scalars().all())
 

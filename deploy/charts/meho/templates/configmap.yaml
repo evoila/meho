@@ -105,6 +105,17 @@ data:
   # `docs/cross-repo/reverse-proxy-contract.md` for the trust
   # contract.
   FORWARDED_ALLOW_IPS: {{ .Values.config.forwardedAllowIps | quote }}
+  # v0.20.0 (PR #2191) target-destination SSRF guard. The backplane
+  # refuses to register or dial a target that resolves to a non-public
+  # address; this env var is the operator's scoped opt-out. Read per
+  # request from the environment by
+  # `backend/src/meho_backplane/targets/ssrf_guard.py`
+  # (`TARGET_SSRF_ALLOWLIST_ENV`) — NOT via settings.py. Rendered
+  # unconditionally: the default `""` is a genuine no-op (the guard
+  # stays default-deny). Comma-separated CIDRs / bare IPs / hostname
+  # literals. See `deploy/charts/meho/values.yaml`
+  # (`config.targetSsrfAllowlist`) and `docs/codebase/target-ssrf-guard.md`.
+  MEHO_TARGET_SSRF_ALLOWLIST: {{ .Values.config.targetSsrfAllowlist | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

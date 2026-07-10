@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — first-class Helm chart value for the target-SSRF allowlist (#2240)
+
+- **The target-destination SSRF allowlist is now a typed Helm chart
+  value** (#2240). v0.20.0 shipped the default-deny target-destination
+  SSRF guard whose only opt-out is the `MEHO_TARGET_SSRF_ALLOWLIST` env
+  var ("Deployment impact — action likely required"), but the chart had
+  no surface for it: operators had to reach for the untyped `extraEnv`
+  escape hatch, which `values.schema.json` does not validate and
+  `helm show values` does not surface. A new `config.targetSsrfAllowlist`
+  value (schema-typed optional string, default `""`) now renders into
+  `MEHO_TARGET_SSRF_ALLOWLIST` on the backplane ConfigMap — injected
+  into the container via the existing `envFrom.configMapRef` — so a
+  scoped allowlist (e.g. `"10.0.0.0/8,192.168.0.0/16"` for a deploy that
+  registers on-prem appliances on RFC 1918 space) is a first-class,
+  `helm show values`-discoverable setting. The default `""` is a genuine
+  no-op that keeps the guard fully on (default-deny), so existing
+  installs are unchanged. Chart-only — the guard itself is untouched.
+  (#2240)
+
 ### Changed — scheduler `fire_at` tick-quantization latency documented on the API schema (#2245)
 
 - **The scheduler's fire-time latency window is now part of the API contract,

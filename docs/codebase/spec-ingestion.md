@@ -389,6 +389,27 @@ synchronously (no regression for small-spec / CI callers). This
 parallels the `meho.agents.run` + `meho.agents.run_status` async
 precedent (#811).
 
+**Inline spec content on the MCP tool (#2326).** Each `specs[*]` entry
+on `meho.connector.ingest` carries a required `uri` (the audit label)
+and an optional `content` string. When `content` is set the handler
+passes it straight to `SpecSource(uri=…, content=…)`, so the pipeline
+uses the inline bytes verbatim and skips the fetch — the same
+`SpecSource.content` on-ramp the CLI upload uses (`meho connector ingest
+--spec file://… / docs:…` reads the file client-side and posts the bytes
+here, #1535). Before this, the MCP tool schema required a `uri`-only
+entry and a `file://` / `docs:` scheme was rejected by the fetch-path
+https guard, forcing agent-driven flows to publish private lab specs to
+a public gist purely to satisfy the fetcher. Inline content bypasses the
+fetcher entirely, so it adds no SSRF surface (strictly safer than the
+gist workaround it retires) and lets an appliance-served or
+hand-authored spec with no public https URL (NSX, VCFA) be ingested over
+a fully MCP-drivable flow. The `uri` stays the audit label the origin
+classification reads (a non-`spec:` label with inline content →
+`inline`), so the resulting L1/L2 rows match what the CLI upload of the
+same file produces. A `file://` on a **content-less** `uri` is still
+rejected — inline content is the private-spec path, not a co-located
+filesystem fetch (a separate deployment-topology question).
+
 The `ingest` handler additionally maps **every typed `SpecError`
 sibling** to JSON-RPC `-32602 Invalid Params` with the structured
 detail on `error.data` **on the inline path**: `VersionMismatchError`

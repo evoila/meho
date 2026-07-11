@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — reject `kind=event` scheduler triggers at create until #826 lands (#2325)
+
+- Creating a `kind=event` scheduled trigger now returns a structured 422
+  `event_triggers_not_implemented` (MCP invalid-params with the same
+  code; UI modal banner naming #826) on **every** transport — REST, MCP,
+  and the operator console. Previously the create succeeded and the
+  trigger reported `status=active`, but it could never fire: the
+  event-subscription matcher in `events/drain.py` is still the documented
+  T5 no-op, so events that real producers already emit onto the outbox
+  (e.g. `operations/agent_run.py` publishes agent-run terminal-transition
+  events) were silently swallowed. Accept-and-never-fire is dishonest;
+  the honest shape until #826 wires the matcher is a refusal at create.
+  The guard is a single check in `SchedulerAdminService.create` — removed
+  in the same change that lands #826.
+- Any pre-existing `active` event trigger is parked to `paused` by a
+  one-shot startup reconcile (`reconcile_active_event_triggers`, run once
+  before the first scheduler tick), with the reason logged under
+  `scheduler_event_triggers_parked` so an operator sees it parked (via
+  `?kind=event&status=paused` or the UI list) rather than misleadingly
+  active. No schema change, no migration; `cron` / `one_off` creation is
+  unchanged.
+
 ### Added — approval-TTL lifecycle wired end-to-end (parked approvals now expire) (#2322)
 
 - Every parked approval is now stamped `expires_at = created_at +

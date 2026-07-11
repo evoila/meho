@@ -450,6 +450,44 @@ invalid cron expression surfaces as `invalid_arguments` at the
 boundary; an unknown `agent_definition_id` surfaces as
 `agent_definition_not_found` (422 / MCP invalid-params).
 
+### `kind=event` is refused at create until #826 (#2325)
+
+`kind=event` trigger creation is **refused** with a structured 422
+`event_triggers_not_implemented` (MCP invalid-params with the same
+code; UI modal banner naming #826) on every transport. The refusal
+lives in one place — `SchedulerAdminService.create` raises
+`EventTriggersNotImplementedError` before any DB write — so the wire
+schema still models the `event` kind but no `event` row is ever
+persisted.
+
+Why: the event-subscription matcher in
+`backend/src/meho_backplane/events/drain.py` is still the documented
+T5 no-op (it stamps `processed_at` on drained rows without consulting
+`scheduled_trigger`). Real producers already emit onto the outbox —
+`backend/src/meho_backplane/operations/agent_run.py` publishes
+agent-run terminal-transition events — so those events land in
+`event_outbox` and are silently swallowed. Accepting a trigger that
+reports `status=active` but can never fire is dishonest to the
+operator; refusing at create is the honest shape until #826 wires the
+matcher. The guard is a single create-site check (not a feature-flag
+system) and is removed in the same change that lands #826, at which
+point the `create_event_trigger` branch below the guard dispatches for
+real.
+
+**Pre-existing rows.** Event triggers created `active` before this
+refusal landed are parked to `paused` by a one-shot startup reconcile
+(`reconcile_active_event_triggers` in `scheduler/loop.py`, run once at
+the top of `_scheduler_loop` before the first tick). Because an event
+trigger carries no `next_fire_at`, the tick loop's `claim_due_triggers`
+scan never sees it, so an in-loop park path would never fire — the
+reconcile is the deliberate cleanup. The park reason is logged under
+`scheduler_event_triggers_parked` (`reason=event_triggers_not_implemented:826`),
+mirroring the `_park_trigger` "reason is logged for audit" precedent
+since the row has no reason column; the parked state is visible via
+`GET /api/v1/scheduler/triggers?kind=event&status=paused` and the UI
+list. The reconcile is idempotent and removed alongside the guard when
+#826 lands.
+
 ### Cross-tenant admin
 
 `tenant_admin` callers may target another tenant by passing

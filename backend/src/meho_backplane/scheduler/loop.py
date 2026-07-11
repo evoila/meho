@@ -159,10 +159,16 @@ from meho_backplane.scheduler.repository import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "reconcile_active_event_triggers",
     "run_one_tick",
     "start_scheduler",
     "stop_scheduler",
 ]
+
+#: Logged reason (and the code an operator greps) for an event trigger
+#: parked by the #2325 startup reconcile -- event dispatch is refused at
+#: create until #826 wires the event-subscription matcher.
+_EVENT_PARK_REASON: str = "event_triggers_not_implemented:826"
 
 _log = structlog.get_logger(__name__)
 
@@ -718,8 +724,48 @@ async def run_one_tick(invoker: AgentInvoker | None = None) -> int:
     return fires
 
 
+async def reconcile_active_event_triggers() -> int:
+    """Park any pre-existing ``active`` event triggers (#2325). Return the count.
+
+    ``kind=event`` triggers are refused at create until #826 wires the
+    event-subscription matcher (:mod:`meho_backplane.events.drain` is
+    still a no-op, so an event trigger sits ``active`` but can never
+    fire). Rows created ``active`` before that refusal landed would sit
+    silently dead. This one-shot startup reconcile transitions every
+    ``active`` event trigger to ``paused`` so an operator sees it parked
+    (via ``GET /api/v1/scheduler/triggers?kind=event&status=paused`` or
+    the UI list) rather than misleadingly ``active``; the reason is
+    logged under ``scheduler_event_triggers_parked`` -- mirroring the
+    :func:`_park_trigger` "reason is logged for audit" precedent, since
+    the row carries no reason column.
+
+    Idempotent: a second run finds no ``active`` event rows and parks
+    nothing. Removed in the change that lands the #826 matcher (event
+    triggers become dispatchable and no longer need parking).
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            update(ScheduledTrigger)
+            .where(
+                ScheduledTrigger.kind == ScheduledTriggerKind.EVENT.value,
+                ScheduledTrigger.status == ScheduledTriggerStatus.ACTIVE.value,
+            )
+            .values(status=ScheduledTriggerStatus.PAUSED.value)
+        )
+        await session.commit()
+    parked: int = result.rowcount or 0  # type: ignore[attr-defined]
+    if parked:
+        _log.warning(
+            "scheduler_event_triggers_parked",
+            count=parked,
+            reason=_EVENT_PARK_REASON,
+        )
+    return parked
+
+
 async def _scheduler_loop() -> None:
-    """The forever loop: sleep one cadence, tick, repeat.
+    """The forever loop: reconcile once, then sleep one cadence, tick, repeat.
 
     Sleep-then-tick (rather than tick-then-sleep) so the first tick
     after process start is delayed by one cadence -- letting the rest
@@ -729,6 +775,14 @@ async def _scheduler_loop() -> None:
     """
     interval = get_settings().scheduler_tick_interval_seconds
     _log.info("scheduler_started", interval_seconds=interval)
+    # #2325 one-shot startup reconcile: park any pre-existing active event
+    # triggers -- event dispatch is refused at create pending #826, so an
+    # active event row is silently dead. Guarded so a reconcile failure
+    # never stops the tick loop from starting.
+    try:
+        await reconcile_active_event_triggers()
+    except Exception:
+        _log.warning("scheduler_event_reconcile_failed", exc_info=True)
     while True:
         # Sleep first so the very first tick does not race the rest of
         # the lifespan startup; CancelledError here unwinds cleanly.

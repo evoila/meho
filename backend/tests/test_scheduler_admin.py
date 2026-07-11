@@ -62,6 +62,7 @@ from meho_backplane.mcp.registry import get_tool
 from meho_backplane.scheduler.schemas import ScheduledTriggerCreate
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    EventTriggersNotImplementedError,
     SchedulerAdminService,
 )
 from meho_backplane.settings import get_settings
@@ -412,25 +413,38 @@ async def test_service_create_one_off_trigger() -> None:
 
 
 @pytest.mark.asyncio
-async def test_service_create_event_trigger() -> None:
+async def test_service_create_rejects_event_trigger() -> None:
+    """kind=event is refused at create until #826 wires the matcher (#2325).
+
+    events/drain.py is still the documented no-op, so an accepted event
+    trigger sits active-but-never-fires. The service refuses it before
+    any DB write; no row is persisted.
+    """
     def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="event-bot")
     service = SchedulerAdminService()
-    entry = await service.create(
-        tenant_id=_TENANT_A,
-        created_by_sub="op-admin",
-        payload=ScheduledTriggerCreate(
-            kind=ScheduledTriggerKind.EVENT,
-            agent_definition_id=def_id,
-            event_filter={"connector_id": "bind9", "op_class": "write"},
-        ),
-    )
-    assert entry.kind == ScheduledTriggerKind.EVENT
-    assert entry.event_filter == {"connector_id": "bind9", "op_class": "write"}
-    assert entry.cron_expr is None
-    assert entry.fire_at is None
-    # Event triggers don't carry a wall-clock next_fire_at -- the outbox
-    # dispatcher (T3) wakes them.
-    assert entry.next_fire_at is None
+    with pytest.raises(EventTriggersNotImplementedError):
+        await service.create(
+            tenant_id=_TENANT_A,
+            created_by_sub="op-admin",
+            payload=ScheduledTriggerCreate(
+                kind=ScheduledTriggerKind.EVENT,
+                agent_definition_id=def_id,
+                event_filter={"connector_id": "bind9", "op_class": "write"},
+            ),
+        )
+    # No trigger row was persisted by the refused create.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ScheduledTrigger).where(ScheduledTrigger.tenant_id == _TENANT_A)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
 
 
 @pytest.mark.asyncio
@@ -974,6 +988,30 @@ async def test_rest_unknown_agent_definition_returns_422(client: TestClient) -> 
 
 
 @pytest.mark.asyncio
+async def test_rest_event_trigger_returns_422(client: TestClient) -> None:
+    """POST kind=event -> 422 'event_triggers_not_implemented' naming #826 (#2325)."""
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="event-422")
+    key = make_rsa_keypair("kid-event-422")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        result = client.post(
+            "/api/v1/scheduler/triggers",
+            json={
+                "kind": "event",
+                "agent_definition_id": str(def_id),
+                "event_filter": {"connector_id": "bind9", "op_class": "write"},
+            },
+            headers=headers,
+        )
+        assert result.status_code == 422, result.text
+        assert result.json()["detail"] == "event_triggers_not_implemented"
+        # The refused create persisted no row.
+        listed = client.get("/api/v1/scheduler/triggers", headers=headers)
+        assert listed.json()["triggers"] == []
+
+
+@pytest.mark.asyncio
 async def test_rest_invalid_cron_expr_returns_422(client: TestClient) -> None:
     """A POST with an invalid cron expression is rejected at schema time."""
     def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="invalid-cron")
@@ -1082,6 +1120,34 @@ async def test_mcp_create_rejects_cron_without_inputs() -> None:
                 "kind": "cron",
                 "agent_definition_id": str(def_id),
                 "cron_expr": "*/5 * * * *",
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_mcp_create_rejects_event_trigger() -> None:
+    """meho.scheduler.create refuses kind=event as invalid-params (#2325).
+
+    Same 'event_triggers_not_implemented' code the REST route surfaces;
+    kind=event stays refused until #826 wires the matcher.
+    """
+    from meho_backplane.mcp.server import McpInvalidParamsError
+    from meho_backplane.mcp.tools.scheduler import _create_handler  # type: ignore[attr-defined]
+
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="mcp-event-bot")
+    operator = Operator(
+        sub="mcp-admin",
+        raw_jwt="dummy",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    with pytest.raises(McpInvalidParamsError, match="event_triggers_not_implemented"):
+        await _create_handler(
+            operator,
+            {
+                "kind": "event",
+                "agent_definition_id": str(def_id),
+                "event_filter": {"connector_id": "bind9", "op_class": "write"},
             },
         )
 
@@ -1234,3 +1300,69 @@ async def test_durability_trigger_survives_scheduler_restart(
     second_tick_fires = await run_one_tick()
     assert second_tick_fires == 0
     assert fire_calls.count(entry.id) == 1
+
+
+# ---------------------------------------------------------------------------
+# Startup reconcile of pre-existing active event triggers (#2325)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reconcile_parks_active_event_triggers() -> None:
+    """Pre-existing active event triggers are parked to 'paused' (#2325).
+
+    An event trigger created active before the create-time refusal landed
+    would sit silently dead (the drain matcher is a no-op pending #826).
+    The one-shot startup reconcile transitions it to 'paused' so an
+    operator sees it parked; cron / one_off rows are untouched. The
+    reconcile is idempotent -- a second run parks nothing.
+    """
+    from meho_backplane.scheduler.loop import reconcile_active_event_triggers
+    from meho_backplane.scheduler.repository import create_event_trigger
+
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="reconcile-bot")
+
+    # Seed an active event trigger directly via the repository (the
+    # service refuses kind=event, which is exactly the state this
+    # reconcile cleans up for rows that predate the refusal).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        event_row = await create_event_trigger(
+            session,
+            tenant_id=_TENANT_A,
+            agent_definition_id=def_id,
+            event_filter={"connector_id": "bind9", "op_class": "write"},
+            inputs=None,
+            identity_sub="__scheduler__",
+            created_by_sub="op-admin",
+            in_flight_policy="fail_into_audit",
+        )
+        event_id = event_row.id
+        await session.commit()
+
+    # A live cron trigger the reconcile must leave alone.
+    service = SchedulerAdminService()
+    cron = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="op-admin",
+        payload=ScheduledTriggerCreate(
+            kind=ScheduledTriggerKind.CRON,
+            agent_definition_id=def_id,
+            cron_expr="*/5 * * * *",
+            inputs={"prompt": "scheduled run"},
+        ),
+    )
+
+    parked = await reconcile_active_event_triggers()
+    assert parked == 1
+
+    async with sessionmaker() as session:
+        event_after = await session.get(ScheduledTrigger, event_id)
+        assert event_after is not None
+        assert event_after.status == ScheduledTriggerStatus.PAUSED.value
+    cron_after = await service.get(_TENANT_A, cron.id)
+    assert cron_after is not None
+    assert cron_after.status == ScheduledTriggerStatus.ACTIVE
+
+    # Idempotent: a second reconcile finds no active event rows.
+    assert await reconcile_active_event_triggers() == 0

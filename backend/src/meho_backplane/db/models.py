@@ -4053,6 +4053,48 @@ class ScheduledTrigger(Base):
         nullable=True,
         default=None,
     )
+    # Skip-state projection (#2327). The tick loop's precondition gate
+    # (:func:`~meho_backplane.scheduler.loop._prepare_invocation`) skips a
+    # due trigger without advancing its state when the definition is
+    # missing/disabled or credentials are unresolved. Before #2327 that
+    # skip was invisible on the row -- an operator's ``scheduler list``
+    # showed a healthy-looking ``active`` trigger while it silently
+    # skipped every 30 s tick for weeks. These three columns project the
+    # cumulative skip state onto the row so the read surfaces
+    # (``scheduler.list`` / ``scheduler.show`` / the operator console)
+    # agree with the pod-log WARNs. Migration ``0057`` adds them.
+    #
+    # * ``last_skip_reason`` -- the stable machine tag of the most recent
+    #   skip cause (``definition_missing`` / ``definition_disabled`` /
+    #   ``credentials_unresolved``; a park path also stamps
+    #   ``invalid_cron_expr`` / ``unknown_kind``). NULL until the first
+    #   skip; cleared back to NULL on the next successful fire.
+    last_skip_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # * ``last_skipped_at`` -- UTC time of the most recent skip. NULL
+    #   until the first skip; cleared on the next successful fire.
+    last_skipped_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # * ``skip_count`` -- consecutive skips since the last successful
+    #   fire (reset to 0 on the next fire). The loop parks the trigger
+    #   (``status='paused'``) once this reaches
+    #   :data:`~meho_backplane.scheduler.loop._PARK_AFTER_CONSECUTIVE_SKIPS`
+    #   so a permanently-unresolvable trigger stops silently re-tripping
+    #   every tick and the state machine itself communicates "broken,
+    #   stopped trying". NOT NULL, default 0; migration 0057 backfills
+    #   pre-#2327 rows with the server-side ``0`` default.
+    skip_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     # JSON payload forwarded as the agent run's initial input by the
     # dispatcher (T2 #823). Nullable: a trigger that just kicks off an
     # agent definition with no extra parameters leaves this NULL.

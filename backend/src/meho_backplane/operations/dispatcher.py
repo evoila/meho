@@ -277,6 +277,7 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     build_permission_preflight,
     build_proposed_effect,
+    describe_preview_provenance,
 )
 from meho_backplane.operations._validate import (
     compute_params_hash,
@@ -1600,6 +1601,20 @@ async def _build_proposed_effect(
             base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
         if preflight is not None:
             base["permission_preflight"] = preflight
+        # Stamp the reviewer-facing preview provenance onto every parked
+        # op's envelope (#2332). ``preview_populated`` lets a caller
+        # programmatically refuse to auto-approve an op-identity-only
+        # (blind) request; ``preview_reason`` names WHY a sparse preview is
+        # sparse — a deliberately-redacted credential write vs a connector
+        # that never populated one — so the approval surface can style the
+        # blind case as elevated-risk. Read from the value
+        # :func:`build_proposed_effect` produced (``preview``), so the
+        # identifier-only default that ``base`` may hold is classified
+        # correctly rather than mislabelled populated.
+        preview_populated, preview_reason = describe_preview_provenance(preview, op_id=op_id)
+        base["preview_populated"] = preview_populated
+        if preview_reason is not None:
+            base["preview_reason"] = preview_reason
         # Promote the catalog severity onto every parked op's envelope
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``

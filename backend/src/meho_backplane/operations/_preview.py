@@ -87,9 +87,12 @@ if TYPE_CHECKING:
     from meho_backplane.db.models import EndpointDescriptor
 
 __all__ = [
+    "PREVIEW_REASON_CREDENTIAL_REDACTED",
+    "PREVIEW_REASON_NOT_POPULATED",
     "PreviewContext",
     "build_permission_preflight",
     "build_proposed_effect",
+    "describe_preview_provenance",
     "register_permission_preflight",
     "register_preview_builder",
 ]
@@ -102,6 +105,21 @@ _log = structlog.get_logger(__name__)
 _SENSITIVE_CLASSES: frozenset[str] = frozenset(
     {"credential_read", "credential_mint", "credential_write"}
 )
+
+#: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
+#: collapsed to the op-identity-only default *because the op is a
+#: credential class with no bespoke builder* — the value redaction is
+#: intentional, not a missing preview. Distinguishes "asked to approve a
+#: deliberately-redacted credential write" from "the connector never
+#: populated a preview" so the approval surface can style it as
+#: elevated-risk rather than merely incomplete.
+PREVIEW_REASON_CREDENTIAL_REDACTED = "credential_write_redacted"
+
+#: Reviewer-facing reason code (#2332) for a ``proposed_effect`` that
+#: collapsed to the op-identity-only default for a *non*-credential op —
+#: no builder registered and nothing to echo (empty params), or a builder
+#: that declined. The preview is absent, not deliberately redacted.
+PREVIEW_REASON_NOT_POPULATED = "connector_did_not_populate"
 
 #: Sentinel substituted for a scrubbed secret-bearing param value. A
 #: non-empty marker (rather than dropping the key) keeps the param shape
@@ -452,6 +470,50 @@ async def build_proposed_effect(ctx: PreviewContext) -> dict[str, Any] | None:
         "op_class": op_class,
         "preview": preview,
     }
+
+
+def describe_preview_provenance(
+    preview: dict[str, Any] | None, *, op_id: str
+) -> tuple[bool, str | None]:
+    """Classify a built ``proposed_effect`` envelope for the reviewer surface (#2332).
+
+    Returns ``(preview_populated, preview_reason)`` from the value
+    :func:`build_proposed_effect` produced (before the identifier-only
+    default is merged in), so the dispatcher can stamp both onto every
+    parked-request envelope:
+
+    * ``preview_populated`` — ``True`` when a real bespoke ``preview`` or
+      generic ``params_echo`` landed; ``False`` when the envelope
+      collapsed to the op-identity-only default (a caller can then refuse
+      to auto-approve the blind case). A builder that *raised* (the
+      ``preview_unavailable`` marker, #1628) counts as **not** populated —
+      the blast radius is unknown, not shown.
+    * ``preview_reason`` — set only when ``preview_populated`` is ``False``
+      and the op is not the fault case:
+
+      - :data:`PREVIEW_REASON_CREDENTIAL_REDACTED` when the op is a
+        credential class (its preview is intentionally suppressed absent a
+        bespoke builder).
+      - :data:`PREVIEW_REASON_NOT_POPULATED` otherwise (no builder /
+        nothing to echo).
+
+      ``None`` when the preview is populated, or when the builder faulted
+      (that state carries its own ``preview_unavailable`` / ``preview_error``
+      marker and is not a "reason" for an intentionally-sparse preview).
+    """
+    if preview is not None and preview.get("preview_unavailable") is True:
+        # The builder ran but faulted — a distinct signaled state that
+        # already carries its own marker + reason; not "populated", and
+        # not an intentionally-sparse-preview reason code.
+        return False, None
+    if preview is not None and ("preview" in preview or "params_echo" in preview):
+        return True, None
+    # Collapsed to the identifier-only default: name WHY so the approver
+    # sees a deliberately-redacted credential write distinctly from a
+    # connector that simply never populated a preview.
+    if classify_op(op_id) in _SENSITIVE_CLASSES:
+        return False, PREVIEW_REASON_CREDENTIAL_REDACTED
+    return False, PREVIEW_REASON_NOT_POPULATED
 
 
 async def build_permission_preflight(ctx: PreviewContext) -> dict[str, Any] | None:

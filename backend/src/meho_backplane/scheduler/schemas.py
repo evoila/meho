@@ -308,6 +308,42 @@ class ScheduledTriggerRead(BaseModel):
             ),
         ),
     ]
+    last_skip_reason: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Machine tag of the most recent tick the scheduler skipped this "
+                "trigger without firing -- one of 'definition_missing', "
+                "'definition_disabled', 'credentials_unresolved' (a park also "
+                "stamps 'invalid_cron_expr' / 'unknown_kind'). null when the "
+                "trigger has never skipped since its last successful fire "
+                "(cleared to null on the next fire). A non-null value on an "
+                "'active' trigger means it looks healthy but is silently not "
+                "firing -- fix the named cause. (#2327)"
+            ),
+        ),
+    ]
+    last_skipped_at: Annotated[
+        datetime | None,
+        Field(
+            description=(
+                "UTC timestamp of the most recent skipped tick; null until the "
+                "first skip and cleared on the next successful fire. (#2327)"
+            ),
+        ),
+    ]
+    skip_count: Annotated[
+        int,
+        Field(
+            description=(
+                "Consecutive ticks skipped since the last successful fire (0 when "
+                "healthy; reset to 0 on the next fire). The scheduler parks the "
+                "trigger ('status'='paused') once this reaches its internal "
+                "consecutive-skip cap, so a permanently-unresolvable trigger "
+                "stops silently re-tripping every tick. (#2327)"
+            ),
+        ),
+    ]
     inputs: dict[str, object] | None
     identity_sub: str
     created_by_sub: str

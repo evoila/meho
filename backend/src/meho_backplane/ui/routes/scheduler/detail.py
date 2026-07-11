@@ -124,6 +124,12 @@ def _build_context(
             "in_flight_policy": trigger.in_flight_policy.value,
             "next_fire_at": coerce_utc_aware(trigger.next_fire_at),
             "last_fired_at": coerce_utc_aware(trigger.last_fired_at),
+            # Skip-state projection (#2327) -- surfaces the silent-skip
+            # loop on the row so a healthy-looking 'active' trigger that
+            # is actually skipping every tick is visible to the operator.
+            "last_skip_reason": trigger.last_skip_reason,
+            "last_skipped_at": coerce_utc_aware(trigger.last_skipped_at),
+            "skip_count": trigger.skip_count,
             "inputs_json": _pretty_json(trigger.inputs),
             "identity_sub": trigger.identity_sub,
             "created_by_sub": trigger.created_by_sub,

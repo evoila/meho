@@ -120,6 +120,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -180,6 +181,14 @@ _SCHEDULER_ADVISORY_LOCK_KEY: int = 0x4D45_484F_5343_4844  # "MEHOSCHD"
 #: one-off workloads (the consumer doc anticipates "dozens" of
 #: triggers per deployment).
 _CLAIM_BATCH_LIMIT: int = 50
+
+#: Slow cadence (seconds) for the scheduler Vault-token ``lookup-self``
+#: health check (#2328). Deliberately a fixed constant, not a tunable:
+#: hourly is frequent enough to cut time-to-notice on a dead token from
+#: weeks to minutes without adding Vault load, and the substrate stays
+#: config-minimal. The renew-on-use path (which actually keeps the token
+#: alive) runs at tick frequency; this is only the visibility backstop.
+_TOKEN_CHECK_INTERVAL_SECONDS: float = 3600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -718,6 +727,27 @@ async def run_one_tick(invoker: AgentInvoker | None = None) -> int:
     return fires
 
 
+async def _check_scheduler_vault_token(*, reason: str) -> None:
+    """Run the scheduler Vault-token ``lookup-self`` health check (#2328).
+
+    Thin, never-raising wrapper around
+    :func:`~meho_backplane.scheduler.vault_credentials.verify_scheduler_token`
+    so a token check (which reaches Vault) can never stall or crash the
+    tick loop. ``verify_scheduler_token`` already logs a dead/unreachable
+    token loudly; this only guards against an unexpected error escaping
+    it. An unconfigured token is a silent no-op there (the documented
+    env-var-fallback opt-out).
+    """
+    from meho_backplane.scheduler.vault_credentials import verify_scheduler_token
+
+    try:
+        await verify_scheduler_token(reason=reason)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.warning("scheduler_vault_token_check_errored", reason=reason, exc_info=True)
+
+
 async def _scheduler_loop() -> None:
     """The forever loop: sleep one cadence, tick, repeat.
 
@@ -726,9 +756,16 @@ async def _scheduler_loop() -> None:
     of the lifespan eager-init complete before the loop touches the DB.
     Per-tick ``try`` / ``except`` so a transient failure (DB blip,
     advisory-lock query error) is logged and the loop continues.
+
+    A Vault-token ``lookup-self`` runs once at startup and then on a
+    slow cadence (:data:`_TOKEN_CHECK_INTERVAL_SECONDS`) so a dead
+    scheduler token surfaces as a loud log within minutes rather than
+    weeks (#2328).
     """
     interval = get_settings().scheduler_tick_interval_seconds
     _log.info("scheduler_started", interval_seconds=interval)
+    await _check_scheduler_vault_token(reason="startup")
+    last_token_check = time.monotonic()
     while True:
         # Sleep first so the very first tick does not race the rest of
         # the lifespan startup; CancelledError here unwinds cleanly.
@@ -739,6 +776,9 @@ async def _scheduler_loop() -> None:
             raise
         except Exception:
             _log.warning("scheduler_tick_failed", exc_info=True)
+        if time.monotonic() - last_token_check >= _TOKEN_CHECK_INTERVAL_SECONDS:
+            last_token_check = time.monotonic()
+            await _check_scheduler_vault_token(reason="periodic")
 
 
 def start_scheduler() -> asyncio.Task[None]:

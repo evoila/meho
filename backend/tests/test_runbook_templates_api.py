@@ -440,8 +440,8 @@ def test_list_operator_ok(client: TestClient) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert len(body["templates"]) == 1
-    assert body["templates"][0]["slug"] == "rotate-cert"
+    assert len(body["items"]) == 1
+    assert body["items"][0]["slug"] == "rotate-cert"
     fake_list.assert_awaited_once()
     assert fake_list.await_args.args[0] == tenant_a
 
@@ -479,14 +479,14 @@ def test_list_invalid_status_422(client: TestClient) -> None:
     assert response.status_code == 422
 
 
-def test_list_envelope_v2_unified_shape(client: TestClient) -> None:
-    """``?envelope=v2`` returns ``{items, next_cursor}``; the keyed field is absent.
+def test_list_unified_envelope_shape(client: TestClient) -> None:
+    """``GET /api/v1/runbooks/templates`` returns ``{items, next_cursor}`` by default.
 
-    G0.22-T6 (#1611): the same rows the default ``{"templates": [...]}``
-    shape carries ride under ``items``; the listing is unpaged so
+    #2338 breaking pass: the rows ride under ``items`` (the legacy
+    ``{"templates": [...]}`` key is gone); the listing is unpaged so
     ``next_cursor`` is always ``null``. The cross-endpoint contract pin
-    lives in ``test_api_v1_list_envelope_v2.py``; this test owns the
-    data-bearing assertion that the v2 items match the keyed payload.
+    lives in ``test_api_v1_list_envelope_contract.py``; this test owns
+    the data-bearing assertion that the items match the payload.
     """
     key, token = _operator_token()
     summary = TemplateSummary(
@@ -504,7 +504,7 @@ def test_list_envelope_v2_unified_shape(client: TestClient) -> None:
     ):
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get(
-            "/api/v1/runbooks/templates?envelope=v2",
+            "/api/v1/runbooks/templates",
             headers=_authed(token),
         )
 

@@ -49,7 +49,7 @@ func TestRunListRunsHappyPath(t *testing.T) {
 			t.Errorf("expected GET; got %s", r.Method)
 		}
 		lastQuery = r.URL.RawQuery
-		resp := api.RunbookListRunsResponse{Runs: []api.RunSummary{
+		resp := api.RunbookListRunsResponse{Items: []api.RunSummary{
 			newRunSummary(t, "11111111-1111-4111-8111-111111111111",
 				"vmware-host-quiesce", "alice", api.RunSummaryState("in_progress"), 2, 5),
 			newRunSummary(t, "22222222-2222-4222-8222-222222222222",
@@ -72,7 +72,7 @@ func TestRunListRunsHappyPath(t *testing.T) {
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("runListRuns: %v; stderr=%s", err, stderr.String())
+		t.Fatalf("runListItems: %v; stderr=%s", err, stderr.String())
 	}
 	for _, want := range []string{
 		"status=in_progress", "assignee=alice",
@@ -101,7 +101,7 @@ func TestRunListRunsEmpty(t *testing.T) {
 	mux.HandleFunc("/api/v1/runbooks/runs", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Runs: nil})
+		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Items: nil})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -119,7 +119,7 @@ func TestRunListRunsEmpty(t *testing.T) {
 
 // TestRunListRunsJSON — issue test #17.
 func TestRunListRunsJSON(t *testing.T) {
-	expected := api.RunbookListRunsResponse{Runs: []api.RunSummary{
+	expected := api.RunbookListRunsResponse{Items: []api.RunSummary{
 		newRunSummary(t, "11111111-1111-4111-8111-111111111111",
 			"x", "alice", api.RunSummaryState("in_progress"), 1, 3),
 	}}
@@ -142,13 +142,13 @@ func TestRunListRunsJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
-	if len(decoded.Runs) != 1 || decoded.Runs[0].TemplateSlug != "x" {
+	if len(decoded.Items) != 1 || decoded.Items[0].TemplateSlug != "x" {
 		t.Errorf("envelope: %+v", decoded)
 	}
 	// Confirm full UUID is preserved in --json (not the 8-char
 	// truncation the table renders).
-	if decoded.Runs[0].RunId.String() != "11111111-1111-4111-8111-111111111111" {
-		t.Errorf("expected full UUID in --json; got %q", decoded.Runs[0].RunId.String())
+	if decoded.Items[0].RunId.String() != "11111111-1111-4111-8111-111111111111" {
+		t.Errorf("expected full UUID in --json; got %q", decoded.Items[0].RunId.String())
 	}
 }
 
@@ -162,7 +162,7 @@ func TestRunListRunsOperatorOmitsAssigneeQueryParam(t *testing.T) {
 		lastQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Runs: []api.RunSummary{
+		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Items: []api.RunSummary{
 			newRunSummary(t, "11111111-1111-4111-8111-111111111111",
 				"x", "operator-self", api.RunSummaryState("in_progress"), 1, 2),
 		}})
@@ -174,7 +174,7 @@ func TestRunListRunsOperatorOmitsAssigneeQueryParam(t *testing.T) {
 	cmd, _, _ := newRunCmd(t)
 	err := runListRuns(cmd, listRunsOptions{BackplaneOverride: srv.URL})
 	if err != nil {
-		t.Fatalf("runListRuns: %v", err)
+		t.Fatalf("runListItems: %v", err)
 	}
 	if strings.Contains(lastQuery, "assignee=") {
 		t.Errorf("OPERATOR call without --assignee should omit the query param; got %q", lastQuery)
@@ -190,7 +190,7 @@ func TestRunListRunsAdminWithAssignee(t *testing.T) {
 		lastQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Runs: []api.RunSummary{
+		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Items: []api.RunSummary{
 			newRunSummary(t, "11111111-1111-4111-8111-111111111111",
 				"x", "junior-bob", api.RunSummaryState("in_progress"), 1, 2),
 		}})
@@ -205,7 +205,7 @@ func TestRunListRunsAdminWithAssignee(t *testing.T) {
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("runListRuns: %v", err)
+		t.Fatalf("runListItems: %v", err)
 	}
 	if !strings.Contains(lastQuery, "assignee=junior-bob") {
 		t.Errorf("expected assignee in query; got %q", lastQuery)
@@ -221,7 +221,7 @@ func TestRunListRunsForwardsWorkRef(t *testing.T) {
 		lastQuery = r.URL.RawQuery
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Runs: []api.RunSummary{
+		_ = json.NewEncoder(w).Encode(api.RunbookListRunsResponse{Items: []api.RunSummary{
 			newRunSummary(t, "11111111-1111-4111-8111-111111111111",
 				"x", "operator-self", api.RunSummaryState("in_progress"), 1, 2),
 		}})
@@ -236,7 +236,7 @@ func TestRunListRunsForwardsWorkRef(t *testing.T) {
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("runListRuns: %v", err)
+		t.Fatalf("runListItems: %v", err)
 	}
 	if !strings.Contains(lastQuery, "work_ref=") ||
 		!strings.Contains(lastQuery, url.QueryEscape("gh:evoila/meho#9")) {
@@ -335,7 +335,7 @@ func TestRunListRunsOpacityNoStepBodyLeak(t *testing.T) {
 	cmd, stdout, _ := newRunCmd(t)
 	err := runListRuns(cmd, listRunsOptions{BackplaneOverride: srv.URL})
 	if err != nil {
-		t.Fatalf("runListRuns: %v", err)
+		t.Fatalf("runListItems: %v", err)
 	}
 	if strings.Contains(stdout.String(), "LEAKED_STEP_BODY") {
 		t.Errorf("OPACITY VIOLATION: leaked step body in table; got:\n%s", stdout.String())

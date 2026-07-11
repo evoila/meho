@@ -862,7 +862,7 @@
           "targets"
         ],
         "summary": "List Targets",
-        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.\n\nG0.16-T6 Finding A (#1312) \u2014 non-breaking shape opt-in. The\ndefault response stays the v0.8.0 bare list ``[TargetSummary,\n...]``; passing ``?envelope=v2`` returns the unified envelope\n``{\"items\": [...], \"next_cursor\": <opaque str | null>}`` per\n``docs/codebase/api-shape-conventions.md`` \u00a72. The cursor on the\nv2 envelope is the last-row ``name`` of the page when the page\nfilled to ``limit`` (so a re-issue carries pagination), and\n``None`` when the page exhausted the matching set (so callers\nsee \"no more pages\" without inspecting list length). The opt-in\nsemantics let SDK / CLI / MCP sister surfaces adopt the v2\nshape at their own cadence; the v0.8.0 default flips after two\nrelease cycles per the \u00a72 migration recipe.",
+        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": <opaque str |\nnull>}`` list envelope per ``docs/codebase/api-shape-conventions.md``\n\u00a72 (#2338 breaking pass \u2014 the response shape converged from the\nv0.8.0 bare list onto the reference envelope; the ``?envelope=v2``\nopt-in that bridged the migration was retired). ``next_cursor`` is\nthe last-row ``name`` of the page when the page filled to ``limit``\n(so a re-issue carries pagination), and ``None`` when the page\nexhausted the matching set (so callers see \"no more pages\" without\ninspecting list length).",
         "operationId": "list_targets_api_v1_targets_get",
         "parameters": [
           {
@@ -898,19 +898,6 @@
             }
           },
           {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
-          },
-          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -927,19 +914,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/TargetSummary"
-                      }
-                    },
-                    {
-                      "type": "object",
-                      "additionalProperties": true
-                    }
-                  ],
-                  "title": "Response List Targets Api V1 Targets Get"
+                  "$ref": "#/components/schemas/TargetListResponse"
                 }
               }
             }
@@ -1389,10 +1364,10 @@
               "const": "v2",
               "type": "string",
               "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).",
               "title": "Envelope"
             },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+            "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312)."
           },
           {
             "name": "authorization",
@@ -1575,10 +1550,10 @@
               "const": "v2",
               "type": "string",
               "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).",
               "title": "Envelope"
             },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+            "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312)."
           },
           {
             "name": "authorization",
@@ -3232,7 +3207,7 @@
           "connectors"
         ],
         "summary": "List Endpoint",
-        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nThe default response is wrapped in ``{\"connectors\": [...]}`` so\nfuture paging / cursor fields can land non-breakingly. The route\nbuilds the payload by calling :meth:`ConnectorListItem.model_dump`\n(with ``mode=\"json\"``) on each item returned by\n:func:`list_ingested_connectors` rather than annotating\n``response_model=ConnectorListResponse`` \u2014 per-item ``tenant_id``\nUUIDs need to render as strings in JSON, and the per-item\n``mode=\"json\"`` dump is the simplest way to get that without\nintroducing a custom serializer.\n\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": ...}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is\nnot cursor-paginated, so ``next_cursor`` is always ``None`` under\nthe opt-in. Omitting the param keeps the v0.8.0 default shape so\nno client breaks (G0.18-T3 #1356, completing #1312 acceptance A).",
+        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n``{\"connectors\": [...]}`` keyed shape onto the reference envelope;\nthe ``?envelope=v2`` opt-in that bridged the migration was retired).\nPer-item ``tenant_id`` UUIDs render as JSON strings via FastAPI's\n``response_model`` serialization. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``null``.",
         "operationId": "list_endpoint_api_v1_connectors_get",
         "parameters": [
           {
@@ -3252,19 +3227,6 @@
             }
           },
           {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
-          },
-          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -3281,23 +3243,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "additionalProperties": {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "additionalProperties": true
-                        }
-                      }
-                    },
-                    {
-                      "type": "object",
-                      "additionalProperties": true
-                    }
-                  ],
-                  "title": "Response List Endpoint Api V1 Connectors Get"
+                  "$ref": "#/components/schemas/ConnectorListResponse"
                 }
               }
             }
@@ -4138,7 +4084,7 @@
           "runbooks"
         ],
         "summary": "List Templates",
-        "description": "List the latest version of each template slug for the operator's tenant.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant\nid from the query string. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler; ``operator`` and\n``tenant_admin`` both pass.\n\nThe optional ``status`` / ``target_kind`` filters narrow the rows\nconsidered before the latest-per-slug projection; ``limit`` is capped\nat 500. ``status`` is typed as the closed ``draft`` / ``published`` /\n``deprecated`` vocabulary, so an out-of-vocabulary value trips a clean\n422 at FastAPI's query-parameter validation boundary (before the\nhandler body runs) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`\ninternally.\n\nThe default response is the v0.8.0 keyed\n:class:`RunbookTemplateListResponse` shape (``{\"templates\": [...]}``).\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72 -- the listing is not\ncursor-paginated (``limit`` truncates), so ``next_cursor`` is always\n``null`` under the opt-in, matching the sibling unpaged adopters.\nOmitting the param keeps the keyed default so no client breaks\n(G0.22-T6 #1611, joining the shape unified in #1356/#1366).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as the named :class:`RunbookTemplateListResponse` while\nstill letting the opt-in branch return the unified shape.\n\nBinds ``audit_op_id=\"runbook.list_templates\"`` + ``audit_op_class=\n\"read\"`` before the service call.",
+        "description": "List the latest version of each template slug for the operator's tenant.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant\nid from the query string. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler; ``operator`` and\n``tenant_admin`` both pass.\n\nThe optional ``status`` / ``target_kind`` filters narrow the rows\nconsidered before the latest-per-slug projection; ``limit`` is capped\nat 500. ``status`` is typed as the closed ``draft`` / ``published`` /\n``deprecated`` vocabulary, so an out-of-vocabulary value trips a clean\n422 at FastAPI's query-parameter validation boundary (before the\nhandler body runs) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`\ninternally.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass -- the response shape converged from the v0.8.0\n``{\"templates\": [...]}`` keyed shape onto the reference envelope,\nrenaming ``templates`` -> ``items``; the ``?envelope=v2`` opt-in\nthat bridged the migration was retired). The listing is not\ncursor-paginated (``limit`` truncates), so ``next_cursor`` is always\n``null``, matching the sibling unpaged adopters.\n\nBinds ``audit_op_id=\"runbook.list_templates\"`` + ``audit_op_class=\n\"read\"`` before the service call.",
         "operationId": "list_templates_api_v1_runbooks_templates_get",
         "parameters": [
           {
@@ -4177,19 +4123,6 @@
               "default": 100,
               "title": "Limit"
             }
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -4679,7 +4612,7 @@
           "runbooks"
         ],
         "summary": "List Runs",
-        "description": "List runs for the operator's tenant, scoped by role.\n\nRole floor: ``operator``. The handler computes\n``caller_is_admin`` from ``operator.tenant_role`` and passes it\nto the service:\n\n* ``caller_is_admin=False`` (operator path) -- the service forces\n  ``assignee=operator.sub`` regardless of what the query string\n  says, so an ``OPERATOR`` only ever sees their own runs even if\n  they try to filter to another assignee. The filter is a\n  *narrow* surface for their own view, never an *escape* into\n  another operator's.\n* ``caller_is_admin=True`` (admin path) -- the filter is honoured\n  as-is, so a ``TENANT_ADMIN`` can pass ``?assignee=<other-sub>``\n  to inspect a junior's runs.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``status`` is typed as the\nclosed ``in_progress`` / ``completed`` / ``abandoned`` vocabulary,\nso an out-of-vocabulary value trips a clean 422 at FastAPI's\nquery-parameter validation boundary (before the handler body\nruns) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.runs_schemas.ListRunsFilter`\ninternally.\n\nThe default response is the v0.8.0 keyed\n:class:`RunbookListRunsResponse` shape (``{\"runs\": [...]}``).\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72 -- the listing is\nnot cursor-paginated (``limit`` truncates), so ``next_cursor`` is\nalways ``null`` under the opt-in, matching the sibling unpaged\nadopters. Omitting the param keeps the keyed default so no client\nbreaks (G0.22-T6 #1611, joining the shape unified in #1356/#1366).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so\nthe documented OpenAPI 200 schema, and the typed CLI client\ngenerated from it) as the named :class:`RunbookListRunsResponse`\nwhile still letting the opt-in branch return the unified shape.\n\nBinds ``audit_op_id=\"runbook.list_runs\"`` + ``audit_op_class=\n\"read\"`` before the service call. ``runbook.list_runs`` matches\nno ``.list`` / ``.get`` suffix the broadcast classifier\nrecognises, so the explicit override is load-bearing to keep\nclassification from defaulting to ``op_class=\"other\"`` (same\ngotcha :mod:`meho_backplane.api.v1.runbook_templates`'s\n``list_templates`` documents).",
+        "description": "List runs for the operator's tenant, scoped by role.\n\nRole floor: ``operator``. The handler computes\n``caller_is_admin`` from ``operator.tenant_role`` and passes it\nto the service:\n\n* ``caller_is_admin=False`` (operator path) -- the service forces\n  ``assignee=operator.sub`` regardless of what the query string\n  says, so an ``OPERATOR`` only ever sees their own runs even if\n  they try to filter to another assignee. The filter is a\n  *narrow* surface for their own view, never an *escape* into\n  another operator's.\n* ``caller_is_admin=True`` (admin path) -- the filter is honoured\n  as-is, so a ``TENANT_ADMIN`` can pass ``?assignee=<other-sub>``\n  to inspect a junior's runs.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``status`` is typed as the\nclosed ``in_progress`` / ``completed`` / ``abandoned`` vocabulary,\nso an out-of-vocabulary value trips a clean 422 at FastAPI's\nquery-parameter validation boundary (before the handler body\nruns) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.runs_schemas.ListRunsFilter`\ninternally.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass -- the response shape converged from the v0.8.0\n``{\"runs\": [...]}`` keyed shape onto the reference envelope,\nrenaming ``runs`` -> ``items``; the ``?envelope=v2`` opt-in that\nbridged the migration was retired). The listing is not\ncursor-paginated (``limit`` truncates), so ``next_cursor`` is always\n``null``, matching the sibling unpaged adopters.\n\nBinds ``audit_op_id=\"runbook.list_runs\"`` + ``audit_op_class=\n\"read\"`` before the service call. ``runbook.list_runs`` matches\nno ``.list`` / ``.get`` suffix the broadcast classifier\nrecognises, so the explicit override is load-bearing to keep\nclassification from defaulting to ``op_class=\"other\"`` (same\ngotcha :mod:`meho_backplane.api.v1.runbook_templates`'s\n``list_templates`` documents).",
         "operationId": "list_runs_api_v1_runbooks_runs_get",
         "parameters": [
           {
@@ -4738,19 +4671,6 @@
               "default": 100,
               "title": "Limit"
             }
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -5579,7 +5499,7 @@
           "audit"
         ],
         "summary": "My Recent",
-        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.\n\nThe default response is the v0.8.0 :class:`AuditQueryResult` shape\n(``rows`` + ``next_cursor``). Passing ``?envelope=v2`` returns the\nunified ``{\"items\": [...], \"next_cursor\": ...}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72, carrying the same\nforward-only cursor. Omitting the param keeps the v0.8.0 default so\nno client breaks (G0.18-T3 #1356, completing #1312 acceptance A).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as the named :class:`AuditQueryResult` while still letting\nthe opt-in branch return the unified shape.",
+        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": ...}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n:class:`AuditQueryResult` ``{\"rows\": [...]}`` shape onto the\nreference envelope, renaming ``rows`` -> ``items``; the\n``?envelope=v2`` opt-in that bridged the migration was retired),\ncarrying the same forward-only cursor. The sibling audit-query\nendpoints (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep\nthe :class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set.",
         "operationId": "my_recent_api_v1_audit_my_recent_get",
         "parameters": [
           {
@@ -5606,19 +5526,6 @@
             }
           },
           {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
-          },
-          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -5635,7 +5542,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AuditQueryResult"
+                  "$ref": "#/components/schemas/MyRecentPage"
                 }
               }
             }
@@ -5767,7 +5674,7 @@
           "broadcast"
         ],
         "summary": "List Overrides",
-        "description": "List override rules owned by the operator's tenant.\n\nThe default response is the v0.8.0 bare list of\n:class:`BroadcastOverrideRead`. Passing ``?envelope=v2`` returns\nthe unified ``{\"items\": [...], \"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``null`` under the\nopt-in. Omitting the param keeps the v0.8.0 default so no client\nbreaks (G0.18-T3 #1356, completing #1312 acceptance A).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as ``list[BroadcastOverrideRead]`` while still letting the\nopt-in branch return the unified shape.",
+        "description": "List override rules owned by the operator's tenant.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0 bare\n``[BroadcastOverrideRead, ...]`` array onto the reference envelope;\nthe ``?envelope=v2`` opt-in that bridged the migration was retired).\nThis listing is not cursor-paginated, so ``next_cursor`` is always\n``null``.",
         "operationId": "list_overrides_api_v1_broadcast_overrides_get",
         "parameters": [
           {
@@ -5782,19 +5689,6 @@
               "title": "Op Id Pattern"
             },
             "description": "Exact-match filter on op_id_pattern (not a glob match)."
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -5813,11 +5707,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/BroadcastOverrideRead"
-                  },
-                  "title": "Response List Overrides Api V1 Broadcast Overrides Get"
+                  "$ref": "#/components/schemas/BroadcastOverridesListResponse"
                 }
               }
             }
@@ -7647,7 +7537,7 @@
           "conventions"
         ],
         "summary": "List Conventions",
-        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.\n\nThe default response is the v0.8.0 keyed\n:class:`ConventionListResponse` shape (``entries`` +\n``budget_status``). Passing ``?envelope=v2`` returns the unified\n``{\"items\": [...], \"next_cursor\": null, \"budget_status\": {...}}``\nshape per ``docs/codebase/api-shape-conventions.md`` \u00a72 -- the\nconvention list is unpaginated, so ``next_cursor`` is always\n``null`` and ``budget_status`` rides as a top-level sidecar\n(not nested under ``meta``). Omitting the param keeps the v0.8.0\ndefault so no client breaks (G0.18-T3 #1356, completing #1312\nacceptance A).\n\nThe response also carries ``budget_status`` (T7 #1094): the\npreamble budget arithmetic for the operator's tenant, computed\nby a call to :func:`~meho_backplane.conventions.preamble.assemble_preamble`.\nThe ``--kind`` query filter narrows the ``entries`` list only;\n``budget_status`` always reflects the full ``operational``\nset (a ``--kind=workflow`` list call still wants the truthful\nbudget signal). The assembler runs an indexed SELECT + an\nin-memory pack -- O(N) per call where N is the tenant's\noperational-convention count (~10-20 in practice), so the\ncost is negligible against the list round-trip.",
+        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null,\n\"budget_status\": {...}}`` list envelope per\n``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338 breaking pass --\nthe response shape converged from the v0.8.0 ``{\"entries\": [...]}``\nkeyed shape onto the reference envelope, renaming ``entries`` ->\n``items``; the ``?envelope=v2`` opt-in that bridged the migration\nwas retired). The convention list is unpaginated, so ``next_cursor``\nis always ``null`` and ``budget_status`` rides as a top-level\nsidecar (not nested under ``meta``).\n\n``budget_status`` (T7 #1094) is the preamble budget arithmetic for\nthe operator's tenant, computed by a call to\n:func:`~meho_backplane.conventions.preamble.assemble_preamble`. The\n``--kind`` query filter narrows the ``items`` list only;\n``budget_status`` always reflects the full ``operational`` set (a\n``--kind=workflow`` list call still wants the truthful budget\nsignal). The assembler runs an indexed SELECT + an in-memory pack --\nO(N) per call where N is the tenant's operational-convention count\n(~10-20 in practice), so the cost is negligible against the list\nround-trip.",
         "operationId": "list_conventions_api_v1_conventions_get",
         "parameters": [
           {
@@ -7661,19 +7551,6 @@
               "title": "Kind"
             },
             "description": "Filter by kind (operational / workflow / reference)."
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -20952,6 +20829,28 @@
         "title": "BroadcastOverrideRead",
         "description": "Outgoing row representation.\n\n``model_config = ConfigDict(from_attributes=True)`` lets the\nhandler return the SQLAlchemy ORM object directly; FastAPI\nserialises via this model rather than the ORM's ``__dict__``."
       },
+      "BroadcastOverridesListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BroadcastOverrideRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "BroadcastOverridesListResponse",
+        "description": "Unified list envelope for ``GET /api/v1/broadcast/overrides``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``None`` but present\nso the endpoint can grow keyset pagination later without a further\nbreaking change."
+      },
       "BudgetStatus": {
         "properties": {
           "max_tokens": {
@@ -21133,6 +21032,123 @@
         ],
         "title": "ConfirmVerifyResponse",
         "description": "Operator's answer to a ``confirm``-typed verify step.\n\nOnly :attr:`answer` ``= \"yes\"`` advances the run. ``\"no\"`` transitions\nthe step to ``failed``; ``\"escalate\"`` transitions to ``failed`` with\n``verify_response.escalated=true`` semantics so the senior's review\npath is explicit in the persisted state (per Initiative #1198)."
+      },
+      "ConnectorListItem": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "impl_id": {
+            "type": "string",
+            "title": "Impl Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "group_count": {
+            "type": "integer",
+            "title": "Group Count"
+          },
+          "staged_group_count": {
+            "type": "integer",
+            "title": "Staged Group Count"
+          },
+          "enabled_group_count": {
+            "type": "integer",
+            "title": "Enabled Group Count"
+          },
+          "disabled_group_count": {
+            "type": "integer",
+            "title": "Disabled Group Count"
+          },
+          "operation_count": {
+            "type": "integer",
+            "title": "Operation Count"
+          },
+          "enabled_operation_count": {
+            "type": "integer",
+            "title": "Enabled Operation Count"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ingested",
+              "registered"
+            ],
+            "title": "State",
+            "default": "ingested"
+          },
+          "next_step": {
+            "$ref": "#/components/schemas/NextStep",
+            "nullable": true
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "typed",
+              "ingested-shim",
+              "profiled",
+              "profiled-but-unreviewed"
+            ],
+            "title": "Kind",
+            "default": "ingested-shim"
+          },
+          "dispatchable": {
+            "type": "boolean",
+            "title": "Dispatchable",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "product",
+          "version",
+          "impl_id",
+          "tenant_id",
+          "group_count",
+          "staged_group_count",
+          "enabled_group_count",
+          "disabled_group_count",
+          "operation_count",
+          "enabled_operation_count"
+        ],
+        "title": "ConnectorListItem",
+        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho.connector.list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`."
+      },
+      "ConnectorListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ConnectorListResponse",
+        "description": "Unified list envelope for ``GET /api/v1/connectors``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``None``; the field\nis present so a client reads it without a ``KeyError`` guard and so\nthe endpoint can grow keyset pagination later without a further\nbreaking change."
       },
       "ConnectorReviewGroup": {
         "properties": {
@@ -21613,12 +21629,17 @@
       },
       "ConventionListResponse": {
         "properties": {
-          "entries": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/ConventionSummary"
             },
             "type": "array",
-            "title": "Entries"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           },
           "budget_status": {
             "$ref": "#/components/schemas/BudgetStatus"
@@ -21626,11 +21647,11 @@
         },
         "type": "object",
         "required": [
-          "entries",
+          "items",
           "budget_status"
         ],
         "title": "ConventionListResponse",
-        "description": "Response envelope for ``GET /api/v1/conventions``.\n\nWrapped in ``{\"entries\": [...]}`` so a future cursor / total\nfield can land non-breakingly. Same shape the kb + memory list\nsurfaces adopted; consistency across the v0.2 read APIs keeps\nthe CLI's list renderer one switch statement, not three.\n\n``budget_status`` (T7 #1094) carries the preamble budget\narithmetic for the operator's tenant. Always populated; the\nunderlying :func:`~meho_backplane.conventions.preamble.assemble_preamble`\ncall is one indexed SELECT + an in-memory pack -- cheap enough\nto run on every list request. Exposing it on the list\nresponse (rather than on a separate\n``/api/v1/conventions/budget-status`` route the issue body\nexplicitly rejects) keeps the CLI / dashboard consumer paths\nto one HTTP round-trip."
+        "description": "Unified list envelope for ``GET /api/v1/conventions``.\n\nThe `{items, next_cursor, ...sidecars}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. ``items`` carries the\n:class:`ConventionSummary` rows; ``next_cursor`` is always ``None``\n(the listing is not cursor-paginated) but present so the endpoint\ncan grow pagination later without a further breaking change.\n\n``budget_status`` (T7 #1094) is the \u00a72 top-level *sidecar*: it\ncarries the preamble budget arithmetic for the operator's tenant.\nAlways populated; the underlying\n:func:`~meho_backplane.conventions.preamble.assemble_preamble` call\nis one indexed SELECT + an in-memory pack -- cheap enough to run on\nevery list request. Exposing it on the list response (rather than on\na separate ``/api/v1/conventions/budget-status`` route the issue\nbody explicitly rejects) keeps the CLI / dashboard consumer paths to\none HTTP round-trip."
       },
       "ConventionSummary": {
         "properties": {
@@ -23379,6 +23400,51 @@
         "title": "MemoryScope",
         "description": "One of the five memory scopes from consumer-needs.md \u00a7G5 L137-141.\n\nThe string value is the wire-level identifier (route path segment,\nCLI flag value, MCP tool arg). Each value maps to a single\n``documents.kind`` row prefixed with ``memory-`` --\n:func:`kind_for_scope` is the canonical translation. The mapping is\none-to-one and bijective with :func:`scope_for_kind`, so callers\nnever round-trip through ad-hoc string-prefixing.\n\n``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``\nsemantics for free: ``f\"scope={MemoryScope.USER}\"`` renders as\n``\"scope=user\"`` rather than ``\"scope=MemoryScope.USER\"``, matching\nthe :class:`~meho_backplane.auth.operator.TenantRole` convention."
       },
+      "MyRecentPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MyRecentPage",
+        "description": "Unified list envelope for ``GET /api/v1/audit/my-recent``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. It carries the same\naudit rows and forward-only cursor as :class:`AuditQueryResult`, but\nnames the list field ``items`` (not ``rows``) so the reference list\nendpoints agree on one envelope. The sibling audit-query endpoints\n(``/query`` / ``/who-touched`` / ``/by-work-ref``) keep the\n:class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set."
+      },
+      "NextStep": {
+        "properties": {
+          "verb": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Verb"
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Rationale"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verb",
+          "rationale"
+        ],
+        "title": "NextStep",
+        "description": "Self-describing in-product hint pointing at the verb that closes the workflow.\n\nSurfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`\nis ``\"registered\"`` (G0.13-T3 / #1133). An ``\"ingested\"`` row sets\n:attr:`ConnectorListItem.next_step` to ``None`` because the dispatcher\nalready resolves operations against it -- there is nothing left for the\noperator to do.\n\nTwo ``verb`` shapes ship:\n\n* ``meho connector ingest --catalog <product>/<version>`` -- when the\n  connector-spec catalog (G0.7-T8 / #743) carries an entry for the\n  registry's ``(product, version)``. The operator copies the verb,\n  ``meho connector ingest`` looks up the upstream spec URL, and\n  dispatchability follows after operator review.\n* ``meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>``\n  -- when the catalog has no entry. The ``rationale`` makes the\n  missing-catalog branch explicit so the operator knows they need\n  to source the OpenAPI spec themselves.\n\nFrozen for the same reason every wire shape in this module is frozen:\nresponses are read-only and any in-place mutation should surface as a\nPydantic error rather than a silently-modified payload."
+      },
       "NextStepRequest": {
         "properties": {
           "last_verified": {
@@ -24631,20 +24697,25 @@
       },
       "RunbookListRunsResponse": {
         "properties": {
-          "runs": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/RunSummary"
             },
             "type": "array",
-            "title": "Runs"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "runs"
+          "items"
         ],
         "title": "RunbookListRunsResponse",
-        "description": "Response envelope for ``GET /api/v1/runbooks/runs``.\n\nWrapped in ``{\"runs\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- same shape\n:mod:`meho_backplane.api.v1.runbook_templates` adopted for its\nlist response. Per-entry shape is the substrate's\n:class:`~meho_backplane.runbooks.runs_schemas.RunSummary` (no\nstep body content, only the run-level coordinates)."
+        "description": "Unified list envelope for ``GET /api/v1/runbooks/runs``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. Per-entry shape is the\nsubstrate's :class:`~meho_backplane.runbooks.runs_schemas.RunSummary`\n(no step body content, only the run-level coordinates). The listing\nis not cursor-paginated (``limit`` truncates), so ``next_cursor`` is\nalways ``None`` but present so the endpoint can grow pagination later\nwithout a further breaking change."
       },
       "RunbookTemplateBody": {
         "properties": {
@@ -24694,20 +24765,25 @@
       },
       "RunbookTemplateListResponse": {
         "properties": {
-          "templates": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/TemplateSummary"
             },
             "type": "array",
-            "title": "Templates"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "templates"
+          "items"
         ],
         "title": "RunbookTemplateListResponse",
-        "description": "Response envelope for ``GET /api/v1/runbooks/templates``.\n\nWrapped in ``{\"templates\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`\nadopted for its list response. Per-entry shape is the substrate's\n:class:`~meho_backplane.runbooks.schemas.TemplateSummary`."
+        "description": "Unified list envelope for ``GET /api/v1/runbooks/templates``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. Per-entry shape is the\nsubstrate's :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.\nThe listing is not cursor-paginated (``limit`` truncates), so\n``next_cursor`` is always ``None`` but present so the endpoint can\ngrow pagination later without a further breaking change."
       },
       "ScheduledTriggerCreate": {
         "properties": {
@@ -25706,6 +25782,28 @@
         ],
         "title": "TargetCreate",
         "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override.\n\n``version`` is accepted as an optional operator-asserted product\nversion (G0.15-T6 #1215). Operators who know the version up-front\n(e.g. ``\"9.0\"`` for a vCenter Hetzner-DC target the consumer just\ndeployed) can pass it at create time so the very first probe\ndispatches against the versioned connector without round-tripping\nthrough PATCH. Fresh targets still default to ``None`` and resolve\nvia the sibling wildcard registration applied to every typed\nconnector in the same PR (K8s pattern fanned out)."
+      },
+      "TargetListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TargetSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "TargetListResponse",
+        "description": "Unified list envelope for ``GET /api/v1/targets``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. ``items`` carries the\nkeyset-paginated page of :class:`TargetSummary` rows; ``next_cursor``\nis the last-row ``name`` of the page when a further page exists and\n``None`` when this page exhausted the matching set (so callers see\n\"no more pages\" without inspecting list length). The field is always\npresent so a client reads ``response[\"next_cursor\"]`` without a\n``KeyError`` guard."
       },
       "TargetSummary": {
         "properties": {

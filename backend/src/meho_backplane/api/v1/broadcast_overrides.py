@@ -82,7 +82,6 @@ from typing import Annotated, Final, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
@@ -95,13 +94,6 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.db.models import BroadcastOverride
 
 __all__ = ["router"]
-
-
-from meho_backplane.api.v1._envelope import (
-    ENVELOPE_QUERY,
-    EnvelopeVersion,
-    wrap_v2_envelope,
-)
 
 router = APIRouter(prefix="/api/v1/broadcast/overrides", tags=["broadcast"])
 
@@ -197,6 +189,22 @@ class BroadcastOverrideRead(BaseModel):
     created_by_sub: str
     created_at: datetime
     updated_at: datetime
+
+
+class BroadcastOverridesListResponse(BaseModel):
+    """Unified list envelope for ``GET /api/v1/broadcast/overrides``.
+
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. This listing is not
+    cursor-paginated, so ``next_cursor`` is always ``None`` but present
+    so the endpoint can grow keyset pagination later without a further
+    breaking change.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    items: list[BroadcastOverrideRead]
+    next_cursor: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +395,7 @@ async def delete_override_impl(
 # ---------------------------------------------------------------------------
 
 
-@router.get("", response_model=list[BroadcastOverrideRead])
+@router.get("", response_model=BroadcastOverridesListResponse)
 async def list_overrides(
     operator: Annotated[Operator, _require_tenant_admin],
     session: Annotated[AsyncSession, Depends(get_session)],
@@ -398,38 +406,24 @@ async def list_overrides(
             description="Exact-match filter on op_id_pattern (not a glob match).",
         ),
     ] = None,
-    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
-) -> list[BroadcastOverride] | JSONResponse:
+) -> BroadcastOverridesListResponse:
     """List override rules owned by the operator's tenant.
 
-    The default response is the v0.8.0 bare list of
-    :class:`BroadcastOverrideRead`. Passing ``?envelope=v2`` returns
-    the unified ``{"items": [...], "next_cursor": null}`` shape per
-    ``docs/codebase/api-shape-conventions.md`` §2. This listing is not
-    cursor-paginated, so ``next_cursor`` is always ``null`` under the
-    opt-in. Omitting the param keeps the v0.8.0 default so no client
-    breaks (G0.18-T3 #1356, completing #1312 acceptance A).
-
-    The v2 envelope is emitted via a raw :class:`JSONResponse` rather
-    than a union return type: that keeps ``response_model`` (and so the
-    documented OpenAPI 200 schema, and the typed CLI client generated
-    from it) as ``list[BroadcastOverrideRead]`` while still letting the
-    opt-in branch return the unified shape.
+    Returns the unified ``{"items": [...], "next_cursor": null}`` list
+    envelope per ``docs/codebase/api-shape-conventions.md`` §2 (#2338
+    breaking pass — the response shape converged from the v0.8.0 bare
+    ``[BroadcastOverrideRead, ...]`` array onto the reference envelope;
+    the ``?envelope=v2`` opt-in that bridged the migration was retired).
+    This listing is not cursor-paginated, so ``next_cursor`` is always
+    ``null``.
     """
     rows = await list_overrides_impl(
         operator=operator,
         session=session,
         op_id_pattern=op_id_pattern,
     )
-    if envelope == "v2":
-        reads = [BroadcastOverrideRead.model_validate(row) for row in rows]
-        return JSONResponse(
-            wrap_v2_envelope(
-                [read.model_dump(mode="json") for read in reads],
-                next_cursor=None,
-            )
-        )
-    return rows
+    reads = [BroadcastOverrideRead.model_validate(row) for row in rows]
+    return BroadcastOverridesListResponse(items=reads, next_cursor=None)
 
 
 @router.post(

@@ -121,7 +121,6 @@ from typing import Final
 import sqlalchemy as sa
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1.audit_models import AuditQueryRequest, AuditReplayResult
@@ -131,6 +130,7 @@ from meho_backplane.audit_query import (
     AuditQueryResult,
     DurationParseError,
     InvalidCursorError,
+    MyRecentPage,
     UnsupportedFilterError,
     parse_duration,
     query_audit,
@@ -142,12 +142,6 @@ from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
 
 __all__ = ["router"]
-
-from meho_backplane.api.v1._envelope import (
-    ENVELOPE_QUERY,
-    EnvelopeVersion,
-    wrap_v2_envelope,
-)
 
 router = APIRouter(prefix="/api/v1/audit", tags=["audit"])
 
@@ -344,13 +338,12 @@ async def by_work_ref(
     return await _dispatch(filters, tenant_id=operator.tenant_id)
 
 
-@router.get("/my-recent", response_model=AuditQueryResult)
+@router.get("/my-recent", response_model=MyRecentPage)
 async def my_recent(
     since: str = Query(default=_DEFAULT_SINCE, max_length=32),
     limit: int = Query(default=100, ge=1, le=1000),
     operator: Operator = _require_operator,
-    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
-) -> AuditQueryResult | JSONResponse:
+) -> MyRecentPage:
     """Audit rows the calling operator produced within the *since* window.
 
     Principal is taken from ``operator.sub`` (the JWT subject); an
@@ -358,18 +351,16 @@ async def my_recent(
     this route — for that, the full POST surface filters on
     ``principal``.
 
-    The default response is the v0.8.0 :class:`AuditQueryResult` shape
-    (``rows`` + ``next_cursor``). Passing ``?envelope=v2`` returns the
-    unified ``{"items": [...], "next_cursor": ...}`` shape per
-    ``docs/codebase/api-shape-conventions.md`` §2, carrying the same
-    forward-only cursor. Omitting the param keeps the v0.8.0 default so
-    no client breaks (G0.18-T3 #1356, completing #1312 acceptance A).
-
-    The v2 envelope is emitted via a raw :class:`JSONResponse` rather
-    than a union return type: that keeps ``response_model`` (and so the
-    documented OpenAPI 200 schema, and the typed CLI client generated
-    from it) as the named :class:`AuditQueryResult` while still letting
-    the opt-in branch return the unified shape.
+    Returns the unified ``{"items": [...], "next_cursor": ...}`` list
+    envelope per ``docs/codebase/api-shape-conventions.md`` §2 (#2338
+    breaking pass — the response shape converged from the v0.8.0
+    :class:`AuditQueryResult` ``{"rows": [...]}`` shape onto the
+    reference envelope, renaming ``rows`` -> ``items``; the
+    ``?envelope=v2`` opt-in that bridged the migration was retired),
+    carrying the same forward-only cursor. The sibling audit-query
+    endpoints (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep
+    the :class:`AuditQueryResult` ``rows`` shape and are out of the §2
+    reference set.
     """
     _bind_audit_overrides()
     now = datetime.now(UTC)
@@ -379,14 +370,7 @@ async def my_recent(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     filters = AuditQueryFilters(principal=operator.sub, since=since_dt, limit=limit)
     result = await _dispatch(filters, tenant_id=operator.tenant_id)
-    if envelope == "v2":
-        return JSONResponse(
-            wrap_v2_envelope(
-                [row.model_dump(mode="json") for row in result.rows],
-                next_cursor=result.next_cursor,
-            )
-        )
-    return result
+    return MyRecentPage(items=result.rows, next_cursor=result.next_cursor)
 
 
 @router.get("/show/{audit_id}", response_model=AuditEntry)

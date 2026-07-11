@@ -186,57 +186,66 @@ later without a breaking change. The cost of an extra `{"items":}`
 wrap is zero in JSON bytes; the cost of "we shipped a bare array and
 now need to paginate" is a v-bump breaking change.
 
-### Migration shape
+### The converged endpoints (#2338 — the breaking flip)
 
-A bare-array endpoint that gains the `{items, ...}` wrap is a
-breaking change. The migration shape:
+The seven §2 reference list endpoints now return the `{items,
+next_cursor?, ...sidecars}` envelope **unconditionally** — it is the
+default and only shape:
 
-1. Add a `?envelope=v2` query parameter. v2 returns the new shape;
-   omit → v0.x bare-array behaviour.
-2. After two release cycles, flip the default and document the
-   bare-array shape as deprecated.
-3. After three more release cycles, remove the bare-array path.
+| Endpoint | Response model | Sidecar |
+|---|---|---|
+| `GET /api/v1/targets` | `TargetListResponse` | keyset `next_cursor` |
+| `GET /api/v1/connectors` | `ConnectorListResponse` | — |
+| `GET /api/v1/conventions` | `ConventionListResponse` | `budget_status` |
+| `GET /api/v1/audit/my-recent` | `MyRecentPage` | — |
+| `GET /api/v1/broadcast/overrides` | `BroadcastOverridesListResponse` | — |
+| `GET /api/v1/runbooks/templates` | `RunbookTemplateListResponse` | — |
+| `GET /api/v1/runbooks/runs` | `RunbookListRunsResponse` | — |
 
-In practice the SEV-4 sweep that motivated this doc will batch the
-migration onto a single connector-doc-versioned bump (v0.10.0?) so
-adopters change every list call at once.
+Only `targets` is keyset-paginated (`next_cursor` = the last-row
+`name` when a further page exists); the other six are unpaginated, so
+their `next_cursor` is always `null` (present so the field can grow a
+real cursor later without a further breaking change). `conventions`
+carries `budget_status` as a §2 top-level sidecar. Each endpoint keeps
+a named, typed `response_model`, so the generated CLI / Go client gets
+a single clean 200 schema per endpoint (not an `anyOf` union).
 
-Code reference: G0.16-T6 Finding A (#1312) lands the reference
-adoption on
-[`GET /api/v1/targets`](../../backend/src/meho_backplane/api/v1/targets.py)
-via the shared helper
-[`backend/src/meho_backplane/api/v1/_envelope.py`](../../backend/src/meho_backplane/api/v1/_envelope.py)
-(``EnvelopeVersion`` type, ``ENVELOPE_QUERY`` declaration,
-``wrap_v2_envelope`` builder). All five list endpoints accept
-the opt-in: `targets` (the reference) and the topology
-`dependents`/`dependencies` reads in #1312, plus the four sister
-endpoints (``conventions`` / ``audit/my-recent`` /
-``broadcast/overrides`` / ``connectors``) in G0.18-T3 (#1356),
-completing #1312 acceptance A. The two runbook list endpoints
-(``GET /api/v1/runbooks/templates`` / ``GET /api/v1/runbooks/runs``)
-shipped after that sweep with product-specific keyed shapes
-(``{"templates": [...]}`` / ``{"runs": [...]}``) and joined the
-opt-in in G0.22-T6 (#1611). The ``connectors``, ``conventions``,
-``broadcast/overrides``, and both runbook lists are unpaginated, so
-their ``next_cursor`` is always ``null`` under the opt-in;
-``conventions`` carries ``budget_status`` as a top-level sidecar.
+The `audit/my-recent` sibling reads (`/query` / `/who-touched` /
+`/by-work-ref`) are **not** §2 reference list endpoints — they return
+the `AuditQueryResult` `{rows, next_cursor}` shape and are tracked for
+a future convergence pass. The topology closure reads (`dependents` /
+`dependencies`) converge on the §4 `{kind, nodes}` discriminated shape
+rather than §2, and keep their own `?envelope=v2` opt-in.
 
-The sister endpoints with a named/typed v0.8.0 response model
-(``conventions`` → ``ConventionListResponse``, ``audit/my-recent``
-→ ``AuditQueryResult``, ``broadcast/overrides`` →
-``[BroadcastOverrideRead]``, ``runbooks/templates`` →
-``RunbookTemplateListResponse``, ``runbooks/runs`` →
-``RunbookListRunsResponse``) keep ``response_model`` on the route and
-emit the v2 envelope via a raw ``JSONResponse`` in the opt-in branch.
-That preserves the named OpenAPI 200 schema — and the typed CLI
-client generated from it — while still returning the unified shape
-under ``?envelope=v2`` (a union return type would collapse the
-schema to ``anyOf`` and break the generated Go client).
+### How it converged
 
-Sister-surface forwarding: the MCP list tools call the service layer
-in-process and return their own list shapes (no HTTP ``?envelope=``
-param to forward), and the CLI typed clients consume the v0.8.0
-default shape — so neither forwards the opt-in.
+The migration ran in the shape §2 originally prescribed:
+
+1. **G0.16-T6 #1312 / G0.18-T3 #1356 / G0.22-T6 #1611** added a
+   non-breaking `?envelope=v2` opt-in to every endpoint above (default
+   stayed the v0.8.0 bare/keyed shape).
+2. **#2338 (this pass)** flipped the default: the endpoints now return
+   the unified envelope for every request, and the `?envelope=v2`
+   opt-in and its `wrap_v2_envelope` builder were retired. A client
+   still passing `?envelope=v2` is unaffected (FastAPI ignores the
+   now-unknown query param).
+
+This is a **breaking change** to the wire shape (`{connectors}` /
+`{entries}` / `{rows}` / `{templates}` / `{runs}` / bare arrays all
+became `{items}`). The generated Go client and every CLI consumer of
+these endpoints were updated in the same change.
+
+The convention is pinned by a platform-wide contract test,
+[`backend/tests/test_api_v1_list_envelope_contract.py`](../../backend/tests/test_api_v1_list_envelope_contract.py):
+it enumerates the governed endpoints, drives each against the live app,
+and asserts both the runtime body and the OpenAPI 200 schema are the
+`{items, next_cursor?}` envelope (never a bare array, never a
+resource-named list key). A new GET-list endpoint joins the convention
+by returning the envelope and being added to that test's registry.
+
+Sister-surface note: the MCP list tools call the service layer
+in-process and return their own list shapes (no HTTP `?envelope=` to
+forward), so they are unaffected by the REST wire-shape flip.
 
 ## 3. Enum vocabulary discipline
 

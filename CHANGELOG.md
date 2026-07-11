@@ -90,6 +90,43 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes — GET-list endpoints converged on the `{items, next_cursor}` envelope (#2338)
+
+- **BREAKING.** The seven reference `GET`-list endpoints now return the
+  unified `{items, next_cursor?, ...sidecars}` list envelope
+  (`docs/codebase/api-shape-conventions.md` §2) as their default **and
+  only** shape. The `?envelope=v2` opt-in that bridged the migration
+  (G0.16-T6 #1312 / G0.18-T3 #1356 / G0.22-T6 #1611) was retired. A
+  platform-wide contract test now pins the convention so a new list
+  endpoint can't reintroduce a divergent shape. Affected endpoints and
+  the wire-shape change adopters must migrate:
+  - `GET /api/v1/targets` — was a bare `[TargetSummary, …]` array → now
+    `{"items": [...], "next_cursor": <name|null>}` (keyset-paginated).
+  - `GET /api/v1/connectors` — was `{"connectors": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/conventions` — was `{"entries": [...], "budget_status":
+    {...}}` → now `{"items": [...], "next_cursor": null, "budget_status":
+    {...}}` (sidecar unchanged).
+  - `GET /api/v1/audit/my-recent` — was `{"rows": [...], "next_cursor":
+    …}` → now `{"items": [...], "next_cursor": …}`.
+  - `GET /api/v1/broadcast/overrides` — was a bare
+    `[BroadcastOverrideRead, …]` array → now `{"items": [...],
+    "next_cursor": null}`.
+  - `GET /api/v1/runbooks/templates` — was `{"templates": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/runbooks/runs` — was `{"runs": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+
+  **Migration recipe.** Read the list from `response["items"]` instead
+  of the old key (`connectors` / `entries` / `rows` / `templates` /
+  `runs`) or the bare array; read `response["next_cursor"]` for
+  pagination (only `targets` populates it today). The bundled `meho`
+  CLI and the generated Go client already read the new envelope — this
+  change ships them together. Clients still sending `?envelope=v2` are
+  unaffected (the now-unknown param is ignored). The `audit` sibling
+  reads (`/query` / `/who-touched` / `/by-work-ref`) and the topology
+  closure reads keep their existing shapes.
+
 ### Tested — regression pin: a non-dry-run 1275-op-class spec ingest keeps the event loop responsive (#2333)
 
 - Pinned the v0.8.0 large-spec ingest crash fix end-to-end: a

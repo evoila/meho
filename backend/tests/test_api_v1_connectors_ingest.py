@@ -578,8 +578,8 @@ def test_list_operator_role_returns_200(client: TestClient) -> None:
     Asserts the RBAC contract only: response payload shape varies
     with whatever v2-registered connectors are present at test time
     (T5 #733 unions the class-side registry into the response), so
-    the test pins the wire shape (``{"connectors": [...]}``) and the
-    200 status code rather than the exact row set.
+    the test pins the §2 wire shape (``{"items": [...], "next_cursor":
+    null}``) and the 200 status code rather than the exact row set.
     """
     key, token = _operator_token()
     with respx.mock as mock_router:
@@ -587,8 +587,8 @@ def test_list_operator_role_returns_200(client: TestClient) -> None:
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
     body = response.json()
-    assert "connectors" in body
-    assert isinstance(body["connectors"], list)
+    assert isinstance(body["items"], list)
+    assert "next_cursor" in body
 
 
 # ---------------------------------------------------------------------------
@@ -612,7 +612,7 @@ async def test_list_returns_operator_tenant_and_builtins(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     # T5 #733: filter to DB-backed rows; class-only v2 registrations
     # (``group_count == 0``) leak into the response from other tests'
     # lifespan boots and aren't the subject of this assertion.
@@ -651,7 +651,7 @@ async def test_list_status_staged_filters_by_aggregate_state(
             headers=_authed(token),
         )
     assert response.status_code == 200
-    seen_ids = {c["connector_id"] for c in response.json()["connectors"]}
+    seen_ids = {c["connector_id"] for c in response.json()["items"]}
     assert seen_ids == {"vmware-rest-9.0"}
 
 
@@ -675,7 +675,7 @@ async def test_list_status_enabled_requires_uniform_state(
             headers=_authed(token),
         )
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     assert len(connectors) == 1
     item = connectors[0]
     assert item["connector_id"] == "vmware-rest-9.0"
@@ -736,7 +736,7 @@ async def test_list_operation_count_includes_typed_and_composite(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
     assert by_id["vmware-rest-9.0"]["operation_count"] == 3
     assert by_id["bind9-ssh-9.0"]["operation_count"] == 4
     assert by_id["vmware-composite-9.0"]["operation_count"] == 2
@@ -787,7 +787,7 @@ async def test_list_splits_enabled_vs_total_operation_count(
     # The unfiltered listing unions class-side "registered" rows for
     # every v2-registered connector; key on connector_id like the
     # sibling rollup tests instead of expecting a single row.
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
     item = by_id["vmware-rest-9.0"]
     assert item["state"] == "ingested"
     assert item["operation_count"] == 6
@@ -897,7 +897,7 @@ async def test_list_surfaces_register_connector_v2_only_entries(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     by_id = {c["connector_id"]: c for c in connectors}
 
     assert "harbor-rest-2.x" in by_id
@@ -990,7 +990,7 @@ async def test_list_surfaces_profiled_kind_gated_then_dispatchable(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    item = {c["connector_id"]: c for c in response.json()["items"]}["acme-rest-1.0"]
     assert item["state"] == "ingested"
     assert item["kind"] == "profiled-but-unreviewed"
     assert item["dispatchable"] is False
@@ -1016,7 +1016,7 @@ async def test_list_surfaces_profiled_kind_dispatchable_when_enabled(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    item = {c["connector_id"]: c for c in response.json()["items"]}["acme-rest-1.0"]
     assert item["kind"] == "profiled"
     assert item["dispatchable"] is True
 
@@ -1073,7 +1073,7 @@ async def test_list_class_only_entries_excluded_under_status_narrowing(
             headers=_authed(token),
         )
     assert response.status_code == 200
-    seen_ids = {c["connector_id"] for c in response.json()["connectors"]}
+    seen_ids = {c["connector_id"] for c in response.json()["items"]}
     assert "vmware-rest-9.0" in seen_ids
     assert "harbor-rest-2.x" not in seen_ids
 
@@ -1145,7 +1145,7 @@ async def test_list_registered_row_carries_catalog_next_step_hint(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     harbor = by_id["harbor-rest-2.x"]
     assert harbor["state"] == "registered"
@@ -1183,7 +1183,7 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     nsx = by_id["nsx-rest-9.0"]
     assert nsx["state"] == "registered"
@@ -1241,7 +1241,7 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     custom = by_id["customvendor-rest-1.0"]
     assert custom["state"] == "registered"
@@ -1293,7 +1293,7 @@ async def test_list_ingested_row_omits_next_step_hint(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     vmware = by_id["vmware-rest-9.0"]
     assert vmware["state"] == "ingested"
@@ -1360,7 +1360,7 @@ async def test_list_drops_stale_impl_id_rows_whose_connector_id_will_not_resolve
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     seen_ids = {c["connector_id"] for c in connectors}
 
     assert "vmware-rest-9.0" in seen_ids
@@ -1426,7 +1426,7 @@ async def test_list_every_connector_id_round_trips_through_dispatcher(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     operator = Operator(
         sub="op-roundtrip",
         name="Round-Trip Probe",
@@ -4762,7 +4762,7 @@ async def test_review_total_reconciles_with_ungrouped_ops(client: TestClient) ->
     assert r["total_op_count"] == 6
     assert r["ungrouped_op_count"] == 1
 
-    listed = {c["connector_id"]: c for c in listing.json()["connectors"]}
+    listed = {c["connector_id"]: c for c in listing.json()["items"]}
     op_count = listed["vmware-rest-9.0"]["operation_count"]
     assert op_count == 7
     # The reconciliation contract: review total + ungrouped == listing total.
@@ -4785,5 +4785,5 @@ async def test_review_all_grouped_counts_match_listing(client: TestClient) -> No
         listing = client.get("/api/v1/connectors", headers=_authed(token))
     r = review.json()
     assert r["ungrouped_op_count"] == 0
-    listed = {c["connector_id"]: c for c in listing.json()["connectors"]}
+    listed = {c["connector_id"]: c for c in listing.json()["items"]}
     assert r["total_op_count"] == listed["vmware-rest-9.0"]["operation_count"] == 6

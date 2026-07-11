@@ -247,11 +247,11 @@ async def test_get_lists_own_tenant_conventions_priority_desc(
         )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert "entries" in body
-    slugs = [row["slug"] for row in body["entries"]]
+    assert "items" in body
+    slugs = [row["slug"] for row in body["items"]]
     assert slugs == ["high-prio", "mid-prio", "low-prio"]
     # ``ConventionSummary`` shape (no body field).
-    assert "body" not in body["entries"][0]
+    assert "body" not in body["items"][0]
 
 
 @pytest.mark.asyncio
@@ -270,7 +270,7 @@ async def test_get_filters_by_kind(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {token}"},
         )
     assert resp.status_code == 200
-    slugs = {row["slug"] for row in resp.json()["entries"]}
+    slugs = {row["slug"] for row in resp.json()["items"]}
     assert slugs == {"op-rule"}
 
 
@@ -761,7 +761,7 @@ async def test_get_does_not_leak_cross_tenant(client: TestClient) -> None:
     # Tenant B's view sees its own empty preamble budget -- tenant A's
     # convention does not bleed across (the cross-tenant assertion this
     # test originated to guard).
-    assert body["entries"] == []
+    assert body["items"] == []
     assert body["budget_status"] == {
         "max_tokens": DEFAULT_MAX_PREAMBLE_TOKENS,
         "estimated_tokens": 0,
@@ -1055,7 +1055,7 @@ async def test_list_budget_status_empty_tenant(client: TestClient) -> None:
         )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["entries"] == []
+    assert body["items"] == []
     bs = body["budget_status"]
     assert bs["max_tokens"] == DEFAULT_MAX_PREAMBLE_TOKENS
     assert bs["estimated_tokens"] == 0
@@ -1086,7 +1086,7 @@ async def test_list_budget_status_fitting_tenant(client: TestClient) -> None:
         )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert len(body["entries"]) == 4  # all four rows
+    assert len(body["items"]) == 4  # all four rows
     bs = body["budget_status"]
     assert bs["max_tokens"] == DEFAULT_MAX_PREAMBLE_TOKENS
     assert bs["estimated_tokens"] > 0
@@ -1119,7 +1119,7 @@ async def test_list_budget_status_over_budget_tenant(client: TestClient) -> None
     body = resp.json()
     # ``entries`` returns the full set -- packing does not filter
     # the list view; budget_status is the signal.
-    assert {row["slug"] for row in body["entries"]} == {"high-prio", "mid-prio", "low-prio"}
+    assert {row["slug"] for row in body["items"]} == {"high-prio", "mid-prio", "low-prio"}
     bs = body["budget_status"]
     assert bs["over_budget"] is True
     # Lowest priorities drop first (priority DESC order, then
@@ -1179,12 +1179,12 @@ async def test_list_budget_status_cross_tenant_isolation(client: TestClient) -> 
     body_b = resp_b.json()
     # Tenant A: own entries only + fitting budget. Tenant B's bulk
     # of conventions must not influence A's ``over_budget``.
-    assert {row["slug"] for row in body_a["entries"]} == {"a-small"}
+    assert {row["slug"] for row in body_a["items"]} == {"a-small"}
     assert body_a["budget_status"]["over_budget"] is False
     assert body_a["budget_status"]["dropped_slugs"] == []
     # Tenant B: own entries + over-budget; A's tiny convention must
     # not have crossed into B's budget arithmetic.
-    assert {row["slug"] for row in body_b["entries"]} == {"b-high", "b-mid", "b-low"}
+    assert {row["slug"] for row in body_b["items"]} == {"b-high", "b-mid", "b-low"}
     assert body_b["budget_status"]["over_budget"] is True
     assert "a-small" not in body_b["budget_status"]["dropped_slugs"]
     assert "b-low" in body_b["budget_status"]["dropped_slugs"]
@@ -1214,7 +1214,7 @@ async def test_list_budget_status_kind_filter_does_not_narrow_budget(
         )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert {row["slug"] for row in body["entries"]} == {"wf-x"}
+    assert {row["slug"] for row in body["items"]} == {"wf-x"}
     # ``budget_status`` is computed off the full operational set
     # (the packer reads only ``operational`` regardless of the
     # query filter), so a ``--kind=workflow`` list still surfaces

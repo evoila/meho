@@ -242,12 +242,12 @@ func getList(
 // Summary duplicate); we format it back to the RFC 3339 / ISO 8601
 // shape the operator-facing table contract has always used.
 func printListTable(w io.Writer, r *api.ConventionListResponse) {
-	if r == nil || len(r.Entries) == 0 {
+	if r == nil || len(r.Items) == 0 {
 		fmt.Fprintln(w, "no conventions registered in this tenant")
 		return
 	}
 	fmt.Fprintf(w, "%-32s %-11s %-8s %-32s %s\n", "SLUG", "KIND", "PRIORITY", "UPDATED", "TITLE")
-	for _, e := range r.Entries {
+	for _, e := range r.Items {
 		fmt.Fprintf(w, "%-32s %-11s %-8d %-32s %s\n",
 			truncate(e.Slug, 32),
 			e.Kind,

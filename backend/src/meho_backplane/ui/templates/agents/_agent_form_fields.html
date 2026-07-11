@@ -41,6 +41,28 @@
   {%- if errors and field in errors -%}{{ base }}{%- endif -%}
 {%- endmacro -%}
 
+{#- Top-of-form error summary banner. Rendered whenever the handler
+    re-renders the modal with ``errors`` populated (a Pydantic
+    ValidationError, a duplicate name, or an unknown / revoked
+    identity_ref). The re-render is a 200 fragment so HTMX swaps it back
+    into the modal container in place -- the runbooks / conventions
+    inline-error mold; without the 200 the banner would be computed but
+    silently dropped (#2346). Each field also shows its own inline
+    message via ``error_for`` below; this banner is the at-a-glance
+    summary. ``aria-live="assertive"`` announces it to assistive tech. -#}
+{%- if errors -%}
+  <div class="alert alert-error items-start" role="alert" aria-live="assertive" data-form-error-summary>
+    <div>
+      <span class="font-medium">Could not save the agent — please correct the highlighted fields.</span>
+      <ul class="mt-1 list-disc list-inside text-sm">
+        {%- for field, message in errors.items() -%}
+          <li><span class="font-mono">{{ field }}</span>: {{ message }}</li>
+        {%- endfor -%}
+      </ul>
+    </div>
+  </div>
+{%- endif -%}
+
 <label class="form-control">
   <span class="label-text">Name</span>
   <input

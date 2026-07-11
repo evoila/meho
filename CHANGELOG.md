@@ -105,6 +105,17 @@ connector-related release-notes line.
   field to fix and keeps their typed input. Sibling `/ui` create/edit
   forms with the same missing handler (memory, kb) are tracked
   separately for a follow-up sweep.
+### Fixed — scheduler one_off `fire_at` picker now converts local time to UTC on submit (#2339)
+
+- The `/ui/scheduler` Create-trigger modal's `fire_at` `datetime-local`
+  picker showed the operator their own wall-clock time but posted a
+  naive string the engine stored verbatim as UTC, so a CEST (UTC+2)
+  operator who picked "11:00" got a trigger that fired at 11:00Z — two
+  hours late. The modal now converts the picked local value to a
+  UTC ISO-8601 instant on submit (via the browser's DST-aware `Date`,
+  so CET/CEST both resolve correctly), and a live hint next to the
+  field shows the resolved UTC so the conversion is visible rather than
+  silent. Engine-side `fire_at` handling is unchanged.
 
 ### Breaking changes — GET-list endpoints converged on the `{items, next_cursor}` envelope (#2338)
 

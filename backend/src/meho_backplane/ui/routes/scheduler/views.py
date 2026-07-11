@@ -146,6 +146,11 @@ def project_trigger_to_view(
         "timezone": trigger.timezone,
         "next_fire_at": coerce_utc_aware(trigger.next_fire_at),
         "last_fired_at": coerce_utc_aware(trigger.last_fired_at),
+        # Skip-state projection (#2327): a non-zero count drives a warning
+        # badge next to the status so a silently-skipping 'active' trigger
+        # no longer reads as healthy at a glance in the list.
+        "skip_count": trigger.skip_count,
+        "last_skip_reason": trigger.last_skip_reason,
         "agent_name": agent_name or f"{str(trigger.agent_definition_id)[:8]}…",
         "agent_definition_id": str(trigger.agent_definition_id),
         "work_ref": trigger.work_ref,

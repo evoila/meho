@@ -83,6 +83,27 @@
 
           <dt class="opacity-60">Last fired</dt>
           <dd class="font-mono">{% if trigger.last_fired_at %}{{ trigger.last_fired_at.isoformat() }}{% else %}<span class="opacity-40">— (never)</span>{% endif %}</dd>
+
+          {# Skip state (#2327): a non-zero skip_count means the scheduler
+             is skipping this trigger every tick without firing it. Shown
+             only when there is something to show so a healthy trigger's
+             card stays uncluttered; a parked trigger's reason explains the
+             pause. #}
+          {% if trigger.skip_count and trigger.skip_count > 0 %}
+            <dt class="opacity-60">Skips</dt>
+            <dd>
+              <span class="badge badge-warning badge-sm">{{ trigger.skip_count }} consecutive</span>
+            </dd>
+            <dt class="opacity-60">Skip reason</dt>
+            <dd class="font-mono text-xs">{{ trigger.last_skip_reason or "—" }}</dd>
+            <dt class="opacity-60">Last skipped</dt>
+            <dd class="font-mono text-xs">{% if trigger.last_skipped_at %}{{ trigger.last_skipped_at.isoformat() }}{% else %}<span class="opacity-40">—</span>{% endif %}</dd>
+          {% elif trigger.last_skip_reason %}
+            {# skip_count reset to 0 by a later fire, but the last cause is
+               retained on a parked row -- keep the reason visible. #}
+            <dt class="opacity-60">Last skip reason</dt>
+            <dd class="font-mono text-xs">{{ trigger.last_skip_reason }}</dd>
+          {% endif %}
         </dl>
       </div>
     </div>

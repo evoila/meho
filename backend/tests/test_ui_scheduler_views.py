@@ -40,6 +40,9 @@ def _read(
     status: ScheduledTriggerStatus = ScheduledTriggerStatus.ACTIVE,
     next_fire_at: datetime | None = None,
     work_ref: str | None = None,
+    skip_count: int = 0,
+    last_skip_reason: str | None = None,
+    last_skipped_at: datetime | None = None,
 ) -> ScheduledTriggerRead:
     now = datetime(2026, 6, 18, 12, 0, tzinfo=UTC)
     return ScheduledTriggerRead(
@@ -55,6 +58,9 @@ def _read(
         in_flight_policy=ScheduledTriggerInFlightPolicy.FAIL_INTO_AUDIT,
         next_fire_at=next_fire_at,
         last_fired_at=None,
+        last_skip_reason=last_skip_reason,
+        last_skipped_at=last_skipped_at,
+        skip_count=skip_count,
         inputs=None,
         identity_sub="__scheduler__",
         created_by_sub="op-admin",
@@ -129,6 +135,23 @@ def test_project_coerces_naive_next_fire() -> None:
     next_fire = view["next_fire_at"]
     assert isinstance(next_fire, datetime)
     assert next_fire.tzinfo is UTC
+
+
+def test_project_surfaces_skip_state() -> None:
+    """The projection carries skip_count + last_skip_reason for the list badge (#2327)."""
+    view = project_trigger_to_view(
+        _read(skip_count=4, last_skip_reason="credentials_unresolved"),
+        agent_names={_AGENT_ID: "nightly"},
+    )
+    assert view["skip_count"] == 4
+    assert view["last_skip_reason"] == "credentials_unresolved"
+
+
+def test_project_healthy_trigger_has_zero_skip_count() -> None:
+    """A never-skipped trigger projects skip_count 0 and no reason."""
+    view = project_trigger_to_view(_read(), agent_names={_AGENT_ID: "nightly"})
+    assert view["skip_count"] == 0
+    assert view["last_skip_reason"] is None
 
 
 def test_build_agent_name_map_filters_bad_shapes() -> None:

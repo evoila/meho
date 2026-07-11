@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — scheduler skip-state on the trigger row + park after N unresolvable skips (#2327)
+
+- The scheduler tick loop now projects its precondition **skips** onto the
+  `scheduled_trigger` row (migration `0057`, three columns): `skip_count`
+  (consecutive skips since the last successful fire), `last_skip_reason`
+  (machine tag — `definition_missing` / `definition_disabled` /
+  `credentials_unresolved`; the corrupt-cron / unknown-kind park paths also
+  stamp `invalid_cron_expr` / `unknown_kind`), and `last_skipped_at`.
+  Previously a permanent misconfiguration (revoked scheduler Vault token,
+  deleted-but-referenced definition, never-persisted agent secret) made the
+  loop skip every 30 s tick with the only trace a pod-log WARN, while
+  `meho scheduler list` showed a healthy-looking `active` trigger — a real
+  deploy lost ~360 hourly fires over 15 days before anyone noticed.
+- After a fixed number of **consecutive** unresolvable skips the loop parks
+  the trigger (`status='paused'`) so the state machine itself communicates
+  "broken, stopped trying" instead of re-tripping forever; a successful
+  fire resets the streak and clears the skip fields. The new state is
+  surfaced on `GET /api/v1/scheduler/triggers`, `meho.scheduler.list` /
+  `.show` (MCP), `meho scheduler list` (a `SKIPS` column), and the operator
+  console (a warning badge on the list row + a skip block on the detail
+  page). The at-most-once fire contract and transient-retry behaviour are
+  unchanged — the columns are additive visibility.
+
 ### Added — redaction-safe `proposed_effect` preview for `vault.kv.*` credential writes (#2332)
 
 - A parked `vault.kv.put` / `patch` / `delete` approval request now

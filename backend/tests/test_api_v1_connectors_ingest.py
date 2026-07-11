@@ -39,6 +39,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -4180,6 +4181,164 @@ def test_ingest_packaged_catalog_no_broadcom_portal_fetch_entries_remain() -> No
         assert entry.upstream is None
         assert entry.spec_resource is not None
         assert "#1976" in entry.notes
+
+
+# ---------------------------------------------------------------------------
+# CI dry-run fixture over EVERY packaged catalog entry (G0.31-T #2334)
+#
+# The signal (#2334) was a packaged catalog row whose ``upstream`` pointed
+# at an HTML developer-portal page: the resolver fetched it, YAML-decoded the
+# HTML, and surfaced an opaque bare-400 ("could not decode spec ... line 33")
+# that told the operator nothing actionable. The structured
+# ``catalog_entry_upstream_not_spec`` guard (G0.15-T2 #1211) closes that for a
+# text/html upstream; this fixture is the CI trip-wire that keeps EVERY
+# packaged entry -- present and future -- inside the success-or-structured
+# contract so a new row (or a URL edit) can never regress into a bare-400.
+#
+# Determinism: every fetchable ``upstream`` is mocked (respx) to serve the
+# worst case -- an HTML portal page with a 200 -- so no live network is
+# touched and the outcome is fixed by the catalog + guard alone. An entry
+# that never reaches the fetch path (typed connector -> null upstream;
+# fqdn-templated upstream; shipped ``spec_resource``) resolves on its own
+# deterministic branch. Whatever the branch, the assertion is uniform:
+# the route answers 200 (dry-run parsed a real spec) or a STRUCTURED error
+# envelope -- never the opaque YAML/JSON decode 400.
+# ---------------------------------------------------------------------------
+
+# Markers of the bare, unstructured decode-error 400 the fixture forbids.
+_BARE_DECODE_MARKERS = ("could not decode spec", "invalid yaml", "invalid json")
+
+# A worst-case HTML developer-portal body. The doctype sits on line 1 and
+# markup runs well past line 33 -- the exact "line 33, column 1" coordinate
+# the original bare-400 reported when the HTML fell through the YAML decoder.
+_HTML_PORTAL_BODY = (
+    b"<!doctype html>\n<html>\n<head><title>Developer Portal</title></head>\n<body>\n"
+    + b"<p>API reference landing page (not a machine-readable spec).</p>\n" * 40
+    + b"</body>\n</html>\n"
+)
+
+
+_AddrInfo = list[tuple[int, int, int, str, tuple[str, int]]]
+
+
+def _resolver_allowing(hosts: set[str]) -> Callable[..., _AddrInfo]:
+    """Return a ``getaddrinfo`` stand-in that maps *hosts* to a public IP.
+
+    The SSRF destination guard (#95) resolves the upstream host before it
+    opens a socket. respx intercepts the HTTP itself, so the resolver only
+    has to hand back a public, non-special address for the catalog entry's
+    upstream host(s) (plus the module's fixed test hosts) so the guard lets
+    the (already-mocked) fetch proceed -- no live DNS, no live network.
+    """
+
+    allowed = set(hosts) | _INGEST_TEST_HOSTS
+
+    def _resolver(host: str, port: object, **kwargs: object) -> _AddrInfo:
+        if host in allowed:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_INGEST_TEST_PUBLIC_IP, 443))]
+        return socket.getaddrinfo(host, port, **kwargs)  # type: ignore[arg-type]
+
+    return _resolver
+
+
+def _packaged_catalog_entries() -> list[tuple[str, str]]:
+    """``(product, version)`` for every entry in the real packaged catalog."""
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    return [(entry.product, entry.version) for entry in load_catalog().entries]
+
+
+@pytest.mark.parametrize(
+    ("product", "version"),
+    _packaged_catalog_entries(),
+    ids=[f"{p}/{v}" for p, v in _packaged_catalog_entries()],
+)
+def test_dry_run_every_packaged_catalog_entry_is_success_or_structured_never_bare_400(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    product: str,
+    version: str,
+) -> None:
+    """Every packaged catalog entry dry-run-resolves without a bare-400 (#2334).
+
+    Drives ``POST /connectors/ingest {catalog_entry, dry_run: true}`` against
+    each shipped ``(product, version)`` with every fetchable ``upstream``
+    mocked to serve an HTML developer-portal page (the worst case). The
+    contract, asserted uniformly, is: the route returns 200 (a real spec
+    dry-run-parsed) or a STRUCTURED error body (``detail`` is an envelope
+    dict carrying a snake_case classifier -- ``catalog_entry_typed_connector``,
+    ``catalog_entry_templated_upstream``, ``catalog_entry_upstream_not_spec``,
+    ``product_impl_id_mismatch``, ``version_mismatch``, ...), NEVER the opaque
+    ``could not decode spec ... line 33`` YAML/JSON decode 400 that the signal
+    filed and never an unhandled 500. A future row whose ``upstream`` drifts
+    to an HTML portal (or any non-spec content-type) trips here at CI time
+    instead of on an operator's first POST.
+    """
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    entry = load_catalog().get(product, version)
+    assert entry is not None, f"{product}/{version} vanished from the packaged catalog"
+
+    # Only non-templated upstreams reach the HTTP fetch path; an
+    # fqdn-templated URL (``<nsx-mgr-fqdn>``) is refused earlier by
+    # ``catalog_entry_templated_upstream`` before any fetch.
+    fetch_urls = [u for u in (entry.upstream or ()) if "<" not in u and ">" not in u]
+    hosts = {host for u in fetch_urls if (host := urlparse(u).hostname)}
+    monkeypatch.setattr(
+        "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+        _resolver_allowing(hosts),
+    )
+
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        for url in fetch_urls:
+            mock_router.get(url).mock(
+                return_value=httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    content=_HTML_PORTAL_BODY,
+                ),
+            )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": f"{product}/{version}", "dry_run": True, "async": False},
+            headers=_authed(token),
+        )
+
+    ref = f"{product}/{version}"
+    assert response.status_code != 500, f"{ref} raised an unhandled 500: {response.text}"
+    body = response.json()
+    detail = body.get("detail") if isinstance(body, dict) else None
+
+    # A bare, unstructured string ``detail`` is exactly the failure mode
+    # #2334 targets -- forbid it regardless of the status code.
+    if isinstance(detail, str):
+        low = detail.lower()
+        assert not any(marker in low for marker in _BARE_DECODE_MARKERS), (
+            f"{ref} dry-run returned a BARE decode error: {detail!r}. A packaged "
+            "catalog entry must resolve to a dry-run success or a structured "
+            "error envelope, never the opaque 'could not decode spec' 400 (#2334)."
+        )
+
+    if response.status_code == 200:
+        return
+    # Any non-2xx must be a structured envelope with a snake_case classifier.
+    assert response.status_code in (400, 422), f"{ref} unexpected status: {response.text}"
+    assert isinstance(detail, dict), (
+        f"{ref} dry-run returned a bare-{response.status_code} (unstructured "
+        f"detail): {detail!r}. Expected a structured error envelope (#2334)."
+    )
+    # The envelope must carry a machine-branchable snake_case classifier. The
+    # catalog-side 422s key it under ``detail`` (``catalog_entry_*``); the
+    # pipeline round-trip / version 422s key it under ``kind``
+    # (``product_impl_id_mismatch``, ``version_mismatch``). Accept either so
+    # the fixture pins "structured + branchable" without coupling to one shape.
+    classifier = detail.get("detail") or detail.get("kind")
+    assert isinstance(classifier, str) and classifier, (
+        f"{ref} structured error is missing its snake_case classifier "
+        f"(no ``detail``/``kind`` key): {detail!r}"
+    )
 
 
 def test_ingest_explicit_quadruple_still_works_regression(

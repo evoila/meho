@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import uuid
 from unittest.mock import MagicMock
+from urllib.parse import urlparse
 
 import pytest
 from fastapi import FastAPI
@@ -1092,6 +1093,71 @@ def test_shipped_catalog_marks_vcf_family_rows_spec_only() -> None:
             assert entry.catalog_ingest == "supported", (
                 f"{entry.product}/{entry.version} should be catalog_ingest: supported"
             )
+
+
+# ---------------------------------------------------------------------------
+# Packaged-catalog upstream audit (G0.31-T #2334)
+#
+# Every FETCH-PATH ``upstream`` must be a directly-resolvable raw OpenAPI
+# spec (a ``.yaml`` / ``.yml`` / ``.json`` resource), not an HTML
+# documentation portal. The #2334 signal was a row whose ``upstream``
+# pointed at a Broadcom Developer Portal landing page: the resolver fetched
+# HTML, YAML-decoded it, and surfaced an opaque bare-400 ("could not decode
+# spec ... line 33"). The route content-type guard
+# (``catalog_entry_upstream_not_spec``, G0.15-T2 #1211) catches it at request
+# time; this static audit catches the same drift earlier -- at catalog-parse
+# time in CI -- generalized beyond the single Broadcom host to ANY non-raw
+# upstream. Pairs with the route-level CI trip-wire
+# ``test_dry_run_every_packaged_catalog_entry_is_success_or_structured_never_bare_400``
+# in ``test_api_v1_connectors_ingest.py``.
+# ---------------------------------------------------------------------------
+
+_SPEC_URL_SUFFIXES = (".yaml", ".yml", ".json")
+
+
+def _reaches_fetch_path(urls: tuple[str, ...]) -> bool:
+    """True when every URL is non-templated, so the backend will fetch it.
+
+    A row carrying any fqdn-templated URL (``<nsx-mgr-fqdn>``) is refused by
+    ``catalog_entry_templated_upstream`` (422) before ``_load_spec_bytes``
+    runs, so it never reaches the HTML-portal decode trap and is exempt.
+    """
+    return all(("<" not in url and ">" not in url) for url in urls)
+
+
+def test_packaged_catalog_fetch_upstreams_are_raw_spec_urls_not_doc_portals() -> None:
+    """Every fetchable ``upstream`` is a raw spec URL, not an HTML portal (#2334).
+
+    Audits the shipped catalog: for each row that reaches the HTTP fetch path
+    (non-null, fully non-templated ``upstream``), every URL must resolve to a
+    raw OpenAPI resource -- its path ends in ``.yaml`` / ``.yml`` / ``.json``.
+    A URL that is instead an HTML documentation portal (no spec suffix,
+    e.g. ``https://developer.broadcom.com/xapis/.../latest/``) would fetch
+    HTML and, absent the content-type guard, YAML-decode to a bare-400; even
+    with the guard it degrades a catalog-driven ingest to a forced ``--spec``
+    upload. Ship a MEHO-authored minimal spec via ``spec_resource`` (the
+    #1976 on-ramp) or point at a raw-content mirror instead.
+
+    Today only ``harbor`` (raw.githubusercontent.com ``swagger.yaml``) and
+    ``gh`` (raw.githubusercontent.com ``api.github.com.json``) reach the
+    fetch path, and both are raw-spec URLs. A future row (or URL edit) that
+    drifts to a portal page trips here at unit-test time.
+    """
+    offenders: dict[tuple[str, str], list[str]] = {}
+    for entry in load_catalog().entries:
+        if entry.upstream is None or not _reaches_fetch_path(entry.upstream):
+            continue
+        for url in entry.upstream:
+            path = urlparse(url).path.lower().rstrip("/")
+            if not path.endswith(_SPEC_URL_SUFFIXES):
+                offenders.setdefault((entry.product, entry.version), []).append(url)
+    assert offenders == {}, (
+        "packaged catalog row(s) point a fetchable ``upstream`` at a URL that "
+        "is not a raw OpenAPI spec (.yaml/.yml/.json) -- typically an HTML "
+        f"documentation portal that decodes to a bare-400: {offenders}. Point "
+        "the row at a directly-resolvable raw-spec URL, or ship a MEHO-authored "
+        "minimal spec via ``spec_resource`` (the #1976 on-ramp)."
+    )
 
 
 # ---------------------------------------------------------------------------

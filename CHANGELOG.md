@@ -112,6 +112,40 @@ connector-related release-notes line.
   now switch on `error_code` to distinguish "restage the stale credential"
   from a generic connector crash (#2329).
 
+### Added — CI trip-wire: every packaged catalog entry dry-run-resolves without a bare-400, plus a raw-spec-URL upstream audit (#2334)
+
+- A packaged connector-catalog entry whose `upstream` pointed at an HTML
+  developer-portal page used to fetch the HTML, YAML-decode it, and surface
+  an opaque bare-400 (`could not decode spec … line 33`) that told the
+  operator nothing actionable. The structured `catalog_entry_upstream_not_spec`
+  content-type guard (G0.15-T2 #1211) already closes that at request time;
+  #2334 adds the CI guardrails that keep the contract from regressing: a
+  parametrized fixture dry-run-ingests **every** shipped catalog entry (with
+  all fetchable upstreams mocked to serve worst-case HTML — deterministic, no
+  live network) and asserts each resolves to a dry-run success or a
+  **structured** error envelope, never the opaque decode-400 or an unhandled
+  500. A companion static audit asserts every fetch-path `upstream` is a raw
+  OpenAPI URL (`.yaml`/`.yml`/`.json`), not a documentation portal —
+  generalizing the prior Broadcom-only sweep. A future row (or URL edit) that
+  drifts into the portal/HTML pattern now trips at unit-test time instead of
+  on an operator's first POST. Audit finding: the shipped catalog is already
+  clean — only `harbor` and `gh` reach the fetch path and both point at
+  raw-content URLs (#2334).
+### Added — inline spec content on the MCP `connector.ingest` tool (#2326)
+
+- Each `specs[*]` entry on the `meho.connector.ingest` MCP tool now
+  accepts an optional `content` field carrying the spec text inline
+  (~20 MiB cap, the REST bound). When set, the backplane uses the bytes
+  verbatim and skips the fetch — the same `SpecSource.content` on-ramp
+  the CLI upload already uses. Previously the tool required a `uri`-only
+  entry and rejected `file://` / `docs:` schemes at the https fetch
+  guard, forcing agent-driven flows to publish private lab specs to a
+  public gist purely to satisfy the fetcher. Inline content bypasses the
+  fetcher entirely (no SSRF surface, strictly safer than the gist
+  workaround it retires), so an appliance-served or hand-authored spec
+  with no public https URL (NSX, VCFA) can be ingested over a fully
+  MCP-drivable flow; `uri` stays the audit label, so the resulting
+  L1/L2 rows match a CLI upload of the same file (#2326).
 ### Tested — regression pin: a non-dry-run 1275-op-class spec ingest keeps the event loop responsive (#2333)
 
 - Pinned the v0.8.0 large-spec ingest crash fix end-to-end: a

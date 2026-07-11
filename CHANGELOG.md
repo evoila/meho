@@ -109,6 +109,21 @@ connector-related release-notes line.
   on an operator's first POST. Audit finding: the shipped catalog is already
   clean — only `harbor` and `gh` reach the fetch path and both point at
   raw-content URLs (#2334).
+### Tested — regression pin: a non-dry-run 1275-op-class spec ingest keeps the event loop responsive (#2333)
+
+- Pinned the v0.8.0 large-spec ingest crash fix end-to-end: a
+  **non-dry-run** ingest of the 1275-op class (the canonical 7.5 MB
+  vmware/9.0 signal) now has a regression test proving the event loop
+  stays responsive while every operation is committed. A heartbeat
+  coroutine measures loop lag concurrently with
+  `IngestionPipelineService.ingest(dry_run=False)`; the test asserts all
+  1275 ops persist and the loop keeps ticking with no starvation. A
+  deterministic companion injects a fixed blocking parse and proves the
+  `asyncio.to_thread` offload keeps it off the loop, and a third pins
+  that the `--catalog` (`catalog_entry`) shape resolves onto the same
+  `202` + job-handle async path rather than the synchronous pass that
+  crashed the pod. Test-only; no runtime change (the fix shipped in
+  #2275 / #2317).
 
 ### Added — structured post-approval vault-write-forbidden error + write-capability warning on the approval envelope (#2331)
 

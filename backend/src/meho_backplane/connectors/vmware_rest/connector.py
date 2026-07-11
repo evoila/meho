@@ -94,6 +94,7 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.profile_auth import SESSION_TOKEN_OBJECT_KEY
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -471,9 +472,19 @@ class VmwareRestConnector(HttpConnector):
             # one attempted, which distinguishes a real 404 (legacy
             # also missing) from auth/server failure on the modern
             # path.
-            raise RuntimeError(
+            message = (
                 f"vsphere session establish failed for target {target.name!r}: "
                 f"POST {established_path} returned HTTP {exc.response.status_code}"
+            )
+            # #2329: a 401 (rotated/stale password) / 403 (locked-out account)
+            # at establish is an auth-class failure -- raise the structured
+            # ``ConnectorAuthError`` the dispatcher maps to
+            # ``connector_auth_failed`` (restage-the-credential remediation)
+            # instead of the opaque ``connector_error: RuntimeError``. A real
+            # 404 / 5xx keeps the bare RuntimeError shape.
+            raise (
+                session_establish_auth_error(exc, message=message, target=target)
+                or RuntimeError(message)
             ) from exc
         token = _extract_session_token(resp.json(), target.name)
         self._session_tokens[cache_key] = token

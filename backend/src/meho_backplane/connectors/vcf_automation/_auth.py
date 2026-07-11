@@ -20,6 +20,7 @@ import httpx
 import structlog
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.vcf_automation._routing import (
     PROVIDER_CLOUDAPI_ACCEPT,
     PROVIDER_SESSION_PATH,
@@ -131,10 +132,16 @@ async def vcfa_provider_login(
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
+        message = (
             f"vcf-automation provider session establish failed for target "
             f"{target.name!r}: POST {PROVIDER_SESSION_PATH} returned "
             f"HTTP {exc.response.status_code}"
+        )
+        # #2329: a 401/403 on the provider-plane login is an auth-class
+        # establish failure -> structured ``connector_auth_failed``.
+        raise (
+            session_establish_auth_error(exc, message=message, target=target)
+            or RuntimeError(message)
         ) from exc
     jwt: str | None = resp.headers.get(PROVIDER_TOKEN_HEADER)
     if not jwt:
@@ -177,10 +184,16 @@ async def tenant_login(
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
+        message = (
             f"vcf-automation tenant session establish failed for target "
             f"{target.name!r}: POST {TENANT_SESSION_PATH} returned "
             f"HTTP {exc.response.status_code}"
+        )
+        # #2329: a 401/403 on the tenant-plane login is an auth-class
+        # establish failure -> structured ``connector_auth_failed``.
+        raise (
+            session_establish_auth_error(exc, message=message, target=target)
+            or RuntimeError(message)
         ) from exc
     payload: Any = resp.json()
     raw_token = payload.get("token") if isinstance(payload, dict) else None

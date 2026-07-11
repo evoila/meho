@@ -35,6 +35,7 @@ from typing import Any, Literal
 import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
@@ -906,9 +907,32 @@ def is_auth_failed_status(
     return status_code in recognised
 
 
+def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -> str:
+    """The restage-the-stale-credential remediation clause (#2329).
+
+    Names the target and its ``secret_ref`` when known, mirroring the #2091
+    ``connector_vault_forbidden`` remediation shape (state the likely cause,
+    name the exact thing to fix, give the command). The credential is most
+    likely stale because the target's service-account password was rotated
+    upstream while the backplane-side Vault copy lagged -- the routine event
+    the filing (#2329) documents -- so the fix is to restage the credential,
+    not to widen a policy.
+    """
+    who = f"target {target_name!r}" if target_name else "this target"
+    ref_clause = f" (secret_ref {secret_ref!r})" if secret_ref else ""
+    name_arg = target_name if target_name else "<name>"
+    return (
+        f"the credential for {who}{ref_clause} appears stale or wrong -- most "
+        f"likely the upstream service-account password was rotated while the "
+        f"backplane-side Vault copy lagged. Restage it via "
+        f"`meho target credential set {name_arg}` (or the equivalent Vault "
+        f"write), then retry."
+    )
+
+
 def result_connector_auth_failed(
     op_id: str,
-    exc: httpx.HTTPStatusError,
+    exc: httpx.HTTPStatusError | ConnectorAuthError,
     target: Any,
     duration_ms: float,
 ) -> OperationResult:
@@ -948,37 +972,79 @@ def result_connector_auth_failed(
     it degrades to a bare host label rather than raising inside the
     never-raises error path.
 
+    #2329 makes this builder serve **both** the mid-session recovery path
+    (an :exc:`httpx.HTTPStatusError` reaching the dispatcher's
+    ``except httpx.HTTPStatusError`` arm after the #2067 re-login retry
+    exhausts) **and** the *session-establish* path (a
+    :class:`~meho_backplane.connectors._shared.vcf_auth.ConnectorAuthError`
+    raised family-wide when a login POST returns 401/403). Both surface the
+    same ``connector_auth_failed`` code, so a consumer switches on it
+    regardless of *when* auth died -- the convergence the filing asked for.
+    The ``extras.cause`` sub-code distinguishes them
+    (``session_establish_401`` / ``_403`` vs ``session_dispatch_<status>``).
+
     ``extras`` carries the machine-usable fields an agent can branch on
-    without re-parsing the transport error: ``http_status`` (the actual
-    auth-class status the upstream returned), ``host``, and the upstream
-    ``upstream_message`` (the body's ``message`` when JSON, else capped
-    raw text, ``None`` when the body was empty -- shared with the 403/422
-    builders via :func:`_http_upstream_message`).
+    without re-parsing the transport error: ``error_code``, ``cause`` (the
+    stage-and-status sub-code), ``http_status`` (the actual auth-class
+    status), ``target`` (the target name), ``host``, ``secret_ref`` (the
+    Vault ref to restage, when known), ``remediation`` (the restage hint),
+    ``raw_message`` (the connector's original establish message, preserved
+    for debugging per #2329), and ``upstream_message`` (the upstream body's
+    ``message`` when JSON, else capped raw text, ``None`` when empty --
+    shared with the 403/422 builders via :func:`_http_upstream_message`).
     """
-    response = exc.response
-    status_code = response.status_code
-    upstream_message = _http_upstream_message(response)
-    host = getattr(target, "host", None) or "the target host"
+    if isinstance(exc, ConnectorAuthError):
+        status_code = exc.status_code
+        cause = exc.cause
+        raw_message: str | None = _sanitize_free_text(str(exc))
+        target_name = exc.target_name or getattr(target, "name", None)
+        host = exc.host or getattr(target, "host", None) or "the target host"
+        secret_ref = (
+            exc.secret_ref if exc.secret_ref is not None else getattr(target, "secret_ref", None)
+        )
+        # The underlying transport error (chained via ``raise ... from``)
+        # may carry a useful upstream body message; read it opportunistically.
+        underlying = exc.__cause__
+        upstream_message = (
+            _http_upstream_message(underlying.response)
+            if isinstance(underlying, httpx.HTTPStatusError)
+            else None
+        )
+    else:
+        response = exc.response
+        status_code = response.status_code
+        cause = f"session_dispatch_{status_code}"
+        raw_message = None
+        target_name = getattr(target, "name", None)
+        host = getattr(target, "host", None) or "the target host"
+        secret_ref = getattr(target, "secret_ref", None)
+        upstream_message = _http_upstream_message(response)
+    remediation = _auth_restage_remediation(target_name, secret_ref)
     summary = (
         f"connector_auth_failed: the upstream returned an auth/session "
         f"failure (HTTP {status_code}) for {host}. The connector reached the "
-        f"host but its credential or session was rejected. The dispatch path "
-        f"already re-logged-in and retried once on a session-expiry status "
-        f"(401 or vRLI's 440), so when this reaches you the re-login also "
-        f"failed: the credential is most likely missing, invalid, or expired "
-        f"in Vault, or the target's auth_model is wrong. Verify the target's "
-        f"Vault credential and its auth_model against what the connector "
-        f"expects, then retry. See docs/architecture/connector-auth.md "
-        f"for the connector auth contract and "
-        f"docs/codebase/error-message-shape.md for the dispatch error "
+        f"host but its credential or session was rejected. On the dispatch "
+        f"path the session was already re-logged-in and retried once on a "
+        f"session-expiry status (401 or vRLI's 440), so a status reaching you "
+        f"there means re-login also failed; at session establish a 401/403 "
+        f"means the login itself was rejected. Either way {remediation} If "
+        f"this persists after restaging, verify the target's auth_model "
+        f"against what the connector expects. See "
+        f"docs/architecture/connector-auth.md for the connector auth contract "
+        f"and docs/codebase/error-message-shape.md for the dispatch error "
         f"convention."
     )
     if upstream_message is not None:
         summary = f"{summary} Upstream said: {upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_auth_failed",
+        "cause": cause,
         "http_status": status_code,
+        "target": target_name,
         "host": host,
+        "secret_ref": secret_ref,
+        "remediation": remediation,
+        "raw_message": raw_message,
         "upstream_message": upstream_message,
     }
     return OperationResult(

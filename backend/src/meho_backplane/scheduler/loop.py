@@ -191,6 +191,52 @@ _CLAIM_BATCH_LIMIT: int = 50
 _TOKEN_CHECK_INTERVAL_SECONDS: float = 3600.0
 
 
+#: Consecutive precondition-skips a trigger tolerates before the loop
+#: parks it (``status='paused'``) with its ``last_skip_reason`` (#2327).
+#: A precondition skip (definition missing/disabled, credentials
+#: unresolved) leaves the row's fire state untouched so a *transient*
+#: miss self-heals on the next tick once the operator fixes the cause --
+#: but a *permanent* miss (revoked Vault token, deleted definition,
+#: never-persisted secret) would otherwise skip silently every tick
+#: forever. Parking after this many *consecutive* skips lets the state
+#: machine itself say "broken, stopped trying" rather than leaving a
+#: healthy-looking ``active`` row that never fires. The counter resets
+#: to 0 on the next successful fire, so an occasional transient blip
+#: never accumulates toward the park threshold. A module constant (not a
+#: per-deployment tunable) matches :data:`_CLAIM_BATCH_LIMIT`'s posture:
+#: dumb, fixed loop-behaviour bound. At the default 30 s tick this parks
+#: an unresolvable trigger after ~5 min -- past any normal
+#: credential-rotation window, fast enough to stop the silent loop.
+_PARK_AFTER_CONSECUTIVE_SKIPS: int = 10
+
+
+#: Stable machine tags for the precondition-skip causes (#2327). Written
+#: to ``scheduled_trigger.last_skip_reason`` and surfaced verbatim on the
+#: read surfaces, so they are part of the operator-facing contract -- keep
+#: them terse, lowercase, snake_case, and stable across releases.
+_SKIP_DEFINITION_MISSING: str = "definition_missing"
+_SKIP_DEFINITION_DISABLED: str = "definition_disabled"
+_SKIP_CREDENTIALS_UNRESOLVED: str = "credentials_unresolved"
+
+
+@dataclass(frozen=True, slots=True)
+class _PreconditionSkip:
+    """A due trigger the precondition gate could not fire -- with its cause.
+
+    Returned by :func:`_prepare_invocation` in place of the old bare
+    ``None`` so the caller can project the cause onto the trigger row
+    (:func:`_record_skip`) rather than skipping silently. ``reason`` is
+    one of the ``_SKIP_*`` machine tags above; it is written to
+    ``scheduled_trigger.last_skip_reason`` and surfaced on the read
+    surfaces. The row's fire state (``status`` / ``next_fire_at``) is
+    still left untouched by the caller so a transient miss self-heals on
+    the next tick -- the skip-state columns are additive visibility, not
+    a change to the at-most-once contract.
+    """
+
+    reason: str
+
+
 @dataclass(frozen=True, slots=True)
 class _ResolvedDefinition:
     """The agent-definition view the loop needs to invoke a fire.
@@ -283,23 +329,115 @@ async def _park_trigger(
     *,
     reason: str,
 ) -> None:
-    """Transition a corrupted trigger to ``status='paused'``.
+    """Transition a corrupted trigger to ``status='paused'`` with a reason.
 
-    Called for a row whose persisted ``cron_expr`` no longer parses;
-    parking stops the loop from re-tripping on the same bad row every
-    tick. The reason is logged so an operator following audit logs
-    can find the offending row.
+    Called for a row whose persisted ``cron_expr`` no longer parses (or
+    whose ``kind`` is unrecognised); parking stops the loop from
+    re-tripping on the same bad row every tick. The reason is logged
+    *and* -- since #2327 -- stamped onto ``last_skip_reason`` /
+    ``last_skipped_at`` so the parked state explains itself on the read
+    surfaces (``scheduler list`` / ``scheduler show`` / the operator
+    console) rather than forcing the operator to grep pod logs for the
+    offending row.
     """
     await session.execute(
         update(ScheduledTrigger)
         .where(ScheduledTrigger.id == trigger_id)
-        .values(status=ScheduledTriggerStatus.PAUSED.value)
+        .values(
+            status=ScheduledTriggerStatus.PAUSED.value,
+            last_skip_reason=reason,
+            last_skipped_at=datetime.now(UTC),
+        )
     )
     _log.warning(
         "scheduler_trigger_paused",
         trigger_id=str(trigger_id),
         reason=reason,
     )
+
+
+async def _record_skip(
+    session: AsyncSession,
+    row: ScheduledTrigger,
+    *,
+    reason: str,
+) -> None:
+    """Project a precondition-skip onto the trigger row; park at the cap (#2327).
+
+    Called by :func:`_fire_cron` / :func:`_fire_one_off` when
+    :func:`_prepare_invocation` returns a :class:`_PreconditionSkip`.
+    Increments the consecutive ``skip_count`` and stamps
+    ``last_skip_reason`` / ``last_skipped_at`` so the silent every-tick
+    skip becomes visible on every read surface. Once the count reaches
+    :data:`_PARK_AFTER_CONSECUTIVE_SKIPS` the row is parked
+    (``status='paused'``) so a permanently-unresolvable trigger stops
+    re-tripping the loop -- the state machine itself communicates
+    "broken, stopped trying".
+
+    The ``skip_count`` is computed from the value the claim loaded
+    (``row.skip_count``, current because the row is claim-locked for the
+    open transaction) rather than a SQL ``+ 1`` so the local ``row``
+    object stays in sync for the caller and the park decision reads a
+    concrete integer. The ``UPDATE`` is guarded on ``status='active'``
+    so it never resurrects a row a concurrent claimer already moved off
+    ``active``.
+    """
+    now = datetime.now(UTC)
+    new_count = (row.skip_count or 0) + 1
+    should_park = new_count >= _PARK_AFTER_CONSECUTIVE_SKIPS
+    values: dict[str, object] = {
+        "skip_count": new_count,
+        "last_skip_reason": reason,
+        "last_skipped_at": now,
+    }
+    if should_park:
+        values["status"] = ScheduledTriggerStatus.PAUSED.value
+    await session.execute(
+        update(ScheduledTrigger)
+        .where(
+            ScheduledTrigger.id == row.id,
+            ScheduledTrigger.status == ScheduledTriggerStatus.ACTIVE.value,
+        )
+        .values(**values)
+    )
+    # Keep the in-memory row aligned so a later reference this tick reads
+    # the persisted values without a re-query.
+    row.skip_count = new_count
+    row.last_skip_reason = reason
+    row.last_skipped_at = now
+    if should_park:
+        row.status = ScheduledTriggerStatus.PAUSED.value
+        # One WARN on the park transition -- the per-tick skip is already
+        # logged by ``_prepare_invocation``; this line marks the moment
+        # the loop gave up, which is the operator-actionable event.
+        _log.warning(
+            "scheduler_trigger_parked_after_skips",
+            trigger_id=str(row.id),
+            reason=reason,
+            skip_count=new_count,
+        )
+
+
+async def _clear_skip_state(session: AsyncSession, row: ScheduledTrigger) -> None:
+    """Reset a trigger's skip state after a successful prepare (#2327).
+
+    A successful :func:`_prepare_invocation` means the precondition cause
+    that was tripping the skip is gone, so the consecutive-skip streak
+    breaks: reset ``skip_count`` to 0 and clear ``last_skip_reason`` /
+    ``last_skipped_at``. Called only when ``row.skip_count`` is already
+    non-zero, so the healthy hot path (every fire of a well-behaved
+    trigger) issues no extra ``UPDATE``. The write is flushed into the
+    caller's open transaction and committed alongside the advance /
+    mark-fired step.
+    """
+    await session.execute(
+        update(ScheduledTrigger)
+        .where(ScheduledTrigger.id == row.id)
+        .values(skip_count=0, last_skip_reason=None, last_skipped_at=None)
+    )
+    row.skip_count = 0
+    row.last_skip_reason = None
+    row.last_skipped_at = None
 
 
 def _coerce_inputs(inputs: dict[str, object] | None) -> str:
@@ -371,8 +509,10 @@ class _PreparedInvocation:
     work_ref: str | None
 
 
-async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | None:
-    """Resolve definition + credentials for a due trigger; ``None`` to skip.
+async def _prepare_invocation(
+    row: ScheduledTrigger,
+) -> _PreparedInvocation | _PreconditionSkip:
+    """Resolve definition + credentials for a due trigger; skip signal to skip.
 
     Called *before* the advance/mark-fired commit so a precondition
     miss (definition deleted, agent disabled, agent secret not wired)
@@ -382,9 +522,12 @@ async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | No
 
     Returns:
         :class:`_PreparedInvocation` on success.
-        ``None`` when the caller should skip the fire without advancing.
+        :class:`_PreconditionSkip` (carrying the machine-tag ``reason``)
+        when the caller should skip the fire without advancing -- the
+        caller projects that reason onto the row (#2327) instead of
+        skipping silently.
 
-    Skip-with-``None`` cases (each logged at WARN/INFO before return):
+    Skip cases (each logged at WARN/INFO before return):
 
     * **definition missing** -- the FK lookup returned no row. The
       ``agent_definition`` row was removed after the trigger was
@@ -417,14 +560,14 @@ async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | No
             trigger_id=str(row.id),
             agent_definition_id=str(row.agent_definition_id),
         )
-        return None
+        return _PreconditionSkip(reason=_SKIP_DEFINITION_MISSING)
     if not definition.enabled:
         _log.info(
             "scheduler_definition_disabled",
             trigger_id=str(row.id),
             agent_name=definition.name,
         )
-        return None
+        return _PreconditionSkip(reason=_SKIP_DEFINITION_DISABLED)
     try:
         agent_client_id, agent_client_secret = await resolve_agent_credentials(
             definition.identity_ref,
@@ -437,7 +580,7 @@ async def _prepare_invocation(row: ScheduledTrigger) -> _PreparedInvocation | No
             identity_ref=definition.identity_ref,
             reason=str(exc),
         )
-        return None
+        return _PreconditionSkip(reason=_SKIP_CREDENTIALS_UNRESOLVED)
     return _PreparedInvocation(
         name=definition.name,
         identity_ref=definition.identity_ref,
@@ -484,8 +627,16 @@ async def _fire_cron(
     other replica owns this tick).
     """
     prepared = await _prepare_invocation(row)
-    if prepared is None:
+    if isinstance(prepared, _PreconditionSkip):
+        # Project the skip onto the row (and park at the cap) instead of
+        # skipping silently (#2327). The row's fire state is still
+        # untouched -- a transient miss self-heals on the next tick.
+        await _record_skip(session, row, reason=prepared.reason)
+        await session.commit()
         return False
+    # The precondition cause (if any) has cleared -- break the skip streak.
+    if (row.skip_count or 0) > 0:
+        await _clear_skip_state(session, row)
     try:
         advanced = await advance_cron_trigger(
             session,
@@ -537,8 +688,16 @@ async def _fire_one_off(
     is visible in audit.
     """
     prepared = await _prepare_invocation(row)
-    if prepared is None:
+    if isinstance(prepared, _PreconditionSkip):
+        # Project the skip onto the row (and park at the cap) instead of
+        # skipping silently (#2327). The one-off stays ``active`` -- not
+        # consumed -- so it still fires once the operator fixes the cause.
+        await _record_skip(session, row, reason=prepared.reason)
+        await session.commit()
         return False
+    # The precondition cause (if any) has cleared -- break the skip streak.
+    if (row.skip_count or 0) > 0:
+        await _clear_skip_state(session, row)
     marked = await mark_one_off_fired(session, row, fire_instant=fire_instant)
     if marked is None:
         return False

@@ -2372,12 +2372,18 @@ async def test_park_without_builder_uses_identifier_default(
         row = await fresh.get(ApprovalRequest, approval_request_id)
         assert row is not None
         # Identifier-only default -- no built-preview envelope -- with the
-        # catalog safety_level stamped on by the dispatcher seam (#1855).
+        # catalog safety_level stamped on by the dispatcher seam (#1855)
+        # and the reviewer-facing preview provenance (#2332):
+        # preview_populated=False + a "connector_did_not_populate" reason
+        # so a caller can refuse to auto-approve the blind, op-identity-only
+        # request.
         assert row.proposed_effect == {
             "op_id": "vault.kv.no_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),
             "safety_level": "safe",
+            "preview_populated": False,
+            "preview_reason": "connector_did_not_populate",
         }
         assert "preview" not in row.proposed_effect
 

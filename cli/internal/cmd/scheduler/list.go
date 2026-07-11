@@ -231,8 +231,11 @@ func getList(
 }
 
 // printListTable renders the triggers as a compact table:
-// ID, KIND, STATUS, SCHEDULE (cron_expr or fire_at), NEXT_FIRE_AT.
-// Consumes `api.ScheduledTriggerListResponse` directly so the
+// ID, KIND, STATUS, SKIPS, SCHEDULE (cron_expr or fire_at), NEXT_FIRE_AT,
+// WORK_REF. The SKIPS column (#2327) surfaces the consecutive-skip count so
+// an `active` trigger that is silently skipping every tick no longer reads
+// as healthy on `meho scheduler list`; "-" when the trigger is firing
+// cleanly. Consumes `api.ScheduledTriggerListResponse` directly so the
 // generated typed envelope is the single source of truth for the
 // on-screen shape.
 func printListTable(w io.Writer, r *api.ScheduledTriggerListResponse) {
@@ -240,8 +243,8 @@ func printListTable(w io.Writer, r *api.ScheduledTriggerListResponse) {
 		fmt.Fprintln(w, "no scheduled triggers in this tenant")
 		return
 	}
-	fmt.Fprintf(w, "%-36s %-8s %-10s %-30s %-24s %s\n",
-		"ID", "KIND", "STATUS", "SCHEDULE", "NEXT_FIRE_AT", "WORK_REF")
+	fmt.Fprintf(w, "%-36s %-8s %-10s %-6s %-30s %-24s %s\n",
+		"ID", "KIND", "STATUS", "SKIPS", "SCHEDULE", "NEXT_FIRE_AT", "WORK_REF")
 	for _, t := range r.Triggers {
 		schedule := ""
 		switch string(t.Kind) {
@@ -267,7 +270,11 @@ func printListTable(w io.Writer, r *api.ScheduledTriggerListResponse) {
 		if t.WorkRef != nil && *t.WorkRef != "" {
 			workRef = *t.WorkRef
 		}
-		fmt.Fprintf(w, "%-36s %-8s %-10s %-30s %-24s %s\n",
-			t.Id.String(), string(t.Kind), string(t.Status), schedule, next, workRef)
+		skips := "-"
+		if t.SkipCount > 0 {
+			skips = fmt.Sprintf("%d", t.SkipCount)
+		}
+		fmt.Fprintf(w, "%-36s %-8s %-10s %-6s %-30s %-24s %s\n",
+			t.Id.String(), string(t.Kind), string(t.Status), skips, schedule, next, workRef)
 	}
 }

@@ -115,6 +115,53 @@ connector-related release-notes line.
   static `VAULT_SCHEDULER_TOKEN` remains the default; an unreadable/empty
   file falls through to it.
 
+### Added — scheduler skip-state on the trigger row + park after N unresolvable skips (#2327)
+
+- The scheduler tick loop now projects its precondition **skips** onto the
+  `scheduled_trigger` row (migration `0057`, three columns): `skip_count`
+  (consecutive skips since the last successful fire), `last_skip_reason`
+  (machine tag — `definition_missing` / `definition_disabled` /
+  `credentials_unresolved`; the corrupt-cron / unknown-kind park paths also
+  stamp `invalid_cron_expr` / `unknown_kind`), and `last_skipped_at`.
+  Previously a permanent misconfiguration (revoked scheduler Vault token,
+  deleted-but-referenced definition, never-persisted agent secret) made the
+  loop skip every 30 s tick with the only trace a pod-log WARN, while
+  `meho scheduler list` showed a healthy-looking `active` trigger — a real
+  deploy lost ~360 hourly fires over 15 days before anyone noticed.
+- After a fixed number of **consecutive** unresolvable skips the loop parks
+  the trigger (`status='paused'`) so the state machine itself communicates
+  "broken, stopped trying" instead of re-tripping forever; a successful
+  fire resets the streak and clears the skip fields. The new state is
+  surfaced on `GET /api/v1/scheduler/triggers`, `meho.scheduler.list` /
+  `.show` (MCP), `meho scheduler list` (a `SKIPS` column), and the operator
+  console (a warning badge on the list row + a skip block on the detail
+  page). The at-most-once fire contract and transient-retry behaviour are
+  unchanged — the columns are additive visibility.
+
+### Added — redaction-safe `proposed_effect` preview for `vault.kv.*` credential writes (#2332)
+
+- A parked `vault.kv.put` / `patch` / `delete` approval request now
+  carries a bespoke, redaction-safe `proposed_effect` preview instead of
+  the op-identity-only default. The approver sees the KV **mount**,
+  **path**, KV **version**, the write **semantics** (`put` = wholesale
+  replace, `patch` = merge, `delete` = version soft-delete), and the set
+  of **key names** being written — never their **values**. This restores
+  the approver's ability to distinguish "rotate the throwaway probe key"
+  from "clobber the production database password" while keeping the
+  value-redaction promise the credential-class suppression established
+  (#1422 / #1856). Wired as a bespoke builder (`vault.kv.put` / `patch`
+  classify `credential_write`, so the generic params-echo default is
+  suppressed for them), mirroring the Keycloak user-create builder mold
+  (#1857).
+- Every parked-request envelope now carries two reviewer-facing
+  provenance fields: `preview_populated` (a `bool` a caller can read to
+  refuse to auto-approve a blind, op-identity-only request) and, when a
+  preview is intentionally sparse, `preview_reason` —
+  `credential_write_redacted` (a deliberately-redacted credential write
+  with no bespoke builder) vs `connector_did_not_populate` (a
+  non-credential op that simply never populated one) — so the approval
+  surface can style the blind case as elevated-risk. `proposed_effect`
+  is a free-form JSON field, so no API schema / OpenAPI change (#2332).
 ### Added — approval-TTL lifecycle wired end-to-end (parked approvals now expire) (#2322)
 
 - Every parked approval is now stamped `expires_at = created_at +

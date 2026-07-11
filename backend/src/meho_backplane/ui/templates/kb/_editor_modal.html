@@ -54,8 +54,11 @@
     1. A full ``<dialog>`` block included from ``index.html`` (initial
        page render — ``error_message`` is None).
     2. A bare fragment re-rendered by ``POST /ui/kb/new`` on validation
-       failure (422 — ``error_message`` is set). In that case HTMX
-       swaps ``#kb-editor-modal`` with this response.
+       failure (``error_message`` is set). In that case HTMX swaps
+       ``#kb-editor-modal`` with this response. The re-render returns
+       200, not the semantically-matching 422: HTMX 2 does not swap a
+       non-2xx response, so a 4xx error fragment is computed but never
+       shown (#2384, the mold from #2346).
 -#}
 <dialog
   id="kb-editor-modal"

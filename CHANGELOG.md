@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — CI trip-wire: every packaged catalog entry dry-run-resolves without a bare-400, plus a raw-spec-URL upstream audit (#2334)
+
+- A packaged connector-catalog entry whose `upstream` pointed at an HTML
+  developer-portal page used to fetch the HTML, YAML-decode it, and surface
+  an opaque bare-400 (`could not decode spec … line 33`) that told the
+  operator nothing actionable. The structured `catalog_entry_upstream_not_spec`
+  content-type guard (G0.15-T2 #1211) already closes that at request time;
+  #2334 adds the CI guardrails that keep the contract from regressing: a
+  parametrized fixture dry-run-ingests **every** shipped catalog entry (with
+  all fetchable upstreams mocked to serve worst-case HTML — deterministic, no
+  live network) and asserts each resolves to a dry-run success or a
+  **structured** error envelope, never the opaque decode-400 or an unhandled
+  500. A companion static audit asserts every fetch-path `upstream` is a raw
+  OpenAPI URL (`.yaml`/`.yml`/`.json`), not a documentation portal —
+  generalizing the prior Broadcom-only sweep. A future row (or URL edit) that
+  drifts into the portal/HTML pattern now trips at unit-test time instead of
+  on an operator's first POST. Audit finding: the shipped catalog is already
+  clean — only `harbor` and `gh` reach the fetch path and both point at
+  raw-content URLs (#2334).
+
 ### Added — structured post-approval vault-write-forbidden error + write-capability warning on the approval envelope (#2331)
 
 - A typed `vault.kv.put` / `patch` / `delete` that Vault denies at

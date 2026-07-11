@@ -146,13 +146,25 @@ vocabulary.
 
 **Why it inserts clean today.** §6 conflict detection keys off
 *existing* edges. The supersede pass only marks `source='auto'` rows
-(`_mark_same_kind_different_endpoint_superseded` in
-[`topology/annotate.py`](../../backend/src/meho_backplane/topology/annotate.py)),
-and the incompatible-kind pass only fires when an edge of a *different*
-kind already sits on the same pair. On a pair no populator covers,
-neither condition holds, so the curated row inserts with `source:
-curated, conflicts: []` — the §6 machinery stays dormant until a
-competing edge exists.
+(`_mark_same_kind_different_endpoint_superseded`,
+[`annotate.py:314`](../../backend/src/meho_backplane/topology/annotate.py)),
+so it is dormant on an uncovered pair — there is no auto row to
+supersede. The incompatible-kind pass, however, carries **no `source`
+filter**: it selects every edge of a *different* kind on the same
+`(from, to)` pair, whatever its origin
+(`_mark_incompatible_kinds_conflict`,
+[`annotate.py:366-371`](../../backend/src/meho_backplane/topology/annotate.py)).
+So the curated row inserts with `source: curated, conflicts: []` **only
+when the pair is otherwise empty**. If a pre-existing curated
+different-kind edge already sits on it — an operator curated
+`depends-on(A→B)`, then curates `runs-on(A→B)` — the incompatible-kind
+pass still fires and the new row carries a **non-empty** `conflicts`
+array. That coexistence is by design (rule 2's docstring uses the
+`depends-on` ⇄ `routes-through` example: both rows survive, each
+referencing the other). Clean insertion therefore requires **both** no
+existing `auto` row and no existing different-kind edge of any source on
+the pair; on a genuinely empty pair the §6 machinery stays dormant until
+a competing edge exists.
 
 **The grandfather commitment.** The state above is safe but would be
 *fragile* without a forward guarantee: the day a non-k8s populator
@@ -161,9 +173,10 @@ curated, which could turn today's clean curated rows into §6
 conflict/supersede noise. The commitment is therefore:
 
 > Any populator that begins covering a previously-uncovered
-> auto-discoverable kind ships with a **one-shot reconciliation** that
-> grandfathers pre-existing curated edges of that kind — they stay
-> visible and are **not** retroactively marked as §6 conflicts.
+> `(kind, pair-type)` — coverage is per `(kind, pair-type)`, not per
+> kind globally — ships with a **one-shot reconciliation** that
+> grandfathers the pre-existing curated edges on that pair-type: they
+> stay visible and are **not** retroactively marked as §6 conflicts.
 
 The substrate already leans this way for the *identical* pair: when a
 refresh re-discovers an edge an operator has curated on the same

@@ -138,18 +138,36 @@ any pair no populator covers.** Choosing the semantically-correct kind
 is legitimate there, not a workaround — an operator should not fall
 back to a weaker curated-only kind (`depends-on`) just to dodge the
 vocabulary. Such a write inserts clean (`source: curated, conflicts:
-[]`) because §6 detection keys off *existing* edges: the supersede pass
-(rule 1) only marks `source='auto'` rows and the incompatible-kind pass
-(rule 2) only fires against an existing different-kind edge on the same
-pair — a pair no populator covers has neither, so the §6 machinery is
-dormant.
+[]`) **only when no other edge already sits on that ordered pair**,
+because §6 detection keys off *existing* edges. The supersede pass
+(rule 1) only marks `source='auto'` rows
+([`annotate.py:314`](../../backend/src/meho_backplane/topology/annotate.py)),
+so it is genuinely dormant on an uncovered pair — there is no auto row to
+supersede. The incompatible-kind pass (rule 2), however, carries **no
+`source` filter**: it selects every different-kind edge on the same
+`(from, to)` pair regardless of origin
+([`annotate.py:366-371`](../../backend/src/meho_backplane/topology/annotate.py)).
+So the clean-insert guarantee holds only where the pair is otherwise
+empty. If a *pre-existing curated* different-kind edge already sits on it
+— an operator curated `depends-on(A→B)`, then later curates
+`runs-on(A→B)` — rule 2 still fires and the new curated row inserts with
+a **non-empty** `conflicts` array. That is by design: rule 2's own
+docstring describes exactly this `depends-on` ⇄ `routes-through`
+coexistence, where both rows survive and each carries the other's id.
+Clean insertion therefore requires *both* no existing `auto` row **and**
+no existing different-kind edge (of any source) on the pair.
 
 **Grandfather rule on populator ship.** So that today's correct
 modelling stays safe when coverage later arrives, MEHO commits that any
-populator newly covering a previously-uncovered kind ships with a
-one-shot reconciliation that grandfathers pre-existing curated edges of
-that kind — they stay visible, not retroactively §6-conflicted. The
-substrate already applies this for the *identical* pair:
+populator newly covering a `(kind, pair-type)` an operator already
+curated ships with a one-shot reconciliation that grandfathers those
+pre-existing curated edges — they stay visible, not retroactively
+§6-conflicted. Coverage is per `(kind, pair-type)`, not per kind
+globally: the k8s populator already covers `runs-on` for k8s pairs, so
+the trigger is a populator adding a previously-uncovered *pair-type* (a
+hypervisor host, an appliance→cluster) under a kind that may already be
+covered elsewhere. The substrate already applies this for the
+*identical* pair:
 [`refresh._refresh_curated_edge`](../../backend/src/meho_backplane/topology/refresh.py)
 keeps an operator-curated row operator-owned when a probe re-discovers
 the same `(from, to, kind)` (it bumps `last_seen` only; the

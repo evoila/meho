@@ -80,6 +80,7 @@ from meho_backplane.connectors._shared.vault_creds import (
 from meho_backplane.connectors.schemas import AuthModel
 
 __all__ = [
+    "ConnectorAuthError",
     "CredentialsCache",
     "SessionLoginError",
     "VcfCredentialsLoader",
@@ -87,6 +88,7 @@ __all__ = [
     "basic_auth_header",
     "is_acceptable_auth_model",
     "load_credentials_from_vault",
+    "session_establish_auth_error",
     "vcf_session_login",
 ]
 
@@ -411,6 +413,107 @@ class SessionLoginError(RuntimeError):
     """
 
 
+#: Statuses a *session-establish* POST returns that are auth-class, not a
+#: transient/transport fault. #2329: a rotated/stale service-account
+#: password surfaces as ``401`` at ``POST /api/session`` (vSphere) /
+#: ``/v1/tokens`` (SDDC) / the tenant login (VCF Automation); a
+#: locked-out or scope-stripped account surfaces as ``403``. Both are the
+#: same *kind* of failure -- the credential the target was staged with no
+#: longer authenticates -- so both siphon into the structured
+#: :class:`ConnectorAuthError` the dispatcher maps to ``connector_auth_failed``
+#: (the #2091 ``connector_vault_forbidden`` mold). Every other establish
+#: status (a 404 = endpoint-not-served, a 5xx = appliance fault, a
+#: token-less 2xx) is NOT an auth failure and keeps its existing
+#: :exc:`RuntimeError` / :class:`SessionLoginError` shape.
+_SESSION_ESTABLISH_AUTH_STATUSES: frozenset[int] = frozenset({401, 403})
+
+
+class ConnectorAuthError(SessionLoginError):
+    """A session **establish** failed because the credential was rejected (#2329).
+
+    The family-wide structured signal that a VCF connector's login POST
+    (vSphere ``/api/session``, NSX ``/api/session/create``, VCF Automation's
+    provider/tenant logins, SDDC Manager ``/v1/tokens``, vRLI
+    ``/api/v2/sessions``) returned an auth-class status
+    (:data:`_SESSION_ESTABLISH_AUTH_STATUSES`: ``401`` for a rotated/stale
+    password, ``403`` for a locked-out / scope-stripped account). Before
+    #2329 every one of those sites wrapped the underlying
+    :exc:`httpx.HTTPStatusError` into a *bare* :exc:`RuntimeError` whose only
+    signal was an interpolated string, so the dispatcher flattened it to
+    ``connector_error: RuntimeError`` -- a consumer could not switch on the
+    failure to "restage the stale credential" without parsing the message.
+
+    Subclassing :class:`SessionLoginError` (hence :exc:`RuntimeError`) keeps
+    every existing ``except SessionLoginError`` / ``pytest.raises(RuntimeError)``
+    caller working; the *new* behaviour is that the dispatcher recognises this
+    specific subclass ahead of its generic ``except Exception`` arm and routes
+    it to :func:`~meho_backplane.operations._errors.result_connector_auth_failed`
+    -- the same builder the mid-session-401 recovery path (#2067) already
+    reaches, so the ``connector_auth_failed`` code is emitted consistently
+    regardless of *when* the auth failure surfaces.
+
+    The structured attributes let the builder shape a #2091-style envelope
+    (``cause`` sub-code, ``target``, ``secret_ref``, ``remediation``) without
+    re-parsing the message. ``host`` / ``secret_ref`` are best-effort: the
+    :func:`vcf_session_login` helper only knows the ``target_name``, so the
+    builder falls back to the live dispatch ``target`` the dispatcher threads
+    in for those two fields.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int,
+        cause: str,
+        target_name: str | None = None,
+        host: str | None = None,
+        secret_ref: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.cause = cause
+        self.target_name = target_name
+        self.host = host
+        self.secret_ref = secret_ref
+
+
+def session_establish_auth_error(
+    exc: httpx.HTTPStatusError,
+    *,
+    message: str,
+    target: Any = None,
+    target_name: str | None = None,
+) -> ConnectorAuthError | None:
+    """Build a :class:`ConnectorAuthError` when *exc* is an establish-time auth failure.
+
+    The single classifier every family establish site funnels its caught
+    :exc:`httpx.HTTPStatusError` through (#2329), so the auth-class status set
+    lives in exactly one place. Returns ``None`` when the status is *not*
+    auth-class (``404`` endpoint-not-served, ``5xx`` appliance fault, ...), so
+    the caller keeps its existing non-auth :exc:`RuntimeError` shape for those.
+
+    *message* is the site's already-composed operator-facing string (it names
+    the target and the login path); it is reused verbatim so the diagnostic
+    text is unchanged and lands in the envelope's ``extras.raw_message``.
+    ``target`` (the live target object) is read best-effort for ``host`` /
+    ``secret_ref`` / ``name``; ``target_name`` is the explicit fallback for the
+    :func:`vcf_session_login` path, which has only the name.
+    """
+    status_code = exc.response.status_code
+    if status_code not in _SESSION_ESTABLISH_AUTH_STATUSES:
+        return None
+    resolved_name = target_name if target_name is not None else getattr(target, "name", None)
+    return ConnectorAuthError(
+        message,
+        status_code=status_code,
+        cause=f"session_establish_{status_code}",
+        target_name=resolved_name,
+        host=getattr(target, "host", None),
+        secret_ref=getattr(target, "secret_ref", None),
+    )
+
+
 SessionTokenExtractor = Callable[[httpx.Response], str | None]
 """Pull the session token out of a :class:`httpx.Response`.
 
@@ -494,9 +597,19 @@ async def vcf_session_login(
         resp = await client.post(path, json=body, headers=request_headers)
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        raise SessionLoginError(
+        message = (
             f"vcf session-login failed for target {target_name!r}: "
             f"POST {path} returned HTTP {exc.response.status_code}"
+        )
+        # #2329: a 401 (rotated/stale password) or 403 (locked-out account)
+        # at establish is an auth-class failure the dispatcher maps to the
+        # structured ``connector_auth_failed`` code; every other status keeps
+        # the generic ``SessionLoginError`` shape. ``ConnectorAuthError``
+        # subclasses ``SessionLoginError``, so consumers catching the latter
+        # are unaffected.
+        raise (
+            session_establish_auth_error(exc, message=message, target_name=target_name)
+            or SessionLoginError(message)
         ) from exc
     token = token_extractor(resp)
     if not token:

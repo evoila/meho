@@ -95,6 +95,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx.session import (
     NsxSessionLoader,
@@ -259,9 +260,16 @@ class NsxConnector(HttpConnector):
                 # httpx's default str() shows only the URL/status, which
                 # loses the per-target identification the dispatcher's
                 # audit row needs.
-                raise RuntimeError(
+                message = (
                     f"nsx session establish failed for target {target.name!r}: "
                     f"POST {_SESSION_CREATE_PATH} returned HTTP {exc.response.status_code}"
+                )
+                # #2329: 401/403 at establish -> structured
+                # ``connector_auth_failed`` (restage remediation); other
+                # statuses keep the bare RuntimeError shape.
+                raise (
+                    session_establish_auth_error(exc, message=message, target=target)
+                    or RuntimeError(message)
                 ) from exc
             xsrf: str | None = resp.headers.get(_XSRF_HEADER)
             if not xsrf:

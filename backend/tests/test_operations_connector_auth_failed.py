@@ -50,6 +50,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
+from meho_backplane.connectors._shared.vcf_auth import (
+    ConnectorAuthError,
+    session_establish_auth_error,
+)
 from meho_backplane.connectors.adapters import HttpConnector
 from meho_backplane.connectors.profile import (
     AuthSpec,
@@ -281,6 +285,45 @@ class _Http401Connector(HttpConnector):
         raise NotImplementedError
 
 
+class _EstablishAuthConnector(_Http401Connector):
+    """Connector whose session **establish** raises :class:`ConnectorAuthError`.
+
+    #2329: models the family establish sites (vSphere ``/api/session`` etc.)
+    after the fix -- a login POST that returns 401/403 raises the structured
+    ``ConnectorAuthError`` (chained from the transport error) instead of a
+    bare ``RuntimeError``. Overrides ``_request_json`` to raise it directly so
+    the dispatcher's new ``except ConnectorAuthError`` main-ladder arm is
+    exercised without live HTTP. It has NO ``invalidate_session`` hook, so the
+    dispatcher does not attempt the #2067 mid-session retry -- an establish-time
+    bad password fails fast.
+    """
+
+    impl_id = "vcfops-rest-establish"
+    establish_status: ClassVar[int] = 401
+
+    async def _request_json(
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        http_exc = _make_http_status_error(
+            headers=self.response_headers,
+            json_body={"message": "Cannot complete login: incorrect user name or password"},
+            status_code=self.establish_status,
+        )
+        message = f"vsphere session establish failed for target {getattr(target, 'name', None)!r}"
+        raise (
+            session_establish_auth_error(http_exc, message=message, target=target)
+            or RuntimeError(message)
+        ) from http_exc
+
+
 class _Http440Connector(_Http401Connector):
     """Same shape as :class:`_Http401Connector` but raises vRLI's 440.
 
@@ -483,8 +526,9 @@ def test_result_connector_auth_failed_shape_401() -> None:
     # Names the likely cause (session/credential expiry OR auth_model).
     assert "auth_model" in out.error
     assert "Vault" in out.error
-    # Remediation imperative ("Verify ... then retry") + both doc refs.
-    assert "Verify the target's Vault credential" in out.error
+    # #2329 remediation imperative (restage the stale credential, naming the
+    # target + command) + both doc refs.
+    assert "meho target credential set vrli-lab" in out.error
     assert "docs/architecture/connector-auth.md" in out.error
     assert "docs/codebase/error-message-shape.md" in out.error
     # The upstream body message tails the operator-facing string.
@@ -492,8 +536,15 @@ def test_result_connector_auth_failed_shape_401() -> None:
 
     extras = out.extras
     assert extras["error_code"] == "connector_auth_failed"
+    # #2329: the dispatch-path (mid-session recovery) sub-code names the stage.
+    assert extras["cause"] == "session_dispatch_401"
     assert extras["http_status"] == 401
+    assert extras["target"] == "vrli-lab"
     assert extras["host"] == "vrli.lab.internal"
+    assert extras["secret_ref"] is None
+    assert "meho target credential set vrli-lab" in extras["remediation"]
+    # The httpx (dispatch) path has no connector-composed establish message.
+    assert extras["raw_message"] is None
     assert extras["upstream_message"] == "session token invalid or expired"
 
 
@@ -552,6 +603,104 @@ def test_result_connector_auth_failed_missing_host_degrades_gracefully() -> None
 
 
 # ---------------------------------------------------------------------------
+# Establish-path builder shape (#2329 ConnectorAuthError branch)
+# ---------------------------------------------------------------------------
+
+
+def _make_establish_auth_error(
+    *,
+    status_code: int,
+    target: object,
+    json_body: dict[str, Any] | None = None,
+) -> ConnectorAuthError:
+    """Build a chained :class:`ConnectorAuthError` the way an establish site does.
+
+    Mirrors the production ``raise session_establish_auth_error(...) from exc``
+    seam so ``exc.__cause__`` carries the underlying transport error the
+    builder reads the upstream body from.
+    """
+    http_exc = _make_http_status_error(status_code=status_code, json_body=json_body)
+    message = f"vsphere session establish failed for target {getattr(target, 'name', None)!r}"
+    auth_err = session_establish_auth_error(http_exc, message=message, target=target)
+    assert auth_err is not None
+    try:
+        raise auth_err from http_exc
+    except ConnectorAuthError as chained:
+        return chained
+
+
+def test_session_establish_auth_error_classifies_401_and_403() -> None:
+    """401/403 at establish yield a ConnectorAuthError; other statuses do not."""
+    target = _FakeTarget(name="vc-a", host="vc-a.lab")
+    for status in (401, 403):
+        exc = _make_http_status_error(status_code=status)
+        err = session_establish_auth_error(exc, message="m", target=target)
+        assert isinstance(err, ConnectorAuthError)
+        assert err.status_code == status
+        assert err.cause == f"session_establish_{status}"
+        assert err.target_name == "vc-a"
+    for status in (404, 500, 502):
+        exc = _make_http_status_error(status_code=status)
+        assert session_establish_auth_error(exc, message="m", target=target) is None
+
+
+def test_result_connector_auth_failed_establish_401_shape() -> None:
+    """Establish 401 -> cause sub-code + target + secret_ref + remediation + raw_message."""
+
+    class _SecretTarget:
+        name = "vc-prod"
+        host = "vc-prod.lab.internal"
+        secret_ref = "tenants/t1/vc-prod"
+
+    auth_err = _make_establish_auth_error(
+        status_code=401,
+        target=_SecretTarget(),
+        json_body={"message": "Cannot authenticate user"},
+    )
+    out = result_connector_auth_failed("vmware.vm.info", auth_err, _SecretTarget(), duration_ms=2.0)
+
+    assert out.error is not None
+    assert out.error.startswith("connector_auth_failed:")
+    assert "vc-prod.lab.internal" in out.error
+    assert "401" in out.error
+    # Restage remediation names the target + its secret_ref.
+    assert "meho target credential set vc-prod" in out.error
+    assert "tenants/t1/vc-prod" in out.error
+
+    extras = out.extras
+    assert extras["error_code"] == "connector_auth_failed"
+    assert extras["cause"] == "session_establish_401"
+    assert extras["http_status"] == 401
+    assert extras["target"] == "vc-prod"
+    assert extras["host"] == "vc-prod.lab.internal"
+    assert extras["secret_ref"] == "tenants/t1/vc-prod"
+    assert "meho target credential set vc-prod" in extras["remediation"]
+    # The connector's establish message is preserved for debugging.
+    assert isinstance(extras["raw_message"], str)
+    assert "session establish failed" in extras["raw_message"]
+    # The upstream body (chained via ``__cause__``) still tails the message.
+    assert extras["upstream_message"] == "Cannot authenticate user"
+
+
+def test_result_connector_auth_failed_establish_403_cause_subcode() -> None:
+    """Establish 403 (locked-out account) carries the ``session_establish_403`` cause."""
+    auth_err = _make_establish_auth_error(status_code=403, target=_FakeTarget(name="nsx-a"))
+    out = result_connector_auth_failed("GET:/api/x", auth_err, _FakeTarget(name="nsx-a"), 1.0)
+    assert out.extras["cause"] == "session_establish_403"
+    assert out.extras["http_status"] == 403
+    assert out.extras["target"] == "nsx-a"
+
+
+def test_connector_auth_error_is_session_login_error() -> None:
+    """Subclassing keeps every ``except SessionLoginError`` / RuntimeError caller working."""
+    from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
+
+    err = ConnectorAuthError("m", status_code=401, cause="session_establish_401")
+    assert isinstance(err, SessionLoginError)
+    assert isinstance(err, RuntimeError)
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher conversion (the #1804 acceptance-criterion unit tests)
 # ---------------------------------------------------------------------------
 
@@ -598,7 +747,7 @@ async def test_dispatch_converts_401_to_connector_auth_failed(
     assert result.error.startswith("connector_auth_failed:")
     # Host + remediation in the operator-facing message.
     assert "vrli.lab.internal" in result.error
-    assert "Verify the target's Vault credential" in result.error
+    assert "meho target credential set vrli-lab" in result.error
     assert result.extras["error_code"] == "connector_auth_failed"
     assert result.extras["http_status"] == 401
     assert result.extras["host"] == "vrli.lab.internal"
@@ -618,6 +767,69 @@ async def test_dispatch_converts_401_to_connector_auth_failed(
     assert len(rows) == 1
     assert rows[0].payload["result_status"] == "error"
 
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "error"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_converts_establish_auth_error_to_connector_auth_failed(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#2329: an establish-time ``ConnectorAuthError`` -> ``connector_auth_failed``.
+
+    A connector whose session establish raises the structured
+    ``ConnectorAuthError`` (a rotated/stale password rejected at the login
+    POST) is caught by the dispatcher's new ``except ConnectorAuthError`` arm
+    ahead of the generic ``except Exception`` -- NOT flattened to the bare
+    ``connector_error: RuntimeError`` the filing observed. The audit row +
+    broadcast event still land (always-audit contract).
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-establish",
+        cls=_EstablishAuthConnector,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-establish",
+        op_id="GET:/api/v2/events",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-establish-9",
+        op_id="GET:/api/v2/events",
+        target=_FakeTarget(name="vc-prod", host="vc-prod.lab.internal"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_auth_failed:")
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["cause"] == "session_establish_401"
+    assert result.extras["http_status"] == 401
+    assert result.extras["target"] == "vc-prod"
+    assert "meho target credential set vc-prod" in result.extras["remediation"]
+    # NOT the bare shape the filing observed.
+    assert "connector_error" not in result.error
+    assert "exception_message" not in result.extras
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = (
+            (await fresh.execute(select(AuditLog).where(AuditLog.path == "GET:/api/v2/events")))
+            .scalars()
+            .all()
+        )
+    assert len(rows) == 1
+    assert rows[0].payload["result_status"] == "error"
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "error"
 

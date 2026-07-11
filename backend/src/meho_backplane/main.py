@@ -127,6 +127,10 @@ from meho_backplane.memory import (
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
+from meho_backplane.operations.approval_expiry import (
+    start_approval_expiry_sweeper,
+    stop_approval_expiry_sweeper,
+)
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
@@ -426,6 +430,7 @@ class _BackgroundTasks:
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
+    approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
@@ -462,6 +467,13 @@ def _start_background_tasks() -> _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None = None
     if settings.grant_expiry_enabled:
         grant_expiry = start_grant_expiry_sweeper()
+    # #2322 (G0.31 #2364) — approval-TTL sweeper. Gated on
+    # APPROVAL_EXPIRY_ENABLED so operators running an external sweep don't
+    # double-expire. Drives ``expire_stale_requests`` per tenant so parked
+    # approvals actually age out (the lifecycle was inert before #2322).
+    approval_expiry: asyncio.Task[None] | None = None
+    if settings.approval_expiry_enabled:
+        approval_expiry = start_approval_expiry_sweeper()
     # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
     # SCHEDULER_ENABLED so operators using an external orchestrator
     # (or running the test path without a scheduler) can opt out.
@@ -486,6 +498,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         grant_expiry=grant_expiry,
+        approval_expiry=approval_expiry,
         scheduler=scheduler,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
@@ -506,6 +519,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
+    if tasks.approval_expiry is not None:
+        await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.topology_history is not None:

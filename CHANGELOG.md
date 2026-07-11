@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — approval-TTL lifecycle wired end-to-end (parked approvals now expire) (#2322)
+
+- Every parked approval is now stamped `expires_at = created_at +
+  APPROVAL_DEFAULT_TTL` (new `APPROVAL_DEFAULT_TTL_SECONDS`, default 14
+  days) at park time across **all** transports — REST, MCP, and run-bound
+  dispatches (they all park through the dispatcher's
+  `_handle_needs_approval`, plus the composite park path). An explicit
+  caller deadline is honoured but capped at that ceiling, so no surface
+  can park an unbounded-lived approval. Previously every parked row
+  carried `expires_at: null` and the `expired` status / column /
+  `expire_stale_requests` helper existed but had zero production callers —
+  the TTL lifecycle was shipped but inert.
+- A dedicated periodic sweeper (`operations.approval_expiry`, gated on
+  `APPROVAL_EXPIRY_ENABLED`, `APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS`
+  default 300s) drives `expire_stale_requests` per tenant under a
+  `system:approval-expiry` operator, so past-deadline pending approvals
+  transition to `expired` within one tick, each with a decision audit row
+  and a fail-open `approval.expired` broadcast. Expired rows leave the
+  default `?status=pending` view and cannot be approved or resumed.
+- Legacy pre-#2322 rows with `expires_at IS NULL` age out too: the sweep
+  coalesces a null deadline against `created_at + APPROVAL_DEFAULT_TTL`
+  (no schema change, no migration) and backfills the deadline on expiry.
+
 ### Fixed — agent-run resume stamps `parent_audit_id` so approved chains replay as one subtree (#2323)
 
 - Completing #2086: an approval chain resumed by the **in-process agent

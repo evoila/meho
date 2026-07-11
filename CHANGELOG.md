@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — redaction-safe `proposed_effect` preview for `vault.kv.*` credential writes (#2332)
+
+- A parked `vault.kv.put` / `patch` / `delete` approval request now
+  carries a bespoke, redaction-safe `proposed_effect` preview instead of
+  the op-identity-only default. The approver sees the KV **mount**,
+  **path**, KV **version**, the write **semantics** (`put` = wholesale
+  replace, `patch` = merge, `delete` = version soft-delete), and the set
+  of **key names** being written — never their **values**. This restores
+  the approver's ability to distinguish "rotate the throwaway probe key"
+  from "clobber the production database password" while keeping the
+  value-redaction promise the credential-class suppression established
+  (#1422 / #1856). Wired as a bespoke builder (`vault.kv.put` / `patch`
+  classify `credential_write`, so the generic params-echo default is
+  suppressed for them), mirroring the Keycloak user-create builder mold
+  (#1857).
+- Every parked-request envelope now carries two reviewer-facing
+  provenance fields: `preview_populated` (a `bool` a caller can read to
+  refuse to auto-approve a blind, op-identity-only request) and, when a
+  preview is intentionally sparse, `preview_reason` —
+  `credential_write_redacted` (a deliberately-redacted credential write
+  with no bespoke builder) vs `connector_did_not_populate` (a
+  non-credential op that simply never populated one) — so the approval
+  surface can style the blind case as elevated-risk. `proposed_effect`
+  is a free-form JSON field, so no API schema / OpenAPI change (#2332).
 ### Added — approval-TTL lifecycle wired end-to-end (parked approvals now expire) (#2322)
 
 - Every parked approval is now stamped `expires_at = created_at +

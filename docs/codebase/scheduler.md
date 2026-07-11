@@ -187,6 +187,20 @@ primitive with no AppRole `secret_id` bootstrap). Operators preferring
 AppRole run a Vault Agent sidecar that renews a token into the env var:
 additive, no code change.
 
+The documented mint is a **periodic** token (`-period=768h`), which
+expires `period` after its last renewal. To keep it alive the broker
+fires a best-effort `auth/token/renew-self` after every successful
+read/write (`_maybe_renew_scheduler_token`), renewing the token at
+tick frequency so it never ages out while the pod runs; failures are
+logged and swallowed. `verify_scheduler_token` runs
+`auth/token/lookup-self` at scheduler startup and hourly (driven from
+`loop.py`) and logs a dead/unreachable token loudly, cutting
+time-to-notice from weeks to minutes. The token is resolved from its
+live source per use (`_current_scheduler_token`): setting
+`VAULT_SCHEDULER_TOKEN_FILE` points at a sidecar's token sink that is
+re-read on every read/write, so a re-mint is picked up without a pod
+restart (#2328).
+
 ### Precondition gate vs invoke-time failure
 
 The two fire paths follow the same lifecycle shape:

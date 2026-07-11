@@ -220,6 +220,44 @@ disables the Vault path entirely — the scheduler then falls back to the
 `SCHEDULER_AGENT_SECRET_ENV_PATTERN` env-var convention (an *unset*
 token is not an error; an *under-scoped* one is).
 
+#### Token renewal — the periodic-token fuse (#2328)
+
+The `-period=768h` above mints a **periodic** token. A Vault periodic
+token expires `period` after its **last renewal** — so a token that is
+never renewed carries a built-in ~32-day fuse: when it blows, every
+Vault-first credential read returns 403 and the scheduler silently skips
+every fire.
+
+Since #2328 the backplane renews the token itself: it fires a
+best-effort `auth/token/renew-self` after every successful agent-secret
+read/write, so at scheduler-tick frequency a periodic token with any
+sane `period` never expires while the pod runs. It also runs
+`auth/token/lookup-self` at startup and hourly and logs a dead or
+unreachable token loudly (`scheduler_vault_token_dead` /
+`scheduler_vault_token_unreachable`); the healthy path logs
+`scheduler_vault_token_verified` with the token's `ttl` / `expire_time`.
+Watch `expire_time` advance across renewals to confirm the loop is
+alive:
+
+```bash
+vault token lookup -accessor "$ACCESSOR"   # expire_time should advance
+```
+
+For this to work the policy must allow the token to renew itself. The
+default `token/renew-self` capability is granted to every token, so no
+policy change is required; a policy that explicitly `deny`s
+`auth/token/renew-self` breaks renewal (the WARN
+`scheduler_vault_token_renew_failed` surfaces it).
+
+**Re-mint without a pod restart.** A token fed via the
+`VAULT_SCHEDULER_TOKEN` env var is frozen for the pod's lifetime — a
+re-mint requires patching the Secret and restarting the pod. To let a
+Vault Agent sidecar (or an operator) re-mint the token live, point
+`VAULT_SCHEDULER_TOKEN_FILE` at the sidecar's token sink file instead:
+the scheduler re-reads that file on **every** use, so a rewritten token
+is picked up without a restart. When both are set the file wins; an
+unreadable/empty file falls through to `VAULT_SCHEDULER_TOKEN`.
+
 ## Verification
 
 Run from any host with the operator's Vault token (`vault login`

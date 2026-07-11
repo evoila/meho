@@ -39,6 +39,27 @@ def _required_settings_env(monkeypatch: pytest.MonkeyPatch):
     get_settings.cache_clear()
 
 
+class _FakeTokenApi:
+    """In-memory stand-in for ``client.auth.token`` (renew/lookup-self)."""
+
+    def __init__(self) -> None:
+        self.renew_calls = 0
+        self.renew_raises: BaseException | None = None
+        self.lookup_result: Any = None
+        self.lookup_raises: BaseException | None = None
+
+    def renew_self(self, increment: int | None = None) -> Any:
+        self.renew_calls += 1
+        if self.renew_raises is not None:
+            raise self.renew_raises
+        return {"auth": {"lease_duration": 2764800}}
+
+    def lookup_self(self, mount_point: str = "token") -> Any:
+        if self.lookup_raises is not None:
+            raise self.lookup_raises
+        return self.lookup_result
+
+
 class _FakeKvV2:
     """In-memory stand-in for ``client.secrets.kv.v2``."""
 
@@ -47,6 +68,9 @@ class _FakeKvV2:
         self.read_result: Any = None
         self.read_raises: BaseException | None = None
         self.last_read: dict[str, Any] | None = None
+        #: Co-located so a test holding the kv fake can assert
+        #: renew-on-use without threading a second fixture through.
+        self.token_api = _FakeTokenApi()
 
     def create_or_update_secret(
         self, *, path: str, secret: dict[str, Any], mount_point: str
@@ -68,9 +92,15 @@ class _FakeSecrets:
         self.kv = type("KV", (), {"v2": kv})()
 
 
+class _FakeAuth:
+    def __init__(self, token: _FakeTokenApi) -> None:
+        self.token = token
+
+
 class _FakeClient:
     def __init__(self, kv: _FakeKvV2) -> None:
         self.secrets = _FakeSecrets(kv)
+        self.auth = _FakeAuth(kv.token_api)
 
 
 @pytest.fixture
@@ -81,6 +111,22 @@ def fake_kv(monkeypatch: pytest.MonkeyPatch) -> _FakeKvV2:
     def _fake_build_client(_settings: Any, *, token: str | None = None) -> _FakeClient:
         # Assert the scheduler token is threaded through.
         assert token == "scheduler-tok"
+        return _FakeClient(kv)
+
+    monkeypatch.setattr(vc, "_build_client", _fake_build_client)
+    return kv
+
+
+@pytest.fixture
+def fake_kv_any_token(monkeypatch: pytest.MonkeyPatch) -> _FakeKvV2:
+    """Like :func:`fake_kv` but does not pin the threaded-through token.
+
+    Used by the token-source and ``lookup-self`` tests, where the token
+    comes from a file / differs from the env-var default.
+    """
+    kv = _FakeKvV2()
+
+    def _fake_build_client(_settings: Any, *, token: str | None = None) -> _FakeClient:
         return _FakeClient(kv)
 
     monkeypatch.setattr(vc, "_build_client", _fake_build_client)
@@ -202,3 +248,118 @@ async def test_read_vault_error_maps_to_broker_error(fake_kv: _FakeKvV2) -> None
     fake_kv.read_raises = hvac.exceptions.Forbidden("denied")
     with pytest.raises(vc.SchedulerVaultBrokerError):
         await vc.read_agent_secret("agent:reporter")
+
+
+# --- renew-on-use (#2328) --------------------------------------------
+
+
+async def test_read_renews_token_on_success(fake_kv: _FakeKvV2) -> None:
+    fake_kv.read_result = {"data": {"data": {vc.SECRET_FIELD: "s"}, "metadata": {}}}
+    assert await vc.read_agent_secret("agent:reporter") == "s"
+    assert fake_kv.token_api.renew_calls == 1
+
+
+async def test_write_renews_token_on_success(fake_kv: _FakeKvV2) -> None:
+    await vc.write_agent_secret("agent:reporter", "s")
+    assert fake_kv.token_api.renew_calls == 1
+
+
+async def test_renew_failure_does_not_break_read(fake_kv: _FakeKvV2) -> None:
+    """A failed best-effort renew is swallowed — the read still returns."""
+    fake_kv.read_result = {"data": {"data": {vc.SECRET_FIELD: "s"}, "metadata": {}}}
+    fake_kv.token_api.renew_raises = hvac.exceptions.Forbidden("not renewable")
+    assert await vc.read_agent_secret("agent:reporter") == "s"
+    assert fake_kv.token_api.renew_calls == 1
+
+
+async def test_missing_path_read_does_not_renew(fake_kv: _FakeKvV2) -> None:
+    """InvalidPath (secret absent) returns before the renew step."""
+    fake_kv.read_raises = hvac.exceptions.InvalidPath("404")
+    assert await vc.read_agent_secret("agent:reporter") is None
+    assert fake_kv.token_api.renew_calls == 0
+
+
+# --- token source re-read (#2328) ------------------------------------
+
+
+def test_current_scheduler_token_prefers_file(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_file = tmp_path / "tok"
+    token_file.write_text("file-token\n", encoding="utf-8")
+    monkeypatch.setenv("VAULT_SCHEDULER_TOKEN_FILE", str(token_file))
+    get_settings.cache_clear()
+    assert vc._current_scheduler_token(get_settings()) == "file-token"
+
+
+def test_current_scheduler_token_falls_back_when_file_absent(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("VAULT_SCHEDULER_TOKEN_FILE", str(tmp_path / "nope"))
+    get_settings.cache_clear()
+    # env token from the autouse fixture is "scheduler-tok".
+    assert vc._current_scheduler_token(get_settings()) == "scheduler-tok"
+
+
+def test_current_scheduler_token_empty_file_falls_back(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token_file = tmp_path / "tok"
+    token_file.write_text("   \n", encoding="utf-8")
+    monkeypatch.setenv("VAULT_SCHEDULER_TOKEN_FILE", str(token_file))
+    get_settings.cache_clear()
+    assert vc._current_scheduler_token(get_settings()) == "scheduler-tok"
+
+
+def test_current_scheduler_token_reread_per_call(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file is re-read on every call — a re-mint is picked up live."""
+    token_file = tmp_path / "tok"
+    token_file.write_text("first", encoding="utf-8")
+    monkeypatch.setenv("VAULT_SCHEDULER_TOKEN_FILE", str(token_file))
+    get_settings.cache_clear()
+    settings = get_settings()
+    assert vc._current_scheduler_token(settings) == "first"
+    token_file.write_text("rotated", encoding="utf-8")
+    # Same (cached) settings object — but the token is resolved fresh.
+    assert vc._current_scheduler_token(settings) == "rotated"
+
+
+# --- lookup-self health check (#2328) --------------------------------
+
+
+async def test_verify_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VAULT_SCHEDULER_TOKEN", raising=False)
+    get_settings.cache_clear()
+    status = await vc.verify_scheduler_token()
+    assert status.configured is False
+    assert status.ok is True
+    assert status.detail == "not_configured"
+
+
+async def test_verify_ok_reports_lifetime(fake_kv_any_token: _FakeKvV2) -> None:
+    fake_kv_any_token.token_api.lookup_result = {
+        "data": {"ttl": 2764800, "expire_time": "2026-08-11T00:00:00Z"}
+    }
+    status = await vc.verify_scheduler_token(reason="startup")
+    assert status.configured is True
+    assert status.ok is True
+    assert status.ttl_seconds == 2764800
+    assert status.expire_time == "2026-08-11T00:00:00Z"
+
+
+async def test_verify_dead_token(fake_kv_any_token: _FakeKvV2) -> None:
+    fake_kv_any_token.token_api.lookup_raises = hvac.exceptions.Forbidden("403")
+    status = await vc.verify_scheduler_token()
+    assert status.configured is True
+    assert status.ok is False
+    assert status.detail.startswith("denied:")
+
+
+async def test_verify_unreachable(fake_kv_any_token: _FakeKvV2) -> None:
+    fake_kv_any_token.token_api.lookup_raises = requests.exceptions.ConnectionError("down")
+    status = await vc.verify_scheduler_token()
+    assert status.configured is True
+    assert status.ok is False
+    assert status.detail.startswith("unreachable:")

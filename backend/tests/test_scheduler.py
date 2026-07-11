@@ -1593,3 +1593,167 @@ async def test_blocking_run_does_not_stall_later_triggers_in_same_tick(
     assert all(r.status == AgentRunStatus.SUCCEEDED.value for r in final_runs), [
         r.status for r in final_runs
     ]
+
+
+# ---------------------------------------------------------------------------
+# Skip-state projection + park-after-N (#2327)
+# ---------------------------------------------------------------------------
+#
+# The precondition gate (`_prepare_invocation`) skips a due trigger without
+# advancing its state when the definition is missing/disabled or credentials
+# are unresolved. Before #2327 that skip was invisible on the row -- these
+# tests pin the fix: the loop projects the cumulative skip state onto the
+# `scheduled_trigger` row (`last_skip_reason` / `last_skipped_at` /
+# `skip_count`) and parks the trigger after `_PARK_AFTER_CONSECUTIVE_SKIPS`
+# consecutive skips so a permanently-unresolvable trigger stops silently
+# re-tripping every tick.
+
+
+@pytest.mark.asyncio
+async def test_unresolved_credentials_skip_records_skip_state_on_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A credentials-unresolved skip projects reason + count onto the row (#2327)."""
+    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    stuck_instant = base - timedelta(minutes=1)
+    await _force_due(trigger.id, stuck_instant)
+
+    fires = await run_one_tick(invoker=_make_invoker())
+    assert fires == 0
+
+    held = await _get_trigger(trigger.id)
+    # Still active + not advanced (the pre-#2327 contract is preserved) ...
+    assert held.status == ScheduledTriggerStatus.ACTIVE.value
+    assert _aware(held.next_fire_at) == stuck_instant
+    # ... but the skip is now visible on the row.
+    assert held.skip_count == 1
+    assert held.last_skip_reason == "credentials_unresolved"
+    assert held.last_skipped_at is not None
+
+
+@pytest.mark.asyncio
+async def test_missing_definition_skip_records_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A deleted-definition skip stamps ``definition_missing`` on the row (#2327)."""
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    agent_id = await _seed_tenant_and_agent()
+    trigger = await _create_cron(
+        agent_definition_id=agent_id,
+        base=datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC),
+    )
+    await _force_due(trigger.id, datetime(2026, 1, 1, tzinfo=UTC))
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        from sqlalchemy import delete
+
+        from meho_backplane.db.models import AgentDefinition
+
+        await session.execute(delete(AgentDefinition).where(AgentDefinition.id == agent_id))
+        await session.commit()
+
+    fires = await run_one_tick(invoker=_make_invoker())
+    assert fires == 0
+
+    held = await _get_trigger(trigger.id)
+    assert held.status == ScheduledTriggerStatus.ACTIVE.value
+    assert held.skip_count == 1
+    assert held.last_skip_reason == "definition_missing"
+
+
+@pytest.mark.asyncio
+async def test_consecutive_skips_park_the_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After ``_PARK_AFTER_CONSECUTIVE_SKIPS`` skips the row is parked (#2327).
+
+    Drives the same due-but-unresolvable trigger through the cap; the
+    parked (``paused``) status is what stops the silent every-tick loop and
+    lets the read surfaces say "broken, stopped trying".
+    """
+    from meho_backplane.scheduler.loop import _PARK_AFTER_CONSECUTIVE_SKIPS
+
+    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    await _force_due(trigger.id, base - timedelta(minutes=1))
+
+    # One tick short of the cap: still active, still climbing.
+    for _ in range(_PARK_AFTER_CONSECUTIVE_SKIPS - 1):
+        assert await run_one_tick(invoker=_make_invoker()) == 0
+    almost = await _get_trigger(trigger.id)
+    assert almost.status == ScheduledTriggerStatus.ACTIVE.value
+    assert almost.skip_count == _PARK_AFTER_CONSECUTIVE_SKIPS - 1
+
+    # The tick that reaches the cap parks the row.
+    assert await run_one_tick(invoker=_make_invoker()) == 0
+    parked = await _get_trigger(trigger.id)
+    assert parked.status == ScheduledTriggerStatus.PAUSED.value
+    assert parked.skip_count == _PARK_AFTER_CONSECUTIVE_SKIPS
+    assert parked.last_skip_reason == "credentials_unresolved"
+
+    # A parked row is no longer claimed, so it stops re-tripping.
+    assert await run_one_tick(invoker=_make_invoker()) == 0
+    still = await _get_trigger(trigger.id)
+    assert still.skip_count == _PARK_AFTER_CONSECUTIVE_SKIPS
+
+
+@pytest.mark.asyncio
+async def test_successful_fire_clears_skip_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful fire resets the consecutive-skip streak to a clean row (#2327)."""
+    monkeypatch.delenv("MEHO_AGENT_SECRET_AGENT_REPORTER", raising=False)
+    agent_id = await _seed_tenant_and_agent()
+    base = datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC)
+    trigger = await _create_cron(agent_definition_id=agent_id, base=base)
+    await _force_due(trigger.id, base - timedelta(minutes=1))
+
+    # Skip once -- skip state is now non-zero.
+    assert await run_one_tick(invoker=_make_invoker()) == 0
+    skipped = await _get_trigger(trigger.id)
+    assert skipped.skip_count == 1
+    assert skipped.last_skip_reason == "credentials_unresolved"
+
+    # Wire the secret; the next tick fires and clears the skip state.
+    monkeypatch.setenv("MEHO_AGENT_SECRET_AGENT_REPORTER", "test-secret")
+    assert await run_one_tick(invoker=_make_invoker()) == 1
+    fired = await _get_trigger(trigger.id)
+    assert fired.skip_count == 0
+    assert fired.last_skip_reason is None
+    assert fired.last_skipped_at is None
+    assert fired.last_fired_at is not None
+
+
+@pytest.mark.asyncio
+async def test_corrupt_cron_park_stamps_skip_reason() -> None:
+    """The corrupt-cron park path also records a reason on the row (#2327).
+
+    The parked state now explains itself on the read surfaces rather than
+    living only in the pod log.
+    """
+    agent_id = await _seed_tenant_and_agent()
+    trigger = await _create_cron(
+        agent_definition_id=agent_id,
+        base=datetime(2026, 5, 25, 12, 0, 0, tzinfo=UTC),
+    )
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(ScheduledTrigger, trigger.id)
+        assert row is not None
+        row.cron_expr = "not a cron expr"
+        row.next_fire_at = datetime(2026, 1, 1, tzinfo=UTC)
+        await session.commit()
+
+    assert await run_one_tick(invoker=_make_invoker()) == 0
+
+    parked = await _get_trigger(trigger.id)
+    assert parked.status == ScheduledTriggerStatus.PAUSED.value
+    assert parked.last_skip_reason is not None
+    assert parked.last_skip_reason.startswith("invalid_cron_expr")
+    assert parked.last_skipped_at is not None

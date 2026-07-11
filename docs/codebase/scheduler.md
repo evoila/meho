@@ -160,8 +160,12 @@ pod env var only when Vault yields nothing (#1478). The lookup chain:
 3. When **neither** source yields a secret,
    `AgentCredentialsUnresolvedError` is raised; the loop logs
    `scheduler_credentials_unresolved` and skips the fire. The trigger
-   stays `active` so a subsequent tick retries once the secret is
-   available — no parking.
+   stays `active` (fire state untouched) so a subsequent tick retries
+   once the secret is available. Since #2327 the skip is recorded on the
+   row (`last_skip_reason='credentials_unresolved'`, `skip_count++`) and,
+   after `_PARK_AFTER_CONSECUTIVE_SKIPS` consecutive skips, the trigger is
+   parked (`status='paused'`) so a permanently-unresolvable secret stops
+   the silent every-tick loop — see "Skip-state projection + park-after-N".
 
 The write side: registering an agent principal
 ([`AgentPrincipalService.register`](../../backend/src/meho_backplane/auth/agent_principals.py))
@@ -183,17 +187,38 @@ primitive with no AppRole `secret_id` bootstrap). Operators preferring
 AppRole run a Vault Agent sidecar that renews a token into the env var:
 additive, no code change.
 
+The documented mint is a **periodic** token (`-period=768h`), which
+expires `period` after its last renewal. To keep it alive the broker
+fires a best-effort `auth/token/renew-self` after every successful
+read/write (`_maybe_renew_scheduler_token`), renewing the token at
+tick frequency so it never ages out while the pod runs; failures are
+logged and swallowed. `verify_scheduler_token` runs
+`auth/token/lookup-self` at scheduler startup and hourly (driven from
+`loop.py`) and logs a dead/unreachable token loudly, cutting
+time-to-notice from weeks to minutes. The token is resolved from its
+live source per use (`_current_scheduler_token`): setting
+`VAULT_SCHEDULER_TOKEN_FILE` points at a sidecar's token sink that is
+re-read on every read/write, so a re-mint is picked up without a pod
+restart (#2328).
+
 ### Precondition gate vs invoke-time failure
 
 The two fire paths follow the same lifecycle shape:
 
 1. **Prepare** (`_prepare_invocation`) — look up the agent definition
    (FK; real-FK lookup-by-primary-key) and resolve the agent's
-   `client_credentials` pair Vault-first (env-var fallback). Returns
-   `None` (skip without state writes) when any precondition fails:
-   - the agent definition was removed since trigger creation, or
-   - the definition is disabled, or
-   - the agent's secret is in neither Vault nor the fallback env var.
+   `client_credentials` pair Vault-first (env-var fallback). Returns a
+   `_PreconditionSkip` (carrying a machine-tag `reason`; skip without
+   advancing fire state) when any precondition fails:
+   - the agent definition was removed since trigger creation
+     (`definition_missing`), or
+   - the definition is disabled (`definition_disabled`), or
+   - the agent's secret is in neither Vault nor the fallback env var
+     (`credentials_unresolved`).
+
+   The caller projects that reason onto the trigger row rather than
+   skipping silently — see "Skip-state projection + park-after-N"
+   below (#2327).
 2. **Advance / mark-fired** — only when the prepare step succeeded.
    The conditional `UPDATE` (status / next_fire_at guard) commits
    the row's state transition.
@@ -213,6 +238,61 @@ at-most-once contract honest for invoke-time failures (where it was
 always the right behaviour) without dropping work for the
 precondition cases (where it was always recoverable by the
 operator).
+
+### Skip-state projection + park-after-N (#2327)
+
+A precondition skip leaves the trigger's fire state untouched so a
+*transient* miss self-heals on the next tick once the operator fixes the
+cause. But before #2327 the skip was invisible on the row: a **permanent**
+miss (revoked scheduler Vault token, deleted-but-still-referenced
+definition, never-persisted agent secret) produced an infinite silent
+loop whose only trace was a WARN pair in the pod log every tick.
+`scheduler list` showed a healthy-looking `active` trigger; a real deploy
+lost ~360 hourly fires over 15 days before anyone noticed.
+
+The fix projects the cumulative skip state onto the row and parks a
+permanently-broken trigger:
+
+- **Three columns on `scheduled_trigger`** (migration `0057`):
+  - `last_skip_reason` (`text`, nullable) — the machine tag of the most
+    recent skip cause (`definition_missing` / `definition_disabled` /
+    `credentials_unresolved`; a park path also stamps `invalid_cron_expr`
+    / `unknown_kind`).
+  - `last_skipped_at` (`timestamptz`, nullable) — UTC time of the most
+    recent skip.
+  - `skip_count` (`integer` NOT NULL, default 0) — **consecutive** skips
+    since the last successful fire.
+- **On each skip** the loop calls `_record_skip`: increment `skip_count`,
+  stamp `last_skip_reason` / `last_skipped_at`. The row's `next_fire_at`
+  (cron) / `status='active'` (one-off) is still untouched, so the
+  at-most-once contract and the transient-retry behaviour are unchanged —
+  the columns are additive visibility only.
+- **Park at the cap**: once `skip_count` reaches
+  `_PARK_AFTER_CONSECUTIVE_SKIPS` (a module constant, 10, matching the
+  `_CLAIM_BATCH_LIMIT` "dumb fixed loop-bound" posture — no per-deployment
+  tunable) the same `_record_skip` transitions the row to
+  `status='paused'`. The state machine itself now says "broken, stopped
+  trying" instead of re-tripping every tick forever. At the default 30 s
+  tick that's ~5 min of an unresolvable trigger — past any normal
+  credential-rotation window.
+- **Reset on recovery**: a successful `_prepare_invocation` breaks the
+  streak. When `skip_count > 0` the loop calls `_clear_skip_state` before
+  the advance / mark-fired step, resetting `skip_count` to 0 and clearing
+  the reason / timestamp. The healthy hot path (a well-behaved trigger's
+  every fire) issues no extra `UPDATE` — the reset only fires when there
+  was a streak to clear.
+- **Parks carry a reason too**: the corrupt-cron and unknown-kind park
+  paths (`_park_trigger`) also stamp `last_skip_reason` / `last_skipped_at`
+  now, so every paused-by-the-loop row explains itself on the read
+  surfaces.
+
+The state is surfaced everywhere the row is read: `ScheduledTriggerRead`
+carries the three fields, so `GET /api/v1/scheduler/triggers`,
+`meho.scheduler.list` / `.show` (MCP), `meho scheduler list` (a `SKIPS`
+column), and the operator console (a warning badge on the list row + a
+skip block on the detail page) all agree with the pod-log WARNs. This is
+the same read-surface projection pattern `last_fired_at` / `next_fire_at`
+already use.
 
 ### work_ref inheritance (#1663)
 
@@ -239,9 +319,11 @@ nothing when the trigger carries no ticket (the run lands `NULL`).
 
 ### Cron fire path (`_fire_cron`)
 
-1. `_prepare_invocation(row)` → `_PreparedInvocation` or `None`.
-   On `None` the trigger's `next_fire_at` stays unchanged so the
-   next tick re-claims and re-tries.
+1. `_prepare_invocation(row)` → `_PreparedInvocation` or
+   `_PreconditionSkip`. On a skip the loop records the skip state
+   (`_record_skip`) and the trigger's `next_fire_at` stays unchanged so
+   the next tick re-claims and re-tries; on success it clears any prior
+   skip state before advancing.
 2. `advance_cron_trigger(row, fire_instant=now)`:
    - Compute the next cron match via `croniter` from `now` in the
      trigger's timezone.
@@ -258,10 +340,11 @@ nothing when the trigger carries no ticket (the run lands `NULL`).
 
 ### One-off fire path (`_fire_one_off`)
 
-1. `_prepare_invocation(row)` → `_PreparedInvocation` or `None`.
-   On `None` the trigger stays `status='active'` (the row is
-   **not** consumed) so the next tick re-claims and re-tries once
-   the operator fixes the underlying issue.
+1. `_prepare_invocation(row)` → `_PreparedInvocation` or
+   `_PreconditionSkip`. On a skip the loop records the skip state
+   (`_record_skip`) and the trigger stays `status='active'` (the row is
+   **not** consumed) so the next tick re-claims and re-tries once the
+   operator fixes the underlying issue.
 2. `mark_one_off_fired(row, fire_instant=now)`:
    - Conditional `UPDATE` (`WHERE id=:id AND status='active' AND
      next_fire_at=:previous_next`) sets `status='fired'`,

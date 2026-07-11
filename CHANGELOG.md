@@ -105,6 +105,53 @@ connector-related release-notes line.
   (a warning, not a gate), and documents the per-operator templated
   write-identity contract in `docs/cross-repo/connector-vault-policy.md`
   (#2331).
+### Fixed — scheduler Vault token renews on use + startup/periodic lookup-self (defuses the ~32-day periodic-token fuse) (#2328)
+
+- The scheduler now fires a best-effort `auth/token/renew-self` after
+  every successful Vault agent-secret read/write, so the documented
+  **periodic** service token (`-period=768h`) is renewed at scheduler-tick
+  frequency and never ages out while the process runs. Previously the
+  backplane never renewed it — a token minted per the onboarding guide
+  silently died ~32 days after standup and every Vault-first credential
+  read started returning 403. Renewal failures are logged and swallowed
+  (the read/write already succeeded), never a new failure mode.
+- The scheduler token is now self-looked-up (`auth/token/lookup-self`) at
+  startup and on a slow cadence (hourly), logging a dead or unreachable
+  token as a loud `scheduler_vault_token_dead` /
+  `scheduler_vault_token_unreachable` ERROR the moment it's observed —
+  cutting time-to-notice from weeks to minutes. The healthy path logs
+  `scheduler_vault_token_verified` with the token's `ttl`/`expire_time`
+  so operators can watch expiry advance across renewals.
+- The token is now resolved from its live source on every use. A new
+  optional `VAULT_SCHEDULER_TOKEN_FILE` names a file (a Vault-Agent
+  sidecar sink) the token is re-read from per read/write, so a re-mint is
+  picked up **without a pod restart** — removing the manual re-mint +
+  Secret-patch + pod-restart remediation the fuse otherwise forced. The
+  static `VAULT_SCHEDULER_TOKEN` remains the default; an unreadable/empty
+  file falls through to it.
+
+### Added — scheduler skip-state on the trigger row + park after N unresolvable skips (#2327)
+
+- The scheduler tick loop now projects its precondition **skips** onto the
+  `scheduled_trigger` row (migration `0057`, three columns): `skip_count`
+  (consecutive skips since the last successful fire), `last_skip_reason`
+  (machine tag — `definition_missing` / `definition_disabled` /
+  `credentials_unresolved`; the corrupt-cron / unknown-kind park paths also
+  stamp `invalid_cron_expr` / `unknown_kind`), and `last_skipped_at`.
+  Previously a permanent misconfiguration (revoked scheduler Vault token,
+  deleted-but-referenced definition, never-persisted agent secret) made the
+  loop skip every 30 s tick with the only trace a pod-log WARN, while
+  `meho scheduler list` showed a healthy-looking `active` trigger — a real
+  deploy lost ~360 hourly fires over 15 days before anyone noticed.
+- After a fixed number of **consecutive** unresolvable skips the loop parks
+  the trigger (`status='paused'`) so the state machine itself communicates
+  "broken, stopped trying" instead of re-tripping forever; a successful
+  fire resets the streak and clears the skip fields. The new state is
+  surfaced on `GET /api/v1/scheduler/triggers`, `meho.scheduler.list` /
+  `.show` (MCP), `meho scheduler list` (a `SKIPS` column), and the operator
+  console (a warning badge on the list row + a skip block on the detail
+  page). The at-most-once fire contract and transient-retry behaviour are
+  unchanged — the columns are additive visibility.
 
 ### Added — redaction-safe `proposed_effect` preview for `vault.kv.*` credential writes (#2332)
 

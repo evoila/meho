@@ -140,7 +140,7 @@ connector-related release-notes line.
   mold established for `/ui/agents/create` in #2346, and already shipped
   on the runbooks start-run and conventions author modals), so the error
   swaps back into the modal in place with the operator's input and the
-  CSRF-token refresh preserved. The memory create form was assessed and
+  CSRF-token refresh preserved. The OpenAPI snapshot was regenerated for the updated route docstring in a follow-up (PR #2389). The memory create form was assessed and
   intentionally **not** changed: it already surfaces recoverable errors
   via its client-side `hx-on::response-error` handler (#1754) over a
   `hx-swap="none"` post, which — unlike a server re-render — is the only

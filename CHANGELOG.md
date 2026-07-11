@@ -106,6 +106,32 @@ connector-related release-notes line.
   overrides the `X-CSRF-Token` header, so the double-submit pair can
   never drift regardless of render order. Security is unchanged (the
   HMAC binding to the session id still defeats cookie injection).
+### Fixed — `/ui/agents/create` now shows backend validation errors (#2346)
+
+- The Create-agent modal previously swallowed backend 4xx validation
+  responses: the handler re-rendered the modal with per-field errors but
+  returned it as `409` / `422`, and HTMX's default response handling
+  does not swap a non-2xx fragment — so a bad `identity_ref`, a
+  duplicate name, or an out-of-range `turn_budget` made the Create
+  button appear to "do nothing" while the failure was only visible in
+  DevTools. The recoverable-error re-render now returns `200` (the same
+  inline-error mold the runbooks start-run and conventions author modals
+  already ship) and carries a top-of-form error banner in addition to
+  the existing per-field messages, so the operator sees exactly which
+  field to fix and keeps their typed input. Sibling `/ui` create/edit
+  forms with the same missing handler (memory, kb) are tracked
+  separately for a follow-up sweep.
+### Fixed — scheduler one_off `fire_at` picker now converts local time to UTC on submit (#2339)
+
+- The `/ui/scheduler` Create-trigger modal's `fire_at` `datetime-local`
+  picker showed the operator their own wall-clock time but posted a
+  naive string the engine stored verbatim as UTC, so a CEST (UTC+2)
+  operator who picked "11:00" got a trigger that fired at 11:00Z — two
+  hours late. The modal now converts the picked local value to a
+  UTC ISO-8601 instant on submit (via the browser's DST-aware `Date`,
+  so CET/CEST both resolve correctly), and a live hint next to the
+  field shows the resolved UTC so the conversion is visible rather than
+  silent. Engine-side `fire_at` handling is unchanged.
 
 ### Breaking changes — GET-list endpoints converged on the `{items, next_cursor}` envelope (#2338)
 

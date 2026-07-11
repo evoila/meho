@@ -583,6 +583,10 @@ def test_create_modal_renders_for_tenant_admin() -> None:
     assert 'hx-post="/ui/scheduler/create"' in body
     assert str(_AGENT_ID) in body  # agent dropdown option
     assert 'hx-post="/ui/scheduler/validate-cron"' in body  # live cron validation
+    # #2340: the form's `find button[type=submit]` disabled-elt must be
+    # disinherited so the descendant validate-cron POST does not inherit it
+    # and log `... returned no matches!` on every debounced keystroke.
+    assert 'hx-disinherit="hx-disabled-elt"' in body
 
 
 def test_create_modal_carries_fire_at_utc_conversion() -> None:

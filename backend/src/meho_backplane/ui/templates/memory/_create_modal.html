@@ -70,6 +70,7 @@
         hx-target="this"
         hx-swap="none"
         hx-disabled-elt="find button[type=submit]"
+        hx-disinherit="hx-disabled-elt"
         data-target-scoped-values="{{ target_scoped_values | join(',') }}"
         class="space-y-3 py-2"
         aria-labelledby="memory-create-modal-title"

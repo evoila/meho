@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — inline spec content on the MCP `connector.ingest` tool (#2326)
+
+- Each `specs[*]` entry on the `meho.connector.ingest` MCP tool now
+  accepts an optional `content` field carrying the spec text inline
+  (~20 MiB cap, the REST bound). When set, the backplane uses the bytes
+  verbatim and skips the fetch — the same `SpecSource.content` on-ramp
+  the CLI upload already uses. Previously the tool required a `uri`-only
+  entry and rejected `file://` / `docs:` schemes at the https fetch
+  guard, forcing agent-driven flows to publish private lab specs to a
+  public gist purely to satisfy the fetcher. Inline content bypasses the
+  fetcher entirely (no SSRF surface, strictly safer than the gist
+  workaround it retires), so an appliance-served or hand-authored spec
+  with no public https URL (NSX, VCFA) can be ingested over a fully
+  MCP-drivable flow; `uri` stays the audit label, so the resulting
+  L1/L2 rows match a CLI upload of the same file (#2326).
 ### Tested — regression pin: a non-dry-run 1275-op-class spec ingest keeps the event loop responsive (#2333)
 
 - Pinned the v0.8.0 large-spec ingest crash fix end-to-end: a

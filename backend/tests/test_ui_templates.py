@@ -556,3 +556,41 @@ def test_session_expiry_handler_served_as_static_asset() -> None:
     # SPDX header posture matches the sibling app-shell scripts.
     source = handler.read_text(encoding="utf-8")
     assert "SPDX-License-Identifier: Apache-2.0" in source
+
+
+def test_csrf_token_hook_overrides_header_from_live_cookie() -> None:
+    """The CSRF hook re-reads the live cookie and sets ``X-CSRF-Token`` (#2345).
+
+    A single global ``htmx:configRequest`` listener reads the ``meho_csrf``
+    cookie at request time and overrides the outgoing header echo, so a
+    modal's baked-in token can never drift out of sync with the cookie.
+    """
+    script = (static_src_dir() / "app" / "csrf-token.js").read_text(encoding="utf-8")
+    assert "SPDX-License-Identifier: Apache-2.0" in script
+    assert re.search(r'addEventListener\(\s*"htmx:configRequest"', script), (
+        "the hook must attach on the htmx:configRequest event so it runs "
+        "before every htmx request is sent"
+    )
+    assert "document.cookie" in script, (
+        "the hook must read the LIVE cookie at request time (not a baked-in render-time snapshot)"
+    )
+    assert '"meho_csrf"' in script, "the hook must read the meho_csrf double-submit cookie"
+    assert re.search(r'headers\[\s*CSRF_HEADER_NAME\s*\]|headers\["X-CSRF-Token"\]', script), (
+        "the hook must set the X-CSRF-Token header on the outgoing request"
+    )
+
+
+def test_head_assets_loads_csrf_token_hook_after_htmx() -> None:
+    """``_head_assets.html`` ships the CSRF hook, deferred, after htmx (#2345).
+
+    The listener must be registered before the first htmx request can
+    resolve, so the script loads after ``htmx.min.js`` -- both ``defer``red,
+    which preserves document order.
+    """
+    source = (templates_dir() / "_head_assets.html").read_text(encoding="utf-8")
+    assert '<script src="/ui/static/src/app/csrf-token.js" defer></script>' in source, (
+        "_head_assets.html must load the CSRF double-submit header hook"
+    )
+    htmx_pos = source.index("/ui/static/src/vendor/htmx.min.js")
+    hook_pos = source.index("/ui/static/src/app/csrf-token.js")
+    assert htmx_pos < hook_pos, "the CSRF hook must load after htmx.min.js"

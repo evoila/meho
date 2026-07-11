@@ -67,15 +67,26 @@ form field (server-rendered form fallback). Missing or invalid →
 Token issuance
 ==============
 
-The server mints a fresh token on every authenticated dashboard render
-(:func:`mint_csrf_token`). Surface templates embed the token in the
-HTMX-friendly shape::
+The token is **session-stable** (Task #2345): :func:`mint_csrf_token`
+derives it deterministically from the session, so it is identical for
+the session's lifetime and only changes when the session rotates at an
+auth boundary (login / refresh). Every authenticated render can
+therefore ``mint + Set-Cookie`` the value freely without rotating it
+out from under an already-open modal -- the historical drift where
+some surfaces rotated on fragment render and others reused the live
+cookie, 403-ing the 3rd write of a session, is removed at its source.
+
+Surface templates embed the token in the HTMX-friendly shape::
 
     <body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
 
 so every HTMX ``hx-post`` / ``hx-delete`` request inherits the header
-automatically. Forms outside the HTMX surface include the token in a
-hidden field; the middleware accepts either source.
+automatically. A global ``htmx:configRequest`` hook
+(:mod:`static/src/app/csrf-token.js`) additionally re-reads the live
+``meho_csrf`` cookie at request time and overrides the header echo, so
+any future rotation of the cookie is picked up without a page reload.
+Forms outside the HTMX surface include the token in a hidden field; the
+middleware accepts either source.
 
 References
 ----------
@@ -92,7 +103,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import secrets
 from typing import Final
 from urllib.parse import parse_qs
 
@@ -149,8 +159,10 @@ _UI_PREFIX: Final[str] = "/ui/"
 #: greppability rather than as a runtime branch.
 _AUTH_PREFIX: Final[str] = "/ui/auth/"
 
-#: Random-half byte length. 32 bytes = 256 bits of entropy; comfortably
-#: above the OWASP "cryptographically strong random" floor.
+#: Nonce byte length. 32 bytes = 256 bits, and matches the SHA-256
+#: digest size the deterministic per-session nonce derivation
+#: (:func:`_session_nonce`) produces, so the token keeps its historical
+#: ``<mac_hex>.<32-byte-hex>`` wire shape.
 _RANDOM_BYTES: Final[int] = 32
 
 #: HMAC algorithm. SHA-256 keeps the token compact while exceeding
@@ -196,32 +208,72 @@ def _csrf_secret() -> bytes:
     return key.encode("utf-8")
 
 
-def mint_csrf_token(session_id: str) -> str:
-    """Mint a fresh signed double-submit CSRF token for *session_id*.
+#: Domain-separation label mixed into the nonce derivation so the
+#: per-session nonce can never collide with any other HMAC the same
+#: secret keys (the token MAC itself, or the session store's Fernet
+#: usage). Bound into :func:`_session_nonce` only.
+_NONCE_DOMAIN: Final[bytes] = b"meho-csrf-nonce-v1\x00"
 
-    Token shape: ``"<hmac_hex>.<random_hex>"`` where ``hmac_hex`` is
-    HMAC-SHA256(secret, ``session_id || random``) hex-encoded. The two
-    halves are joined with ``.`` so the random-half can be parsed out
-    by :func:`verify_csrf_token` without an explicit length parameter.
+
+def _session_nonce(session_id: str) -> bytes:
+    """Return the deterministic per-session nonce (``_RANDOM_BYTES`` long).
+
+    Derived as ``HMAC-SHA256(secret, _NONCE_DOMAIN || session_id)`` so it
+    is a stable, unpredictable function of the session alone: same
+    session → same nonce → same token on every mint, a *different*
+    session → a different nonce. SHA-256's 32-byte digest matches
+    :data:`_RANDOM_BYTES` exactly, so the token keeps its historical
+    ``<hmac_hex>.<32-byte-hex>`` wire shape and :func:`verify_csrf_token`
+    stays byte-for-byte unchanged.
+    """
+    return hmac.new(_csrf_secret(), _NONCE_DOMAIN + session_id.encode("ascii"), _HMAC_ALG).digest()
+
+
+def mint_csrf_token(session_id: str) -> str:
+    """Mint the signed double-submit CSRF token for *session_id*.
+
+    Token shape: ``"<hmac_hex>.<nonce_hex>"`` where ``hmac_hex`` is
+    HMAC-SHA256(secret, ``session_id || nonce``) hex-encoded. The two
+    halves are joined with ``.`` so the nonce half can be parsed out by
+    :func:`verify_csrf_token` without an explicit length parameter.
+
+    **Session-stable by design (Task #2345).** The nonce is *derived*
+    from the session (:func:`_session_nonce`) rather than freshly random
+    on each call, so the token is a pure function of ``session_id``:
+    minting twice for the same session yields the identical value, and
+    the token only changes when the session itself rotates at an auth
+    boundary (login / refresh-token rotation). This is the OWASP
+    "synchronizer-style" per-session token, and it is what unifies the
+    ``/ui/*`` CSRF pattern: every surface's render can freely
+    ``mint + Set-Cookie`` without ever rotating the value out from under
+    an already-open modal or a sibling fragment's echoed
+    ``hx-headers`` token. The historical rotate-on-render vs
+    reuse-the-live-cookie split (topology/keycloak modals rotated; the
+    memory/agents list handlers reused) drifted the double-submit pair
+    apart on the 3rd write of a session; a stable value removes the
+    drift at its source, and the global ``htmx:configRequest`` hook
+    (``static/src/app/csrf-token.js``) re-reads the live cookie at
+    request time so any future rotation is still picked up.
 
     The token is the value the template embeds in
-    ``hx-headers='{"X-CSRF-Token": "<token>"}'`` AND the value the
-    middleware sets on the ``meho_csrf`` cookie. Both ride the same
+    ``hx-headers='{"X-CSRF-Token": "<token>"}'`` AND the value each
+    render sets on the ``meho_csrf`` cookie. Both ride the same
     response; the browser sends the cookie back automatically and the
     HTMX wiring sends the header echo. Mismatch → 403.
 
-    The minting is stateless -- nothing persists server-side. Any
-    in-flight token presented with a matching ``session_id`` validates
-    until the operator logs out (or the session row expires); replay
-    is not a concern because the token's only valid recipient is the
-    backplane itself, and the SameSite=Strict session cookie blocks
-    cross-site replay outright.
+    Security is unchanged: the HMAC binding to ``session_id`` (the
+    secret never leaves the server) is what defeats the sub-domain
+    cookie-injection vector, and a JS attacker on another origin can
+    neither read the ``meho_csrf`` cookie nor send the custom header.
+    Determinism costs nothing here -- the token was never single-use
+    (verification is stateless; any in-flight token for the session
+    validates until logout), so per-mint uniqueness carried no security
+    weight, only the drift bug.
     """
-    random_bytes = secrets.token_bytes(_RANDOM_BYTES)
-    random_hex = random_bytes.hex()
-    payload = session_id.encode("ascii") + random_bytes
+    nonce = _session_nonce(session_id)
+    payload = session_id.encode("ascii") + nonce
     mac = hmac.new(_csrf_secret(), payload, _HMAC_ALG).hexdigest()
-    return f"{mac}.{random_hex}"
+    return f"{mac}.{nonce.hex()}"
 
 
 def verify_csrf_token(session_id: str, token: str) -> bool:

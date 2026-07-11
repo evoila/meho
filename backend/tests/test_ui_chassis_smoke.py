@@ -76,6 +76,7 @@ from meho_backplane.ui.csrf import (
     CSRFMiddleware,
     _csrf_secret,
     mint_csrf_token,
+    verify_csrf_token,
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
@@ -513,6 +514,61 @@ def test_csrf_accepts_matching_token() -> None:
             headers={CSRF_HEADER_NAME: valid_token},
         )
     assert response.status_code == 200
+
+
+def test_csrf_token_is_session_stable() -> None:
+    """Minting twice for one session returns the identical token (#2345).
+
+    The unified ``/ui`` CSRF pattern derives the token deterministically
+    from the session, so a render that re-mints never rotates the value
+    out from under an already-open modal. Different sessions still get
+    different tokens, and every minted token validates.
+    """
+    session_a = str(_seed_session_sync())
+    session_b = str(uuid.uuid4())
+
+    first = mint_csrf_token(session_a)
+    second = mint_csrf_token(session_a)
+
+    assert first == second, "a re-mint for the same session must be byte-identical"
+    assert mint_csrf_token(session_b) != first, "distinct sessions must not share a token"
+    assert verify_csrf_token(session_a, first)
+    assert verify_csrf_token(session_a, second)
+
+
+def test_csrf_repeated_writes_survive_token_rerender() -> None:
+    """Re-minting the cookie mid-session no longer 403s a modal's echo (#2345).
+
+    Reproduces the "works twice, 403s the 3rd write" drift: a modal was
+    rendered with a token snapshot, then a sibling render re-mints and
+    re-sets the ``meho_csrf`` cookie. With rotate-on-render minting the
+    cookie value would diverge from the modal's echoed header and the
+    write would fail the double-submit match; with the session-stable
+    token the re-mint is identical, so every repeated write still passes.
+    """
+    session_id = _seed_session_sync()
+
+    app = _build_app()
+
+    @app.post("/ui/sentinel-write")
+    async def _sentinel_write() -> dict[str, str]:
+        return {"ok": "true"}
+
+    # The token a modal baked into its ``hx-headers`` echo at open time.
+    modal_echo = mint_csrf_token(str(session_id))
+
+    with respx.mock(assert_all_called=False):
+        client = TestClient(app, follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        for _ in range(4):
+            # Each surrounding render re-mints + re-sets the cookie; with a
+            # session-stable token the value never drifts from ``modal_echo``.
+            client.cookies.set(CSRF_COOKIE_NAME, mint_csrf_token(str(session_id)))
+            response = client.post(
+                "/ui/sentinel-write",
+                headers={CSRF_HEADER_NAME: modal_echo},
+            )
+            assert response.status_code == 200
 
 
 def test_csrf_rejects_forged_signature() -> None:

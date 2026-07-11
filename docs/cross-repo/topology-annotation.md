@@ -83,14 +83,18 @@ thumb follows from the split:
   operator to assert them. These are the canonical use cases for
   `meho topology annotate`.
 - **Four auto-discoverable kinds** (`runs-on`, `mounts`,
-  `routes-through`, `belongs-to`) — probes write these on every
-  refresh. **Do not annotate them.** A duplicate annotation lands as
-  a §6 conflict marker (`conflicts_with` on both rows) and clutters
-  the inventory survey without semantic gain. The legitimate reason
-  to write one of these kinds yourself is the §6 *supersede* flow
-  below: the probe wrote a `runs-on` edge to the wrong endpoint and
-  you need the curated row to override it until the next probe
-  catches up.
+  `routes-through`, `belongs-to`) — a populator writes these on every
+  refresh **for the pair-types it covers**. Where a populator covers
+  the pair, **do not annotate the same relationship** — a duplicate
+  clutters the inventory survey without semantic gain, and asserting a
+  *different* endpoint fires the §6 *supersede* flow below (the
+  legitimate reason to write one of these kinds yourself: the probe
+  wrote a `runs-on` edge to the wrong host and you override it until
+  the next probe catches up). But auto-discovery is not yet universal —
+  v0.2 ships a populator for Kubernetes only — so for a pair-type **no
+  populator covers**, these kinds are legitimately curated-assertable.
+  See [Curating an auto-discoverable kind before its populator
+  exists](#curating-an-auto-discoverable-kind-before-its-populator-exists).
 
 The canonical example: a Kubernetes namespace `customer-a-prod`
 depends on a Postgres database `prod-db-1` (a `depends-on` curated
@@ -118,6 +122,79 @@ Kubernetes probe already writes that edge on every refresh. If your
 intent is "I want the graph to record the runtime placement", just
 run `meho topology refresh <k8s-target>`. If your intent is "the
 probe wrote the wrong host", that's the §6 supersede flow below.
+
+### Curating an auto-discoverable kind before its populator exists
+
+The "auto vs curated" split assumes **coverage**: an auto-discoverable
+kind is safe to leave to the probes only where a populator actually
+emits it for the pair-type in question. That assumption does not hold
+universally in v0.2 — auto-discovery is **Kubernetes-only**. The base
+connector's `discover_topology` is a no-op
+([`connectors/base.py`](../../backend/src/meho_backplane/connectors/base.py)),
+and the Kubernetes connector is the only one that overrides it
+([`connectors/kubernetes/connector.py`](../../backend/src/meho_backplane/connectors/kubernetes/connector.py)).
+So for a non-k8s pair — a virtualization-management appliance
+`runs-on` its host cluster, a workload `runs-on` a hypervisor — **no
+probe ever emits the edge**.
+
+**Policy: an auto-discoverable kind MAY be curated on any pair no
+populator covers.** Asserting `runs-on` (or `mounts` /
+`routes-through` / `belongs-to`) on such a pair is legitimate, not a
+workaround — pick the semantically-correct kind, don't fall back to a
+weaker curated-only kind (`depends-on`) chosen only to sidestep the
+vocabulary.
+
+**Why it inserts clean today.** §6 conflict detection keys off
+*existing* edges. The supersede pass only marks `source='auto'` rows
+(`_mark_same_kind_different_endpoint_superseded`,
+[`annotate.py:314`](../../backend/src/meho_backplane/topology/annotate.py)),
+so it is dormant on an uncovered pair — there is no auto row to
+supersede. The incompatible-kind pass, however, carries **no `source`
+filter**: it selects every edge of a *different* kind on the same
+`(from, to)` pair, whatever its origin
+(`_mark_incompatible_kinds_conflict`,
+[`annotate.py:366-371`](../../backend/src/meho_backplane/topology/annotate.py)).
+So the curated row inserts with `source: curated, conflicts: []` **only
+when the pair is otherwise empty**. If a pre-existing curated
+different-kind edge already sits on it — an operator curated
+`depends-on(A→B)`, then curates `runs-on(A→B)` — the incompatible-kind
+pass still fires and the new row carries a **non-empty** `conflicts`
+array. That coexistence is by design (rule 2's docstring uses the
+`depends-on` ⇄ `routes-through` example: both rows survive, each
+referencing the other). Clean insertion therefore requires **both** no
+existing `auto` row and no existing different-kind edge of any source on
+the pair; on a genuinely empty pair the §6 machinery stays dormant until
+a competing edge exists.
+
+**The grandfather commitment.** The state above is safe but would be
+*fragile* without a forward guarantee: the day a non-k8s populator
+ships, it starts emitting auto edges for pairs an operator already
+curated, which could turn today's clean curated rows into §6
+conflict/supersede noise. The commitment is therefore:
+
+> Any populator that begins covering a previously-uncovered
+> `(kind, pair-type)` — coverage is per `(kind, pair-type)`, not per
+> kind globally — ships with a **one-shot reconciliation** that
+> grandfathers the pre-existing curated edges on that pair-type: they
+> stay visible and are **not** retroactively marked as §6 conflicts.
+
+The substrate already leans this way for the *identical* pair: when a
+refresh re-discovers an edge an operator has curated on the same
+`(from, to, kind)`, `_refresh_curated_edge`
+([`topology/refresh.py`](../../backend/src/meho_backplane/topology/refresh.py))
+keeps the row **operator-owned** — it bumps `last_seen` only, leaves
+the `source='curated'` marker and every §6 marker untouched, and never
+inserts a competing auto row. The grandfather commitment extends that
+same "operator-owned rows survive a populator arrival" principle to the
+related-pair interactions (a populator emitting the same kind to a
+*different* endpoint) that a future reconciliation must settle.
+
+This is a **documentation-level policy commitment**, not shipped
+machinery: the machine-readable `curated_until_populator_covers` bucket
+and the reconciliation job itself are deferred to the initiative that
+ships the non-k8s populator. Recording the commitment now means you can
+model `runs-on` correctly today without fear that a later populator
+will punish you for it.
 
 ## The closed 10-kind vocabulary
 

@@ -87,7 +87,9 @@ widens the `graph_edge.kind` CHECK from the G9.1 subset; the
 `StrEnum` and the CHECK move in lock-step).
 
 **Four auto-discoverable kinds** — refresh writes these on every
-probe. Probe-derived edges have to be high-confidence — a wrong
+probe, **for the pair-types a populator covers** (see
+[Curated-until-populator-covers policy](#curated-until-populator-covers-policy)
+below). Probe-derived edges have to be high-confidence — a wrong
 edge in a `dependents` answer misleads the operator on the very op
 the verb is supposed to make safer.
 
@@ -117,6 +119,69 @@ different product) and cannot be derived from any single probe.
 The operator-facing recipe for *when* to annotate, the §6 conflict
 rules below, and the CLI walkthrough live in
 [`docs/cross-repo/topology-annotation.md`](../cross-repo/topology-annotation.md).
+
+### Curated-until-populator-covers policy
+
+The auto/curated split assumes **populator coverage**: an
+auto-discoverable kind is left to the probes only where a populator
+actually emits it. v0.2 auto-discovery is **Kubernetes-only** — the
+base connector's `discover_topology` is a no-op
+([`connectors/base.py`](../../backend/src/meho_backplane/connectors/base.py))
+and only the Kubernetes connector overrides it
+([`connectors/kubernetes/connector.py`](../../backend/src/meho_backplane/connectors/kubernetes/connector.py))
+— so for a non-k8s pair (a virtualization-management appliance
+`runs-on` its host cluster, a workload `runs-on` a hypervisor) no probe
+ever emits `runs-on` / `mounts` / `routes-through` / `belongs-to`.
+
+The policy that follows: **an auto-discoverable kind MAY be curated on
+any pair no populator covers.** Choosing the semantically-correct kind
+is legitimate there, not a workaround — an operator should not fall
+back to a weaker curated-only kind (`depends-on`) just to dodge the
+vocabulary. Such a write inserts clean (`source: curated, conflicts:
+[]`) **only when no other edge already sits on that ordered pair**,
+because §6 detection keys off *existing* edges. The supersede pass
+(rule 1) only marks `source='auto'` rows
+([`annotate.py:314`](../../backend/src/meho_backplane/topology/annotate.py)),
+so it is genuinely dormant on an uncovered pair — there is no auto row to
+supersede. The incompatible-kind pass (rule 2), however, carries **no
+`source` filter**: it selects every different-kind edge on the same
+`(from, to)` pair regardless of origin
+([`annotate.py:366-371`](../../backend/src/meho_backplane/topology/annotate.py)).
+So the clean-insert guarantee holds only where the pair is otherwise
+empty. If a *pre-existing curated* different-kind edge already sits on it
+— an operator curated `depends-on(A→B)`, then later curates
+`runs-on(A→B)` — rule 2 still fires and the new curated row inserts with
+a **non-empty** `conflicts` array. That is by design: rule 2's own
+docstring describes exactly this `depends-on` ⇄ `routes-through`
+coexistence, where both rows survive and each carries the other's id.
+Clean insertion therefore requires *both* no existing `auto` row **and**
+no existing different-kind edge (of any source) on the pair.
+
+**Grandfather rule on populator ship.** So that today's correct
+modelling stays safe when coverage later arrives, MEHO commits that any
+populator newly covering a `(kind, pair-type)` an operator already
+curated ships with a one-shot reconciliation that grandfathers those
+pre-existing curated edges — they stay visible, not retroactively
+§6-conflicted. Coverage is per `(kind, pair-type)`, not per kind
+globally: the k8s populator already covers `belongs-to` for k8s pairs
+(namespace→target, node→target), so
+the trigger is a populator adding a previously-uncovered *pair-type* (a
+hypervisor host, an appliance→cluster) under a kind that may already be
+covered elsewhere. The substrate already applies this for the
+*identical* pair:
+[`refresh._refresh_curated_edge`](../../backend/src/meho_backplane/topology/refresh.py)
+keeps an operator-curated row operator-owned when a probe re-discovers
+the same `(from, to, kind)` (it bumps `last_seen` only; the
+`source='curated'` marker and any §6 markers are untouched, and no
+competing auto row is inserted). The grandfather rule extends that same
+"operator-owned rows survive a populator arrival" principle to the
+related-pair interactions a future reconciliation must settle. The
+machine-readable `curated_until_populator_covers` bucket and the
+reconciliation job itself are deferred to the initiative that ships the
+non-k8s populator; recording the commitment now is what makes writing
+`runs-on` today safe. The operator runbook
+([`topology-annotation.md`](../cross-repo/topology-annotation.md#curating-an-auto-discoverable-kind-before-its-populator-exists))
+carries the full recipe.
 
 ## G9.2 curated-edge surface
 

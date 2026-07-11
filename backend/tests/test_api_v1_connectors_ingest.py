@@ -166,6 +166,17 @@ def _reset_ingest_job_registry() -> Iterator[None]:
 # per the ipaddress module so the SSRF destination guard passes.
 _INGEST_TEST_PUBLIC_IP = "93.184.216.34"
 
+# The genuine ``socket.getaddrinfo``, captured at import time before any
+# fixture patches the global attribute. The stand-ins below delegate to it
+# for non-test hosts. They must NOT re-reference ``socket.getaddrinfo`` for
+# that delegation: the autouse fixture patches the *global* module attribute
+# (``openapi.socket`` is the shared ``socket`` module), so ``socket.getaddrinfo``
+# is the mock itself while a patch is active — delegating through it recurses
+# infinitely. A leaked/active patch reaching an unrelated caller (e.g. the
+# embedding-model load resolving a HuggingFace CDN host) must resolve through
+# the real function to stay a transparent no-op (evoila/meho#574, #2385).
+_REAL_GETADDRINFO = socket.getaddrinfo
+
 # Hostname for all spec mock endpoints in this module.
 _SPEC_HOST = "specs.example.test"
 _SPEC_BASE = f"https://{_SPEC_HOST}"
@@ -186,17 +197,29 @@ _INGEST_TEST_HOSTS = frozenset(
 
 
 def _ingest_getaddrinfo(
-    host: str, port: object, **kwargs: object
+    host: str, port: object, *args: object, **kwargs: object
 ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
     """Mock for ``socket.getaddrinfo`` in the SSRF guard.
 
     Returns a public IP for test hostnames so the destination guard
     accepts them; delegates to the real function for everything else so
     that the discovery/JWKS mock routes wired by respx still resolve.
+
+    The trailing ``*args``/``**kwargs`` mirror the full ``getaddrinfo``
+    arity (``family``, ``type``, ``proto``, ``flags``). ``mock.patch`` here
+    rebinds the *global* ``socket.getaddrinfo`` attribute, so a resolution
+    that runs outside this module -- e.g. the embedding-model load, which
+    calls ``getaddrinfo`` positionally as
+    ``getaddrinfo(host, port, family, type, proto, flags)`` -- can hit the
+    patch if it is still active on the worker. Accepting all positional args
+    and delegating to the captured real function (never the re-looked-up,
+    still-patched ``socket.getaddrinfo``, which would recurse) makes such a
+    leaked call a transparent no-op rather than a ``TypeError`` or a
+    ``RecursionError`` (evoila/meho#574, #2385).
     """
     if host in _INGEST_TEST_HOSTS:
         return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_INGEST_TEST_PUBLIC_IP, 443))]
-    return socket.getaddrinfo(host, port, **kwargs)  # type: ignore[arg-type]
+    return _REAL_GETADDRINFO(host, port, *args, **kwargs)  # type: ignore[arg-type]
 
 
 @pytest.fixture(autouse=True)
@@ -4233,10 +4256,15 @@ def _resolver_allowing(hosts: set[str]) -> Callable[..., _AddrInfo]:
 
     allowed = set(hosts) | _INGEST_TEST_HOSTS
 
-    def _resolver(host: str, port: object, **kwargs: object) -> _AddrInfo:
+    # ``*args``/``**kwargs`` mirror the full ``getaddrinfo`` positional arity,
+    # and the delegation targets the captured real function (not the still-
+    # patched ``socket.getaddrinfo``), so a leaked/active patch on an unrelated
+    # caller is a transparent no-op, never a ``TypeError`` or ``RecursionError``
+    # (evoila/meho#574, #2385).
+    def _resolver(host: str, port: object, *args: object, **kwargs: object) -> _AddrInfo:
         if host in allowed:
             return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_INGEST_TEST_PUBLIC_IP, 443))]
-        return socket.getaddrinfo(host, port, **kwargs)  # type: ignore[arg-type]
+        return _REAL_GETADDRINFO(host, port, *args, **kwargs)  # type: ignore[arg-type]
 
     return _resolver
 

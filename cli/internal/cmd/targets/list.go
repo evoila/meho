@@ -109,21 +109,14 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 	if statusCode != http.StatusOK {
 		return renderHTTPStatus(cmd, backplaneURL, statusCode, body, opts.JSONOut)
 	}
-	// G0.16-T6 Finding A (#1312) — `GET /api/v1/targets` opted into a
-	// non-breaking envelope=v2 shape, so the OpenAPI spec now declares
-	// two `200` content schemas (bare `list[TargetSummary]` by default,
-	// `{"items": [...], "next_cursor": …}` when the operator passes
-	// `?envelope=v2`). oapi-codegen collapses multi-shape 200s into a
-	// `struct{union json.RawMessage}` whose discriminator field is
-	// unexported and whose parser fails json.Unmarshal on any concrete
-	// shape, so the `*WithResponse` path can't deliver a typed payload.
-	// The CLI never sends `envelope=v2` (today's bare-list UX is the
-	// operator contract); `getTargets` calls the low-level client and
-	// returns the raw body, which we decode into the default shape
-	// here. Once oapi-codegen ships an `.AsXxx()` helper for the
-	// default branch (issue tracked upstream), swap this for it.
-	var summaries []api.TargetSummary
-	if err := json.Unmarshal(body, &summaries); err != nil {
+	// #2338 — `GET /api/v1/targets` converged onto the §2 unified list
+	// envelope `{"items": [...], "next_cursor": <str|null>}` as its
+	// default and only shape (the `?envelope=v2` opt-in that bridged
+	// the G0.16-T6 #1312 migration was retired). `getTargets` returns
+	// the raw body via the low-level client (preserving the shared
+	// 401-retry path); decode the envelope here and render `items`.
+	var envelope api.TargetListResponse
+	if err := json.Unmarshal(body, &envelope); err != nil {
 		return output.RenderError(
 			cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
@@ -132,9 +125,9 @@ func runList(cmd *cobra.Command, opts listOptions) error {
 		)
 	}
 	if opts.JSONOut {
-		return output.PrintJSON(cmd.OutOrStdout(), summaries)
+		return output.PrintJSON(cmd.OutOrStdout(), envelope.Items)
 	}
-	printTargetsTable(cmd.OutOrStdout(), summaries)
+	printTargetsTable(cmd.OutOrStdout(), envelope.Items)
 	return nil
 }
 

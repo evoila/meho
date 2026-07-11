@@ -66,7 +66,7 @@ def client() -> Iterator[TestClient]:
 
 
 def test_list_targets_empty_for_new_tenant(client: TestClient) -> None:
-    """A tenant with no targets returns an empty list."""
+    """A tenant with no targets returns an empty ``items`` envelope."""
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
@@ -75,7 +75,7 @@ def test_list_targets_empty_for_new_tenant(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key)}"},
         )
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json() == {"items": [], "next_cursor": None}
 
 
 @pytest.mark.asyncio
@@ -102,7 +102,7 @@ async def test_list_targets_returns_targets(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
-    names = {t["name"] for t in response.json()}
+    names = {t["name"] for t in response.json()["items"]}
     assert "rdc-vcenter" in names
     assert "rdc-vault" in names
 
@@ -125,7 +125,7 @@ async def test_list_targets_product_filter(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
-    data = response.json()
+    data = response.json()["items"]
     assert len(data) == 1
     assert data[0]["product"] == "vsphere"
 
@@ -146,7 +146,7 @@ async def test_list_targets_cursor_pagination(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert response.status_code == 200
-    names = [t["name"] for t in response.json()]
+    names = [t["name"] for t in response.json()["items"]]
     assert names == ["gamma"]
 
 
@@ -1224,7 +1224,7 @@ def test_create_target_sddc_round_trips_through_list_endpoint(client: TestClient
         )
         response = client.get("/api/v1/targets", headers=headers)
     assert response.status_code == 200
-    rows = response.json()
+    rows = response.json()["items"]
     by_name = {row["name"]: row for row in rows}
     assert "roundtrip-sddc" in by_name
     assert by_name["roundtrip-sddc"]["product"] == "sddc"
@@ -1638,18 +1638,17 @@ def test_update_target_clear_preferred_impl_id_succeeds(client: TestClient) -> N
 
 
 @pytest.mark.asyncio
-async def test_list_targets_envelope_v2_returns_unified_shape(
+async def test_list_targets_returns_unified_envelope_with_cursor(
     client: TestClient,
 ) -> None:
-    """``?envelope=v2`` returns the §2 unified shape (G0.16-T6 Finding A #1312).
+    """``GET /api/v1/targets`` returns the §2 ``{items, next_cursor}`` envelope.
 
-    Default (no ``?envelope=``) stays the v0.8.0 bare list — pinned
-    by the existing test suite. The opt-in returns
-    ``{items, next_cursor}``: items always present,
-    ``next_cursor`` is ``None`` when the page exhausted the
-    matching set, the last-row ``name`` otherwise. The migration
-    is non-breaking by design: the opt-in is a query parameter,
-    not a versioned URL.
+    #2338 breaking pass — the envelope is the default and only shape
+    (the ``?envelope=v2`` opt-in that bridged the G0.16-T6 #1312
+    migration was retired). ``items`` is always present; ``next_cursor``
+    is the last-row ``name`` when the page filled to ``limit`` (so a
+    re-issue carries pagination) and ``None`` when the page exhausted the
+    matching set.
     """
     tenant = str(uuid.uuid4())
     for name in ("a-target", "b-target", "c-target"):
@@ -1662,42 +1661,33 @@ async def test_list_targets_envelope_v2_returns_unified_shape(
     key = make_rsa_keypair("kid-A")
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
-        bare = client.get(
+        full = client.get(
             "/api/v1/targets?limit=2",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
         )
-        v2_full = client.get(
-            "/api/v1/targets?envelope=v2&limit=2",
+        last = client.get(
+            "/api/v1/targets?limit=2&cursor=b-target",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
         )
-        v2_last = client.get(
-            "/api/v1/targets?envelope=v2&limit=2&cursor=b-target",
-            headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
-        )
-    # Default shape unchanged — a bare list of 2 rows.
-    assert bare.status_code == 200
-    assert isinstance(bare.json(), list)
-    assert len(bare.json()) == 2
-
-    # v2 envelope — items + next_cursor.
-    assert v2_full.status_code == 200
-    body = v2_full.json()
+    # Filled page — items + a next_cursor for the following page.
+    assert full.status_code == 200
+    body = full.json()
     assert isinstance(body, dict)
     assert [row["name"] for row in body["items"]] == ["a-target", "b-target"]
     # Page filled to limit → cursor for the next page.
     assert body["next_cursor"] == "b-target"
 
     # Last page → cursor is None.
-    body_last = v2_last.json()
+    body_last = last.json()
     assert body_last["items"][0]["name"] == "c-target"
     assert body_last["next_cursor"] is None
 
 
 @pytest.mark.asyncio
-async def test_list_targets_envelope_v2_exact_limit_terminal_page(
+async def test_list_targets_exact_limit_terminal_page(
     client: TestClient,
 ) -> None:
-    """``?envelope=v2`` emits ``next_cursor=null`` on an exact-``limit`` terminal page.
+    """The envelope emits ``next_cursor=null`` on an exact-``limit`` terminal page.
 
     G0.16-T6 review-iter-1 M1 (#1312). The pre-fix shape
     (``next_cursor = rows[-1].name if len(rows) >= limit``) emitted a
@@ -1724,7 +1714,7 @@ async def test_list_targets_envelope_v2_exact_limit_terminal_page(
     with respx.mock as mock_router:
         mock_discovery_and_jwks(mock_router, public_jwks(key))
         resp = client.get(
-            "/api/v1/targets?envelope=v2&limit=5",
+            "/api/v1/targets?limit=5",
             headers={"Authorization": f"Bearer {_operator_token(key, tenant)}"},
         )
     assert resp.status_code == 200
@@ -1768,7 +1758,7 @@ async def test_list_target_field_set_superset_of_detail(client: TestClient) -> N
         )
     assert list_resp.status_code == 200
     assert detail_resp.status_code == 200
-    list_row = next(r for r in list_resp.json() if r["name"] == "prod-vc-1")
+    list_row = next(r for r in list_resp.json()["items"] if r["name"] == "prod-vc-1")
     detail_row = detail_resp.json()
     # The only fields a list row is allowed to omit are the
     # operator-authored free-form blobs the convention doc names.
@@ -1855,7 +1845,7 @@ async def test_list_cross_tenant_isolation(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_b)}"},
         )
     assert response.status_code == 200
-    assert response.json() == []
+    assert response.json() == {"items": [], "next_cursor": None}
 
 
 # ---------------------------------------------------------------------------
@@ -2003,7 +1993,7 @@ async def test_delete_target_excluded_from_list(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {_operator_token(key, tenant_id)}"},
         )
     assert listing.status_code == 200
-    names = {t["name"] for t in listing.json()}
+    names = {t["name"] for t in listing.json()["items"]}
     assert names == {"live-one"}
 
 

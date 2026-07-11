@@ -509,7 +509,7 @@ def test_audit_my_recent_row_includes_policy_decision(client: TestClient) -> Non
             headers={"Authorization": f"Bearer {token}"},
         )
     assert resp.status_code == 200
-    assert resp.json()["rows"][0]["policy_decision"] == "needs-approval"
+    assert resp.json()["items"][0]["policy_decision"] == "needs-approval"
 
 
 # ---------------------------------------------------------------------------

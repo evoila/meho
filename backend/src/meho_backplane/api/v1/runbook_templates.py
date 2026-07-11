@@ -19,11 +19,12 @@ Route inventory
   HTTP 201. Role: ``tenant_admin``.
 * ``GET /api/v1/runbooks/templates`` -- list the latest version of each
   slug for the operator's tenant. Query params: ``status``,
-  ``target_kind``, ``limit``, ``envelope``. Returns
-  :class:`RunbookTemplateListResponse` by default; ``?envelope=v2``
-  returns the unified ``{"items": [...], "next_cursor": null}`` shape
-  per ``docs/codebase/api-shape-conventions.md`` §2 (G0.22-T6 #1611).
-  Role: ``operator``.
+  ``target_kind``, ``limit``. Returns the unified
+  :class:`RunbookTemplateListResponse` ``{"items": [...],
+  "next_cursor": null}`` envelope per
+  ``docs/codebase/api-shape-conventions.md`` §2 (#2338 breaking pass --
+  converged from the v0.8.0 ``{"templates": [...]}`` shape, retiring the
+  ``?envelope=v2`` opt-in G0.22-T6 #1611 shipped). Role: ``operator``.
 * ``GET /api/v1/runbooks/templates/{slug}`` -- fetch the full body of one
   template. Query param: ``version`` (optional -> latest). Returns
   :class:`~meho_backplane.runbooks.schemas.ShowTemplateResponse`. 404 when
@@ -137,14 +138,8 @@ from typing import Any, Final, Literal
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from meho_backplane.api.v1._envelope import (
-    ENVELOPE_QUERY,
-    EnvelopeVersion,
-    wrap_v2_envelope,
-)
 from meho_backplane.api.v1._errors import http_for, register_error
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -286,17 +281,20 @@ _SHOW_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
 
 
 class RunbookTemplateListResponse(BaseModel):
-    """Response envelope for ``GET /api/v1/runbooks/templates``.
+    """Unified list envelope for ``GET /api/v1/runbooks/templates``.
 
-    Wrapped in ``{"templates": [...]}`` so a future paging / cursor field
-    can land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`
-    adopted for its list response. Per-entry shape is the substrate's
-    :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. Per-entry shape is the
+    substrate's :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.
+    The listing is not cursor-paginated (``limit`` truncates), so
+    ``next_cursor`` is always ``None`` but present so the endpoint can
+    grow pagination later without a further breaking change.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    templates: list[TemplateSummary]
+    items: list[TemplateSummary]
+    next_cursor: str | None = None
 
 
 class _VersionBody(BaseModel):
@@ -368,8 +366,7 @@ async def list_templates(
     target_kind: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     operator: Operator = _require_operator,
-    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
-) -> RunbookTemplateListResponse | JSONResponse:
+) -> RunbookTemplateListResponse:
     """List the latest version of each template slug for the operator's tenant.
 
     Tenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant
@@ -386,21 +383,14 @@ async def list_templates(
     :class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`
     internally.
 
-    The default response is the v0.8.0 keyed
-    :class:`RunbookTemplateListResponse` shape (``{"templates": [...]}``).
-    Passing ``?envelope=v2`` returns the unified ``{"items": [...],
-    "next_cursor": null}`` shape per
-    ``docs/codebase/api-shape-conventions.md`` §2 -- the listing is not
+    Returns the unified ``{"items": [...], "next_cursor": null}`` list
+    envelope per ``docs/codebase/api-shape-conventions.md`` §2 (#2338
+    breaking pass -- the response shape converged from the v0.8.0
+    ``{"templates": [...]}`` keyed shape onto the reference envelope,
+    renaming ``templates`` -> ``items``; the ``?envelope=v2`` opt-in
+    that bridged the migration was retired). The listing is not
     cursor-paginated (``limit`` truncates), so ``next_cursor`` is always
-    ``null`` under the opt-in, matching the sibling unpaged adopters.
-    Omitting the param keeps the keyed default so no client breaks
-    (G0.22-T6 #1611, joining the shape unified in #1356/#1366).
-
-    The v2 envelope is emitted via a raw :class:`JSONResponse` rather
-    than a union return type: that keeps ``response_model`` (and so the
-    documented OpenAPI 200 schema, and the typed CLI client generated
-    from it) as the named :class:`RunbookTemplateListResponse` while
-    still letting the opt-in branch return the unified shape.
+    ``null``, matching the sibling unpaged adopters.
 
     Binds ``audit_op_id="runbook.list_templates"`` + ``audit_op_class=
     "read"`` before the service call.
@@ -416,14 +406,7 @@ async def list_templates(
         template_filter,
         limit=limit,
     )
-    if envelope == "v2":
-        return JSONResponse(
-            wrap_v2_envelope(
-                [summary.model_dump(mode="json") for summary in summaries],
-                next_cursor=None,
-            )
-        )
-    return RunbookTemplateListResponse(templates=summaries)
+    return RunbookTemplateListResponse(items=summaries)
 
 
 @router.get("/{slug}", response_model=ShowTemplateResponse, responses=_SHOW_RESPONSES)

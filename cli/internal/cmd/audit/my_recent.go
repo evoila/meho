@@ -43,7 +43,7 @@ func newMyRecentCmd() *cobra.Command {
 			"--since defaults to 24h server-side; pass a different " +
 			"shorthand (7d / 30m / 2w) or an ISO-8601 datetime to widen " +
 			"the window. --limit caps the page size (1..1000, server " +
-			"default 100). --json emits the raw AuditQueryResult.",
+			"default 100). --json emits the raw {items, next_cursor} envelope.",
 		Args:          cobra.NoArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -61,7 +61,7 @@ func newMyRecentCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max rows (1..1000, server default 100 when omitted)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
-		"emit raw AuditQueryResult JSON instead of the human table")
+		"emit the raw {items, next_cursor} envelope JSON instead of the human table")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
 		"backplane URL to query (defaults to the URL recorded by the most recent `meho login`)")
 	return cmd
@@ -100,11 +100,19 @@ func runMyRecent(cmd *cobra.Command, opts myRecentOptions) error {
 	}
 	if result == nil {
 		return output.RenderError(cmd.ErrOrStderr(),
-			output.Unexpected("backplane returned 200 OK but no JSON body decoded against AuditQueryResult"),
+			output.Unexpected("backplane returned 200 OK but no JSON body decoded against MyRecentPage"),
 			opts.JSONOut,
 		)
 	}
-	printQueryTable(cmd.OutOrStdout(), result)
+	// #2338: my-recent converged onto the §2 `{items, next_cursor}`
+	// envelope (MyRecentPage). The rows it carries are the same
+	// AuditEntry set the shared `printQueryTable` renders, so adapt the
+	// page onto the table's AuditQueryResult shape rather than forking a
+	// near-identical renderer.
+	printQueryTable(cmd.OutOrStdout(), &api.AuditQueryResult{
+		Rows:       result.Items,
+		NextCursor: result.NextCursor,
+	})
 	return nil
 }
 
@@ -132,7 +140,7 @@ func getMyRecent(
 	ctx context.Context,
 	client *api.AuthedClient,
 	opts myRecentOptions,
-) ([]byte, *api.AuditQueryResult, error) {
+) ([]byte, *api.MyRecentPage, error) {
 	params := buildMyRecentParams(opts)
 	resp, err := client.MyRecentApiV1AuditMyRecentGetWithResponse(ctx, params)
 	if err != nil {

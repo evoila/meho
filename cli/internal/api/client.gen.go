@@ -77,6 +77,20 @@ const (
 	Yes      ConfirmVerifyResponseAnswer = "yes"
 )
 
+// Defines values for ConnectorListItemKind.
+const (
+	ConnectorListItemKindIngestedShim          ConnectorListItemKind = "ingested-shim"
+	ConnectorListItemKindProfiled              ConnectorListItemKind = "profiled"
+	ConnectorListItemKindProfiledButUnreviewed ConnectorListItemKind = "profiled-but-unreviewed"
+	ConnectorListItemKindTyped                 ConnectorListItemKind = "typed"
+)
+
+// Defines values for ConnectorListItemState.
+const (
+	Ingested   ConnectorListItemState = "ingested"
+	Registered ConnectorListItemState = "registered"
+)
+
 // Defines values for ConnectorReviewPayloadKind.
 const (
 	ConnectorReviewPayloadKindIngestedShim          ConnectorReviewPayloadKind = "ingested-shim"
@@ -426,10 +440,10 @@ const (
 
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
-	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
-	Disabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
-	Enabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
-	Staged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
+	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
+	ListEndpointApiV1ConnectorsGetParamsStatusDisabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
+	ListEndpointApiV1ConnectorsGetParamsStatusEnabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
+	ListEndpointApiV1ConnectorsGetParamsStatusStaged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
 )
 
 // Defines values for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer.
@@ -2310,6 +2324,18 @@ type BroadcastOverrideRead struct {
 	UpdatedAt    time.Time          `json:"updated_at"`
 }
 
+// BroadcastOverridesListResponse Unified list envelope for “GET /api/v1/broadcast/overrides“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. This listing is not
+// cursor-paginated, so “next_cursor“ is always “None“ but present
+// so the endpoint can grow keyset pagination later without a further
+// breaking change.
+type BroadcastOverridesListResponse struct {
+	Items      []BroadcastOverrideRead `json:"items"`
+	NextCursor *string                 `json:"next_cursor"`
+}
+
 // BudgetStatus Preamble budget status for the operator's tenant.
 //
 // Surfaced as a sub-document on every “GET /api/v1/conventions“
@@ -2500,6 +2526,143 @@ type ConfirmVerifyResponse struct {
 
 // ConfirmVerifyResponseAnswer defines model for ConfirmVerifyResponse.Answer.
 type ConfirmVerifyResponseAnswer string
+
+// ConnectorListItem One row in the “GET /api/v1/connectors“ response.
+//
+// Projects :class:`OperationGroup` aggregation. “connector_id“ is
+// the operator-facing identifier (“"<impl_id>-<version>"“);
+// “product“ / “version“ / “impl_id“ are the parsed triple.
+//
+// “tenant_id“ is “None“ for built-in / global connectors and a
+// UUID for tenant-curated ones. “group_count“ totals the rows
+// visible to the caller; the three “*_group_count“ fields split
+// that total by “review_status“ so operators can spot
+// review-queue backlog at a glance.
+//
+// “operation_count“ is the sum of operations across all groups
+// in scope; “enabled_operation_count“ (G0.23-T5 / #1636) is the
+// subset of those rows whose per-op “is_enabled“ flag is set --
+// the operations the dispatcher will actually resolve
+// (dispatchable), vs ingested-but-disabled rows that only surface
+// in review. The naming mirrors the “*_group_count“ family above:
+// the unprefixed field is the total, the “enabled_“-prefixed
+// field is the subset. Kept additive (rather than renaming the
+// total to “total_operation_count“) so existing consumers of
+// “operation_count“ -- the CLI's “listEntry“ decode shape and
+// every “meho.connector.list“ client -- keep working unchanged.
+// Mind the axis difference between the two “enabled_*“ fields:
+// “enabled_group_count“ buckets groups by *review_status*, while
+// “enabled_operation_count“ counts the per-op “is_enabled“ bit
+// (the dispatchability flag that survives connector-level
+// enable/disable cycles via operator overrides). Useful for the
+// CLI's “meho connector list --status staged“ summary view and
+// for an LLM browsing the catalog: “vmware-rest-9.0“ ingests
+// ~2,211 ops of which only a fraction are enabled, and before the
+// split nothing on the row said which of the two numbers
+// “operation_count“ was.
+//
+// “state“ (G0.9.1-T1 / #773) distinguishes *dispatchable* rows
+// (“"ingested"“ — DB-backed, resolves through the dispatcher) from
+// *registered-but-empty* rows (“"registered"“ — v2-registry entries
+// without descriptor rows yet). Rows that wouldn't round-trip
+// through the resolver at all (stale-impl_id DB rows, v2 entries
+// whose registry product disagrees with the parser's derived
+// product) are filtered out before the response is built;
+// “connector_id“s the listing emits are guaranteed to resolve
+// through :func:`~meho_backplane.operations._lookup.connector_exists`
+// when “state == "ingested"“, and explicitly labelled
+// not-yet-dispatchable when “state == "registered"“. Defaults to
+// “"ingested"“ so existing call sites (tests, MCP fakes)
+// construct rows without breakage.
+//
+// “next_step“ (G0.13-T3 / #1133) is the self-describing hint that
+// closes the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:
+// half-registered connectors fail lookup with no in-product hint
+// about what verb closes the workflow). It is a :class:`NextStep`
+// object on “state="registered"“ rows and “None“ on
+// “state="ingested"“ rows (no operator action remains for an
+// ingested connector). The hint is computed against the curated
+// connector-spec catalog (#743): when the catalog carries an entry
+// for the registry's “(product, version)“ the verb points at
+// “meho connector ingest --catalog ...“; otherwise it points at
+// the manual-mode flags. Defaults to “None“ so existing
+// construction call sites (tests, MCP fakes) continue to compile
+// without explicit assignment.
+//
+// “kind“ (G0.28-T6 / #1979) is the authoring-mode discriminator —
+// typed / ingested-shim / profiled / profiled-but-unreviewed — an
+// **additive** sibling to “state“ (which is deliberately left
+// unchanged: it is the documented dispatch-resolution state machine
+// with its own consumers). “dispatchable“ is the boolean roll-up of
+// the same projection: “True“ for “typed“ and “profiled“,
+// “False“ for “ingested-shim“ and “profiled-but-unreviewed“.
+// Together they let the operator console / CLI distinguish a working
+// profiled connector from a dead bare shim, which neither “state“
+// nor the count fields could express. Both default to the bare-shim
+// reading (“kind="ingested-shim"“, “dispatchable=False“) so
+// existing construction call sites (tests, MCP fakes) keep working;
+// the listing always sets them explicitly. See
+// :data:`ConnectorAuthoringKind`.
+type ConnectorListItem struct {
+	ConnectorId           string                 `json:"connector_id"`
+	DisabledGroupCount    int                    `json:"disabled_group_count"`
+	Dispatchable          *bool                  `json:"dispatchable,omitempty"`
+	EnabledGroupCount     int                    `json:"enabled_group_count"`
+	EnabledOperationCount int                    `json:"enabled_operation_count"`
+	GroupCount            int                    `json:"group_count"`
+	ImplId                string                 `json:"impl_id"`
+	Kind                  *ConnectorListItemKind `json:"kind,omitempty"`
+
+	// NextStep Self-describing in-product hint pointing at the verb that closes the workflow.
+	//
+	// Surfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`
+	// is ``"registered"`` (G0.13-T3 / #1133). An ``"ingested"`` row sets
+	// :attr:`ConnectorListItem.next_step` to ``None`` because the dispatcher
+	// already resolves operations against it -- there is nothing left for the
+	// operator to do.
+	//
+	// Two ``verb`` shapes ship:
+	//
+	// * ``meho connector ingest --catalog <product>/<version>`` -- when the
+	//   connector-spec catalog (G0.7-T8 / #743) carries an entry for the
+	//   registry's ``(product, version)``. The operator copies the verb,
+	//   ``meho connector ingest`` looks up the upstream spec URL, and
+	//   dispatchability follows after operator review.
+	// * ``meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>``
+	//   -- when the catalog has no entry. The ``rationale`` makes the
+	//   missing-catalog branch explicit so the operator knows they need
+	//   to source the OpenAPI spec themselves.
+	//
+	// Frozen for the same reason every wire shape in this module is frozen:
+	// responses are read-only and any in-place mutation should surface as a
+	// Pydantic error rather than a silently-modified payload.
+	NextStep         *NextStep               `json:"next_step,omitempty"`
+	OperationCount   int                     `json:"operation_count"`
+	Product          string                  `json:"product"`
+	StagedGroupCount int                     `json:"staged_group_count"`
+	State            *ConnectorListItemState `json:"state,omitempty"`
+	TenantId         *openapi_types.UUID     `json:"tenant_id"`
+	Version          string                  `json:"version"`
+}
+
+// ConnectorListItemKind defines model for ConnectorListItem.Kind.
+type ConnectorListItemKind string
+
+// ConnectorListItemState defines model for ConnectorListItem.State.
+type ConnectorListItemState string
+
+// ConnectorListResponse Unified list envelope for “GET /api/v1/connectors“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. This listing is not
+// cursor-paginated, so “next_cursor“ is always “None“; the field
+// is present so a client reads it without a “KeyError“ guard and so
+// the endpoint can grow keyset pagination later without a further
+// breaking change.
+type ConnectorListResponse struct {
+	Items      []ConnectorListItem `json:"items"`
+	NextCursor *string             `json:"next_cursor"`
+}
 
 // ConnectorReviewGroup One group within the review payload.
 //
@@ -2795,22 +2958,23 @@ type ConventionHistoryEntry struct {
 // demand and are exempt from the over-budget 422 rejection.
 type ConventionKind string
 
-// ConventionListResponse Response envelope for “GET /api/v1/conventions“.
+// ConventionListResponse Unified list envelope for “GET /api/v1/conventions“.
 //
-// Wrapped in “{"entries": [...]}“ so a future cursor / total
-// field can land non-breakingly. Same shape the kb + memory list
-// surfaces adopted; consistency across the v0.2 read APIs keeps
-// the CLI's list renderer one switch statement, not three.
+// The `{items, next_cursor, ...sidecars}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. “items“ carries the
+// :class:`ConventionSummary` rows; “next_cursor“ is always “None“
+// (the listing is not cursor-paginated) but present so the endpoint
+// can grow pagination later without a further breaking change.
 //
-// “budget_status“ (T7 #1094) carries the preamble budget
-// arithmetic for the operator's tenant. Always populated; the
-// underlying :func:`~meho_backplane.conventions.preamble.assemble_preamble`
-// call is one indexed SELECT + an in-memory pack -- cheap enough
-// to run on every list request. Exposing it on the list
-// response (rather than on a separate
-// “/api/v1/conventions/budget-status“ route the issue body
-// explicitly rejects) keeps the CLI / dashboard consumer paths
-// to one HTTP round-trip.
+// “budget_status“ (T7 #1094) is the §2 top-level *sidecar*: it
+// carries the preamble budget arithmetic for the operator's tenant.
+// Always populated; the underlying
+// :func:`~meho_backplane.conventions.preamble.assemble_preamble` call
+// is one indexed SELECT + an in-memory pack -- cheap enough to run on
+// every list request. Exposing it on the list response (rather than on
+// a separate “/api/v1/conventions/budget-status“ route the issue
+// body explicitly rejects) keeps the CLI / dashboard consumer paths to
+// one HTTP round-trip.
 type ConventionListResponse struct {
 	// BudgetStatus Preamble budget status for the operator's tenant.
 	//
@@ -2858,7 +3022,8 @@ type ConventionListResponse struct {
 	//   knows exactly which conventions never reach an agent
 	//   session.
 	BudgetStatus BudgetStatus        `json:"budget_status"`
-	Entries      []ConventionSummary `json:"entries"`
+	Items        []ConventionSummary `json:"items"`
+	NextCursor   *string             `json:"next_cursor"`
 }
 
 // ConventionSummary List-row representation returned by “GET /api/v1/conventions“.
@@ -4134,6 +4299,49 @@ type MemoryListResponse struct {
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
 
+// MyRecentPage Unified list envelope for “GET /api/v1/audit/my-recent“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. It carries the same
+// audit rows and forward-only cursor as :class:`AuditQueryResult`, but
+// names the list field “items“ (not “rows“) so the reference list
+// endpoints agree on one envelope. The sibling audit-query endpoints
+// (“/query“ / “/who-touched“ / “/by-work-ref“) keep the
+// :class:`AuditQueryResult` “rows“ shape and are out of the §2
+// reference set.
+type MyRecentPage struct {
+	Items      []AuditEntry `json:"items"`
+	NextCursor *string      `json:"next_cursor"`
+}
+
+// NextStep Self-describing in-product hint pointing at the verb that closes the workflow.
+//
+// Surfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`
+// is “"registered"“ (G0.13-T3 / #1133). An “"ingested"“ row sets
+// :attr:`ConnectorListItem.next_step` to “None“ because the dispatcher
+// already resolves operations against it -- there is nothing left for the
+// operator to do.
+//
+// Two “verb“ shapes ship:
+//
+//   - “meho connector ingest --catalog <product>/<version>“ -- when the
+//     connector-spec catalog (G0.7-T8 / #743) carries an entry for the
+//     registry's “(product, version)“. The operator copies the verb,
+//     “meho connector ingest“ looks up the upstream spec URL, and
+//     dispatchability follows after operator review.
+//   - “meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>“
+//     -- when the catalog has no entry. The “rationale“ makes the
+//     missing-catalog branch explicit so the operator knows they need
+//     to source the OpenAPI spec themselves.
+//
+// Frozen for the same reason every wire shape in this module is frozen:
+// responses are read-only and any in-place mutation should surface as a
+// Pydantic error rather than a silently-modified payload.
+type NextStep struct {
+	Rationale string `json:"rationale"`
+	Verb      string `json:"verb"`
+}
+
 // NextStepRequest Request body for “meho.runbook.next“ -- advance the run.
 //
 // :attr:`last_verified` is the caller's *claim* that the previous
@@ -4789,16 +4997,18 @@ type RunSummaryCurrentStepState string
 // RunSummaryState defines model for RunSummary.State.
 type RunSummaryState string
 
-// RunbookListRunsResponse Response envelope for “GET /api/v1/runbooks/runs“.
+// RunbookListRunsResponse Unified list envelope for “GET /api/v1/runbooks/runs“.
 //
-// Wrapped in “{"runs": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- same shape
-// :mod:`meho_backplane.api.v1.runbook_templates` adopted for its
-// list response. Per-entry shape is the substrate's
-// :class:`~meho_backplane.runbooks.runs_schemas.RunSummary` (no
-// step body content, only the run-level coordinates).
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. Per-entry shape is the
+// substrate's :class:`~meho_backplane.runbooks.runs_schemas.RunSummary`
+// (no step body content, only the run-level coordinates). The listing
+// is not cursor-paginated (“limit“ truncates), so “next_cursor“ is
+// always “None“ but present so the endpoint can grow pagination later
+// without a further breaking change.
 type RunbookListRunsResponse struct {
-	Runs []RunSummary `json:"runs"`
+	Items      []RunSummary `json:"items"`
+	NextCursor *string      `json:"next_cursor"`
 }
 
 // RunbookTemplateBody The author-facing template shape stored in “runbook_templates.steps“.
@@ -4826,14 +5036,17 @@ type RunbookTemplateBody_Steps_Item struct {
 	union json.RawMessage
 }
 
-// RunbookTemplateListResponse Response envelope for “GET /api/v1/runbooks/templates“.
+// RunbookTemplateListResponse Unified list envelope for “GET /api/v1/runbooks/templates“.
 //
-// Wrapped in “{"templates": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`
-// adopted for its list response. Per-entry shape is the substrate's
-// :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. Per-entry shape is the
+// substrate's :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.
+// The listing is not cursor-paginated (“limit“ truncates), so
+// “next_cursor“ is always “None“ but present so the endpoint can
+// grow pagination later without a further breaking change.
 type RunbookTemplateListResponse struct {
-	Templates []TemplateSummary `json:"templates"`
+	Items      []TemplateSummary `json:"items"`
+	NextCursor *string           `json:"next_cursor"`
 }
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
@@ -5590,6 +5803,21 @@ type TargetCreate struct {
 
 // TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
 type TargetCreateProduct string
+
+// TargetListResponse Unified list envelope for “GET /api/v1/targets“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. “items“ carries the
+// keyset-paginated page of :class:`TargetSummary` rows; “next_cursor“
+// is the last-row “name“ of the page when a further page exists and
+// “None“ when this page exhausted the matching set (so callers see
+// "no more pages" without inspecting list length). The field is always
+// present so a client reads “response["next_cursor"]“ without a
+// “KeyError“ guard.
+type TargetListResponse struct {
+	Items      []TargetSummary `json:"items"`
+	NextCursor *string         `json:"next_cursor"`
+}
 
 // TargetSummary Short shape for list endpoints.
 //
@@ -6611,11 +6839,8 @@ type ByWorkRefApiV1AuditByWorkRefRefGetParams struct {
 
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
-	Since *string `form:"since,omitempty" json:"since,omitempty"`
-	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -6644,10 +6869,7 @@ type WhoTouchedApiV1AuditWhoTouchedTargetGetParams struct {
 // ListOverridesApiV1BroadcastOverridesGetParams defines parameters for ListOverridesApiV1BroadcastOverridesGet.
 type ListOverridesApiV1BroadcastOverridesGetParams struct {
 	// OpIdPattern Exact-match filter on op_id_pattern (not a glob match).
-	OpIdPattern *string `form:"op_id_pattern,omitempty" json:"op_id_pattern,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	OpIdPattern   *string `form:"op_id_pattern,omitempty" json:"op_id_pattern,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -6663,11 +6885,8 @@ type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
 
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
 type ListEndpointApiV1ConnectorsGetParams struct {
-	Status *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Status        *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	Authorization *string                                     `json:"authorization,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParamsStatus defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -6736,11 +6955,8 @@ type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer string
 // ListConventionsApiV1ConventionsGetParams defines parameters for ListConventionsApiV1ConventionsGet.
 type ListConventionsApiV1ConventionsGetParams struct {
 	// Kind Filter by kind (operational / workflow / reference).
-	Kind *ConventionKind `form:"kind,omitempty" json:"kind,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Kind          *ConventionKind `form:"kind,omitempty" json:"kind,omitempty"`
+	Authorization *string         `json:"authorization,omitempty"`
 }
 
 // CreateConventionApiV1ConventionsPostParams defines parameters for CreateConventionApiV1ConventionsPost.
@@ -6963,15 +7179,12 @@ type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
 // ListRunsApiV1RunbooksRunsGetParams defines parameters for ListRunsApiV1RunbooksRunsGet.
 type ListRunsApiV1RunbooksRunsGetParams struct {
-	Assignee     *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
-	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
-	WorkRef      *string                                   `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	Limit        *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Assignee      *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
+	Status        *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TemplateSlug  *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
+	WorkRef       *string                                   `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Limit         *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string                                   `json:"authorization,omitempty"`
 }
 
 // ListRunsApiV1RunbooksRunsGetParamsStatus defines parameters for ListRunsApiV1RunbooksRunsGet.
@@ -6999,13 +7212,10 @@ type ReassignRunApiV1RunbooksRunsRunIdReassignPostParams struct {
 
 // ListTemplatesApiV1RunbooksTemplatesGetParams defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
 type ListTemplatesApiV1RunbooksTemplatesGetParams struct {
-	Status     *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TargetKind *string                                             `form:"target_kind,omitempty" json:"target_kind,omitempty"`
-	Limit      *int                                                `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Status        *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TargetKind    *string                                             `form:"target_kind,omitempty" json:"target_kind,omitempty"`
+	Limit         *int                                                `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string                                             `json:"authorization,omitempty"`
 }
 
 // ListTemplatesApiV1RunbooksTemplatesGetParamsStatus defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
@@ -7077,12 +7287,9 @@ type SearchDocsEndpointApiV1SearchDocsPostParams struct {
 
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
-	Product *string `form:"product,omitempty" json:"product,omitempty"`
-	Limit   *int    `form:"limit,omitempty" json:"limit,omitempty"`
-	Cursor  *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Product       *string `form:"product,omitempty" json:"product,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -7125,7 +7332,7 @@ type DependenciesApiV1TopologyDependenciesNameGetParams struct {
 	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
 	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
 
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	// Envelope Opt into the unified REST↔MCP envelope shape per docs/codebase/api-shape-conventions.md §4. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).
 	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
@@ -7136,7 +7343,7 @@ type DependentsApiV1TopologyDependentsNameGetParams struct {
 	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
 	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
 
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	// Envelope Opt into the unified REST↔MCP envelope shape per docs/codebase/api-shape-conventions.md §4. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).
 	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
@@ -17711,22 +17918,6 @@ func NewMyRecentApiV1AuditMyRecentGetRequest(server string, params *MyRecentApiV
 
 		}
 
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -18058,22 +18249,6 @@ func NewListOverridesApiV1BroadcastOverridesGetRequest(server string, params *Li
 
 		}
 
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -18229,22 +18404,6 @@ func NewListEndpointApiV1ConnectorsGetRequest(server string, params *ListEndpoin
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -18882,22 +19041,6 @@ func NewListConventionsApiV1ConventionsGetRequest(server string, params *ListCon
 		if params.Kind != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -21199,22 +21342,6 @@ func NewListRunsApiV1RunbooksRunsGetRequest(server string, params *ListRunsApiV1
 
 		}
 
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -21539,22 +21666,6 @@ func NewListTemplatesApiV1RunbooksTemplatesGetRequest(server string, params *Lis
 		if params.Limit != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -22350,22 +22461,6 @@ func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -35789,7 +35884,7 @@ func (r ByWorkRefApiV1AuditByWorkRefRefGetResponse) StatusCode() int {
 type MyRecentApiV1AuditMyRecentGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *AuditQueryResult
+	JSON200      *MyRecentPage
 	JSON422      *HTTPValidationError
 }
 
@@ -35926,7 +36021,7 @@ func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
 type ListOverridesApiV1BroadcastOverridesGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *[]BroadcastOverrideRead
+	JSON200      *BroadcastOverridesListResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -35994,13 +36089,9 @@ func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) StatusCod
 type ListEndpointApiV1ConnectorsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *struct {
-		union json.RawMessage
-	}
-	JSON422 *HTTPValidationError
+	JSON200      *ConnectorListResponse
+	JSON422      *HTTPValidationError
 }
-type ListEndpointApiV1ConnectorsGet2000 map[string][]map[string]interface{}
-type ListEndpointApiV1ConnectorsGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r ListEndpointApiV1ConnectorsGetResponse) Status() string {
@@ -37389,13 +37480,9 @@ func (r SearchDocsEndpointApiV1SearchDocsPostResponse) StatusCode() int {
 type ListTargetsApiV1TargetsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *struct {
-		union json.RawMessage
-	}
-	JSON422 *HTTPValidationError
+	JSON200      *TargetListResponse
+	JSON422      *HTTPValidationError
 }
-type ListTargetsApiV1TargetsGet2000 = []TargetSummary
-type ListTargetsApiV1TargetsGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r ListTargetsApiV1TargetsGetResponse) Status() string {
@@ -47310,7 +47397,7 @@ func ParseMyRecentApiV1AuditMyRecentGetResponse(rsp *http.Response) (*MyRecentAp
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AuditQueryResult
+		var dest MyRecentPage
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -47501,7 +47588,7 @@ func ParseListOverridesApiV1BroadcastOverridesGetResponse(rsp *http.Response) (*
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest []BroadcastOverrideRead
+		var dest BroadcastOverridesListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -47593,9 +47680,7 @@ func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpo
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest struct {
-			union json.RawMessage
-		}
+		var dest ConnectorListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -49537,9 +49622,7 @@ func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsAp
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest struct {
-			union json.RawMessage
-		}
+		var dest TargetListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

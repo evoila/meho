@@ -42,7 +42,7 @@ func TestRunListTemplatesHappyPath(t *testing.T) {
 			t.Errorf("expected GET; got %s", r.Method)
 		}
 		lastQuery = r.URL.RawQuery
-		resp := api.RunbookTemplateListResponse{Templates: []api.TemplateSummary{
+		resp := api.RunbookTemplateListResponse{Items: []api.TemplateSummary{
 			newTemplateSummary("vcenter-cert-rotation", 3, api.TemplateSummaryStatusPublished, "vmware-rest"),
 			newTemplateSummary("vault-unseal", 1, api.TemplateSummaryStatusDraft, ""),
 		}}
@@ -62,7 +62,7 @@ func TestRunListTemplatesHappyPath(t *testing.T) {
 		BackplaneOverride: srv.URL,
 	})
 	if err != nil {
-		t.Fatalf("runListTemplates: %v; stderr=%s", err, stderr.String())
+		t.Fatalf("runListItems: %v; stderr=%s", err, stderr.String())
 	}
 	if !strings.Contains(lastQuery, "status=published") {
 		t.Errorf("expected status=published in query; got %q", lastQuery)
@@ -92,7 +92,7 @@ func TestRunListTemplatesEmpty(t *testing.T) {
 	mux.HandleFunc("/api/v1/runbooks/templates", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(api.RunbookTemplateListResponse{Templates: nil})
+		_ = json.NewEncoder(w).Encode(api.RunbookTemplateListResponse{Items: nil})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -110,7 +110,7 @@ func TestRunListTemplatesEmpty(t *testing.T) {
 
 // TestRunListTemplatesJSON — --json emits the round-tripped envelope.
 func TestRunListTemplatesJSON(t *testing.T) {
-	expected := api.RunbookTemplateListResponse{Templates: []api.TemplateSummary{
+	expected := api.RunbookTemplateListResponse{Items: []api.TemplateSummary{
 		newTemplateSummary("x", 1, api.TemplateSummaryStatusDraft, ""),
 	}}
 	mux := http.NewServeMux()
@@ -132,7 +132,7 @@ func TestRunListTemplatesJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not JSON: %v; %q", err, stdout.String())
 	}
-	if len(decoded.Templates) != 1 || decoded.Templates[0].Slug != "x" {
+	if len(decoded.Items) != 1 || decoded.Items[0].Slug != "x" {
 		t.Errorf("envelope: %+v", decoded)
 	}
 }

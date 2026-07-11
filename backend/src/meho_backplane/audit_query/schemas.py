@@ -64,6 +64,7 @@ __all__ = [
     "AuditEntry",
     "AuditQueryFilters",
     "AuditQueryResult",
+    "MyRecentPage",
     "ReplayNode",
 ]
 
@@ -205,3 +206,22 @@ class AuditQueryResult(BaseModel):
 
     rows: list[AuditEntry]
     next_cursor: str | None
+
+
+class MyRecentPage(BaseModel):
+    """Unified list envelope for ``GET /api/v1/audit/my-recent``.
+
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. It carries the same
+    audit rows and forward-only cursor as :class:`AuditQueryResult`, but
+    names the list field ``items`` (not ``rows``) so the reference list
+    endpoints agree on one envelope. The sibling audit-query endpoints
+    (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep the
+    :class:`AuditQueryResult` ``rows`` shape and are out of the §2
+    reference set.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    items: list[AuditEntry]
+    next_cursor: str | None = None

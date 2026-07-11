@@ -872,7 +872,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 func TestPrintListTableHappyPath(t *testing.T) {
 	tenantA := "tenant-a"
 	r := &connectorListEnvelope{
-		Connectors: []listEntry{
+		Items: []listEntry{
 			{
 				ConnectorID:       "vault-1.x",
 				GroupCount:        2,
@@ -1042,7 +1042,7 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			t.Error("next_step.rationale must survive decode")
 		}
 		var buf bytes.Buffer
-		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Items: []listEntry{got}}); err != nil {
 			t.Fatalf("PrintJSON: %v", err)
 		}
 		out := buf.String()
@@ -1085,7 +1085,7 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			t.Fatalf("next_step must be nil on an ingested row; got %+v", got.NextStep)
 		}
 		var buf bytes.Buffer
-		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Items: []listEntry{got}}); err != nil {
 			t.Fatalf("PrintJSON: %v", err)
 		}
 		out := buf.String()
@@ -2472,7 +2472,7 @@ func TestGetListWithMockServer(t *testing.T) {
 				t.Errorf("expected status=staged; got %q", r.URL.Query().Get("status"))
 			}
 			writeJSON(t, w, 200, connectorListEnvelope{
-				Connectors: []listEntry{
+				Items: []listEntry{
 					{
 						ConnectorID:      "vmware-rest-9.0",
 						GroupCount:       9,
@@ -2490,7 +2490,7 @@ func TestGetListWithMockServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getList: %v", err)
 	}
-	if len(got.Connectors) != 1 || got.Connectors[0].ConnectorID != "vmware-rest-9.0" {
+	if len(got.Items) != 1 || got.Items[0].ConnectorID != "vmware-rest-9.0" {
 		t.Fatalf("unexpected list: %+v", got)
 	}
 }
@@ -2653,7 +2653,7 @@ func TestShippedResourceLabel(t *testing.T) {
 func TestRegisteredTriplesFromMockServer(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"GET /api/v1/connectors": func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(t, w, 200, connectorListEnvelope{Connectors: []listEntry{
+			writeJSON(t, w, 200, connectorListEnvelope{Items: []listEntry{
 				{ConnectorID: "vmware-rest-9.0", Product: "vmware", Version: "9.0", ImplID: "vmware-rest"},
 			}})
 		},
@@ -2890,7 +2890,7 @@ func TestDecodeErrorClassifiedAsUnexpected(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(200)
 			// Malformed JSON — triggers json.SyntaxError on decode.
-			_, _ = w.Write([]byte(`{"connectors": [{"connector_id": "x"`))
+			_, _ = w.Write([]byte(`{"items": [{"connector_id": "x"`))
 		},
 	})
 	defer srv.Close()

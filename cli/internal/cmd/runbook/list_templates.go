@@ -202,13 +202,13 @@ func getTemplateList(
 // rows want the precise edited_at; the column is sized for the
 // worst-case Go `time.Time`-formatted shape (RFC3339 with nanos).
 func printTemplateListTable(w io.Writer, r *api.RunbookTemplateListResponse) {
-	if r == nil || len(r.Templates) == 0 {
+	if r == nil || len(r.Items) == 0 {
 		fmt.Fprintln(w, "no runbook templates registered in this tenant")
 		return
 	}
 	fmt.Fprintf(w, "%-40s %-7s %-10s %-20s %s\n",
 		"SLUG", "VERSION", "STATUS", "TARGET_KIND", "EDITED_AT")
-	for _, t := range r.Templates {
+	for _, t := range r.Items {
 		targetKind := "-"
 		if t.TargetKind != nil && *t.TargetKind != "" {
 			targetKind = *t.TargetKind

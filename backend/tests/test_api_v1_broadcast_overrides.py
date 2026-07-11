@@ -199,7 +199,7 @@ async def test_get_lists_own_tenant_overrides(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {token}"},
         )
     assert resp.status_code == 200, resp.text
-    body = resp.json()
+    body = resp.json()["items"]
     assert len(body) == 2
     patterns = {row["op_id_pattern"] for row in body}
     assert patterns == {"vault.kv.*", "audit.*"}
@@ -446,7 +446,7 @@ async def test_get_does_not_leak_cross_tenant(client: TestClient) -> None:
             headers={"Authorization": f"Bearer {token_b}"},
         )
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.json() == {"items": [], "next_cursor": None}
 
 
 @pytest.mark.asyncio

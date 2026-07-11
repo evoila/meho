@@ -144,7 +144,7 @@ func TestRunListHappyPath(t *testing.T) {
 			t.Errorf("missing Authorization header")
 		}
 		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
-			Entries: []api.ConventionSummary{sampleSummary(t)},
+			Items: []api.ConventionSummary{sampleSummary(t)},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -166,7 +166,7 @@ func TestRunListJSONPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
-			Entries: []api.ConventionSummary{sampleSummary(t)},
+			Items: []api.ConventionSummary{sampleSummary(t)},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -181,7 +181,7 @@ func TestRunListJSONPath(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("decode stdout JSON: %v; raw=%s", err, stdout.String())
 	}
-	if len(got.Entries) != 1 || got.Entries[0].Slug != "vault-canonical" {
+	if len(got.Items) != 1 || got.Items[0].Slug != "vault-canonical" {
 		t.Errorf("decoded JSON unexpected: %+v", got)
 	}
 }
@@ -203,7 +203,7 @@ func TestRunListOverBudgetExitsFive(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
-			Entries: []api.ConventionSummary{sampleSummary(t)},
+			Items: []api.ConventionSummary{sampleSummary(t)},
 			BudgetStatus: api.BudgetStatus{
 				MaxTokens:       600,
 				EstimatedTokens: 920,
@@ -259,7 +259,7 @@ func TestRunListOverBudgetJSONExitsZero(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
-			Entries: []api.ConventionSummary{sampleSummary(t)},
+			Items: []api.ConventionSummary{sampleSummary(t)},
 			BudgetStatus: api.BudgetStatus{
 				MaxTokens:       600,
 				EstimatedTokens: 920,
@@ -300,7 +300,7 @@ func TestRunListFittingTenantExitsZero(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/conventions", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(t, w, http.StatusOK, api.ConventionListResponse{
-			Entries: []api.ConventionSummary{sampleSummary(t)},
+			Items: []api.ConventionSummary{sampleSummary(t)},
 			BudgetStatus: api.BudgetStatus{
 				MaxTokens:       600,
 				EstimatedTokens: 120,

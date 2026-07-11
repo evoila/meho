@@ -745,7 +745,7 @@ async def test_scenario_4_my_recent_ignores_client_supplied_principal(
                 headers=_bearer(token_alice),
             )
     assert resp.status_code == 200, resp.text
-    rows = resp.json()["rows"]
+    rows = resp.json()["items"]
     assert len(rows) == 2, f"alice's my-recent returned {len(rows)} rows; expected 2"
     assert {r["principal_sub"] for r in rows} == {"alice"}
 

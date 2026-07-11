@@ -61,7 +61,7 @@ from typing import Annotated, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -84,13 +84,6 @@ from meho_backplane.db.engine import get_session
 from meho_backplane.mcp.server import RESOURCES_SUBSCRIBE_ENABLED
 
 __all__ = ["router"]
-
-
-from meho_backplane.api.v1._envelope import (
-    ENVELOPE_QUERY,
-    EnvelopeVersion,
-    wrap_v2_envelope,
-)
 
 router = APIRouter(prefix="/api/v1/conventions", tags=["conventions"])
 
@@ -220,8 +213,7 @@ async def list_conventions(
         ConventionKind | None,
         Query(description="Filter by kind (operational / workflow / reference)."),
     ] = None,
-    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
-) -> ConventionListResponse | JSONResponse:
+) -> ConventionListResponse:
     """List the operator's tenant's conventions, optionally filtered by kind.
 
     Returns the lighter :class:`ConventionSummary` shape (no full
@@ -229,27 +221,26 @@ async def list_conventions(
     the same key T4's preamble assembler uses for packing, so the
     list view surfaces conventions in T4's consideration order.
 
-    The default response is the v0.8.0 keyed
-    :class:`ConventionListResponse` shape (``entries`` +
-    ``budget_status``). Passing ``?envelope=v2`` returns the unified
-    ``{"items": [...], "next_cursor": null, "budget_status": {...}}``
-    shape per ``docs/codebase/api-shape-conventions.md`` §2 -- the
-    convention list is unpaginated, so ``next_cursor`` is always
-    ``null`` and ``budget_status`` rides as a top-level sidecar
-    (not nested under ``meta``). Omitting the param keeps the v0.8.0
-    default so no client breaks (G0.18-T3 #1356, completing #1312
-    acceptance A).
+    Returns the unified ``{"items": [...], "next_cursor": null,
+    "budget_status": {...}}`` list envelope per
+    ``docs/codebase/api-shape-conventions.md`` §2 (#2338 breaking pass --
+    the response shape converged from the v0.8.0 ``{"entries": [...]}``
+    keyed shape onto the reference envelope, renaming ``entries`` ->
+    ``items``; the ``?envelope=v2`` opt-in that bridged the migration
+    was retired). The convention list is unpaginated, so ``next_cursor``
+    is always ``null`` and ``budget_status`` rides as a top-level
+    sidecar (not nested under ``meta``).
 
-    The response also carries ``budget_status`` (T7 #1094): the
-    preamble budget arithmetic for the operator's tenant, computed
-    by a call to :func:`~meho_backplane.conventions.preamble.assemble_preamble`.
-    The ``--kind`` query filter narrows the ``entries`` list only;
-    ``budget_status`` always reflects the full ``operational``
-    set (a ``--kind=workflow`` list call still wants the truthful
-    budget signal). The assembler runs an indexed SELECT + an
-    in-memory pack -- O(N) per call where N is the tenant's
-    operational-convention count (~10-20 in practice), so the
-    cost is negligible against the list round-trip.
+    ``budget_status`` (T7 #1094) is the preamble budget arithmetic for
+    the operator's tenant, computed by a call to
+    :func:`~meho_backplane.conventions.preamble.assemble_preamble`. The
+    ``--kind`` query filter narrows the ``items`` list only;
+    ``budget_status`` always reflects the full ``operational`` set (a
+    ``--kind=workflow`` list call still wants the truthful budget
+    signal). The assembler runs an indexed SELECT + an in-memory pack --
+    O(N) per call where N is the tenant's operational-convention count
+    (~10-20 in practice), so the cost is negligible against the list
+    round-trip.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_ID_LIST,
@@ -261,16 +252,8 @@ async def list_conventions(
         kind=kind,
     )
 
-    if envelope == "v2":
-        return JSONResponse(
-            wrap_v2_envelope(
-                [entry.model_dump(mode="json") for entry in entries],
-                next_cursor=None,
-                budget_status=budget_status.model_dump(mode="json"),
-            )
-        )
     return ConventionListResponse(
-        entries=entries,
+        items=entries,
         budget_status=budget_status,
     )
 

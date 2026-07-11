@@ -726,16 +726,20 @@ class ConnectorListItem(BaseModel):
 
 
 class ConnectorListResponse(BaseModel):
-    """Response shape for ``GET /api/v1/connectors``.
+    """Unified list envelope for ``GET /api/v1/connectors``.
 
-    Wrapped in an object (rather than a bare ``list[...]``) so
-    future paging / total / cursor metadata can land without a
-    breaking change to the JSON shape.
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. This listing is not
+    cursor-paginated, so ``next_cursor`` is always ``None``; the field
+    is present so a client reads it without a ``KeyError`` guard and so
+    the endpoint can grow keyset pagination later without a further
+    breaking change.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    connectors: list[ConnectorListItem]
+    items: list[ConnectorListItem]
+    next_cursor: str | None = None
 
 
 class EditGroupBody(BaseModel):

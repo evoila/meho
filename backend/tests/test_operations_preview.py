@@ -159,16 +159,18 @@ async def test_no_builder_credential_class_op_yields_none() -> None:
     """A credential-class op with no builder still parks with no preview.
 
     Since #1856 a no-builder op gets the generic params-echo default, but
-    the credential-class suppression runs *first*: ``vault.kv.put`` is
-    ``credential_write``, so it collapses to the identifier-only default
-    (caller fallback) rather than echoing its (secret-bearing) params.
+    the credential-class suppression runs *first*: ``vault.auth.userpass.write``
+    is ``credential_write`` with no bespoke builder, so it collapses to the
+    identifier-only default (caller fallback) rather than echoing its
+    (secret-bearing) params. (``vault.kv.put`` now ships a bespoke builder,
+    #2332, so the exemplar here is a still-builderless credential op.)
     """
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vault.kv.put"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vault.auth.userpass.write"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"path": "secret/data/x", "data": {"k": "v"}},
+        params={"username": "svc", "password": "s3kret"},
     )
     assert await build_proposed_effect(ctx) is None
 
@@ -422,11 +424,14 @@ async def test_credential_class_op_bespoke_builder_runs() -> None:
 async def test_permission_preflight_runs_for_credential_class_op() -> None:
     """A permission preflight runs even when the op classifies credential-class.
 
-    This is the whole point of the separate hook: ``vault.kv.put`` IS
-    ``credential_write`` (so its *preview* is suppressed), yet its
-    capability-only *permission* check must still run — it carries no
-    secret material, and it is exactly the op whose write Vault may deny
-    post-approval.
+    This is the whole point of the separate hook: ``vault.auth.userpass.write``
+    IS ``credential_write`` with no bespoke preview builder (so its
+    *preview* is suppressed), yet its capability-only *permission* check
+    must still run — it carries no secret material, and a credential write
+    is exactly the op whose write Vault may deny post-approval. (The
+    exemplar is a builderless credential op because ``vault.kv.put`` now
+    ships a bespoke preview builder, #2332, so its preview is no longer
+    suppressed.)
     """
     ran = False
 
@@ -435,13 +440,13 @@ async def test_permission_preflight_runs_for_credential_class_op() -> None:
         ran = True
         return {"check": "vault.capabilities-self", "will_be_denied": True}
 
-    register_permission_preflight("vault.kv.put", _preflight)
+    register_permission_preflight("vault.auth.userpass.write", _preflight)
     ctx = PreviewContext(
-        descriptor=_FakeDescriptor(op_id="vault.kv.put"),  # type: ignore[arg-type]
+        descriptor=_FakeDescriptor(op_id="vault.auth.userpass.write"),  # type: ignore[arg-type]
         connector_instance=None,
         operator=_operator(),
         target=_FakeTarget(),
-        params={"path": "secret/data/x", "data": {"k": "v"}},
+        params={"username": "svc", "password": "s3kret"},
     )
 
     # The preview is suppressed (credential class), proving the preflight

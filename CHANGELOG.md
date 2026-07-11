@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — unified the `/ui` CSRF double-submit token pattern (#2345)
+
+- The operator console's `/ui/*` write surfaces no longer `403
+  csrf_token_invalid` on the 3rd repeated write of a session. The
+  codebase mixed two CSRF patterns — some renders rotated the
+  `meho_csrf` cookie on every fragment render while others reused the
+  live cookie — so an open modal's echoed token could drift out of sync
+  with the cookie. The double-submit token is now **session-stable**:
+  `mint_csrf_token` derives it deterministically from the session, so
+  re-minting on any render returns the identical value and the token
+  only changes when the session rotates at an auth boundary. A global
+  `htmx:configRequest` hook (`static/src/app/csrf-token.js`)
+  additionally re-reads the live `meho_csrf` cookie at request time and
+  overrides the `X-CSRF-Token` header, so the double-submit pair can
+  never drift regardless of render order. Security is unchanged (the
+  HMAC binding to the session id still defeats cookie injection).
 ### Fixed — `/ui/agents/create` now shows backend validation errors (#2346)
 
 - The Create-agent modal previously swallowed backend 4xx validation

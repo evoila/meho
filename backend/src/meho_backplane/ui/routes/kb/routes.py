@@ -625,7 +625,9 @@ def build_kb_router() -> APIRouter:
         On success, returns ``HX-Redirect`` to the new entry's detail
         page so HTMX swaps the page without a full navigation. On
         validation failure (invalid slug, empty body) re-renders the
-        editor modal with an inline error message.
+        editor modal with an inline error message as a **200** fragment
+        so HTMX swaps it back in place -- a non-2xx re-render is silently
+        dropped by HTMX 2 (#2384; the mold established in #2346).
 
         Tag parsing: the ``tags`` field is a comma-separated string
         (``"tag-a, tag-b"``); individual values are stripped of
@@ -678,8 +680,19 @@ def build_kb_router() -> APIRouter:
             "tags": tags,
             "csrf_token": csrf_token,
         }
+        # The fragment is returned as 200, not the semantically-matching 422:
+        # the form posts with hx-swap="outerHTML", and HTMX 2's default
+        # response handling does not swap a non-2xx response (swap: false),
+        # so a 422 re-render is computed server-side but never shown -- the
+        # operator sees the error banner dropped and the Save button appears
+        # to do nothing (#2384, sibling of #2346). Returning 200 is the same
+        # inline-error mold the agents create, runbooks start-run, and
+        # conventions author modals already ship. This /ui route is
+        # HTMX-only (the REST /api/v1/kb surface carries the machine-readable
+        # status contract), so the fragment status is a rendering concern,
+        # not an external contract.
         response = get_templates().TemplateResponse(
-            request, "kb/_editor_modal.html", context, status_code=422
+            request, "kb/_editor_modal.html", context, status_code=200
         )
         response.set_cookie(
             key=CSRF_COOKIE_NAME,

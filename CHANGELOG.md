@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `/ui/kb` editor save renders backend errors visibly (200-on-recoverable-error mold, #2384)
+
+- The KB editor modal's save handler (`POST /ui/kb/new`) re-rendered
+  its inline error banner on a validation failure (invalid slug, empty
+  body) but returned **422**. The form swaps with `hx-swap="outerHTML"`,
+  and HTMX 2 does not swap a non-2xx response, so the error fragment was
+  computed server-side and silently dropped — the operator saw the Save
+  button appear to do nothing. The re-render now returns **200** (the
+  mold established for `/ui/agents/create` in #2346, and already shipped
+  on the runbooks start-run and conventions author modals), so the error
+  swaps back into the modal in place with the operator's input and the
+  CSRF-token refresh preserved. The memory create form was assessed and
+  intentionally **not** changed: it already surfaces recoverable errors
+  via its client-side `hx-on::response-error` handler (#1754) over a
+  `hx-swap="none"` post, which — unlike a server re-render — is the only
+  path that can display the chassis CSRF-middleware 403; returning 200
+  there would suppress `htmx:responseError` and regress it (see #2384
+  discussion).
+
 ### Docs — curated-until-populator-covers policy for auto-only edge kinds + grandfather rule (#2336)
 
 - Documented that the four auto-discoverable topology edge kinds

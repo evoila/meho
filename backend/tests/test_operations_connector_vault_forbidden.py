@@ -431,6 +431,96 @@ def test_builder_empty_message_has_no_dangling_tail() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Write-identity-forbidden builder shape (#2331)
+# ---------------------------------------------------------------------------
+
+
+def test_write_forbidden_names_path_identity_and_write_stanza() -> None:
+    """Write shape: path, acting identity, §6.1 stanza, do-not-widen warning."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        _make_forbidden("targets/op-x/prod"),
+        duration_ms=1.0,
+        write_path="secret/data/targets/op-x/prod",
+        identity_hint="op-x",
+    )
+    assert out.status == "error"
+    assert out.op_id == "vault.kv.put"
+    assert out.error is not None
+    assert out.error.startswith("vault_write_identity_forbidden:")
+    # Names the denied data path + the acting identity.
+    assert "'secret/data/targets/op-x/prod'" in out.error
+    assert "'op-x'" in out.error
+    # Frames it as a write-identity gap, not a read/secret_ref diagnosis.
+    assert "lacks 'create'/'update'" in out.error
+    assert "secret_ref" not in out.error
+    # Remediation names the write stanza + probe + the policy-doc contract.
+    assert "§6.1" in out.error
+    assert "§6.2" in out.error
+    assert "Do NOT widen the backplane's shared Vault policy" in out.error
+    assert "docs/cross-repo/connector-vault-policy.md" in out.error
+    # hvac tail present.
+    assert "Vault said:" in out.error
+    assert "permission denied" in out.error
+    # Structured, machine-usable extras.
+    assert out.extras["error_code"] == "vault_write_identity_forbidden"
+    assert out.extras["path"] == "secret/data/targets/op-x/prod"
+    assert out.extras["identity_hint"] == "op-x"
+    assert out.extras["doc_ref"].startswith("docs/cross-repo/connector-vault-policy.md")
+    assert out.extras["exception_class"] == "Forbidden"
+    assert "permission denied" in out.extras["exception_message"]
+
+
+def test_write_forbidden_omits_clauses_when_path_and_identity_absent() -> None:
+    """No path / identity → no fabricated clause, extras carry None."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.delete",
+        hvac.exceptions.Forbidden("permission denied"),
+        duration_ms=1.0,
+        write_path=None,
+        identity_hint=None,
+    )
+    assert out.error is not None
+    assert out.error.startswith("vault_write_identity_forbidden:")
+    assert "dispatched under identity" not in out.error
+    assert out.extras["path"] is None
+    assert out.extras["identity_hint"] is None
+
+
+def test_write_forbidden_caps_oversized_message() -> None:
+    """A pathological hvac message is capped like the read sibling."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        hvac.exceptions.Forbidden("x" * 400),
+        duration_ms=0.5,
+        write_path="secret/data/x",
+    )
+    message = out.extras["exception_message"]
+    assert isinstance(message, str)
+    assert message.endswith("...<truncated>")
+
+
+def test_write_forbidden_empty_message_has_no_dangling_tail() -> None:
+    """An empty exception leaves no dangling ``Vault said:`` tail."""
+    from meho_backplane.operations._errors import result_connector_vault_write_forbidden
+
+    out = result_connector_vault_write_forbidden(
+        "vault.kv.put",
+        Exception(),
+        duration_ms=0.5,
+        write_path="secret/data/x",
+    )
+    assert out.error is not None
+    assert "Vault said:" not in out.error
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher conversion (the #2091 acceptance-criterion tests)
 # ---------------------------------------------------------------------------
 

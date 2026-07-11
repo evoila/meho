@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — structured post-approval vault-write-forbidden error + write-capability warning on the approval envelope (#2331)
+
+- A typed `vault.kv.put` / `patch` / `delete` that Vault denies at
+  dispatch now surfaces a dedicated `connector_vault_write_forbidden`
+  result (the write-side sibling of the read-oriented
+  `connector_vault_forbidden`, #2091) naming the exact `<mount>/data/<path>`
+  Vault denied, the acting operator identity, and the write-policy stanza
+  to add — instead of a bare permission-denied or a misleading read-path
+  diagnosis. The park-time `sys/capabilities-self` write preflight already
+  shipped; #2331 promotes its `will_be_denied` signal to a top-level
+  `write_capability_warning` on the parked `proposed_effect` envelope so
+  the approval surface can render a "this write may not land" banner
+  (a warning, not a gate), and documents the per-operator templated
+  write-identity contract in `docs/cross-repo/connector-vault-policy.md`
+  (#2331).
 ### Changed — reject `kind=event` scheduler triggers at create until #826 lands (#2325)
 
 - Creating a `kind=event` scheduled trigger now returns a structured 422

@@ -269,6 +269,22 @@ async def _module_handler_raises(
     raise RuntimeError("simulated handler explosion")
 
 
+async def _module_handler_raises_vault_forbidden(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Handler that raises hvac Forbidden -- the post-approval write denial (#2331)."""
+    import hvac.exceptions
+
+    raise hvac.exceptions.Forbidden(
+        "1 error occurred:\n\t* permission denied",
+        errors=["permission denied"],
+        method="POST",
+        url="https://vault.test/v1/secret/data/meho/test/x",
+    )
+
+
 async def _module_handler_target_optional(
     operator: Operator,
     target: Any,
@@ -1878,6 +1894,56 @@ async def test_dispatch_returns_connector_error_when_handler_raises(
     assert captured_events[0].result_status == "error"
 
 
+@pytest.mark.asyncio
+async def test_dispatch_kv_write_forbidden_uses_write_identity_error(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A denied ``vault.kv.put`` -> ``vault_write_identity_forbidden`` (#2331).
+
+    The post-approval write-identity gap: the op reached the connector and
+    Vault answered ``permission denied``. The dispatcher's Forbidden arm
+    routes a KV *write* op to the write-specific structured cause naming
+    the data path + acting identity + the §6.1 stanza — NOT the
+    read-oriented ``connector_vault_forbidden`` (which would talk about a
+    target ``secret_ref``).
+    """
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.put",
+        handler=_module_handler_raises_vault_forbidden,
+        summary="Write a KV v2 secret.",
+        description="Write a secret; the handler simulates a Vault RBAC denial.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    operator = _make_operator(sub="op-writer")
+    target = _FakeTarget(product="vault")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.put",
+        target=target,
+        params={"path": "meho/test/x", "data": {"k": "v"}},
+    )
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("vault_write_identity_forbidden:")
+    assert result.extras["error_code"] == "vault_write_identity_forbidden"
+    # Data path rendered from mount default + params; identity is the caller.
+    assert result.extras["path"] == "secret/data/meho/test/x"
+    assert result.extras["identity_hint"] == "op-writer"
+    # NOT mislabelled as the read-path credential-resolution cause.
+    assert "connector_vault_forbidden" not in result.error
+    assert result.extras["error_code"] != "connector_vault_forbidden"
+
+
 # ---------------------------------------------------------------------------
 # Policy gate
 # ---------------------------------------------------------------------------
@@ -2463,6 +2529,82 @@ async def test_park_merges_permission_preflight_onto_identifier_default(
             assert "data" not in row.proposed_effect
     finally:
         _PERMISSION_PREFLIGHTS.pop("vault.kv.preflight_op", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("will_be_denied", [True, False])
+async def test_park_stamps_write_capability_warning_when_denied(
+    stub_embedding_service: AsyncMock,
+    captured_events: list[BroadcastEvent],
+    will_be_denied: bool,
+) -> None:
+    """A will-be-denied preflight promotes a named top-level warning (#2331).
+
+    When the park-time capability probe reports ``will_be_denied: true``,
+    the envelope carries ``write_capability_warning =
+    "connector_identity_may_lack_write"`` so the approval surface can render
+    a banner without reaching into ``permission_preflight``. It is a
+    warning, not a gate — the park still proceeds and the op is
+    ``awaiting_approval`` either way. Absent when the write will be
+    authorized.
+    """
+    from meho_backplane.db.models import ApprovalRequest
+    from meho_backplane.operations._preview import (
+        _PERMISSION_PREFLIGHTS,
+        PreviewContext,
+        register_permission_preflight,
+    )
+
+    async def _preflight(ctx: PreviewContext) -> dict[str, Any]:
+        return {
+            "check": "vault.capabilities-self",
+            "path": f"secret/data/{ctx.params.get('path', '?')}",
+            "required": ["create", "update"],
+            "granted": ["read"] if will_be_denied else ["create", "read", "update"],
+            "will_be_denied": will_be_denied,
+            "principal_sub": ctx.operator.sub,
+        }
+
+    register_connector_v2(product="vault", version="", impl_id="", cls=_NoOpVaultConnector)
+    target = _FakeTarget(product="vault")
+    await register_typed_operation(
+        product="vault",
+        version="1.x",
+        impl_id="vault",
+        op_id="vault.kv.warn_op",
+        handler=_module_handler_returning_dict,
+        summary="Op with a registered permission preflight.",
+        description="Parks for approval; the preflight may flag a will-be-denied write.",
+        parameter_schema={"type": "object"},
+        safety_level="caution",
+        requires_approval=True,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+    register_permission_preflight("vault.kv.warn_op", _preflight)
+    try:
+        result = await dispatch(
+            operator=_make_operator(principal_kind=PrincipalKind.AGENT),
+            connector_id="vault-1.x",
+            op_id="vault.kv.warn_op",
+            target=target,
+            params={"path": "meho/test/x"},
+        )
+        assert result.status == "awaiting_approval"
+        approval_request_id = UUID(result.extras["approval_request_id"])
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as fresh:
+            row = await fresh.get(ApprovalRequest, approval_request_id)
+            assert row is not None
+            if will_be_denied:
+                assert (
+                    row.proposed_effect["write_capability_warning"]
+                    == "connector_identity_may_lack_write"
+                )
+            else:
+                assert "write_capability_warning" not in row.proposed_effect
+    finally:
+        _PERMISSION_PREFLIGHTS.pop("vault.kv.warn_op", None)
 
 
 # ---------------------------------------------------------------------------

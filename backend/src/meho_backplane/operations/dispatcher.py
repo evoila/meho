@@ -253,6 +253,7 @@ from meho_backplane.operations._errors import (
     result_connector_tls_verify_failed,
     result_connector_unsupported,
     result_connector_vault_forbidden,
+    result_connector_vault_write_forbidden,
     result_denied,
     result_handler_unreachable,
     result_invalid_params,
@@ -1007,6 +1008,38 @@ async def _run_branch_with_error_handling(
             result_status="error",
             duration_ms=duration_ms,
         )
+        # #2331: a typed KV-v2 *write* (``vault.kv.put`` / ``patch`` /
+        # ``delete``) that Vault denies is the post-approval write-identity
+        # gap, not a credential-resolution read. The read-oriented
+        # ``connector_vault_forbidden`` below would mis-describe it (it talks
+        # about a target's ``secret_ref`` outside the readable subtree, which
+        # does not apply to a write against the operator's own templated
+        # write path). Emit the write-specific structured cause naming the
+        # data path + acting identity + the §6.1 write stanza instead. The
+        # park-time preflight (#1514) already warns on this at approval time;
+        # this is the post-approval terminal error when the warning went
+        # unheeded (or the reviewer's token lacked the grant the dispatcher's
+        # did).
+        from meho_backplane.connectors.vault.ops import (
+            VAULT_KV_WRITE_CAPABILITIES,
+            vault_kv_write_target_path,
+        )
+
+        if op_id in VAULT_KV_WRITE_CAPABILITIES:
+            try:
+                write_path = vault_kv_write_target_path(params)
+            except (KeyError, ValueError):
+                # ``path`` normalises to nothing (validate_params guarantees
+                # presence, but stay defensive inside the never-raises arm) —
+                # omit the path rather than fault.
+                write_path = None
+            return result_connector_vault_write_forbidden(
+                op_id,
+                vault_exc,
+                duration_ms,
+                write_path=write_path,
+                identity_hint=operator.sub,
+            )
         expected_secret_ref: str | None = None
         target_name = getattr(target, "name", None)
         if target_name:
@@ -1601,6 +1634,15 @@ async def _build_proposed_effect(
             base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
         if preflight is not None:
             base["permission_preflight"] = preflight
+            # #2331: promote a will-be-denied preflight to a named,
+            # top-level warning on the envelope so the approval surface can
+            # render a "this write may not land" banner without reaching
+            # into the ``permission_preflight`` sub-dict. Rides #2332's
+            # preview provenance surface (its natural carrier per the task):
+            # a warning, not a gate — refuse-to-park stays off by default,
+            # the approver may know the write policy is landing alongside.
+            if preflight.get("will_be_denied") is True:
+                base["write_capability_warning"] = "connector_identity_may_lack_write"
         # Stamp the reviewer-facing preview provenance onto every parked
         # op's envelope (#2332). ``preview_populated`` lets a caller
         # programmatically refuse to auto-approve an op-identity-only

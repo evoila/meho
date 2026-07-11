@@ -163,7 +163,8 @@ populator newly covering a `(kind, pair-type)` an operator already
 curated ships with a one-shot reconciliation that grandfathers those
 pre-existing curated edges — they stay visible, not retroactively
 §6-conflicted. Coverage is per `(kind, pair-type)`, not per kind
-globally: the k8s populator already covers `runs-on` for k8s pairs, so
+globally: the k8s populator already covers `belongs-to` for k8s pairs
+(namespace→target, node→target), so
 the trigger is a populator adding a previously-uncovered *pair-type* (a
 hypervisor host, an appliance→cluster) under a kind that may already be
 covered elsewhere. The substrate already applies this for the

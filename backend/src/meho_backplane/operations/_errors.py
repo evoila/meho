@@ -50,6 +50,7 @@ __all__ = [
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
     "result_connector_vault_forbidden",
+    "result_connector_vault_write_forbidden",
     "result_denied",
     "result_handler_unreachable",
     "result_invalid_params",
@@ -1094,6 +1095,93 @@ def result_connector_vault_forbidden(
             "error_code": "connector_vault_forbidden",
             "secret_ref": secret_ref,
             "expected_secret_ref": expected_secret_ref,
+            "exception_class": type(exc).__name__,
+            "exception_message": msg,
+        },
+    )
+
+
+#: Setup-doc anchor the write-identity-forbidden remediation points at.
+#: Kept as a module constant so the operator-facing text and the machine
+#: ``extras["doc_ref"]`` stay single-sourced.
+_VAULT_WRITE_POLICY_DOC = "docs/cross-repo/connector-vault-policy.md"
+
+
+def result_connector_vault_write_forbidden(
+    op_id: str,
+    exc: BaseException,
+    duration_ms: float,
+    *,
+    write_path: str | None,
+    identity_hint: str | None = None,
+) -> OperationResult:
+    """A KV-v2 write was denied by Vault RBAC (post-approval write-identity gap).
+
+    #2331 (Initiative #2364). The write-side sibling of
+    :func:`result_connector_vault_forbidden` (#2091). The four-eyes flow
+    can succeed end to end — park → approve → re-dispatch — and the write
+    still fails at Vault's ACL because the identity the connector dispatches
+    with lacks ``create`` / ``update`` on the target ``<mount>/data/<path>``.
+    Routing that denial through the read-oriented
+    :func:`result_connector_vault_forbidden` mis-describes it: that builder
+    talks about a target's ``secret_ref`` being outside the readable
+    per-tenant subtree, which does not apply to a typed ``vault.kv.*`` write
+    (the write authorizes against the operator's own templated write path,
+    not a target credential read). This builder names the **write** cause
+    instead — the exact data path Vault denied, the acting identity, the
+    write-policy stanza to add — so the operator sees the actionable
+    problem rather than a bare ``permission denied`` or a misleading
+    read-path diagnosis.
+
+    Unlike the read builder there is no ``secret_ref`` to fabricate: the
+    path is the op's own ``<mount>/data/<path>`` (rendered by the caller
+    via :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
+    and the identity hint is the dispatching / reviewing operator's ``sub``.
+    The remediation points at the write-capability stanza (§6.1) and the
+    ``sys/capabilities-self`` probe (§6.2) of the policy doc, and repeats
+    the do-NOT-widen-the-shared-policy warning: the grant is per-operator
+    templated, not a role-wide widen.
+
+    ``extras`` carries the machine-usable fields
+    (``error_code`` / ``path`` / ``identity_hint`` / ``doc_ref`` /
+    ``exception_class`` / ``exception_message``) so an agent can branch on
+    the write-identity gap without re-parsing the text (#1141 convention).
+    The hvac ``Forbidden`` text names only the operator-supplied path — no
+    secret material — and tails the operator-facing string under the
+    :data:`_EXC_MESSAGE_CAP` discipline.
+    """
+    msg = str(exc)
+    if len(msg) > _EXC_MESSAGE_CAP:
+        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    path_clause = f" on {write_path!r}" if write_path else ""
+    identity_clause = (
+        f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
+    )
+    summary = (
+        f"vault_write_identity_forbidden: Vault denied the KV-v2 write{path_clause} "
+        f"(permission denied). The approval handshake succeeded, but the identity "
+        f"the connector dispatched the write with lacks 'create'/'update' on that "
+        f"data path.{identity_clause} This is a deploy write-identity gap, not a bug "
+        f"in the approve→execute flow: add the per-operator write-capability stanza "
+        f"(§6.1) so the dispatching/reviewing operator's token can write the path, "
+        f"and verify it with the 'sys/capabilities-self' probe (§6.2). Do NOT widen "
+        f"the backplane's shared Vault policy — the write grant is per-operator "
+        f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
+    )
+    if msg:
+        # hvac renders Forbidden as "permission denied, on POST <url>" — the
+        # URL is the operator-supplied data path, never secret material.
+        summary = f"{summary} Vault said: {msg}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "vault_write_identity_forbidden",
+            "path": write_path,
+            "identity_hint": identity_hint,
+            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
             "exception_class": type(exc).__name__,
             "exception_message": msg,
         },

@@ -111,6 +111,30 @@ connector-related release-notes line.
   `?kind=event&status=paused` or the UI list) rather than misleadingly
   active. No schema change, no migration; `cron` / `one_off` creation is
   unchanged.
+### Fixed — scheduler Vault token renews on use + startup/periodic lookup-self (defuses the ~32-day periodic-token fuse) (#2328)
+
+- The scheduler now fires a best-effort `auth/token/renew-self` after
+  every successful Vault agent-secret read/write, so the documented
+  **periodic** service token (`-period=768h`) is renewed at scheduler-tick
+  frequency and never ages out while the process runs. Previously the
+  backplane never renewed it — a token minted per the onboarding guide
+  silently died ~32 days after standup and every Vault-first credential
+  read started returning 403. Renewal failures are logged and swallowed
+  (the read/write already succeeded), never a new failure mode.
+- The scheduler token is now self-looked-up (`auth/token/lookup-self`) at
+  startup and on a slow cadence (hourly), logging a dead or unreachable
+  token as a loud `scheduler_vault_token_dead` /
+  `scheduler_vault_token_unreachable` ERROR the moment it's observed —
+  cutting time-to-notice from weeks to minutes. The healthy path logs
+  `scheduler_vault_token_verified` with the token's `ttl`/`expire_time`
+  so operators can watch expiry advance across renewals.
+- The token is now resolved from its live source on every use. A new
+  optional `VAULT_SCHEDULER_TOKEN_FILE` names a file (a Vault-Agent
+  sidecar sink) the token is re-read from per read/write, so a re-mint is
+  picked up **without a pod restart** — removing the manual re-mint +
+  Secret-patch + pod-restart remediation the fuse otherwise forced. The
+  static `VAULT_SCHEDULER_TOKEN` remains the default; an unreadable/empty
+  file falls through to it.
 
 ### Added — scheduler skip-state on the trigger row + park after N unresolvable skips (#2327)
 

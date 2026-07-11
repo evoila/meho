@@ -190,6 +190,16 @@ class Settings(BaseModel):
         surfaced in API responses. Operators wanting AppRole instead of a
         static token can wrap a Vault Agent sidecar that writes the token
         to this env var — additive, no code change.
+    vault_scheduler_token_file:
+        Optional filesystem path the scheduler reads its Vault token from,
+        **fresh on every read/write** (#2328). When set and non-empty it
+        takes precedence over :attr:`vault_scheduler_token`; an
+        unreadable/empty file falls through to the env-var token. This is
+        the sink a Vault Agent sidecar writes renewed/re-minted tokens to:
+        because the contents are re-read per use (only the path is cached),
+        a re-mint is picked up **without a pod restart** — the manual
+        remediation the ~32-day periodic-token fuse otherwise forced.
+        Default ``""`` (use the env-var token). Never logged.
     database_url:
         SQLAlchemy URL for the PostgreSQL database, e.g.
         ``postgresql+asyncpg://meho:<password>@<host>:5432/meho``.
@@ -905,6 +915,14 @@ class Settings(BaseModel):
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
     vault_scheduler_token: str = Field(default="", repr=False)
+    # #2328 — optional path to a file the scheduler's Vault token is read
+    # **fresh from on every use**, so a Vault-Agent sidecar (or an
+    # operator) that re-mints the token into this sink is picked up
+    # without a pod restart. Takes precedence over ``vault_scheduler_token``
+    # when set and non-empty; an unreadable/empty file falls through to the
+    # env-var token. Only the path is config (safe to cache); the contents
+    # are re-read per read/write. Never logged.
+    vault_scheduler_token_file: str = Field(default="", repr=False)
     # #2229 (Initiative #2227) — names the credential backend a schemeless
     # target ``secret_ref`` resolves through. ``vault`` (the default) keeps
     # every existing install on today's Vault KV-v2 read with no config
@@ -1525,6 +1543,7 @@ def get_settings() -> Settings:
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
         ),
         vault_scheduler_token=os.environ.get("VAULT_SCHEDULER_TOKEN", "").strip(),
+        vault_scheduler_token_file=os.environ.get("VAULT_SCHEDULER_TOKEN_FILE", "").strip(),
         # Empty / whitespace-only ``CREDENTIAL_BACKEND`` falls back to the
         # ``vault`` default so a blank chart value never yields an unknown
         # ("") backend kind (``min_length=1`` on the field would reject it).

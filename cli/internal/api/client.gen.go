@@ -5102,8 +5102,17 @@ type ScheduledTriggerRead struct {
 	// LastFiredAt Timestamp of the most recent fire (UTC), stamped with the scheduler tick that claimed the row -- not the trigger's fire_at / next_fire_at. Because fires are tick-aligned, successive last_fired_at values sit on the tick grid and can trail the requested time by up to one tick interval (SCHEDULER_TICK_INTERVAL_SECONDS, default 30 s); null until the first fire.
 	LastFiredAt *time.Time `json:"last_fired_at"`
 
+	// LastSkipReason Machine tag of the most recent tick the scheduler skipped this trigger without firing -- one of 'definition_missing', 'definition_disabled', 'credentials_unresolved' (a park also stamps 'invalid_cron_expr' / 'unknown_kind'). null when the trigger has never skipped since its last successful fire (cleared to null on the next fire). A non-null value on an 'active' trigger means it looks healthy but is silently not firing -- fix the named cause. (#2327)
+	LastSkipReason *string `json:"last_skip_reason"`
+
+	// LastSkippedAt UTC timestamp of the most recent skipped tick; null until the first skip and cleared on the next successful fire. (#2327)
+	LastSkippedAt *time.Time `json:"last_skipped_at"`
+
 	// NextFireAt Next instant the trigger is eligible to fire (UTC) -- the column the tick loop scans; null for event triggers (dispatched on event arrival, not the clock). The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
 	NextFireAt *time.Time `json:"next_fire_at"`
+
+	// SkipCount Consecutive ticks skipped since the last successful fire (0 when healthy; reset to 0 on the next fire). The scheduler parks the trigger ('status'='paused') once this reaches its internal consecutive-skip cap, so a permanently-unresolvable trigger stops silently re-tripping every tick. (#2327)
+	SkipCount int `json:"skip_count"`
 
 	// Status Closed lifecycle status of a :class:`ScheduledTrigger`.
 	//

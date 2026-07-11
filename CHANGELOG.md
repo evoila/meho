@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — `/ui/agents` polish: card toggle, no auto-open Stop dialog, sub-view back-nav (#2347)
+
+- The `/ui/agents` cards now carry a one-click enable/disable **Toggle**
+  (tenant_admin only), routed through the same `/ui/agents/{name}/toggle`
+  endpoint the detail view uses — an operator no longer has to open the
+  detail page and navigate back just to flip an agent's state.
+- Submitting **Run** on an agent no longer auto-opens the "Stop this run"
+  confirm dialog. The dialog ships inside the run-transcript fragment
+  swapped in on submit, and the app-shell modal controller's
+  `htmx:afterSwap` sweep was popping it the instant a run started, hiding
+  the live logs. Button-driven dialogs now opt out of the sweep via
+  `data-auto-open="false"`, so the Stop confirm opens only on the Stop
+  button.
+- The `/ui/agents/runs` list and per-run detail views gained a
+  breadcrumb back to `/ui/agents` (the run detail now links the agents
+  console directly, not only the runs list), matching the grants and
+  principals sub-views.
+
 ### Fixed — unified the `/ui` CSRF double-submit token pattern (#2345)
 
 - The operator console's `/ui/*` write surfaces no longer `403

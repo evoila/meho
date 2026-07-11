@@ -433,6 +433,51 @@ def test_list_shows_new_agent_button_for_admin() -> None:
     assert 'hx-get="/ui/agents/create"' in response.text
 
 
+def test_list_card_shows_toggle_for_admin_with_flipped_state() -> None:
+    """Each card carries a one-click enable/disable toggle for a tenant_admin.
+
+    The card toggle POSTs the *flipped* ``enabled`` value to the same
+    ``/ui/agents/{name}/toggle`` route the detail view uses, so an admin can
+    flip an agent's state without opening the detail page (#2347).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="on-agent", enabled=True)
+    _seed_agent(tenant_id=_TENANT_A, name="off-agent", enabled=False)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_session(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    body = response.text
+    assert 'data-action="toggle"' in body
+    # An enabled agent's toggle disables it; a disabled agent's enables it.
+    assert 'hx-post="/ui/agents/on-agent/toggle"' in body
+    assert 'hx-post="/ui/agents/off-agent/toggle"' in body
+    assert '"enabled": "false"' in body  # on-agent -> disable
+    assert '"enabled": "true"' in body  # off-agent -> enable
+
+
+def test_list_card_hides_toggle_for_operator() -> None:
+    """A non-admin operator sees no card-level toggle (soft gate)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="on-agent", enabled=True)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_session(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    assert 'data-action="toggle"' not in response.text
+    assert "/ui/agents/on-agent/toggle" not in response.text
+
+
 # ---------------------------------------------------------------------------
 # Detail view
 # ---------------------------------------------------------------------------

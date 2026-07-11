@@ -61,6 +61,7 @@ from meho_backplane.scheduler.cron import (
 from meho_backplane.scheduler.schemas import ScheduledTriggerCreate
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    EventTriggersNotImplementedError,
     SchedulerAdminService,
 )
 from meho_backplane.ui.auth.middleware import UISessionContext
@@ -405,6 +406,15 @@ async def create_trigger(
             tenant_id=operator.tenant_id,
             created_by_sub=operator.sub,
             payload=payload,
+        )
+    except EventTriggersNotImplementedError as exc:
+        # kind=event is refused at create until #826 wires the event-
+        # subscription matcher; re-render the modal with the reason
+        # (names #826) rather than tearing the operator out of the flow.
+        return await _rerender_modal_with_error(
+            request,
+            session_ctx,
+            error_message=str(exc),
         )
     except AgentDefinitionMissingError:
         return await _rerender_modal_with_error(

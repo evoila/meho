@@ -79,6 +79,7 @@ from meho_backplane.scheduler.schemas import (
 
 __all__ = [
     "AgentDefinitionMissingError",
+    "EventTriggersNotImplementedError",
     "SchedulerAdminService",
 ]
 
@@ -111,6 +112,43 @@ class AgentDefinitionMissingError(Exception):
         self.agent_definition_id = agent_definition_id
         super().__init__(
             f"agent definition {agent_definition_id} not found in this tenant",
+        )
+
+
+class EventTriggersNotImplementedError(Exception):
+    """Raised when a create body carries ``kind=event`` (#2325).
+
+    Event-subscription triggers are refused at create until #826 wires
+    the event-outbox subscription matcher. Today
+    :mod:`meho_backplane.events.drain` is the documented T5 no-op matcher
+    -- it stamps ``processed_at`` on drained rows without ever consulting
+    ``scheduled_trigger`` -- so a persisted event trigger sits ``active``
+    but can never fire. Real producers already emit onto the outbox
+    (:mod:`meho_backplane.operations.agent_run` publishes agent-run
+    terminal-transition events), so those events are silently swallowed.
+    Accepting a trigger that can never fire is dishonest to the operator;
+    the honest shape until #826 lands is a refusal at create.
+
+    The refusal is a single create-site guard, removed in the same change
+    that lands the #826 matcher (at which point the
+    :func:`~meho_backplane.scheduler.repository.create_event_trigger`
+    branch in :meth:`SchedulerAdminService.create` comes back into play).
+    The REST route maps it to 422 ``event_triggers_not_implemented``; the
+    MCP tool to an invalid-params error with the same code; the UI to a
+    modal banner naming #826.
+    """
+
+    #: Machine-readable error code the boundary surfaces on every
+    #: transport so a caller branches on the string, not on prose.
+    error_code = "event_triggers_not_implemented"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "kind=event triggers are not yet dispatchable: the "
+            "event-subscription matcher is a no-op pending #826, so an "
+            "accepted event trigger would stay active but never fire. "
+            "Refused at create until #826 lands -- use kind=cron or "
+            "kind=one_off.",
         )
 
 
@@ -182,11 +220,23 @@ class SchedulerAdminService:
 
         Raises
         ------
+        EventTriggersNotImplementedError
+            When ``payload.kind`` is ``event``. Refused at create until
+            #826 wires the event-subscription matcher (the drain matcher
+            is a no-op today, so an accepted event trigger never fires).
+            The boundary maps this to 422 ``event_triggers_not_implemented``.
         AgentDefinitionMissingError
             When ``agent_definition_id`` does not name a definition in
             *tenant_id*. The boundary maps this to 422
             ``agent_definition_not_found``.
         """
+        # #2325: refuse kind=event before any DB work. events/drain.py is
+        # still the documented T5 no-op, so a persisted event trigger is
+        # active-but-never-fires. Single create-site guard -- removed when
+        # #826 lands, at which point the create_event_trigger branch below
+        # dispatches for real.
+        if payload.kind == ScheduledTriggerKind.EVENT:
+            raise EventTriggersNotImplementedError()
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
             await self._assert_agent_definition_exists(
@@ -225,6 +275,9 @@ class SchedulerAdminService:
                         work_ref=payload.work_ref,
                     )
                 else:  # payload.kind == ScheduledTriggerKind.EVENT
+                    # Unreachable while the #2325 guard above stands; kept
+                    # so #826 re-enables event dispatch by deleting the
+                    # guard, not by re-authoring this branch.
                     assert payload.event_filter is not None
                     row = await create_event_trigger(
                         session,

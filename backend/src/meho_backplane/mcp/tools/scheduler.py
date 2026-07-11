@@ -71,6 +71,7 @@ from meho_backplane.scheduler.schemas import (
 )
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    EventTriggersNotImplementedError,
     SchedulerAdminService,
 )
 
@@ -236,6 +237,10 @@ async def _create_handler(
             created_by_sub=operator.sub,
             payload=payload,
         )
+    except EventTriggersNotImplementedError as exc:
+        # kind=event is refused at create until #826 wires the event-
+        # subscription matcher; same error code the REST route surfaces.
+        raise McpInvalidParamsError(exc.error_code) from exc
     except AgentDefinitionMissingError as exc:
         raise McpInvalidParamsError("agent_definition_not_found") from exc
     structlog.contextvars.bind_contextvars(audit_trigger_id=str(entry.id))
@@ -251,7 +256,10 @@ register_mcp_tool(
             "('cron'|'one_off'|'event'), agent_definition_id (UUID of an "
             "agent definition in the operator's tenant), and exactly one "
             "of cron_expr (for kind=cron), fire_at (ISO 8601 string for "
-            "kind=one_off), or event_filter (object for kind=event). For "
+            "kind=one_off), or event_filter (object for kind=event). NOTE: "
+            "kind=event is refused at create with 'event_triggers_not_"
+            "implemented' until #826 wires the event-subscription matcher "
+            "(an accepted event trigger cannot fire today). For "
             "kind=cron/one_off, inputs (JSON object) is REQUIRED and must "
             "render a non-empty prompt (a 'prompt' string, or any non-empty "
             "object; inputs: {} is rejected); it is optional for kind=event. "

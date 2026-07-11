@@ -73,6 +73,7 @@ from meho_backplane.scheduler.schemas import (
 )
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    EventTriggersNotImplementedError,
     SchedulerAdminService,
 )
 
@@ -193,6 +194,14 @@ async def create_trigger(
             created_by_sub=operator.sub,
             payload=body,
         )
+    except EventTriggersNotImplementedError as exc:
+        # 422 -- kind=event is refused at create until #826 wires the
+        # event-subscription matcher (the drain matcher is a no-op today,
+        # so an accepted event trigger would never fire).
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.error_code,
+        ) from exc
     except AgentDefinitionMissingError as exc:
         # 422 -- the payload is well-formed but its
         # ``agent_definition_id`` does not resolve to a definition in

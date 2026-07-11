@@ -107,6 +107,16 @@
       if (dialog.open || typeof dialog.showModal !== "function") {
         continue;
       }
+      // Respect an explicit opt-out. A button-driven inline dialog (e.g.
+      // the agent run console's Stop-confirm) ships INSIDE a swapped-in
+      // fragment -- the run transcript, swapped over ``#agent-run-transcript``
+      // on Run submit -- but must open only on its own trigger, never on the
+      // swap. Without this guard the auto-open sweep pops the Stop dialog the
+      // instant a run starts, blocking the live transcript the operator
+      // wanted to watch (#2347). The dialog carries ``data-auto-open="false"``.
+      if (dialog.dataset.autoOpen === "false") {
+        continue;
+      }
       // Never open a dialog nested inside another already-open dialog --
       // the operator-facing modal is the top-level one; a stray nested
       // duplicate must not steal the top layer.

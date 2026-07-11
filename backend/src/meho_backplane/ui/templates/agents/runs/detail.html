@@ -20,7 +20,16 @@
 {% block content %}
 <section class="space-y-5">
   <header class="space-y-1">
-    <a href="/ui/agents/runs" class="link link-hover text-sm opacity-70">&larr; Agent runs</a>
+    {# Full breadcrumb back through the runs list to the agents console, so
+       the operator has a one-click return to ``/ui/agents`` (not only to
+       the runs list) matching the other agents sub-views (#2347). #}
+    <nav class="text-sm opacity-70" aria-label="Breadcrumb">
+      <a href="/ui/agents" class="link link-hover">Agents</a>
+      <span aria-hidden="true">/</span>
+      <a href="/ui/agents/runs" class="link link-hover">Runs</a>
+      <span aria-hidden="true">/</span>
+      <span class="font-mono">{{ run.run_id }}</span>
+    </nav>
     <h1 class="text-xl font-semibold flex items-center gap-3">
       <span>Run</span>
       <span class="font-mono text-sm opacity-70">{{ run.run_id }}</span>

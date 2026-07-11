@@ -73,6 +73,30 @@
               >
                 updated {{ agent.updated_at.isoformat() }}
               </div>
+
+              {# One-click enable / disable straight from the card, so a
+                 tenant_admin never has to open the detail view to flip an
+                 agent's state (#2347). It POSTs the flipped ``enabled`` to
+                 the same ``/ui/agents/{name}/toggle`` route the detail view
+                 uses; the 204 + ``HX-Redirect`` reloads the list with the
+                 new pill. Rendered for tenant_admins only (the top-level
+                 ``can_write``); the route re-checks the role server-side. #}
+              {% if can_write %}
+                <div class="card-actions justify-end pt-1">
+                  <button
+                    type="button"
+                    class="btn btn-xs btn-ghost"
+                    data-action="toggle"
+                    hx-post="/ui/agents/{{ agent.name | urlencode }}/toggle"
+                    hx-vals='{"enabled": "{{ "false" if agent.enabled else "true" }}"}'
+                    hx-target="body"
+                    hx-swap="none"
+                    aria-label="{{ "Disable" if agent.enabled else "Enable" }} {{ agent.name }}"
+                  >
+                    {% if agent.enabled %}Disable{% else %}Enable{% endif %}
+                  </button>
+                </div>
+              {% endif %}
             </div>
           </article>
         </li>

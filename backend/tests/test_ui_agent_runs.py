@@ -233,6 +233,18 @@ def test_list_renders_run_row_for_operator() -> None:
     assert "toolset" not in body
 
 
+def test_list_renders_back_to_agents_breadcrumb() -> None:
+    """The runs list carries a breadcrumb back to ``/ui/agents`` (#2347)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_run(tenant_id=_TENANT_A, status_value=AgentRunStatus.SUCCEEDED.value)
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'aria-label="Breadcrumb"' in body
+    assert '<a href="/ui/agents" class="link link-hover">Agents</a>' in body
+
+
 def test_list_status_filter_narrows_rows() -> None:
     """``?status=failed`` shows only the failed run, not the running one."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -355,6 +367,20 @@ def test_detail_renders_terminal_run_statically() -> None:
     # the approvals bell -- so we assert the panel's own poll target is
     # absent rather than the bare "hx-trigger" substring.)
     assert f'hx-get="/ui/agents/runs/{rid}"' not in body
+
+
+def test_detail_renders_back_to_agents_breadcrumb() -> None:
+    """The run-detail page breadcrumbs back to ``/ui/agents`` (not only the
+    runs list), matching the other agents sub-views (#2347)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_run(tenant_id=_TENANT_A, status_value=AgentRunStatus.SUCCEEDED.value)
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get(f"/ui/agents/runs/{rid}")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'aria-label="Breadcrumb"' in body
+    assert '<a href="/ui/agents" class="link link-hover">Agents</a>' in body
+    assert '<a href="/ui/agents/runs" class="link link-hover">Runs</a>' in body
 
 
 def test_detail_non_terminal_run_self_polls() -> None:

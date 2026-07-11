@@ -138,8 +138,15 @@
        Native <dialog> (the console's destructive-action confirm pattern).
        The run id is interpolated client-side so the operator sees exactly
        which run halts. The agent stops after its current step (the cancel
-       is observed on the next turn boundary, not a synchronous tear-down). -#}
-    <dialog x-ref="stopConfirm" class="modal" data-role="stop-confirm">
+       is observed on the next turn boundary, not a synchronous tear-down).
+
+       ``data-auto-open="false"`` opts this dialog out of the app-shell
+       modal controller's ``htmx:afterSwap`` auto-open sweep
+       (``app/modal-dialogs.js``): this fragment is itself swapped in on Run
+       submit, and without the opt-out the sweep would pop the Stop dialog
+       the instant a run starts, hiding the live transcript. It opens only
+       on the Stop button's ``@click`` (#2347). -#}
+    <dialog x-ref="stopConfirm" class="modal" data-role="stop-confirm" data-auto-open="false">
       <div class="modal-box max-w-md">
         <h3 class="text-base font-semibold">Stop this run?</h3>
         <p class="py-3 text-sm opacity-80">

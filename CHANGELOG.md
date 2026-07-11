@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — leaky `_ingest_getaddrinfo` test shim now delegates to the real resolver, killing the xdist cross-test flake (#2385)
+
+- The ingest SSRF-guard mocks in `test_api_v1_connectors_ingest.py`
+  (`_ingest_getaddrinfo` and the `_resolver_allowing` twin) patched the
+  **global** `socket.getaddrinfo` attribute (`openapi.socket` is the
+  shared `socket` module), so the patch leaked process-wide onto any
+  worker also running the embedding/DNS path under `pytest-xdist`
+  (`test_real_descriptor_embedding_path`, `test_g51_memory_canary`).
+  The two-positional-arg signature crashed the leaked positional call
+  with `TypeError: takes 2 positional arguments but N were given`
+  (evoila/meho#574), and its early-stop masked a real failure at #2338's
+  merge (hotfix #2383).
+- Both stand-ins now accept the full `getaddrinfo` positional arity
+  (`*args`/`**kwargs`) and delegate non-test hosts to the **real**
+  resolver captured at import time (`_REAL_GETADDRINFO`) instead of the
+  re-looked-up, still-patched `socket.getaddrinfo` — which would recurse
+  infinitely. A leaked/active patch is now a transparent no-op, never a
+  `TypeError` or `RecursionError`. SSRF-guard behavior is unchanged: test
+  hostnames still resolve to the fixed public test IP and the destination
+  guard still fires.
+
 ### Docs — curated-until-populator-covers policy for auto-only edge kinds + grandfather rule (#2336)
 
 - Documented that the four auto-discoverable topology edge kinds

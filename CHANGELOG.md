@@ -90,6 +90,45 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-07-11
+
+### Breaking changes — GET-list endpoints converged on the `{items, next_cursor}` envelope (#2338)
+
+- **BREAKING.** The seven reference `GET`-list endpoints now return the
+  unified `{items, next_cursor?, ...sidecars}` list envelope
+  (`docs/codebase/api-shape-conventions.md` §2) as their default **and
+  only** shape. The `?envelope=v2` opt-in that bridged the migration
+  (G0.16-T6 #1312 / G0.18-T3 #1356 / G0.22-T6 #1611) was retired. A
+  platform-wide contract test now pins the convention so a new list
+  endpoint can't reintroduce a divergent shape. Affected endpoints and
+  the wire-shape change adopters must migrate:
+  - `GET /api/v1/targets` — was a bare `[TargetSummary, …]` array → now
+    `{"items": [...], "next_cursor": <name|null>}` (keyset-paginated).
+  - `GET /api/v1/connectors` — was `{"connectors": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/conventions` — was `{"entries": [...], "budget_status":
+    {...}}` → now `{"items": [...], "next_cursor": null, "budget_status":
+    {...}}` (sidecar unchanged).
+  - `GET /api/v1/audit/my-recent` — was `{"rows": [...], "next_cursor":
+    …}` → now `{"items": [...], "next_cursor": …}`.
+  - `GET /api/v1/broadcast/overrides` — was a bare
+    `[BroadcastOverrideRead, …]` array → now `{"items": [...],
+    "next_cursor": null}`.
+  - `GET /api/v1/runbooks/templates` — was `{"templates": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/runbooks/runs` — was `{"runs": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+
+  **Migration recipe.** Read the list from `response["items"]` instead
+  of the old key (`connectors` / `entries` / `rows` / `templates` /
+  `runs`) or the bare array; read `response["next_cursor"]` for
+  pagination (only `targets` populates it today). The bundled `meho`
+  CLI and the generated Go client already read the new envelope — this
+  change ships them together. Clients still sending `?envelope=v2` are
+  unaffected (the now-unknown param is ignored). The `audit` sibling
+  reads (`/query` / `/who-touched` / `/by-work-ref`) and the topology
+  closure reads keep their existing shapes.
+
 ### Fixed — `/ui/kb` editor save renders backend errors visibly (200-on-recoverable-error mold, #2384)
 
 - The KB editor modal's save handler (`POST /ui/kb/new`) re-rendered
@@ -226,43 +265,6 @@ connector-related release-notes line.
   so CET/CEST both resolve correctly), and a live hint next to the
   field shows the resolved UTC so the conversion is visible rather than
   silent. Engine-side `fire_at` handling is unchanged.
-
-### Breaking changes — GET-list endpoints converged on the `{items, next_cursor}` envelope (#2338)
-
-- **BREAKING.** The seven reference `GET`-list endpoints now return the
-  unified `{items, next_cursor?, ...sidecars}` list envelope
-  (`docs/codebase/api-shape-conventions.md` §2) as their default **and
-  only** shape. The `?envelope=v2` opt-in that bridged the migration
-  (G0.16-T6 #1312 / G0.18-T3 #1356 / G0.22-T6 #1611) was retired. A
-  platform-wide contract test now pins the convention so a new list
-  endpoint can't reintroduce a divergent shape. Affected endpoints and
-  the wire-shape change adopters must migrate:
-  - `GET /api/v1/targets` — was a bare `[TargetSummary, …]` array → now
-    `{"items": [...], "next_cursor": <name|null>}` (keyset-paginated).
-  - `GET /api/v1/connectors` — was `{"connectors": [...]}` → now
-    `{"items": [...], "next_cursor": null}`.
-  - `GET /api/v1/conventions` — was `{"entries": [...], "budget_status":
-    {...}}` → now `{"items": [...], "next_cursor": null, "budget_status":
-    {...}}` (sidecar unchanged).
-  - `GET /api/v1/audit/my-recent` — was `{"rows": [...], "next_cursor":
-    …}` → now `{"items": [...], "next_cursor": …}`.
-  - `GET /api/v1/broadcast/overrides` — was a bare
-    `[BroadcastOverrideRead, …]` array → now `{"items": [...],
-    "next_cursor": null}`.
-  - `GET /api/v1/runbooks/templates` — was `{"templates": [...]}` → now
-    `{"items": [...], "next_cursor": null}`.
-  - `GET /api/v1/runbooks/runs` — was `{"runs": [...]}` → now
-    `{"items": [...], "next_cursor": null}`.
-
-  **Migration recipe.** Read the list from `response["items"]` instead
-  of the old key (`connectors` / `entries` / `rows` / `templates` /
-  `runs`) or the bare array; read `response["next_cursor"]` for
-  pagination (only `targets` populates it today). The bundled `meho`
-  CLI and the generated Go client already read the new envelope — this
-  change ships them together. Clients still sending `?envelope=v2` are
-  unaffected (the now-unknown param is ignored). The `audit` sibling
-  reads (`/query` / `/who-touched` / `/by-work-ref`) and the topology
-  closure reads keep their existing shapes.
 
 ### Changed — structured `connector_auth_failed` at session establish across the VCF family (#2329)
 
@@ -1107,6 +1109,64 @@ connector-related release-notes line.
   unchanged `vault.kv.read` path (zero migration), while a GSM install
   reads its probe secret (`gsm:<project>/meho-test-federation`) through the
   credential-backend seam and reports the same `vault` status shape. (#2231)
+
+### Fixed — empty runbook step bodies backfilled (migration 0054) + structured template-hydration errors (#2239)
+
+- **Legacy runbook rows readable again via migration `0054`** (#2239 / PR #2309): the #2122 `min_length=1` step-body tightening shipped no data migration, and the read path re-validates stored `runbook_templates.steps` JSONB on every read (`_steps_from_storage`), so any pre-v0.20.0 template with an empty or whitespace-only step body 500'd `GET /api/v1/runbooks/templates/{slug}`, broke MCP `meho.runbook.show_template` with an opaque `-32603`, and — via pinned-template hydration — broke `list_runs` tenant-wide. Alembic migration `0054_backfill_empty_runbook_step_bodies` rewrites every such body to a non-empty placeholder: pure-data, idempotent, tenant-agnostic, documented no-op `downgrade()`. One rewrite repairs all read sinks at once, since runs re-read the same row; the deliberate fail-closed read-side validation is kept, not relaxed.
+- **Structured `template_body_validation_failed` envelope on both template-show transports** (#2239 / PR #2309): a hydration `ValidationError` no longer leaks as a bare `text/plain` 500 or a data-less `-32603`. A single shared builder (`runbooks/hydration_errors.py`, per the `error-message-shape.md` convention) emits the stable code, the `slug`/`version` coordinates, a compact pydantic `errors` list, and a remediation message pointing at migration 0054 or a re-save via `PATCH /api/v1/runbooks/templates/{slug}`; REST carries it in `HTTPException.detail` (declared in the OpenAPI snapshot and regenerated Go client), MCP in the JSON-RPC `error.data`. Any future malformed row is diagnosable instead of opaque; `docs/codebase/runbook-template-hydration.md` documents the surface.
+
+### Fixed — input-less `one_off`/`cron` scheduler triggers now rejected at create time with 422 (#2244)
+
+- **Create-time 422 for prompt-less cron/one_off triggers** (#2244 / PR #2308): `ScheduledTriggerCreate`'s discriminated-union validator (`backend/src/meho_backplane/scheduler/schemas.py`) now rejects a `POST /api/v1/scheduler/triggers` body of kind `one_off` or `cron` whose payload renders no usable prompt — missing `inputs`, or the `inputs: {}` edge, which `_coerce_inputs` serialized to the literal string `"{}"` that slipped past the fire-time `scheduled_run_no_input` guard and reached the model as a meaningless user turn. Previously such a trigger created with 201 and deterministically failed at fire (a cron burning a run every tick, a one_off burning its single at-most-once fire). The check is payload-only (`_payload_yields_prompt`, no agent-definition load), so the #1505 layering objection does not apply; the fire-time guard is retained as defense-in-depth for rows inserted around the wire schema.
+- **Contract mirrored across MCP, console, and clients** (#2244 / PR #2308): the MCP scheduler create tool (`mcp/tools/scheduler.py`) documents the requirement in its `inputs` schema ("an empty {} is rejected"), the `/ui` scheduler create modal (`_create_modal.html`) labels the inputs field kind-aware — "required, must render a prompt" for `cron`/`one_off`, "optional" for `event` — and surfaces the 422 as a form error, and `docs/codebase/scheduler.md` plus the regenerated OpenAPI snapshot and typed Go CLI client (`cli/api/openapi.json`, `cli/internal/api/client.gen.go`) record the new contract. `kind=event` stays exempt: its future event-dispatch junction may derive the prompt from the matched event.
+
+### Added — typed `vmware.host.usage` op: per-host utilisation with zero catalog ingest (#2257)
+
+- **New typed op `vmware.host.usage`** (#2257 / PR #2263): the first vmware op with `source_kind="typed"` — a bound method on `VmwareRestConnector` (new `connectors/vmware_rest/typed_ops.py`) that returns one row per ESXi host with CPU/memory load from `summary.quickStats` (`overallCpuUsage` MHz, `overallMemoryUsage` MB, uptime), hardware capacity totals from `summary.hardware` (sockets/cores/threads, per-core MHz, `memorySize` bytes), and `runtime.inMaintenanceMode`. It lists hosts via `GET /vcenter/host`, then reads those properties per host through a direct PropertyCollector `RetrievePropertiesEx` call on the connector session — no `dispatch_child`, no ingested `endpoint_descriptor` rows — so it works on a fresh boot before any catalog ingest, which no composite can. Both legs route through `mount_op_path` (modern `/api` and legacy `/rest`/vcsim), and per-host reads are best-effort with a `read_note`.
+- **Vmware typed-op registration mold** (#2257 / PR #2263): a `VmwareTypedOp` metadata dataclass plus a `register_vmware_typed_operations` registrar, queued at import time via `register_typed_op_registrar` in `connectors/vmware_rest/__init__.py` and executed by `run_typed_op_registrars` at startup, with a curated `when_to_use` blurb for the grouped op — the mold the later typed vmware ops (`host.vsan_health`, `host.network_uplinks`, #2279) reuse. Shipped with 15 unit tests (`tests/test_connectors_vmware_rest_typed_host_usage.py`) plus respx end-to-end integration over both mounts, and updated `docs/codebase/connectors-vmware-rest.md`. No migrations; OpenAPI snapshot unchanged.
+
+### Changed — code-shipped composites dispatch sub-ops on the connector's own session (two-world op model, #2251, #2253–#2256)
+
+- **Direct-session substrate + write-governance seam** (#2251 / PR #2261, #2254 / PR #2265): `dispatch_composite` now inspects the handler signature and injects the resolved connector instance and/or the catalog-routed `dispatch_child` only when the handler declares it, so a composite can issue sub-calls via `connector._get_json` / `connector._post_json` + `connector.mount_op_path` with no `endpoint_descriptor` lookup — every existing `dispatch_child`-only handler keeps its exact signature and behaviour. The new `enforce_subop_policy` helper in `operations/composite.py` keeps direct **write** sub-ops governed: it re-runs the dispatcher's `policy_gate` against an in-memory, never-persisted `EndpointDescriptor` built from the sub-op's declared `op_id`/`safety_level`/`requires_approval` — auto-execute proceeds, needs-approval writes a durable `ApprovalRequest` and returns `awaiting_approval` so the write queues, deny blocks it (#508 property 3). Trade-offs documented in `docs/architecture/operations-substrate.md`.
+- **vmware's 7 read + 8 write composites migrated** (#2253 / PR #2276, #2256 / PR #2284): `composites/_read.py` (via the `_read_sub_op` helper) and `composites/_write.py` drop `dispatch_child`-through-ingested-rows for direct session calls, so all vmware composites now work on a fresh boot with **zero vCenter catalog ingest** (the `composite_l2_missing` defect class) with identical response schemas and aggregation. Each mutating sub-call passes `enforce_subop_policy` before its `_post_json`; sub-ops declare `dangerous`/`requires_approval=False` so the top-level composite stays the single primary approval gate (no resume-path double-gate). `_write_preview` live reads also resolve on the session, fixing their fresh-boot `preview_unavailable` degradation. Only the `host.evacuate` → `vmware.composite.vm.migrate` recursion keeps `dispatch_child`, and the dispatcher's `_handler_requires_target` now fails a `connector`-declaring composite dispatched with `target=None` cleanly as `target_required`.
+- **`gh.composite.pr_status_summary` migrated; gh `composite_backing` registration dropped** (#2255 / PR #2268): the composite's three reads (PR, check-runs, reviews) now go through the resolved `GitHubRestConnector`'s own session with a byte-identical seven-key response envelope — fixing #2050 by construction, since a fresh deploy with no gh catalog ingest can no longer dead-end at `composite_l2_missing`; secondary reads keep their graceful degradation (`null` + `*_status="unknown"`). gh's `composite_backing` registration and the `_register_and_assert_composite_backings` load assertion are removed — the platform-wide registration-time invariant (#2252) supersedes the gh-only guard, and the dormant L2 coping apparatus was deleted wholesale under #2259 (see "Removed — the L2 composite failure-coping apparatus", PR #2297).
+
+### Changed — `VAULT_ADDR` now optional: a gsm-backend install boots Vault-free (#2277)
+
+- **`Settings.vault_addr` is now optional** (#2277 / PR #2278): the field is `HttpUrl | None` defaulting to `None` in `backend/src/meho_backplane/settings.py`, and the env loader coerces a missing or blank `VAULT_ADDR` to `None`, so a `CREDENTIAL_BACKEND=gsm` backplane boots with no Vault anywhere — the last mile of Initiative #2227's zero-new-secret-infrastructure promise for GCP-native adopters. Fail-closed moves from import time to first use: `auth/vault.py:_build_client` raises the new `VaultNotConfiguredError` (a `VaultClientError` subclass the dispatcher surfaces as a handled `connector_error`, never a 5xx) naming both `VAULT_ADDR` and `CREDENTIAL_BACKEND`, so a Vault-backend install missing its address fails loudly and actionably at the first Vault operation instead of crashing the lifespan with a bare `KeyError`.
+- **Readiness probe and Helm chart follow suit** (#2277 / PR #2278): `vault_readiness_probe` now returns `ok=True` with `detail="not_configured"` when `vault_addr` is unset — the skip-unconfigured contract established for the docs backends in #1606 — so a GSM-only deploy's `/api/v1/health` readiness stays green instead of perma-failing against a Vault it does not run. `deploy/charts/meho/templates/configmap.yaml` renders `VAULT_ADDR` only when `config.vaultAddr` is non-empty, so a `gsm` install injects no empty env var into the pod; `backend/tests/test_chart_vault_addr_optional.py` proves both `helm template` shapes. Installs with `VAULT_ADDR` set are behaviourally unchanged; no DB migration and no OpenAPI change ship with this.
+
+### Connectors — read-only RabbitMQ Management HTTP API connector (#2233)
+- **RabbitMQ Management connector — 16 typed read ops, `shared_service_account` auth model live** (#2233 / PR #2280): new `RabbitMqConnector` (`backend/src/meho_backplane/connectors/rabbitmq/`) over the Management HTTP API (`/api`, ports 15672/15671) registers the versioned triple `(rabbitmq, 3.x, rabbitmq-management)` plus the wildcard fallback at import and upserts its 16 read ops at lifespan startup, so a fresh boot dispatches immediately: `rabbitmq.overview`, `.nodes`, `.exchanges`, `.queues`, `.bindings`, `.vhosts`, `.connections`, `.channels`, `.consumers`, `.shovels`, `.shovel_status`, `.federation_links`, `.parameters`, `.policies`, `.definitions`, and the `.request` GET/HEAD passthrough. HTTP Basic auth reads live operator-context Vault KV-v2 credentials via `load_credentials_from_vault` (`session.py`), a thin wrapper over the shared `load_basic_credentials` helper (`_shared/vault_creds.py`); other auth models are refused with a clear boundary error. Each op names the RabbitMQ user tag (`monitoring`/`policymaker`/`administrator`) its surface requires.
+- **Read-only by construction, broker credentials redacted by default** (#2233 / PR #2280): a code-level method gate (`RabbitMqMethodNotAllowedError`) refuses any verb other than GET/HEAD before the request leaves the process, so even `rabbitmq.request` cannot mutate the broker; every op ships `safety_level=safe`, `requires_approval=False` — write/admin ops (create shovel, set policy) are deliberately out of scope for a future approval-gated write surface. `redact.py` blanks `amqp://user:pass@` URI userinfo and `password`/`secret`/`password_hash` keys in shovel, federation, parameter, and definitions payloads before they reach the agent. The regenerated CLI OpenAPI snapshot adds `rabbitmq` to the `TargetCreate.product` enum; `probe()` fails closed without operator context (the Management API has no unauthenticated endpoint). Docs: `docs/codebase/connectors-rabbitmq.md`.
+
+### Connectors — read-only Prometheus connector also serving Thanos Query and Mimir/Cortex (#2234)
+
+- **Prometheus/Thanos/Mimir read surface, typed and boot-dispatchable** (#2234 / PR #2281): new `PrometheusConnector` (`backend/src/meho_backplane/connectors/prometheus/`) covers the three PromQL-HTTP-compatible metrics backends — Prometheus, Thanos Query, Grafana Mimir/Cortex — over their shared `/api/v1` API. Eight typed read ops (`prometheus.query`, `query_range`, `series`, `labels`, `targets`, `rules`, `alerts`, plus the gate-constrained `prometheus.get` GET passthrough), all `safety_level="safe"` with no approval gate; no write ops ship (a future G3.x write-surface initiative would add any). Dual-registered via `register_connector_v2` as `("prometheus", "2.x", "prometheus-api")` plus the wildcard fallback, with `endpoint_descriptor` rows upserted at lifespan startup — a fresh boot dispatches all eight ops with no ingest step. Prometheus is now a selectable target type in the API and CLI (regenerated `cli/api/openapi.json` + `client.gen.go`).
+- **Read-only by construction; optional auth with a live credential path** (#2234 / PR #2281): every dispatched request passes a GET-only + `/api/v1/` path-allowlist gate with an `/api/v1/admin/` blocklist and `..` traversal guard, so TSDB-delete and `/-/reload` are unreachable through dispatch. `secret_ref=None` is a first-class state — `auth_headers` returns `{}` with no credential load (the unauthenticated in-cluster port-forward case, net-new platform-wide). When `secret_ref` is set, the default loader performs a live operator-context KV-v2 read via `_shared/vault_creds.load_vault_secret_data` (no stubbed loader), selecting Bearer (`token` field) or Basic (`username`+`password`) from the stored secret's shape. Scheme (`http`/`https`) and the Mimir `/prometheus` mount prefix come from per-target `extras`; in-cluster hosts still require `MEHO_TARGET_SSRF_ALLOWLIST`.
+- **Fingerprint with operator-asserted flavour** (#2234 / PR #2281): `fingerprint()` reads `GET /api/v1/status/buildinfo` and best-effort augments it with `/-/ready`, scrape-target, firing-alert, and rule-group counts, surfacing a `flavour` hint (`prometheus`/`thanos`/`mimir`). The flavour comes from `target.extras["flavour"]`, not response sniffing — Thanos and Mimir vendor Prometheus's buildinfo struct byte-identically, so targets are not self-identifying. Developer doc at `docs/codebase/connectors-prometheus.md`; no operator onboarding recipe yet and no DB migration ships with this change.
+
+### Connectors — Grafana Loki read-only multi-tenant connector (#2235)
+
+- **Grafana Loki typed connector — 6 read-only ops, dispatches on a fresh boot** (#2235 / PR #2282): `LokiConnector` (`backend/src/meho_backplane/connectors/loki/`), a hand-rolled `HttpConnector` subclass registered via `register_connector_v2` under `(product="loki", version="3.x", impl_id="loki-api")` plus the `("loki", "", "")` wildcard fallback. Six typed operations upsert into `endpoint_descriptor` at lifespan via `register_typed_operation`: `loki.query`, `loki.query_range`, `loki.labels`, `loki.label_values`, `loki.series`, and the gated `loki.get` passthrough — all `safety_level="safe"`, `requires_approval=False`. Read-only by construction: every op issues a GET, and the passthrough runs through `assert_loki_read_only` (`read_only.py`), a `/loki/api/v1`-scoped gate with an explicit `/push` + `/delete*` segment blocklist, so a write never reaches the wire. No write/admin ops and no DB migration ship.
+- **Optional auth live, per-call multi-tenancy** (#2235 / PR #2282): the credential path is wired, not stubbed — `auth_headers` performs the live operator-context Vault KV-v2 read via `load_vault_secret_data`, so `operations/call` executes end-to-end on a freshly booted backplane. `secret_ref=None` sends no `Authorization` header (the port-forward case); a `token` field yields Bearer, `username`+`password` yields Basic, and any other secret shape fails closed with `VaultCredentialsReadError`. Every op accepts an optional `tenant` selector rendered into Loki's `X-Scope-OrgID` header; a tenant-less `401` against an `auth_enabled` Loki surfaces `LokiTenantRequiredError` instead of a bare 401. `fingerprint()`/`probe()` stay unauthenticated and tenant-free (`status/buildinfo`, `/ready`). The new `loki` product token enters the `TargetCreate.product` enum; CLI OpenAPI snapshot (`cli/api/openapi.json`) and generated Go client regenerated. Doc: `docs/codebase/connectors-loki.md`.
+
+### Connectors — Proxmox VE read/write connector, PVEAPIToken auth, approval-gated writes (#2238)
+- **Proxmox VE 8.x typed connector — `shared_service_account` auth model live** (#2238 / PR #2283): `ProxmoxConnector` (`backend/src/meho_backplane/connectors/proxmox/`), an `HttpConnector` over the PVE REST API (`/api2/json` on :8006), registers 4 typed ops on a fresh boot — 3 read (`proxmox.about`, `proxmox.api.get`, `proxmox.task.status`) and 1 write (`proxmox.api.write`). The default loader `load_credentials_from_vault` (`session.py`) performs the live operator-context Vault KV-v2 read, so dispatch executes end-to-end for `shared_service_account` targets; any other `auth_model` raises a clear boundary error. Dual v2 registration (`("proxmox", "8.x", "proxmox-api")` + wildcard) adds `proxmox` to the `TargetCreate.product` enum; OpenAPI snapshot and Go client regenerated.
+- **API token preferred, ticket/cookie fallback** (#2238 / PR #2283): credentials resolve from the target's `secret_ref`, discriminated by stored fields — `token_id` + `token_secret` send `Authorization: PVEAPIToken=<id>=<secret>` on every request (CSRF-exempt, no expiry; preferred), else `username` + `password` (default realm `pam`) mint a ~2h ticket via `POST /api2/json/access/ticket`, ride as the `PVEAuthCookie` cookie, and attach `CSRFPreventionToken` on every write. The minted ticket is not auto-re-minted on expiry — a documented limit token auth avoids. Self-signed TLS is handled per-target through the inherited `tls_ca_pin` / `verify_tls` policy.
+- **Approval-gated generic write passthrough** (#2238 / PR #2283): the sole write op `proxmox.api.write` (POST/PUT/DELETE) registers `safety_level="dangerous"` + `requires_approval=True`, so every dispatch parks in the human approval queue (`awaiting_approval`) and the handler runs only on the `_approved=True` resume path — there is no code-level GET gate. Both passthroughs validate paths through a two-layer allowlist (anchored schema `pattern` plus fail-closed `validate_api_path`/`validate_method` in `ops.py`) beneath the constant, never-parameterised `/api2/json` base. UPID-returning writes hand back a parsed `{upid, node}` so the caller can follow up with `proxmox.task.status` (`wait=true` polls to terminal `stopped`). Docs: `docs/codebase/connectors-proxmox.md`.
+
+### Connectors — read-only PostgreSQL wire-protocol connector (#2236)
+- **PostgreSQL wire connector, 7 read-only typed ops** (#2236 / PR #2285): MEHO's first database wire-protocol connector — `PostgresConnector` subclasses the generic `Connector` ABC (not `HttpConnector`) and drives `asyncpg` over PostgreSQL protocol v3, registered as `("postgres", "16", "postgres-wire")` plus a `("postgres", "", "")` wildcard fallback in `backend/src/meho_backplane/connectors/postgres/`. Seven typed ops (`postgres.databases`, `schemas`, `tables`, `indexes`, `activity`, `settings`, `query`) register into `endpoint_descriptor` at lifespan; every op is `safety_level=safe` with `requires_approval=False` and no write op exists. Read-only is doubly enforced: sessions open with `default_transaction_read_only=on` (server-side, SQLSTATE 25006 backstop), and free-form `postgres.query` passes a first-keyword allowlist (`SELECT`/`SHOW`/`EXPLAIN`/`WITH`/`TABLE`/`VALUES`) before the wire. `postgres` joins the `TargetCreate.product` enum (CLI OpenAPI snapshot + Go client regenerated).
+- **Loader-wired, dispatches on a fresh boot; optional auth, no TLS yet** (#2236 / PR #2285): credentialled targets resolve `{username, password}` via the live operator-context Vault read (the shared `_shared/vault_creds.load_basic_credentials` helper, called from `connect_read_only` in `session.py` — no stub), and a `secret_ref=None` target takes the net-new trust-auth branch, connecting as role `postgres` with no password; secrets never enter logs or `OperationResult`s. The testcontainers lane `tests/integration/test_connectors_postgres_container.py` proves `fingerprint`, vacuum stats, and the server-side read-only backstop against a real `postgres:16-alpine`. TLS is not wired yet (unencrypted; fine for trust-auth port-forward/in-cluster), and `postgres.activity` omits in-flight query text. No DB migration ships. Establishes the DB-connector shape the mongodb sibling (#2237) reuses; docs at `docs/codebase/connectors-postgres.md`.
+
+### Connectors — read-only MongoDB wire-protocol connector via pymongo async (#2237)
+- **MongoDB read-only wire-protocol connector** (#2237 / PR #2296): `MongoDbConnector` (`backend/src/meho_backplane/connectors/mongodb/`) is MEHO's second wire-protocol (non-HTTP) connector, following the DB-connector shape postgres (#2236) established, driving `pymongo.AsyncMongoClient` (PyMongo's native async API; Motor is deprecated, EOL 2026-05-14) over the Mongo wire protocol on :27017. It registers at import time under the v2 triple `("mongodb", "7", "mongodb-wire")` plus the `("mongodb", "", "")` wildcard, and its lifespan registrar upserts eight typed read ops — `mongodb.databases`, `mongodb.collections`, `mongodb.db_stats`, `mongodb.collection_stats`, `mongodb.indexes`, `mongodb.count`, `mongodb.server_status`, `mongodb.replica_status` — all `safety_level=safe` / `requires_approval=False`, so nothing is approval-gated; as typed ops they catalog and dispatch on a fresh boot with no ingest step. `mongodb` joins the `TargetCreate.product` OpenAPI enum; `cli/api/openapi.json` and the Go client were regenerated.
+- **Read-only by construction; optional auth with the single basic-credentials model live** (#2237 / PR #2296): every op issues only fixed read commands from the closed `MONGO_READ_COMMANDS` allowlist in `session.py` — never a caller-supplied one; no free-form command, `eval`, `$where`, or aggregation-with-`$out` surface exists, and `assert_read_command` fails closed on anything off-list — so there are no write or approval-gated ops at all. A target without a `secret_ref` connects credential-less (`directConnection=True`, bounded 5 s server-selection timeout); a credentialled target resolves `{username, password}` through the live operator-context Vault read (`load_basic_credentials`) and authenticates against the `admin` database, failing closed on an operator-less dispatch path. TLS to the Mongo target is not yet wired. `fingerprint()` reads `buildInfo`/`hello`/slim `serverStatus`; `probe()` returns typed `auth_failed`/`tcp_unreachable`/`connect_failed` reasons. Ships no DB migration; see `docs/codebase/connectors-mongodb.md`.
+
+### Changed — dependency bumps
+
+- Bumped: `fastapi` 0.137.2→0.139.0 (#2167), `uvicorn[standard]` floor →0.50.1 (#2166), `croniter` 6.2.2→6.2.3 (#2164), `pydantic-ai-slim` →2.7.0 with the profile tests migrated to `TypedDict` shapes (#2243); CI/tooling — `actions/cache` (+`/restore`) 5.0.5→6.1.0 (#2096, #2094), `trufflesecurity/trufflehog` 3.95.6→3.95.8 (#2156), `golangci/golangci-lint-action` 9.2.1→9.3.0 (#2157), `docker/setup-buildx-action` 4.1.0→4.2.0 (#2158), `docker/build-push-action` 7.2.0→7.3.0 (#2159), `docker/login-action` 4.2.0→4.4.0 (#2160), `docker/metadata-action` 6.1.0→6.2.0 (#2161), `docker/setup-qemu-action` 4.1.0→4.2.0 (#2162), `astral-sh/setup-uv` 8.2.0→8.3.1 (#2163).
 
 ## [0.20.0] - 2026-07-08
 

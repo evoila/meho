@@ -1274,6 +1274,224 @@ async def test_expire_stale_requests_publishes_approval_expired_broadcast(
 
 
 # ---------------------------------------------------------------------------
+# Approval-TTL: park-time expires_at stamping + bounding (#2322)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_stamps_default_expires_at(
+    session: AsyncSession,
+) -> None:
+    """A parked row with no caller deadline defaults to created_at + APPROVAL_DEFAULT_TTL."""
+    operator = _make_operator()
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.ttl-default",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    assert request.expires_at is not None
+    ttl = timedelta(seconds=get_settings().approval_default_ttl_seconds)
+    # Deadline is created_at + the configured default TTL (allow a small
+    # clock-skew window between the two _now() reads).
+    assert abs((request.expires_at - request.created_at) - ttl) < timedelta(seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_caps_over_long_override(
+    session: AsyncSession,
+) -> None:
+    """A caller deadline longer than the ceiling is capped at created_at + default TTL."""
+    operator = _make_operator()
+    ttl = timedelta(seconds=get_settings().approval_default_ttl_seconds)
+    over_long = datetime.now(UTC) + ttl + timedelta(days=30)
+
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.ttl-cap",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        expires_at=over_long,
+    )
+    await session.commit()
+
+    assert request.expires_at is not None
+    assert request.expires_at < over_long
+    # Capped to the ceiling (created_at + default TTL), not the caller value.
+    assert abs((request.expires_at - request.created_at) - ttl) < timedelta(seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_honours_shorter_override(
+    session: AsyncSession,
+) -> None:
+    """A caller deadline shorter than the ceiling is respected as-is."""
+    operator = _make_operator()
+    shorter = datetime.now(UTC) + timedelta(hours=1)
+
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.ttl-short",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        expires_at=shorter,
+    )
+    await session.commit()
+
+    assert request.expires_at == shorter
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_requests_coalesces_legacy_null_expiry(
+    session: AsyncSession,
+) -> None:
+    """With default_ttl, a legacy null-expires_at row past created_at+TTL ages out.
+
+    Rows parked before #2322 carry ``expires_at IS NULL``. The sweeper
+    passes ``default_ttl`` so they are coalesced against
+    ``created_at + default_ttl`` and expired once that deadline passes;
+    the null deadline is backfilled to the coalesced value.
+    """
+    operator = _make_operator()
+    ttl = timedelta(days=14)
+
+    # A legacy row: null expiry, created 15 days ago (past created_at + 14d).
+    old = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.legacy-old",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    # A legacy row: null expiry, created 1 day ago (still within the TTL).
+    recent = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.legacy-recent",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    # Rewrite both to the pre-#2322 shape (null expiry) with backdated created_at.
+    async with get_sessionmaker()() as setup:
+        old_row = await setup.get(ApprovalRequest, old.id)
+        recent_row = await setup.get(ApprovalRequest, recent.id)
+        assert old_row is not None and recent_row is not None
+        old_row.expires_at = None
+        old_row.created_at = datetime.now(UTC) - timedelta(days=15)
+        recent_row.expires_at = None
+        recent_row.created_at = datetime.now(UTC) - timedelta(days=1)
+        await setup.commit()
+
+    async with get_sessionmaker()() as s2:
+        expired = await expire_stale_requests(s2, operator=operator, default_ttl=ttl)
+        await s2.commit()
+
+    assert [r.id for r in expired] == [old.id]
+
+    async with get_sessionmaker()() as fresh:
+        old_final = await fresh.get(ApprovalRequest, old.id)
+        recent_final = await fresh.get(ApprovalRequest, recent.id)
+        assert old_final is not None and recent_final is not None
+        assert old_final.status == ApprovalRequestStatus.EXPIRED.value
+        # Backfilled deadline == created_at + default TTL.
+        assert old_final.expires_at is not None
+        assert abs((old_final.expires_at - old_final.created_at) - ttl) < timedelta(seconds=2)
+        # The still-within-TTL legacy row is untouched.
+        assert recent_final.status == ApprovalRequestStatus.PENDING.value
+        assert recent_final.expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_requests_without_default_ttl_ignores_null_rows(
+    session: AsyncSession,
+) -> None:
+    """The historical contract: with no default_ttl, null-expiry rows are never swept."""
+    operator = _make_operator()
+    row = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.legacy-ignored",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as setup:
+        r = await setup.get(ApprovalRequest, row.id)
+        assert r is not None
+        r.expires_at = None
+        r.created_at = datetime.now(UTC) - timedelta(days=999)
+        await setup.commit()
+
+    async with get_sessionmaker()() as s2:
+        expired = await expire_stale_requests(s2, operator=operator)
+        await s2.commit()
+
+    assert expired == []
+    async with get_sessionmaker()() as fresh:
+        final = await fresh.get(ApprovalRequest, row.id)
+        assert final is not None
+        assert final.status == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_expired_run_bound_request_cannot_be_approved(
+    session: AsyncSession,
+) -> None:
+    """An expired run-bound request is terminal — it cannot be approved or resumed (#2293).
+
+    Pins that once the TTL sweep flips a pending run-bound request to
+    ``expired``, no approval surface can revive it: ``approve_request``
+    hits the already-decided guard, so the op is never claimed or
+    re-dispatched.
+    """
+    requester = _make_operator(sub="agent-requester")
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    past = datetime.now(UTC) - timedelta(hours=1)
+
+    request = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.expired-resume",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        run_id=uuid.uuid4(),
+        expires_at=past,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        expired = await expire_stale_requests(s2, operator=requester)
+        await s2.commit()
+    assert [r.id for r in expired] == [request.id]
+
+    async with get_sessionmaker()() as approve_session:
+        with pytest.raises(ApprovalRequestAlreadyDecidedError):
+            await approve_request(approve_session, request.id, operator=reviewer)
+
+
+# ---------------------------------------------------------------------------
 # pause → approve → resume → execute (integration-style)
 # ---------------------------------------------------------------------------
 

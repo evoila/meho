@@ -114,6 +114,28 @@ connector-related release-notes line.
   non-credential op that simply never populated one) — so the approval
   surface can style the blind case as elevated-risk. `proposed_effect`
   is a free-form JSON field, so no API schema / OpenAPI change (#2332).
+### Added — approval-TTL lifecycle wired end-to-end (parked approvals now expire) (#2322)
+
+- Every parked approval is now stamped `expires_at = created_at +
+  APPROVAL_DEFAULT_TTL` (new `APPROVAL_DEFAULT_TTL_SECONDS`, default 14
+  days) at park time across **all** transports — REST, MCP, and run-bound
+  dispatches (they all park through the dispatcher's
+  `_handle_needs_approval`, plus the composite park path). An explicit
+  caller deadline is honoured but capped at that ceiling, so no surface
+  can park an unbounded-lived approval. Previously every parked row
+  carried `expires_at: null` and the `expired` status / column /
+  `expire_stale_requests` helper existed but had zero production callers —
+  the TTL lifecycle was shipped but inert.
+- A dedicated periodic sweeper (`operations.approval_expiry`, gated on
+  `APPROVAL_EXPIRY_ENABLED`, `APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS`
+  default 300s) drives `expire_stale_requests` per tenant under a
+  `system:approval-expiry` operator, so past-deadline pending approvals
+  transition to `expired` within one tick, each with a decision audit row
+  and a fail-open `approval.expired` broadcast. Expired rows leave the
+  default `?status=pending` view and cannot be approved or resumed.
+- Legacy pre-#2322 rows with `expires_at IS NULL` age out too: the sweep
+  coalesces a null deadline against `created_at + APPROVAL_DEFAULT_TTL`
+  (no schema change, no migration) and backfills the deadline on expiry.
 
 ### Fixed — agent-run resume stamps `parent_audit_id` so approved chains replay as one subtree (#2323)
 
@@ -197,6 +219,18 @@ connector-related release-notes line.
   identity constants each package re-exports are preserved (relocated into the
   package `__init__.py`), so `from meho_backplane.connectors.<pkg> import
   <PROD>_CONNECTOR_ID` still resolves.
+- **Operator action — vRLI canonical-spec swap on the consumer deploy.** If a
+  deploy still serves the hand-edited **gist overlay** of the `vcf-logs-9.0`
+  OpenAPI spec, retire it in this upgrade: the two blockers that forced the
+  overlay are fixed as of v0.20.0 (`#2066` `{+path}` reserved-expansion render,
+  `#1796` `servers[]` base path), so the **canonical** spec now ingests clean.
+  Re-ingest the canonical spec, confirm it does not trip the `#2272`
+  YAML-timestamp ingest class, spot-check a read (`GET:/api/v2/version` → ok;
+  the typed `vrli.event.query` op is unaffected — typed reads have no ingest
+  dependency), then delete the gist. No MEHO code change is required — it is an
+  operator action on the deploy. Tracked with a runbook on `#2358` and
+  coordinated on `evoila-bosnia/claude-rdc-hetzner-dc#1790`.
+
 ### Changed — nsx/connector.py split under the file-size budget (#2356)
 
 - `nsx/connector.py` dropped from 600 to ~562 lines, back under the

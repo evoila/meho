@@ -335,6 +335,14 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     memory_expiry_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
+                    # #2322 (G0.31 #2364) added an approval-TTL sweeper to
+                    # the lifespan body, gated on APPROVAL_EXPIRY_ENABLED
+                    # (default on). Pin it off here — a bare MagicMock
+                    # returns a truthy attribute, so without this the gate
+                    # reads True and the real start_approval_expiry_sweeper
+                    # runs its loop, which hits get_settings() ->
+                    # KeyError: 'KEYCLOAK_ISSUER_URL' (this test pins no env).
+                    approval_expiry_enabled=False,
                     scheduler_enabled=False,
                     agent_run_reaper_enabled=False,
                     event_drain_enabled=False,
@@ -350,9 +358,9 @@ def test_lifespan_calls_eager_import_connectors() -> None:
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
             # G11.3-T2 (#823) scheduler + G11.3-T4 (#825) agent_run-reaper
-            # + G11.3-T3 (#824) event-drain patches combined via
-            # ``patch.multiple`` to stay under CPython's "too many
-            # statically nested blocks" limit (20) the parenthesised
+            # + G11.3-T3 (#824) event-drain + #2322 approval-expiry patches
+            # combined via ``patch.multiple`` to stay under CPython's "too
+            # many statically nested blocks" limit (20) the parenthesised
             # ``with`` form imposes.
             # G3.11-T10 #1253 added validate_catalog_registry_coverage
             # to the lifespan after load_catalog. With _eager_import_connectors
@@ -368,6 +376,12 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),
                 stop_event_drain=AsyncMock(),
+                # #2322 — defensive: the gate above is pinned off so these
+                # never run, but patch them so a future default flip can't
+                # smuggle the real sweeper (and its get_settings() env read)
+                # back into this env-free test.
+                start_approval_expiry_sweeper=MagicMock(),
+                stop_approval_expiry_sweeper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
@@ -426,6 +440,11 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     memory_expiry_enabled=False,
                     topology_history_prune_enabled=False,
                     grant_expiry_enabled=False,
+                    # #2322 — pin the approval-TTL sweeper off; see the
+                    # sibling lifespan test for why a bare MagicMock
+                    # attribute (truthy) would otherwise start the real
+                    # sweeper and KeyError on KEYCLOAK_ISSUER_URL.
+                    approval_expiry_enabled=False,
                     scheduler_enabled=False,
                     agent_run_reaper_enabled=False,
                     event_drain_enabled=False,
@@ -441,9 +460,9 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
             patch("meho_backplane.main.start_grant_expiry_sweeper"),
             patch("meho_backplane.main.stop_grant_expiry_sweeper", new=AsyncMock()),
             # G11.3-T2 (#823) scheduler + G11.3-T4 (#825) agent_run-reaper
-            # + G11.3-T3 (#824) event-drain patches combined via
-            # ``patch.multiple`` to stay under CPython's "too many
-            # statically nested blocks" limit (20) the parenthesised
+            # + G11.3-T3 (#824) event-drain + #2322 approval-expiry patches
+            # combined via ``patch.multiple`` to stay under CPython's "too
+            # many statically nested blocks" limit (20) the parenthesised
             # ``with`` form imposes.
             # Same G3.11-T10 #1253 shape as the sibling lifespan test —
             # registry is empty under the mocks, so skip the catalog
@@ -457,6 +476,11 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),
                 stop_event_drain=AsyncMock(),
+                # #2322 — pinned off via the gate above; patched defensively
+                # (see the sibling lifespan test) so the real env-reading
+                # sweeper can never start in this env-free test.
+                start_approval_expiry_sweeper=MagicMock(),
+                stop_approval_expiry_sweeper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),

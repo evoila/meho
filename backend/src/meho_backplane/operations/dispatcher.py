@@ -230,6 +230,7 @@ from meho_backplane.connectors import (
     ResultHandle,
     resolve_connector_or_label,
 )
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
@@ -1061,6 +1062,29 @@ async def _run_branch_with_error_handling(
             duration_ms,
             expected_secret_ref=expected_secret_ref,
         )
+    except ConnectorAuthError as auth_exc:
+        # #2329: a session *establish* rejected the credential (401/403 at the
+        # login POST, family-wide across the VCF connectors). Before #2329
+        # every establish site wrapped this into a bare ``RuntimeError`` that
+        # fell through to the generic ``connector_error`` arm below, burying
+        # the auth cause in ``extras.exception_message`` -- exactly the opaque
+        # shape #2091 established the structured convention to prevent. Route
+        # it to the same ``connector_auth_failed`` builder the mid-session
+        # recovery path (#2067) reaches from the ``HTTPStatusError`` arm, so
+        # the code is emitted consistently regardless of *when* auth died.
+        # ``ConnectorAuthError`` subclasses ``SessionLoginError`` (a
+        # ``RuntimeError``), so this arm MUST sit ahead of the generic
+        # ``except Exception`` to win.
+        duration_ms = await _audit_error(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+        return result_connector_auth_failed(op_id, auth_exc, target, duration_ms)
     except Exception as exc:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(
@@ -1297,6 +1321,24 @@ async def _retry_after_session_invalidation(
             target=target,
             duration_ms=duration_ms,
         )
+    except ConnectorAuthError as retry_exc:
+        # #2329 convergence with #2067: the one-shot re-dispatch forces a
+        # cold-cache re-establish; if that re-login is itself rejected with a
+        # 401/403, the establish site raises ``ConnectorAuthError``. Classify
+        # it to the same ``connector_auth_failed`` code the first-failure path
+        # uses rather than flattening to ``connector_error`` in the generic
+        # arm below -- so a stale credential surfaced via mid-session recovery
+        # reads identically to one surfaced at first establish.
+        duration_ms = await _audit_error(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+        return result_connector_auth_failed(op_id, retry_exc, target, duration_ms)
     except Exception as retry_exc:
         duration_ms = await _audit_error(
             audit_id=audit_id,

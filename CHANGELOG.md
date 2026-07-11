@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — structured `connector_auth_failed` at session establish across the VCF family (#2329)
+
+- A session-establish login rejected by a rotated/stale/locked-out
+  credential (a `401`/`403` on `POST /api/session`, `/api/session/create`,
+  the VCF Automation provider/tenant logins, SDDC Manager `/v1/tokens`, or
+  vRLI `/api/v2/sessions`) now returns the structured
+  `connector_auth_failed` result instead of a bare
+  `connector_error: RuntimeError` that buried the auth cause in an
+  interpolated exception string. The envelope carries a `cause` sub-code
+  (`session_establish_401` / `_403`), the `target`, its `secret_ref`, a
+  `remediation` naming the `meho target credential set <name>` restage
+  command, and the original message in `raw_message` — the #2091
+  `connector_vault_forbidden` mold. The family connectors now raise a
+  shared `ConnectorAuthError` (a `SessionLoginError`/`RuntimeError`
+  subclass, so existing callers are unaffected) that the dispatcher
+  recognises ahead of its generic error arm and maps to the **same**
+  builder the mid-session-401 recovery path (#2067) reaches — so the code
+  is emitted consistently regardless of *when* auth fails, including when
+  the one-shot mid-session re-establish is itself rejected. A consumer can
+  now switch on `error_code` to distinguish "restage the stale credential"
+  from a generic connector crash (#2329).
+
 ### Tested — regression pin: a non-dry-run 1275-op-class spec ingest keeps the event loop responsive (#2333)
 
 - Pinned the v0.8.0 large-spec ingest crash fix end-to-end: a

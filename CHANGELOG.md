@@ -172,6 +172,18 @@ connector-related release-notes line.
   identity constants each package re-exports are preserved (relocated into the
   package `__init__.py`), so `from meho_backplane.connectors.<pkg> import
   <PROD>_CONNECTOR_ID` still resolves.
+- **Operator action — vRLI canonical-spec swap on the consumer deploy.** If a
+  deploy still serves the hand-edited **gist overlay** of the `vcf-logs-9.0`
+  OpenAPI spec, retire it in this upgrade: the two blockers that forced the
+  overlay are fixed as of v0.20.0 (`#2066` `{+path}` reserved-expansion render,
+  `#1796` `servers[]` base path), so the **canonical** spec now ingests clean.
+  Re-ingest the canonical spec, confirm it does not trip the `#2272`
+  YAML-timestamp ingest class, spot-check a read (`GET:/api/v2/version` → ok;
+  the typed `vrli.event.query` op is unaffected — typed reads have no ingest
+  dependency), then delete the gist. No MEHO code change is required — it is an
+  operator action on the deploy. Tracked with a runbook on `#2358` and
+  coordinated on `evoila-bosnia/claude-rdc-hetzner-dc#1790`.
+
 ### Changed — nsx/connector.py split under the file-size budget (#2356)
 
 - `nsx/connector.py` dropped from 600 to ~562 lines, back under the

@@ -729,6 +729,33 @@ def test_create_submit_input_less_cron_rerenders_modal_with_error() -> None:
     assert _trigger_count(_TENANT_A) == 0
 
 
+def test_create_submit_event_rerenders_modal_with_error() -> None:
+    """A kind=event create surfaces the 422 as a banner naming #826 (#2325)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "event",
+                "agent_definition_id": str(_AGENT_ID),
+                "event_filter": '{"connector_id": "bind9", "op_class": "write"}',
+                "timezone": "UTC",
+                "in_flight_policy": "fail_into_audit",
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "alert-error" in response.text
+    assert "#826" in response.text
+    assert _trigger_count(_TENANT_A) == 0
+
+
 def test_create_submit_rejects_operator_with_403() -> None:
     """An operator POST to create is 403'd server-side (the hidden button is UX only)."""
     _seed_tenant(_TENANT_A, "tenant-a")

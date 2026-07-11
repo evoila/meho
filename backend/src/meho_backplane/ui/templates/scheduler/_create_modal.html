@@ -58,6 +58,7 @@
       hx-target="#scheduler-modal-container"
       hx-swap="innerHTML"
       hx-disabled-elt="find button[type=submit]"
+      hx-disinherit="hx-disabled-elt"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
       class="space-y-3 py-2"
       aria-labelledby="scheduler-create-modal-title"

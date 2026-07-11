@@ -414,7 +414,7 @@ def test_list_targets_after_import_returns_all_names(client: TestClient) -> None
             headers={"Authorization": f"Bearer {_admin_token(key)}"},
         )
         assert r2.status_code == 200
-        listed_names = {t["name"] for t in r2.json()}
+        listed_names = {t["name"] for t in r2.json()["items"]}
         for entry in first_three:
             assert entry["name"] in listed_names
 

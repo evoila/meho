@@ -107,6 +107,23 @@ connector-related release-notes line.
   breadcrumb back to `/ui/agents` (the run detail now links the agents
   console directly, not only the runs list), matching the grants and
   principals sub-views.
+### Fixed — disinherited leaking `hx-disabled-elt` find-selectors across `/ui` modals (#2340)
+
+- Five operator-console modals (`scheduler` create-trigger, `memory`
+  create + body-edit, `conventions` create + edit) bound
+  `hx-disabled-elt="find button[type=submit]"` on the `<form>` to disable
+  the submit button while a request is in flight. Because `hx-disabled-elt`
+  is an *inherited* htmx attribute, each form's descendant htmx requests —
+  the debounced cron-validate / token-preview `POST`s and the in-form
+  Cancel `hx-get` — inherited the value and resolved `find button[type=submit]`
+  against their own (submit-button-less) subtree, logging
+  `The selector "find button[type=submit]" on hx-disabled-elt returned no
+  matches!` on every such request while the intended disable-submit
+  affordance silently never fired. Each form now carries
+  `hx-disinherit="hx-disabled-elt"` (the pattern established for the runbook
+  editor in #2174), scoping the value to the form's own submit. A generic
+  `test_ui_templates.py` guard enforces the discipline across every `/ui`
+  template so a new modal cannot reintroduce the leak.
 
 ### Fixed — unified the `/ui` CSRF double-submit token pattern (#2345)
 

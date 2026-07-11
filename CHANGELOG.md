@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Docs — curated-until-populator-covers policy for auto-only edge kinds + grandfather rule (#2336)
+
+- Documented that the four auto-discoverable topology edge kinds
+  (`runs-on`, `mounts`, `routes-through`, `belongs-to`) MAY be curated
+  on any pair no populator covers — v0.2 auto-discovery is
+  Kubernetes-only (base `discover_topology` is a no-op; only the k8s
+  connector overrides it), so on a non-k8s pair no probe emits the edge
+  and the curated write inserts clean (`source: curated, conflicts:
+  []`). §6 conflict detection stays dormant because it only keys off
+  `source='auto'` rows / existing different-kind edges.
+- Recorded the **grandfather commitment**: any populator that begins
+  covering a previously-uncovered kind ships with a one-shot
+  reconciliation that keeps pre-existing curated edges visible and
+  free of retroactive §6 conflicts — the same operator-owned-rows
+  principle `refresh._refresh_curated_edge` already applies for the
+  identical pair. Policy-only; the `curated_until_populator_covers`
+  bucket and the reconciliation job are deferred to the non-k8s
+  populator initiative. Updated `docs/architecture/topology.md` and
+  `docs/cross-repo/topology-annotation.md`.
+
 ### Fixed — unified the `/ui` CSRF double-submit token pattern (#2345)
 
 - The operator console's `/ui/*` write surfaces no longer `403

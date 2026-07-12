@@ -104,6 +104,11 @@ connector-related release-notes line.
   `allowNoMcpResourceUri` escape hatch is added (kept minimal) — a deliberate
   MCP-less bring-up sets a placeholder `config.backplaneUrl`, and `/mcp` stays
   per-request fail-closed regardless.
+- The chart's own `helm install + helm test (pgvector preflight)` CI lane —
+  an ingress-less install that set neither config value — now pins a
+  placeholder `config.backplaneUrl=https://meho-test.test` (matching the
+  surrounding `.test` fakes) so it satisfies the new render-time guard instead
+  of tripping it.
 
 ### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
 

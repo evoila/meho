@@ -43,6 +43,7 @@ All four share the same registration shape; vROps + vRLI + Fleet share the
 
 from typing import Final
 
+from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.connectors.vcf_operations.connector import VcfOperationsConnector
 from meho_backplane.connectors.vcf_operations.session import (
@@ -101,6 +102,7 @@ __all__ = [
     "VROPS_PRODUCT",
     "VROPS_TYPED_OPS",
     "VROPS_VERSION",
+    "SessionLoginError",
     "VcfOperationsConnector",
     "VcfOperationsCredentialsLoader",
     "VcfOperationsTargetLike",

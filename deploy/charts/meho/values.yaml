@@ -129,6 +129,16 @@ ingress:
 # period, 2s timeout × 3 failures = 15s detection window) so a flaky
 # dependency removes the pod from rotation promptly without triggering a
 # restart. Every field is operator-tunable.
+#
+# `startup` (Issue #2393) gates liveness/readiness until first boot
+# succeeds. First boot registers the full typed-op catalog and preloads the
+# fastembed embedding model before the app binds :8000 (~2-3 min, longer on
+# a cold install that downloads model weights into an empty cache PVC), so
+# the short-delay liveness probe would otherwise CrashLoopBackOff a
+# slow-but-healthy pod. The default budget is `failureThreshold` ×
+# `periodSeconds` = 30 × 10s = 300s (5 min); once it passes the kubelet
+# hands off to the liveness probe for fast hang detection. Clear
+# `probes.startup` to opt out on a fast cluster.
 probes:
   liveness:
     httpGet:
@@ -146,6 +156,15 @@ probes:
     periodSeconds: 5
     timeoutSeconds: 2
     failureThreshold: 3
+  startup:
+    httpGet:
+      path: /healthz
+      port: http
+    # 30 × 10s = 300s (5 min) first-boot budget; covers op-catalog
+    # registration + fastembed model preload/download on a cold install.
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 30
 
 # -- Container resources. Conservative production baselines for the v0.1
 # chassis backplane — sized for steady-state authn/authz traffic plus the

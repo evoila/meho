@@ -116,14 +116,29 @@ deployment path. Consumers mirroring through a private registry override
 
 ### Probes
 
-The Deployment always renders `livenessProbe` and `readinessProbe` against
-the backplane chassis endpoints from G2.1-T2
+The Deployment renders `startupProbe`, `livenessProbe`, and
+`readinessProbe` against the backplane chassis endpoints from G2.1-T2
 (`backend/src/meho_backplane/health.py`):
 
 | Probe | Endpoint | Failure semantics | Default timings (operator-tunable) |
 | --- | --- | --- | --- |
+| `startupProbe` | `/healthz` | Pod **restarts** once the budget is exhausted; disables liveness/readiness until it first passes | `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 30` (30 × 10s = 300s / 5-min first-boot budget) |
 | `livenessProbe` | `/healthz` (always 200 if the process is up) | Pod **restarts** on failure | `initialDelaySeconds: 30`, `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 3` |
 | `readinessProbe` | `/ready` (200 only when every registered probe in the readiness registry passes; 503 with an empty registry at the chassis stage) | Pod **removed from Service endpoints**, no restart | `initialDelaySeconds: 5`, `periodSeconds: 5`, `timeoutSeconds: 2`, `failureThreshold: 3` |
+
+The `startupProbe` (Issue #2393) exists because first boot registers the
+full typed-op catalog and preloads the fastembed embedding model inside the
+FastAPI lifespan **before** the app binds `:8000` — ~2-3 minutes, and longer
+on a cold install where the fastembed cache PVC is empty and the model
+weights are downloaded. The kubelet disables the liveness and readiness
+probes until the startup probe first succeeds, so a slow-but-healthy first
+boot no longer trips the short-delay liveness probe into a
+CrashLoopBackOff. The budget is `failureThreshold × periodSeconds` (300s by
+default); once it passes, the liveness probe's fast 30s detection window
+takes over for genuine hang detection. Inflating
+`probes.liveness.initialDelaySeconds` (the old-only lever) is strictly
+worse — it also blinds liveness to a real hang for the whole life of the
+Pod.
 
 The 30-second liveness `initialDelaySeconds` gives the FastAPI app time to
 import, build the JWKS cache, and bind structlog context before the first
@@ -133,12 +148,16 @@ total detection) makes the Pod fall out of rotation promptly when a
 downstream dependency goes flaky, without triggering an unnecessary
 restart of the backplane process itself.
 
-Probes are **always on** — there is no `enabled: false` escape valve.
-Disabling probes would mask startup deadlocks and let an unready Pod
-accept traffic; that tradeoff is never the right call for a governance
-backplane. Every field under `probes.liveness.*` and `probes.readiness.*`
-in `values.yaml` is operator-tunable for environments that need different
-timings.
+Liveness and readiness are **always on** — there is no `enabled: false`
+escape valve. Disabling them would mask startup deadlocks and let an
+unready Pod accept traffic; that tradeoff is never the right call for a
+governance backplane. Every field under `probes.liveness.*`,
+`probes.readiness.*`, and `probes.startup.*` in `values.yaml` is
+operator-tunable for environments that need different timings. The
+`startupProbe` alone is rendered under a `{{- with .Values.probes.startup }}`
+guard so an operator on a fast cluster can opt out by clearing
+`probes.startup` (e.g. `--set probes.startup=null`); it ships defaulted-on
+because slow first boots are the common case.
 
 The `/ready` endpoint **returns 503 by design** until G2.2 (Vault /
 Keycloak probes) and G2.3 (Alembic migration probe) register concrete
@@ -370,6 +389,7 @@ them).
 | `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |
 | `ingress.className` | `""` | Cluster default IngressClass when empty. |
 | `probes.liveness.*` / `probes.readiness.*` | `/healthz` / `/ready` httpGet + tuned timings | Operator-tunable; never disabled. |
+| `probes.startup.*` | `/healthz` httpGet + 5-min first-boot budget (#2393) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |

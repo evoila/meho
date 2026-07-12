@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — Helm chart `startupProbe` stops liveness crash-looping slow first boots (#2393)
+
+- The backplane Deployment now renders a `startupProbe` on `/healthz` from a
+  new `probes.startup.*` values subtree. The kubelet disables the liveness and
+  readiness probes until the startup probe first passes, so a slow-but-healthy
+  first boot — full typed-op catalog registration plus the fastembed
+  embedding-model preload before the app binds `:8000`, ~2-3 min and longer on
+  a cold install that downloads model weights into an empty cache PVC — no
+  longer trips the short-delay liveness probe into a CrashLoopBackOff.
+- The default budget is `failureThreshold: 30` × `periodSeconds: 10` = 300s
+  (5 min), operator-tunable. `values.schema.json` accepts the new
+  `probes.startup` subtree; liveness/readiness defaults are unchanged. Opt out
+  on a fast cluster by clearing `probes.startup` (e.g. `--set probes.startup=null`).
+
 ### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
 
 - The `connector_auth_failed` envelope's `extras.cause` is now **stage-aware**

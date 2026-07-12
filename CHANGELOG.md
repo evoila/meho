@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — keycloak user write-op password read routed through the credential-backend seam (#2401)
+
+- `keycloak.user.create` / `keycloak.user.reset_password` sourced the
+  operator-supplied `password_secret_ref` by opening an hvac Vault client
+  directly, bypassing the #2229 credential-backend seam. On a
+  `CREDENTIAL_BACKEND=gsm` (no-Vault) deploy this left both write ops with
+  no working credential path — a `gsm:` ref was treated as a literal Vault
+  path. The reader now resolves the ref through `load_vault_secret_data`
+  (the same seam the connector's admin-credential loader and kubeconfig
+  loader ride), so a `gsm:<project>/<secret>#password` ref reaches GCP
+  Secret Manager while schemeless Vault refs resolve byte-for-byte as
+  before (`password_secret_mount` / `password_secret_key` unchanged; the
+  `#field` fragment subsumes `password_secret_key` for schemed refs).
+  Approval-gating of both write ops is untouched.
+
 ### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
 
 - The `connector_auth_failed` envelope's `extras.cause` is now **stage-aware**

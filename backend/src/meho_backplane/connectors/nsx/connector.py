@@ -290,6 +290,11 @@ class NsxConnector(HttpConnector):
             )
             return xsrf
 
+    # #2396: NSX deliberately exposes NO ``invalidate_credentials`` hook. It
+    # caches only the session token (evicted by ``invalidate_session`` below);
+    # the service-account credentials are re-read from Vault via
+    # ``_session_loader`` on every establish, so a restage already converges on
+    # the next cold-session dispatch with no credential cache to evict.
     async def invalidate_session(self, target: NsxTargetLike) -> None:
         """Public duck-typed session-eviction hook for the dispatch path.
 

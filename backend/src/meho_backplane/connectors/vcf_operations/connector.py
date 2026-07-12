@@ -564,6 +564,16 @@ class VcfOperationsConnector(HttpConnector):
             path = f"{path}?{urlencode(query, doseq=True)}"
         return await self._post_json(target, path, operator=operator, json=body)
 
+    async def invalidate_credentials(self, target: VcfOperationsTargetLike) -> None:
+        """Public duck-typed credential-eviction hook for the dispatch path (#2396).
+
+        Delegates to the shared :class:`CredentialsCache.invalidate` so the
+        next credential read re-reads Vault. The dispatcher calls this hook on
+        an establish-auth failure so an operator's out-of-band restage
+        converges on the next dispatch without a backplane restart.
+        """
+        await self._creds.invalidate(target)
+
     async def aclose(self) -> None:
         """Clear cached session tokens + credentials, then tear down the httpx pool.
 

@@ -1585,3 +1585,248 @@ async def test_dispatch_recovery_preserves_per_tenant_cache_isolation(
     assert connector.attempts[("", str(target_b.id))] == 2
     assert ("", str(target_a.id)) in connector.invalidations
     assert ("", str(target_b.id)) in connector.invalidations
+
+
+# ---------------------------------------------------------------------------
+# #2396: establish-auth-failure credential eviction
+#
+# The dispatcher must call a duck-typed ``invalidate_credentials(target)`` hook
+# from BOTH ``ConnectorAuthError`` arms -- the first-establish arm on the main
+# ladder and the post-invalidation arm inside
+# ``_retry_after_session_invalidation`` -- so a connector that cached the
+# credential bytes it read from Vault *before* a rejected login re-reads the
+# store on the next dispatch after an operator restage, with no backplane
+# restart. The hook is duck-typed (getattr) so its absence stays harmless.
+# ---------------------------------------------------------------------------
+
+
+class _EstablishAuthEvictConnector(_EstablishAuthConnector):
+    """Establish-auth-fails AND advertises the #2396 credential-eviction hook.
+
+    Models a real caching connector (the sddc_manager shape): its login POST
+    401s with credential bytes it cached before the attempt, and it exposes the
+    duck-typed ``invalidate_credentials`` hook the dispatcher must call from the
+    first-establish ``ConnectorAuthError`` arm. Records evictions keyed on
+    ``(tenant_id, target.id)`` so the test can assert exactly-one eviction.
+    """
+
+    impl_id = "vcfops-rest-establish-evict"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.evictions: list[tuple[str, str]] = []
+
+    async def invalidate_credentials(self, target: Any) -> None:
+        self.evictions.append(
+            (str(getattr(target, "tenant_id", "")), str(getattr(target, "id", "")))
+        )
+
+
+class _RetryThenEstablishAuthConnector(_Http401Connector):
+    """401 on first dispatch, then a ``ConnectorAuthError`` on the #2067 re-dispatch.
+
+    Models the mid-session-recovery path converging on #2396: a stale session
+    token 401s, ``invalidate_session`` evicts it, and the cold-cache
+    re-establish re-reads Vault yet the (also-stale) credential is itself
+    rejected -- the login POST raises ``ConnectorAuthError``, landing in the
+    dispatcher's post-invalidation ``ConnectorAuthError`` arm inside
+    ``_retry_after_session_invalidation``. That arm must evict credentials so
+    the next dispatch after a restage re-reads. Advertises both hooks and
+    records their calls per cache key.
+    """
+
+    impl_id = "vcfops-rest-retry-establish"
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.attempts: dict[tuple[str, str], int] = {}
+        self.session_invalidations: list[tuple[str, str]] = []
+        self.cred_evictions: list[tuple[str, str]] = []
+
+    def _key(self, target: Any) -> tuple[str, str]:
+        return (str(getattr(target, "tenant_id", "")), str(getattr(target, "id", "")))
+
+    def _next(self, target: Any) -> dict[str, Any]:
+        key = self._key(target)
+        self.attempts[key] = self.attempts.get(key, 0) + 1
+        if self.attempts[key] == 1:
+            # First dispatch: a stale session token yields an upstream 401.
+            raise _make_http_status_error(
+                headers=self.response_headers,
+                json_body=self.response_body,
+                status_code=401,
+            )
+        # Re-dispatch after invalidate_session: the cold re-establish re-reads
+        # the still-stale credential and the login POST is itself rejected.
+        http_exc = _make_http_status_error(
+            headers=self.response_headers,
+            json_body={"message": "Cannot complete login: incorrect user name or password"},
+            status_code=401,
+        )
+        message = f"sddc session establish failed for target {getattr(target, 'name', None)!r}"
+        raise (
+            session_establish_auth_error(http_exc, message=message, target=target)
+            or RuntimeError(message)
+        ) from http_exc
+
+    async def _request_json(  # type: ignore[override]
+        self,
+        target: Any,
+        method: str,
+        path: str,
+        *,
+        operator: Operator,
+        params: dict[str, Any] | None = None,
+        json: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._next(target)
+
+    async def _post_json(  # type: ignore[override]
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        verb: str = "POST",
+        json: dict[str, Any] | None = None,
+        data: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        return self._next(target)
+
+    async def invalidate_session(self, target: Any) -> None:
+        self.session_invalidations.append(self._key(target))
+
+    async def invalidate_credentials(self, target: Any) -> None:
+        self.cred_evictions.append(self._key(target))
+
+
+@pytest.mark.asyncio
+async def test_dispatch_establish_auth_failure_evicts_cached_credentials(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#2396: the first-establish ``ConnectorAuthError`` arm calls ``invalidate_credentials``.
+
+    A connector that caches credentials before a rejected login advertises the
+    duck-typed hook; the dispatcher evicts on the establish-auth failure so the
+    operator's next-dispatch restage re-reads the store with no restart. The
+    result is still the structured ``connector_auth_failed`` envelope.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-establish-evict",
+        cls=_EstablishAuthEvictConnector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-establish-evict",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    target = _FakeTarget(name="sddc-prod", host="sddc.lab.internal")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-establish-evict-9",
+        op_id="GET:/api/v2/events",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+    assert result.extras["cause"] == "session_establish_401"
+
+    connector = get_or_create_connector_instance(_EstablishAuthEvictConnector)
+    assert isinstance(connector, _EstablishAuthEvictConnector)
+    # Exactly one eviction for this cache key -- the establish arm fired the hook.
+    assert connector.evictions == [("", str(target.id))]
+
+
+@pytest.mark.asyncio
+async def test_dispatch_establish_auth_failure_without_hook_is_harmless(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A connector advertising no ``invalidate_credentials`` hook still resolves cleanly.
+
+    The eviction call is ``getattr``-guarded, so a stateless connector (no
+    credential cache, no hook) surfaces the same ``connector_auth_failed``
+    envelope with no error -- absence is harmless (the nsx / vmware_rest case).
+    """
+    assert not hasattr(_EstablishAuthConnector, "invalidate_credentials")
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-establish",
+        cls=_EstablishAuthConnector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-establish",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-establish-9",
+        op_id="GET:/api/v2/events",
+        target=_FakeTarget(name="vc-prod", host="vc-prod.lab.internal"),
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_post_invalidation_establish_auth_failure_evicts_credentials(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#2396: the post-invalidation ``ConnectorAuthError`` arm also evicts credentials.
+
+    The #2067 mid-session recovery evicts the session token and re-dispatches;
+    when that cold-cache re-establish is itself rejected with a
+    ``ConnectorAuthError``, the credential is stale. The dispatcher must evict
+    it (in addition to the token ``invalidate_session`` already dropped) so the
+    next dispatch after a restage re-reads. The result stays
+    ``connector_auth_failed``.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-rest-retry-establish",
+        cls=_RetryThenEstablishAuthConnector,
+    )
+    await _seed(
+        session=session,
+        impl_id="vcfops-rest-retry-establish",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    target = _FakeTarget(name="vc-prod", host="vc-prod.lab.internal")
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id="vcfops-rest-retry-establish-9",
+        op_id="GET:/api/v2/events",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_auth_failed"
+
+    connector = get_or_create_connector_instance(_RetryThenEstablishAuthConnector)
+    assert isinstance(connector, _RetryThenEstablishAuthConnector)
+    key = ("", str(target.id))
+    # Initial 401 + one re-dispatch that establish-auth-fails.
+    assert connector.attempts[key] == 2
+    # The #2067 token eviction fired, and the #2396 credential eviction fired.
+    assert connector.session_invalidations == [key]
+    assert connector.cred_evictions == [key]

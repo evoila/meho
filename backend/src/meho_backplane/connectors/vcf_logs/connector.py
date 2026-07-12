@@ -432,6 +432,18 @@ class VcfLogsConnector(HttpConnector):
         """
         await self._invalidate_session(target)
 
+    async def invalidate_credentials(self, target: VcfLogsTargetLike) -> None:
+        """Public duck-typed credential-eviction hook for the dispatch path (#2396).
+
+        Delegates to the shared :class:`CredentialsCache.invalidate` so the
+        next credential read re-reads Vault. :meth:`invalidate_session`
+        deliberately leaves the credential cache intact (a 440/401 means the
+        *token* expired); the dispatcher calls this hook on an establish-auth
+        failure so an operator's out-of-band restage converges on the next
+        dispatch without a backplane restart.
+        """
+        await self._credentials.invalidate(target)
+
     async def _invalidate_session(self, target: VcfLogsTargetLike) -> None:
         """Drop the cached session token for *target*.
 

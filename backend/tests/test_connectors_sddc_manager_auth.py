@@ -30,7 +30,7 @@ from meho_backplane.connectors._shared.system_operator import (
     synthesise_system_operator,
 )
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
-from meho_backplane.connectors._shared.vcf_auth import SessionLoginError
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError, SessionLoginError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
@@ -550,6 +550,63 @@ async def test_invalidate_session_evicts_token_and_re_mints_on_next_call() -> No
 
         await connector.auth_headers(_TARGET_A, operator=_make_operator())
         assert token_route.call_count == 2
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# invalidate_credentials — the #2396 establish-auth-failure eviction seam
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invalidate_credentials_reloads_after_establish_401_restage() -> None:
+    """#2396 red-today: a restaged credential is re-read after establish-auth eviction.
+
+    The credential cache is written *before* the login POST (``connector.py``
+    caches ``_creds_cache`` then calls ``POST /v1/tokens``), so a login that
+    401s leaves the rejected bytes cached and ``invalidate_session`` leaves
+    them intact by design. Without an eviction path every re-dispatch replays
+    the rejected credential until a restart. This test proves the fix: the
+    first login 401s -> ``ConnectorAuthError`` (loader call 1); the dispatcher
+    calls ``invalidate_credentials``; the operator restages the correct
+    password; the next ``auth_headers`` re-runs the loader (call-count 2) and
+    the login succeeds -- no backplane restart. Red before #2396: the method
+    did not exist.
+    """
+    calls = {"n": 0}
+    creds = {"username": "svc-old", "password": "wrong"}
+
+    async def _swappable_loader(_target: SddcTargetLike, _operator: Operator) -> dict[str, str]:
+        calls["n"] += 1
+        return dict(creds)
+
+    def _login(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if body["password"] == "correct":
+            return httpx.Response(200, json={"accessToken": f"tok-{body['username']}"})
+        return httpx.Response(401, json={"message": "bad credentials"})
+
+    connector = SddcManagerConnector(credentials_loader=_swappable_loader)
+    async with respx.mock(base_url="https://sddc-a.test.invalid") as mock:
+        mock.post(_TOKEN_PATH).mock(side_effect=_login)
+
+        # First dispatch: the wrong staged password is cached, then rejected.
+        with pytest.raises(ConnectorAuthError):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        assert calls["n"] == 1
+        assert target_cache_key(_TARGET_A) in connector._creds_cache
+
+        # The dispatcher's establish-auth arm evicts the cached credential.
+        await connector.invalidate_credentials(_TARGET_A)
+        assert target_cache_key(_TARGET_A) not in connector._creds_cache
+
+        # The operator restages the corrected credential out of band.
+        creds.update(username="svc-new", password="correct")
+
+        # The next dispatch re-reads the store (call-count 2) and succeeds.
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        assert calls["n"] == 2
+        assert headers == {"Authorization": "Bearer tok-svc-new"}
     await connector.aclose()
 
 

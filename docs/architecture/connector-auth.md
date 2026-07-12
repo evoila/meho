@@ -218,6 +218,35 @@ The guards split on *how* they identify a system/operator-less caller:
 the `auth_model == "shared_service_account"` boundary — and does not itself
 reject the system caller; the loader and the cache guards do.)
 
+### Cache eviction — establish-auth failures (#2396)
+
+The credential caches above are populated on the **first** load and are
+otherwise long-lived: the credential dict is written *before* the login
+attempt (e.g. `sddc-manager` writes `_creds_cache` then calls
+`POST /v1/tokens`), and the session-token invalidation seam
+(`invalidate_session`, the #2067 dispatch-path recovery) deliberately leaves
+the credential cache intact — a mid-session 401 means the *token* expired, not
+that the credential is wrong. That left one gap: a credential rejected at
+**establish** time (a rotated/stale password the login POST 401/403s) stayed
+cached, so an operator's out-of-band restage never took effect until a
+backplane restart.
+
+Since #2396 the dispatcher evicts the cached credential on an establish-auth
+failure. Each caching connector exposes a duck-typed
+`invalidate_credentials(target)` hook (the establish-time companion to
+`invalidate_session`) that pops its `_creds_cache` entry under the credential
+lock, or delegates to `CredentialsCache.invalidate` for the shared-VCF-helper
+consumers. The dispatcher calls it — `getattr`-guarded — from **both**
+`ConnectorAuthError` arms (first-establish and post-`invalidate_session`
+recovery), so the **next** dispatch after a restage re-reads Vault and
+converges with no restart. Eviction is not paired with an immediate retry: at
+failure time the restage has not happened yet, so a retry would only replay the
+rejected bytes; convergence needs the operator's restage between dispatches.
+
+`nsx` and `vmware-rest` expose no hook by design — they cache only the session
+token and re-read the service-account credential from Vault on every establish,
+so a restage already converges on the next cold-session dispatch.
+
 ### Why not key the cache on the operator too
 
 Under `shared_service_account` the underlying credential is shared. A

@@ -106,6 +106,24 @@ connector-related release-notes line.
   error). `net.*` ops classify as reads in the broadcast feed
   (#2406 / #2405).
 
+### Fixed — connector credential cache evicted on establish-auth failure (#2396)
+
+- Establish-time auth failures (a login POST rejected with 401/403) now evict
+  the connector's cached credentials so an operator's out-of-band restage
+  converges on the next dispatch **without a backplane restart**. Previously a
+  connector cached the credential bytes it read from Vault *before* attempting
+  the login (e.g. `SddcManagerConnector` writes `_creds_cache` ahead of
+  `POST /v1/tokens`), and `invalidate_session` deliberately left them intact —
+  so a rejected credential replayed forever until a process restart.
+- The dispatcher calls a duck-typed `invalidate_credentials(target)` hook from
+  both `ConnectorAuthError` arms (first-establish and post-`invalidate_session`
+  recovery). The hook is wired family-wide across the caching connectors
+  (`sddc_manager`, `harbor`, `argocd`, `proxmox`, `gcloud`, `hetzner_robot`,
+  `rabbitmq`) and delegates to the shared `CredentialsCache.invalidate` on the
+  `vcf_logs` / `vcf_fleet` / `vcf_operations` consumers. `nsx` and `vmware_rest`
+  are intentionally excluded — they re-read credentials on every establish and
+  cache no raw credential.
+
 ### Fixed — vROps OpsToken session auth
 
 - Rebuild the `vcf-operations` (vROps) connector auth on an acquired-token

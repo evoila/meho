@@ -355,6 +355,60 @@ async def test_acquire_401_surfaces_session_login_error_naming_target() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalidate_credentials_reloads_after_restage() -> None:
+    """#2396: invalidate_credentials drops the credential cache so a restage is re-read.
+
+    Establish-failure flow (post-#2395 OpsToken session): the first acquire is
+    rejected because the staged credential is wrong, so no session token is
+    cached and the connector still holds the wrong credential bytes in the
+    shared :class:`CredentialsCache` (read at line 314 *before* the acquire).
+    Without eviction the next ``auth_headers`` re-reads that cached wrong
+    credential (loader call-count stays 1) and re-acquires with it forever —
+    the bug #2396 fixes. The dispatcher's establish-auth arm calls the new
+    duck-typed ``invalidate_credentials`` hook (which delegates to
+    :meth:`CredentialsCache.invalidate`); after the operator restages, the next
+    ``auth_headers`` re-runs the loader (call-count 2), reads the corrected
+    credential, and the acquire succeeds — with **no backplane restart**. Red
+    before #2396: ``invalidate_credentials`` did not exist.
+    """
+    from meho_backplane.connectors.vcf_operations import SessionLoginError
+
+    call_count = 0
+    creds = {"username": "svc-old", "password": "old-pass"}
+
+    async def _swappable_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
+        nonlocal call_count
+        call_count += 1
+        return dict(creds)
+
+    connector = VcfOperationsConnector(credentials_loader=_swappable_loader)
+
+    # The staged credential is wrong: the first token/acquire is rejected.
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(401, json={"message": "invalid_credentials"})
+        with pytest.raises(SessionLoginError):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    # Loader ran once and the wrong credential is now cached (read before acquire).
+    assert call_count == 1
+
+    # The dispatcher evicts the cached (wrong) credential on the establish-auth failure.
+    await connector.invalidate_credentials(_TARGET_A)
+
+    # The operator restages the corrected credential out of band.
+    creds.update(username="svc-new", password="new-pass")
+
+    # Next dispatch re-reads Vault (loader call-count 2) and the acquire succeeds.
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert call_count == 2
+    assert acquire_route.called
+    assert headers == {"Authorization": f"OpsToken {_OPS_TOKEN}"}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
 async def test_acquire_missing_token_in_body_raises() -> None:
     """A 2xx response without a ``token`` field raises naming the target.
 

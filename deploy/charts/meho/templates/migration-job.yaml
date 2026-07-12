@@ -71,7 +71,22 @@ spec:
       # (subject to `backoffLimit`), which is cheaper than re-scheduling
       # the whole Pod for transient asyncpg connection errors.
       restartPolicy: OnFailure
-      serviceAccountName: {{ include "meho.serviceAccountName" . }}
+      # Deliberately NO `serviceAccountName`. This Job is a
+      # `pre-install,pre-upgrade` hook, so Helm schedules it BEFORE it
+      # creates the chart's normal (non-hook) resources — the `meho`
+      # ServiceAccount (templates/serviceaccount.yaml) among them.
+      # Referencing that SA here deadlocks a fresh `helm install`: the
+      # apiserver rejects the migration pod with
+      # `serviceaccount "meho" not found` on every admission attempt until
+      # the hook exhausts its retries and the release times out (#2391).
+      # The migration runner needs no Kubernetes API access, so the pod
+      # falls back to the namespace `default` ServiceAccount (created by
+      # the SA controller in every namespace, hence always present at hook
+      # time) and — with the token mount disabled just below — carries no
+      # ServiceAccount token at all. Do NOT re-add `serviceAccountName`
+      # here, and do NOT annotate the shared `meho` SA as a hook: it backs
+      # the running Deployment, and any hook-delete-policy would delete it
+      # out from under that Deployment.
       automountServiceAccountToken: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:

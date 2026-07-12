@@ -224,10 +224,21 @@ Pod spec:
   garbage-collection backstop: even if `helm uninstall` is delayed, the
   Job + Pod logs are reaped after the configured window (10 minutes by
   default).
-- Same `serviceAccountName`, `imagePullSecrets`, and pod/container
-  `securityContext` as the backplane Deployment (`runAsNonRoot`,
-  `readOnlyRootFilesystem`, `drop: [ALL]`), with `/tmp` mounted as an
-  `emptyDir` to keep the read-only root invariant.
+- **No `serviceAccountName`** — unlike the backplane Deployment, the Job
+  deliberately omits it (#2391). As a `pre-install,pre-upgrade` hook the
+  Job is scheduled *before* Helm creates the chart's normal (non-hook)
+  resources, so referencing the chart-managed `meho` ServiceAccount here
+  deadlocks a fresh `helm install` (`serviceaccount "meho" not found` on
+  every admission attempt until the release times out). The runner needs
+  no Kubernetes API access, so the pod falls back to the namespace
+  `default` SA and — with `automountServiceAccountToken: false` — mounts
+  no token. Annotating the shared `meho` SA as a hook is *not* the fix:
+  it backs the running Deployment and a hook-delete-policy would delete
+  it out from under that Deployment.
+- Same `imagePullSecrets` and pod/container `securityContext` as the
+  backplane Deployment (`runAsNonRoot`, `readOnlyRootFilesystem`,
+  `drop: [ALL]`), with `/tmp` mounted as an `emptyDir` to keep the
+  read-only root invariant.
 - `envFrom` reuses the backplane's ConfigMap so any Alembic-relevant env
   vars (pool sizes, timeouts) stay in lock-step; `DATABASE_URL` is
   pulled from `Values.postgres.credentialsSecret` at the `url` key

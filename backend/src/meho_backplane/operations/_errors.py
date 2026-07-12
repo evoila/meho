@@ -917,16 +917,104 @@ def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -
     upstream while the backplane-side Vault copy lagged -- the routine event
     the filing (#2329) documents -- so the fix is to restage the credential,
     not to widen a policy.
+
+    #2400: names the **real** staging surface. The prior text pointed at
+    ``meho target credential set <name>``, which does not exist in the CLI --
+    it sent both MFC 401 reporters (#2395, #2396) down a credential rabbit
+    hole citing a phantom command. A target's credential is staged by writing
+    it back to its Vault ``secret_ref`` with ``meho vault kv put``.
     """
     who = f"target {target_name!r}" if target_name else "this target"
     ref_clause = f" (secret_ref {secret_ref!r})" if secret_ref else ""
-    name_arg = target_name if target_name else "<name>"
     return (
         f"the credential for {who}{ref_clause} appears stale or wrong -- most "
         f"likely the upstream service-account password was rotated while the "
-        f"backplane-side Vault copy lagged. Restage it via "
-        f"`meho target credential set {name_arg}` (or the equivalent Vault "
-        f"write), then retry."
+        f"backplane-side Vault copy lagged. Restage it by writing the corrected "
+        f"secret back to its Vault path with "
+        f"`meho vault kv put <mount> <path> --data <field>=<value>`, then retry."
+    )
+
+
+def _auth_scheme_remediation(target_name: str | None) -> str:
+    """The check-the-auth-scheme remediation clause (#2400).
+
+    Emitted only on the ``after_relogin`` stage: a forced re-login SUCCEEDED
+    yet the fresh session was still rejected, so the credential logs in fine
+    and restaging it is the wrong fix. The actionable cause is a mismatched
+    auth scheme / ``auth_model`` between the connector and the appliance (the
+    #2395 vROps class, where stateless Basic was presented to an appliance
+    that only accepts an acquired-token session). Names no CLI command --
+    the fix is a connector/target-config correction, not a Vault write.
+    """
+    who = f"target {target_name!r}" if target_name else "this target"
+    return (
+        f"the credential for {who} logs in fine (the forced re-login "
+        f"succeeded) but the fresh session was still rejected, so this is not a "
+        f"stale credential -- do NOT restage. Verify the target's auth_model / "
+        f"authorization scheme against what the connector and the appliance "
+        f"expect."
+    )
+
+
+#: Shared doc-reference tail every ``connector_auth_failed`` summary ends with.
+_AUTH_FAILED_DOC_TAIL = (
+    "See docs/architecture/connector-auth.md for the connector auth contract "
+    "and docs/codebase/error-message-shape.md for the dispatch error convention."
+)
+
+
+def _auth_failed_summary(
+    *,
+    stage: Literal["establish", "dispatch", "after_relogin"],
+    status_code: int,
+    host: str,
+    remediation: str,
+    relogin: Literal["not_available", "attempted_failed", "reestablished"],
+) -> str:
+    """Compose the stage-aware operator-facing ``connector_auth_failed`` summary (#2400).
+
+    The text describes what the dispatcher **actually did**, not a
+    one-size-fits-all story. Three stages:
+
+    * ``establish`` -- the login POST itself was rejected (a
+      :class:`ConnectorAuthError`). ``relogin == "attempted_failed"`` narrows
+      it to a re-login POST rejected after a mid-session expiry.
+    * ``dispatch`` -- an auth-class status from a connector with **no**
+      ``invalidate_session`` hook: no session stage happened, so no re-login
+      was attempted. The old "already re-logged-in and retried once" claim
+      was false here and is dropped.
+    * ``after_relogin`` -- the **only** stage that re-logged in: the forced
+      re-establish SUCCEEDED and the fresh session was still rejected, so the
+      "already re-logged-in and retried once" sentence lives here alone.
+    """
+    if stage == "establish":
+        lead = (
+            f"connector_auth_failed: the login itself was rejected (HTTP "
+            f"{status_code}) for {host} -- the credential was refused at "
+            f"session establish."
+        )
+        if relogin == "attempted_failed":
+            lead = (
+                f"{lead} This followed a forced re-login after a mid-session "
+                f"auth-class status; the re-login POST was itself rejected."
+            )
+        return f"{lead} {remediation} {_AUTH_FAILED_DOC_TAIL}"
+    if stage == "after_relogin":
+        return (
+            f"connector_auth_failed: the upstream returned an auth/session "
+            f"failure (HTTP {status_code}) for {host}. The session was already "
+            f"re-logged-in and retried once on a session-expiry status, and the "
+            f"fresh session was still rejected. {remediation} "
+            f"{_AUTH_FAILED_DOC_TAIL}"
+        )
+    return (
+        f"connector_auth_failed: the upstream returned an auth/session failure "
+        f"(HTTP {status_code}) for {host}. The connector reached the host but "
+        f"its per-request credential was rejected; this connector holds no "
+        f"re-loginable session (no invalidate_session hook), so no re-login was "
+        f"attempted. {remediation} If this persists after restaging, verify the "
+        f"target's auth scheme / auth_model against what the appliance expects. "
+        f"{_AUTH_FAILED_DOC_TAIL}"
     )
 
 
@@ -935,6 +1023,8 @@ def result_connector_auth_failed(
     exc: httpx.HTTPStatusError | ConnectorAuthError,
     target: Any,
     duration_ms: float,
+    *,
+    relogin: Literal["not_available", "attempted_failed", "reestablished"] = "not_available",
 ) -> OperationResult:
     """Connector raised an upstream **auth/session failure** on dispatch.
 
@@ -946,17 +1036,34 @@ def result_connector_auth_failed(
     :exc:`httpx.HTTPStatusError` with an auth-class status
     (:data:`_AUTH_FAILED_STATUSES`: ``401``, plus vRLI's ``440``).
 
-    ``401`` is the load-bearing case and is connector-agnostic. The
-    dispatch path itself now re-logs-in and retries once on an auth-class
-    status when the connector advertises ``invalidate_session`` (G0.29-T2
-    #2067), so a status that reaches *this* builder means **re-login also
-    failed** -- not a transient blip but a credential / ``auth_model``
-    problem the operator must fix. Routing
+    ``401`` is the load-bearing case and is connector-agnostic. Routing
     it through :func:`result_connector_error` flattened that into an
     opaque ``connector_error: HTTPStatusError`` with the cause buried in
     ``extras["exception_message"]``, which is exactly the diagnosability
     gap that made the #1798 vRLI dispatch (seen as ``connector_error
     (440)``) look like a stub-auth problem.
+
+    #2400 makes the ``cause`` and the summary **stage-aware** so the text
+    describes what the dispatcher actually did, keyed on the ``relogin``
+    discriminator the dispatcher threads in:
+
+    * ``session_establish_<status>`` (``ConnectorAuthError``) -- the login
+      POST itself was rejected; restaging the credential is the right fix.
+    * ``dispatch_<status>`` (``relogin="not_available"``) -- an auth-class
+      status on a connector with **no** ``invalidate_session`` hook. No
+      session stage happened, so no re-login was attempted; the earlier
+      blanket "the session was already re-logged-in and retried once" claim
+      was false here (the #2067 retry is gated on the hook) and is dropped.
+    * ``session_dispatch_<status>_after_relogin``
+      (``relogin="reestablished"``) -- the dispatcher forced a re-login that
+      SUCCEEDED and the fresh session was still rejected. The credential logs
+      in fine, so this is a scheme / ``auth_model`` problem, NOT a stale
+      credential -- the remediation says do NOT restage. This is the only
+      stage that carries the "already re-logged-in and retried once" sentence.
+
+    The old ambiguous ``session_dispatch_<status>`` (no qualifier) is no
+    longer emitted on any path; consumers that matched on ``session_dispatch_``
+    now match only the genuinely-had-a-session ``_after_relogin`` case.
 
     This builder names the **host** (read from ``target.host`` -- the
     operator's own configured value, so not an info-leak per
@@ -980,8 +1087,9 @@ def result_connector_auth_failed(
     raised family-wide when a login POST returns 401/403). Both surface the
     same ``connector_auth_failed`` code, so a consumer switches on it
     regardless of *when* auth died -- the convergence the filing asked for.
-    The ``extras.cause`` sub-code distinguishes them
-    (``session_establish_401`` / ``_403`` vs ``session_dispatch_<status>``).
+    The ``extras.cause`` sub-code distinguishes the stages (#2400):
+    ``session_establish_<status>`` vs ``dispatch_<status>`` vs
+    ``session_dispatch_<status>_after_relogin``.
 
     ``extras`` carries the machine-usable fields an agent can branch on
     without re-parsing the transport error: ``error_code``, ``cause`` (the
@@ -993,7 +1101,13 @@ def result_connector_auth_failed(
     ``message`` when JSON, else capped raw text, ``None`` when empty --
     shared with the 403/422 builders via :func:`_http_upstream_message`).
     """
+    stage: Literal["establish", "dispatch", "after_relogin"]
     if isinstance(exc, ConnectorAuthError):
+        # A login POST was rejected -- the establish stage, whichever call
+        # site raised it (first establish, or a forced re-login whose POST
+        # was itself rejected -- ``relogin == "attempted_failed"``). The
+        # ``session_establish_<status>`` cause is unchanged (#2400).
+        stage = "establish"
         status_code = exc.status_code
         cause = exc.cause
         raw_message: str | None = _sanitize_free_text(str(exc))
@@ -1013,26 +1127,33 @@ def result_connector_auth_failed(
     else:
         response = exc.response
         status_code = response.status_code
-        cause = f"session_dispatch_{status_code}"
         raw_message = None
         target_name = getattr(target, "name", None)
         host = getattr(target, "host", None) or "the target host"
         secret_ref = getattr(target, "secret_ref", None)
         upstream_message = _http_upstream_message(response)
-    remediation = _auth_restage_remediation(target_name, secret_ref)
-    summary = (
-        f"connector_auth_failed: the upstream returned an auth/session "
-        f"failure (HTTP {status_code}) for {host}. The connector reached the "
-        f"host but its credential or session was rejected. On the dispatch "
-        f"path the session was already re-logged-in and retried once on a "
-        f"session-expiry status (401 or vRLI's 440), so a status reaching you "
-        f"there means re-login also failed; at session establish a 401/403 "
-        f"means the login itself was rejected. Either way {remediation} If "
-        f"this persists after restaging, verify the target's auth_model "
-        f"against what the connector expects. See "
-        f"docs/architecture/connector-auth.md for the connector auth contract "
-        f"and docs/codebase/error-message-shape.md for the dispatch error "
-        f"convention."
+        # #2400: the HTTPStatusError branch is stage-aware on ``relogin``.
+        # ``reestablished`` -- the dispatcher forced a re-login that SUCCEEDED
+        # and the fresh session was still rejected (keep the ``session_``
+        # prefix + the ``_after_relogin`` qualifier). Anything else means no
+        # session stage happened (no ``invalidate_session`` hook), so the
+        # cause drops the misleading ``session_`` prefix entirely.
+        if relogin == "reestablished":
+            stage = "after_relogin"
+            cause = f"session_dispatch_{status_code}_after_relogin"
+        else:
+            stage = "dispatch"
+            cause = f"dispatch_{status_code}"
+    if stage == "after_relogin":
+        remediation = _auth_scheme_remediation(target_name)
+    else:
+        remediation = _auth_restage_remediation(target_name, secret_ref)
+    summary = _auth_failed_summary(
+        stage=stage,
+        status_code=status_code,
+        host=host,
+        remediation=remediation,
+        relogin=relogin,
     )
     if upstream_message is not None:
         summary = f"{summary} Upstream said: {upstream_message}"

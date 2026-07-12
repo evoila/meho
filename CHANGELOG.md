@@ -105,6 +105,43 @@ connector-related release-notes line.
   it adds a permanent second-DSN/second-Secret surface and a standing superuser
   credential for a one-time bootstrap step that a documented `psql` line (or
   CNPG `postInitSQL`) covers. Migration `0003` SQL is unchanged.
+### Fixed — migrate hook ServiceAccount fresh-install ordering deadlock (#2391)
+
+- The `meho-migrate` `pre-install,pre-upgrade` hook Job no longer sets
+  `serviceAccountName`. Helm schedules hooks before it creates the chart's
+  normal (non-hook) resources, so the Job referenced the `meho`
+  ServiceAccount that did not exist yet — a fresh `helm install` deadlocked
+  with `serviceaccount "meho" not found` on every admission attempt until
+  the release timed out. The migration runner needs no Kubernetes API
+  access, so the pod now falls back to the namespace `default` SA and
+  (with `automountServiceAccountToken: false` unchanged) carries no token.
+  A `helm template` unit assertion pins that the hook Job renders without
+  `serviceAccountName` while the backplane Deployment keeps its own (#2391).
+
+### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
+
+- The `connector_auth_failed` envelope's `extras.cause` is now **stage-aware**
+  and describes what the dispatcher actually did: `session_establish_<status>`
+  (the login POST itself was rejected), `dispatch_<status>` (an auth-class
+  status on a connector with **no** `invalidate_session` hook — no session
+  stage happened, so no re-login was attempted), and
+  `session_dispatch_<status>_after_relogin` (the dispatcher force-re-logged-in,
+  the re-login SUCCEEDED, and the fresh session was **still** rejected). The
+  false "the session was already re-logged-in and retried once" sentence now
+  appears **only** on the `after_relogin` envelope.
+- **Cause-string rename for consumers.** The old ambiguous unqualified
+  `session_dispatch_<status>` is no longer emitted on any path. A consumer that
+  matched on `session_dispatch_` now matches only the genuinely-had-a-session
+  `session_dispatch_<status>_after_relogin` case; a no-session dispatch failure
+  is `dispatch_<status>`.
+- **Truthful remediation.** The restage hint named a phantom
+  `meho target credential set <name>` command that does not exist in the CLI —
+  it sent both MFC 401 reporters (#2395, #2396) down a credential rabbit hole.
+  The establish / `dispatch` stages now name the real staging surface
+  `meho vault kv put <mount> <path> --data <field>=<value>`; the `after_relogin`
+  stage says do **NOT** restage (the credential logs in fine — verify the
+  target's `auth_model` / auth scheme) and names no command. The phantom
+  command is also removed from `docs/codebase/error-message-shape.md`.
 
 ### Fixed — connector credential cache evicted on establish-auth failure (#2396)
 

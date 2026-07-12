@@ -331,6 +331,21 @@ class SddcManagerConnector(HttpConnector):
         async with self._session_lock:
             self._session_tokens.pop(target_cache_key(target), None)
 
+    async def invalidate_credentials(self, target: SddcTargetLike) -> None:
+        """Public duck-typed credential-eviction hook for the dispatch path (#2396).
+
+        Drops the cached credentials for *target* so the next
+        :meth:`_load_credentials` re-reads Vault. The credential cache is
+        written *before* the login POST (even when that login 401s), and
+        :meth:`invalidate_session` deliberately leaves it intact; on an
+        establish-auth failure the dispatcher calls this hook so an operator's
+        out-of-band restage takes effect on the next dispatch without a
+        backplane restart. Holds :attr:`_creds_lock` so the pop is serialised
+        against an in-flight :meth:`_load_credentials`.
+        """
+        async with self._creds_lock:
+            self._creds_cache.pop(target_cache_key(target), None)
+
     async def _get_json_with_session_retry(
         self,
         target: SddcTargetLike,

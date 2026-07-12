@@ -1075,6 +1075,12 @@ async def _run_branch_with_error_handling(
         # ``ConnectorAuthError`` subclasses ``SessionLoginError`` (a
         # ``RuntimeError``), so this arm MUST sit ahead of the generic
         # ``except Exception`` to win.
+        #
+        # #2396: evict any credentials the connector cached before the rejected
+        # login so the operator's restage takes effect on the next dispatch
+        # without a backplane restart (duck-typed; no-op for connectors with no
+        # credential cache).
+        await _evict_connector_credentials(connector_instance, target)
         duration_ms = await _audit_error(
             audit_id=audit_id,
             operator=operator,
@@ -1128,6 +1134,37 @@ async def _audit_error(
         duration_ms=duration_ms,
     )
     return duration_ms
+
+
+async def _evict_connector_credentials(connector_instance: Connector | None, target: Any) -> None:
+    """Evict *connector_instance*'s cached credentials for *target*, if it advertises the hook.
+
+    #2396: the establish-time companion to the #2067 ``invalidate_session``
+    seam. A family of connectors caches the credential bytes it reads from
+    Vault *before* attempting the login (e.g. ``SddcManagerConnector`` writes
+    ``_creds_cache`` ahead of ``POST /v1/tokens``); when that login is rejected
+    the cached bytes are the rejected ones, and ``invalidate_session`` leaves
+    them intact by design (a mid-session 401 means the *token* expired, not the
+    credential). A plain restage into Vault never reaches that in-process
+    cache, so every re-dispatch replayed the rejected bytes until a backplane
+    restart. Popping the cache on the establish-auth failure means the next
+    dispatch re-reads the store and the restage converges with no restart.
+
+    Duck-typed (``getattr``) like ``invalidate_session`` so connectors that
+    re-read credentials on each establish and cache no raw credential (nsx,
+    vmware_rest) or hold no credential cache at all (ProfiledRestConnector)
+    expose no hook and are simply skipped -- absence is harmless.
+
+    Eviction is deliberately *not* followed by a one-shot re-dispatch here (as
+    ``invalidate_session`` is in :func:`_retry_after_session_invalidation`): at
+    establish-auth-failure time the restage has not happened yet, so an
+    immediate retry would only replay the same rejected bytes. Convergence
+    needs the operator's out-of-band restage between dispatches; a single
+    failed attempt to prime the eviction is sufficient and loop-free.
+    """
+    evict = getattr(connector_instance, "invalidate_credentials", None)
+    if callable(evict):
+        await evict(target)
 
 
 def _classify_http_status_error(
@@ -1329,6 +1366,12 @@ async def _retry_after_session_invalidation(
         # uses rather than flattening to ``connector_error`` in the generic
         # arm below -- so a stale credential surfaced via mid-session recovery
         # reads identically to one surfaced at first establish.
+        #
+        # #2396: the cold-cache re-establish re-read Vault yet was still
+        # rejected -- the cached credential is stale. Evict it (in addition to
+        # the session token ``invalidate_session`` already dropped) so the next
+        # dispatch after a restage re-reads the store without a restart.
+        await _evict_connector_credentials(connector_instance, target)
         duration_ms = await _audit_error(
             audit_id=audit_id,
             operator=operator,

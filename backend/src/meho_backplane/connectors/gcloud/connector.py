@@ -1153,6 +1153,23 @@ class GcloudConnector(HttpConnector):
             ],
         }
 
+    async def invalidate_credentials(self, target: GcloudTargetLike) -> None:
+        """Duck-typed credential-eviction hook for the dispatch path (#2396).
+
+        Drops both the cached impersonated-credentials object and the derived
+        bearer token for *target* so the next :meth:`auth_headers` re-runs
+        ADC + impersonation from a cold cache. Called by the dispatcher on an
+        establish-auth failure so a corrected ADC / impersonation-grant
+        converges on the next dispatch without a backplane restart. Acquires
+        the per-target token lock so the pop is serialised against an in-flight
+        fetch/refresh.
+        """
+        cache_key = target_cache_key(target)
+        lock = self._token_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            self._creds_cache.pop(cache_key, None)
+            self._token_cache.pop(cache_key, None)
+
     async def aclose(self) -> None:
         """Clear cached tokens and credentials, then tear down the httpx pool.
 

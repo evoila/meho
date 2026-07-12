@@ -238,6 +238,43 @@ async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
     await connector.aclose()
 
 
+@pytest.mark.asyncio
+async def test_invalidate_credentials_reloads_after_restage() -> None:
+    """#2396: invalidate_credentials drops the cache so a restage is re-read.
+
+    A CredentialsCache consumer caches the credential on first use, and the
+    shared cache's ``invalidate`` was previously reachable from no production
+    caller. The new ``invalidate_credentials`` hook (called by the dispatcher's
+    establish-auth arm) delegates to it, so after an operator restages the
+    credential the next ``auth_headers`` re-runs the loader (call-count 2) and
+    carries the new bytes -- with no backplane restart. Red before #2396: the
+    method did not exist.
+    """
+    call_count = 0
+    creds = {"username": "svc-old", "password": "old-pass"}
+
+    async def _swappable_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
+        nonlocal call_count
+        call_count += 1
+        return dict(creds)
+
+    connector = VcfOperationsConnector(credentials_loader=_swappable_loader)
+    h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    assert _decode_basic_auth(h1["Authorization"]) == ("svc-old", "old-pass")
+    assert call_count == 1
+
+    # The dispatcher evicts on the establish-auth failure.
+    await connector.invalidate_credentials(_TARGET_A)
+
+    # The operator restages the corrected credential out of band.
+    creds.update(username="svc-new", password="new-pass")
+
+    h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    assert call_count == 2
+    assert _decode_basic_auth(h2["Authorization"]) == ("svc-new", "new-pass")
+    await connector.aclose()
+
+
 # ---------------------------------------------------------------------------
 # Per-target isolation
 # ---------------------------------------------------------------------------

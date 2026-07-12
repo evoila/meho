@@ -497,6 +497,11 @@ class VmwareRestConnector(HttpConnector):
         )
         return token
 
+    # #2396: vmware_rest deliberately exposes NO ``invalidate_credentials``
+    # hook. It caches only the session token (evicted below); the
+    # service-account credentials are re-read from Vault via ``_session_loader``
+    # on every ``_establish_and_cache_session``, so a restage already converges
+    # on the next cold-session dispatch with no credential cache to evict.
     async def invalidate_session(self, target: VsphereTargetLike) -> None:
         """Evict the cached session token + login path for *target*.
 

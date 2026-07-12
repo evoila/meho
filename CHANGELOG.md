@@ -109,6 +109,18 @@ connector-related release-notes line.
   placeholder `config.backplaneUrl=https://meho-test.test` (matching the
   surrounding `.test` fakes) so it satisfies the new render-time guard instead
   of tripping it.
+### Fixed — migrate hook ServiceAccount fresh-install ordering deadlock (#2391)
+
+- The `meho-migrate` `pre-install,pre-upgrade` hook Job no longer sets
+  `serviceAccountName`. Helm schedules hooks before it creates the chart's
+  normal (non-hook) resources, so the Job referenced the `meho`
+  ServiceAccount that did not exist yet — a fresh `helm install` deadlocked
+  with `serviceaccount "meho" not found` on every admission attempt until
+  the release timed out. The migration runner needs no Kubernetes API
+  access, so the pod now falls back to the namespace `default` SA and
+  (with `automountServiceAccountToken: false` unchanged) carries no token.
+  A `helm template` unit assertion pins that the hook Job renders without
+  `serviceAccountName` while the backplane Deployment keeps its own (#2391).
 
 ### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
 

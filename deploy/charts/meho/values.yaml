@@ -423,6 +423,24 @@ postgres:
   # -- Name of the Kubernetes Secret holding the DATABASE_URL value at key
   # `url` — MUST be set. Synced from Vault by External Secrets Operator (ESO)
   # in production; the consumer pre-provisions it before `helm install`.
+  #
+  # HARD PREREQUISITE (pgvector): the pre-install migration Job runs Alembic
+  # revision 0003, which executes `CREATE EXTENSION IF NOT EXISTS vector`.
+  # PostgreSQL requires **superuser** to create an extension, so a cold
+  # install against a least-privilege app role fails at that step with
+  # `permission denied to create extension "vector"`
+  # (`HINT: Must be superuser to create this extension.`). Satisfy ONE of:
+  #   (a) pre-create the extension once, as a superuser, before installing:
+  #         psql -d meho -c "CREATE EXTENSION IF NOT EXISTS vector;"
+  #       (CNPG: `kubectl exec <cluster>-1 -n <ns> -c postgres -- \
+  #                 psql -d meho -c "CREATE EXTENSION IF NOT EXISTS vector;"`),
+  #       OR at cluster bootstrap via CNPG `postInitSQL`:
+  #         spec.bootstrap.initdb.postInitSQL:
+  #           - "CREATE EXTENSION IF NOT EXISTS vector;"
+  #   (b) point this DSN at a superuser-capable role for the first migration.
+  # Option (a) with a least-privilege app role is the recommended, minimal
+  # posture. See `deploy/values-examples/README.md` (§ pgvector extension
+  # prerequisite) and `docs/decisions/pgvector-superuser-prerequisite.md`.
   credentialsSecret: ""
 
 vault:

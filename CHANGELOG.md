@@ -103,6 +103,21 @@ connector-related release-notes line.
   (5 min), operator-tunable. `values.schema.json` accepts the new
   `probes.startup` subtree; liveness/readiness defaults are unchanged. Opt out
   on a fast cluster by clearing `probes.startup` (e.g. `--set probes.startup=null`).
+### Documentation — pgvector superuser prerequisite for cold migration 0003 (#2392)
+
+- Document the hard prerequisite that a **cold** install must satisfy before
+  the pre-install migration Job runs: Alembic revision `0003` executes
+  `CREATE EXTENSION IF NOT EXISTS vector`, which PostgreSQL only lets a
+  **superuser** run, so a first-time install against a least-privilege app role
+  fails with `permission denied to create extension "vector"`. The chart
+  `values.yaml` `postgres.credentialsSecret` comment and
+  `deploy/values-examples/README.md` now state the prerequisite with the exact
+  superuser `psql` one-liner and the CNPG `postInitSQL` bootstrap path.
+- Record the decision (`docs/decisions/pgvector-superuser-prerequisite.md`) to
+  **reject** a dedicated `migrationSuperuserDsn` chart value as out of scope —
+  it adds a permanent second-DSN/second-Secret surface and a standing superuser
+  credential for a one-time bootstrap step that a documented `psql` line (or
+  CNPG `postInitSQL`) covers. Migration `0003` SQL is unchanged.
 ### Fixed — migrate hook ServiceAccount fresh-install ordering deadlock (#2391)
 
 - The `meho-migrate` `pre-install,pre-upgrade` hook Job no longer sets

@@ -38,6 +38,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock
 from uuid import UUID
@@ -523,12 +524,16 @@ def test_result_connector_auth_failed_shape_401() -> None:
     # Names the host + the actual status.
     assert "vrli.lab.internal" in out.error
     assert "401" in out.error
-    # Names the likely cause (session/credential expiry OR auth_model).
+    # Names the likely cause (per-request credential rejected OR auth scheme).
     assert "auth_model" in out.error
     assert "Vault" in out.error
-    # #2329 remediation imperative (restage the stale credential, naming the
-    # target + command) + both doc refs.
-    assert "meho target credential set vrli-lab" in out.error
+    # #2400: the default (no invalidate_session hook) is the ``dispatch`` stage,
+    # so no session stage happened -- the false "already re-logged-in and
+    # retried once" sentence must NOT appear here.
+    assert "already re-logged-in" not in out.error
+    # #2400 remediation imperative names the REAL staging command.
+    assert "meho vault kv put" in out.error
+    assert "meho target credential set" not in out.error
     assert "docs/architecture/connector-auth.md" in out.error
     assert "docs/codebase/error-message-shape.md" in out.error
     # The upstream body message tails the operator-facing string.
@@ -536,16 +541,96 @@ def test_result_connector_auth_failed_shape_401() -> None:
 
     extras = out.extras
     assert extras["error_code"] == "connector_auth_failed"
-    # #2329: the dispatch-path (mid-session recovery) sub-code names the stage.
-    assert extras["cause"] == "session_dispatch_401"
+    # #2400: no session stage happened -> the cause drops the ``session_``
+    # prefix (it is not ``session_dispatch_401``).
+    assert extras["cause"] == "dispatch_401"
     assert extras["http_status"] == 401
     assert extras["target"] == "vrli-lab"
     assert extras["host"] == "vrli.lab.internal"
     assert extras["secret_ref"] is None
-    assert "meho target credential set vrli-lab" in extras["remediation"]
+    assert "meho vault kv put" in extras["remediation"]
     # The httpx (dispatch) path has no connector-composed establish message.
     assert extras["raw_message"] is None
     assert extras["upstream_message"] == "session token invalid or expired"
+
+
+def test_result_connector_auth_failed_after_relogin_cause_and_no_restage() -> None:
+    """#2400: ``reestablished`` -> ``_after_relogin`` cause + scheme (not restage) remediation.
+
+    The forced re-login SUCCEEDED and the fresh session was STILL rejected, so
+    the credential logs in fine: the ONLY stage that keeps the "already
+    re-logged-in and retried once" sentence, and its remediation must NOT tell
+    the operator to restage.
+    """
+    exc = _make_http_status_error(
+        status_code=401,
+        json_body={"message": "session token invalid or expired"},
+    )
+    out = result_connector_auth_failed(
+        "GET:/api/v2/events",
+        exc,
+        _FakeTarget(name="vrops-lab", host="vrops.lab.internal"),
+        duration_ms=1.0,
+        relogin="reestablished",
+    )
+    assert out.error is not None
+    # The re-login sentence lives here (and, per the sibling tests, nowhere else).
+    assert "already re-logged-in and retried once" in out.error
+    # Do-NOT-restage guidance; no phantom command, and no restage command.
+    assert "do NOT restage" in out.error
+    assert "meho target credential set" not in out.error
+    assert "meho vault kv put" not in out.error
+    assert out.extras["cause"] == "session_dispatch_401_after_relogin"
+    assert out.extras["http_status"] == 401
+    assert "do NOT restage" in out.extras["remediation"]
+
+
+def test_result_connector_auth_failed_dispatch_causes_carry_no_session_prefix() -> None:
+    """#2400: the no-session-stage cause is ``dispatch_<s>`` for every auth-class status."""
+    for status in (401, 440):
+        exc = _make_http_status_error(status_code=status, json_body={})
+        out = result_connector_auth_failed(
+            "GET:/api/v2/events", exc, _FakeTarget(), duration_ms=1.0
+        )
+        assert out.extras["cause"] == f"dispatch_{status}"
+        assert out.error is not None
+        assert "already re-logged-in" not in out.error
+
+
+def test_auth_failed_remediation_names_only_commands_that_exist() -> None:
+    """#2400: the remediation names only real CLI commands, not the phantom one.
+
+    Grounds the acceptance criterion against the CLI tree: the referenced verb
+    must be a real cobra command, and the phantom command that sent both MFC
+    401 reporters (#2395, #2396) down a credential rabbit hole must exist
+    nowhere in the CLI.
+    """
+    cli_root = Path(__file__).resolve().parents[2] / "cli"
+    assert cli_root.is_dir(), f"CLI tree not found at {cli_root}"
+    go_sources = "\n".join(p.read_text() for p in cli_root.rglob("*.go"))
+
+    # The phantom command exists in neither the emitted text nor the CLI tree.
+    assert "meho target credential set" not in go_sources
+    assert "credential set" not in go_sources
+
+    # The staging verb the remediation names is a real cobra command:
+    # `meho vault` -> `kv` -> `put <mount> <path>`.
+    assert 'Use:   "vault"' in go_sources or 'Use:          "vault"' in go_sources
+    assert '"kv"' in go_sources
+    assert 'Use:   "put <mount> <path>"' in go_sources
+
+    # Every stage's emitted remediation/summary names only that real command
+    # (or, for after_relogin, no command at all).
+    exc = _make_http_status_error(status_code=401, json_body={})
+    dispatch_out = result_connector_auth_failed("op", exc, _FakeTarget(), duration_ms=1.0)
+    assert "meho vault kv put" in dispatch_out.extras["remediation"]
+    assert "meho target credential set" not in dispatch_out.error
+
+    after = result_connector_auth_failed(
+        "op", exc, _FakeTarget(), duration_ms=1.0, relogin="reestablished"
+    )
+    assert "meho target credential set" not in after.error
+    assert "meho vault kv put" not in after.error  # do-not-restage stage names no command
 
 
 def test_result_connector_auth_failed_shape_440_carries_actual_status() -> None:
@@ -663,8 +748,11 @@ def test_result_connector_auth_failed_establish_401_shape() -> None:
     assert out.error.startswith("connector_auth_failed:")
     assert "vc-prod.lab.internal" in out.error
     assert "401" in out.error
-    # Restage remediation names the target + its secret_ref.
-    assert "meho target credential set vc-prod" in out.error
+    # #2400: establish stage names the login-rejected story + the REAL restage
+    # command + the target's secret_ref.
+    assert "login itself was rejected" in out.error
+    assert "meho vault kv put" in out.error
+    assert "meho target credential set" not in out.error
     assert "tenants/t1/vc-prod" in out.error
 
     extras = out.extras
@@ -674,7 +762,7 @@ def test_result_connector_auth_failed_establish_401_shape() -> None:
     assert extras["target"] == "vc-prod"
     assert extras["host"] == "vc-prod.lab.internal"
     assert extras["secret_ref"] == "tenants/t1/vc-prod"
-    assert "meho target credential set vc-prod" in extras["remediation"]
+    assert "meho vault kv put" in extras["remediation"]
     # The connector's establish message is preserved for debugging.
     assert isinstance(extras["raw_message"], str)
     assert "session establish failed" in extras["raw_message"]
@@ -745,9 +833,13 @@ async def test_dispatch_converts_401_to_connector_auth_failed(
     assert result.status == "error"
     assert result.error is not None
     assert result.error.startswith("connector_auth_failed:")
-    # Host + remediation in the operator-facing message.
+    # Host + remediation in the operator-facing message. This connector has no
+    # invalidate_session hook -> #2400 ``dispatch_401`` stage (no re-login).
     assert "vrli.lab.internal" in result.error
-    assert "meho target credential set vrli-lab" in result.error
+    assert "meho vault kv put" in result.error
+    assert "meho target credential set" not in result.error
+    assert "already re-logged-in" not in result.error
+    assert result.extras["cause"] == "dispatch_401"
     assert result.extras["error_code"] == "connector_auth_failed"
     assert result.extras["http_status"] == 401
     assert result.extras["host"] == "vrli.lab.internal"
@@ -816,7 +908,8 @@ async def test_dispatch_converts_establish_auth_error_to_connector_auth_failed(
     assert result.extras["cause"] == "session_establish_401"
     assert result.extras["http_status"] == 401
     assert result.extras["target"] == "vc-prod"
-    assert "meho target credential set vc-prod" in result.extras["remediation"]
+    assert "meho vault kv put" in result.extras["remediation"]
+    assert "meho target credential set" not in result.error
     # NOT the bare shape the filing observed.
     assert "connector_error" not in result.error
     assert "exception_message" not in result.extras
@@ -1435,6 +1528,14 @@ async def test_dispatch_second_auth_failure_resolves_to_auth_failed_no_loop(
     assert result.error is not None
     assert result.error.startswith("connector_auth_failed:")
     assert result.extras["error_code"] == "connector_auth_failed"
+    # #2400: the re-login succeeded (invalidate_session ran, the re-dispatch
+    # re-established) yet the fresh session was still rejected -> the ONLY
+    # stage that carries the ``_after_relogin`` qualifier + the re-login
+    # sentence, and its remediation must NOT tell the operator to restage.
+    assert result.extras["cause"] == "session_dispatch_401_after_relogin"
+    assert "already re-logged-in and retried once" in result.error
+    assert "do NOT restage" in result.error
+    assert "meho target credential set" not in result.error
     connector = get_or_create_connector_instance(_PersistentAuthFailConnector)
     assert isinstance(connector, _PersistentAuthFailConnector)
     # Initial attempt + exactly one retry, then it gave up (no loop).

@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — harden ingest-job timeout warning tests against xdist logger-cache ordering (#2397)
+
+- `test_operations_ingest_jobs.py` rebinds `jobs._log` to a fresh structlog
+  proxy per test. Under `pytest -n --dist loadscope`, a sibling module that
+  calls `configure_logging()` (`cache_logger_on_first_use=True`) then later
+  reconfigures structlog with a fresh processors list could orphan the
+  module-level `_log` proxy's cached bound logger; `capture_logs()` mutates
+  the *current* config list in place, so it could no longer reach the cached
+  logger and the capture came back empty — deterministically failing the
+  timeout-fallback warning assertions depending on worker layout. The
+  per-test rebind forces re-realization against the live config list.
+  Test-only; product `jobs.py` behaviour is unchanged.
+
 ### Fixed — kubeconfig loader routed through the credential-backend seam (#2397)
 
 - The Kubernetes connector's default kubeconfig loader

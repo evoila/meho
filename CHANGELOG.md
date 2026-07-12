@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — kubeconfig loader routed through the credential-backend seam (#2397)
+
+- The Kubernetes connector's default kubeconfig loader
+  (`load_kubeconfig_from_vault`) no longer reads Vault directly — it now
+  resolves `target.secret_ref` through the shared credential-backend seam
+  (`load_vault_secret_data` → `split_credential_ref` → the backend registry).
+  A `product: kubernetes` target with a `gsm:<project>/<secret>#kubeconfig`
+  ref now authenticates on a `CREDENTIAL_BACKEND=gsm` / no-Vault deployment,
+  closing the last-mile gap #2227 left for the k8s connector (every other
+  connector already got `gsm:` for free via the seam).
+- The loader inherits the seam's Vault-kind KV-v2 API-path-shape guard: a
+  `secret/data/…`-shaped `secret_ref` now fails with an actionable error
+  instead of silently 404ing (a latent defect the old direct-read bypass
+  carried). Behaviour is otherwise unchanged for schemeless / `vault:` refs
+  on Vault deployments.
+
 ### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
 
 - The `connector_auth_failed` envelope's `extras.cause` is now **stage-aware**

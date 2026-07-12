@@ -76,21 +76,31 @@ Source: `backend/src/meho_backplane/connectors/kubernetes/`.
   `Target` model once G0.3 (#224) lands; the structural shape there
   satisfies the Protocol unchanged.
 - **`load_kubeconfig_from_vault`** (`kubeconfig.py`) -- the default
-  kubeconfig loader. After G3.10-T4 (#948) it performs the live
-  operator-context KV-v2 read: opens
-  `vault_client_for_operator(operator)` (forwards the operator's
-  validated Keycloak JWT to Vault's JWT/OIDC auth method), reads
-  `target.secret_ref`, extracts the `kubeconfig` field, and parses the
+  kubeconfig loader. Since #2397 it reads through the shared
+  **credential-backend seam** rather than opening Vault directly: it
+  calls `load_vault_secret_data(target, operator, mount=mount)`
+  (`_shared/vault_creds.py`), which runs the fail-closed precondition
+  guards, splits the `secret_ref` scheme via `split_credential_ref`
+  (schemeless / `vault:` → the operator-context Vault KV-v2 read,
+  `gsm:` → GCP Secret Manager, …), and returns the raw secret-field
+  dict; the loader then extracts the `kubeconfig` field and parses the
   YAML into the dict shape
-  `kubernetes_asyncio.config.new_client_from_config_dict` accepts. The
-  read happens **under the operator's Vault Identity entity** —
+  `kubernetes_asyncio.config.new_client_from_config_dict` accepts.
+  Routing through the seam is what lets a
+  `gsm:<project>/<secret>#kubeconfig` ref authenticate on a
+  `CREDENTIAL_BACKEND=gsm` / no-Vault deployment (the last-mile gap
+  #2227 left for the k8s connector); it also inherits the Vault-kind
+  KV-v2 API-path-shape guard, so a `secret/data/…`-shaped ref fails
+  actionably instead of 404ing. For the default Vault backend the read
+  still happens **under the operator's Vault Identity entity** —
   per-operator RBAC + per-operator audit. Tests still inject a custom
   loader for unit-scope determinism; the `(target, operator)` signature
   is shared by the default and every injected loader. Fail-closed
-  guards: empty `operator.raw_jwt` (the system-call carve-out) and
-  unset `target.secret_ref` both raise `VaultCredentialsReadError`
-  before Vault is touched. This is the rubric **State 2** wiring
-  (`shared_service_account` only). Decision: [`docs/architecture/connector-auth.md`](../architecture/connector-auth.md).
+  guards (in the seam): empty `operator.raw_jwt` (the system-call
+  carve-out) and unset `target.secret_ref` both raise
+  `VaultCredentialsReadError` before any store is touched. This is the
+  rubric **State 2** wiring (`shared_service_account` only). Decision:
+  [`docs/architecture/connector-auth.md`](../architecture/connector-auth.md).
 
 ## Probe ↔ dispatch convergence on the route operator (G0.16-T4 #1306)
 
@@ -507,10 +517,12 @@ The `k8s.ls` handler is a thin path parser:
 - **G0.6 substrate** -- `register_typed_operation()` for descriptor
   upserts; the dispatcher's lookup + handler-resolve + reducer path
   for op execution; `OperationResult` envelope.
-- **Vault (G3.3, future)** -- the production kubeconfig loader resolves
-  `target.secret_ref` to a kubeconfig dict via the operator-context
-  Vault read path. The current stub raises `NotImplementedError`; tests
-  and the integration suite inject a custom loader.
+- **Credential-backend seam** -- the production kubeconfig loader
+  resolves `target.secret_ref` to a kubeconfig dict via the shared
+  `load_vault_secret_data` seam (`_shared/vault_creds.py`), which
+  dispatches on the ref scheme to the Vault KV-v2 operator-context read
+  (default) or GCP Secret Manager (`gsm:`, #2397). Tests and the
+  integration suite inject a custom loader.
 
 ## JSONFlux handle pattern
 

@@ -43,6 +43,7 @@ import pytest
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import Connector
+from meho_backplane.connectors._shared import credential_backend as cb
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.kubernetes import (
     KubernetesConnector,
@@ -320,6 +321,107 @@ def test_default_loader_propagates_yaml_parse_errors(
     async def _check() -> None:
         with pytest.raises(ValueError, match="failed to parse"):
             await load_kubeconfig_from_vault(_TARGET_A, _make_operator())
+
+    asyncio.run(_check())
+
+
+# ---------------------------------------------------------------------------
+# Credential-backend seam dispatch (#2397) — the kubeconfig loader routes
+# through split_credential_ref instead of reading Vault directly, so a
+# gsm: ref resolves on a CREDENTIAL_BACKEND=gsm / no-Vault deployment and
+# the Vault-kind API-path-shape guard now covers kubeconfig refs too.
+# ---------------------------------------------------------------------------
+
+
+def test_default_loader_dispatches_gsm_ref_through_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``gsm:`` secret_ref routes to the gsm backend, never a Vault read.
+
+    Before #2397 the loader read Vault directly, so a ``gsm:`` ref was
+    interpreted as a literal KV-v2 path and failed on a no-Vault deploy.
+    Now it goes through
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
+    which splits the scheme and dispatches to the registered ``gsm``
+    backend; this loader then pulls the ``kubeconfig`` field out of the
+    returned dict and parses it. The Vault fake proves the read never
+    falls through to Vault.
+    """
+    kubeconfig_yaml = (
+        "apiVersion: v1\n"
+        "kind: Config\n"
+        "current-context: default\n"
+        "clusters:\n"
+        "- name: c1\n"
+        "  cluster: {server: 'https://gke.test:443'}\n"
+    )
+    # Seeded but must never be read — the gsm ref must not hit Vault.
+    vault_fake = install_fake_client(monkeypatch, secret={"kubeconfig": "SHOULD-NOT-BE-READ"})
+
+    class _FakeGsmBackend:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        async def load_secret_data(
+            self,
+            secret_ref: str,
+            operator: Operator,
+            *,
+            target_name: str,
+            mount: str,
+        ) -> dict[str, object]:
+            del operator, mount
+            self.calls.append({"secret_ref": secret_ref, "target_name": target_name})
+            return {"kubeconfig": kubeconfig_yaml}
+
+    fake_backend = _FakeGsmBackend()
+    monkeypatch.setitem(cb.CREDENTIAL_BACKEND_REGISTRY, "gsm", fake_backend)
+
+    gsm_target = _StubTarget(
+        name="gke-meho",
+        host="gke-meho.test.invalid",
+        port=443,
+        secret_ref="gsm:my-project/gke-meho-kubeconfig#kubeconfig",
+    )
+
+    async def _check() -> None:
+        result = await load_kubeconfig_from_vault(gsm_target, _make_operator())
+        assert result["apiVersion"] == "v1"
+        assert result["clusters"][0]["cluster"]["server"] == "https://gke.test:443"
+        # Dispatched to the gsm backend with the scheme stripped.
+        assert fake_backend.calls[-1]["secret_ref"] == "my-project/gke-meho-kubeconfig#kubeconfig"
+        # Vault was never touched — the ref was not treated as a KV-v2 path.
+        assert vault_fake.secrets.kv.v2.read_calls == []
+        assert vault_fake.auth.jwt.login_calls == []
+
+    asyncio.run(_check())
+
+
+def test_default_loader_rejects_api_path_shaped_secret_ref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KV-v2 API-path-shaped secret_ref fails closed via the seam's guard.
+
+    Routing through the seam means the kubeconfig loader inherits the
+    Vault backend's API-path-shape guard: a ``secret/data/…``-shaped ref
+    (which hvac would double-resolve to a 404) is rejected with an
+    actionable error before Vault is touched — a latent defect the old
+    direct-read bypass silently carried.
+    """
+    fake = install_fake_client(monkeypatch, secret={"kubeconfig": "apiVersion: v1"})
+    bad = _StubTarget(
+        name="rke2-bad",
+        host="rke2-bad.test.invalid",
+        port=6443,
+        secret_ref="secret/data/k8s/rke2-meho",
+    )
+
+    async def _check() -> None:
+        with pytest.raises(VaultCredentialsReadError, match="API-path-shaped secret_ref"):
+            await load_kubeconfig_from_vault(bad, _make_operator())
+        # The guard fires before any login / read.
+        assert fake.secrets.kv.v2.read_calls == []
+        assert fake.auth.jwt.login_calls == []
 
     asyncio.run(_check())
 

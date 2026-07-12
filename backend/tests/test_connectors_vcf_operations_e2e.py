@@ -8,11 +8,12 @@ Covers all four acceptance criteria from Issue #837:
 (a) All 8 curated vROps read ops dispatch through the full
     ``call_operation`` stack against a respx-mocked vROps appliance
     and return ``status='ok'``.
-(b) HTTP Basic auth path: vROps' ``/suite-api/api/*`` surface is
-    stateless — no session token, no 401-retry. The connector's stub
-    credentials loader is verified to be called (once, then cached)
-    on the first dispatch — mirrors the SDDC Manager Basic-auth
-    posture, not NSX's session-cookie-with-401-retry posture.
+(b) OpsToken session-auth path (#2395): vROps 9.0.2 authenticates on an
+    acquired-token session — the first dispatch POSTs to
+    ``/suite-api/api/auth/token/acquire`` and the connector then presents
+    ``Authorization: OpsToken <token>``. The connector's stub credentials
+    loader is verified to be called (once, then cached) on the first
+    dispatch.
 (c) Audit rows: each dispatch inserts an ``AuditLog`` row carrying
     ``method='DISPATCH'``, a non-null ``target_id``, and a
     ``payload["params_hash"]`` key.
@@ -268,13 +269,12 @@ async def test_vcf_operations_e2e_all_ops_dispatch_ok(
     op_id: str,
     vcf_operations_e2e_canary: _VropsE2EBundle,
 ) -> None:
-    """All 8 vROps core ops dispatch through the full dispatcher and return status='ok'.
+    """All 6 vROps ingested browse ops dispatch through the full dispatcher and return status='ok'.
 
-    Acceptance criterion (a). HTTP Basic auth is computed by the
-    connector's stub credentials loader on first dispatch (then
-    cached); no session-establish step is needed because Basic auth
-    is stateless on the vROps side. The parametrise reports one CI
-    case per op_id for granular failure attribution.
+    Acceptance criterion (a). The connector acquires an OpsToken on the
+    first dispatch (stub credentials loader → ``token/acquire``) and
+    presents it on each read. The parametrise reports one CI case per
+    op_id for granular failure attribution.
     """
     params = _RESOURCE_GET_OP_PARAMS.get(op_id, {})
     result = await call_operation(
@@ -297,17 +297,12 @@ async def test_vcf_operations_e2e_credentials_cached_after_first_dispatch(
 ) -> None:
     """First dispatch loads credentials; subsequent dispatches reuse the cache.
 
-    Acceptance criterion (b). vROps' Basic auth is stateless server-
-    side — there's no session token to refresh and no 401-retry. The
-    only thing the connector caches is the Vault-sourced
+    Acceptance criterion (b). The connector caches the Vault-sourced
     ``{"username": ..., "password": ...}`` mapping behind
-    :class:`CredentialsCache`. Pin the contract: cache empty on
-    first reach, populated after one dispatch, and not re-filled on
-    the second dispatch to the same target.
-
-    Mirrors :func:`test_sddc_e2e_credentials_cached_after_first_dispatch`
-    in the SDDC Manager E2E. NSX's analogue tests a 401-retry loop
-    that doesn't apply to vROps.
+    :class:`CredentialsCache` (and, separately, the acquired OpsToken).
+    Pin the credential-cache contract: cache empty on first reach,
+    populated after one dispatch, and not re-filled on the second
+    dispatch to the same target (the acquired token is likewise reused).
     """
     instance = vcf_operations_e2e_canary.connector_instance
     target_name = vcf_operations_e2e_canary.target_name

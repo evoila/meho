@@ -10,11 +10,14 @@ instance with a stub credentials loader (so no Vault read is required),
 a probed :class:`~meho_backplane.db.models.Target` row, the 6 ingested
 browse-breadth :class:`~meho_backplane.db.models.EndpointDescriptor` rows
 from :data:`_VROPS_SEED_OPS`, and a :mod:`respx`-mocked vROps REST surface
-answering each of the 6 read ops.
+answering the ``token/acquire`` session-establish plus each of the 6 read
+ops.
 
-vROps uses HTTP Basic on every request — no session establish call is
-needed. The stub credentials loader bypasses the Vault-backed loader;
-the respx router matches requests by path.
+vROps 9.0.2 authenticates on an acquired-token session (#2395): the first
+request per target POSTs to ``/suite-api/api/auth/token/acquire`` and the
+connector then presents ``Authorization: OpsToken <token>``. The stub
+credentials loader bypasses the Vault-backed loader; the respx router
+matches requests by path.
 
 Why a minimal direct-insert path (not full G0.7 canary ingest)
 ==============================================================
@@ -303,6 +306,17 @@ VROPS_CANARY_SUPERMETRICS: dict[str, object] = {
     "links": [{"href": "/suite-api/api/supermetrics", "rel": "SELF", "name": "current"}],
 }
 
+#: Synthetic ``token/acquire`` response — the OpsToken session establish
+#: (#2395). ``validity`` is an epoch-ms expiry, ``expiresAt`` a human string;
+#: the connector consumes only ``token``.
+VROPS_CANARY_ACQUIRE_TOKEN: str = "vrops-canary-ops-token"
+VROPS_CANARY_ACQUIRE_RESPONSE: dict[str, object] = {
+    "token": VROPS_CANARY_ACQUIRE_TOKEN,
+    "validity": 1470421325035,
+    "expiresAt": "Friday, August 5, 2016 6:22:05 PM UTC",
+    "roles": [],
+}
+
 #: Synthetic version response (the ``vrops.about`` op).
 VROPS_CANARY_VERSION: dict[str, object] = {
     "releaseName": "9.0.0.1.23456789",
@@ -445,14 +459,15 @@ async def _vrops_credentials_loader(
 
 
 def _register_vrops_routes(mock: respx.MockRouter) -> None:
-    """Register the 8 vROps read-op routes on *mock*.
+    """Register the session-establish + 8 vROps read-op routes on *mock*.
 
-    vROps uses HTTP Basic on every request — no session establish
-    call is needed. Each route returns a pre-seeded JSON body. The
-    one templated path (``/suite-api/api/resources/{id}``) is
-    registered for the specific id the smoke test dispatches
-    against.
+    vROps 9.0.2 authenticates on an acquired-token session (#2395): the
+    ``token/acquire`` POST returns the OpsToken the connector then presents
+    on each read. Each read route returns a pre-seeded JSON body. The one
+    templated path (``/suite-api/api/resources/{id}``) is registered for the
+    specific id the smoke test dispatches against.
     """
+    mock.post("/suite-api/api/auth/token/acquire").respond(200, json=VROPS_CANARY_ACQUIRE_RESPONSE)
     mock.get("/suite-api/api/versions/current").respond(200, json=VROPS_CANARY_VERSION)
     mock.get("/suite-api/api/resources").respond(200, json=VROPS_CANARY_RESOURCES)
     mock.get("/suite-api/api/resources/00000000-0000-4000-8000-000000000000").respond(

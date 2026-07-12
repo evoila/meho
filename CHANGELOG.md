@@ -108,6 +108,17 @@ connector-related release-notes line.
   are intentionally excluded — they re-read credentials on every establish and
   cache no raw credential.
 
+### Fixed — vROps OpsToken session auth
+
+- Rebuild the `vcf-operations` (vROps) connector auth on an acquired-token
+  session: acquire via `POST /suite-api/api/auth/token/acquire` and present
+  `Authorization: OpsToken <token>` on both the typed and generic-ingested
+  dispatch paths, replacing the stateless HTTP Basic that live VCF
+  Operations 9.0.2 rejects. Adds an `invalidate_session` hook so the
+  dispatcher's session-expiry seam re-acquires on a mid-flight 401, moves
+  `authSource` federation into the acquire body, and deletes the
+  per-request `?auth-source=` query mechanism (#2395).
+
 ## [0.21.0] - 2026-07-11
 
 ### Breaking changes — GET-list endpoints converged on the `{items, next_cursor}` envelope (#2338)

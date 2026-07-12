@@ -240,6 +240,20 @@ the namespace; `kubectl logs -n <ns> job/<release>-meho-migrate` shows
 the Alembic error (rendered to stderr by the runner as
 `migration_failed: <ExcClass>: <msg>`).
 
+**pgvector superuser prerequisite (cold install).** Revision `0003`
+(`backend/alembic/versions/0003_create_documents_with_pgvector.py`) runs
+`CREATE EXTENSION IF NOT EXISTS vector`, which PostgreSQL only allows a
+**superuser** to execute (the `vector` extension is not marked trusted).
+The migration Job runs under the app-role `DATABASE_URL`, so a **cold**
+install against a least-privilege role fails at this step with
+`permission denied to create extension "vector"`. The extension must be
+pre-created once by a superuser (or bootstrapped via CNPG
+`postInitSQL`) — see the `deploy/values-examples/README.md` § *pgvector
+extension prerequisite* and the recorded decision at
+`docs/decisions/pgvector-superuser-prerequisite.md` (which rejects a
+dedicated `migrationSuperuserDsn` chart value in favour of the documented
+prerequisite). The chart does **not** ship a superuser migration DSN.
+
 ### Broadcast subchart (`charts/broadcast/`)
 
 A custom in-tree Helm subchart deploys Valkey 9.x as the

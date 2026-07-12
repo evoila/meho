@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Documentation — pgvector superuser prerequisite for cold migration 0003 (#2392)
+
+- Document the hard prerequisite that a **cold** install must satisfy before
+  the pre-install migration Job runs: Alembic revision `0003` executes
+  `CREATE EXTENSION IF NOT EXISTS vector`, which PostgreSQL only lets a
+  **superuser** run, so a first-time install against a least-privilege app role
+  fails with `permission denied to create extension "vector"`. The chart
+  `values.yaml` `postgres.credentialsSecret` comment and
+  `deploy/values-examples/README.md` now state the prerequisite with the exact
+  superuser `psql` one-liner and the CNPG `postInitSQL` bootstrap path.
+- Record the decision (`docs/decisions/pgvector-superuser-prerequisite.md`) to
+  **reject** a dedicated `migrationSuperuserDsn` chart value as out of scope —
+  it adds a permanent second-DSN/second-Secret surface and a standing superuser
+  credential for a one-time bootstrap step that a documented `psql` line (or
+  CNPG `postInitSQL`) covers. Migration `0003` SQL is unchanged.
+
 ### Fixed — connector credential cache evicted on establish-auth failure (#2396)
 
 - Establish-time auth failures (a login POST rejected with 401/403) now evict

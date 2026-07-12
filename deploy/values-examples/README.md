@@ -1234,6 +1234,77 @@ numbered for cross-reference with the originating dogfood reports.
   [#798](https://github.com/evoila/meho/issues/798) (G0.9.1-T13)
   closes Wall #4 in code.
 
+## pgvector extension prerequisite
+
+The chart's pre-install migration Job runs Alembic revision `0003`
+([`backend/alembic/versions/0003_create_documents_with_pgvector.py`](../../backend/alembic/versions/0003_create_documents_with_pgvector.py)),
+which executes:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+`CREATE EXTENSION` requires a **superuser** in stock PostgreSQL. A
+normally-provisioned cluster gives MEHO a **least-privilege app role**
+(the DSN user in `postgres.credentialsSecret`), which is *not* a
+superuser — so a **cold** install fails at this step with:
+
+```
+permission denied to create extension "vector"
+HINT:  Must be superuser to create this extension.
+```
+
+Warm/managed setups often hide this because the extension is already
+present (a pre-existing extension makes `IF NOT EXISTS` a NOTICE-and-skip,
+with no ownership check) or because migrations run as a superuser. A
+first-time adopter following this chart with a least-privilege role hits
+it immediately.
+
+**Satisfy one of the two options below before `helm install`.** Option A
+(pre-create the extension once, keep the app role least-privilege) is the
+recommended, minimal posture — it keeps the running DSN unprivileged and
+adds no chart surface. The chart intentionally does **not** ship a
+separate superuser migration DSN; that decision and its rationale are
+recorded in
+[`docs/decisions/pgvector-superuser-prerequisite.md`](../../docs/decisions/pgvector-superuser-prerequisite.md).
+
+### Option A (recommended): pre-create the extension as a superuser
+
+Create the extension once, as a superuser, against the target database
+**before** installing. It is idempotent — safe to re-run.
+
+```bash
+psql -d meho -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+**CloudNativePG (CNPG):** exec into the primary Pod's `postgres`
+container (which runs as the bootstrap superuser) and create it there.
+CNPG's Postgres 18.1 image ships pgvector 0.8.1; the extension just needs
+a superuser to enable it:
+
+```bash
+kubectl exec <cluster>-1 -n <ns> -c postgres -- \
+  psql -d meho -c "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+To make it survive a cluster re-bootstrap, declare it at init time on the
+CNPG `Cluster` — `postInitSQL` runs as the bootstrap superuser:
+
+```yaml
+spec:
+  bootstrap:
+    initdb:
+      postInitSQL:
+        - "CREATE EXTENSION IF NOT EXISTS vector;"
+```
+
+### Option B: run the first migration under a superuser-capable role
+
+Point `postgres.credentialsSecret`'s `DATABASE_URL` at a
+superuser-capable role for the first migration. This is simpler to state
+but keeps a privileged credential on the running DSN unless you rotate it
+back down afterwards, so Option A is preferred.
+
 ## End-to-end install flow
 
 The order matters because the chart's migration Job runs as a
@@ -1260,6 +1331,12 @@ kubectl apply -n meho -f externalsecret-meho-postgres.yaml
 kubectl -n meho wait --for=create secret/meho-postgres --timeout=60s
 kubectl -n meho get externalsecret meho-postgres -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
 # → "True"
+
+# 3b. Pre-create the pgvector extension as a superuser (see § pgvector
+#     extension prerequisite). Skip only if the migration DSN's role is
+#     already superuser-capable. Idempotent.
+kubectl exec meho-db-1 -n meho -c postgres -- \
+  psql -d meho -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
 # 4. Apply the chart.
 helm upgrade --install meho ./deploy/charts/meho/ \

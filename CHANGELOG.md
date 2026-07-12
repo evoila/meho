@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — Helm chart fails at render time on an unresolvable MCP resource URI (#2394)
+
+- The chart now `fail`s at `helm template` / `helm install` time — with an
+  actionable message naming `config.backplaneUrl`, `config.mcpResourceUri`,
+  and `ingress.host` — when the `/mcp` audience is unresolvable (ingress
+  disabled / empty host **and** both config values blank). Previously such an
+  ingress-less bring-up rendered an empty audience and the pod crash-looped at
+  startup with a runtime `audience_not_configured` stack trace instead of
+  failing before anything was applied. The guard mirrors the existing eso/agent
+  render-time guards and fires only on the nothing-resolves path: the
+  ingress-derived default and explicit-value installs render unchanged. No
+  `allowNoMcpResourceUri` escape hatch is added (kept minimal) — a deliberate
+  MCP-less bring-up sets a placeholder `config.backplaneUrl`, and `/mcp` stays
+  per-request fail-closed regardless.
+- The chart's own `helm install + helm test (pgvector preflight)` CI lane —
+  an ingress-less install that set neither config value — now pins a
+  placeholder `config.backplaneUrl=https://meho-test.test` (matching the
+  surrounding `.test` fakes) so it satisfies the new render-time guard instead
+  of tripping it.
 ### Fixed — Helm chart `startupProbe` stops liveness crash-looping slow first boots (#2393)
 
 - The backplane Deployment now renders a `startupProbe` on `/healthz` from a

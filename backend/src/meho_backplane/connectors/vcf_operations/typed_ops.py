@@ -7,7 +7,7 @@ Initiative #2266 (T3, #2303) converts the vROps *audited* read set —
 the ops the adopter actually runs (audit #2294) — from ``is_enabled``
 curation over ingested ``endpoint_descriptor`` rows to **typed** ops
 (``source_kind="typed"``) dispatched directly on the connector's
-existing hand-rolled HTTP Basic (+ optional ``auth-source``) session.
+acquired-token (``OpsToken``) session.
 A typed op works on a fresh boot with **zero catalog ingest**: the
 dispatcher resolves its ``handler_ref`` (a bound method on
 :class:`~meho_backplane.connectors.vcf_operations.connector.VcfOperationsConnector`)
@@ -166,7 +166,7 @@ VROPS_LIVENESS_OP = VropsTypedOp(
     summary="vROps appliance liveness and identity (release name + build number).",
     description=(
         "Reads GET /suite-api/api/versions/current directly on the "
-        "connector's HTTP Basic (+ optional auth-source) session — the same "
+        "connector's OpsToken session — the same "
         "surface the connector's reachability probe uses — so it works with "
         "zero catalog ingest. Returns the appliance's releaseName and "
         "buildNumber (and humanlyReadableReleaseName when the build emits "

@@ -5,25 +5,25 @@
 
 The hand-rolled
 :class:`~meho_backplane.connectors.vcf_operations.connector.VcfOperationsConnector`
-reads service-account credentials from the target's Vault path and sends them
-as HTTP Basic auth on every request — no session token is established; vROps'
-``/suite-api/api/*`` surface accepts Basic auth on each call.
+reads service-account credentials from the target's Vault path, acquires a
+session token via ``POST /suite-api/api/auth/token/acquire``, and presents it
+as ``Authorization: OpsToken <token>`` on every request — VCF Operations 9.0.2
+rejects stateless HTTP Basic (#2395).
 
 The credential fetch (Vault path → ``{"username": ..., "password": ...}`` dict)
 is delegated to the shared :class:`~meho_backplane.connectors._shared.vcf_auth.CredentialsCache`
 and :data:`~meho_backplane.connectors._shared.vcf_auth.VcfCredentialsLoader`
-contract — all three G3.6 skeleton connectors (vROps #829, vRLI #830,
+contract — the VCF management-plane connectors (vROps #829, vRLI #830,
 Fleet #831) share the same load-once-per-target cache shape and the same
 ``RuntimeError``-naming-target contract for missing keys (#841).
 
 vROps adds one product-specific field on top of the shared target Protocol:
-``auth_source``. When set, the connector appends ``?auth-source=<value>`` as a
-query parameter on authenticated requests so vROps can route the Basic-auth
-challenge to a non-local identity domain (``Local``, ``vIDM``, an Active
-Directory realm name, etc.). When unset (``None``), the connector omits the
-query parameter and vROps routes against its default local realm. The exact
-acceptable values are operator-configured per vROps deployment; the connector
-passes the string through verbatim.
+``auth_source``. When set, it rides the **acquire body** as ``"authSource"``
+so vROps routes the login to a non-local identity domain (``Local``, ``vIDM``,
+an Active Directory realm name, etc.). When unset (``None`` or empty), the
+field is omitted and vROps authenticates against its default local realm. The
+exact acceptable values are operator-configured per vROps deployment; the
+connector passes the string through verbatim.
 """
 
 from __future__ import annotations
@@ -62,12 +62,12 @@ class VcfOperationsTargetLike(Protocol):
     the shared :class:`~meho_backplane.connectors._shared.vcf_auth.VcfTargetLike`
     base with one product-specific field:
 
-    * ``auth_source`` — optional vROps auth-source name. When set, the
-      connector appends ``?auth-source=<value>`` to authenticated request
-      URLs. When ``None``, no query parameter is added and vROps uses its
-      default local realm. The accepted values (``Local``, ``vIDM``, an AD
-      realm name, etc.) are operator-configured per vROps deployment; the
-      connector passes the string through verbatim.
+    * ``auth_source`` — optional vROps auth-source name. When set, it rides
+      the ``token/acquire`` body as ``"authSource"``. When ``None`` (or
+      empty), the field is omitted and vROps uses its default local realm.
+      The accepted values (``Local``, ``vIDM``, an AD realm name, etc.) are
+      operator-configured per vROps deployment; the connector passes the
+      string through verbatim.
 
     The base shared fields (``id``, ``tenant_id``, ``name``, ``host``,
     ``port``, ``secret_ref``, ``auth_model``) are gated and consumed

@@ -4,8 +4,8 @@
 """Tests for the vROps typed read surface (Initiative #2266 T3, #2303).
 
 Covers the audited read set converted from ingested-row curation to
-**typed** ops (``source_kind="typed"``) on the connector's hand-rolled
-HTTP Basic (+ optional ``auth-source``) session:
+**typed** ops (``source_kind="typed"``) on the connector's acquired-token
+(``OpsToken``) session (#2395):
 
 * ``vrops.liveness`` — ``GET /suite-api/api/versions/current`` (appliance
   liveness + identity; the documented reachability surface — vROps'
@@ -26,10 +26,12 @@ Coverage matrix (per #2303 acceptance criteria):
   invariant: the dispatch path never touches an ingested descriptor row).
 * **The query op is a body POST** — ``vrops.resource.query`` sends the
   ``ResourceQuerySpec`` body and paginates via query params.
-* **auth-source rides every request** — both the GET (``_request_json``
-  override) and the body POST (``_post_json`` override) carry
-  ``?auth-source=<value>`` when the target federates identity, and omit it
-  otherwise.
+* **authSource rides the acquire body** — when the target federates
+  identity, ``target.auth_source`` lands as ``"authSource"`` in the
+  ``token/acquire`` body (not as a per-request query param), and is
+  omitted otherwise.
+* **OpsToken on every read** — each read carries
+  ``Authorization: OpsToken <token>``, never Basic or Bearer.
 * **Metadata shape** — all three are ``safety_level="safe"``,
   ``requires_approval=False``, tagged ``read-only``, with
   ``additionalProperties=False`` parameter schemas and non-empty
@@ -83,6 +85,16 @@ _VROPS_BASE_URL = f"https://{_VROPS_HOST}"
 _LIVENESS_PATH = "/suite-api/api/versions/current"
 _ALERTS_PATH = "/suite-api/api/alerts"
 _RESOURCES_QUERY_PATH = "/suite-api/api/resources/query"
+
+#: OpsToken session-establish path + canned acquire response (#2395).
+_ACQUIRE_PATH = "/suite-api/api/auth/token/acquire"
+_OPS_TOKEN = "vrops-typed-ops-token"
+_ACQUIRE_RESPONSE: dict[str, Any] = {
+    "token": _OPS_TOKEN,
+    "validity": 1470421325035,
+    "expiresAt": "Friday, August 5, 2016 6:22:05 PM UTC",
+    "roles": [],
+}
 
 _LIVENESS_RESPONSE: dict[str, Any] = {"releaseName": "9.0.0", "buildNumber": 23456789}
 _ALERTS_RESPONSE: dict[str, Any] = {
@@ -232,6 +244,7 @@ async def test_each_typed_read_dispatches_live_and_returns_payload(
     operator = _make_operator()
 
     async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
         route = mock.request(method, path).respond(200, json=payload)
         result = await dispatch(
             operator=operator,
@@ -244,8 +257,9 @@ async def test_each_typed_read_dispatches_live_and_returns_payload(
     assert result.status == "ok", result.error
     assert result.result == payload
     assert route.called and route.call_count == 1
+    # Scheme-regression pin: the read carries OpsToken, never Basic/Bearer.
     sent_auth = route.calls[0].request.headers.get("authorization")
-    assert sent_auth is not None and sent_auth.startswith("Basic ")
+    assert sent_auth == f"OpsToken {_OPS_TOKEN}"
 
 
 @pytest.mark.asyncio
@@ -303,6 +317,7 @@ async def test_resource_query_sends_body_and_paginates(
         "pageSize": 100,
     }
     async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
         route = mock.post(_RESOURCES_QUERY_PATH).respond(200, json=_RESOURCES_QUERY_RESPONSE)
         result = await dispatch(
             operator=_make_operator(),
@@ -327,10 +342,16 @@ async def test_resource_query_sends_body_and_paginates(
 
 
 @pytest.mark.asyncio
-async def test_auth_source_threads_on_get_and_post(
+async def test_auth_source_rides_acquire_body_not_the_reads(
     _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A federated target's auth-source rides both the GET and the body-POST reads."""
+    """A federated target's auth_source rides the token/acquire body, not the reads.
+
+    Its token-era home (#2395): ``authSource`` lands in the
+    ``/suite-api/api/auth/token/acquire`` body. The reads themselves carry
+    only the OpsToken header + their own query params — no ``auth-source``
+    query param (that mechanism is deleted).
+    """
     await _register_typed_ops(_stub_embedding)
     install_fake_client(
         monkeypatch, secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
@@ -338,6 +359,7 @@ async def test_auth_source_threads_on_get_and_post(
     target = _TypedReadTarget(auth_source="vIDM")
 
     async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
         alerts_route = mock.get(_ALERTS_PATH).respond(200, json=_ALERTS_RESPONSE)
         query_route = mock.post(_RESOURCES_QUERY_PATH).respond(200, json=_RESOURCES_QUERY_RESPONSE)
 
@@ -359,28 +381,40 @@ async def test_auth_source_threads_on_get_and_post(
     assert alerts_result.status == "ok", alerts_result.error
     assert query_result.status == "ok", query_result.error
 
-    # GET path — auth-source merged by the _request_json override, plus the filters.
+    # The acquire body carries authSource (the token cache means it fires once).
+    assert acquire_route.call_count == 1
+    acquire_body = json.loads(acquire_route.calls[0].request.content)
+    assert acquire_body == {
+        "username": _CANARY_USERNAME,
+        "password": _CANARY_PASSWORD,
+        "authSource": "vIDM",
+    }
+
+    # GET path — its own filters ride the query, but no auth-source param.
     alerts_params = alerts_route.calls[0].request.url.params
-    assert alerts_params["auth-source"] == "vIDM"
+    assert "auth-source" not in alerts_params
     assert alerts_params["alertCriticality"] == "CRITICAL"
     resource_ids = [value for key, value in alerts_params.multi_items() if key == "resourceId"]
     assert resource_ids == ["r-1", "r-2"]
+    assert alerts_route.calls[0].request.headers.get("authorization") == f"OpsToken {_OPS_TOKEN}"
 
-    # POST path — auth-source merged by the _post_json override.
-    assert query_route.calls[0].request.url.params["auth-source"] == "vIDM"
+    # POST path — no auth-source query param either.
+    assert "auth-source" not in query_route.calls[0].request.url.params
+    assert query_route.calls[0].request.headers.get("authorization") == f"OpsToken {_OPS_TOKEN}"
 
 
 @pytest.mark.asyncio
-async def test_auth_source_omitted_when_unset(
+async def test_auth_source_omitted_from_acquire_body_when_unset(
     _stub_embedding: AsyncMock, session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With no auth_source, the reads omit ?auth-source= (vROps' default local realm)."""
+    """With no auth_source, the acquire body omits authSource (vROps' default local realm)."""
     await _register_typed_ops(_stub_embedding)
     install_fake_client(
         monkeypatch, secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
     )
 
     async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
         route = mock.post(_RESOURCES_QUERY_PATH).respond(200, json=_RESOURCES_QUERY_RESPONSE)
         result = await dispatch(
             operator=_make_operator(),
@@ -391,6 +425,9 @@ async def test_auth_source_omitted_when_unset(
         )
 
     assert result.status == "ok", result.error
+    acquire_body = json.loads(acquire_route.calls[0].request.content)
+    assert "authSource" not in acquire_body
+    assert acquire_body == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
     assert "auth-source" not in route.calls[0].request.url.params
 
 

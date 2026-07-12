@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — net.tcp_check network-diagnostics probe (net.* keystone)
+
+- Add the synthetic `net.*` connector (`connectors/net/`, no
+  `Connector` class, `secret.move` mold) and its first op
+  `net.tcp_check` — a targetless TCP reachability probe that opens a
+  connection to `host:port` under a bounded timeout, measures latency,
+  and closes immediately. Introduces the dedicated probe allowlist
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` with **inverted, fail-closed**
+  semantics (the parsed set is the whole permitted probe space; **empty
+  ⇒ the connector is inert**), the audit-visible `host:port` (recorded
+  in the durable audit row's `raw_payload`), and the return-failures
+  contract (a refused / timed-out / DNS-failed probe returns
+  `{connected: false, reason}` with `status="ok"`, never a `connector_*`
+  error). `net.*` ops classify as reads in the broadcast feed
+  (#2406 / #2405).
+
 ### Fixed — vROps OpsToken session auth
 
 - Rebuild the `vcf-operations` (vROps) connector auth on an acquired-token

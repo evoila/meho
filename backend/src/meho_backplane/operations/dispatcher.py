@@ -1174,6 +1174,7 @@ def _classify_http_status_error(
     connector_instance: Connector | None,
     target: Any,
     duration_ms: float,
+    relogin: Literal["not_available", "reestablished"] = "not_available",
 ) -> OperationResult:
     """Map an upstream ``HTTPStatusError`` to its structured ``OperationResult``.
 
@@ -1190,6 +1191,13 @@ def _classify_http_status_error(
       :func:`result_connector_auth_failed` (#1804).
     * every other status (404, 429, 5xx) -> the generic
       :func:`result_connector_error`.
+
+    *relogin* (#2400) tells the auth-failed builder which stage produced the
+    status so the cause + summary are truthful. The first-failure caller
+    reaches this arm only when the connector has **no** ``invalidate_session``
+    hook (``not_available`` -- no session stage happened); the retry caller
+    reaches it after a re-login SUCCEEDED and the fresh session was still
+    rejected (``reestablished``). Only the auth-class branch consumes it.
     """
     status_code = http_exc.response.status_code
     if status_code == 403:
@@ -1197,7 +1205,7 @@ def _classify_http_status_error(
     if status_code == 422:
         return result_connector_http_422(op_id, http_exc, duration_ms)
     if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
-        return result_connector_auth_failed(op_id, http_exc, target, duration_ms)
+        return result_connector_auth_failed(op_id, http_exc, target, duration_ms, relogin=relogin)
     return result_connector_error(op_id, http_exc, duration_ms)
 
 
@@ -1351,12 +1359,16 @@ async def _retry_after_session_invalidation(
             params_hash=params_hash,
             started=started,
         )
+        # #2400: the re-login SUCCEEDED (invalidate_session ran, the re-dispatch
+        # re-established a fresh session) yet the fresh session was still
+        # rejected -- ``reestablished`` stamps ``session_dispatch_<s>_after_relogin``.
         return _classify_http_status_error(
             http_exc=retry_exc,
             op_id=op_id,
             connector_instance=connector_instance,
             target=target,
             duration_ms=duration_ms,
+            relogin="reestablished",
         )
     except ConnectorAuthError as retry_exc:
         # #2329 convergence with #2067: the one-shot re-dispatch forces a
@@ -1381,7 +1393,12 @@ async def _retry_after_session_invalidation(
             params_hash=params_hash,
             started=started,
         )
-        return result_connector_auth_failed(op_id, retry_exc, target, duration_ms)
+        # #2400: the forced re-login POST was itself rejected -- an establish
+        # failure (``session_establish_<s>``), narrowed by ``attempted_failed``
+        # to the "re-login after a mid-session expiry" sub-case in the summary.
+        return result_connector_auth_failed(
+            op_id, retry_exc, target, duration_ms, relogin="attempted_failed"
+        )
     except Exception as retry_exc:
         duration_ms = await _audit_error(
             audit_id=audit_id,

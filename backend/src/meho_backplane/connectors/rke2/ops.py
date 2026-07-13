@@ -14,12 +14,12 @@ G-Node/RKE2-T1 (#2221) scaffold -- ships the read-only tier only:
   RKE2 config-file modes and the on-disk join-token presence with the
   token **value never read** (redacted by construction). Two ops total.
 
-The first approval-gated write op ``rke2.token.rotate`` (G-Node/RKE2-T2
-#2429) lands in :mod:`meho_backplane.connectors.rke2.ops_write` and is
-composed onto :data:`RKE2_OPS` here via :data:`WRITE_OPS`. The remaining
-write ops (``rke2.node.service.restart`` / ``rke2.node.config.update`` /
-``rke2.etcd-snapshot.save``) ship in sibling Tasks #2430/#2431 under
-Initiative #2172.
+The approval-gated write ops land in
+:mod:`meho_backplane.connectors.rke2.ops_write` and are composed onto
+:data:`RKE2_OPS` here via :data:`WRITE_OPS`: ``rke2.token.rotate`` (T2 #2429)
+plus ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430).
+The remaining write op (``rke2.etcd-snapshot.save`` T4 #2431) appends to the
+same tuple from its own sibling module under Initiative #2172.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.bind9.ops` and
@@ -132,9 +132,11 @@ def _rke2_ops() -> tuple[Rke2Op, ...]:
 
     Composition: ``rke2.about`` (identity canary) + ``READ_OPS`` (the
     read-only posture tier: ``rke2.posture.show``) + ``WRITE_OPS`` (the
-    approval-gated write tier: ``rke2.token.rotate``, G-Node/RKE2-T2 #2429),
-    exactly as :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops`
-    layers its ``WRITE_OPS`` on.
+    approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus
+    ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430)).
+    This layers ``WRITE_OPS`` onto the read surface exactly as
+    :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` does; the
+    remaining write op (T4 #2431) appends its own tuple the same way.
 
     Implemented as a function call rather than a module-level literal so
     the import order stays linear: ``ops.py`` defines :class:`Rke2Op` +

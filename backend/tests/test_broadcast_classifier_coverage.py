@@ -235,3 +235,27 @@ def test_boolean_and_integer_attrs_do_not_trip_the_sweep() -> None:
         },
     )
     assert _unpinned_secret_bearing_ops([fixture_op]) == []
+
+
+def test_rke2_node_write_ops_classify_as_expected() -> None:
+    """G-Node/RKE2-T3 #2430 -- the two node-write ops land in the right class.
+
+    ``rke2.node.service.restart`` carries no secret in its params (a single
+    allow-listed unit) and classifies plain ``write`` via the new ``.restart``
+    write-suffix. ``rke2.node.config.update`` carries a token-bearing
+    ``patch`` and is pinned to ``credential_write`` so its broadcast collapses
+    to aggregate-only rather than shipping a written join token in full.
+    """
+    assert classify_op("rke2.node.service.restart") == "write"
+    assert classify_op("rke2.node.config.update") == "credential_write"
+
+
+def test_rke2_node_write_ops_are_registered_and_pinned(
+    registered_ops: list[tuple[str, dict[str, Any] | None]],
+) -> None:
+    """Both node-write ops are in the registered set and none is unpinned-secret."""
+    ids = {op_id for op_id, _ in registered_ops}
+    assert "rke2.node.service.restart" in ids
+    assert "rke2.node.config.update" in ids
+    unpinned = {op_id for op_id, _, _ in _unpinned_secret_bearing_ops(registered_ops)}
+    assert "rke2.node.config.update" not in unpinned

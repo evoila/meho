@@ -339,13 +339,23 @@ async def test_posture_show_never_leaks_secret_material(
 # ---------------------------------------------------------------------------
 
 
+#: The read-only tier (T1 #2221). Every entry is safe-tier / no-approval and
+#: takes no operator parameters.
 _READ_OP_IDS: frozenset[str] = frozenset({"rke2.about", "rke2.posture.show"})
-_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | {"rke2.token.rotate"}
+
+#: The approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus the
+#: node-write ops ``rke2.node.service.restart`` / ``rke2.node.config.update``
+#: (T3 #2430). Every entry is dangerous-tier / requires-approval.
+_WRITE_OP_IDS: frozenset[str] = frozenset(
+    {"rke2.token.rotate", "rke2.node.service.restart", "rke2.node.config.update"}
+)
+
+_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS
 
 
-def test_rke2_ops_has_three_entries() -> None:
-    # Two read ops (#2221) + the approval-gated rke2.token.rotate write (#2429).
-    assert len(RKE2_OPS) == 3
+def test_rke2_ops_count_matches_expected() -> None:
+    # Two read ops (#2221) + three approval-gated write ops (#2429 / #2430).
+    assert len(RKE2_OPS) == len(_EXPECTED_OP_IDS)
 
 
 def test_rke2_ops_about_is_first() -> None:
@@ -371,11 +381,31 @@ def test_rke2_read_ops_all_safe_read_only_no_approval() -> None:
         assert "read-only" in op.tags, f"{op.op_id!r} missing read-only tag"
 
 
-def test_rke2_ops_parameter_schemas_closed() -> None:
+def test_rke2_write_ops_all_dangerous_approval_gated() -> None:
+    """AC: every node-write op is dangerous-tier, approval-gated, write-tagged."""
     for op in RKE2_OPS:
+        if op.op_id not in _WRITE_OP_IDS:
+            continue
+        assert op.safety_level == "dangerous", f"{op.op_id!r} is not dangerous-tier"
+        assert op.requires_approval is True, f"{op.op_id!r} must require approval"
+        assert "write" in op.tags, f"{op.op_id!r} missing write tag"
+
+
+def test_rke2_read_ops_parameter_schemas_closed() -> None:
+    for op in RKE2_OPS:
+        if op.op_id not in _READ_OP_IDS:
+            continue
         assert op.parameter_schema.get("additionalProperties") is False
         # The read tier takes no operator parameters -- fixed paths only.
         assert op.parameter_schema.get("properties") == {}
+
+
+def test_rke2_write_ops_parameter_schemas_closed() -> None:
+    for op in RKE2_OPS:
+        if op.op_id not in _WRITE_OP_IDS:
+            continue
+        # Write ops take bounded params but reject unknown keys.
+        assert op.parameter_schema.get("additionalProperties") is False
 
 
 def test_rke2_ops_have_ssh_transport_when_to_use() -> None:

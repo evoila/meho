@@ -26,7 +26,10 @@ T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
   join-token presence, **with the token value never read** (redacted by
   construction).
 
-T2 (#2429) adds the **first approval-gated write op**:
+Both `safety_level="safe"` / `requires_approval=false`.
+
+T2 (#2429) adds the **first approval-gated write op** (in the
+`rke2-token-write` group):
 
 - `rke2.token.rotate` — rotates the RKE2 server join token cluster-wide via
   `rke2 token rotate` over sudo-SSH. `safety_level="dangerous"`,
@@ -38,8 +41,28 @@ T2 (#2429) adds the **first approval-gated write op**:
   non-server node, an inactive `rke2-server`, or a below-floor / known-bad
   (`v1.27.10+rke2r1`) RKE2 version before any mutation.
 
-The remaining write ops (`rke2.node.service.restart`, `rke2.node.config.update`,
-`rke2.etcd-snapshot.save`) ship in sibling Tasks #2430/#2431.
+T3 (#2430) adds two more **approval-gated node-write ops**
+(`safety_level="dangerous"` / `requires_approval=true`), both in the shared
+`rke2-node-write` group:
+
+- `rke2.node.service.restart` — restarts EXACTLY one allow-listed unit
+  (`rke2-server` / `rke2-agent`) via `systemctl restart <UNIT>` and
+  health-gates on `systemctl is-active`. The unit is a schema `enum`
+  re-checked against a module-level frozenset in the handler (fail-closed,
+  the proxmox method-allowlist mold); no other unit and no arbitrary
+  `systemctl` action.
+- `rke2.node.config.update` — a **backplane-owned key merge** of a bounded
+  `/etc/rancher/rke2/*.yaml` file. The handler reads + parses the current
+  YAML in-process, applies the operator's key-level `patch`
+  (`semantics: merge|replace`), validates it re-parses, and writes it back
+  atomically (temp under `/etc/rancher/rke2`, `chmod 0600` + `chown
+  root:root`, `mv`). No host-side `sed`/`yq`, no arbitrary-file-write
+  primitive. RKE2 config is inert until a restart, so this op does **not**
+  restart — it returns `restart_required: true` and changed key **names**
+  only (never a value; the config body carries `token:` join credentials).
+
+The remaining write op (`rke2.etcd-snapshot.save` T4 #2431) appends to
+`RKE2_OPS` from its own sibling module the same way.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -67,18 +90,33 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   copied into every op's `when_to_use`), `_RKE2_ABOUT_OP`, and `RKE2_OPS`
   (`about` + the `READ_OPS` posture tuple + the `WRITE_OPS` write tuple).
 
-- **Write tier** (`ops_write.py`, #2429) — `rke2_token_rotate` (the async
-  handler, bound to the connector via the `token_rotate` shim),
-  `rke2_version_rotate_verdict` / `parse_rke2_release` (the pure version-gate
-  logic against the per-minor CVE-fix floor + the `v1.27.10+rke2r1` deny),
-  and `WRITE_OPS` (`rke2.token.rotate`). The minted new token is stashed in
-  Vault under `secret/tenants/<tenant_id>/rke2/<node>/server-token`; only a
-  pointer is returned. `_sudo.py` carries the family's own safe-`sudo -S`
-  primitive (`run_remote_bash_with_sudo`) — the #697-hardened wire shape
-  (script bytes first, password last on stdin, never in argv / history /
-  log). `ops_write_preview.py` registers a non-secret park-time
-  `proposed_effect` preview builder (`{node, service, semantics,
-  new_token_minted}`).
+- **Write ops** (`ops_write.py`, #2429 + #2430) — the three approval-gated
+  write ops share one module:
+  - `rke2.token.rotate` (#2429): `rke2_token_rotate` (the async handler, bound
+    via the `token_rotate` shim), `rke2_version_rotate_verdict` /
+    `parse_rke2_release` (the pure version-gate logic against the per-minor
+    CVE-fix floor + the `v1.27.10+rke2r1` deny). The minted new token is
+    stashed in Vault under
+    `secret/tenants/<tenant_id>/rke2/<node>/server-token`; only a pointer is
+    returned. `_sudo.py` carries the family's own safe-`sudo -S` primitive
+    (`run_remote_bash_with_sudo`) — the #697-hardened wire shape (script bytes
+    first, password last on stdin, never in argv / history / log).
+    `ops_write_preview.py` registers a non-secret park-time `proposed_effect`
+    preview builder (`{node, service, semantics, new_token_minted}`).
+  - `rke2.node.service.restart` / `rke2.node.config.update` (#2430): the
+    bounds (`bound_unit` frozenset re-check; `ensure_config_path_under_root` /
+    `bound_config_path` lexical `/etc/rancher/rke2/*.yaml` confinement +
+    `ConfigPathRejectedError`; `apply_config_patch` / `changed_config_keys`
+    backplane-owned merge), the `rke2_service_restart` / `rke2_config_update`
+    handlers, and the two node-write approval-park preview builders (registered
+    at import via `register_rke2_write_previews`). Privilege model for these
+    node ops: the connector operates as `root` over SSH (the posture tier
+    already `stat`s `0600 root:root` token files), so they run via
+    `_run_command` without a separate sudo-password stream — the sudo primitive
+    is reserved for the credential-minting `token.rotate` flow.
+  - Shared: `WRITE_OPS` (all three ops) and
+    `RKE2_WHEN_TO_USE_WRITE_BY_GROUP` (`rke2-token-write` + `rke2-node-write`,
+    merged into the connector's `_WHEN_TO_USE_BY_GROUP`).
 
 - **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck.
   Synchronous `register_connector_v2` at import time (versioned triple +
@@ -144,11 +182,29 @@ full detail) and its park-time preview carries no token value.
 - `connectors/registry.py` — the v2 registry + eager-import walk.
 - stdlib `re`, `shlex` (path quoting, defensive even though paths are fixed).
 
+## Broadcast / approval wiring (T3 #2430)
+
+- `rke2.node.service.restart` classifies plain `write` via the `.restart`
+  write-suffix added to `broadcast/events.py::_WRITE_SUFFIXES`; its params
+  (a single unit) carry no secret.
+- `rke2.node.config.update` is pinned in
+  `broadcast/events.py::_CREDENTIAL_WRITE_OPS` (its `patch` may carry a
+  `token:` value), so the broadcast collapses to aggregate-only.
+- Approval-park previews: `_rke2_service_restart_preview` renders
+  `{resource: systemd_unit, unit, action, node}`; `_rke2_config_update_preview`
+  renders `{resource: config_file, path, semantics, key_names}` — key names
+  only, never the file body or values.
+
 ## Known issues / follow-ups
 
-- `rke2.token.rotate` lands in T2 (#2429); the remaining write ops (service
-  restart / config update / etcd-snapshot) are deferred to #2430/#2431 under
+- `rke2.token.rotate` (T2 #2429) + `rke2.node.service.restart` /
+  `rke2.node.config.update` (T3 #2430) are landed; the remaining write op
+  (`etcd-snapshot.save` #2431) is deferred to its sibling Task under
   Initiative #2172.
+- The node-write ops (service.restart / config.update) assume `root` SSH access
+  (consistent with the read posture tier); a future non-root + sudo-password
+  path would route them through `_sudo.run_remote_bash_with_sudo` (as
+  `token.rotate` already does) if a target ever connects as a non-root user.
 - The rotate is a **single-node atomic op**: multi-node token-propagation /
   restart choreography is an operator-composed runbook of T2+T3 ops, not part
   of this op (per the Initiative DoD).

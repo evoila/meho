@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+"""meho_backplane.connectors.net — network-diagnostics probes (Initiative #2405).
+
+A **synthetic** connector subpackage in the ``secret.*`` mold: no vendor
+connector backs it, so this package calls neither ``register_connector``
+nor ``register_connector_v2``. The ``net.*`` handlers are module-level
+functions the dispatcher routes to with ``connector_instance=None`` /
+``target=None`` — the probe destination is a param, not a registered
+``Target``.
+
+Importing the package (the lifespan's
+:func:`~meho_backplane.connectors.registry._eager_import_connectors` pass
+walks ``connectors/<product>/`` and imports each subpackage) queues the
+``net.tcp_check`` typed-op upsert onto the lifespan-driven registrar list
+via :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar`,
+so the ``endpoint_descriptor`` row lands before the first dispatch.
+
+This is the keystone (#2406) of the ``net.*`` family: ``net.tcp_check``
+plus the three foundations sibling ops (T2-T4) reuse — the dedicated
+probe allowlist (``MEHO_NETDIAG_PROBE_ALLOWLIST``, empty ⇒ inert), the
+audit-visible host:port, and the return-failures contract (a failed
+probe is ``status="ok"`` with ``connected=false``, never a
+``connector_*`` error). See :mod:`meho_backplane.connectors.net.ops` and
+:mod:`meho_backplane.connectors.net.allowlist`.
+"""
+
+from meho_backplane.connectors.net.ops import register_net_typed_operations
+from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+# Queue the net.tcp_check typed-op upsert onto the lifespan-driven
+# registrar list (run after the connector eager-import pass).
+register_typed_op_registrar(register_net_typed_operations)
+
+__all__ = [
+    "register_net_typed_operations",
+]

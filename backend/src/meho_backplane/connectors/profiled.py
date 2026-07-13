@@ -112,7 +112,10 @@ from meho_backplane.connectors._shared.vault_creds import (
     VaultCredentialsReadError,
     load_basic_credentials,
 )
-from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
+from meho_backplane.connectors._shared.vcf_auth import (
+    is_acceptable_auth_model,
+    session_establish_auth_error,
+)
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.base import ShimKind
 from meho_backplane.connectors.profile import AuthSpec, ExecutionProfile, split_version
@@ -477,7 +480,32 @@ class ProfiledRestConnector(HttpConnector):
             legacy_path = spec.legacy_fallback.legacy_login_path
             resp = await self._login_attempt(target, spec, auth, legacy_path, body, secret)
             established_path = legacy_path
-        resp.raise_for_status()
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            # #2414: a login-POST auth-class rejection (401 / 403) is a session
+            # *establish* failure, the same shape the typed connectors surface
+            # through ``vcf_session_login``. Raising the raw ``HTTPStatusError``
+            # here let it reach the dispatcher's mid-session retry
+            # ``HTTPStatusError`` arm -- a profiled connector advertises
+            # ``invalidate_session``, so the failure was re-dispatched once and
+            # then stamped ``session_dispatch_<s>_after_relogin`` (do-NOT-restage).
+            # That is wrong: the login itself was refused, so restaging the
+            # credential IS the fix. Route it through the single family
+            # classifier so the dispatcher's ``except ConnectorAuthError`` arm
+            # stamps ``session_establish_<s>`` (restage) instead, and
+            # ``reestablished`` / ``after_relogin`` stays reserved for a genuine
+            # post-re-login dispatch failure. A non-auth status (404, 5xx) yields
+            # ``None`` from the classifier, so the raw error re-raises unchanged.
+            message = (
+                f"profiled session-login failed for target "
+                f"{getattr(target, 'name', '?')!r}: POST {established_path} "
+                f"returned HTTP {exc.response.status_code}"
+            )
+            auth_error = session_establish_auth_error(exc, message=message, target=target)
+            if auth_error is not None:
+                raise auth_error from exc
+            raise
         return resp.json(), established_path
 
     async def _login_attempt(

@@ -106,6 +106,43 @@ connector-related release-notes line.
   false, reason}` with `status="ok"` (never a `connector_*` error).
   `dnspython` (ISC-licensed) is pinned as a direct dependency. Parent
   Initiative #2405.
+### Added — net.http_probe HTTP reachability probe (no body, per-hop redirect re-gating)
+
+- Add `net.http_probe` to the synthetic `net.*` connector — a targetless
+  HTTP(S) reachability/identity probe that issues a single `HEAD`/`GET`
+  from the backplane and reports `status`, response `headers`, the
+  `redirect_chain`, a `tls` summary (version/cipher/ALPN/cert
+  identity), `timing_ms`, `final_url`, and the body's `body_size` /
+  `body_sha256` — but **never the response body** (the anti-exfil
+  floor). It uses a fresh `httpx.AsyncClient(follow_redirects=False)`
+  and walks redirects manually so **every redirect hop's host is
+  re-checked against `MEHO_NETDIAG_PROBE_ALLOWLIST` before it is
+  followed**: a redirect to a non-allowlisted host halts with
+  `reason="blocked_redirect"` and is never dialed (open-redirect SSRF
+  floor). `method` is restricted to `HEAD`/`GET` at the schema boundary;
+  a refused / timed-out / DNS-failed / TLS-failed / redirect-blocked
+  probe returns `{reachable, reason}` with `status="ok"`, never a
+  `connector_*` error. No new dependency (reuses the existing `httpx`
+  stack) (#2408 / #2405).
+### Fixed — profiled-connector login-POST 401 stamped establish-stage, not after_relogin (#2414)
+
+- A profiled session-scheme connector whose login POST is rejected
+  (`ProfiledRestConnector._post_login`, HTTP `401`/`403`) is now stamped
+  `connector_auth_failed` with the **establish-stage** cause
+  `session_establish_<status>` and the restage remediation (`meho vault kv
+  put …`), matching the typed connectors. Previously it raised a raw
+  `httpx.HTTPStatusError`; because a profiled connector advertises
+  `invalidate_session`, the dispatcher re-dispatched the failing login once
+  and mislabelled it `session_dispatch_<status>_after_relogin` (do-NOT-restage)
+  — telling the operator the session was re-established and retried (false)
+  and not to restage the credential (wrong). The `reestablished` /
+  `after_relogin` label is now reserved for a genuine post-re-login *dispatch*
+  failure (the re-login POST succeeded and the fresh session was still
+  rejected). The fix routes the login-POST auth-class rejection through the
+  same `session_establish_auth_error` classifier the typed family uses; a
+  non-auth login-POST status (404, 5xx) re-raises unchanged. Typed-connector
+  stamping and the #2262/#1798 registration/shadowing invariants are
+  untouched (#2414).
 ### Fixed — keycloak user write-op password read routed through the credential-backend seam (#2401)
 
 - `keycloak.user.create` / `keycloak.user.reset_password` sourced the
@@ -136,6 +173,26 @@ connector-related release-notes line.
   `{connected: false, reason}` with `status="ok"`, never a `connector_*`
   error). `net.*` ops classify as reads in the broadcast feed
   (#2406 / #2405).
+
+### Added — net.tls_inspect full presented certificate chain (openssl s_client parity)
+
+- Add `net.tls_inspect` on the `net.*` keystone — a targetless probe
+  that opens a TLS handshake with certificate verification **off** and
+  reports the **full chain the server presents** (leaf → intermediates →
+  root-if-sent, leaf-first): per-cert subject / SAN / issuer / validity
+  window / serial / self-signed flag, plus `chain_complete` (did the
+  server send a self-signed root), a leaf `hostname_match` computed
+  independently of the disabled verification, and the negotiated protocol
+  and cipher — `openssl s_client -showcerts` parity. A self-signed /
+  expired / hostname-mismatched cert is **inspected and reported**
+  (`handshake=true`, `status="ok"`), never rejected; a refused /
+  timed-out / DNS-failed / non-TLS endpoint returns `{handshake: false,
+  reason}` with `status="ok"`. Reuses the T1 probe allowlist, audit-
+  visible `host:port`, and return-failures contract. Adds `pyOpenSSL`
+  (full-chain read; stdlib `ssl` on the 3.12 floor exposes only the leaf)
+  and promotes `cryptography` to a declared runtime dependency — both
+  Apache-2.0 (#2407 / #2405).
+
 ### Fixed — harden ingest-job timeout warning tests against xdist logger-cache ordering (#2397)
 
 - `test_operations_ingest_jobs.py` rebinds `jobs._log` to a fresh structlog

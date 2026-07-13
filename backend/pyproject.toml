@@ -102,6 +102,20 @@ dependencies = [
     # legs alike) instead of partially ingesting. Builds on the existing
     # ``jsonschema`` dependency; used metaschema-only (no semantic add-ons).
     "openapi-spec-validator>=0.9.0",
+    # Full presented TLS certificate-chain inspection for the synthetic
+    # ``net.tls_inspect`` diagnostic op (#2407). Stdlib ``ssl`` on Python
+    # 3.12 (the ``requires-python`` floor) exposes only the **leaf** via
+    # ``getpeercert`` — the full-chain ``SSLSocket.get_unverified_chain()``
+    # is 3.13+. pyOpenSSL's ``Connection.get_peer_cert_chain()`` returns
+    # the whole chain the server sent on an unverified handshake, and each
+    # cert's ``.to_cryptography()`` hands off to the ``cryptography`` x509
+    # parser already used elsewhere. Apache-2.0 (license-check clean).
+    "pyopenssl>=25.0.0",
+    # Direct runtime dependency now: ``net.tls_inspect`` parses each
+    # presented cert via ``cryptography.x509`` (subject/SAN/issuer/validity
+    # extraction). Previously a dev-only + transitive (pyjwt[crypto],
+    # pyopenssl) install; declared here because the app imports it directly.
+    "cryptography>=49.0.0",
 ]
 
 [dependency-groups]
@@ -110,7 +124,6 @@ dev = [
     "pytest-asyncio>=1.4.0",
     "ruff>=0.15.20",
     "mypy>=2.1.0",
-    "cryptography>=49.0.0",
     "respx>=0.21",
     "pytest-cov>=5.0",
     "pytest-xdist>=3.6",

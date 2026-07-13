@@ -15,8 +15,18 @@ module-level functions the dispatcher routes to with
 
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op (T2–T4:
-`tls_inspect` / `http_probe` / `dns_lookup`) reuses, and the T4 op
-`net.dns_lookup` (#2409) built on that mold.
+`tls_inspect` / `http_probe` / `dns_lookup`) reuses, and the sibling ops
+`net.tls_inspect` (#2407, T2), `net.http_probe` (#2408, T3), and
+`net.dns_lookup` (#2409, T4) built on that mold — all described below.
+
+Each op queues a registrar in `__init__.py` via
+`register_typed_op_registrar` (`net.tcp_check` and `net.dns_lookup` share
+`ops.register_net_typed_operations`; `net.tls_inspect` →
+`tls.register_net_tls_inspect_operation`; `net.http_probe` →
+`http_probe.register_net_http_probe_operations`). Siblings therefore
+extend the package by adding (at most) a module and one registrar-queue
+line rather than contending for a single registrar function — which also
+keeps parallel task branches from colliding on one shared file.
 
 ## Core mechanism
 
@@ -141,6 +151,106 @@ and `ConnectionRefusedError` are all `OSError` subclasses — so the
 handler's `except` arms are ordered specific-before-general
 (timeout → DNS → refused → generic `OSError`).
 
+## `net.http_probe` (T3, #2408)
+
+`net.http_probe(url, method=HEAD|GET, timeout_seconds?)` issues a
+**single** HTTP request from the backplane and reports the
+reachability/identity surface — `status`, response `headers`, the
+`redirect_chain`, a `tls` summary, `timing_ms`, `final_url`, and the
+body's `body_size` / `body_sha256` — but **never the response body**. It
+is a reachability/identity probe, not a fetch/exfil path (the anti-exfil
+floor). Lives in `connectors/net/http_probe.py` with its own registrar
+(`register_net_http_probe_operations`), queued alongside
+`net.tcp_check`'s registrar in the package `__init__`.
+
+It reuses the same three foundations plus two probe-specific rules:
+
+1. **Fresh client, manual redirects.** Unlike the target-coupled
+   `HttpConnector` (per-target pooled client), the op builds a fresh
+   `httpx.AsyncClient(follow_redirects=False)` per call and walks
+   redirects itself — httpx's own follower would dial the next host
+   *before* the allowlist could see it.
+2. **Per-hop redirect re-gating (open-redirect SSRF floor).** Every
+   redirect hop's host is passed through `assert_probe_allowed` **before
+   it is followed**. A redirect to a non-allowlisted host (e.g. a
+   cloud-metadata / credential host) halts the walk with
+   `{"reachable": true, "reason": "blocked_redirect",
+   "blocked_redirect": "<host>"}` and is **never dialed** — the concern
+   noted at `adapters/http.py:260`. The redirect count is bounded
+   (`_MAX_REDIRECTS`) and the whole walk runs under one
+   `asyncio.wait_for(timeout)` ceiling.
+
+The body is streamed chunk-by-chunk only to accumulate a running length
+and SHA-256 (`_consume_body_size_and_hash`); the full body is never
+materialised or returned. The `tls` summary is read off httpx's
+`network_stream` response extension (`ssl_object`) before the stream is
+consumed — negotiated version, cipher, ALPN, and the peer cert's
+subject/issuer/`notAfter` (public identity, never private material);
+`null` for plain HTTP. `method` is restricted to `HEAD`/`GET` by a schema
+`enum`, so the dispatcher rejects anything else with `invalid_params`
+before the handler runs. Reason codes extend the T1 set with
+`invalid_url`, `blocked_redirect`, `too_many_redirects`, and `tls_error`.
+
+Because it issues an HTTP request, `net.http_probe` adds **`httpx`** to
+the family's dependency surface (already a project dep — no new dep).
+
+## `net.tls_inspect` — full presented certificate chain (T2, #2407)
+
+`net.tls_inspect(host, port, server_name?, timeout_seconds?)` opens a TLS
+handshake with **certificate verification off** and reports the **full
+chain the server presented** — `openssl s_client -showcerts` parity. It
+inspects; it never verifies (self-signed appliances are the point), so a
+self-signed / expired / hostname-mismatched cert is **reported**, never
+rejected.
+
+Why pyOpenSSL and not stdlib `ssl`: on the `requires-python` floor (3.12)
+`ssl.SSLSocket.getpeercert` returns only the **leaf**; the full-chain
+`ssl.SSLSocket.get_unverified_chain` is 3.13+. pyOpenSSL's
+`Connection.get_peer_cert_chain(as_cryptography=True)` (the
+`as_cryptography` kwarg landed in pyOpenSSL 24.3) returns the whole
+presented chain as `cryptography.x509.Certificate` objects directly, so
+the parse reuses the `cryptography` x509 API.
+
+Control flow (`connectors/net/tls.py`):
+
+1. `assert_probe_allowed(host)` — the T1 allowlist floor, before any
+   socket opens.
+2. `asyncio.to_thread(_blocking_tls_inspect, ...)` — the blocking
+   socket + handshake runs off the event loop. The context is
+   `SSL.Context(TLS_CLIENT_METHOD)` with `set_verify(VERIFY_NONE)`; SNI
+   is set from `server_name` (default `host`) **only for hostnames**
+   (RFC 6066 forbids an IP-literal SNI).
+3. Because a socket with a timeout is non-blocking under the hood,
+   pyOpenSSL raises `WantReadError` / `WantWriteError`; `_run_until_ready`
+   drives `do_handshake` (and the best-effort `shutdown`) to completion
+   by `select`-waiting under a single `deadline` derived from the
+   clamped timeout, so a stalled peer cannot pin the worker thread.
+4. Each presented cert is flattened to
+   `{subject, issuer, san, not_before, not_after, serial, self_signed}`
+   (leaf-first). `serial` is stringified (a serial is a large integer a
+   JSON number consumer would truncate); timestamps use the tz-aware
+   `not_valid_*_utc` accessors.
+
+Derived top-level fields:
+
+- `leaf` — convenience alias for `chain[0]`; `not_after` — the leaf's,
+  for the common "is it expiring" read.
+- `hostname_match` — computed **independently** of the (disabled) stack
+  verification: `server_name` vs the leaf SAN dNSNames (wildcard-aware,
+  RFC 6125 single-leftmost-label), SAN iPAddresses for an IP
+  `server_name`, falling back to the subject CN only when the cert
+  carries no SAN dNSName (legacy appliances).
+- `chain_complete` — whether the **last** presented cert is self-signed
+  (i.e. the server sent a root), not a trust decision.
+
+It shares the same synthetic natural key as `net.tcp_check`
+(`net-probe-1.x`), reuses the return-failures contract (a refused /
+timed-out / DNS-failed / non-TLS endpoint returns `handshake=false` with
+a reason code — `not_in_probe_allowlist` / `timeout` / `refused` /
+`dns_failure` / `unreachable` / `tls_error` — and `status="ok"`), and is
+`safety_level="safe"` + `requires_approval=False`. A completed handshake
+sends **no** application bytes.
+
 ## Broadcast classification
 
 `net.*` ops classify as `read` in the broadcast sensitivity taxonomy
@@ -156,12 +266,24 @@ connectors' ops.
 
 ## Key types / control flow
 
-- `connectors/net/__init__.py` — queues `register_net_typed_operations`
-  onto the lifespan registrar list via `register_typed_op_registrar`
-  (auto-imported by the `_eager_import_connectors` package walk).
+- `connectors/net/__init__.py` — queues each op registrar
+  (`register_net_typed_operations`, `register_net_tls_inspect_operation`,
+  `register_net_http_probe_operations`) onto the lifespan registrar list
+  via `register_typed_op_registrar` (auto-imported by the
+  `_eager_import_connectors` package walk).
 - `connectors/net/ops.py` — the `net_tcp_check` and `net_dns_lookup`
-  handlers, their parameter / response schemas, and the shared registrar
-  (`register_net_typed_operations` upserts both ops).
+  handlers, their parameter / response schemas, the shared registrar
+  (`register_net_typed_operations` upserts both ops), and the shared
+  timeout bounds/clamp (`_DEFAULT_TIMEOUT_SECONDS` /
+  `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`) reused by `tls.py`
+  (package-internal import; `ops` never imports `tls`, so no cycle).
+- `connectors/net/tls.py` — `net_tls_inspect` handler, its schemas, the
+  cert-flattening / hostname-match / chain helpers, and its registrar.
+- `connectors/net/http_probe.py` — `net_http_probe` handler, its
+  parameter / response schema, the manual redirect walk
+  (`_walk_redirects`), the TLS summary (`_tls_summary`), the
+  size/hash-only body reader (`_consume_body_size_and_hash`), and the
+  registrar.
 - `connectors/net/allowlist.py` — `PROBE_ALLOWLIST_ENV`,
   `parse_probe_allowlist`, `assert_probe_allowed`,
   `ProbeNotAllowedError`.
@@ -173,15 +295,29 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 
 ## Dependencies
 
-`net.tcp_check` is standard library only (`asyncio`, `socket`,
-`ipaddress`, `time`). `net.dns_lookup` adds **dnspython** (ISC-licensed,
-already present transitively via `email-validator` / `pymongo`; pinned
-direct in `backend/pyproject.toml` so the connector's requirement is
-explicit) — used via `dns.asyncresolver` / `dns.reversename` /
-`dns.rdatatype` / `dns.flags`.
+- `net.tcp_check` and the allowlist: standard library only (`asyncio`,
+  `socket`, `ipaddress`, `time`).
+- `net.tls_inspect`: `pyOpenSSL` (full presented chain via
+  `get_peer_cert_chain`) + `cryptography` (x509 parsing) — both Apache-2.0
+  (Python License Check clean). `pyOpenSSL` was promoted to a runtime
+  dependency and `cryptography` from a dev-only + transitive install to a
+  declared runtime dependency (the handler imports `cryptography.x509`
+  directly).
+- `net.http_probe`: `httpx` (already a project dependency) for the HTTP
+  request and its `network_stream` TLS extension — no **new** runtime
+  dependency is added.
+- `net.dns_lookup`: **dnspython** (ISC-licensed, already present
+  transitively via `email-validator` / `pymongo`; pinned direct in
+  `backend/pyproject.toml` so the connector's requirement is explicit) —
+  used via `dns.asyncresolver` / `dns.reversename` / `dns.rdatatype` /
+  `dns.flags`.
 
 ## Known issues / deferred
 
+- `net.tls_inspect` **inspects, never verifies** — trust-store
+  verification, OCSP/CRL/revocation, and client-cert / mTLS presentation
+  are explicitly out of scope (#2407). `chain_complete` is a
+  "did the server send a self-signed root" signal, not a trust decision.
 - No port-scoped allowlist (v1 scopes hosts only).
 - Hostname allowlisting is verbatim; an operator who allowlists a CIDR
   cannot probe a hostname that merely resolves into it (list the name).
@@ -192,8 +328,9 @@ explicit) — used via `dns.asyncresolver` / `dns.reversename` /
 
 ## References
 
-- Parent: Initiative #2405, Tasks #2406 (`tcp_check`) / #2409
-  (`dns_lookup`). Mold: secret broker
+- Parent: Initiative #2405, Tasks #2406 (T1 `tcp_check`) + #2407 (T2
+  `tls_inspect`) + #2408 (T3 `http_probe`) + #2409 (T4 `dns_lookup`).
+  Mold: secret broker
   (`docs/codebase/connectors-secret-broker.md`). SSRF sibling:
   `docs/codebase/target-ssrf-guard.md`. Broadcast taxonomy:
   `docs/codebase/broadcast.md`.

@@ -57,6 +57,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.rke2.ops import RKE2_OPS
+from meho_backplane.connectors.rke2.ops_write import RKE2_WHEN_TO_USE_WRITE_BY_GROUP
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -320,6 +321,26 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_posture_show(self, target, params, operator)
 
+    async def token_rotate(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.token.rotate`` (G-Node/RKE2-T2 #2429).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_write.rke2_token_rotate`;
+        runs only on the ``_approved=True`` resume path. Mints a new server
+        join token, rotates it over sudo-SSH, and stashes it in Vault --
+        returning only a pointer, never the token value.
+        """
+        from meho_backplane.connectors.rke2.ops_write import (
+            rke2_token_rotate as _rke2_token_rotate,
+        )
+
+        return await _rke2_token_rotate(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`RKE2_OPS` into ``endpoint_descriptor``.
@@ -483,4 +504,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Pair with a rotation runbook to confirm the token is present "
         "before rotating. Transport: plain SSH (``stat``, read-only)."
     ),
+    # Approval-gated write groups. Keys carry a ``-write`` suffix so they
+    # never collide with the read-op group keys above.
+    **RKE2_WHEN_TO_USE_WRITE_BY_GROUP,
 }

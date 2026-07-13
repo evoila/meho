@@ -211,6 +211,17 @@ def test_deliberately_unpinned_fixture_op_fails_the_sweep() -> None:
     assert violations == [("acme.credstore.create", "write", ["password"])]
 
 
+def test_rke2_token_rotate_is_pinned_credential_mint() -> None:
+    """rke2.token.rotate mints a token server-side -> credential_mint (#2429).
+
+    ``.rotate`` is not a write/read suffix, so without the explicit pin the
+    op would classify ``other`` and broadcast full detail. The pin collapses
+    its broadcast to aggregate-only (defence-in-depth: the handler already
+    never returns the token, but the class must match the semantics).
+    """
+    assert classify_op("rke2.token.rotate") == "credential_mint"
+
+
 def test_boolean_and_integer_attrs_do_not_trip_the_sweep() -> None:
     """AppRole-style config attributes stay unflagged (vetted full detail)."""
     fixture_op: tuple[str, dict[str, Any] | None] = (

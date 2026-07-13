@@ -56,13 +56,19 @@ Password handling (critical security)
 =====================================
 
 ``user.create`` and ``user.reset_password`` **never** carry the password
-inline in op params. The password is read from Vault under the operator's
-identity (``password_secret_ref`` — a KV-v2 path; optional
-``password_secret_mount`` / ``password_secret_key``) via the same
-``vault_client_for_operator`` primitive the Vault connector ops use. Two
-layers of defence keep the password out of audit + broadcast:
+inline in op params. The password is read from the operator's configured
+credential backend under the operator's identity: ``password_secret_ref``
+is resolved through the credential-backend seam
+(:func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
+#2229), so a schemeless ref reads the deployment default (Vault KV-v2 —
+honouring ``password_secret_mount`` / ``password_secret_key``) while a
+``<kind>:`` ref (e.g. ``gsm:<project>/<secret>#password``) reaches that
+backend. This is the same seam the connector's admin-credential loader
+rides (``session.py``); the write-op reader no longer opens hvac
+directly. Two layers of defence keep the password out of audit +
+broadcast:
 
-* The **op params** carry only a Vault *path*, never the secret — so the
+* The **op params** carry only a secret *ref*, never the secret — so the
   audit row's ``params_hash`` (params are never stored verbatim) hashes a
   path, and the broadcast ``params`` view carries a path.
 * Both ops are additionally pinned in
@@ -89,11 +95,13 @@ References
 
 from __future__ import annotations
 
-import asyncio
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-import meho_backplane.auth.vault as _auth_vault
-from meho_backplane.connectors._shared.vault_creds import strip_credential_value
+from meho_backplane.connectors._shared.vault_creds import (
+    load_vault_secret_data,
+    strip_credential_value,
+)
 from meho_backplane.connectors.keycloak.session import quote_segment, resolve_realm_config
 
 if TYPE_CHECKING:
@@ -146,21 +154,50 @@ class KeycloakRoleNotFoundError(Exception):
 
 
 # ---------------------------------------------------------------------------
-# Vault-sourced password reader (operator-context)
+# Credential-backend-sourced password reader (operator-context)
 # ---------------------------------------------------------------------------
 
 
-async def _read_password_from_vault(operator: Operator, params: dict[str, Any]) -> str:
-    """Read a user password from Vault under the operator's identity.
+@dataclass(slots=True)
+class _PasswordSecretTarget:
+    """Adapter presenting the op's ``password_secret_ref`` to the seam.
 
-    The password is **never** an inline param — only its Vault location is.
-    ``password_secret_ref`` is the KV-v2 path; ``password_secret_mount``
-    (default ``secret``) the mount; ``password_secret_key`` (default
-    ``password``) the field within the secret payload. Forwards the
-    operator's validated JWT to Vault's JWT/OIDC auth method via
-    :func:`~meho_backplane.auth.vault.vault_client_for_operator` (the same
-    operator-context read the connector's admin-credential loader uses) and
-    offloads the blocking hvac call with ``asyncio.to_thread``.
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`
+    reads its ``secret_ref`` off a
+    :class:`~meho_backplane.connectors._shared.vault_creds.BasicCredentialsTargetLike`
+    (``name`` / ``host`` / ``secret_ref``). A user-write password lives at
+    a **per-op** ``password_secret_ref``, not at the connector target's
+    admin ``secret_ref`` — so this thin adapter carries the connector
+    target's ``name`` / ``host`` for log + error attribution while pointing
+    the seam at the op's password ref. Not frozen: the structural Protocol
+    declares settable members, so an immutable dataclass would not satisfy
+    it.
+    """
+
+    name: str
+    host: str
+    secret_ref: str | None
+
+
+async def _read_password_from_vault(
+    operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+) -> str:
+    """Read a user password via the credential-backend seam (#2229).
+
+    The password is **never** an inline param — only its secret *ref* is.
+    ``password_secret_ref`` is resolved through
+    :func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`,
+    so a schemeless ref reads the deployment-default backend (Vault KV-v2,
+    honouring ``password_secret_mount`` / ``password_secret_key``) while an
+    explicit ``<kind>:`` ref (e.g. ``gsm:<project>/<secret>#password``)
+    reaches that backend. ``password_secret_mount`` is the Vault KV-v2
+    mount (a Vault-only knob gsm ignores, matching the seam contract);
+    ``password_secret_key`` (default ``password``) names the field in the
+    returned payload — for a schemed ref carrying a ``#field`` fragment the
+    backend has already narrowed the payload to that one field, so the
+    fragment subsumes ``password_secret_key``. The read runs under the
+    operator's identity (the seam forwards the operator JWT); the write-op
+    reader no longer opens hvac directly.
 
     Raises :exc:`KeycloakPasswordSecretError` when the requested key is
     absent or its value is not a non-empty string.
@@ -169,14 +206,11 @@ async def _read_password_from_vault(operator: Operator, params: dict[str, Any]) 
     mount = str(params.get("password_secret_mount") or _DEFAULT_PASSWORD_MOUNT).strip()
     key = str(params.get("password_secret_key") or _DEFAULT_PASSWORD_KEY).strip()
 
-    async with _auth_vault.vault_client_for_operator(operator) as client:
-        payload = await asyncio.to_thread(
-            client.secrets.kv.v2.read_secret_version,
-            path=secret_ref,
-            mount_point=mount,
-            raise_on_deleted_version=False,
-        )
-    secret_data = payload["data"]["data"]
+    secret_data = await load_vault_secret_data(
+        _PasswordSecretTarget(name=target.name, host=target.host, secret_ref=secret_ref),
+        operator,
+        mount=mount,
+    )
     value = secret_data.get(key) if isinstance(secret_data, dict) else None
     # Whitespace-strip as the connector's credential loaders do (a trailing
     # newline would otherwise ride into the user's Keycloak password); check
@@ -184,11 +218,12 @@ async def _read_password_from_vault(operator: Operator, params: dict[str, Any]) 
     stripped = strip_credential_value(value) if isinstance(value, str) else None
     if not stripped:
         raise KeycloakPasswordSecretError(
-            f"keycloak_password_secret: Vault secret at mount={mount!r} "
-            f"path={secret_ref!r} carries no usable string value under key "
-            f"{key!r}. Store the password under that key (or set "
-            f"password_secret_key) so the user write can source it without "
-            f"the password ever appearing in op params."
+            f"keycloak_password_secret: credential secret at "
+            f"password_secret_ref={secret_ref!r} (mount={mount!r}) carries no "
+            f"usable string value under key {key!r}. Store the password under "
+            f"that key (or set password_secret_key, or select it with a "
+            f"'#field' fragment on a schemed ref) so the user write can source "
+            f"it without the password ever appearing in op params."
         )
     return stripped
 
@@ -460,7 +495,7 @@ async def keycloak_user_create(
     representation.setdefault("enabled", True)
 
     if params.get("password_secret_ref"):
-        password = await _read_password_from_vault(operator, params)
+        password = await _read_password_from_vault(operator, target, params)
         representation["credentials"] = [
             {"type": "password", "value": password, "temporary": _temporary_flag(params)}
         ]
@@ -511,7 +546,7 @@ async def keycloak_user_reset_password(
                 f"keycloak.user.reset_password: no user with username={username!r} in realm "
                 f"{realms.managed_realm!r}"
             )
-    password = await _read_password_from_vault(operator, params)
+    password = await _read_password_from_vault(operator, target, params)
     credential = {"type": "password", "value": password, "temporary": _temporary_flag(params)}
     await self._write_admin(
         target,

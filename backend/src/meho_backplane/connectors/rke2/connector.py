@@ -321,6 +321,26 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_posture_show(self, target, params, operator)
 
+    async def token_rotate(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.token.rotate`` (G-Node/RKE2-T2 #2429).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_write.rke2_token_rotate`;
+        runs only on the ``_approved=True`` resume path. Mints a new server
+        join token, rotates it over sudo-SSH, and stashes it in Vault --
+        returning only a pointer, never the token value.
+        """
+        from meho_backplane.connectors.rke2.ops_write import (
+            rke2_token_rotate as _rke2_token_rotate,
+        )
+
+        return await _rke2_token_rotate(self, target, params, operator)
+
     async def service_restart(
         self,
         target: Target,
@@ -508,7 +528,8 @@ class Rke2SshConnector(SshConnector):
 #: closed with a :class:`ValueError` if a ``group_key`` lacks a curated
 #: entry (the bind9 / holodeck precedent). Defined after the class so the
 #: strings can reference the transport note without a forward import. The
-#: write-op group (``rke2-node-write``) is merged in from
+#: write-op groups (``rke2-token-write`` / ``rke2-node-write``) are merged in
+#: from
 #: :data:`~meho_backplane.connectors.rke2.ops_write.RKE2_WHEN_TO_USE_WRITE_BY_GROUP`
 #: (the holodeck precedent -- write blurbs live next to the write ops).
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {

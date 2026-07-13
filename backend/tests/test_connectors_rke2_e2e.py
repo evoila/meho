@@ -23,6 +23,8 @@ Acceptance criteria verified (Issue #2221)
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import types
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -95,6 +97,22 @@ async def _fake_shell_process_factory(process: Any) -> None:
         response = _RKE2_VERSION_FIXTURE
     elif cmd.startswith("stat -c '%n|%a|%U|%G'"):
         response = _STAT_FIXTURE
+    elif cmd.startswith("printf 'ACTIVE="):
+        # rke2.token.rotate fingerprint preflight: server node, active,
+        # patched version (1.29 is above the CVE-fix range).
+        response = (
+            "ACTIVE=active\nUNIT=rke2-server.service\n"
+            "VERSION=rke2 version v1.29.3+rke2r2 (a1b2c3d)\n"
+        )
+    elif cmd.startswith("set -e; umask 077; f=$(mktemp)"):
+        # The safe-sudo wire command streams the script + password on stdin;
+        # drain it (the real mktemp pipeline would consume it) so the client
+        # write side doesn't break, then simulate a successful
+        # `rke2 token rotate` (exit 0, no stdout, never echoing a token).
+        with contextlib.suppress(Exception):
+            await process.stdin.read()
+        process.exit(0)
+        return
     else:
         process.stderr.write(f"fake-shell: unknown command: {cmd!r}\n")
         process.exit(127)
@@ -316,3 +334,116 @@ async def test_rke2_e2e_posture_show_dispatches_ok_and_redacts(
     # Redaction: no token VALUE anywhere in the dispatch result.
     assert _TOKEN_VALUE_CANARY not in repr(result)
     assert "value" not in token
+
+
+# ---------------------------------------------------------------------------
+# rke2.token.rotate -- park -> approve -> execute -> audit (#2429)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch  # noqa: E402
+
+from sqlalchemy import select  # noqa: E402
+
+from meho_backplane.db.models import AuditLog  # noqa: E402
+from meho_backplane.operations import dispatch  # noqa: E402
+from meho_backplane.targets.resolver import resolve_target  # noqa: E402
+
+# The minted token the handler generates on the approved path. Patched to a
+# fixed canary so the audit-row assertion can prove it never lands there.
+_MINTED_TOKEN_CANARY = "K10E2Ecanaryminted00000000deadbeefMUSTNOTLEAK"  # gitleaks:allow NOSONAR
+
+
+def _fake_vault_write(version: int = 3):
+    """Patch vault_client_for_operator to a fake async-CM KV-v2 writer."""
+    client = MagicMock()
+    client.secrets.kv.v2.create_or_update_secret = MagicMock(
+        return_value={"data": {"version": version}}
+    )
+
+    @contextlib.asynccontextmanager
+    async def _fake_client(operator: Any):
+        yield client
+
+    return patch("meho_backplane.auth.vault.vault_client_for_operator", _fake_client)
+
+
+async def _dispatch_rotate(bundle: _Rke2E2EBundle, *, approved: bool) -> dict[str, Any]:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        resolved = await resolve_target(session, _OPERATOR.tenant_id, _TARGET_NAME)
+    # The sudo credential resolves off the target's Vault secret; the seeded
+    # connector's _auth_config doesn't cover _resolve_secret, so stub it.
+    with patch.object(
+        bundle.connector,
+        "_resolve_secret",
+        new=_AsyncReturn({"username": "root", "password": "e2e-sudo-pw"}),
+    ):
+        result = await dispatch(
+            operator=_OPERATOR,
+            connector_id=_CONNECTOR_ID,
+            op_id="rke2.token.rotate",
+            target=resolved,
+            params={},
+            _approved=approved,
+        )
+    return result.model_dump(mode="json")
+
+
+class _AsyncReturn:
+    """Minimal awaitable-returning stand-in for an async method patch."""
+
+    def __init__(self, value: Any) -> None:
+        self._value = value
+
+    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._value
+
+
+@pytest.mark.asyncio
+async def test_rke2_token_rotate_parks_for_user(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """An un-approved USER dispatch parks (not run, not hard-denied)."""
+    del captured_events
+    result = await _dispatch_rotate(rke2_e2e, approved=False)
+    assert result["status"] == "awaiting_approval", result
+    assert result.get("extras", {}).get("approval_request_id")
+
+
+@pytest.mark.asyncio
+async def test_rke2_token_rotate_approved_audit_row_has_no_token(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """AC: approved resume rotates + stashes to Vault; the raw audit row has NO token."""
+    del captured_events
+    op_id = "rke2.token.rotate"
+    with (
+        _fake_vault_write(version=5),
+        patch("secrets.token_hex", return_value=_MINTED_TOKEN_CANARY),
+    ):
+        result = await _dispatch_rotate(rke2_e2e, approved=True)
+
+    assert result["status"] == "ok", result.get("error")
+    payload = result["result"]
+    assert payload["rotated"] is True
+    assert payload["token_ref"]["backend"] == "vault"
+    assert payload["token_ref"]["kv_version"] == 5
+    # Caller view carries no token value.
+    assert _MINTED_TOKEN_CANARY not in json.dumps(result)
+
+    # THE audit rule: the RAW audit-row payload (persisted pre-redaction) must
+    # carry no token value either -- assert against the row, not just the view.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = await session.execute(
+            select(AuditLog)
+            .where(AuditLog.method == "DISPATCH", AuditLog.path == op_id)
+            .order_by(AuditLog.occurred_at.desc())
+            .limit(1)
+        )
+        row = rows.scalar_one()
+    assert row.raw_payload is not None
+    assert _MINTED_TOKEN_CANARY not in json.dumps(row.raw_payload)
+    assert _MINTED_TOKEN_CANARY not in json.dumps(row.payload)

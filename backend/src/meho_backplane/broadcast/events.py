@@ -112,6 +112,13 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # ``OperationResult`` returned to the caller still carries it.
         "vault.token.create",
         "vault.auth.approle.generate_secret_id",
+        # G-Node/RKE2-T2 #2429 — the RKE2 server-token rotate mints a new
+        # join token server-side. The handler never returns the token value
+        # (only a Vault pointer), so nothing sensitive is in the response —
+        # but ``.rotate`` would otherwise classify ``other`` and broadcast
+        # full params/detail. Pinning to ``credential_mint`` collapses the
+        # broadcast to aggregate-only as defence-in-depth for the op class.
+        "rke2.token.rotate",
     }
 )
 

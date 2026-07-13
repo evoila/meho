@@ -33,6 +33,9 @@ v2 triple advertises this class.
 """
 
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.connectors.rke2 import (
+    ops_write_preview,  # noqa: F401 -- preview-builder registration side-effect
+)
 from meho_backplane.connectors.rke2.connector import Rke2SshConnector
 from meho_backplane.connectors.rke2.ops import RKE2_OPS, Rke2Op
 from meho_backplane.operations.typed_register import register_typed_op_registrar

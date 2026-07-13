@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — rke2.token.rotate approval-gated server-token rotation (#2429)
+
+- Add `rke2.token.rotate`, the first approval-gated write op on the
+  `rke2-ssh` connector (`safety_level=dangerous`, `requires_approval=True`).
+  It rotates the RKE2 server join token cluster-wide via `rke2 token rotate`
+  over sudo-SSH. It takes **no parameters and no token value**: the new token
+  is minted server-side, the old token is read on-disk as root inside the
+  rotate script, and the new token is written to Vault — only a pointer plus
+  non-secret metadata (`rotated` / `node` / `exit_status`) is returned, so no
+  token value ever reaches the result, the audit `raw_payload`, or the
+  broadcast feed (the op is pinned to `credential_mint` and carries a
+  no-secret park-time preview). A read-only fingerprint gate refuses a
+  non-server node, an inactive `rke2-server`, or a below-floor / known-bad
+  (`v1.27.10+rke2r1`) RKE2 version before any mutation, because a botched
+  rotate wedges future node joins (rancher/rke2#5785, #6250). Multi-node
+  restart choreography stays an operator runbook — `backend/src/meho_backplane/
+  connectors/rke2/ops_write.py`, `docs/codebase/connectors-rke2.md` (#2429).
+
 ### Added — node/rke2-ssh connector scaffold + read-only posture tier (#2221)
 
 - Add the `rke2` node-OS connector (`rke2-ssh-1.x`), the read-only entry in

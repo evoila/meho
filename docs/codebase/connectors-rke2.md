@@ -26,10 +26,20 @@ T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
   join-token presence, **with the token value never read** (redacted by
   construction).
 
-Two ops total, both `safety_level="safe"` / `requires_approval=false`. The
-approval-gated write ops (`rke2.token.rotate`, `rke2.node.service.restart`,
-`rke2.node.config.update`, `rke2.etcd-snapshot.save`) ship in sibling Tasks
-#2429/#2430/#2431 — explicitly out of scope for T1.
+T2 (#2429) adds the **first approval-gated write op**:
+
+- `rke2.token.rotate` — rotates the RKE2 server join token cluster-wide via
+  `rke2 token rotate` over sudo-SSH. `safety_level="dangerous"`,
+  `requires_approval=True`. Takes **no parameters and no token value**: the
+  new token is minted server-side, the OLD token is read on-disk as root
+  inside the rotate script, and the new token is written to Vault — only a
+  **pointer** to the Vault location plus non-secret metadata (`rotated` /
+  `node` / `exit_status`) is returned. A read-only fingerprint gate refuses a
+  non-server node, an inactive `rke2-server`, or a below-floor / known-bad
+  (`v1.27.10+rke2r1`) RKE2 version before any mutation.
+
+The remaining write ops (`rke2.node.service.restart`, `rke2.node.config.update`,
+`rke2.etcd-snapshot.save`) ship in sibling Tasks #2430/#2431.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -55,7 +65,20 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
   copied into every op's `when_to_use`), `_RKE2_ABOUT_OP`, and `RKE2_OPS`
-  (`about` + the `READ_OPS` posture tuple).
+  (`about` + the `READ_OPS` posture tuple + the `WRITE_OPS` write tuple).
+
+- **Write tier** (`ops_write.py`, #2429) — `rke2_token_rotate` (the async
+  handler, bound to the connector via the `token_rotate` shim),
+  `rke2_version_rotate_verdict` / `parse_rke2_release` (the pure version-gate
+  logic against the per-minor CVE-fix floor + the `v1.27.10+rke2r1` deny),
+  and `WRITE_OPS` (`rke2.token.rotate`). The minted new token is stashed in
+  Vault under `secret/tenants/<tenant_id>/rke2/<node>/server-token`; only a
+  pointer is returned. `_sudo.py` carries the family's own safe-`sudo -S`
+  primitive (`run_remote_bash_with_sudo`) — the #697-hardened wire shape
+  (script bytes first, password last on stdin, never in argv / history /
+  log). `ops_write_preview.py` registers a non-secret park-time
+  `proposed_effect` preview builder (`{node, service, semantics,
+  new_token_minted}`).
 
 - **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck.
   Synchronous `register_connector_v2` at import time (versioned triple +
@@ -101,6 +124,17 @@ foundation for the load-bearing Initiative #2172 rule: a secret-returning
 handler must never return the secret (the audit `raw_payload` stores the raw
 result).
 
+`rke2.token.rotate` (T2) is the write-side application of the same rule. The
+dispatcher persists the **raw** handler result on the audit row and
+connector-boundary redaction never scrubs `raw_payload`, so the only reliable
+control is that the handler never returns the token — old or new. Both are
+handled off the result surface: the OLD token is read on-disk as root inside
+the sudo script (a shell `$(cat ...)`, never entering Python), and the NEW
+token is minted here, written to Vault, and returned only as a pointer. The
+op is additionally pinned in `broadcast/events._CREDENTIAL_MINT_OPS`
+(defence-in-depth: `.rotate` would otherwise classify `other` and broadcast
+full detail) and its park-time preview carries no token value.
+
 ## Dependencies
 
 - `connectors/adapters/ssh.py` — the SSH transport base (pool, auth,
@@ -112,8 +146,12 @@ result).
 
 ## Known issues / follow-ups
 
-- Write ops (token rotate / service restart / config update / etcd-snapshot)
-  are deferred to #2429/#2430/#2431 under Initiative #2172.
+- `rke2.token.rotate` lands in T2 (#2429); the remaining write ops (service
+  restart / config update / etcd-snapshot) are deferred to #2430/#2431 under
+  Initiative #2172.
+- The rotate is a **single-node atomic op**: multi-node token-propagation /
+  restart choreography is an operator-composed runbook of T2+T3 ops, not part
+  of this op (per the Initiative DoD).
 - Host-key checking is disabled (`known_hosts=None`) at the adapter level for
   v0.2, shared across the whole SSH family; pinning is deferred repo-wide.
 - The RKE2 version probe is best-effort: `version` is `null` when the `rke2`

@@ -14,10 +14,12 @@ G-Node/RKE2-T1 (#2221) scaffold -- ships the read-only tier only:
   RKE2 config-file modes and the on-disk join-token presence with the
   token **value never read** (redacted by construction). Two ops total.
 
-The approval-gated write ops (``rke2.token.rotate`` /
-``rke2.node.service.restart`` / ``rke2.node.config.update`` /
-``rke2.etcd-snapshot.save``) ship in sibling Tasks #2429/#2430/#2431
-under Initiative #2172 -- explicitly **out of scope** here.
+The first approval-gated write op ``rke2.token.rotate`` (G-Node/RKE2-T2
+#2429) lands in :mod:`meho_backplane.connectors.rke2.ops_write` and is
+composed onto :data:`RKE2_OPS` here via :data:`WRITE_OPS`. The remaining
+write ops (``rke2.node.service.restart`` / ``rke2.node.config.update`` /
+``rke2.etcd-snapshot.save``) ship in sibling Tasks #2430/#2431 under
+Initiative #2172.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.bind9.ops` and
@@ -129,20 +131,20 @@ def _rke2_ops() -> tuple[Rke2Op, ...]:
     """Return the merged registration tuple.
 
     Composition: ``rke2.about`` (identity canary) + ``READ_OPS`` (the
-    read-only posture tier: ``rke2.posture.show``). Two ops total -- the
-    full T1 (#2221) read surface. The approval-gated write ops append to
-    this tuple in the sibling write Tasks, exactly as
-    :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` layers
-    its ``WRITE_OPS`` on.
+    read-only posture tier: ``rke2.posture.show``) + ``WRITE_OPS`` (the
+    approval-gated write tier: ``rke2.token.rotate``, G-Node/RKE2-T2 #2429),
+    exactly as :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops`
+    layers its ``WRITE_OPS`` on.
 
     Implemented as a function call rather than a module-level literal so
     the import order stays linear: ``ops.py`` defines :class:`Rke2Op` +
-    ``_RKE2_ABOUT_OP``, then imports the read ops from
-    :mod:`meho_backplane.connectors.rke2.ops_read`.
+    ``_RKE2_ABOUT_OP``, then imports the read + write ops from their
+    sibling modules.
     """
     from meho_backplane.connectors.rke2.ops_read import READ_OPS
+    from meho_backplane.connectors.rke2.ops_write import WRITE_OPS
 
-    return (_RKE2_ABOUT_OP, *READ_OPS)
+    return (_RKE2_ABOUT_OP, *READ_OPS, *WRITE_OPS)
 
 
 #: The ops :class:`Rke2SshConnector` registers at lifespan startup.

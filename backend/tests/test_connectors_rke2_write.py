@@ -5,9 +5,13 @@
 
 Coverage matrix (per Task #2430 acceptance criteria):
 
-* ``WRITE_OPS`` registration shape -- two ops, both
-  ``safety_level='dangerous'`` + ``requires_approval=True``, both carry the
-  ``write`` tag and the SSH-only transport note.
+* ``WRITE_OPS`` registration shape -- three ops (``rke2.token.rotate`` from
+  T2 #2429 plus this task's two node ops ``service.restart`` +
+  ``config.update``), all ``safety_level='dangerous'`` + ``requires_approval=True``,
+  all carrying the ``write`` tag and an SSH transport note. token.rotate is the
+  credential-minting op (group ``rke2-token-write``, distinct from the node ops'
+  ``rke2-node-write``); its Vault-pointer / no-token-value contract is asserted
+  in ``test_connectors_rke2.py``.
 * Bounds (pure, no event loop):
   - ``service.restart`` -- rejects any unit outside {rke2-server, rke2-agent}
     at the schema enum AND the handler frozenset re-check.
@@ -121,13 +125,13 @@ def _op(op_id: str) -> Any:
 # ---------------------------------------------------------------------------
 
 EXPECTED_WRITE_OP_IDS: frozenset[str] = frozenset(
-    {"rke2.node.service.restart", "rke2.node.config.update"}
+    {"rke2.token.rotate", "rke2.node.service.restart", "rke2.node.config.update"}
 )
 
 
 def test_write_ops_registration_set() -> None:
     assert {op.op_id for op in WRITE_OPS} == EXPECTED_WRITE_OP_IDS
-    assert len(WRITE_OPS) == 2
+    assert len(WRITE_OPS) == 3
 
 
 def test_write_ops_are_dangerous_and_require_approval() -> None:
@@ -142,7 +146,23 @@ def test_write_ops_carry_transport_note_and_instructions() -> None:
         instr = op.llm_instructions or {}
         assert "SSH" in instr.get("when_to_use", ""), f"{op.op_id} missing SSH transport note"
         assert instr.get("output_shape"), f"{op.op_id} missing output_shape"
-        assert op.group_key == "rke2-node-write"
+        # token.rotate is a credential-write op in its own group; the two node
+        # ops share rke2-node-write. Both are valid RKE2 write groups.
+        assert op.group_key in {"rke2-node-write", "rke2-token-write"}
+
+
+def test_token_rotate_is_the_credential_minting_write_op() -> None:
+    """The union brought T2 #2429's ``rke2.token.rotate`` into ``WRITE_OPS``.
+
+    Its credential-mint / Vault-pointer contract is exercised in full by
+    ``test_connectors_rke2.py``; here we only guard that the distinguishing
+    credential identity is not silently dropped from the write set again.
+    """
+    token_op = _op("rke2.token.rotate")
+    assert "credential" in token_op.tags
+    assert token_op.group_key == "rke2-token-write"
+    assert token_op.safety_level == "dangerous"
+    assert token_op.requires_approval is True
 
 
 # ---------------------------------------------------------------------------

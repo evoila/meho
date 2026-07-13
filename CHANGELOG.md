@@ -108,6 +108,20 @@ connector-related release-notes line.
   probe returns `{reachable, reason}` with `status="ok"`, never a
   `connector_*` error. No new dependency (reuses the existing `httpx`
   stack) (#2408 / #2405).
+### Fixed — keycloak user write-op password read routed through the credential-backend seam (#2401)
+
+- `keycloak.user.create` / `keycloak.user.reset_password` sourced the
+  operator-supplied `password_secret_ref` by opening an hvac Vault client
+  directly, bypassing the #2229 credential-backend seam. On a
+  `CREDENTIAL_BACKEND=gsm` (no-Vault) deploy this left both write ops with
+  no working credential path — a `gsm:` ref was treated as a literal Vault
+  path. The reader now resolves the ref through `load_vault_secret_data`
+  (the same seam the connector's admin-credential loader and kubeconfig
+  loader ride), so a `gsm:<project>/<secret>#password` ref reaches GCP
+  Secret Manager while schemeless Vault refs resolve byte-for-byte as
+  before (`password_secret_mount` / `password_secret_key` unchanged; the
+  `#field` fragment subsumes `password_secret_key` for schemed refs).
+  Approval-gating of both write ops is untouched.
 
 ### Added — net.tcp_check network-diagnostics probe (net.* keystone)
 
@@ -124,6 +138,26 @@ connector-related release-notes line.
   `{connected: false, reason}` with `status="ok"`, never a `connector_*`
   error). `net.*` ops classify as reads in the broadcast feed
   (#2406 / #2405).
+
+### Added — net.tls_inspect full presented certificate chain (openssl s_client parity)
+
+- Add `net.tls_inspect` on the `net.*` keystone — a targetless probe
+  that opens a TLS handshake with certificate verification **off** and
+  reports the **full chain the server presents** (leaf → intermediates →
+  root-if-sent, leaf-first): per-cert subject / SAN / issuer / validity
+  window / serial / self-signed flag, plus `chain_complete` (did the
+  server send a self-signed root), a leaf `hostname_match` computed
+  independently of the disabled verification, and the negotiated protocol
+  and cipher — `openssl s_client -showcerts` parity. A self-signed /
+  expired / hostname-mismatched cert is **inspected and reported**
+  (`handshake=true`, `status="ok"`), never rejected; a refused /
+  timed-out / DNS-failed / non-TLS endpoint returns `{handshake: false,
+  reason}` with `status="ok"`. Reuses the T1 probe allowlist, audit-
+  visible `host:port`, and return-failures contract. Adds `pyOpenSSL`
+  (full-chain read; stdlib `ssl` on the 3.12 floor exposes only the leaf)
+  and promotes `cryptography` to a declared runtime dependency — both
+  Apache-2.0 (#2407 / #2405).
+
 ### Fixed — harden ingest-job timeout warning tests against xdist logger-cache ordering (#2397)
 
 - `test_operations_ingest_jobs.py` rebinds `jobs._log` to a fresh structlog

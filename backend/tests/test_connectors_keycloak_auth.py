@@ -701,6 +701,7 @@ async def test_user_write_password_reader_strips_trailing_newline(
 
     value = await _read_password_from_vault(
         _make_operator(),
+        _TARGET,
         {"password_secret_ref": "rdc/keycloak/user-pw"},
     )
 
@@ -724,7 +725,124 @@ async def test_user_write_password_reader_rejects_whitespace_only_secret(
     with pytest.raises(KeycloakPasswordSecretError):
         await _read_password_from_vault(
             _make_operator(),
+            _TARGET,
             {"password_secret_ref": "rdc/keycloak/user-pw"},
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_kc_loader_settings_env")
+async def test_user_write_password_reader_honours_custom_key_and_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schemeless ref reads the Vault backend, honouring key + mount (AC #2).
+
+    Regression pin: ``password_secret_key`` selects a non-default field and
+    ``password_secret_mount`` is threaded through to the KV-v2 read exactly
+    as before the seam routing — a schemeless ref must behave byte-for-byte.
+    """
+    from meho_backplane.connectors.keycloak.ops_write import _read_password_from_vault
+    from tests._vault_fakes import install_fake_client
+
+    fake = install_fake_client(monkeypatch, secret={"db_pw": "s3cret\n"})
+
+    value = await _read_password_from_vault(
+        _make_operator(),
+        _TARGET,
+        {
+            "password_secret_ref": "rdc/keycloak/user-pw",
+            "password_secret_key": "db_pw",
+            "password_secret_mount": "kv2",
+        },
+    )
+
+    assert value == "s3cret"
+    # The Vault backend received the op's mount + path verbatim (mount is a
+    # Vault-only knob) — proving schemeless routing is unchanged.
+    assert fake.secrets.kv.v2.read_calls[-1] == {
+        "path": "rdc/keycloak/user-pw",
+        "mount_point": "kv2",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_kc_loader_settings_env")
+async def test_user_write_password_reader_dispatches_gsm_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``gsm:``-schemed ref dispatches to the gsm backend, fragment-selected (AC #1).
+
+    Proves the write-op password read rides the #2229 credential-backend
+    seam: an explicit ``gsm:`` scheme reaches a registered gsm backend
+    (here a fake), the ``#field`` fragment subsumes ``password_secret_key``,
+    and ``password_secret_mount`` (a Vault-only knob) is ignored by gsm.
+    """
+    from meho_backplane.connectors._shared.credential_backend import (
+        CREDENTIAL_BACKEND_REGISTRY,
+    )
+    from meho_backplane.connectors.keycloak.ops_write import _read_password_from_vault
+
+    seen: dict[str, Any] = {}
+
+    class _FakeGsmBackend:
+        async def load_secret_data(
+            self,
+            secret_ref: str,
+            operator: Operator,
+            *,
+            target_name: str,
+            mount: str,
+        ) -> dict[str, object]:
+            seen["secret_ref"] = secret_ref
+            seen["mount"] = mount
+            # Mirror gsm's fragment contract: '<path>#<field>' narrows the
+            # payload to that one field. The scheme was already split off by
+            # the seam, so secret_ref is the scheme-stripped remainder.
+            _path, _sep, field = secret_ref.rpartition("#")
+            return {field: "gsm-sourced-pw\n"}
+
+    saved = CREDENTIAL_BACKEND_REGISTRY.get("gsm")
+    CREDENTIAL_BACKEND_REGISTRY["gsm"] = _FakeGsmBackend()  # type: ignore[assignment]
+    try:
+        value = await _read_password_from_vault(
+            _make_operator(),
+            _TARGET,
+            {
+                "password_secret_ref": "gsm:meho-prod/keycloak-user#password",
+                # A Vault-only knob gsm ignores — set to prove it is inert.
+                "password_secret_mount": "kv2",
+            },
+        )
+    finally:
+        if saved is not None:
+            CREDENTIAL_BACKEND_REGISTRY["gsm"] = saved
+        else:  # pragma: no cover - gsm self-registers at import
+            CREDENTIAL_BACKEND_REGISTRY.pop("gsm", None)
+
+    assert value == "gsm-sourced-pw"
+    # Scheme split off, fragment preserved; mount threaded but gsm-inert.
+    assert seen["secret_ref"] == "meho-prod/keycloak-user#password"
+    assert seen["mount"] == "kv2"
+
+
+def test_ops_write_has_no_direct_vault_client_usage() -> None:
+    """No direct ``vault_client_for_operator`` / hvac read remains (AC #3).
+
+    Grep-pins the seam adoption: the write-op password reader must resolve
+    ``password_secret_ref`` through ``load_vault_secret_data``, never open
+    an hvac client itself. A regression that re-introduces a direct Vault
+    read (the pre-#2401 shape that broke gsm deploys) fails here.
+    """
+    from pathlib import Path
+
+    import meho_backplane.connectors.keycloak.ops_write as ops_write_module
+
+    source = Path(ops_write_module.__file__).read_text(encoding="utf-8")
+    for forbidden in ("vault_client_for_operator", "read_secret_version", "import hvac"):
+        assert forbidden not in source, (
+            f"keycloak/ops_write.py must not use {forbidden!r} directly — "
+            "route the password read through the credential-backend seam "
+            "(load_vault_secret_data)"
         )
 
 

@@ -15,7 +15,15 @@ module-level functions the dispatcher routes to with
 
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op (T2–T4:
-`tls_inspect` / `http_probe` / `dns_lookup`) reuses.
+`tls_inspect` / `http_probe` / `dns_lookup`) reuses, and the first
+sibling `net.tls_inspect` (#2407, T2 — see below).
+
+Every op ships its own module + registrar function and queues it in
+`__init__.py` (`net.tcp_check` → `ops.register_net_typed_operations`,
+`net.tls_inspect` → `tls.register_net_tls_inspect_operation`). Siblings
+therefore extend the package by adding a module and one registrar-queue
+line rather than contending for a single registrar function — which also
+keeps parallel task branches from colliding on one shared file.
 
 ## Core mechanism
 
@@ -141,6 +149,63 @@ before the handler runs. Reason codes extend the T1 set with
 Because it issues an HTTP request, `net.http_probe` adds **`httpx`** to
 the family's dependency surface (already a project dep — no new dep).
 
+## `net.tls_inspect` — full presented certificate chain (T2, #2407)
+
+`net.tls_inspect(host, port, server_name?, timeout_seconds?)` opens a TLS
+handshake with **certificate verification off** and reports the **full
+chain the server presented** — `openssl s_client -showcerts` parity. It
+inspects; it never verifies (self-signed appliances are the point), so a
+self-signed / expired / hostname-mismatched cert is **reported**, never
+rejected.
+
+Why pyOpenSSL and not stdlib `ssl`: on the `requires-python` floor (3.12)
+`ssl.SSLSocket.getpeercert` returns only the **leaf**; the full-chain
+`ssl.SSLSocket.get_unverified_chain` is 3.13+. pyOpenSSL's
+`Connection.get_peer_cert_chain(as_cryptography=True)` (the
+`as_cryptography` kwarg landed in pyOpenSSL 24.3) returns the whole
+presented chain as `cryptography.x509.Certificate` objects directly, so
+the parse reuses the `cryptography` x509 API.
+
+Control flow (`connectors/net/tls.py`):
+
+1. `assert_probe_allowed(host)` — the T1 allowlist floor, before any
+   socket opens.
+2. `asyncio.to_thread(_blocking_tls_inspect, ...)` — the blocking
+   socket + handshake runs off the event loop. The context is
+   `SSL.Context(TLS_CLIENT_METHOD)` with `set_verify(VERIFY_NONE)`; SNI
+   is set from `server_name` (default `host`) **only for hostnames**
+   (RFC 6066 forbids an IP-literal SNI).
+3. Because a socket with a timeout is non-blocking under the hood,
+   pyOpenSSL raises `WantReadError` / `WantWriteError`; `_run_until_ready`
+   drives `do_handshake` (and the best-effort `shutdown`) to completion
+   by `select`-waiting under a single `deadline` derived from the
+   clamped timeout, so a stalled peer cannot pin the worker thread.
+4. Each presented cert is flattened to
+   `{subject, issuer, san, not_before, not_after, serial, self_signed}`
+   (leaf-first). `serial` is stringified (a serial is a large integer a
+   JSON number consumer would truncate); timestamps use the tz-aware
+   `not_valid_*_utc` accessors.
+
+Derived top-level fields:
+
+- `leaf` — convenience alias for `chain[0]`; `not_after` — the leaf's,
+  for the common "is it expiring" read.
+- `hostname_match` — computed **independently** of the (disabled) stack
+  verification: `server_name` vs the leaf SAN dNSNames (wildcard-aware,
+  RFC 6125 single-leftmost-label), SAN iPAddresses for an IP
+  `server_name`, falling back to the subject CN only when the cert
+  carries no SAN dNSName (legacy appliances).
+- `chain_complete` — whether the **last** presented cert is self-signed
+  (i.e. the server sent a root), not a trust decision.
+
+It shares the same synthetic natural key as `net.tcp_check`
+(`net-probe-1.x`), reuses the return-failures contract (a refused /
+timed-out / DNS-failed / non-TLS endpoint returns `handshake=false` with
+a reason code — `not_in_probe_allowlist` / `timeout` / `refused` /
+`dns_failure` / `unreachable` / `tls_error` — and `status="ok"`), and is
+`safety_level="safe"` + `requires_approval=False`. A completed handshake
+sends **no** application bytes.
+
 ## Broadcast classification
 
 `net.*` ops classify as `read` in the broadcast sensitivity taxonomy
@@ -156,13 +221,19 @@ connectors' ops.
 
 ## Key types / control flow
 
-- `connectors/net/__init__.py` — queues `register_net_typed_operations`
-  **and** `register_net_http_probe_operations` onto the lifespan
-  registrar list via `register_typed_op_registrar` (auto-imported by the
+- `connectors/net/__init__.py` — queues each op registrar
+  (`register_net_typed_operations`, `register_net_tls_inspect_operation`,
+  `register_net_http_probe_operations`) onto the lifespan registrar list
+  via `register_typed_op_registrar` (auto-imported by the
   `_eager_import_connectors` package walk). Each sibling op has its own
   registrar so the family extends without editing a shared function body.
 - `connectors/net/ops.py` — `net_tcp_check` handler, its parameter /
-  response schema, and the registrar.
+  response schema, the registrar, and the shared timeout bounds/clamp
+  (`_DEFAULT_TIMEOUT_SECONDS` / `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`)
+  reused by `tls.py` (package-internal import; `ops` never imports `tls`,
+  so no cycle).
+- `connectors/net/tls.py` — `net_tls_inspect` handler, its schemas, the
+  cert-flattening / hostname-match / chain helpers, and its registrar.
 - `connectors/net/http_probe.py` — `net_http_probe` handler, its
   parameter / response schema, the manual redirect walk
   (`_walk_redirects`), the TLS summary (`_tls_summary`), the
@@ -179,13 +250,24 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 
 ## Dependencies
 
-`net.tcp_check` and the allowlist are standard library only (`asyncio`,
-`socket`, `ipaddress`, `ssl`, `time`). `net.http_probe` additionally uses
-`httpx` (already a project dependency) for the HTTP request and its
-`network_stream` TLS extension — no **new** runtime dependency is added.
+- `net.tcp_check` and the allowlist: standard library only (`asyncio`,
+  `socket`, `ipaddress`, `time`).
+- `net.tls_inspect`: `pyOpenSSL` (full presented chain via
+  `get_peer_cert_chain`) + `cryptography` (x509 parsing) — both Apache-2.0
+  (Python License Check clean). `pyOpenSSL` was promoted to a runtime
+  dependency and `cryptography` from a dev-only + transitive install to a
+  declared runtime dependency (the handler imports `cryptography.x509`
+  directly).
+- `net.http_probe`: `httpx` (already a project dependency) for the HTTP
+  request and its `network_stream` TLS extension — no **new** runtime
+  dependency is added.
 
 ## Known issues / deferred
 
+- `net.tls_inspect` **inspects, never verifies** — trust-store
+  verification, OCSP/CRL/revocation, and client-cert / mTLS presentation
+  are explicitly out of scope (#2407). `chain_complete` is a
+  "did the server send a self-signed root" signal, not a trust decision.
 - No port-scoped allowlist (v1 scopes hosts only).
 - Hostname allowlisting is verbatim; an operator who allowlists a CIDR
   cannot probe a hostname that merely resolves into it (list the name).
@@ -196,7 +278,8 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 
 ## References
 
-- Parent: Initiative #2405, Task #2406. Mold: secret broker
+- Parent: Initiative #2405, Tasks #2406 (T1 keystone) + #2407 (T2
+  `tls_inspect`). Mold: secret broker
   (`docs/codebase/connectors-secret-broker.md`). SSRF sibling:
   `docs/codebase/target-ssrf-guard.md`. Broadcast taxonomy:
   `docs/codebase/broadcast.md`.

@@ -42,7 +42,8 @@ fresh target with no asserted version still resolves.
   the nine approval-gated write ops, reusing the `KeycloakOp` dataclass.
   Every op is `requires_approval=True`; a create treats HTTP 409 as an
   idempotent success; `user.create`/`user.reset_password` source the
-  password from Vault via `_read_password_from_vault` (never inline).
+  password through the credential-backend seam via
+  `_read_password_from_vault` (never inline).
   `WHEN_TO_USE_WRITE_BY_GROUP` carries the write groups' blurbs (keyed with
   a `_write` suffix so they never collide with the read groups when
   `register_operations` merges both maps).
@@ -220,9 +221,13 @@ Three load-bearing properties:
 - **Idempotency.** A create that hits HTTP 409 (already-exists) is a
   success (`conflict: true`), and the existing object's UUID is resolved.
 - **Password handling.** `user.create` / `user.reset_password` source the
-  password from Vault (`_read_password_from_vault`, operator-context
-  `vault_client_for_operator`) via a `password_secret_ref` path param —
-  **never** an inline `password`. The password lands in the Keycloak
+  password through the credential-backend seam (`_read_password_from_vault`
+  → `load_vault_secret_data`, #2229/#2401) via a `password_secret_ref`
+  param — **never** an inline `password`. A schemeless ref reads the
+  deployment-default backend (Vault KV-v2, honouring `password_secret_mount`
+  / `password_secret_key`); a `<kind>:` ref (e.g.
+  `gsm:<project>/<secret>#password`) reaches that backend, the `#field`
+  fragment subsuming `password_secret_key`. The password lands in the Keycloak
   credential body but never in op params; audit stores a `params_hash`
   (never raw params); and both ops are pinned in
   `broadcast.events._CREDENTIAL_WRITE_OPS` → aggregate-only broadcast.

@@ -142,13 +142,25 @@ data:
   # value resolves — explicit `config.backplaneUrl` / `config.mcpResourceUri`,
   # or derived from the Ingress host for the common ingress-fronted
   # deploy (see `meho.backplaneUrl` / `meho.mcpResourceUri` helpers).
-  # When nothing resolves the keys are omitted (env var stays unset) and
-  # the backend's startup guard fails loudly with the remediation.
+  # #2394 — when nothing resolves we `fail` at render time (mirroring the
+  # eso/agent guards in externalsecrets.yaml + _helpers.tpl) instead of
+  # emitting an empty audience and letting the pod crash-loop at startup on
+  # `audience_not_configured` (`_assert_mcp_resource_uri_configured` in
+  # main.py). The guard fires only on the ingress-less, nothing-set path —
+  # the ingress-derived default and explicit-value installs both resolve a
+  # non-empty URI and render unchanged. There is deliberately no
+  # `allowNoMcpResourceUri` escape hatch: an operator who wants a
+  # bring-up before ingress/DNS exists sets a placeholder
+  # `config.backplaneUrl` (the documented workaround), which keeps /mcp
+  # per-request fail-closed without a new chart tunable.
   {{- $backplaneUrl := include "meho.backplaneUrl" . }}
+  {{- $mcpResourceUri := include "meho.mcpResourceUri" . }}
+  {{- if not $mcpResourceUri }}
+  {{- fail "MCP resource URI is unresolvable: the /mcp audience is empty, so every /mcp request would fail closed and the backplane refuses to boot (audience_not_configured). Resolve it one of three ways: set config.backplaneUrl=<https://your-host> (audience derived as <url>/mcp), set config.mcpResourceUri=<https://your-host/mcp> explicitly, or enable ingress with ingress.host set (audience derived from the ingress host). For a deliberate MCP-less bring-up before ingress/DNS exists, set a placeholder config.backplaneUrl — /mcp stays per-request fail-closed regardless." }}
+  {{- end }}
   {{- if $backplaneUrl }}
   BACKPLANE_URL: {{ $backplaneUrl | quote }}
   {{- end }}
-  {{- $mcpResourceUri := include "meho.mcpResourceUri" . }}
   {{- if $mcpResourceUri }}
   MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
   {{- end }}

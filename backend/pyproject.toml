@@ -87,6 +87,15 @@ dependencies = [
     # AsyncMongoClient runs commands off the event loop natively (no
     # ``asyncio.to_thread`` wrapper needed).
     "pymongo>=4.13,<5",
+    # DNS resolver library for the net.dns_lookup diagnostic op (#2409).
+    # dnspython drives typed record lookups (A/AAAA/CNAME/MX/TXT/SRV/NS/SOA,
+    # reverse PTR) and per-query resolver selection via
+    # ``dns.asyncresolver.Resolver`` — capabilities socket.getaddrinfo (the
+    # only in-tree resolver) cannot provide. The async resolver runs the
+    # query off the event loop natively (no ``asyncio.to_thread`` wrapper).
+    # Already present transitively (email-validator, pymongo); pinned direct
+    # so the net.* connector's runtime requirement is explicit. ISC-licensed.
+    "dnspython>=2.7,<3",
     # Structural (metaschema) gate on OpenAPI 3.0/3.1 spec ingest (#2292):
     # validates a decoded document against the official OAS metaschema so a
     # metaschema-invalid spec is refused at parse (dry-run and effectful

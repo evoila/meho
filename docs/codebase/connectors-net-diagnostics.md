@@ -15,7 +15,8 @@ module-level functions the dispatcher routes to with
 
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op (T2–T4:
-`tls_inspect` / `http_probe` / `dns_lookup`) reuses.
+`tls_inspect` / `http_probe` / `dns_lookup`) reuses, and the T4 op
+`net.dns_lookup` (#2409) built on that mold.
 
 ## Core mechanism
 
@@ -35,6 +36,48 @@ The op is registered under the natural key
 `parse_connector_id` back to `("net", "1.x", "net-probe")`.
 `safety_level="safe"` + `requires_approval=False` make it
 agent-auto-runnable and ungated.
+
+## `net.dns_lookup` — full `dig` parity (#2409)
+
+`net.dns_lookup(name, type?, resolver?, timeout_seconds?)` resolves DNS
+from the backplane's vantage via **dnspython** (`dns.asyncresolver`,
+which runs the query off the event loop natively — no
+`asyncio.to_thread` wrapper). It is the same synthetic, targetless op
+under the same `net-probe-1.x` connector, registered alongside
+`net.tcp_check` by `register_net_typed_operations`.
+
+- **Forward**: `type` (default `A`, one of
+  A/AAAA/CNAME/MX/TXT/SRV/NS/SOA/PTR) drives `resolve(name, type)`.
+- **Reverse**: when `name` is an IP literal, the `type` is ignored and a
+  PTR lookup runs via `dns.reversename.from_address` (mirrors `dig -x`).
+- **Chosen resolver**: an optional `resolver` IP sets
+  `resolver.nameservers = [resolver]`, so an operator can compare "what
+  the pod's resolver returns" against an authoritative/other nameserver
+  — the split-horizon case that forced registering a vCenter by IP. A
+  non-IP `resolver` is rejected with `reason="bad_resolver"` (dnspython's
+  `nameservers` setter accepts only IPs, and an unresolved name pins no
+  server).
+
+Success returns `{resolved: true, name, type, resolver: "system"|<ip>,
+records: [{type, value, ttl}], authoritative, authenticated_data, reason:
+null}`. `authoritative` is the answer's AA flag; `authenticated_data` is
+the DNSSEC AD flag **reported, not validated** (chain validation, AXFR,
+and `dig +trace` are out of scope, #2409).
+
+**Gating (one guard, uniformly — #1177):** the queried `name` is passed
+through `assert_probe_allowed` before any query (a hostname matched
+verbatim, an IP by range), and a custom `resolver` IP is gated the same
+way — querying an internal resolver or resolving internal names is itself
+mild recon. Both must be allowlisted or the lookup is refused with
+`reason="not_in_probe_allowlist"`.
+
+**Return-failures:** `NXDOMAIN` / `NoAnswer` / `NoNameservers` (SERVFAIL)
+/ `dns.exception.Timeout` map to `{resolved: false, reason:
+nxdomain|no_answer|servfail|timeout}` with `status="ok"`; a missing
+system resolver config with no chosen resolver maps to
+`reason="no_resolver"`. None are raised as `connector_*` errors. The
+`name`/`type`/`resolver` in the return dict are audit-visible via
+`raw_payload`.
 
 ## The three foundations
 
@@ -116,8 +159,9 @@ connectors' ops.
 - `connectors/net/__init__.py` — queues `register_net_typed_operations`
   onto the lifespan registrar list via `register_typed_op_registrar`
   (auto-imported by the `_eager_import_connectors` package walk).
-- `connectors/net/ops.py` — `net_tcp_check` handler, its parameter /
-  response schema, and the registrar.
+- `connectors/net/ops.py` — the `net_tcp_check` and `net_dns_lookup`
+  handlers, their parameter / response schemas, and the shared registrar
+  (`register_net_typed_operations` upserts both ops).
 - `connectors/net/allowlist.py` — `PROBE_ALLOWLIST_ENV`,
   `parse_probe_allowlist`, `assert_probe_allowed`,
   `ProbeNotAllowedError`.
@@ -129,8 +173,12 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 
 ## Dependencies
 
-Standard library only (`asyncio`, `socket`, `ipaddress`, `time`) — no
-new runtime dependency.
+`net.tcp_check` is standard library only (`asyncio`, `socket`,
+`ipaddress`, `time`). `net.dns_lookup` adds **dnspython** (ISC-licensed,
+already present transitively via `email-validator` / `pymongo`; pinned
+direct in `backend/pyproject.toml` so the connector's requirement is
+explicit) — used via `dns.asyncresolver` / `dns.reversename` /
+`dns.rdatatype` / `dns.flags`.
 
 ## Known issues / deferred
 
@@ -144,7 +192,8 @@ new runtime dependency.
 
 ## References
 
-- Parent: Initiative #2405, Task #2406. Mold: secret broker
+- Parent: Initiative #2405, Tasks #2406 (`tcp_check`) / #2409
+  (`dns_lookup`). Mold: secret broker
   (`docs/codebase/connectors-secret-broker.md`). SSRF sibling:
   `docs/codebase/target-ssrf-guard.md`. Broadcast taxonomy:
   `docs/codebase/broadcast.md`.

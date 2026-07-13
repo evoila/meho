@@ -42,7 +42,7 @@ dependencies = [
     # call is run off the event loop via ``asyncio.to_thread``.
     "google-cloud-secret-manager>=2.20.0",
     "duckdb>=1.5.4",
-    "pyarrow>=21.0.0",
+    "pyarrow>=25.0.0",
     "msgspec>=0.20.0",
     "tabulate>=0.9.0",
     # ``[anthropic]`` brings the Anthropic SDK + the

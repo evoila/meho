@@ -106,6 +106,66 @@ connector-related release-notes line.
   error). `net.*` ops classify as reads in the broadcast feed
   (#2406 / #2405).
 
+### Fixed — Helm chart fails at render time on an unresolvable MCP resource URI (#2394)
+
+- The chart now `fail`s at `helm template` / `helm install` time — with an
+  actionable message naming `config.backplaneUrl`, `config.mcpResourceUri`,
+  and `ingress.host` — when the `/mcp` audience is unresolvable (ingress
+  disabled / empty host **and** both config values blank). Previously such an
+  ingress-less bring-up rendered an empty audience and the pod crash-looped at
+  startup with a runtime `audience_not_configured` stack trace instead of
+  failing before anything was applied. The guard mirrors the existing eso/agent
+  render-time guards and fires only on the nothing-resolves path: the
+  ingress-derived default and explicit-value installs render unchanged. No
+  `allowNoMcpResourceUri` escape hatch is added (kept minimal) — a deliberate
+  MCP-less bring-up sets a placeholder `config.backplaneUrl`, and `/mcp` stays
+  per-request fail-closed regardless.
+- The chart's own `helm install + helm test (pgvector preflight)` CI lane —
+  an ingress-less install that set neither config value — now pins a
+  placeholder `config.backplaneUrl=https://meho-test.test` (matching the
+  surrounding `.test` fakes) so it satisfies the new render-time guard instead
+  of tripping it.
+### Fixed — Helm chart `startupProbe` stops liveness crash-looping slow first boots (#2393)
+
+- The backplane Deployment now renders a `startupProbe` on `/healthz` from a
+  new `probes.startup.*` values subtree. The kubelet disables the liveness and
+  readiness probes until the startup probe first passes, so a slow-but-healthy
+  first boot — full typed-op catalog registration plus the fastembed
+  embedding-model preload before the app binds `:8000`, ~2-3 min and longer on
+  a cold install that downloads model weights into an empty cache PVC — no
+  longer trips the short-delay liveness probe into a CrashLoopBackOff.
+- The default budget is `failureThreshold: 30` × `periodSeconds: 10` = 300s
+  (5 min), operator-tunable. `values.schema.json` accepts the new
+  `probes.startup` subtree; liveness/readiness defaults are unchanged. Opt out
+  on a fast cluster by clearing `probes.startup` (e.g. `--set probes.startup=null`).
+### Documentation — pgvector superuser prerequisite for cold migration 0003 (#2392)
+
+- Document the hard prerequisite that a **cold** install must satisfy before
+  the pre-install migration Job runs: Alembic revision `0003` executes
+  `CREATE EXTENSION IF NOT EXISTS vector`, which PostgreSQL only lets a
+  **superuser** run, so a first-time install against a least-privilege app role
+  fails with `permission denied to create extension "vector"`. The chart
+  `values.yaml` `postgres.credentialsSecret` comment and
+  `deploy/values-examples/README.md` now state the prerequisite with the exact
+  superuser `psql` one-liner and the CNPG `postInitSQL` bootstrap path.
+- Record the decision (`docs/decisions/pgvector-superuser-prerequisite.md`) to
+  **reject** a dedicated `migrationSuperuserDsn` chart value as out of scope —
+  it adds a permanent second-DSN/second-Secret surface and a standing superuser
+  credential for a one-time bootstrap step that a documented `psql` line (or
+  CNPG `postInitSQL`) covers. Migration `0003` SQL is unchanged.
+### Fixed — migrate hook ServiceAccount fresh-install ordering deadlock (#2391)
+
+- The `meho-migrate` `pre-install,pre-upgrade` hook Job no longer sets
+  `serviceAccountName`. Helm schedules hooks before it creates the chart's
+  normal (non-hook) resources, so the Job referenced the `meho`
+  ServiceAccount that did not exist yet — a fresh `helm install` deadlocked
+  with `serviceaccount "meho" not found` on every admission attempt until
+  the release timed out. The migration runner needs no Kubernetes API
+  access, so the pod now falls back to the namespace `default` SA and
+  (with `automountServiceAccountToken: false` unchanged) carries no token.
+  A `helm template` unit assertion pins that the hook Job renders without
+  `serviceAccountName` while the backplane Deployment keeps its own (#2391).
+
 ### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
 
 - The `connector_auth_failed` envelope's `extras.cause` is now **stage-aware**

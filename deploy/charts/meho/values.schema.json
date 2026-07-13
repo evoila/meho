@@ -169,7 +169,8 @@
       "required": ["liveness", "readiness"],
       "properties": {
         "liveness": { "$ref": "#/definitions/httpProbe" },
-        "readiness": { "$ref": "#/definitions/httpProbe" }
+        "readiness": { "$ref": "#/definitions/httpProbe" },
+        "startup": { "$ref": "#/definitions/httpProbe" }
       }
     },
     "resources": {

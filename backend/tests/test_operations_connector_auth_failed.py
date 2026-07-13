@@ -45,6 +45,7 @@ from uuid import UUID
 
 import httpx
 import pytest
+import respx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -62,6 +63,7 @@ from meho_backplane.connectors.profile import (
     FingerprintSpec,
     PaginationSpec,
 )
+from meho_backplane.connectors.profiled import ProfiledRestConnector
 from meho_backplane.connectors.registry import (
     clear_registry,
     register_connector_v2,
@@ -384,6 +386,43 @@ class _Http440VrliProfileConnector(_Http440Connector):
         pagination=PaginationSpec(strategy="none", items_key="value"),
         expiry_statuses=frozenset({401, 440}),
     )
+
+
+class _ProfiledEstablish401Connector(ProfiledRestConnector):
+    """A real profiled connector whose ``session_login`` login POST returns 401.
+
+    #2414: unlike the ``_Http4xx`` fakes (which short-circuit ``_request_json``),
+    this exercises the genuine ``ProfiledRestConnector`` auth flow --
+    ``auth_headers`` -> ``_session_token`` -> ``_mint_session_token`` ->
+    ``_post_login`` -- so the login-POST 401 travels the exact path the bug
+    traversed. A profiled connector advertises ``invalidate_session``, so before
+    the fix the raw login-POST ``HTTPStatusError`` was re-dispatched once and
+    stamped ``session_dispatch_401_after_relogin``; after the fix ``_post_login``
+    raises ``ConnectorAuthError`` (establish stage) -> ``session_establish_401``.
+    The login endpoint is mocked with respx; the credential loader is stubbed so
+    no Vault read is needed (the dispatcher instantiates the class with no args).
+    """
+
+    product = "vcfops"
+    version = "9"
+    impl_id = "vcfops-profiled-establish-401"
+    supported_version_range = ">=9,<10"
+    profile: ClassVar[ExecutionProfile] = ExecutionProfile(
+        product="vcfops",
+        version="9",
+        auth=AuthSpec(scheme="session_login", secret_fields=("username", "password")),
+        fingerprint=FingerprintSpec(
+            path="/api/version", version_key="version", version_splitter="none"
+        ),
+        probe="delegate",
+        pagination=PaginationSpec(strategy="none", items_key="value"),
+    )
+
+    def __init__(self) -> None:
+        async def _loader(_target: Any, _operator: Operator) -> dict[str, str]:
+            return {"username": "svc", "password": "pw"}
+
+        super().__init__(credentials_loader=_loader)
 
 
 class _Http404Connector(_Http401Connector):
@@ -1214,6 +1253,76 @@ async def test_dispatch_440_with_vrli_profile_maps_to_auth_failed(
     assert result.error.startswith("connector_auth_failed:")
     assert result.extras["error_code"] == "connector_auth_failed"
     assert result.extras["http_status"] == 440
+
+
+@pytest.mark.asyncio
+async def test_dispatch_profiled_login_post_401_is_establish_not_after_relogin(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#2414: a profiled login-POST 401 stamps establish stage, not after_relogin.
+
+    Red-today end-to-end regression against the exact path the bug traversed. A
+    real :class:`ProfiledRestConnector` dispatches an ingested op; its
+    ``session_login`` establish POST returns 401. Before the fix the raw
+    ``HTTPStatusError`` reached the dispatcher's retry arm (the connector
+    advertises ``invalidate_session``) and was stamped
+    ``session_dispatch_401_after_relogin`` with the do-NOT-restage remediation.
+    After the fix ``_post_login`` raises ``ConnectorAuthError`` -> the
+    ``session_establish_401`` cause + the restage remediation, and the
+    ``already re-logged-in and retried once`` / ``do NOT restage`` text is
+    absent.
+    """
+    register_connector_v2(
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-profiled-establish-401",
+        cls=_ProfiledEstablish401Connector,
+    )
+    await _insert_ingested_descriptor(
+        session=session,
+        product="vcfops",
+        version="9",
+        impl_id="vcfops-profiled-establish-401",
+        op_id="GET:/api/v2/events",
+        embedding=stub_embedding_service.encode_one.return_value,
+    )
+
+    target = _FakeTarget(name="vrli-lab", host="vrli.lab.internal")
+    # The real profiled connector keys its session/client cache on the
+    # tenant-unique ``(tenant_id, id)`` tuple (the typed ``_Http4xx`` fakes
+    # never reach ``target_cache_key`` because they short-circuit
+    # ``_request_json``), so the target needs a ``tenant_id``.
+    target.tenant_id = _TENANT
+    async with respx.mock(base_url="https://vrli.lab.internal") as mock:
+        login = mock.post("/api/v2/sessions").respond(401, json={"message": "login refused"})
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id="vcfops-profiled-establish-401-9",
+            op_id="GET:/api/v2/events",
+            target=target,
+            params={},
+        )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("connector_auth_failed:")
+    assert result.extras["error_code"] == "connector_auth_failed"
+    # The load-bearing assertion: establish stage, NOT the retry arm's
+    # after_relogin cause.
+    assert result.extras["cause"] == "session_establish_401"
+    assert result.extras["cause"] != "session_dispatch_401_after_relogin"
+    # The establish stage carries the restage remediation, not the
+    # do-NOT-restage after_relogin text.
+    assert "meho vault kv put" in result.error
+    assert "do NOT restage" not in result.error
+    assert "already re-logged-in and retried once" not in result.error
+    # The login POST was attempted; the establish failed fast (no wasteful
+    # re-dispatch loop -- the ConnectorAuthError arm does not retry).
+    assert login.call_count == 1
+    assert len(captured_events) == 1
+    assert captured_events[0].result_status == "error"
 
 
 # ---------------------------------------------------------------------------

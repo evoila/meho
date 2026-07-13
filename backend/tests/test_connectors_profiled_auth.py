@@ -35,6 +35,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.profile_auth import ProfileAuthError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.profile import (
     AuthSpec,
     ExecutionProfile,
@@ -606,8 +607,24 @@ async def test_session_login_basic_falls_back_to_legacy_on_404() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("modern_status", [401, 403, 500, 503])
-async def test_session_login_basic_does_not_fall_back_on_non_404(modern_status: int) -> None:
+@pytest.mark.parametrize(
+    ("modern_status", "expected_exc"),
+    [
+        # #2414: an auth-class login-POST rejection (401 / 403) is a session
+        # *establish* failure and now raises the structured ConnectorAuthError
+        # (the typed connectors' shape) so the dispatcher stamps
+        # ``session_establish_<s>`` (restage) rather than the retry arm's
+        # ``after_relogin`` (do-NOT-restage). A 5xx is a server fault, not an
+        # auth rejection, so it keeps the raw httpx.HTTPStatusError shape.
+        (401, ConnectorAuthError),
+        (403, ConnectorAuthError),
+        (500, httpx.HTTPStatusError),
+        (503, httpx.HTTPStatusError),
+    ],
+)
+async def test_session_login_basic_does_not_fall_back_on_non_404(
+    modern_status: int, expected_exc: type[Exception]
+) -> None:
     """401 / 403 / 5xx on modern are auth/server failures — no legacy retry."""
     connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
     target = _StubTarget(name="vcenter", host="vcenter.invalid")
@@ -615,13 +632,50 @@ async def test_session_login_basic_does_not_fall_back_on_non_404(modern_status: 
     async with respx.mock(base_url="https://vcenter.invalid", assert_all_called=False) as mock:
         modern = mock.post("/api/session").respond(modern_status)
         legacy = mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-tok")
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(expected_exc):
             await connector.auth_headers(target, operator=_operator())
 
     assert modern.call_count == 1
     assert legacy.call_count == 0
     # No session recorded — the establish failed.
     assert target_cache_key(target) not in connector._session_login_paths
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403])
+async def test_session_login_post_auth_status_raises_connector_auth_error(status: int) -> None:
+    """#2414: a login-POST 401 / 403 raises ConnectorAuthError (establish stage).
+
+    Red-today regression. A profiled connector's ``_post_login`` used to raise
+    the raw ``httpx.HTTPStatusError`` on a login-POST auth-class rejection.
+    Because a profiled connector advertises ``invalidate_session``, that landed
+    in the dispatcher's retry ``HTTPStatusError`` arm and was mislabelled
+    ``session_dispatch_<s>_after_relogin`` (do-NOT-restage) -- wrong, since the
+    login itself was refused. It now raises the structured
+    :class:`ConnectorAuthError` carrying the ``session_establish_<status>``
+    cause (the typed connectors' shape), which the dispatcher stamps as the
+    establish stage with the restage remediation. The target's ``host`` /
+    ``secret_ref`` ride the error for the #2091-style envelope.
+    """
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")
+
+    async with respx.mock(base_url="https://vrli.invalid") as mock:
+        mock.post("/api/v2/sessions").respond(status, json={"message": "login refused"})
+        with pytest.raises(ConnectorAuthError) as exc_info:
+            await connector.auth_headers(target, operator=_operator())
+
+    err = exc_info.value
+    assert err.status_code == status
+    assert err.cause == f"session_establish_{status}"
+    assert err.target_name == "vrli"
+    assert err.host == "vrli.invalid"
+    assert err.secret_ref == "p/secret"
+    # The underlying transport error is chained for the upstream-body read.
+    assert isinstance(err.__cause__, httpx.HTTPStatusError)
+    # No session cached — the establish failed before a token was minted.
+    assert target_cache_key(target) not in connector._session_tokens
     await connector.aclose()
 
 

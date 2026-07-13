@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-07-13
+
 ### Added — rke2.etcd-snapshot.save safe managed-etcd snapshot op (#2431)
 
 - Add `rke2.etcd-snapshot.save` on the `rke2-ssh` connector — an on-demand

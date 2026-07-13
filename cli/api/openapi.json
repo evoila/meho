@@ -25693,6 +25693,7 @@
               "prometheus",
               "proxmox",
               "rabbitmq",
+              "rke2",
               "sddc",
               "vault",
               "vcfa",

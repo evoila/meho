@@ -18,21 +18,30 @@ via :func:`~meho_backplane.operations.typed_register.register_typed_op_registrar
 so the ``endpoint_descriptor`` row lands before the first dispatch.
 
 This is the keystone (#2406) of the ``net.*`` family: ``net.tcp_check``
-plus the three foundations sibling ops (T2-T4) reuse — the dedicated
-probe allowlist (``MEHO_NETDIAG_PROBE_ALLOWLIST``, empty ⇒ inert), the
-audit-visible host:port, and the return-failures contract (a failed
-probe is ``status="ok"`` with ``connected=false``, never a
-``connector_*`` error). See :mod:`meho_backplane.connectors.net.ops` and
+plus the sibling ops (T2-T4) reuse — the dedicated probe allowlist
+(``MEHO_NETDIAG_PROBE_ALLOWLIST``, empty ⇒ inert), the audit-visible
+host:port, and the return-failures contract (a failed probe is
+``status="ok"`` with ``connected=false``, never a ``connector_*``
+error). ``net.tls_inspect`` (T2, #2407) is the first sibling: it reuses
+all three foundations to report the full presented TLS certificate chain
+on an unverified handshake. Each op ships its own module + registrar and
+queues it here, so siblings extend this package without contending for a
+single registrar function. See :mod:`meho_backplane.connectors.net.ops`,
+:mod:`meho_backplane.connectors.net.tls`, and
 :mod:`meho_backplane.connectors.net.allowlist`.
 """
 
 from meho_backplane.connectors.net.ops import register_net_typed_operations
+from meho_backplane.connectors.net.tls import register_net_tls_inspect_operation
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
-# Queue the net.tcp_check typed-op upsert onto the lifespan-driven
-# registrar list (run after the connector eager-import pass).
+# Queue each net.* typed-op upsert onto the lifespan-driven registrar
+# list (run after the connector eager-import pass). One registrar per op
+# keeps siblings from contending for a shared function.
 register_typed_op_registrar(register_net_typed_operations)
+register_typed_op_registrar(register_net_tls_inspect_operation)
 
 __all__ = [
+    "register_net_tls_inspect_operation",
     "register_net_typed_operations",
 ]

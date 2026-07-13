@@ -106,6 +106,49 @@ and `ConnectionRefusedError` are all `OSError` subclasses — so the
 handler's `except` arms are ordered specific-before-general
 (timeout → DNS → refused → generic `OSError`).
 
+## `net.http_probe` (T3, #2408)
+
+`net.http_probe(url, method=HEAD|GET, timeout_seconds?)` issues a
+**single** HTTP request from the backplane and reports the
+reachability/identity surface — `status`, response `headers`, the
+`redirect_chain`, a `tls` summary, `timing_ms`, `final_url`, and the
+body's `body_size` / `body_sha256` — but **never the response body**. It
+is a reachability/identity probe, not a fetch/exfil path (the anti-exfil
+floor). Lives in `connectors/net/http_probe.py` with its own registrar
+(`register_net_http_probe_operations`), queued alongside
+`net.tcp_check`'s registrar in the package `__init__`.
+
+It reuses the same three foundations plus two probe-specific rules:
+
+1. **Fresh client, manual redirects.** Unlike the target-coupled
+   `HttpConnector` (per-target pooled client), the op builds a fresh
+   `httpx.AsyncClient(follow_redirects=False)` per call and walks
+   redirects itself — httpx's own follower would dial the next host
+   *before* the allowlist could see it.
+2. **Per-hop redirect re-gating (open-redirect SSRF floor).** Every
+   redirect hop's host is passed through `assert_probe_allowed` **before
+   it is followed**. A redirect to a non-allowlisted host (e.g. a
+   cloud-metadata / credential host) halts the walk with
+   `{"reachable": true, "reason": "blocked_redirect",
+   "blocked_redirect": "<host>"}` and is **never dialed** — the concern
+   noted at `adapters/http.py:260`. The redirect count is bounded
+   (`_MAX_REDIRECTS`) and the whole walk runs under one
+   `asyncio.wait_for(timeout)` ceiling.
+
+The body is streamed chunk-by-chunk only to accumulate a running length
+and SHA-256 (`_consume_body_size_and_hash`); the full body is never
+materialised or returned. The `tls` summary is read off httpx's
+`network_stream` response extension (`ssl_object`) before the stream is
+consumed — negotiated version, cipher, ALPN, and the peer cert's
+subject/issuer/`notAfter` (public identity, never private material);
+`null` for plain HTTP. `method` is restricted to `HEAD`/`GET` by a schema
+`enum`, so the dispatcher rejects anything else with `invalid_params`
+before the handler runs. Reason codes extend the T1 set with
+`invalid_url`, `blocked_redirect`, `too_many_redirects`, and `tls_error`.
+
+Because it issues an HTTP request, `net.http_probe` adds **`httpx`** to
+the family's dependency surface (already a project dep — no new dep).
+
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 
 `net.tls_inspect(host, port, server_name?, timeout_seconds?)` opens a TLS
@@ -178,10 +221,12 @@ connectors' ops.
 
 ## Key types / control flow
 
-- `connectors/net/__init__.py` — queues both op registrars
-  (`register_net_typed_operations`, `register_net_tls_inspect_operation`)
-  onto the lifespan registrar list via `register_typed_op_registrar`
-  (auto-imported by the `_eager_import_connectors` package walk).
+- `connectors/net/__init__.py` — queues each op registrar
+  (`register_net_typed_operations`, `register_net_tls_inspect_operation`,
+  `register_net_http_probe_operations`) onto the lifespan registrar list
+  via `register_typed_op_registrar` (auto-imported by the
+  `_eager_import_connectors` package walk). Each sibling op has its own
+  registrar so the family extends without editing a shared function body.
 - `connectors/net/ops.py` — `net_tcp_check` handler, its parameter /
   response schema, the registrar, and the shared timeout bounds/clamp
   (`_DEFAULT_TIMEOUT_SECONDS` / `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`)
@@ -189,6 +234,11 @@ connectors' ops.
   so no cycle).
 - `connectors/net/tls.py` — `net_tls_inspect` handler, its schemas, the
   cert-flattening / hostname-match / chain helpers, and its registrar.
+- `connectors/net/http_probe.py` — `net_http_probe` handler, its
+  parameter / response schema, the manual redirect walk
+  (`_walk_redirects`), the TLS summary (`_tls_summary`), the
+  size/hash-only body reader (`_consume_body_size_and_hash`), and the
+  registrar.
 - `connectors/net/allowlist.py` — `PROBE_ALLOWLIST_ENV`,
   `parse_probe_allowlist`, `assert_probe_allowed`,
   `ProbeNotAllowedError`.
@@ -200,14 +250,17 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 
 ## Dependencies
 
-- `net.tcp_check`: standard library only (`asyncio`, `socket`,
-  `ipaddress`, `time`).
+- `net.tcp_check` and the allowlist: standard library only (`asyncio`,
+  `socket`, `ipaddress`, `time`).
 - `net.tls_inspect`: `pyOpenSSL` (full presented chain via
   `get_peer_cert_chain`) + `cryptography` (x509 parsing) — both Apache-2.0
   (Python License Check clean). `pyOpenSSL` was promoted to a runtime
   dependency and `cryptography` from a dev-only + transitive install to a
   declared runtime dependency (the handler imports `cryptography.x509`
   directly).
+- `net.http_probe`: `httpx` (already a project dependency) for the HTTP
+  request and its `network_stream` TLS extension — no **new** runtime
+  dependency is added.
 
 ## Known issues / deferred
 

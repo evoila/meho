@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — net.http_probe HTTP reachability probe (no body, per-hop redirect re-gating)
+
+- Add `net.http_probe` to the synthetic `net.*` connector — a targetless
+  HTTP(S) reachability/identity probe that issues a single `HEAD`/`GET`
+  from the backplane and reports `status`, response `headers`, the
+  `redirect_chain`, a `tls` summary (version/cipher/ALPN/cert
+  identity), `timing_ms`, `final_url`, and the body's `body_size` /
+  `body_sha256` — but **never the response body** (the anti-exfil
+  floor). It uses a fresh `httpx.AsyncClient(follow_redirects=False)`
+  and walks redirects manually so **every redirect hop's host is
+  re-checked against `MEHO_NETDIAG_PROBE_ALLOWLIST` before it is
+  followed**: a redirect to a non-allowlisted host halts with
+  `reason="blocked_redirect"` and is never dialed (open-redirect SSRF
+  floor). `method` is restricted to `HEAD`/`GET` at the schema boundary;
+  a refused / timed-out / DNS-failed / TLS-failed / redirect-blocked
+  probe returns `{reachable, reason}` with `status="ok"`, never a
+  `connector_*` error. No new dependency (reuses the existing `httpx`
+  stack) (#2408 / #2405).
 ### Fixed — profiled-connector login-POST 401 stamped establish-stage, not after_relogin (#2414)
 
 - A profiled session-scheme connector whose login POST is rejected

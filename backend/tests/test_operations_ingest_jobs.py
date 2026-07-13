@@ -49,6 +49,31 @@ from meho_backplane.operations.ingest.jobs import INGESTED_NOT_DISPATCHABLE
 from meho_backplane.operations.ingest.register_ingested import IngestionResult
 
 
+@pytest.fixture(autouse=True)
+def _rebind_jobs_logger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test a fresh, unrealized ``jobs._log`` structlog proxy.
+
+    Guards against an xdist ``--dist loadscope`` ordering hazard. A sibling
+    module that calls ``meho_backplane.logging.configure_logging()`` sets
+    ``cache_logger_on_first_use=True`` and installs a **fresh** processors
+    list; a later sibling call swaps in yet another fresh list. Once the
+    module-level ``jobs._log`` proxy is realized (e.g. by an earlier
+    ``run_ingest_job`` test that emits a log line) it caches a bound logger
+    holding a reference to whichever list was live *then*.
+    ``structlog.testing.capture_logs`` mutates the *current* config list in
+    place (by design, to reach live bound loggers), so it can no longer
+    intercept the orphaned cached logger — the capture comes back empty and
+    ``test_load_timeout_env_rejected_values_fall_back`` (and the other
+    capture-based tests here) fail deterministically depending on worker
+    layout. Rebinding a fresh proxy per test forces re-realization against
+    the live config list inside the test — the same list ``capture_logs``
+    mutates — so the capture is robust regardless of prior realization.
+    ``monkeypatch`` restores the original module logger after each test;
+    product ``jobs.py`` behaviour is unchanged.
+    """
+    monkeypatch.setattr(jobs, "_log", structlog.get_logger(jobs.__name__))
+
+
 def _pipeline_result(
     *,
     connector_id: str = "vrli-rest-9.0",

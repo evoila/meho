@@ -639,6 +639,14 @@ jobs:
         # blocks until it's healthy because ``--wait-for-jobs`` only
         # covers hook Jobs, not Deployments / StatefulSets.
         run: |
+          # #2394: this ingress-less preflight sets neither
+          # config.backplaneUrl nor config.mcpResourceUri, which is
+          # exactly the unresolvable-MCP-URI case the configmap render
+          # guard now fail-closes (templates/configmap.yaml). Pin a
+          # placeholder backplane URL (matching the surrounding `.test`
+          # fakes) so the guard resolves MCP_RESOURCE_URI to
+          # https://meho-test.test/mcp and the install renders — the
+          # guard behaviour itself is asserted by the render-time tests.
           helm install meho-test ./deploy/charts/meho \
             --namespace meho-test \
             --wait-for-jobs \
@@ -653,6 +661,7 @@ jobs:
             --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
             --set config.keycloakAudience=meho-backplane \
             --set config.vaultAddr=https://vault.test \
+            --set config.backplaneUrl=https://meho-test.test \
             --set retrieval.modelCache.enabled=false
 
       - name: Wait for broadcast (Valkey) Deployment to roll out

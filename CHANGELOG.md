@@ -105,6 +105,67 @@ connector-related release-notes line.
   `#field` fragment subsumes `password_secret_key` for schemed refs).
   Approval-gating of both write ops is untouched.
 
+### Fixed — harden ingest-job timeout warning tests against xdist logger-cache ordering (#2397)
+
+- `test_operations_ingest_jobs.py` rebinds `jobs._log` to a fresh structlog
+  proxy per test. Under `pytest -n --dist loadscope`, a sibling module that
+  calls `configure_logging()` (`cache_logger_on_first_use=True`) then later
+  reconfigures structlog with a fresh processors list could orphan the
+  module-level `_log` proxy's cached bound logger; `capture_logs()` mutates
+  the *current* config list in place, so it could no longer reach the cached
+  logger and the capture came back empty — deterministically failing the
+  timeout-fallback warning assertions depending on worker layout. The
+  per-test rebind forces re-realization against the live config list.
+  Test-only; product `jobs.py` behaviour is unchanged.
+
+### Fixed — kubeconfig loader routed through the credential-backend seam (#2397)
+
+- The Kubernetes connector's default kubeconfig loader
+  (`load_kubeconfig_from_vault`) no longer reads Vault directly — it now
+  resolves `target.secret_ref` through the shared credential-backend seam
+  (`load_vault_secret_data` → `split_credential_ref` → the backend registry).
+  A `product: kubernetes` target with a `gsm:<project>/<secret>#kubeconfig`
+  ref now authenticates on a `CREDENTIAL_BACKEND=gsm` / no-Vault deployment,
+  closing the last-mile gap #2227 left for the k8s connector (every other
+  connector already got `gsm:` for free via the seam).
+- The loader inherits the seam's Vault-kind KV-v2 API-path-shape guard: a
+  `secret/data/…`-shaped `secret_ref` now fails with an actionable error
+  instead of silently 404ing (a latent defect the old direct-read bypass
+  carried). Behaviour is otherwise unchanged for schemeless / `vault:` refs
+  on Vault deployments.
+
+### Fixed — Helm chart fails at render time on an unresolvable MCP resource URI (#2394)
+
+- The chart now `fail`s at `helm template` / `helm install` time — with an
+  actionable message naming `config.backplaneUrl`, `config.mcpResourceUri`,
+  and `ingress.host` — when the `/mcp` audience is unresolvable (ingress
+  disabled / empty host **and** both config values blank). Previously such an
+  ingress-less bring-up rendered an empty audience and the pod crash-looped at
+  startup with a runtime `audience_not_configured` stack trace instead of
+  failing before anything was applied. The guard mirrors the existing eso/agent
+  render-time guards and fires only on the nothing-resolves path: the
+  ingress-derived default and explicit-value installs render unchanged. No
+  `allowNoMcpResourceUri` escape hatch is added (kept minimal) — a deliberate
+  MCP-less bring-up sets a placeholder `config.backplaneUrl`, and `/mcp` stays
+  per-request fail-closed regardless.
+- The chart's own `helm install + helm test (pgvector preflight)` CI lane —
+  an ingress-less install that set neither config value — now pins a
+  placeholder `config.backplaneUrl=https://meho-test.test` (matching the
+  surrounding `.test` fakes) so it satisfies the new render-time guard instead
+  of tripping it.
+### Fixed — Helm chart `startupProbe` stops liveness crash-looping slow first boots (#2393)
+
+- The backplane Deployment now renders a `startupProbe` on `/healthz` from a
+  new `probes.startup.*` values subtree. The kubelet disables the liveness and
+  readiness probes until the startup probe first passes, so a slow-but-healthy
+  first boot — full typed-op catalog registration plus the fastembed
+  embedding-model preload before the app binds `:8000`, ~2-3 min and longer on
+  a cold install that downloads model weights into an empty cache PVC — no
+  longer trips the short-delay liveness probe into a CrashLoopBackOff.
+- The default budget is `failureThreshold: 30` × `periodSeconds: 10` = 300s
+  (5 min), operator-tunable. `values.schema.json` accepts the new
+  `probes.startup` subtree; liveness/readiness defaults are unchanged. Opt out
+  on a fast cluster by clearing `probes.startup` (e.g. `--set probes.startup=null`).
 ### Documentation — pgvector superuser prerequisite for cold migration 0003 (#2392)
 
 - Document the hard prerequisite that a **cold** install must satisfy before

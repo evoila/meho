@@ -10,9 +10,11 @@ exposes ``name``/``host``/``port``/``secret_ref`` satisfies the Protocol
 structurally with no edits here.
 
 The default loader, :func:`load_kubeconfig_from_vault`, performs the
-**live** operator-context KV-v2 read: it forwards the operator's
-validated Keycloak JWT to Vault and reads ``target.secret_ref`` for the
-``kubeconfig`` field, parses the YAML into the dict shape
+**live** operator-context read through the credential-backend seam: for
+the default Vault backend it forwards the operator's validated Keycloak
+JWT to Vault and reads ``target.secret_ref`` for the ``kubeconfig``
+field; for a ``gsm:`` ref it reads GCP Secret Manager instead. Either
+way it parses the YAML into the dict shape
 ``kubernetes_asyncio.config.new_client_from_config_dict`` accepts, and
 returns it. This is the rubric **State 2** wiring (`shared_service_account`
 only) per `Goal #214 (Connector parity)
@@ -28,14 +30,27 @@ The shared :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_cred
 helper returns a flat ``{field: str}`` dict — the right shape for the
 HTTP-basic ``{username, password}`` pairs every REST connector consumes.
 A kubeconfig is structurally different: it's a YAML document with nested
-``clusters`` / ``contexts`` / ``users`` arrays under a single Vault field
-``kubeconfig`` (decision #8 convention). So this loader reuses the lower-
-level Vault primitive (:func:`~meho_backplane.auth.vault.vault_client_for_operator`
-+ ``read_secret_version``) directly and does its own YAML parse via
-:func:`parse_kubeconfig_yaml`, mirroring the shape of the shared helper
-but with a kubeconfig-shaped return type and a kubeconfig-specific error
-contract (a malformed YAML field is a value error, not a missing
-credential field).
+``clusters`` / ``contexts`` / ``users`` arrays stored under a single
+``kubeconfig`` field (decision #8 convention). So this loader reads the
+raw secret-field dict through the shared
+:func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`
+seam — the same backend-agnostic path the field-inspection connectors
+(gh-rest, keycloak-session, loki, prometheus, proxmox) use — then pulls
+the ``kubeconfig`` field out and runs its own YAML parse via
+:func:`parse_kubeconfig_yaml`, keeping a kubeconfig-shaped return type and
+a kubeconfig-specific error contract (a malformed YAML field is a value
+error, not a missing credential field).
+
+Routing through the seam (rather than the lower-level Vault primitive it
+called before #2397) is what lets a ``product: kubernetes`` target
+resolve a ``secret_ref`` of **any** registered backend
+(:func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
+→ the ``vault`` / ``gsm`` / … registry): a
+``gsm:<project>/<secret>#kubeconfig`` ref now authenticates on a
+``CREDENTIAL_BACKEND=gsm`` / no-Vault deployment, closing the last-mile
+gap #2227 left for the Kubernetes connector. The seam also enforces the
+KV-v2 API-path-shape guard on the Vault backend, so a ``secret/data/…``-
+shaped ref fails with an actionable error instead of silently 404ing.
 
 No kubeconfig content in logs
 =============================
@@ -50,16 +65,18 @@ durable artifact.
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import structlog
 import yaml
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.auth.vault import vault_client_for_operator
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    BasicCredentialsTargetLike,
+    VaultCredentialsReadError,
+    load_vault_secret_data,
+)
 
 __all__ = [
     "DEFAULT_KUBECONFIG_FIELD",
@@ -141,59 +158,6 @@ def parse_kubeconfig_yaml(kubeconfig_text: str) -> dict[str, Any]:
     return parsed
 
 
-def _resolve_secret_ref(target: KubernetesTargetLike, operator: Operator) -> str:
-    """Validate the pre-read preconditions and return the KV-v2 path.
-
-    Two fail-closed guards, both raising
-    :class:`~meho_backplane.connectors._shared.vault_creds.VaultCredentialsReadError`
-    *before* Vault is touched:
-
-    * empty ``operator.raw_jwt`` — an operator-context read requires an
-      authenticated operator. System-initiated calls (topology scheduler,
-      readiness probe) carry ``raw_jwt=""`` and must error here rather
-      than silently falling back to a backplane identity (the decision's
-      system-call carve-out, mirroring
-      :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
-    * unset ``target.secret_ref`` — the target is unconfigured.
-
-    Returns the stripped ``secret_ref`` path so trailing whitespace never
-    slips into the hvac call.
-    """
-    if not operator.raw_jwt:
-        raise VaultCredentialsReadError(
-            "operator-context credential read requires an authenticated operator; "
-            f"target={target.name!r} has no operator JWT (system-initiated calls "
-            "cannot read per-target kubeconfig credentials)"
-        )
-    if not target.secret_ref:
-        raise VaultCredentialsReadError(
-            f"target {target.name!r} has no secret_ref configured; cannot read "
-            "its kubeconfig from Vault"
-        )
-    return target.secret_ref.strip()
-
-
-def _structural_unwrap(payload: object, *, target_name: str) -> dict[str, object]:
-    """Unwrap hvac's ``read_secret_version`` payload to the secret data dict.
-
-    KV-v2's GET on ``/{mount}/data/{path}`` returns
-    ``{"data": {"data": {<secret kv>}, "metadata": {...}}}``. The secret
-    content is the *nested* ``data["data"]`` — the same double-unwrap the
-    shared :func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`
-    helper performs. A malformed payload (missing either ``data`` level)
-    raises :class:`VaultCredentialsReadError` naming the target rather
-    than a bare ``KeyError`` deep inside hvac's response.
-    """
-    outer = payload.get("data") if isinstance(payload, dict) else None
-    secret_data = outer.get("data") if isinstance(outer, dict) else None
-    if not isinstance(secret_data, dict):
-        raise VaultCredentialsReadError(
-            f"vault KV-v2 read for target {target_name!r} returned a malformed "
-            "payload: expected a nested 'data.data' object holding the kubeconfig field"
-        )
-    return secret_data
-
-
 def _extract_kubeconfig_text(
     secret_data: dict[str, object],
     *,
@@ -230,14 +194,21 @@ async def load_kubeconfig_from_vault(
     field: str = DEFAULT_KUBECONFIG_FIELD,
     mount: str = DEFAULT_KUBECONFIG_KV_MOUNT,
 ) -> dict[str, Any]:
-    """Default kubeconfig loader — live operator-context Vault KV-v2 read + YAML parse.
+    """Default kubeconfig loader — operator-context seam read + YAML parse.
 
-    Opens :func:`~meho_backplane.auth.vault.vault_client_for_operator`
-    (JWT/OIDC login forwarding ``operator.raw_jwt``), reads
-    ``target.secret_ref`` as a KV-v2 secret off the event loop
-    (``asyncio.to_thread`` — hvac is synchronous), structurally unwraps
-    the nested ``data["data"]``, extracts the kubeconfig YAML from the
-    ``kubeconfig`` field, and returns the parsed dict.
+    Reads ``target.secret_ref`` through the shared backend-dispatch seam
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_vault_secret_data`),
+    which runs the fail-closed precondition guards (empty operator JWT /
+    unset ``secret_ref``), splits the ref's scheme
+    (:func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
+    — schemeless/``vault:`` → the operator-context Vault KV-v2 read,
+    ``gsm:`` → GCP Secret Manager, …), and returns the raw secret-field
+    dict. This loader then extracts the kubeconfig YAML from the
+    ``kubeconfig`` field and returns the parsed dict.
+
+    Routing through the seam is what lets a ``gsm:<project>/<secret>#kubeconfig``
+    ref authenticate on a ``CREDENTIAL_BACKEND=gsm`` / no-Vault deployment
+    (#2397) — the last-mile gap #2227 left for the Kubernetes connector.
 
     This is the rubric **State 2** wiring (`shared_service_account` only)
     per `Goal #214 (Connector parity) <https://github.com/evoila/meho/issues/214>`_.
@@ -248,19 +219,21 @@ async def load_kubeconfig_from_vault(
     Parameters
     ----------
     target
-        The target whose ``secret_ref`` (a KV-v2 path string) holds the
-        kubeconfig YAML.
+        The target whose ``secret_ref`` (a backend-scheme-prefixed or
+        schemeless store path) holds the kubeconfig YAML.
     operator
-        The request-scoped operator. ``operator.raw_jwt`` is forwarded
-        to Vault's JWT/OIDC auth method — the read happens under the
-        operator's Vault Identity entity, giving per-operator RBAC and
-        audit (the locked Option A decision).
+        The request-scoped operator. For the operator-context Vault
+        backend ``operator.raw_jwt`` is forwarded to Vault's JWT/OIDC auth
+        method — the read happens under the operator's Vault Identity
+        entity, giving per-operator RBAC and audit (the locked Option A
+        decision); other backends resolve it their own way.
     field
-        The KV-v2 secret field holding the kubeconfig YAML. Defaults to
+        The secret field holding the kubeconfig YAML. Defaults to
         ``"kubeconfig"`` (decision #8 convention); pass a different
         value only for a non-default field name.
     mount
-        The KV-v2 mount point. Defaults to ``"secret"`` (the consumer
+        The Vault KV-v2 mount point (ignored by backends with no mount
+        concept, e.g. GSM). Defaults to ``"secret"`` (the consumer
         convention); pass a different value only for a non-default mount.
 
     Returns
@@ -274,48 +247,54 @@ async def load_kubeconfig_from_vault(
     VaultCredentialsReadError
         Read-phase failure: ``operator.raw_jwt`` is empty (the
         fail-closed system-call carve-out), ``target.secret_ref`` is
-        unset, the KV-v2 payload is malformed, or the requested
-        ``field`` is missing.
+        unset, a Vault-backend ``secret_ref`` is KV-v2 API-path-shaped,
+        the payload is malformed, or the requested ``field`` is missing.
+    meho_backplane.connectors._shared.credential_backend.UnknownCredentialBackendError
+        The ``secret_ref`` names a scheme with no registered backend.
     ValueError
         Raised by :func:`parse_kubeconfig_yaml` when the kubeconfig
         field is not parseable YAML or does not parse to a mapping.
     meho_backplane.auth.vault.VaultClientError
-        Login-phase failure raised by
-        :func:`vault_client_for_operator` —
+        Login-phase failure raised by the Vault backend —
         :class:`~meho_backplane.auth.vault.VaultUnreachableError`
         (network/TLS) or
         :class:`~meho_backplane.auth.vault.VaultRoleDeniedError` (Vault
         rejected the JWT for the role). Propagated verbatim so callers
         can distinguish login-phase from read-phase failure.
     """
-    # Fail-closed precondition guards (empty JWT / unset secret_ref) run
-    # before Vault is touched; returns the stripped KV-v2 path.
-    path = _resolve_secret_ref(target, operator)
-
-    async with vault_client_for_operator(operator) as client:
-        payload = await asyncio.to_thread(
-            client.secrets.kv.v2.read_secret_version,
-            path=path,
-            mount_point=mount,
-            raise_on_deleted_version=False,
-        )
-
-    secret_data = _structural_unwrap(payload, target_name=target.name)
+    # Resolve target.secret_ref through the backend-dispatch seam: the
+    # shared loader runs the fail-closed precondition guards (empty
+    # operator JWT / unset secret_ref) and the Vault-kind API-path-shape
+    # guard, splits the ref's scheme (schemeless/``vault:`` → Vault KV-v2,
+    # ``gsm:`` → GCP Secret Manager, …), and returns the raw secret-field
+    # dict for whichever backend the deployment runs — the swap that makes
+    # a ``gsm:`` kubeconfig ref work on a no-Vault deployment (#2397).
+    #
+    # ``KubernetesTargetLike`` narrows ``secret_ref`` to ``str`` (a k8s
+    # target without a kubeconfig ref cannot work); the shared loader reads
+    # it as ``str | None``. The two Protocols are structurally identical on
+    # the members the loader touches (name / host / secret_ref) and the
+    # loader only *reads* the ref, so the cast bridges mypy's invariant
+    # data-attribute check without weakening either contract.
+    secret_data = await load_vault_secret_data(
+        cast(BasicCredentialsTargetLike, target), operator, mount=mount
+    )
     kubeconfig_text = _extract_kubeconfig_text(
-        secret_data, target_name=target.name, secret_ref=path, field=field
+        secret_data, target_name=target.name, secret_ref=target.secret_ref, field=field
     )
 
     # Log only non-secret attribution: target / host / secret_ref / field
     # name — never any kubeconfig content. The parsed dict is ephemeral
     # in-memory state and must not enter any log event, OperationResult,
-    # or durable artifact. Resolve the logger per-call so
-    # ``structlog.testing.capture_logs`` can reach it (same precedent +
-    # rationale as ``_shared.vault_creds.load_basic_credentials``).
+    # or durable artifact. (The shared seam additionally logs the *set of
+    # field names* present — also never a value.) Resolve the logger
+    # per-call so ``structlog.testing.capture_logs`` can reach it (same
+    # precedent + rationale as ``_shared.vault_creds.load_basic_credentials``).
     structlog.get_logger(__name__).info(
         "vault_kubeconfig_loaded",
         target=target.name,
         host=target.host,
-        secret_ref=path,
+        secret_ref=target.secret_ref,
         field=field,
     )
 

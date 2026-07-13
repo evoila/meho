@@ -77,6 +77,17 @@
       "description": "Container-level securityContext. Same rationale as podSecurityContext.",
       "additionalProperties": true
     },
+    "netdiag": {
+      "type": "object",
+      "description": "Network-diagnostics (net.*) connector posture (Initiative #2405).",
+      "additionalProperties": false,
+      "properties": {
+        "pingGroupRange": {
+          "type": "string",
+          "description": "Optional '<low> <high>' GID range for the net.ipv4.ping_group_range pod sysctl enabling unprivileged ICMP-echo ping (net.ping). Empty (default) renders no sysctl and no pod-security change. Set only after a security review; see values.yaml for the safe-vs-unsafe sysctl and GID caveats."
+        }
+      }
+    },
     "service": {
       "type": "object",
       "additionalProperties": false,

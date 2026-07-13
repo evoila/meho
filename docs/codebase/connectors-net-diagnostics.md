@@ -14,10 +14,11 @@ module-level functions the dispatcher routes to with
 **param**, not a registered `Target`.
 
 This page describes the keystone (#2406, Initiative #2405 T1):
-`net.tcp_check` plus the three foundations every sibling op (T2–T4:
-`tls_inspect` / `http_probe` / `dns_lookup`) reuses, and the sibling ops
-`net.tls_inspect` (#2407, T2), `net.http_probe` (#2408, T3), and
-`net.dns_lookup` (#2409, T4) built on that mold — all described below.
+`net.tcp_check` plus the three foundations every sibling op reuses, and
+the sibling ops `net.tls_inspect` (#2407, T2), `net.http_probe` (#2408,
+T3), `net.dns_lookup` (#2409, T4), and the ICMP cohort `net.ping` /
+`net.trace` / `net.path_mtu` (#2411, T6) built on that mold — all
+described below.
 
 Each op queues a registrar in `__init__.py` via
 `register_typed_op_registrar` (`net.tcp_check` and `net.dns_lookup` share
@@ -251,6 +252,79 @@ a reason code — `not_in_probe_allowlist` / `timeout` / `refused` /
 `safety_level="safe"` + `requires_approval=False`. A completed handshake
 sends **no** application bytes.
 
+## ICMP cohort — `net.ping` / `net.trace` / `net.path_mtu` (T6, #2411)
+
+The ICMP cohort completes local-tool parity (`ping` / `traceroute` /
+`tracepath`) so a local agent never drops to the shell for path
+diagnosis. All three live in `connectors/net/icmp.py` behind one
+registrar (`register_net_icmp_operations`), share the `net-probe-1.x`
+identity, and reuse the three T1 foundations. The blocking socket work
+runs off the event loop via `asyncio.to_thread`. IPv4-only, Linux-only in
+v1.
+
+The load-bearing decision is the **pod-security posture** (resolved
+2026-07-12): reading ICMP replies/errors normally needs `CAP_NET_RAW`,
+but that capability is deliberately **not** granted to the
+credential-holding backplane pod. The cohort uses only unprivileged Linux
+mechanisms, and the ABI constants (`IP_RECVERR`, `IP_MTU_DISCOVER`,
+`IP_MTU`, `IP_PMTUDISC_DO`, ICMP types, `sock_extended_err` layout) are
+pinned as module-level integers because the stdlib `socket` module does
+not expose them.
+
+- **`net.trace` + `net.path_mtu` — fully unprivileged via `IP_RECVERR`.**
+  A connected UDP socket with increasing `IP_TTL` (trace) or
+  `IP_PMTUDISC_DO` (path_mtu) reads the ICMP `TimeExceeded` /
+  fragmentation-needed replies off the socket **error queue**
+  (`recvmsg(MSG_ERRQUEUE)`). Readiness is polled with `poll()` on
+  `POLLERR` — a socket error queue does **not** wake `select`'s
+  exceptional set (that is TCP out-of-band data), so `select` would block
+  the full per-hop timeout even when the error is already queued. No pod
+  capability, no sysctl — works on any cluster.
+- **`net.ping` (ICMP echo) — best-effort, degrades gracefully.** Opens an
+  unprivileged `IPPROTO_ICMP` **datagram** socket (permitted only when the
+  pod's GID is inside `net.ipv4.ping_group_range`). Where it is not, the
+  socket raises `PermissionError` on creation and the op returns
+  `{available: false, reason: "icmp_echo_unprivileged_unavailable"}`
+  (`status="ok"`), pointing the caller at `net.tcp_check` — it **degrades,
+  never crashes**, and never forces a capability grant.
+
+Result shapes (all `status="ok"`, all audit-visible host via
+`raw_payload`):
+
+- `net.ping(host, count?, timeout_seconds?)` →
+  `{available, reachable, reason, packets_sent, packets_received, rtt_ms:
+  {min,avg,max}|null, host}`.
+- `net.trace(host, port?, max_hops?, hop_timeout_seconds?)` →
+  `{completed, reason, reached, hops: [{ttl, address|null, rtt_ms|null}],
+  host, port}` — `address=null` is a silent `*` hop; an ICMP
+  `DestUnreachable` (type 3) marks arrival at the destination, a
+  `TimeExceeded` (type 11) an intermediate router.
+- `net.path_mtu(host, port?, timeout_seconds?)` →
+  `{available, mtu|null, reason, host, port}` — sends DF-set datagrams and
+  reads the converged next-hop MTU from `getsockopt(IP_MTU)`.
+
+Per-op bounds are clamped in the handler and mirrored as schema maxima:
+ping `count ≤ 10`; trace `max_hops ≤ 64`, `hop_timeout ≤ 5s`, plus a
+`_TRACE_HARD_WALL_SECONDS` overall ceiling; timeouts `≤ 5s`. On a
+non-Linux host or a kernel that rejects the socket options, trace/path_mtu
+return `completed:false` / `available:false` with a
+`*_mechanism_unavailable` reason rather than raising.
+
+### Chart posture (`deploy/charts/meho/`)
+
+No pod-security change ships by default: `trace`/`path_mtu` are
+unprivileged everywhere and `ping` degrades where the sysctl is absent.
+The chart adds an **optional, default-off** `netdiag.pingGroupRange`
+value that, when set to a `"<low> <high>"` GID range, renders a
+`net.ipv4.ping_group_range` **pod sysctl** into the Deployment's
+`securityContext.sysctls`. It is documented with a security note in
+`values.yaml`: the range must include the pod's running GID, the sysctl
+is *safe* on Kubernetes 1.29+ but *unsafe* (needs a kubelet allowlist) on
+older clusters, and enabling it only widens who may open unprivileged
+ICMP datagram sockets — it never grants `CAP_NET_RAW`. Empty (default)
+renders no sysctl. A privileged `CAP_NET_RAW` sidecar remains the
+documented escalation path (not implemented).
+
 ## Broadcast classification
 
 `net.*` ops classify as `read` in the broadcast sensitivity taxonomy
@@ -284,6 +358,11 @@ connectors' ops.
   (`_walk_redirects`), the TLS summary (`_tls_summary`), the
   size/hash-only body reader (`_consume_body_size_and_hash`), and the
   registrar.
+- `connectors/net/icmp.py` — the `net_ping` / `net_trace` /
+  `net_path_mtu` handlers, their schemas, the low-level errqueue / ICMP
+  primitives (`_checksum`, `_build_echo_request`, `_parse_extended_err`,
+  `_drain_icmp_error`), the pinned Linux ABI constants, and the shared
+  registrar (`register_net_icmp_operations` upserts all three).
 - `connectors/net/allowlist.py` — `PROBE_ALLOWLIST_ENV`,
   `parse_probe_allowlist`, `assert_probe_allowed`,
   `ProbeNotAllowedError`.
@@ -311,6 +390,10 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
   `backend/pyproject.toml` so the connector's requirement is explicit) —
   used via `dns.asyncresolver` / `dns.reversename` / `dns.rdatatype` /
   `dns.flags`.
+- `net.ping` / `net.trace` / `net.path_mtu`: standard library only
+  (`asyncio`, `socket`, `select`, `struct`, `errno`, `os`, `time`) — no
+  new runtime dependency. The Linux socket ABI constants the stdlib does
+  not surface are pinned as module-level integers.
 
 ## Known issues / deferred
 
@@ -322,6 +405,12 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 - Hostname allowlisting is verbatim; an operator who allowlists a CIDR
   cannot probe a hostname that merely resolves into it (list the name).
 - Egress rate-limiting and raw-socket ops (D3) are deferred.
+- The ICMP cohort is IPv4-only and Linux-only in v1. `net.ping` degrades
+  to `available:false` where `net.ipv4.ping_group_range` excludes the
+  pod's GID; a `CAP_NET_RAW` sidecar for ping-everywhere is the documented
+  escalation path, not implemented (#2411). `net.path_mtu` reports the
+  converged next-hop MTU from the kernel PMTU cache; a full per-hop MTU
+  walk (tracepath's `+mtu` detail) is out of scope.
 - `safety_level="safe"` (agent-auto-runnable) is the chosen posture; the
   reviewed alternative `"caution"` (operators auto-run, agents do not)
   is a one-line change if a security review prefers it.
@@ -329,8 +418,8 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 ## References
 
 - Parent: Initiative #2405, Tasks #2406 (T1 `tcp_check`) + #2407 (T2
-  `tls_inspect`) + #2408 (T3 `http_probe`) + #2409 (T4 `dns_lookup`).
-  Mold: secret broker
+  `tls_inspect`) + #2408 (T3 `http_probe`) + #2409 (T4 `dns_lookup`) +
+  #2411 (T6 ICMP cohort `ping`/`trace`/`path_mtu`). Mold: secret broker
   (`docs/codebase/connectors-secret-broker.md`). SSRF sibling:
   `docs/codebase/target-ssrf-guard.md`. Broadcast taxonomy:
   `docs/codebase/broadcast.md`.

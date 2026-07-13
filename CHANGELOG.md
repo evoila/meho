@@ -109,6 +109,20 @@ connector-related release-notes line.
   non-auth login-POST status (404, 5xx) re-raises unchanged. Typed-connector
   stamping and the #2262/#1798 registration/shadowing invariants are
   untouched (#2414).
+### Fixed — keycloak user write-op password read routed through the credential-backend seam (#2401)
+
+- `keycloak.user.create` / `keycloak.user.reset_password` sourced the
+  operator-supplied `password_secret_ref` by opening an hvac Vault client
+  directly, bypassing the #2229 credential-backend seam. On a
+  `CREDENTIAL_BACKEND=gsm` (no-Vault) deploy this left both write ops with
+  no working credential path — a `gsm:` ref was treated as a literal Vault
+  path. The reader now resolves the ref through `load_vault_secret_data`
+  (the same seam the connector's admin-credential loader and kubeconfig
+  loader ride), so a `gsm:<project>/<secret>#password` ref reaches GCP
+  Secret Manager while schemeless Vault refs resolve byte-for-byte as
+  before (`password_secret_mount` / `password_secret_key` unchanged; the
+  `#field` fragment subsumes `password_secret_key` for schemed refs).
+  Approval-gating of both write ops is untouched.
 
 ### Added — net.tcp_check network-diagnostics probe (net.* keystone)
 

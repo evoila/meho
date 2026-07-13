@@ -57,6 +57,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.rke2.ops import RKE2_OPS
+from meho_backplane.connectors.rke2.ops_write import RKE2_WHEN_TO_USE_WRITE_BY_GROUP
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -320,6 +321,47 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_posture_show(self, target, params, operator)
 
+    async def service_restart(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.service.restart`` (G-Node/RKE2-T3 #2430).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_write.rke2_service_restart`,
+        which restarts an allow-listed RKE2 unit and health-gates on
+        ``systemctl is-active``. Approval-gated -- runs only on the
+        ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.rke2.ops_write import (
+            rke2_service_restart as _rke2_service_restart,
+        )
+
+        return await _rke2_service_restart(self, target, params, operator)
+
+    async def config_update(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.config.update`` (G-Node/RKE2-T3 #2430).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_write.rke2_config_update`,
+        which applies a backplane-owned key merge to a bounded
+        ``/etc/rancher/rke2/*.yaml`` file and writes it back ``0600 root:root``
+        atomically. Approval-gated -- runs only on the ``_approved=True``
+        resume path.
+        """
+        from meho_backplane.connectors.rke2.ops_write import (
+            rke2_config_update as _rke2_config_update,
+        )
+
+        return await _rke2_config_update(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`RKE2_OPS` into ``endpoint_descriptor``.
@@ -465,8 +507,12 @@ class Rke2SshConnector(SshConnector):
 #: ``group_key`` declared in :data:`RKE2_OPS`; the registration walk fails
 #: closed with a :class:`ValueError` if a ``group_key`` lacks a curated
 #: entry (the bind9 / holodeck precedent). Defined after the class so the
-#: strings can reference the transport note without a forward import.
+#: strings can reference the transport note without a forward import. The
+#: write-op group (``rke2-node-write``) is merged in from
+#: :data:`~meho_backplane.connectors.rke2.ops_write.RKE2_WHEN_TO_USE_WRITE_BY_GROUP`
+#: (the holodeck precedent -- write blurbs live next to the write ops).
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    **RKE2_WHEN_TO_USE_WRITE_BY_GROUP,
     "identity": (
         "Use for RKE2 node identity questions before any posture or "
         "(future) maintenance op: 'which RKE2 version is this node "

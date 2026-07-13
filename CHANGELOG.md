@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — rke2 node service.restart + config.update write ops (#2430)
+
+- Add the first two approval-gated node-write ops on the `rke2-ssh`
+  connector (Initiative #2172, T3), both `dangerous` / `requires_approval`
+  and parked for human approval before anything changes.
+  `rke2.node.service.restart` restarts EXACTLY one allow-listed unit
+  (`rke2-server` / `rke2-agent`) — a schema `enum` re-checked against a
+  module-level frozenset in the handler (fail-closed; no arbitrary unit or
+  `systemctl` action) — and health-gates on `systemctl is-active`.
+  `rke2.node.config.update` applies a **backplane-owned key merge** to a
+  bounded `/etc/rancher/rke2/*.yaml` file: the connector reads + parses the
+  current YAML in-process, applies the operator's key-level `patch`
+  (`merge`/`replace`), validates it re-parses, and writes it back atomically
+  (`0600 root:root`) — no host-side `sed`/`yq`. It does **not** restart
+  (config is inert until one), returning `restart_required: true` and changed
+  key **names** only. The op is pinned `credential_write` (its `patch` may
+  carry a `token:` value) and `.restart` joins the broadcast write-suffix set,
+  so both broadcast correctly. Approval-park previews render the systemd-unit
+  and config-file blast-radius shapes without the file body or values —
+  `backend/src/meho_backplane/connectors/rke2/ops_write.py`,
+  `docs/codebase/connectors-rke2.md` (#2430).
+
 ### Added — node/rke2-ssh connector scaffold + read-only posture tier (#2221)
 
 - Add the `rke2` node-OS connector (`rke2-ssh-1.x`), the read-only entry in

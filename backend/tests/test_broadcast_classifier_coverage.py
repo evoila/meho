@@ -211,6 +211,17 @@ def test_deliberately_unpinned_fixture_op_fails_the_sweep() -> None:
     assert violations == [("acme.credstore.create", "write", ["password"])]
 
 
+def test_rke2_token_rotate_is_pinned_credential_mint() -> None:
+    """rke2.token.rotate mints a token server-side -> credential_mint (#2429).
+
+    ``.rotate`` is not a write/read suffix, so without the explicit pin the
+    op would classify ``other`` and broadcast full detail. The pin collapses
+    its broadcast to aggregate-only (defence-in-depth: the handler already
+    never returns the token, but the class must match the semantics).
+    """
+    assert classify_op("rke2.token.rotate") == "credential_mint"
+
+
 def test_boolean_and_integer_attrs_do_not_trip_the_sweep() -> None:
     """AppRole-style config attributes stay unflagged (vetted full detail)."""
     fixture_op: tuple[str, dict[str, Any] | None] = (
@@ -224,3 +235,27 @@ def test_boolean_and_integer_attrs_do_not_trip_the_sweep() -> None:
         },
     )
     assert _unpinned_secret_bearing_ops([fixture_op]) == []
+
+
+def test_rke2_node_write_ops_classify_as_expected() -> None:
+    """G-Node/RKE2-T3 #2430 -- the two node-write ops land in the right class.
+
+    ``rke2.node.service.restart`` carries no secret in its params (a single
+    allow-listed unit) and classifies plain ``write`` via the new ``.restart``
+    write-suffix. ``rke2.node.config.update`` carries a token-bearing
+    ``patch`` and is pinned to ``credential_write`` so its broadcast collapses
+    to aggregate-only rather than shipping a written join token in full.
+    """
+    assert classify_op("rke2.node.service.restart") == "write"
+    assert classify_op("rke2.node.config.update") == "credential_write"
+
+
+def test_rke2_node_write_ops_are_registered_and_pinned(
+    registered_ops: list[tuple[str, dict[str, Any] | None]],
+) -> None:
+    """Both node-write ops are in the registered set and none is unpinned-secret."""
+    ids = {op_id for op_id, _ in registered_ops}
+    assert "rke2.node.service.restart" in ids
+    assert "rke2.node.config.update" in ids
+    unpinned = {op_id for op_id, _, _ in _unpinned_secret_bearing_ops(registered_ops)}
+    assert "rke2.node.config.update" not in unpinned

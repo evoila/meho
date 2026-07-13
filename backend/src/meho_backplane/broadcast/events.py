@@ -112,6 +112,13 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # ``OperationResult`` returned to the caller still carries it.
         "vault.token.create",
         "vault.auth.approle.generate_secret_id",
+        # G-Node/RKE2-T2 #2429 — the RKE2 server-token rotate mints a new
+        # join token server-side. The handler never returns the token value
+        # (only a Vault pointer), so nothing sensitive is in the response —
+        # but ``.rotate`` would otherwise classify ``other`` and broadcast
+        # full params/detail. Pinning to ``credential_mint`` collapses the
+        # broadcast to aggregate-only as defence-in-depth for the op class.
+        "rke2.token.rotate",
     }
 )
 
@@ -156,6 +163,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only rather than shipping it on the feed.
         "keycloak.user.create",
         "keycloak.user.reset_password",
+        # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
+        # param carries key -> value edits, and an RKE2 ``config.yaml`` body
+        # holds ``token:`` / ``agent-token:`` join credentials, so a plain
+        # ``write`` classification (the ``.update`` suffix) would broadcast a
+        # written token in full. Pinning it collapses the broadcast to
+        # aggregate-only. (The op result itself returns key NAMES only.)
+        "rke2.node.config.update",
     }
 )
 
@@ -200,6 +214,14 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     # falls through to ``other``. Classifying it ``write`` keeps the feed's
     # mutation signal accurate.
     ".assign",
+    # RKE2 node service-restart verb (G-Node/RKE2-T3 #2430).
+    # ``rke2.node.service.restart`` is a disruptive mutation; its params
+    # (a single allow-listed unit name) carry no secret, so the plain
+    # ``write`` class (full detail) is correct — but without this suffix it
+    # falls through to ``other`` and broadcasts the full param dict as an
+    # unclassified event. Classifying it ``write`` keeps the mutation signal
+    # accurate on the feed.
+    ".restart",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
@@ -373,10 +395,11 @@ def classify_op(op_id: str) -> str:
        never matches.
     6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
        ``.delete`` / ``.patch`` / ``.put`` / ``.write`` / ``.add`` /
-       ``.remove``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
-       runs first, so a ``.write``-shaped secret-bearing op like
-       ``vault.auth.userpass.write`` keeps its ``credential_write``
-       class.
+       ``.remove`` / ``.assign`` / ``.restart``). The
+       ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3) runs first, so a
+       secret-bearing op like ``vault.auth.userpass.write`` or
+       ``rke2.node.config.update`` (``.update``-shaped, token-bearing
+       patch) keeps its ``credential_write`` class.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
        / ``.versions``). ``.read`` is deliberately **not** a read

@@ -454,9 +454,13 @@ def test_sudo_is_only_referenced_via_the_safe_primitive() -> None:
     commands, ``["sudo", "-S", ...]`` list-form argv,
     ``("sudo",)`` tuple-form). The only files allowed to carry such
     a literal are :mod:`~meho_backplane.connectors.bind9.connector`
-    (the ``_remote_bash_with_sudo`` helper) and
+    (the ``_remote_bash_with_sudo`` helper),
     :mod:`~meho_backplane.connectors.bind9._atomic` (the atomic-apply
-    primitive that funnels its writes through the helper).
+    primitive that funnels its writes through the helper), and
+    :mod:`~meho_backplane.connectors.rke2._sudo` (the rke2 connector's
+    own sanctioned safe-sudo primitive — same wire shape as bind9's
+    ``_remote_bash_with_sudo``: it stdin-streams a bash script body to
+    ``sudo -S -p "" bash`` so the password never lands in argv/logs).
 
     A failure means a new sudo argv slipped in somewhere; the
     operator must fold it back through :meth:`_remote_bash_with_sudo`.
@@ -476,13 +480,14 @@ def test_sudo_is_only_referenced_via_the_safe_primitive() -> None:
     connectors_root = (
         Path(__file__).resolve().parent.parent / "src" / "meho_backplane" / "connectors"
     )
-    # Narrow whitelist: only the two files that own the safe-sudo
+    # Narrow whitelist: only the files that own a sanctioned safe-sudo
     # primitive. ops_*.py files reference sudo only via docstrings /
     # error messages / the ``"sudo_password"`` dict key — all of which
     # the detection regex below correctly ignores.
     allowed_files = {
         connectors_root / "bind9" / "connector.py",
         connectors_root / "bind9" / "_atomic.py",
+        connectors_root / "rke2" / "_sudo.py",
     }
     sudo_argv_re = re.compile(r"""(?<=["'])sudo(?=["'\s\\])""")
     offenders: list[str] = []

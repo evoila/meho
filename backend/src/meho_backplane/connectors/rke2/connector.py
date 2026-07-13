@@ -39,11 +39,12 @@ connector does **not** override ``_auth_config`` and does **not** touch
 the bind9 anti-shape.
 
 The approval-gated write ops (``rke2.token.rotate`` /
-``rke2.node.service.restart`` / ``rke2.node.config.update``) ship in
-sibling Tasks #2429/#2430 by appending to
-:data:`~meho_backplane.connectors.rke2.ops.RKE2_OPS`; the dispatcher shim
-does not change. The safe, non-gated ``rke2.etcd-snapshot.save`` (T4
-#2431) lands here alongside the read tier.
+``rke2.node.service.restart`` / ``rke2.node.config.update``) land in
+:mod:`~meho_backplane.connectors.rke2.ops_write` (sibling Tasks
+#2429/#2430) and the safe, non-gated ``rke2.etcd-snapshot.save`` (T4
+#2431) in :mod:`~meho_backplane.connectors.rke2.ops_snapshot`; all are
+composed onto :data:`~meho_backplane.connectors.rke2.ops.RKE2_OPS` and
+their bound-method shims live here. The dispatcher shim does not change.
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.rke2.ops import RKE2_OPS
+from meho_backplane.connectors.rke2.ops_write import RKE2_WHEN_TO_USE_WRITE_BY_GROUP
 from meho_backplane.connectors.schemas import (
     FingerprintResult,
     OperationResult,
@@ -324,6 +326,67 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_posture_show(self, target, params, operator)
 
+    async def token_rotate(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.token.rotate`` (G-Node/RKE2-T2 #2429).
+
+        **Approval-gated write.** Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_write.rke2_token_rotate`;
+        runs only on the ``_approved=True`` resume path. Mints a new server
+        join token, rotates it over sudo-SSH, and stashes it in Vault --
+        returning only a pointer, never the token value.
+        """
+        from meho_backplane.connectors.rke2.ops_write import (
+            rke2_token_rotate as _rke2_token_rotate,
+        )
+
+        return await _rke2_token_rotate(self, target, params, operator)
+
+    async def service_restart(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.service.restart`` (G-Node/RKE2-T3 #2430).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_write.rke2_service_restart`,
+        which restarts an allow-listed RKE2 unit and health-gates on
+        ``systemctl is-active``. Approval-gated -- runs only on the
+        ``_approved=True`` resume path.
+        """
+        from meho_backplane.connectors.rke2.ops_write import (
+            rke2_service_restart as _rke2_service_restart,
+        )
+
+        return await _rke2_service_restart(self, target, params, operator)
+
+    async def config_update(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.node.config.update`` (G-Node/RKE2-T3 #2430).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_write.rke2_config_update`,
+        which applies a backplane-owned key merge to a bounded
+        ``/etc/rancher/rke2/*.yaml`` file and writes it back ``0600 root:root``
+        atomically. Approval-gated -- runs only on the ``_approved=True``
+        resume path.
+        """
+        from meho_backplane.connectors.rke2.ops_write import (
+            rke2_config_update as _rke2_config_update,
+        )
+
+        return await _rke2_config_update(self, target, params, operator)
+
     async def etcd_snapshot_save(
         self,
         target: Target,
@@ -489,8 +552,13 @@ class Rke2SshConnector(SshConnector):
 #: ``group_key`` declared in :data:`RKE2_OPS`; the registration walk fails
 #: closed with a :class:`ValueError` if a ``group_key`` lacks a curated
 #: entry (the bind9 / holodeck precedent). Defined after the class so the
-#: strings can reference the transport note without a forward import.
+#: strings can reference the transport note without a forward import. The
+#: write-op groups (``rke2-token-write`` / ``rke2-node-write``) are merged in
+#: from
+#: :data:`~meho_backplane.connectors.rke2.ops_write.RKE2_WHEN_TO_USE_WRITE_BY_GROUP`
+#: (the holodeck precedent -- write blurbs live next to the write ops).
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
+    **RKE2_WHEN_TO_USE_WRITE_BY_GROUP,
     "identity": (
         "Use for RKE2 node identity questions before any posture or "
         "(future) maintenance op: 'which RKE2 version is this node "
@@ -510,7 +578,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "rke2-etcd-snapshot": (
         "Use to capture an on-demand managed-etcd snapshot on an RKE2 "
         "server node before a risky change: ``rke2.etcd-snapshot.save`` "
-        "runs ``rke2 etcd-snapshot save`` under sudo and returns the "
+        "runs ``rke2 etcd-snapshot save`` as root over SSH and returns the "
         "snapshot name + on-disk path (never etcd contents). Refuses "
         "non-server or external-datastore nodes with a structured error. "
         "Safe and non-mutating to running cluster state -- it copies etcd "

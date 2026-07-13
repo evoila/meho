@@ -16,13 +16,17 @@ Coverage matrix (per Task #2221 acceptance criteria):
 * Redaction invariant -- ``posture_show`` issues a single ``stat`` (never
   a ``cat`` of the token path); the token entry carries ``redacted: true``
   and no secret material bleeds into the result envelope or logs.
-* ``RKE2_OPS`` registration shape -- 3 ops, all ``safety_level='safe'``
-  / ``requires_approval=false``, ``additionalProperties=False`` on every
-  parameter schema, non-empty SSH-transport ``when_to_use``, and ``rke2.``
-  namespace op_ids with handler methods on the class. The two read-tier
-  ops (``rke2.about`` / ``rke2.posture.show``) take no params; the safe
-  non-gated ``rke2.etcd-snapshot.save`` (T4 #2431) takes an optional,
-  charset-bounded ``name``.
+* ``RKE2_OPS`` registration shape -- 6 ops: two read (``rke2.about`` /
+  ``rke2.posture.show``, T1 #2221), three approval-gated write
+  (``rke2.token.rotate`` T2 #2429, ``rke2.node.service.restart`` /
+  ``rke2.node.config.update`` T3 #2430), and one safe non-gated snapshot
+  (``rke2.etcd-snapshot.save`` T4 #2431). Read ops are safe / read-only /
+  no-approval and take no params; write ops are dangerous / approval-gated;
+  the snapshot op is safe / no-approval but neither read-only nor write and
+  takes an optional charset-bounded ``name``. Every op has
+  ``additionalProperties=False`` on its parameter schema, a non-empty
+  SSH-transport ``when_to_use``, and a ``rke2.`` op_id with a handler method
+  on the class.
 * ``rke2.etcd-snapshot.save`` handler -- name charset re-check
   (fail-closed), the embedded-etcd-server precondition guard, and a
   bounded-name save parsed from the RKE2 ``Snapshot <name> saved.`` log.
@@ -30,6 +34,7 @@ Coverage matrix (per Task #2221 acceptance criteria):
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
@@ -350,12 +355,30 @@ async def test_posture_show_never_leaks_secret_material(
 # ---------------------------------------------------------------------------
 
 
+#: The read-only tier (T1 #2221). Every entry is safe-tier / no-approval and
+#: takes no operator parameters.
 _READ_OP_IDS: frozenset[str] = frozenset({"rke2.about", "rke2.posture.show"})
-_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | {"rke2.etcd-snapshot.save"}
+
+#: The approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus the
+#: node-write ops ``rke2.node.service.restart`` / ``rke2.node.config.update``
+#: (T3 #2430). Every entry is dangerous-tier / requires-approval.
+_WRITE_OP_IDS: frozenset[str] = frozenset(
+    {"rke2.token.rotate", "rke2.node.service.restart", "rke2.node.config.update"}
+)
+
+#: The safe, non-gated snapshot tier (T4 #2431): ``rke2.etcd-snapshot.save``.
+#: Safe-tier / no-approval like the read ops, but it is active (it copies etcd
+#: to disk), so it carries NEITHER the read-only tag NOR the dangerous/write
+#: tier -- it belongs to neither sweep set.
+_SNAPSHOT_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save"})
+
+_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | _SNAPSHOT_OP_IDS
 
 
-def test_rke2_ops_has_three_entries() -> None:
-    assert len(RKE2_OPS) == 3
+def test_rke2_ops_count_matches_expected() -> None:
+    # Two read ops (#2221) + three approval-gated write ops (#2429 / #2430)
+    # + one safe non-gated snapshot op (#2431) = six.
+    assert len(RKE2_OPS) == len(_EXPECTED_OP_IDS)
 
 
 def test_rke2_ops_about_is_first() -> None:
@@ -371,11 +394,14 @@ def test_rke2_ops_all_namespaced() -> None:
         assert op.op_id.startswith("rke2."), f"{op.op_id!r} lacks rke2. prefix"
 
 
-def test_rke2_ops_all_safe_no_approval() -> None:
-    """AC: every op is safe-tier and requires no approval (incl. the snapshot op)."""
-    for op in RKE2_OPS:
+def test_rke2_read_ops_all_safe_read_only_no_approval() -> None:
+    """AC: every READ op is safe-tier, read-only, and requires no approval."""
+    read_ops = [op for op in RKE2_OPS if op.op_id in _READ_OP_IDS]
+    assert {op.op_id for op in read_ops} == _READ_OP_IDS
+    for op in read_ops:
         assert op.safety_level == "safe", f"{op.op_id!r} is not safe-tier"
         assert op.requires_approval is False, f"{op.op_id!r} requires approval"
+        assert "read-only" in op.tags, f"{op.op_id!r} missing read-only tag"
 
 
 def test_rke2_read_ops_tagged_read_only() -> None:
@@ -387,9 +413,39 @@ def test_rke2_read_ops_tagged_read_only() -> None:
     assert "read-only" not in by_id["rke2.etcd-snapshot.save"].tags
 
 
-def test_rke2_ops_parameter_schemas_closed() -> None:
+def test_rke2_snapshot_op_safe_active_not_gated() -> None:
+    """AC: the snapshot op is safe-tier / no-approval, but neither read nor write.
+
+    ``rke2.etcd-snapshot.save`` copies etcd to disk -- it is active on the node
+    filesystem yet does not mutate running cluster state, so it is deliberately
+    safe-tier and non-gated. It must sit in NEITHER sweep set: not read-only
+    (no ``read-only`` tag) and not the dangerous/approval write tier.
+    """
+    by_id = {op.op_id: op for op in RKE2_OPS}
+    for op_id in _SNAPSHOT_OP_IDS:
+        op = by_id[op_id]
+        assert op.safety_level == "safe", f"{op_id!r} is not safe-tier"
+        assert op.requires_approval is False, f"{op_id!r} requires approval"
+        assert "read-only" not in op.tags, f"{op_id!r} must not be read-only-tagged"
+        assert op_id not in _READ_OP_IDS
+        assert op_id not in _WRITE_OP_IDS
+
+
+def test_rke2_write_ops_all_dangerous_approval_gated() -> None:
+    """AC: every node-write op is dangerous-tier, approval-gated, write-tagged."""
+    for op in RKE2_OPS:
+        if op.op_id not in _WRITE_OP_IDS:
+            continue
+        assert op.safety_level == "dangerous", f"{op.op_id!r} is not dangerous-tier"
+        assert op.requires_approval is True, f"{op.op_id!r} must require approval"
+        assert "write" in op.tags, f"{op.op_id!r} missing write tag"
+
+
+def test_rke2_read_ops_parameter_schemas_closed() -> None:
     by_id = {op.op_id: op for op in RKE2_OPS}
     for op in RKE2_OPS:
+        if op.op_id not in _READ_OP_IDS:
+            continue
         assert op.parameter_schema.get("additionalProperties") is False
     # The read tier takes no operator parameters -- fixed paths only.
     for op_id in _READ_OP_IDS:
@@ -400,6 +456,14 @@ def test_rke2_ops_parameter_schemas_closed() -> None:
     assert set(props) == {"name"}
     assert props["name"].get("pattern") == r"^[A-Za-z0-9._-]+$"
     assert save_schema.get("required", []) == []  # name is optional
+
+
+def test_rke2_write_ops_parameter_schemas_closed() -> None:
+    for op in RKE2_OPS:
+        if op.op_id not in _WRITE_OP_IDS:
+            continue
+        # Write ops take bounded params but reject unknown keys.
+        assert op.parameter_schema.get("additionalProperties") is False
 
 
 def test_rke2_ops_have_ssh_transport_when_to_use() -> None:
@@ -455,11 +519,13 @@ async def test_etcd_snapshot_save_success_default_name() -> None:
     assert result["path"] == f"{SNAPSHOT_DEFAULT_DIR}/on-demand-rke2-node-1754907117"
     assert result["exit_status"] == 0
     issued = [call.args[1] for call in mock_cmd.await_args_list]
-    # Guard runs first under sudo -n; then the save under sudo -n by
+    # Guard runs first (plain, as root -- no sudo argv); then the save by
     # absolute binary path, with no --name flag when none was supplied.
-    assert issued[0].startswith("sudo -n -- sh -c ")
+    # No command constructs a sudo argv (repo-wide sudo-guard invariant).
+    assert issued[0].startswith("sh -c ")
     assert "datastore-endpoint" in issued[0]
-    assert issued[1] == ("sudo -n -- /var/lib/rancher/rke2/bin/rke2 etcd-snapshot save")
+    assert issued[1] == "/var/lib/rancher/rke2/bin/rke2 etcd-snapshot save"
+    assert not any("sudo" in cmd for cmd in issued)
 
 
 @pytest.mark.asyncio
@@ -473,9 +539,8 @@ async def test_etcd_snapshot_save_bounded_name_quoted_in_argv() -> None:
         mock_cmd.side_effect = sequence
         result = await connector.etcd_snapshot_save(_TARGET, {"name": "pre_up-grade.1"})
     save_cmd = mock_cmd.await_args_list[1].args[1]
-    assert save_cmd == (
-        "sudo -n -- /var/lib/rancher/rke2/bin/rke2 etcd-snapshot save --name pre_up-grade.1"
-    )
+    assert save_cmd == ("/var/lib/rancher/rke2/bin/rke2 etcd-snapshot save --name pre_up-grade.1")
+    assert "sudo" not in save_cmd
     assert result["snapshot_name"] == "pre_up-grade.1-node-9"
 
 
@@ -512,6 +577,26 @@ async def test_etcd_snapshot_save_refuses_non_server_node() -> None:
 
 
 @pytest.mark.asyncio
+async def test_etcd_snapshot_save_guard_transport_failure_raises_distinct_error() -> None:
+    """M1: a non-zero guard exit is a transport failure, not a node-role verdict.
+
+    ``_run_command`` wraps ``conn.run(check=False)``, so an SSH/shell failure
+    returns a non-zero exit with empty stdout. The handler must raise a
+    distinct transport error (not mislabel the empty verdict as
+    "not an embedded-etcd server"), and MUST NOT run the save command.
+    """
+    from meho_backplane.connectors.rke2.ops_snapshot import Rke2SnapshotError
+
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stderr="sudo: a password is required\n", exit_status=1)
+        with pytest.raises(Rke2SnapshotError, match="precondition guard failed to run"):
+            await connector.etcd_snapshot_save(_TARGET, {})
+    # Guard ran and failed; the save command never did (single await).
+    mock_cmd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_etcd_snapshot_save_nonzero_exit_raises() -> None:
     from meho_backplane.connectors.rke2.ops_snapshot import Rke2SnapshotError
 
@@ -544,3 +629,274 @@ async def test_etcd_snapshot_save_never_leaks_credentials(
     for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
         assert canary not in rendered
         assert canary not in caplog.text
+
+
+# ===========================================================================
+# rke2.token.rotate write op (#2429)
+# ===========================================================================
+
+import contextlib  # noqa: E402 -- grouped with the write-op section it serves
+
+from meho_backplane.auth.operator import Operator, TenantRole  # noqa: E402
+from meho_backplane.connectors.rke2.ops_write import (  # noqa: E402
+    WRITE_OPS,
+    parse_rke2_release,
+    rke2_token_rotate,
+    rke2_version_rotate_verdict,
+)
+
+# A minted-token canary. The handler must NEVER surface the minted token in
+# its result envelope (the raw result is persisted on the audit row).
+_CANARY_NEW_TOKEN = "K10CANARYnewtokenvalueMUSTNOTLEAK0000deadbeef"  # gitleaks:allow NOSONAR
+
+_OP_TENANT = uuid.UUID("00000000-0000-0000-0000-0000000024f9")
+_OPERATOR = Operator(
+    sub="rke2-token-rotate-test",
+    name="RKE2 Rotate Test",
+    email=None,
+    raw_jwt="<rke2-rotate-raw-jwt>",
+    tenant_id=_OP_TENANT,
+    tenant_role=TenantRole.TENANT_ADMIN,
+)
+
+
+def _preflight_stdout(
+    *,
+    unit: str = "rke2-server.service",
+    active: str = "active",
+    version: str = "rke2 version v1.28.5+rke2r2 (abc)",
+) -> str:
+    return f"ACTIVE={active}\nUNIT={unit}\nVERSION={version}\n"
+
+
+@contextlib.contextmanager
+def _patch_vault_write(version: int = 7, raises: bool = False):
+    """Patch vault_client_for_operator to a fake async-CM KV-v2 writer.
+
+    Yields the create_or_update_secret mock so a test can inspect what the
+    handler wrote (the minted token lands in Vault, not in the result).
+    """
+    write_mock = MagicMock(return_value={"data": {"version": version}})
+    if raises:
+        write_mock.side_effect = RuntimeError("vault down")
+    client = MagicMock()
+    client.secrets.kv.v2.create_or_update_secret = write_mock
+
+    @contextlib.asynccontextmanager
+    async def _fake_client(operator: Any):
+        yield client
+
+    with patch("meho_backplane.auth.vault.vault_client_for_operator", _fake_client):
+        yield write_mock
+
+
+def _write_op() -> Any:
+    return next(op for op in WRITE_OPS if op.op_id == "rke2.token.rotate")
+
+
+# --- Registration shape ----------------------------------------------------
+
+
+def test_token_rotate_is_dangerous_and_requires_approval() -> None:
+    op = _write_op()
+    assert op.safety_level == "dangerous"
+    assert op.requires_approval is True
+    assert "write" in op.tags
+
+
+def test_token_rotate_schema_has_no_token_param() -> None:
+    """AC: the schema takes no token field and is closed (no free-form input)."""
+    schema = _write_op().parameter_schema
+    assert schema["additionalProperties"] is False
+    assert schema["properties"] == {}
+
+
+def test_token_rotate_when_to_use_mentions_ssh_and_approval() -> None:
+    instr = _write_op().llm_instructions or {}
+    when = instr.get("when_to_use", "")
+    assert "SSH" in when
+    assert "approval-gated" in when
+
+
+# --- Version fingerprint gate (pure) ---------------------------------------
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["v1.28.3+rke2r2", "v1.25.15+rke2r2", "v1.27.10+rke2r2", "v1.29.0+rke2r1", "1.30.2+rke2r1"],
+)
+def test_version_verdict_accepts_patched(version: str) -> None:
+    ok, _ = rke2_version_rotate_verdict(version)
+    assert ok is True
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["v1.28.2+rke2r2", "v1.27.10+rke2r1", "v1.24.17+rke2r1", "v1.28.3+rke2r1", "junk", "v1.28.3"],
+)
+def test_version_verdict_refuses_below_floor_and_known_bad(version: str) -> None:
+    ok, reason = rke2_version_rotate_verdict(version)
+    assert ok is False
+    assert reason
+
+
+def test_parse_rke2_release_shapes() -> None:
+    assert parse_rke2_release("v1.28.3+rke2r2") == ((1, 28, 3), 2)
+    assert parse_rke2_release("1.27.10+rke2r1") == ((1, 27, 10), 1)
+    assert parse_rke2_release("v1.28.3") is None
+    assert parse_rke2_release(None) is None
+
+
+# --- Handler: happy path, no token leak ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_rotate_happy_path_returns_pointer_never_token() -> None:
+    connector = Rke2SshConnector()
+    sudo_proc = _proc(stdout="", exit_status=0)
+    with (
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch(
+            "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
+            new_callable=AsyncMock,
+        ) as mock_sudo,
+        patch("secrets.token_hex", return_value=_CANARY_NEW_TOKEN),
+        _patch_vault_write(version=9) as write_mock,
+    ):
+        mock_secret.return_value = {"password": _CANARY_PASSWORD}
+        mock_cmd.return_value = _proc(stdout=_preflight_stdout())
+        mock_sudo.return_value = sudo_proc
+        result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
+
+    assert result["rotated"] is True
+    assert result["exit_status"] == 0
+    ref = result["token_ref"]
+    assert ref["backend"] == "vault"
+    assert ref["kv_version"] == 9
+    assert f"tenants/{_OP_TENANT}/rke2/" in ref["path"]
+    # THE audit rule: the minted token never appears in the returned result.
+    assert _CANARY_NEW_TOKEN not in repr(result)
+    # ...but it WAS written to Vault (the sink) and passed to the sudo script.
+    write_mock.assert_called_once()
+    assert write_mock.call_args.kwargs["secret"] == {"token": _CANARY_NEW_TOKEN}
+    script = mock_sudo.await_args.args[2]
+    assert "/var/lib/rancher/rke2/bin/rke2 token rotate" in script
+    assert 'OLD=$(cat "$TOKENFILE")' in script  # OLD read server-side, never in Python
+    assert _CANARY_NEW_TOKEN in script  # new token quoted into the script body only
+
+
+@pytest.mark.asyncio
+async def test_token_rotate_vault_write_failure_is_honest_no_token() -> None:
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch(
+            "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
+            new_callable=AsyncMock,
+        ) as mock_sudo,
+        patch("secrets.token_hex", return_value=_CANARY_NEW_TOKEN),
+        _patch_vault_write(raises=True),
+    ):
+        mock_secret.return_value = {"password": _CANARY_PASSWORD}
+        mock_cmd.return_value = _proc(stdout=_preflight_stdout())
+        mock_sudo.return_value = _proc(exit_status=0)
+        result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
+
+    assert result["rotated"] is True  # the cluster token DID rotate
+    assert result["token_ref"] is None
+    assert result["vault_error"] == "RuntimeError"
+    assert _CANARY_NEW_TOKEN not in repr(result)
+
+
+# --- Handler: fingerprint-gate refusals (reject before any rotate) ---------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("preflight", "expected_gate"),
+    [
+        (_preflight_stdout(unit=""), "role"),  # not a server node
+        (_preflight_stdout(active="inactive"), "service"),  # rke2-server down
+        (_preflight_stdout(version="rke2 version v1.28.2+rke2r2 (x)"), "version"),  # below floor
+    ],
+)
+async def test_token_rotate_gate_refuses_before_rotate(preflight: str, expected_gate: str) -> None:
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch(
+            "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
+            new_callable=AsyncMock,
+        ) as mock_sudo,
+    ):
+        mock_secret.return_value = {"password": _CANARY_PASSWORD}
+        mock_cmd.return_value = _proc(stdout=preflight)
+        result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
+        mock_sudo.assert_not_awaited()  # no mutation on a gate refusal
+    assert result["rotated"] is False
+    assert result["gate"] == expected_gate
+
+
+@pytest.mark.asyncio
+async def test_token_rotate_without_operator_fails_closed() -> None:
+    """No operator => no Vault sink => refuse before touching anything."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        result = await rke2_token_rotate(connector, _TARGET, {}, None)
+        mock_cmd.assert_not_awaited()
+    assert result["rotated"] is False
+    assert result["gate"] == "operator"
+
+
+@pytest.mark.asyncio
+async def test_token_rotate_missing_sudo_credential_refuses() -> None:
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+    ):
+        mock_secret.return_value = {"username": "root"}  # no password / sudo_password
+        result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
+        mock_cmd.assert_not_awaited()
+    assert result["rotated"] is False
+    assert result["gate"] == "credentials"
+
+
+@pytest.mark.asyncio
+async def test_token_rotate_nonzero_exit_no_vault_no_output() -> None:
+    connector = Rke2SshConnector()
+    with (
+        patch.object(connector, "_resolve_secret", new_callable=AsyncMock) as mock_secret,
+        patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd,
+        patch(
+            "meho_backplane.connectors.rke2.ops_write.run_remote_bash_with_sudo",
+            new_callable=AsyncMock,
+        ) as mock_sudo,
+        patch("secrets.token_hex", return_value=_CANARY_NEW_TOKEN),
+        _patch_vault_write() as write_mock,
+    ):
+        mock_secret.return_value = {"password": _CANARY_PASSWORD}
+        mock_cmd.return_value = _proc(stdout=_preflight_stdout())
+        mock_sudo.return_value = _proc(stdout="boom", stderr="rke2: rotate failed", exit_status=1)
+        result = await rke2_token_rotate(connector, _TARGET, {}, _OPERATOR)
+
+    assert result["rotated"] is False
+    assert result["gate"] == "rotate"
+    assert result["exit_status"] == 1
+    write_mock.assert_not_called()  # no Vault write on a failed rotate
+    # Never surface raw stdout/stderr (could echo a token); only structured fields.
+    assert "stderr" not in result
+    assert "stdout" not in result
+    assert _CANARY_NEW_TOKEN not in repr(result)
+
+
+@pytest.mark.asyncio
+async def test_token_rotate_shim_delegates_to_handler() -> None:
+    """The connector bound-method shim runs the same guarded path."""
+    connector = Rke2SshConnector()
+    result = await connector.token_rotate(_TARGET, {}, None)  # operator=None short-circuits
+    assert result["rotated"] is False
+    assert result["gate"] == "operator"

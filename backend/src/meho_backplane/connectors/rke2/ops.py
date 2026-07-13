@@ -14,11 +14,14 @@ G-Node/RKE2-T1 (#2221) scaffold -- ships the read-only tier only:
   RKE2 config-file modes and the on-disk join-token presence with the
   token **value never read** (redacted by construction). Two ops total.
 
+The approval-gated write ops land in
+:mod:`meho_backplane.connectors.rke2.ops_write` and are composed onto
+:data:`RKE2_OPS` here via :data:`WRITE_OPS`: ``rke2.token.rotate`` (T2 #2429)
+plus ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430).
 The safe, non-gated ``rke2.etcd-snapshot.save`` op (T4 #2431) is composed
-in from :mod:`~meho_backplane.connectors.rke2.ops_snapshot`. The
-approval-gated write ops (``rke2.token.rotate`` /
-``rke2.node.service.restart`` / ``rke2.node.config.update``) ship in
-sibling Tasks #2429/#2430 under Initiative #2172 -- **out of scope** here.
+in from :mod:`~meho_backplane.connectors.rke2.ops_snapshot` via
+:data:`SNAPSHOT_OPS` -- it is the lone non-gated op in the Initiative #2172
+surface.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.bind9.ops` and
@@ -130,12 +133,14 @@ def _rke2_ops() -> tuple[Rke2Op, ...]:
     """Return the merged registration tuple.
 
     Composition: ``rke2.about`` (identity canary) + ``READ_OPS`` (the
-    read-only posture tier: ``rke2.posture.show``) + ``SNAPSHOT_OPS`` (the
-    safe, non-gated ``rke2.etcd-snapshot.save`` -- T4 #2431). The
-    approval-gated write ops append to this tuple in the sibling write
-    Tasks (#2429/#2430), exactly as
-    :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` layers
-    its ``WRITE_OPS`` on.
+    read-only posture tier: ``rke2.posture.show``) + ``WRITE_OPS`` (the
+    approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus
+    ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430))
+    + ``SNAPSHOT_OPS`` (the safe, non-gated ``rke2.etcd-snapshot.save`` --
+    T4 #2431). This layers the write + snapshot tiers onto the read surface
+    exactly as
+    :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` layers its
+    ``WRITE_OPS`` on.
 
     Implemented as a function call rather than a module-level literal so
     the import order stays linear: ``ops.py`` defines :class:`Rke2Op` +
@@ -144,8 +149,9 @@ def _rke2_ops() -> tuple[Rke2Op, ...]:
     """
     from meho_backplane.connectors.rke2.ops_read import READ_OPS
     from meho_backplane.connectors.rke2.ops_snapshot import SNAPSHOT_OPS
+    from meho_backplane.connectors.rke2.ops_write import WRITE_OPS
 
-    return (_RKE2_ABOUT_OP, *READ_OPS, *SNAPSHOT_OPS)
+    return (_RKE2_ABOUT_OP, *READ_OPS, *WRITE_OPS, *SNAPSHOT_OPS)
 
 
 #: The ops :class:`Rke2SshConnector` registers at lifespan startup.

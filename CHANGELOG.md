@@ -102,10 +102,51 @@ connector-related release-notes line.
   `^[A-Za-z0-9._-]+$` at the schema boundary **and** re-checked in the
   handler (fail-closed), then `shlex.quote`'d into an absolute-path argv; a
   fail-closed precondition guard refuses a non-server or
-  external-`datastore-endpoint` node. Runs under `sudo -n` (no secret in the
-  argv, so no password-hiding mold needed) — `backend/src/meho_backplane/
-  connectors/rke2/ops_snapshot.py`, `docs/codebase/connectors-rke2.md`
-  (#2431).
+  external-`datastore-endpoint` node, and the guard's own exit status is
+  checked before its verdict is read (a transport failure surfaces distinctly
+  rather than mislabeling the node role). Runs **as root over plain SSH** via
+  `_run_command` — no `sudo` argv, matching the sibling T3 node-write ops and
+  staying clear of the repo-wide sudo-guard invariant — `backend/src/
+  meho_backplane/connectors/rke2/ops_snapshot.py`,
+  `docs/codebase/connectors-rke2.md` (#2431).
+### Added — rke2 node service.restart + config.update write ops (#2430)
+
+- Add the first two approval-gated node-write ops on the `rke2-ssh`
+  connector (Initiative #2172, T3), both `dangerous` / `requires_approval`
+  and parked for human approval before anything changes.
+  `rke2.node.service.restart` restarts EXACTLY one allow-listed unit
+  (`rke2-server` / `rke2-agent`) — a schema `enum` re-checked against a
+  module-level frozenset in the handler (fail-closed; no arbitrary unit or
+  `systemctl` action) — and health-gates on `systemctl is-active`.
+  `rke2.node.config.update` applies a **backplane-owned key merge** to a
+  bounded `/etc/rancher/rke2/*.yaml` file: the connector reads + parses the
+  current YAML in-process, applies the operator's key-level `patch`
+  (`merge`/`replace`), validates it re-parses, and writes it back atomically
+  (`0600 root:root`) — no host-side `sed`/`yq`. It does **not** restart
+  (config is inert until one), returning `restart_required: true` and changed
+  key **names** only. The op is pinned `credential_write` (its `patch` may
+  carry a `token:` value) and `.restart` joins the broadcast write-suffix set,
+  so both broadcast correctly. Approval-park previews render the systemd-unit
+  and config-file blast-radius shapes without the file body or values —
+  `backend/src/meho_backplane/connectors/rke2/ops_write.py`,
+  `docs/codebase/connectors-rke2.md` (#2430).
+### Added — rke2.token.rotate approval-gated server-token rotation (#2429)
+
+- Add `rke2.token.rotate`, the first approval-gated write op on the
+  `rke2-ssh` connector (`safety_level=dangerous`, `requires_approval=True`).
+  It rotates the RKE2 server join token cluster-wide via `rke2 token rotate`
+  over sudo-SSH. It takes **no parameters and no token value**: the new token
+  is minted server-side, the old token is read on-disk as root inside the
+  rotate script, and the new token is written to Vault — only a pointer plus
+  non-secret metadata (`rotated` / `node` / `exit_status`) is returned, so no
+  token value ever reaches the result, the audit `raw_payload`, or the
+  broadcast feed (the op is pinned to `credential_mint` and carries a
+  no-secret park-time preview). A read-only fingerprint gate refuses a
+  non-server node, an inactive `rke2-server`, or a below-floor / known-bad
+  (`v1.27.10+rke2r1`) RKE2 version before any mutation, because a botched
+  rotate wedges future node joins (rancher/rke2#5785, #6250). Multi-node
+  restart choreography stays an operator runbook — `backend/src/meho_backplane/
+  connectors/rke2/ops_write.py`, `docs/codebase/connectors-rke2.md` (#2429).
 
 ### Added — node/rke2-ssh connector scaffold + read-only posture tier (#2221)
 

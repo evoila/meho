@@ -61,8 +61,26 @@ T3 (#2430) adds two more **approval-gated node-write ops**
   restart — it returns `restart_required: true` and changed key **names**
   only (never a value; the config body carries `token:` join credentials).
 
-The remaining write op (`rke2.etcd-snapshot.save` T4 #2431) appends to
-`RKE2_OPS` from its own sibling module the same way.
+T4 (#2431) adds the lone **safe, non-gated snapshot op** (in the
+`rke2-etcd-snapshot` group):
+
+- `rke2.etcd-snapshot.save` — triggers an on-demand managed-etcd snapshot on
+  a server node (`rke2 etcd-snapshot save`, embedded-etcd only). It is
+  `safety_level="safe"` / `requires_approval=false` because it is read-only
+  with respect to *running* cluster state (it copies etcd to a file on disk)
+  and returns only a snapshot name + path, never etcd contents. An optional
+  `name` param is charset-bounded to `^[A-Za-z0-9._-]+$` at the schema
+  boundary AND re-checked in the handler; a fail-closed precondition guard
+  refuses a non-server / external-`datastore-endpoint` node. Like the sibling
+  T3 node-write ops it runs **as root over plain SSH** (`_run_command`, no
+  `sudo` argv) — the connector already authenticates as root, so no sudo
+  construction is needed and the repo-wide sudo-guard stays satisfied.
+
+Six ops total: two safe read-only (T1), three `dangerous` /
+`requires_approval=true` write ops (T2 + T3), and one safe non-gated snapshot
+op (T4). The snapshot op is safe / no-approval like the read ops but is
+neither read-only-tagged nor in the dangerous write tier — it belongs to
+neither sweep set.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -88,7 +106,8 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
   copied into every op's `when_to_use`), `_RKE2_ABOUT_OP`, and `RKE2_OPS`
-  (`about` + the `READ_OPS` posture tuple + the `WRITE_OPS` write tuple).
+  (`about` + the `READ_OPS` posture tuple + the `WRITE_OPS` write tuple +
+  the `SNAPSHOT_OPS` tuple).
 
 - **Write ops** (`ops_write.py`, #2429 + #2430) — the three approval-gated
   write ops share one module:
@@ -117,6 +136,19 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   - Shared: `WRITE_OPS` (all three ops) and
     `RKE2_WHEN_TO_USE_WRITE_BY_GROUP` (`rke2-token-write` + `rke2-node-write`,
     merged into the connector's `_WHEN_TO_USE_BY_GROUP`).
+
+- **Snapshot handler + parser** (`ops_snapshot.py`, #2431) —
+  `rke2_etcd_snapshot_save` (the async handler: guard → save → parse, both run
+  as root over plain `_run_command` with **no** `sudo` argv),
+  `parse_saved_snapshot_name` (recovers the name from the RKE2
+  `Snapshot <name> saved.` log), `_validate_name` (fail-closed charset
+  re-check), and the `Rke2SnapshotNameError` / `Rke2SnapshotPreconditionError`
+  / `Rke2SnapshotError` structured errors. The `rke2` binary is invoked by
+  absolute path; the single optional `name` is the only operator input and
+  is `shlex.quote`'d into the argv after the charset re-check. The precondition
+  guard's own exit status is checked before its stdout verdict is read, so an
+  SSH/transport failure surfaces as a distinct transport error rather than a
+  mislabeled "not an embedded-etcd server" verdict (fail-closed either way).
 
 - **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck.
   Synchronous `register_connector_v2` at import time (versioned triple +
@@ -182,6 +214,26 @@ full detail) and its park-time preview carries no token value.
 - `connectors/registry.py` — the v2 registry + eager-import walk.
 - stdlib `re`, `shlex` (path quoting, defensive even though paths are fixed).
 
+## Privilege (etcd-snapshot.save)
+
+The snapshot op runs both remote commands (the precondition guard and the
+`rke2 etcd-snapshot save` itself) **as root over plain SSH** via
+`_run_command` — no `sudo` argv. The connector authenticates as root (the
+same posture the read tier relies on when it `stat`s `0600 root:root` token
+files, and the same model the T3 node-write ops use for `systemctl` and
+config-file writes), so no privilege elevation is constructed here. This
+deliberately avoids hand-rolling a `sudo` argv, which the repo-wide
+sudo-guard (`test_sudo_is_only_referenced_via_the_safe_primitive` + its
+integration twin `test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree`)
+forbids in any `connectors/` file outside the sanctioned safe-sudo
+primitives. The only operator input, `name`, is charset-bounded and
+`shlex.quote`'d. The credential-minting `token.rotate` flow is the one RKE2
+op that needs the sudo-password wire shape (`_sudo.py`); a non-secret snapshot
+does not. The precondition guard's own exit status is checked before its
+stdout verdict is interpreted, so a transport/SSH failure surfaces as a
+distinct error rather than a mislabeled node-role verdict (fail-closed either
+way).
+
 ## Broadcast / approval wiring (T3 #2430)
 
 - `rke2.node.service.restart` classifies plain `write` via the `.restart`
@@ -197,14 +249,16 @@ full detail) and its park-time preview carries no token value.
 
 ## Known issues / follow-ups
 
-- `rke2.token.rotate` (T2 #2429) + `rke2.node.service.restart` /
-  `rke2.node.config.update` (T3 #2430) are landed; the remaining write op
-  (`etcd-snapshot.save` #2431) is deferred to its sibling Task under
-  Initiative #2172.
-- The node-write ops (service.restart / config.update) assume `root` SSH access
-  (consistent with the read posture tier); a future non-root + sudo-password
-  path would route them through `_sudo.run_remote_bash_with_sudo` (as
-  `token.rotate` already does) if a target ever connects as a non-root user.
+- `rke2.token.rotate` (T2 #2429), `rke2.node.service.restart` /
+  `rke2.node.config.update` (T3 #2430), and `rke2.etcd-snapshot.save`
+  (T4 #2431) are all landed — the Initiative #2172 SSH write/maintenance
+  surface is complete.
+- The node-write ops (service.restart / config.update) and the snapshot op
+  assume `root` SSH access (consistent with the read posture tier); a future
+  non-root + sudo-password path would route the mutating node ops through
+  `_sudo.run_remote_bash_with_sudo` (as `token.rotate` already does) if a
+  target ever connects as a non-root user. `rke2.etcd-snapshot.save` would
+  surface a `connector_error` on such a target rather than executing.
 - The rotate is a **single-node atomic op**: multi-node token-propagation /
   restart choreography is an operator-composed runbook of T2+T3 ops, not part
   of this op (per the Initiative DoD).

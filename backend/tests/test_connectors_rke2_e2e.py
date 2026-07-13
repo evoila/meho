@@ -3,11 +3,12 @@
 
 """RKE2 connector recorded-fixture / asyncssh fake-shell E2E test (#2221).
 
-Drives ``rke2.about`` and ``rke2.posture.show`` through the full
-``call_operation`` dispatch stack against an in-process asyncssh
-fake-shell server that replays plain-SSH command stubs -- no Docker
-dependency, no live RKE2 node. The shape mirrors the G3.8 Holodeck
-recorded-fixture E2E precedent (``test_connectors_holodeck_e2e.py``).
+Drives ``rke2.about``, ``rke2.posture.show`` and the safe, non-gated
+``rke2.etcd-snapshot.save`` (T4 #2431) through the full ``call_operation``
+dispatch stack against an in-process asyncssh fake-shell server that
+replays plain-SSH command stubs -- no Docker dependency, no live RKE2
+node. The shape mirrors the G3.8 Holodeck recorded-fixture E2E precedent
+(``test_connectors_holodeck_e2e.py``).
 
 Acceptance criteria verified (Issue #2221)
 ==========================================
@@ -67,6 +68,10 @@ _STAT_FIXTURE = (
     "/etc/rancher/rke2/rke2.yaml|600|root|root\n"
     "/var/lib/rancher/rke2/server/token|600|root|root\n"
 )
+# Precondition-guard sentinel for an embedded-etcd server node.
+_SNAPSHOT_GUARD_FIXTURE = "ok\n"
+# `rke2 etcd-snapshot save` logs the saved snapshot name to stderr.
+_SNAPSHOT_SAVE_FIXTURE = "INFO[0000] Snapshot pre-upgrade-rke2-node-e2e-1754907117 saved.\n"
 
 # A canary token value the fixture never emits (posture never reads the
 # token content). Asserted absent from every dispatch result.
@@ -104,6 +109,16 @@ async def _fake_shell_process_factory(process: Any) -> None:
             "ACTIVE=active\nUNIT=rke2-server.service\n"
             "VERSION=rke2 version v1.29.3+rke2r2 (a1b2c3d)\n"
         )
+    elif cmd.startswith("/var/lib/rancher/rke2/bin/rke2 etcd-snapshot save"):
+        # rke2.etcd-snapshot.save -- run as root over plain SSH (no sudo argv).
+        # rke2 logs the saved-snapshot line to stderr; stdout stays empty.
+        process.stderr.write(_SNAPSHOT_SAVE_FIXTURE)
+        process.exit(0)
+        return
+    elif cmd.startswith("sh -c "):
+        # etcd-snapshot precondition guard (plain, as root) -- report an
+        # embedded-etcd server node.
+        response = _SNAPSHOT_GUARD_FIXTURE
     elif cmd.startswith("set -e; umask 077; f=$(mktemp)"):
         # The safe-sudo wire command streams the script + password on stdin;
         # drain it (the real mktemp pipeline would consume it) so the client
@@ -334,6 +349,38 @@ async def test_rke2_e2e_posture_show_dispatches_ok_and_redacts(
     # Redaction: no token VALUE anywhere in the dispatch result.
     assert _TOKEN_VALUE_CANARY not in repr(result)
     assert "value" not in token
+
+
+@pytest.mark.asyncio
+async def test_rke2_e2e_etcd_snapshot_save_dispatches_ok_non_gated(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """rke2.etcd-snapshot.save (safe, non-gated) auto-executes -- no approval park.
+
+    A TENANT_ADMIN dispatch of the safe, non-approval snapshot op runs to
+    completion through the full ``call_operation`` stack: it does NOT park
+    at ``awaiting_approval`` (that gate is only for the sibling write ops),
+    and the result carries the parsed snapshot name + path with exit 0.
+    """
+    del captured_events
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": _CONNECTOR_ID,
+            "op_id": "rke2.etcd-snapshot.save",
+            "target": {"name": _TARGET_NAME},
+            "params": {"name": "pre-upgrade"},
+        },
+    )
+    # Non-gated: the dispatch executes rather than parking for approval.
+    assert result["status"] == "ok", f"rke2.etcd-snapshot.save did not auto-execute: {result}"
+    payload = result["result"]
+    assert payload["snapshot_name"] == "pre-upgrade-rke2-node-e2e-1754907117"
+    assert payload["path"] == (
+        "/var/lib/rancher/rke2/server/db/snapshots/pre-upgrade-rke2-node-e2e-1754907117"
+    )
+    assert payload["exit_status"] == 0
 
 
 # ---------------------------------------------------------------------------

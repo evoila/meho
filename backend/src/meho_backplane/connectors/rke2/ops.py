@@ -18,8 +18,10 @@ The approval-gated write ops land in
 :mod:`meho_backplane.connectors.rke2.ops_write` and are composed onto
 :data:`RKE2_OPS` here via :data:`WRITE_OPS`: ``rke2.token.rotate`` (T2 #2429)
 plus ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430).
-The remaining write op (``rke2.etcd-snapshot.save`` T4 #2431) appends to the
-same tuple from its own sibling module under Initiative #2172.
+The safe, non-gated ``rke2.etcd-snapshot.save`` op (T4 #2431) is composed
+in from :mod:`~meho_backplane.connectors.rke2.ops_snapshot` via
+:data:`SNAPSHOT_OPS` -- it is the lone non-gated op in the Initiative #2172
+surface.
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.bind9.ops` and
@@ -133,20 +135,23 @@ def _rke2_ops() -> tuple[Rke2Op, ...]:
     Composition: ``rke2.about`` (identity canary) + ``READ_OPS`` (the
     read-only posture tier: ``rke2.posture.show``) + ``WRITE_OPS`` (the
     approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus
-    ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430)).
-    This layers ``WRITE_OPS`` onto the read surface exactly as
-    :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` does; the
-    remaining write op (T4 #2431) appends its own tuple the same way.
+    ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430))
+    + ``SNAPSHOT_OPS`` (the safe, non-gated ``rke2.etcd-snapshot.save`` --
+    T4 #2431). This layers the write + snapshot tiers onto the read surface
+    exactly as
+    :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` layers its
+    ``WRITE_OPS`` on.
 
     Implemented as a function call rather than a module-level literal so
     the import order stays linear: ``ops.py`` defines :class:`Rke2Op` +
-    ``_RKE2_ABOUT_OP``, then imports the read + write ops from their
-    sibling modules.
+    ``_RKE2_ABOUT_OP``, then imports the per-tier ops from their sibling
+    modules.
     """
     from meho_backplane.connectors.rke2.ops_read import READ_OPS
+    from meho_backplane.connectors.rke2.ops_snapshot import SNAPSHOT_OPS
     from meho_backplane.connectors.rke2.ops_write import WRITE_OPS
 
-    return (_RKE2_ABOUT_OP, *READ_OPS, *WRITE_OPS)
+    return (_RKE2_ABOUT_OP, *READ_OPS, *WRITE_OPS, *SNAPSHOT_OPS)
 
 
 #: The ops :class:`Rke2SshConnector` registers at lifespan startup.

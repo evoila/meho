@@ -25,6 +25,9 @@ This module ships:
   :meth:`fingerprint`, registered as the ``rke2.about`` typed op.
 * :meth:`Rke2SshConnector.posture_show` -- the read-only posture tier
   (``rke2.posture.show``): config-file modes + redacted token presence.
+* :meth:`Rke2SshConnector.etcd_snapshot_save` -- the safe, non-gated
+  ``rke2.etcd-snapshot.save`` op (T4 #2431): an on-demand managed-etcd
+  snapshot on a server node, returning a snapshot name + path.
 * :meth:`Rke2SshConnector.execute` -- the G0.6 dispatcher shim (same
   shape as :meth:`Bind9Connector.execute` / :meth:`HolodeckConnector.execute`).
 
@@ -36,10 +39,12 @@ connector does **not** override ``_auth_config`` and does **not** touch
 the bind9 anti-shape.
 
 The approval-gated write ops (``rke2.token.rotate`` /
-``rke2.node.service.restart`` / ``rke2.node.config.update`` /
-``rke2.etcd-snapshot.save``) ship in sibling Tasks #2429/#2430/#2431 by
-appending to :data:`~meho_backplane.connectors.rke2.ops.RKE2_OPS`; the
-dispatcher shim does not change.
+``rke2.node.service.restart`` / ``rke2.node.config.update``) land in
+:mod:`~meho_backplane.connectors.rke2.ops_write` (sibling Tasks
+#2429/#2430) and the safe, non-gated ``rke2.etcd-snapshot.save`` (T4
+#2431) in :mod:`~meho_backplane.connectors.rke2.ops_snapshot`; all are
+composed onto :data:`~meho_backplane.connectors.rke2.ops.RKE2_OPS` and
+their bound-method shims live here. The dispatcher shim does not change.
 """
 
 from __future__ import annotations
@@ -382,6 +387,26 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_config_update(self, target, params, operator)
 
+    async def etcd_snapshot_save(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.etcd-snapshot.save`` (T4 #2431).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_snapshot.rke2_etcd_snapshot_save`,
+        which guards the embedded-etcd server precondition and triggers an
+        on-demand managed-etcd snapshot over the shared SSH adapter. Safe
+        tier, non-gated -- the result carries a snapshot name + path only.
+        """
+        from meho_backplane.connectors.rke2.ops_snapshot import (
+            rke2_etcd_snapshot_save as _rke2_etcd_snapshot_save,
+        )
+
+        return await _rke2_etcd_snapshot_save(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`RKE2_OPS` into ``endpoint_descriptor``.
@@ -549,5 +574,16 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "exists (presence + mode only -- the token VALUE is never read). "
         "Pair with a rotation runbook to confirm the token is present "
         "before rotating. Transport: plain SSH (``stat``, read-only)."
+    ),
+    "rke2-etcd-snapshot": (
+        "Use to capture an on-demand managed-etcd snapshot on an RKE2 "
+        "server node before a risky change: ``rke2.etcd-snapshot.save`` "
+        "runs ``rke2 etcd-snapshot save`` as root over SSH and returns the "
+        "snapshot name + on-disk path (never etcd contents). Refuses "
+        "non-server or external-datastore nodes with a structured error. "
+        "Safe and non-mutating to running cluster state -- it copies etcd "
+        "to disk. Pair it ahead of the approval-gated node-write ops "
+        "(token rotate / config update / service restart) as the recovery "
+        "point. Transport: plain SSH."
     ),
 }

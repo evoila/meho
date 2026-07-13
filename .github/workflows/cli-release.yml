@@ -208,7 +208,7 @@ jobs:
           echo "RELEASE_NOTES_FILE=${NOTES_FILE}" >> "${GITHUB_ENV}"
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89  # v7.2.2
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94  # v7.2.3
         with:
           # Pinned to the exact patch so the GoReleaser build that
           # produces the signed (cosign) release artefacts is

@@ -26,10 +26,21 @@ T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
   join-token presence, **with the token value never read** (redacted by
   construction).
 
-Two ops total, both `safety_level="safe"` / `requires_approval=false`. The
+T4 (#2431) adds the lone **safe, non-gated write-ish op**:
+
+- `rke2.etcd-snapshot.save` — triggers an on-demand managed-etcd snapshot on
+  a server node (`rke2 etcd-snapshot save`, embedded-etcd only). It is
+  `safety_level="safe"` / `requires_approval=false` because it is read-only
+  with respect to *running* cluster state (it copies etcd to a file on disk)
+  and returns only a snapshot name + path, never etcd contents. An optional
+  `name` param is charset-bounded to `^[A-Za-z0-9._-]+$` at the schema
+  boundary AND re-checked in the handler; a fail-closed precondition guard
+  refuses a non-server / external-`datastore-endpoint` node.
+
+Three ops total, all `safety_level="safe"` / `requires_approval=false`. The
 approval-gated write ops (`rke2.token.rotate`, `rke2.node.service.restart`,
-`rke2.node.config.update`, `rke2.etcd-snapshot.save`) ship in sibling Tasks
-#2429/#2430/#2431 — explicitly out of scope for T1.
+`rke2.node.config.update`) ship in sibling Tasks #2429/#2430 — out of scope
+here.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -55,7 +66,16 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
   copied into every op's `when_to_use`), `_RKE2_ABOUT_OP`, and `RKE2_OPS`
-  (`about` + the `READ_OPS` posture tuple).
+  (`about` + the `READ_OPS` posture tuple + the `SNAPSHOT_OPS` tuple).
+
+- **Snapshot handler + parser** (`ops_snapshot.py`) —
+  `rke2_etcd_snapshot_save` (the async handler: guard → `sudo -n` save →
+  parse), `parse_saved_snapshot_name` (recovers the name from the RKE2
+  `Snapshot <name> saved.` log), `_validate_name` (fail-closed charset
+  re-check), and the `Rke2SnapshotNameError` / `Rke2SnapshotPreconditionError`
+  / `Rke2SnapshotError` structured errors. The `rke2` binary is invoked by
+  absolute path; the single optional `name` is the only operator input and
+  is `shlex.quote`'d into the argv after the charset re-check.
 
 - **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck.
   Synchronous `register_connector_v2` at import time (versioned triple +
@@ -110,10 +130,27 @@ result).
 - `connectors/registry.py` — the v2 registry + eager-import walk.
 - stdlib `re`, `shlex` (path quoting, defensive even though paths are fixed).
 
+## Privilege (etcd-snapshot.save)
+
+The snapshot op runs every remote command under `sudo -n` (non-interactive):
+the `rke2` binary and the config / etcd paths are root-owned. `sudo -n` needs
+no password on a root or NOPASSWD-sudo operator account (the expected RKE2
+node access model) and fails **closed** — exiting non-zero rather than
+hanging — when a password would be required. The op interpolates no secret
+into its argv (the only operator input, `name`, is charset-bounded and
+`shlex.quote`'d), so it does **not** need the password-hiding
+`_remote_bash_with_sudo` mold the approval-gated write ops (#2429/#2430)
+add; keeping it self-contained also lets it land independently of those
+concurrent tasks.
+
 ## Known issues / follow-ups
 
-- Write ops (token rotate / service restart / config update / etcd-snapshot)
-  are deferred to #2429/#2430/#2431 under Initiative #2172.
+- The approval-gated write ops (token rotate / service restart / config
+  update) are deferred to #2429/#2430 under Initiative #2172.
+- If a real deployment requires a sudo *password* (no root / NOPASSWD),
+  `rke2.etcd-snapshot.save` surfaces a `connector_error` (`sudo: a password
+  is required`) rather than executing; adopting the `_remote_bash_with_sudo`
+  primitive that #2429/#2430 add is the follow-up for that case.
 - Host-key checking is disabled (`known_hosts=None`) at the adapter level for
   v0.2, shared across the whole SSH family; pinning is deferred repo-wide.
 - The RKE2 version probe is best-effort: `version` is `null` when the `rke2`

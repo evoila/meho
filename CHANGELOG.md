@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — rke2.etcd-snapshot.save safe managed-etcd snapshot op (#2431)
+
+- Add `rke2.etcd-snapshot.save` on the `rke2-ssh` connector — an on-demand
+  managed-etcd snapshot over SSH (`rke2 etcd-snapshot save`, embedded-etcd
+  only). It is the lone **safe / non-gated** op in Initiative #2172:
+  `safety_level="safe"`, `requires_approval=false`, because it is read-only
+  with respect to running cluster state (copies etcd to disk) and returns
+  only a snapshot name + path — never etcd contents (so the audit
+  `raw_payload` carries no secret). An optional `name` is charset-bounded to
+  `^[A-Za-z0-9._-]+$` at the schema boundary **and** re-checked in the
+  handler (fail-closed), then `shlex.quote`'d into an absolute-path argv; a
+  fail-closed precondition guard refuses a non-server or
+  external-`datastore-endpoint` node. Runs under `sudo -n` (no secret in the
+  argv, so no password-hiding mold needed) — `backend/src/meho_backplane/
+  connectors/rke2/ops_snapshot.py`, `docs/codebase/connectors-rke2.md`
+  (#2431).
+
 ### Added — node/rke2-ssh connector scaffold + read-only posture tier (#2221)
 
 - Add the `rke2` node-OS connector (`rke2-ssh-1.x`), the read-only entry in

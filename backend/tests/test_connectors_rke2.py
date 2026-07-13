@@ -16,10 +16,16 @@ Coverage matrix (per Task #2221 acceptance criteria):
 * Redaction invariant -- ``posture_show`` issues a single ``stat`` (never
   a ``cat`` of the token path); the token entry carries ``redacted: true``
   and no secret material bleeds into the result envelope or logs.
-* ``RKE2_OPS`` registration shape -- 2 ops, both ``safety_level='safe'``
-  / ``requires_approval=false`` / read-only, ``additionalProperties=False``
-  on the parameter schema, non-empty SSH-transport ``when_to_use``, and
-  ``rke2.`` namespace op_ids with handler methods on the class.
+* ``RKE2_OPS`` registration shape -- 3 ops, all ``safety_level='safe'``
+  / ``requires_approval=false``, ``additionalProperties=False`` on every
+  parameter schema, non-empty SSH-transport ``when_to_use``, and ``rke2.``
+  namespace op_ids with handler methods on the class. The two read-tier
+  ops (``rke2.about`` / ``rke2.posture.show``) take no params; the safe
+  non-gated ``rke2.etcd-snapshot.save`` (T4 #2431) takes an optional,
+  charset-bounded ``name``.
+* ``rke2.etcd-snapshot.save`` handler -- name charset re-check
+  (fail-closed), the embedded-etcd-server precondition guard, and a
+  bounded-name save parsed from the RKE2 ``Snapshot <name> saved.`` log.
 """
 
 from __future__ import annotations
@@ -42,6 +48,12 @@ from meho_backplane.connectors.rke2.ops_read import (
     RKE2_TOKEN_PATH,
     parse_posture,
     parse_stat_output,
+)
+from meho_backplane.connectors.rke2.ops_snapshot import (
+    SNAPSHOT_DEFAULT_DIR,
+    Rke2SnapshotNameError,
+    Rke2SnapshotPreconditionError,
+    parse_saved_snapshot_name,
 )
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
@@ -338,11 +350,12 @@ async def test_posture_show_never_leaks_secret_material(
 # ---------------------------------------------------------------------------
 
 
-_EXPECTED_OP_IDS: frozenset[str] = frozenset({"rke2.about", "rke2.posture.show"})
+_READ_OP_IDS: frozenset[str] = frozenset({"rke2.about", "rke2.posture.show"})
+_EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | {"rke2.etcd-snapshot.save"}
 
 
-def test_rke2_ops_has_two_entries() -> None:
-    assert len(RKE2_OPS) == 2
+def test_rke2_ops_has_three_entries() -> None:
+    assert len(RKE2_OPS) == 3
 
 
 def test_rke2_ops_about_is_first() -> None:
@@ -358,19 +371,35 @@ def test_rke2_ops_all_namespaced() -> None:
         assert op.op_id.startswith("rke2."), f"{op.op_id!r} lacks rke2. prefix"
 
 
-def test_rke2_ops_all_safe_read_only_no_approval() -> None:
-    """AC: every op is safe-tier, read-only, and requires no approval."""
+def test_rke2_ops_all_safe_no_approval() -> None:
+    """AC: every op is safe-tier and requires no approval (incl. the snapshot op)."""
     for op in RKE2_OPS:
         assert op.safety_level == "safe", f"{op.op_id!r} is not safe-tier"
         assert op.requires_approval is False, f"{op.op_id!r} requires approval"
-        assert "read-only" in op.tags, f"{op.op_id!r} missing read-only tag"
+
+
+def test_rke2_read_ops_tagged_read_only() -> None:
+    """The read-tier ops carry the read-only tag; the snapshot op does not."""
+    by_id = {op.op_id: op for op in RKE2_OPS}
+    for op_id in _READ_OP_IDS:
+        assert "read-only" in by_id[op_id].tags, f"{op_id!r} missing read-only tag"
+    # The snapshot op is active (copies etcd to disk), so it is NOT read-only.
+    assert "read-only" not in by_id["rke2.etcd-snapshot.save"].tags
 
 
 def test_rke2_ops_parameter_schemas_closed() -> None:
+    by_id = {op.op_id: op for op in RKE2_OPS}
     for op in RKE2_OPS:
         assert op.parameter_schema.get("additionalProperties") is False
-        # The read tier takes no operator parameters -- fixed paths only.
-        assert op.parameter_schema.get("properties") == {}
+    # The read tier takes no operator parameters -- fixed paths only.
+    for op_id in _READ_OP_IDS:
+        assert by_id[op_id].parameter_schema.get("properties") == {}
+    # The snapshot op exposes exactly one optional, charset-bounded param.
+    save_schema = by_id["rke2.etcd-snapshot.save"].parameter_schema
+    props = save_schema.get("properties", {})
+    assert set(props) == {"name"}
+    assert props["name"].get("pattern") == r"^[A-Za-z0-9._-]+$"
+    assert save_schema.get("required", []) == []  # name is optional
 
 
 def test_rke2_ops_have_ssh_transport_when_to_use() -> None:
@@ -394,3 +423,124 @@ def test_rke2_connector_registry_triple() -> None:
 
     registry = all_connectors_v2()
     assert registry.get(("rke2", "1.x", "rke2-ssh")) is Rke2SshConnector
+
+
+# ---------------------------------------------------------------------------
+# etcd-snapshot.save handler (T4 #2431)
+# ---------------------------------------------------------------------------
+
+
+_SAVE_LOG_OK = "INFO[0000] Snapshot on-demand-rke2-node-1754907117 saved.\n"
+
+
+def test_parse_saved_snapshot_name_variants() -> None:
+    assert parse_saved_snapshot_name(_SAVE_LOG_OK) == "on-demand-rke2-node-1754907117"
+    assert parse_saved_snapshot_name("Snapshot my-snap-42 saved.") == "my-snap-42"
+    assert parse_saved_snapshot_name("nothing here") is None
+    assert parse_saved_snapshot_name("") is None
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_success_default_name() -> None:
+    connector = Rke2SshConnector()
+    # side_effect order: precondition guard, then the save command.
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stderr=_SAVE_LOG_OK, exit_status=0),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.etcd_snapshot_save(_TARGET, {})
+    assert result["snapshot_name"] == "on-demand-rke2-node-1754907117"
+    assert result["path"] == f"{SNAPSHOT_DEFAULT_DIR}/on-demand-rke2-node-1754907117"
+    assert result["exit_status"] == 0
+    issued = [call.args[1] for call in mock_cmd.await_args_list]
+    # Guard runs first under sudo -n; then the save under sudo -n by
+    # absolute binary path, with no --name flag when none was supplied.
+    assert issued[0].startswith("sudo -n -- sh -c ")
+    assert "datastore-endpoint" in issued[0]
+    assert issued[1] == ("sudo -n -- /var/lib/rancher/rke2/bin/rke2 etcd-snapshot save")
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_bounded_name_quoted_in_argv() -> None:
+    connector = Rke2SshConnector()
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stderr="INFO[0000] Snapshot pre_up-grade.1-node-9 saved.\n"),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.etcd_snapshot_save(_TARGET, {"name": "pre_up-grade.1"})
+    save_cmd = mock_cmd.await_args_list[1].args[1]
+    assert save_cmd == (
+        "sudo -n -- /var/lib/rancher/rke2/bin/rke2 etcd-snapshot save --name pre_up-grade.1"
+    )
+    assert result["snapshot_name"] == "pre_up-grade.1-node-9"
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_rejects_bad_name_before_any_command() -> None:
+    """A name outside ^[A-Za-z0-9._-]+$ fails closed before any SSH command."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        for bad in ("../etc", "has space", "semi;colon", "$(inject)", ""):
+            with pytest.raises(Rke2SnapshotNameError):
+                await connector.etcd_snapshot_save(_TARGET, {"name": bad})
+        mock_cmd.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_refuses_external_datastore() -> None:
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="external-datastore\n")
+        with pytest.raises(Rke2SnapshotPreconditionError, match="external datastore"):
+            await connector.etcd_snapshot_save(_TARGET, {})
+    # Guard ran; the save command never did (single await).
+    mock_cmd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_refuses_non_server_node() -> None:
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="no-embedded-etcd\n")
+        with pytest.raises(Rke2SnapshotPreconditionError, match="embedded-etcd server"):
+            await connector.etcd_snapshot_save(_TARGET, {})
+    mock_cmd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_nonzero_exit_raises() -> None:
+    from meho_backplane.connectors.rke2.ops_snapshot import Rke2SnapshotError
+
+    connector = Rke2SshConnector()
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stderr="FATA[0000] etcd is not running\n", exit_status=1),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        with pytest.raises(Rke2SnapshotError, match="exited 1"):
+            await connector.etcd_snapshot_save(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_save_never_leaks_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No SSH/sudo credential material appears in the result or logs."""
+    connector = Rke2SshConnector()
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stderr=_SAVE_LOG_OK, exit_status=0),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        with caplog.at_level("DEBUG"):
+            result = await connector.etcd_snapshot_save(_TARGET, {})
+    rendered = repr(result)
+    for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
+        assert canary not in rendered
+        assert canary not in caplog.text

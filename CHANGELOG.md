@@ -90,6 +90,35 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — harden ingest-job timeout warning tests against xdist logger-cache ordering (#2397)
+
+- `test_operations_ingest_jobs.py` rebinds `jobs._log` to a fresh structlog
+  proxy per test. Under `pytest -n --dist loadscope`, a sibling module that
+  calls `configure_logging()` (`cache_logger_on_first_use=True`) then later
+  reconfigures structlog with a fresh processors list could orphan the
+  module-level `_log` proxy's cached bound logger; `capture_logs()` mutates
+  the *current* config list in place, so it could no longer reach the cached
+  logger and the capture came back empty — deterministically failing the
+  timeout-fallback warning assertions depending on worker layout. The
+  per-test rebind forces re-realization against the live config list.
+  Test-only; product `jobs.py` behaviour is unchanged.
+
+### Fixed — kubeconfig loader routed through the credential-backend seam (#2397)
+
+- The Kubernetes connector's default kubeconfig loader
+  (`load_kubeconfig_from_vault`) no longer reads Vault directly — it now
+  resolves `target.secret_ref` through the shared credential-backend seam
+  (`load_vault_secret_data` → `split_credential_ref` → the backend registry).
+  A `product: kubernetes` target with a `gsm:<project>/<secret>#kubeconfig`
+  ref now authenticates on a `CREDENTIAL_BACKEND=gsm` / no-Vault deployment,
+  closing the last-mile gap #2227 left for the k8s connector (every other
+  connector already got `gsm:` for free via the seam).
+- The loader inherits the seam's Vault-kind KV-v2 API-path-shape guard: a
+  `secret/data/…`-shaped `secret_ref` now fails with an actionable error
+  instead of silently 404ing (a latent defect the old direct-read bypass
+  carried). Behaviour is otherwise unchanged for schemeless / `vault:` refs
+  on Vault deployments.
+
 ### Fixed — Helm chart fails at render time on an unresolvable MCP resource URI (#2394)
 
 - The chart now `fail`s at `helm template` / `helm install` time — with an

@@ -545,8 +545,16 @@ async def net_dns_lookup(operator: Operator, target: Any, params: dict[str, Any]
 
     # A chosen resolver must be an IP literal: dnspython's ``nameservers``
     # setter rejects a hostname, and an unresolved name pins no server.
-    if resolver_ip is not None and _as_ip_literal(resolver_ip) is None:
-        return _dns_refusal(name, requested_type, resolver_label, "bad_resolver")
+    if resolver_ip is not None:
+        literal = _as_ip_literal(resolver_ip)
+        if literal is None:
+            return _dns_refusal(name, requested_type, resolver_label, "bad_resolver")
+        # Normalize to the bare literal: ``_as_ip_literal`` accepts the
+        # bracketed IPv6 form ([::1]), but dnspython's ``nameservers``
+        # setter rejects brackets — pass the stripped value on and record
+        # it as the audit label.
+        resolver_ip = literal
+        resolver_label = resolver_ip
 
     # One guard applied uniformly (#1177): the queried name is gated, and
     # a custom resolver IP is gated too — querying an internal resolver or

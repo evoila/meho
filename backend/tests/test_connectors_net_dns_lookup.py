@@ -435,6 +435,37 @@ async def test_non_ip_custom_resolver_is_rejected(monkeypatch: pytest.MonkeyPatc
     assert result["reason"] == "bad_resolver"
 
 
+async def test_bracketed_ipv6_resolver_is_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bracketed IPv6 ``resolver`` ([::1]) yields a clean result (handler-direct).
+
+    ``_as_ip_literal`` accepts the bracketed form and the allowlist strips
+    the brackets, so ``[::1]`` clears both gates — but dnspython's
+    ``nameservers`` setter rejects the bracketed literal, raising an
+    uncaught ``ValueError`` that would surface as a ``connector_*`` error
+    and break the return-failures contract. The handler strips the brackets
+    before building the resolver, so the real setter accepts the bare
+    ``::1`` and the audit label records the normalized literal. ``resolve``
+    is stubbed to a timeout so the real ``nameservers`` setter still runs
+    (the crux of the fix) without requiring IPv6 loopback networking.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "probe.example, ::1")
+
+    async def _raise_timeout(*_a: object, **_kw: object) -> object:
+        raise dns.exception.Timeout()
+
+    monkeypatch.setattr(net_ops.dns.asyncresolver.Resolver, "resolve", _raise_timeout)
+
+    result = await net_dns_lookup(
+        _make_operator(),
+        None,
+        {"name": "probe.example", "type": "A", "resolver": "[::1]"},
+    )
+
+    assert result["resolved"] is False
+    assert result["reason"] == "timeout"
+    assert result["resolver"] == "::1"
+
+
 # ---------------------------------------------------------------------------
 # Audit row records name + type + resolver
 # ---------------------------------------------------------------------------

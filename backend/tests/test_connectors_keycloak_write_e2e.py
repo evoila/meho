@@ -138,10 +138,10 @@ def _stub_loader(_target: KeycloakTargetLike, _operator: Operator) -> Any:
     return _load()
 
 
-async def _stub_read_password(_operator: Operator, params: dict[str, Any]) -> str:
-    """Stand in for the operator-context Vault read.
+async def _stub_read_password(_operator: Operator, _target: Any, params: dict[str, Any]) -> str:
+    """Stand in for the operator-context credential-backend read.
 
-    Asserts the password is sourced via a Vault *path*, never inline: the
+    Asserts the password is sourced via a secret *ref*, never inline: the
     op params must carry ``password_secret_ref`` and must NOT carry an
     inline ``password``.
     """

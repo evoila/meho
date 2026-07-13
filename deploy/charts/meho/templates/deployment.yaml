@@ -29,6 +29,19 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- /*
+        Optional unprivileged-ICMP-ping knob for the net.ping diagnostic
+        (Initiative #2405). Default-off: when empty, NO sysctl is rendered
+        and NO pod-security posture changes — net.trace / net.path_mtu are
+        unprivileged everywhere and net.ping degrades to available=false.
+        SECURITY-REVIEW: setting this widens who may open ICMP sockets in
+        the pod; see values.yaml `netdiag.pingGroupRange`.
+        */}}
+        {{- with .Values.netdiag.pingGroupRange }}
+        sysctls:
+          - name: net.ipv4.ping_group_range
+            value: {{ . | quote }}
+        {{- end }}
       containers:
         - name: backplane
           # Image reference deliberately offers no `default .Chart.AppVersion`

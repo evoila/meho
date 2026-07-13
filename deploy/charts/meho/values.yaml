@@ -80,6 +80,37 @@ securityContext:
     drop:
       - ALL
 
+# -- Network-diagnostics (`net.*`) connector posture (Initiative #2405).
+#
+# The `net.*` diagnostic ops need NO added pod capability by default:
+# `net.trace` and `net.path_mtu` read ICMP errors off the unprivileged
+# Linux `IP_RECVERR` socket error queue, and `net.ping` uses an
+# unprivileged `IPPROTO_ICMP` datagram socket. `CAP_NET_RAW` is
+# deliberately NOT granted to this credential-holding pod (a privileged
+# sidecar is the documented escalation path, not a default).
+netdiag:
+  # -- `net.ipv4.ping_group_range` pod sysctl for unprivileged ICMP-echo
+  # ping (`net.ping`). **Default-off (empty) ships no sysctl and no
+  # pod-security change** — `net.trace` / `net.path_mtu` work
+  # unprivileged everywhere, and `net.ping` degrades gracefully to
+  # `{available: false, reason: icmp_echo_unprivileged_unavailable}`
+  # (pointing callers at `net.tcp_check`) where the range excludes the
+  # pod's GID. Set it ONLY after a security review.
+  #
+  # SECURITY NOTE — read before enabling:
+  #   * Value is a `"<low> <high>"` GID range that must include the GID
+  #     the container runs as (`podSecurityContext.runAsGroup`, or 0 when
+  #     unset). Example matching `runAsGroup: 1001`: `"1001 1001"`.
+  #   * `net.ipv4.ping_group_range` is a *safe* sysctl on Kubernetes 1.29+
+  #     (no kubelet allowlist needed); on older clusters it is *unsafe*
+  #     and pods setting it are rejected at admission unless the kubelet
+  #     runs with `--allowed-unsafe-sysctls=net.ipv4.ping_group_range`.
+  #   * Enabling it only widens who may open unprivileged ICMP *datagram*
+  #     sockets in this pod; it does NOT grant `CAP_NET_RAW` or
+  #     packet-crafting. `net.ping` remains allowlist-gated
+  #     (`MEHO_NETDIAG_PROBE_ALLOWLIST`) regardless.
+  pingGroupRange: ""
+
 service:
   type: ClusterIP
   port: 8000

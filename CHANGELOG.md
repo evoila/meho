@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — net.ping/trace/path_mtu ICMP cohort (unprivileged, degrade-not-crash) (#2411)
+
+- Add the `net.*` ICMP cohort completing local-tool parity: `net.ping`
+  (reachability + RTT), `net.trace` (hop path), and `net.path_mtu`
+  (largest unfragmented packet) — `connectors/net/icmp.py`, one registrar,
+  the shared `net-probe-1.x` synthetic identity, reusing the keystone
+  probe allowlist / audit-visible host / return-failures contract. The
+  cohort uses only **unprivileged** Linux mechanisms and adds **no**
+  `CAP_NET_RAW` to the backplane pod: `net.trace` / `net.path_mtu` read
+  ICMP errors off the `IP_RECVERR` socket error queue (works on any
+  cluster), and `net.ping` uses an unprivileged `IPPROTO_ICMP` datagram
+  socket that **degrades** to `{available: false, reason:
+  icmp_echo_unprivileged_unavailable}` (pointing at `net.tcp_check`) where
+  the pod's GID is outside `net.ipv4.ping_group_range` — never a crash.
+  The Helm chart gains an **optional, default-off** `netdiag.pingGroupRange`
+  value that renders a `net.ipv4.ping_group_range` pod sysctl for
+  operators who want unprivileged ping (documented with a security note;
+  no pod-security change ships by default) (#2411 / #2405).
 ### Added — net.ntp_check clock offset/skew + stratum diagnostics op (#2410)
 
 - Add `net.ntp_check` on the T1 `net.*` mold — a targetless NTP

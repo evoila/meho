@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — node/rke2-ssh connector scaffold + read-only posture tier (#2221)
+
+- Add the `rke2` node-OS connector (`rke2-ssh-1.x`), the read-only entry in
+  the governed SSH cluster-node OS-lifecycle family (Initiative #2172, the
+  holodeck-ssh mold). Ships two safe/no-approval ops over the shared SSH
+  adapter: `rke2.about` (identity — `rke2 --version` + `/etc/os-release`) and
+  `rke2.posture.show`, which `stat`s the RKE2 config-file modes under
+  `/etc/rancher/rke2/` plus the on-disk server join-token presence **with the
+  token value never read** (redacted by construction — no secret can reach
+  the result envelope, the audit `raw_payload`, or the logs). Auth resolves
+  via the fixed SSH adapter (`load_vault_secret_data`, the #2155 either/or
+  key-or-password shape), not the bind9 anti-shape. The approval-gated write
+  ops land in sibling Tasks #2429/#2430/#2431 — `backend/src/meho_backplane/
+  connectors/rke2/`, `docs/codebase/connectors-rke2.md` (#2221).
+
 ### Added — net.ping/trace/path_mtu ICMP cohort (unprivileged, degrade-not-crash) (#2411)
 
 - Add the `net.*` ICMP cohort completing local-tool parity: `net.ping`

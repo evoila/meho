@@ -108,6 +108,25 @@ connector-related release-notes line.
   probe returns `{reachable, reason}` with `status="ok"`, never a
   `connector_*` error. No new dependency (reuses the existing `httpx`
   stack) (#2408 / #2405).
+### Fixed — profiled-connector login-POST 401 stamped establish-stage, not after_relogin (#2414)
+
+- A profiled session-scheme connector whose login POST is rejected
+  (`ProfiledRestConnector._post_login`, HTTP `401`/`403`) is now stamped
+  `connector_auth_failed` with the **establish-stage** cause
+  `session_establish_<status>` and the restage remediation (`meho vault kv
+  put …`), matching the typed connectors. Previously it raised a raw
+  `httpx.HTTPStatusError`; because a profiled connector advertises
+  `invalidate_session`, the dispatcher re-dispatched the failing login once
+  and mislabelled it `session_dispatch_<status>_after_relogin` (do-NOT-restage)
+  — telling the operator the session was re-established and retried (false)
+  and not to restage the credential (wrong). The `reestablished` /
+  `after_relogin` label is now reserved for a genuine post-re-login *dispatch*
+  failure (the re-login POST succeeded and the fresh session was still
+  rejected). The fix routes the login-POST auth-class rejection through the
+  same `session_establish_auth_error` classifier the typed family uses; a
+  non-auth login-POST status (404, 5xx) re-raises unchanged. Typed-connector
+  stamping and the #2262/#1798 registration/shadowing invariants are
+  untouched (#2414).
 ### Fixed — keycloak user write-op password read routed through the credential-backend seam (#2401)
 
 - `keycloak.user.create` / `keycloak.user.reset_password` sourced the

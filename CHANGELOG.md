@@ -105,6 +105,26 @@ connector-related release-notes line.
   `{connected: false, reason}` with `status="ok"`, never a `connector_*`
   error). `net.*` ops classify as reads in the broadcast feed
   (#2406 / #2405).
+
+### Added — net.tls_inspect full presented certificate chain (openssl s_client parity)
+
+- Add `net.tls_inspect` on the `net.*` keystone — a targetless probe
+  that opens a TLS handshake with certificate verification **off** and
+  reports the **full chain the server presents** (leaf → intermediates →
+  root-if-sent, leaf-first): per-cert subject / SAN / issuer / validity
+  window / serial / self-signed flag, plus `chain_complete` (did the
+  server send a self-signed root), a leaf `hostname_match` computed
+  independently of the disabled verification, and the negotiated protocol
+  and cipher — `openssl s_client -showcerts` parity. A self-signed /
+  expired / hostname-mismatched cert is **inspected and reported**
+  (`handshake=true`, `status="ok"`), never rejected; a refused /
+  timed-out / DNS-failed / non-TLS endpoint returns `{handshake: false,
+  reason}` with `status="ok"`. Reuses the T1 probe allowlist, audit-
+  visible `host:port`, and return-failures contract. Adds `pyOpenSSL`
+  (full-chain read; stdlib `ssl` on the 3.12 floor exposes only the leaf)
+  and promotes `cryptography` to a declared runtime dependency — both
+  Apache-2.0 (#2407 / #2405).
+
 ### Fixed — harden ingest-job timeout warning tests against xdist logger-cache ordering (#2397)
 
 - `test_operations_ingest_jobs.py` rebinds `jobs._log` to a fresh structlog

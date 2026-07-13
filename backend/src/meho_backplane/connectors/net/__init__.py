@@ -26,13 +26,18 @@ probe is ``status="ok"`` with ``connected=false``, never a
 :mod:`meho_backplane.connectors.net.allowlist`.
 """
 
+from meho_backplane.connectors.net.http_probe import register_net_http_probe_operations
 from meho_backplane.connectors.net.ops import register_net_typed_operations
 from meho_backplane.operations.typed_register import register_typed_op_registrar
 
-# Queue the net.tcp_check typed-op upsert onto the lifespan-driven
-# registrar list (run after the connector eager-import pass).
+# Queue the net.* typed-op upserts onto the lifespan-driven registrar
+# list (run after the connector eager-import pass). Each sibling op has
+# its own registrar so the family extends without editing a shared
+# function body (net.tcp_check #2406, net.http_probe #2408, …).
 register_typed_op_registrar(register_net_typed_operations)
+register_typed_op_registrar(register_net_http_probe_operations)
 
 __all__ = [
+    "register_net_http_probe_operations",
     "register_net_typed_operations",
 ]

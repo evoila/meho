@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — net.dns_lookup full dig-parity DNS diagnostics op (#2409)
+
+- Add `net.dns_lookup` on the T1 `net.*` mold — a targetless DNS
+  diagnostic via **dnspython** (`dns.asyncresolver`, off the event loop):
+  forward typed records (A/AAAA/CNAME/MX/TXT/SRV/NS/SOA), reverse PTR when
+  the name is an IP literal (`dig -x`), and an optional `resolver` IP to
+  query a chosen nameserver instead of the system resolver (the
+  split-horizon case). Reports `{resolved, name, type, resolver,
+  records:[{type,value,ttl}], authoritative, authenticated_data}` — the
+  DNSSEC AD flag is reported, not validated. The queried `name` and any
+  custom `resolver` IP are gated through the same
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` guard; NXDOMAIN / no-answer / SERVFAIL /
+  timeout / a non-IP resolver / a refused lookup return `{resolved:
+  false, reason}` with `status="ok"` (never a `connector_*` error).
+  `dnspython` (ISC-licensed) is pinned as a direct dependency. Parent
+  Initiative #2405.
 ### Added — net.http_probe HTTP reachability probe (no body, per-hop redirect re-gating)
 
 - Add `net.http_probe` to the synthetic `net.*` connector — a targetless

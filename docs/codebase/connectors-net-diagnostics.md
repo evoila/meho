@@ -15,13 +15,16 @@ module-level functions the dispatcher routes to with
 
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op (T2–T4:
-`tls_inspect` / `http_probe` / `dns_lookup`) reuses, and the first
-sibling `net.tls_inspect` (#2407, T2 — see below).
+`tls_inspect` / `http_probe` / `dns_lookup`) reuses, and the sibling ops
+`net.tls_inspect` (#2407, T2), `net.http_probe` (#2408, T3), and
+`net.dns_lookup` (#2409, T4) built on that mold — all described below.
 
-Every op ships its own module + registrar function and queues it in
-`__init__.py` (`net.tcp_check` → `ops.register_net_typed_operations`,
-`net.tls_inspect` → `tls.register_net_tls_inspect_operation`). Siblings
-therefore extend the package by adding a module and one registrar-queue
+Each op queues a registrar in `__init__.py` via
+`register_typed_op_registrar` (`net.tcp_check` and `net.dns_lookup` share
+`ops.register_net_typed_operations`; `net.tls_inspect` →
+`tls.register_net_tls_inspect_operation`; `net.http_probe` →
+`http_probe.register_net_http_probe_operations`). Siblings therefore
+extend the package by adding (at most) a module and one registrar-queue
 line rather than contending for a single registrar function — which also
 keeps parallel task branches from colliding on one shared file.
 
@@ -43,6 +46,48 @@ The op is registered under the natural key
 `parse_connector_id` back to `("net", "1.x", "net-probe")`.
 `safety_level="safe"` + `requires_approval=False` make it
 agent-auto-runnable and ungated.
+
+## `net.dns_lookup` — full `dig` parity (#2409)
+
+`net.dns_lookup(name, type?, resolver?, timeout_seconds?)` resolves DNS
+from the backplane's vantage via **dnspython** (`dns.asyncresolver`,
+which runs the query off the event loop natively — no
+`asyncio.to_thread` wrapper). It is the same synthetic, targetless op
+under the same `net-probe-1.x` connector, registered alongside
+`net.tcp_check` by `register_net_typed_operations`.
+
+- **Forward**: `type` (default `A`, one of
+  A/AAAA/CNAME/MX/TXT/SRV/NS/SOA/PTR) drives `resolve(name, type)`.
+- **Reverse**: when `name` is an IP literal, the `type` is ignored and a
+  PTR lookup runs via `dns.reversename.from_address` (mirrors `dig -x`).
+- **Chosen resolver**: an optional `resolver` IP sets
+  `resolver.nameservers = [resolver]`, so an operator can compare "what
+  the pod's resolver returns" against an authoritative/other nameserver
+  — the split-horizon case that forced registering a vCenter by IP. A
+  non-IP `resolver` is rejected with `reason="bad_resolver"` (dnspython's
+  `nameservers` setter accepts only IPs, and an unresolved name pins no
+  server).
+
+Success returns `{resolved: true, name, type, resolver: "system"|<ip>,
+records: [{type, value, ttl}], authoritative, authenticated_data, reason:
+null}`. `authoritative` is the answer's AA flag; `authenticated_data` is
+the DNSSEC AD flag **reported, not validated** (chain validation, AXFR,
+and `dig +trace` are out of scope, #2409).
+
+**Gating (one guard, uniformly — #1177):** the queried `name` is passed
+through `assert_probe_allowed` before any query (a hostname matched
+verbatim, an IP by range), and a custom `resolver` IP is gated the same
+way — querying an internal resolver or resolving internal names is itself
+mild recon. Both must be allowlisted or the lookup is refused with
+`reason="not_in_probe_allowlist"`.
+
+**Return-failures:** `NXDOMAIN` / `NoAnswer` / `NoNameservers` (SERVFAIL)
+/ `dns.exception.Timeout` map to `{resolved: false, reason:
+nxdomain|no_answer|servfail|timeout}` with `status="ok"`; a missing
+system resolver config with no chosen resolver maps to
+`reason="no_resolver"`. None are raised as `connector_*` errors. The
+`name`/`type`/`resolver` in the return dict are audit-visible via
+`raw_payload`.
 
 ## The three foundations
 
@@ -225,13 +270,13 @@ connectors' ops.
   (`register_net_typed_operations`, `register_net_tls_inspect_operation`,
   `register_net_http_probe_operations`) onto the lifespan registrar list
   via `register_typed_op_registrar` (auto-imported by the
-  `_eager_import_connectors` package walk). Each sibling op has its own
-  registrar so the family extends without editing a shared function body.
-- `connectors/net/ops.py` — `net_tcp_check` handler, its parameter /
-  response schema, the registrar, and the shared timeout bounds/clamp
-  (`_DEFAULT_TIMEOUT_SECONDS` / `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`)
-  reused by `tls.py` (package-internal import; `ops` never imports `tls`,
-  so no cycle).
+  `_eager_import_connectors` package walk).
+- `connectors/net/ops.py` — the `net_tcp_check` and `net_dns_lookup`
+  handlers, their parameter / response schemas, the shared registrar
+  (`register_net_typed_operations` upserts both ops), and the shared
+  timeout bounds/clamp (`_DEFAULT_TIMEOUT_SECONDS` /
+  `_MAX_TIMEOUT_SECONDS` / `_clamp_timeout`) reused by `tls.py`
+  (package-internal import; `ops` never imports `tls`, so no cycle).
 - `connectors/net/tls.py` — `net_tls_inspect` handler, its schemas, the
   cert-flattening / hostname-match / chain helpers, and its registrar.
 - `connectors/net/http_probe.py` — `net_http_probe` handler, its
@@ -261,6 +306,11 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 - `net.http_probe`: `httpx` (already a project dependency) for the HTTP
   request and its `network_stream` TLS extension — no **new** runtime
   dependency is added.
+- `net.dns_lookup`: **dnspython** (ISC-licensed, already present
+  transitively via `email-validator` / `pymongo`; pinned direct in
+  `backend/pyproject.toml` so the connector's requirement is explicit) —
+  used via `dns.asyncresolver` / `dns.reversename` / `dns.rdatatype` /
+  `dns.flags`.
 
 ## Known issues / deferred
 
@@ -278,8 +328,9 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 
 ## References
 
-- Parent: Initiative #2405, Tasks #2406 (T1 keystone) + #2407 (T2
-  `tls_inspect`). Mold: secret broker
+- Parent: Initiative #2405, Tasks #2406 (T1 `tcp_check`) + #2407 (T2
+  `tls_inspect`) + #2408 (T3 `http_probe`) + #2409 (T4 `dns_lookup`).
+  Mold: secret broker
   (`docs/codebase/connectors-secret-broker.md`). SSRF sibling:
   `docs/codebase/target-ssrf-guard.md`. Broadcast taxonomy:
   `docs/codebase/broadcast.md`.

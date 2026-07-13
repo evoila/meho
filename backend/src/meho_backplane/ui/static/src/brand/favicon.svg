@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="meho">
+  <!--
+    SPDX-License-Identifier: Apache-2.0
+    Copyright (c) 2026 evoila Group
+
+    MEHO tab mark — the "Graphite & Signal" wordmark distilled to a
+    monogram: the lowercase "m" from the sidebar wordmark plus the
+    indigo signal caret that "types" the brand (see base.html brand
+    block + .meho-caret in static/src/styles.css). Colours are the
+    exact brand tokens converted from oklch to sRGB:
+      graphite tile  base-200 -> base-100  #080a0d -> #101316
+      wordmark ink   base-content          #e6e8eb
+      signal caret   primary               #6c7ae5
+    Scales cleanly from 16px tabs up. SVG-only: every browser MEHO
+    targets renders SVG favicons.
+  -->
+  <defs>
+    <linearGradient id="meho-tile" x1="16" y1="0" x2="16" y2="32" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#101316"/>
+      <stop offset="1" stop-color="#080a0d"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="32" height="32" rx="7" fill="url(#meho-tile)"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="6.5" fill="none" stroke="#e6e8eb" stroke-opacity="0.08"/>
+  <!-- lowercase "m": left stem + two grotesque arches -->
+  <path d="M8 22 V15.6 C8 13.7 9.3 12.6 10.9 12.6 C12.5 12.6 13.8 13.7 13.8 15.6 V22
+           M13.8 15.6 C13.8 13.7 15.1 12.6 16.7 12.6 C18.3 12.6 19.6 13.7 19.6 15.6 V22"
+        fill="none" stroke="#e6e8eb" stroke-width="2.9" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- signal caret: thin beam, skewed ~12deg, blinks in the live UI (static here) -->
+  <path d="M24.7 11.8 L26.6 11.8 L24.1 22.2 L22.2 22.2 Z" fill="#6c7ae5"/>
+</svg>

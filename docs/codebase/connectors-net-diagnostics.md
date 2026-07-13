@@ -16,18 +16,19 @@ module-level functions the dispatcher routes to with
 This page describes the keystone (#2406, Initiative #2405 T1):
 `net.tcp_check` plus the three foundations every sibling op reuses, and
 the sibling ops `net.tls_inspect` (#2407, T2), `net.http_probe` (#2408,
-T3), `net.dns_lookup` (#2409, T4), and the ICMP cohort `net.ping` /
-`net.trace` / `net.path_mtu` (#2411, T6) built on that mold — all
-described below.
+T3), `net.dns_lookup` (#2409, T4), `net.ntp_check` (#2410, T5), and the
+ICMP cohort `net.ping` / `net.trace` / `net.path_mtu` (#2411, T6) built on
+that mold — all described below.
 
 Each op queues a registrar in `__init__.py` via
 `register_typed_op_registrar` (`net.tcp_check` and `net.dns_lookup` share
 `ops.register_net_typed_operations`; `net.tls_inspect` →
 `tls.register_net_tls_inspect_operation`; `net.http_probe` →
-`http_probe.register_net_http_probe_operations`). Siblings therefore
-extend the package by adding (at most) a module and one registrar-queue
-line rather than contending for a single registrar function — which also
-keeps parallel task branches from colliding on one shared file.
+`http_probe.register_net_http_probe_operations`; `net.ntp_check` →
+`ntp.register_net_ntp_check_operation`). Siblings therefore extend the
+package by adding (at most) a module and one registrar-queue line rather
+than contending for a single registrar function — which also keeps
+parallel task branches from colliding on one shared file.
 
 ## Core mechanism
 
@@ -195,6 +196,64 @@ before the handler runs. Reason codes extend the T1 set with
 Because it issues an HTTP request, `net.http_probe` adds **`httpx`** to
 the family's dependency surface (already a project dep — no new dep).
 
+## `net.ntp_check` — clock offset/skew + stratum (T5, #2410)
+
+`net.ntp_check(host, port=123, timeout_seconds?)` sends **one** mode-3
+(client) NTPv4 packet to `host:port` over an **unprivileged** client UDP
+socket and reports reachability plus the queried server's **clock offset
+and skew against the backplane's own clock** (RFC 5905 §8), the
+`stratum`, `ref_id`, `root_delay_ms` / `root_dispersion_ms`, and the
+`leap` indicator — `ntpdate -q` / `sntp` parity. Clock skew is a common
+root cause of TLS-cert-validity and Kerberos/auth failures, so "is this
+appliance's clock sane from here" is a real pre-flight / post-mortem
+read. It is **read-only**: it reads the time, it never sets a clock.
+
+Lives in `connectors/net/ntp.py` with its own registrar
+(`register_net_ntp_check_operation`), queued alongside `net.tcp_check`'s
+in the package `__init__`. It reuses the same three foundations and the
+shared timeout bounds/clamp from `ops.py`.
+
+**No dependency — stdlib only.** A mode-3 SNTP request is a fixed 48-byte
+packet (RFC 5905 §7.3): a first octet of `0x23` (leap 0, version 4, mode
+3) and a transmit timestamp; the reply is the same 48-byte header.
+`struct` (`"!B B b b 11I"`) builds and parses it; `asyncio`'s
+`loop.create_datagram_endpoint` sends and receives it off the event loop.
+No raw socket and no added pod capability — a client UDP socket needs
+none.
+
+Control flow:
+
+1. `assert_probe_allowed(host)` — the T1 allowlist floor, before any
+   socket opens.
+2. A one-shot `DatagramProtocol` (`_NtpClientProtocol`) stamps the
+   transmit time `t1` as close to the send as possible, fires the packet,
+   and stamps the receive time `t4` on the reply. The exchange is bounded
+   by `asyncio.wait_for(timeout)`.
+3. `_parse_reply` checks the reply echoes our transmit timestamp in its
+   origin field (an off-path / stale packet fails this → `invalid_response`),
+   then computes offset and round-trip per RFC 5905 §8 with `t1`/`t4` on
+   the backplane clock and the server's receive (`T2`) / transmit (`T3`)
+   timestamps on the server clock:
+
+   ```
+   offset     = ((T2 - t1) + (T3 - t4)) / 2
+   round_trip = (t4 - t1) - (T3 - T2)
+   ```
+
+Timestamps convert via the NTP epoch offset (`2_208_988_800` s between
+1900 and 1970) and a 2**32 fraction scale; `root_delay` / `root_dispersion`
+are NTP 16.16 fixed-point "short" values (`/2**16` seconds → ms). `ref_id`
+renders as a 4-char ASCII refclock code at stratum ≤1 and the upstream
+server's dotted IPv4 at stratum ≥2.
+
+**Return-failures:** a timeout, DNS failure, a refused/unreachable peer,
+a malformed or origin-mismatched reply, or a **kiss-o'-death** (stratum-0)
+packet return `{reachable: false, reason}` with `status="ok"` — reason
+codes extend the T1 set with `kod` and `invalid_response`. A KoD reply
+also surfaces the 4-char `kiss_code` (e.g. `RATE`, `DENY`). None are
+raised as `connector_*` errors; the `host`/`port` in the return dict are
+audit-visible via `raw_payload`.
+
 ## `net.tls_inspect` — full presented certificate chain (T2, #2407)
 
 `net.tls_inspect(host, port, server_name?, timeout_seconds?)` opens a TLS
@@ -358,6 +417,10 @@ connectors' ops.
   (`_walk_redirects`), the TLS summary (`_tls_summary`), the
   size/hash-only body reader (`_consume_body_size_and_hash`), and the
   registrar.
+- `connectors/net/ntp.py` — `net_ntp_check` handler, its schemas, the
+  48-byte packet build/parse (`_build_request` / `_parse_reply`), the
+  NTP-timestamp codec, the one-shot `_NtpClientProtocol`, and the
+  registrar.
 - `connectors/net/icmp.py` — the `net_ping` / `net_trace` /
   `net_path_mtu` handlers, their schemas, the low-level errqueue / ICMP
   primitives (`_checksum`, `_build_echo_request`, `_parse_extended_err`,
@@ -390,6 +453,9 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
   `backend/pyproject.toml` so the connector's requirement is explicit) —
   used via `dns.asyncresolver` / `dns.reversename` / `dns.rdatatype` /
   `dns.flags`.
+- `net.ntp_check`: standard library only (`asyncio`, `socket`, `struct`,
+  `time`) — the SNTP request/reply is a fixed 48-byte packet, so no
+  runtime dependency is added.
 - `net.ping` / `net.trace` / `net.path_mtu`: standard library only
   (`asyncio`, `socket`, `select`, `struct`, `errno`, `os`, `time`) — no
   new runtime dependency. The Linux socket ABI constants the stdlib does
@@ -419,7 +485,9 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 
 - Parent: Initiative #2405, Tasks #2406 (T1 `tcp_check`) + #2407 (T2
   `tls_inspect`) + #2408 (T3 `http_probe`) + #2409 (T4 `dns_lookup`) +
-  #2411 (T6 ICMP cohort `ping`/`trace`/`path_mtu`). Mold: secret broker
+  #2410 (T5 `ntp_check`) + #2411 (T6 ICMP cohort
+  `ping`/`trace`/`path_mtu`). RFC 5905 (NTPv4) for the `ntp_check` packet
+  and offset/delay math. Mold: secret broker
   (`docs/codebase/connectors-secret-broker.md`). SSRF sibling:
   `docs/codebase/target-ssrf-guard.md`. Broadcast taxonomy:
   `docs/codebase/broadcast.md`.

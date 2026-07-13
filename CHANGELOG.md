@@ -108,6 +108,23 @@ connector-related release-notes line.
   value that renders a `net.ipv4.ping_group_range` pod sysctl for
   operators who want unprivileged ping (documented with a security note;
   no pod-security change ships by default) (#2411 / #2405).
+### Added — net.ntp_check clock offset/skew + stratum diagnostics op (#2410)
+
+- Add `net.ntp_check` on the T1 `net.*` mold — a targetless NTP
+  diagnostic (`ntpdate -q` / `sntp` parity) that sends one mode-3 (client)
+  NTPv4 packet over an **unprivileged** UDP socket and reports the queried
+  server's clock offset and skew **against the backplane's own clock** per
+  RFC 5905, plus `stratum`, `ref_id`, `root_delay_ms` /
+  `root_dispersion_ms`, and the `leap` indicator — clock skew is a common
+  root cause of TLS-cert-validity and Kerberos/auth failures. Read-only
+  (never sets a clock) and **no new dependency**: the 48-byte SNTP
+  request/reply is built and parsed with the stdlib `struct`, sent off the
+  event loop via `asyncio` datagram endpoints. The `host` is gated through
+  the same `MEHO_NETDIAG_PROBE_ALLOWLIST` guard; a timeout, a refused /
+  unreachable peer, a malformed or off-path (origin-mismatch) reply, or a
+  kiss-o'-death (stratum-0, with the `kiss_code`) packet return
+  `{reachable: false, reason}` with `status="ok"` (never a `connector_*`
+  error). Parent Initiative #2405.
 
 ### Added — net.dns_lookup full dig-parity DNS diagnostics op (#2409)
 

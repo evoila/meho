@@ -313,6 +313,9 @@ class BroadcastEvent(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
+# code-quality-allow: flat order-significant op-id classifier; length is the
+# explanatory match-order docstring, not branching. Pre-existing >100 (126 on
+# main); #2406 only adds the `net.` prefix to an existing read tuple.
 def classify_op(op_id: str) -> str:
     """Map an op-id to one of the sensitivity classes.
 
@@ -362,7 +365,12 @@ def classify_op(op_id: str) -> str:
        (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
        map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
        map to ``write``. Checked before the dot-suffix branches since
-       ingested ops carry no meho verb suffix.
+       ingested ops carry no meho verb suffix. The ``net.`` product
+       prefix (the synthetic network-diagnostics connector, #2406)
+       rides the ``read`` arm here: every ``net.*`` op is a
+       non-mutating probe, matched by prefix because its verbs are
+       underscore-joined (``net.tcp_check``), so a dotted read suffix
+       never matches.
     6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
        ``.delete`` / ``.patch`` / ``.put`` / ``.write`` / ``.add`` /
        ``.remove``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
@@ -404,6 +412,8 @@ def classify_op(op_id: str) -> str:
     'read'
     >>> classify_op("DELETE:/api/v2.0/projects/myproj/repositories/myrepo")
     'write'
+    >>> classify_op("net.tcp_check")
+    'read'
     >>> classify_op("vsphere.vm.list")
     'read'
     >>> classify_op("vsphere.vm.create")
@@ -425,10 +435,15 @@ def classify_op(op_id: str) -> str:
     # not sensitive, so it stays full-detail like the `other` fall-through.
     if op_id.startswith("approval."):
         return "approval"
-    # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo").
-    # GET/HEAD are safe reads by HTTP semantics; all mutation methods are writes.
-    # Checked after the explicit allowlists so credential_mint pins still win.
-    if op_id.startswith(("GET:", "HEAD:")):
+    # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo");
+    # GET/HEAD are safe reads by HTTP semantics. The synthetic net.* probes
+    # (#2406) ride the same arm: every net.* op is a non-mutating
+    # reachability probe, and it's matched by product prefix (not verb
+    # suffix) because the verbs are underscore-joined (`net.tcp_check`), so
+    # a dotted read suffix like `.check` never matches the `tcp_check`
+    # segment. Checked after the explicit allowlists so credential_mint pins
+    # still win.
+    if op_id.startswith(("GET:", "HEAD:", "net.")):
         return "read"
     if op_id.startswith(("POST:", "PUT:", "PATCH:", "DELETE:")):
         return "write"

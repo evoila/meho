@@ -123,23 +123,23 @@
     aria-label="Filter topology nodes"
     onsubmit="return false;"
   >
-    <div class="card-body grid gap-3 md:grid-cols-4">
-      <label class="form-control md:col-span-2">
-        <span class="label-text">Search by name</span>
+    <div class="card-body grid gap-3 md:grid-cols-4 md:items-end">
+      <label class="flex flex-col gap-1 md:col-span-2">
+        <span class="text-sm font-medium">Search by name</span>
         <input
           type="search"
           name="q"
           value="{{ name_filter }}"
           placeholder="Substring match (case-insensitive)"
-          class="input input-bordered input-sm"
+          class="input input-sm w-full"
           aria-label="Filter nodes by name"
         />
       </label>
-      <label class="form-control">
-        <span class="label-text">Kind</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Kind</span>
         <select
           name="kind"
-          class="select select-bordered select-sm"
+          class="select select-sm w-full"
           aria-label="Filter nodes by kind"
         >
           <option value="">All kinds</option>

@@ -22,6 +22,11 @@
    paint or light-theme operators get a dark flash. External file,
    not inline, to preserve the zero-inline-script CSP posture. #}
 <script src="/ui/static/src/app/theme.js"></script>
+{# Tab mark — the "Graphite & Signal" wordmark distilled to a monogram
+   (static/src/brand/favicon.svg). SVG-only: every browser the console
+   targets renders SVG favicons, and one vector scales across tab sizes.
+   A <link> element, so it keeps the zero-inline-script CSP posture. #}
+<link rel="icon" href="/ui/static/src/brand/favicon.svg" type="image/svg+xml" />
 {# Compiled Tailwind 4 + DaisyUI 5 bundle; built by the ``tailwindcss``
    CLI step in backend/Dockerfile from static/src/styles.css. #}
 <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />

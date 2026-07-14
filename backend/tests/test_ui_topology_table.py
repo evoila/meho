@@ -345,10 +345,20 @@ def test_table_full_page_renders_seeded_nodes() -> None:
     # beside the table on ``lg:`` viewports instead of stacking
     # off-screen below it. The comment at table.html once promised this
     # grid but the markup was absent; assert it is now present.
-    assert "lg:grid-cols-[1fr_28rem]" in body
+    # Issue #164: the flexible track is ``minmax(0,1fr)`` (not a bare
+    # ``1fr``, which resolves to ``minmax(auto,1fr)``) so the table's
+    # ``overflow-x-auto`` wrapper can shrink and scroll instead of blowing
+    # the column out and overlapping the drawer.
+    assert "lg:grid-cols-[minmax(0,1fr)_28rem]" in body
     # And the narrow-viewport scroll-into-view handler is wired so a
     # stacked drawer is brought into view on swap.
     assert "hx-on::after-swap" in body
+    # Issue #165: the last_seen / first_seen cells no longer dump the raw
+    # ISO string into the visible text — they render the console-standard
+    # ``%Y-%m-%d`` date stacked over a ``%H:%M UTC`` time. The ISO value
+    # survives only in the machine-readable ``<time datetime=...>`` attr.
+    assert "UTC</span>" in body  # stacked time line
+    assert '<time datetime="' in body  # ISO retained for semantics
     assert "scrollIntoView" in body
     # CSRF cookie set by the route.
     assert CSRF_COOKIE_NAME in response.cookies

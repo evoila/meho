@@ -65,13 +65,24 @@
         </td>
         <td>
           {% if node.last_seen %}
-            <time datetime="{{ node.last_seen.isoformat() }}">{{ node.last_seen.isoformat() }}</time>
+            {#- Stacked date-over-time (#164 width / #165 raw-ISO fix): the
+                machine-readable ISO stays in the ``datetime`` attribute for
+                semantics; the display uses the console-standard
+                ``%Y-%m-%d`` / ``%H:%M UTC`` split so the column stays narrow.
+                Timestamps are stored tz-aware UTC. -#}
+            <time datetime="{{ node.last_seen.isoformat() }}" class="block leading-tight">
+              <span class="block tabular-nums">{{ node.last_seen.strftime("%Y-%m-%d") }}</span>
+              <span class="block text-xs tabular-nums opacity-60">{{ node.last_seen.strftime("%H:%M UTC") }}</span>
+            </time>
           {% else %}
             <span class="opacity-50">—</span>
           {% endif %}
         </td>
         <td>
-          <time datetime="{{ node.first_seen.isoformat() }}">{{ node.first_seen.isoformat() }}</time>
+          <time datetime="{{ node.first_seen.isoformat() }}" class="block leading-tight">
+            <span class="block tabular-nums">{{ node.first_seen.strftime("%Y-%m-%d") }}</span>
+            <span class="block text-xs tabular-nums opacity-60">{{ node.first_seen.strftime("%H:%M UTC") }}</span>
+          </time>
         </td>
         <td>
           {# ``discovered_by`` doubles as the product / connector slug --

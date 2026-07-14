@@ -65,32 +65,32 @@
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
       class="space-y-3"
     >
-      <fieldset class="grid grid-cols-2 gap-2">
-        <label class="form-control">
-          <span class="label-text text-xs opacity-70">from (name)</span>
+      <fieldset class="grid grid-cols-2 gap-3">
+        <label class="flex flex-col gap-1">
+          <span class="text-xs font-medium opacity-70">From (name)</span>
           <input
             type="text" name="from_name" required
             value="{{ submitted.from_name | default('') }}"
-            class="input input-bordered input-sm font-mono"
+            class="input input-bordered input-sm font-mono w-full"
             aria-label="From node name"
           />
         </label>
-        <label class="form-control">
-          <span class="label-text text-xs opacity-70">from kind (optional)</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-xs font-medium opacity-70">From kind (optional)</span>
           <input
             type="text" name="from_kind"
             value="{{ submitted.from_kind | default('') }}"
-            class="input input-bordered input-sm font-mono"
+            class="input input-bordered input-sm font-mono w-full"
             aria-label="From node kind"
           />
         </label>
       </fieldset>
 
-      <label class="form-control">
-        <span class="label-text text-xs opacity-70">edge kind</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-xs font-medium opacity-70">Edge kind</span>
         <select
           name="kind" required
-          class="select select-bordered select-sm font-mono"
+          class="select select-bordered select-sm font-mono w-full"
           aria-label="Edge kind"
         >
           <option value="" disabled {{ 'selected' if not submitted.get('kind') else '' }}>
@@ -102,42 +102,42 @@
         </select>
       </label>
 
-      <fieldset class="grid grid-cols-2 gap-2">
-        <label class="form-control">
-          <span class="label-text text-xs opacity-70">to (name)</span>
+      <fieldset class="grid grid-cols-2 gap-3">
+        <label class="flex flex-col gap-1">
+          <span class="text-xs font-medium opacity-70">To (name)</span>
           <input
             type="text" name="to_name" required
             value="{{ submitted.to_name | default('') }}"
-            class="input input-bordered input-sm font-mono"
+            class="input input-bordered input-sm font-mono w-full"
             aria-label="To node name"
           />
         </label>
-        <label class="form-control">
-          <span class="label-text text-xs opacity-70">to kind (optional)</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-xs font-medium opacity-70">To kind (optional)</span>
           <input
             type="text" name="to_kind"
             value="{{ submitted.to_kind | default('') }}"
-            class="input input-bordered input-sm font-mono"
+            class="input input-bordered input-sm font-mono w-full"
             aria-label="To node kind"
           />
         </label>
       </fieldset>
 
-      <label class="form-control">
-        <span class="label-text text-xs opacity-70">note (optional)</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-xs font-medium opacity-70">Note (optional)</span>
         <textarea
           name="note" rows="2" maxlength="{{ max_note_length }}"
-          class="textarea textarea-bordered textarea-sm"
+          class="textarea textarea-bordered textarea-sm w-full"
           aria-label="Annotation note"
         >{{ submitted.note | default('') }}</textarea>
       </label>
 
-      <label class="form-control">
-        <span class="label-text text-xs opacity-70">evidence_url (optional)</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-xs font-medium opacity-70">Evidence URL (optional)</span>
         <input
           type="url" name="evidence_url" maxlength="{{ max_evidence_url_length }}"
           value="{{ submitted.evidence_url | default('') }}"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
           aria-label="Evidence URL"
         />
       </label>

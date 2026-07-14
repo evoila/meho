@@ -759,9 +759,11 @@ def test_drawer_renders_node_properties_and_edges() -> None:
     # stretching the full grid-column height. Pin it on the fragment.
     assert 'id="node-drawer"' in body
     assert "self-start" in body
-    # Node identity surfaces.
+    # Node identity surfaces by name.
     assert "vm-on-host-1" in body
-    assert str(child_id) in body
+    # Task #166: the raw node UUID is no longer surfaced in the drawer
+    # (the ``ID`` Properties row was removed as operator-facing noise).
+    assert str(child_id) not in body
     # Outgoing edge surfaces (vm -> host-1).
     assert "host-1" in body
     assert "runs-on" in body
@@ -772,6 +774,17 @@ def test_drawer_renders_node_properties_and_edges() -> None:
     assert "Show dependents" in body
     assert "view=graph" in body
     assert "from=vm-on-host-1" in body
+    # Task #166 drawer polish: Properties labels are capitalized (not the
+    # raw ``first_seen`` / ``discovered_by`` field names).
+    assert "First seen" in body
+    assert "Last seen" in body
+    assert "Discovered by" in body
+    # first_seen / last_seen render the console-standard ``%H:%M UTC``
+    # display (raw ISO only survives in the ``<time datetime=...>`` attr).
+    assert "UTC</time>" in body
+    # The empty HTMX mount slots are ``empty:hidden`` so they don't inject
+    # phantom gaps into the ``space-y-3`` drawer rhythm while unfilled.
+    assert "empty:hidden" in body
 
 
 def test_drawer_renders_recent_ops_for_target_backed_node() -> None:
@@ -801,6 +814,9 @@ def test_drawer_renders_recent_ops_for_target_backed_node() -> None:
     assert "Recent operations" in body
     assert "POST" in body
     assert "/api/v1/targets/vmware-prod/probe" in body
+    # Task #166: the ``Target ID`` Properties row was removed, so the raw
+    # target UUID is no longer surfaced in the drawer.
+    assert str(target_id) not in body
 
 
 def test_drawer_shows_inner_node_has_no_audit_trail() -> None:

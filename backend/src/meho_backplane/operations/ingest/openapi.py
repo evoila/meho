@@ -1329,7 +1329,12 @@ def _collect_2xx_response_codes(responses: dict[str, Any]) -> list[str]:
     then any other key starting with ``"2"`` that wasn't already
     picked.
     """
-    candidates = [c for c in ("200", "201", "202", "203", "204") if c in responses]
+    # Annotate as list[str] so mypy widens the element type: the
+    # comprehension over a tuple of string literals otherwise infers
+    # list[Literal["200", ...]], which then rejects the "2XX" append,
+    # the str-keyed extend, and the list[str] return (list is
+    # invariant). mypy 2.3+ makes this inference; 2.1 did not.
+    candidates: list[str] = [c for c in ("200", "201", "202", "203", "204") if c in responses]
     if "2XX" in responses:
         candidates.append("2XX")
     candidates.extend(

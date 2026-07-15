@@ -49,7 +49,8 @@ stream promotion). Each attempt opens a short-lived session, tries one
 and — on an empty queue — sleeps briefly before re-attempting. No DB
 transaction or pooled connection is held across the sleep, so the handler
 imports ``get_sessionmaker`` directly rather than taking a request-scoped
-``Depends(get_session)``.
+session dependency (which would keep one transaction open for the whole
+hold).
 """
 
 from __future__ import annotations

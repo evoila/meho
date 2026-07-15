@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Gateway — runner dead-man switch + mandatory heartbeat
+
+- Add the runner dead-man switch + mandatory heartbeat for the push-only
+  satellite runner (Initiative #2415, #2501). Every authenticated
+  runner-plane request now stamps `runner_principal.last_seen_at` on the
+  central clock through the single shared choke-point (`assert_runner_scope`)
+  — keyed by the token's `runner_id` claim, never a client value, and with
+  no dedicated heartbeat endpoint (a healthy idle runner already polls once
+  per window, so the idle work cycle *is* the heartbeat; the #1501 lesson).
+  A central interval-tick sweeper (`gateway/deadman.py`, gated on
+  `GATEWAY_DEADMAN_ENABLED`, default on) flips a lapsed runner's
+  `runner_assignments.stale_at` once its `last_seen_at` falls behind
+  `GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER × GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`
+  (default 3 × 30 s = 90 s) judged on the central clock, writing one
+  `gateway.runner.stale` audit row per flip; a fixed advisory lock plus a
+  conditional `WHERE stale_at IS NULL` flip keep it exactly-once under
+  concurrent replicas. Recovery is data-driven — an accepted result
+  ingestion clears the marker; the sweeper only ever flips. `stale_at IS NOT
+  NULL` maps to the `UNKNOWN` rollup state (#2416 / #2506). Migration `0061`
+  adds `runner_principal.last_seen_at` (+ index) and
+  `runner_assignments.stale_at` (#2501).
+
 ### Gateway — versioned assignment + results ingest API
 
 - Add the central-side ingest + versioned assignment API for the push-only

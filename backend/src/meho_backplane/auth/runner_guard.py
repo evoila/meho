@@ -50,6 +50,7 @@ for a dead/revoked runner is #2501's dead-man switch.
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import UTC, datetime
 
 import structlog
 from fastapi import Depends, HTTPException, status
@@ -128,8 +129,25 @@ async def assert_runner_scope(
     Resolves the tenant-scoped ``runner_principal`` row for
     ``(operator.tenant_id, runner_name)`` — one indexed read on the unique
     ``(tenant_id, name)`` index — and requires ``row.id ==
-    operator.runner_id``. Returns the row so callers can reuse it (e.g.
-    #2501's ``last_seen_at`` stamp) without a second query.
+    operator.runner_id``. Returns the row so callers can reuse it without a
+    second query.
+
+    Heartbeat side effect (#2501)
+    -----------------------------
+    On a successful scope match this guard stamps ``row.last_seen_at =
+    now()`` on the **central clock** and commits it — the dead-man switch's
+    mandatory heartbeat. This is the single choke-point every runner-plane
+    request passes through (#2498's ``GET .../next`` + ``POST .../result``,
+    #2499's ``GET /checks/assignment`` + ``POST /checks/results`` all call
+    it, and nothing else does), so piggybacking the stamp here measures the
+    runner's real ability to reach central and cannot be missed by a future
+    runner route that forgets to stamp. The stamp is keyed by ``row.id``
+    (the token's unforgeable ``runner_id`` claim) and reads no request
+    field, so ``last_seen_at`` is never client-controlled — the exact
+    discipline ``web_session.last_seen_at`` follows. There is deliberately
+    **no** dedicated heartbeat endpoint: a healthy idle runner still issues
+    at least one authenticated request per poll window, so the idle work
+    cycle *is* the heartbeat (the #1501 zombie-heartbeat lesson).
 
     Fail-closed with **no existence oracle**: a name that resolves to no
     row *and* a name that resolves to a **different** runner both raise the
@@ -143,8 +161,13 @@ async def assert_runner_scope(
             :func:`require_runner`). ``operator.runner_id`` must be set;
             :func:`require_runner` guarantees this.
         runner_name: The runner name the route addresses (path/query param).
-        session: An open :class:`AsyncSession` the caller owns. This
-            function only reads; it neither commits nor closes.
+        session: An open :class:`AsyncSession` the caller owns. On a
+            successful match this guard stamps the heartbeat and
+            ``commit()``s it on this session (see "Heartbeat side effect");
+            it does not close the session. Callers must therefore invoke
+            ``assert_runner_scope`` **before** any other mutation on the
+            session — its natural position as the auth/scope gate — so the
+            commit flushes only the heartbeat.
 
     Returns:
         The matching :class:`~meho_backplane.db.models.RunnerPrincipal` row.
@@ -172,4 +195,13 @@ async def assert_runner_scope(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=_RUNNER_SCOPE_VIOLATION,
         )
+    # Heartbeat (#2501): stamp runner liveness on the central clock, keyed
+    # by the token's ``runner_id`` claim (``row.id``), reading no request
+    # field. Committed on the caller's own session (no nested session -- the
+    # SQLite dev/test pool is a single-connection StaticPool). This guard is
+    # always the first operation in each runner-plane handler, so the commit
+    # flushes only the heartbeat and it persists even for the callers (the
+    # long-poll GET and the assignment GET) that never otherwise commit.
+    row.last_seen_at = datetime.now(UTC)
+    await session.commit()
     return row

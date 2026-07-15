@@ -119,6 +119,10 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.gateway.deadman import (
+    start_gateway_deadman_sweeper,
+    stop_gateway_deadman_sweeper,
+)
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -439,6 +443,7 @@ class _BackgroundTasks:
     scheduler: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
+    gateway_deadman: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -498,6 +503,14 @@ def _start_background_tasks() -> _BackgroundTasks:
     event_drain: asyncio.Task[None] | None = None
     if settings.event_drain_enabled:
         event_drain = start_event_drain()
+    # Initiative #2415 (#2501) — gateway runner dead-man switch. Gated on
+    # GATEWAY_DEADMAN_ENABLED; default-on is what "mandatory" means (a
+    # runner cannot opt out of heartbeating — the stamp is a request side
+    # effect — so central enforcement is on by default). Operators running
+    # an external liveness sweep can disable the in-tree one via the flag.
+    gateway_deadman: asyncio.Task[None] | None = None
+    if settings.gateway_deadman_enabled:
+        gateway_deadman = start_gateway_deadman_sweeper()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
@@ -507,6 +520,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         scheduler=scheduler,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
+        gateway_deadman=gateway_deadman,
     )
 
 
@@ -518,6 +532,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.gateway_deadman is not None:
+        await stop_gateway_deadman_sweeper(tasks.gateway_deadman)
     if tasks.event_drain is not None:
         await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:

@@ -50,6 +50,7 @@ from meho_backplane.auth.rbac import require_role
 from meho_backplane.auth.runner_guard import assert_runner_scope, require_runner
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.gateway import assignment_service
+from meho_backplane.gateway.deadman import clear_runner_stale
 from meho_backplane.gateway.errors import (
     AssignmentOpNotSafeError,
     AssignmentOpUnknownError,
@@ -195,6 +196,11 @@ async def post_results(
             runner_name=batch.runner_id,
             results=list(batch.results),
         )
+        # Recovery clear seam (#2501): an accepted result batch proves the
+        # runner is alive and reporting, so reset any dead-man flip marker
+        # the central sweeper set. The sweeper only ever flips; this is the
+        # only clear path. Idempotent when the runner was never flipped.
+        await clear_runner_stale(session, tenant_id=operator.tenant_id, runner_name=batch.runner_id)
         await session.commit()
     return ResultIngestResponse(accepted=accepted, duplicates=duplicates)
 

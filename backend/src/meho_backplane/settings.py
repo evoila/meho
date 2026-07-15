@@ -1074,6 +1074,17 @@ class Settings(BaseModel):
     agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
     agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
+    # Initiative #2415 (#2501) -- gateway runner dead-man switch. Same
+    # opt-out shape as AGENT_RUN_REAPER_ENABLED, but default-on is what
+    # "mandatory" means: a runner cannot opt out of heartbeating (the stamp
+    # is a request side effect) and central enforcement is on by default.
+    # The stale threshold is ``gateway_runner_stale_after_multiplier x
+    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`` (30s) -- the default 3x = 90s gives
+    # a healthy idle runner (which authenticates at least once per long-poll
+    # window) ~3 windows of slack before its workloads flip to unknown.
+    gateway_deadman_enabled: bool = True
+    gateway_deadman_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    gateway_runner_stale_after_multiplier: int = Field(default=3, ge=1, le=100)
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -1664,6 +1675,15 @@ def get_settings() -> Settings:
         ),
         agent_run_lease_ttl_seconds=int(
             os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
+        gateway_deadman_enabled=parse_bool_env(
+            os.environ.get("GATEWAY_DEADMAN_ENABLED", "true"),
+        ),
+        gateway_deadman_tick_interval_seconds=int(
+            os.environ.get("GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        gateway_runner_stale_after_multiplier=int(
+            os.environ.get("GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER", "3"),
         ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),

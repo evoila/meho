@@ -121,6 +121,71 @@ authorization boundary is central minting, #2500):
    becomes a structured `error` result — a failed check is a result,
    never a crashed tick.
 
+## Dead-man switch + mandatory heartbeat (#2501)
+
+A runner that dies, wedges, or loses its network path must not leave its
+workloads silently reporting last-known-good forever. Two halves make
+runner liveness observable and enforced, both on the **central clock** —
+a runner's own clock is never consulted.
+
+**Heartbeat (piggybacked, never a dedicated endpoint).** Every
+authenticated runner-plane request stamps `runner_principal.last_seen_at
+= now()` on the central clock. The stamp lives in the single choke-point
+all four runner-plane endpoints pass through —
+`auth/runner_guard.py::assert_runner_scope` (#2498's `GET
+/gateway/{runner}/next` + `POST /gateway/{runner}/result`, #2499's `GET
+/checks/assignment` + `POST /checks/results` all call it, and nothing
+else does). It is keyed by the token's unforgeable `runner_id` claim and
+reads no request field, so `last_seen_at` is never client-controlled
+(the same discipline `web_session.last_seen_at` follows). There is
+deliberately **no** `POST /gateway/{runner}/heartbeat`: a healthy idle
+runner still issues at least one authenticated request per poll window
+(its tick loop fetches the assignment every cadence even with no work),
+so the idle work cycle *is* the heartbeat. This is the #1501 lesson — a
+dedicated heartbeat loop can stay alive while the work loops are wedged,
+which is exactly the zombie state to avoid; stamping the real work
+requests measures the liveness that matters.
+
+**Central sweeper (`gateway/deadman.py`).** An in-process interval-tick
+loop the FastAPI lifespan owns (mould: `memory/expiry.py`, **not** the
+DB-bound scheduler trigger loop). Each tick takes a fixed non-blocking
+advisory lock (reaper mould; no-op on SQLite), selects the
+`runner_assignments` rows whose runner's `last_seen_at` is behind the
+cutoff and whose `stale_at IS NULL`, flips each with a conditional
+`UPDATE ... WHERE stale_at IS NULL`, and writes one internal audit row
+per flip (`method='INTERNAL'`, `path='gateway.runner.stale'`, payload
+`{runner, lapse_seconds}`). The `stale_at IS NULL` predicate + the
+`rowcount` gate keep "exactly one audit row per flip" true even when the
+advisory lock is a no-op or two replicas race, and make an immediate
+second tick a natural no-op.
+
+**Threshold.** `threshold_seconds = gateway_runner_stale_after_multiplier
+× GATEWAY_LONGPOLL_MAX_WAIT_SECONDS` — the multiplier (default 3) times
+#2498's exported long-poll window (30 s), i.e. the maximum quiet interval
+of a healthy idle runner. The number is never re-hardcoded here; it is
+imported from the gateway queue package. Default 90 s gives a healthy
+runner ~3 windows of slack.
+
+**Recovery is data-driven, never sweeper-driven.** The sweeper only ever
+*sets* `stale_at`. An accepted result ingestion (`POST /checks/results`
+or `POST /gateway/{runner}/result`) clears it via
+`gateway/deadman.py::clear_runner_stale` — the only clear path.
+Runner-level derived staleness clears the instant the runner's next
+request re-stamps `last_seen_at`.
+
+**Surfacing contract (#2416 / #2506).** `stale_at IS NOT NULL` maps to
+the `UNKNOWN` state for every check assigned to that runner in the
+five-state rollup #2506 defines (`UNKNOWN → degraded`). This task lands
+the marker + audit trail only; it builds no UI and no rollup — until
+#2416 lands, the flip is observable on the `runner_assignments` row and
+in the `gateway.runner.stale` audit path.
+
+**Settings.** `GATEWAY_DEADMAN_ENABLED` (default `true` — that is what
+"mandatory" means: a runner cannot opt out of heartbeating because the
+stamp is a request side effect, and central enforcement is on by
+default), `GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS` (default 30),
+`GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER` (default 3).
+
 ## Dependencies
 
 - `httpx` (already a direct backend dependency) for the poll/report

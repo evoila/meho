@@ -116,6 +116,21 @@ connector-related release-notes line.
   `gateway_command` —
   `backend/src/meho_backplane/operations/gateway_commands.py` (#2500).
 
+### Accessibility — operator-console a11y + soak/keycloak hardening (#2512)
+
+- Fix ~10 real static-analysis findings triaged out of the SonarCloud noise
+  (G0.35-T2): every `<th>` in the topology table head now carries
+  `scope="col"` and the empty action column gets a visually-hidden
+  `<span class="sr-only">Actions</span>`; the connectors review-row
+  custom-description input and the ingest-modal spec-URL repeater input gain
+  accessible names via `aria-label`; the keycloak token parser drops a
+  provably-dead `isinstance` re-check; and `scripts/soak/soak-harness.sh`
+  pins its embedded `uv run` to `--locked` so a stale lockfile fails closed,
+  matching the repo-wide CI posture — `backend/src/meho_backplane/ui/
+  templates/topology/_table_head.html`, `.../connectors/_review_op_row.html`,
+  `.../connectors/_ingest_modal.html`,
+  `backend/src/meho_backplane/connectors/keycloak/connector.py`,
+  `scripts/soak/soak-harness.sh` (#2512).
 ### Gateway — versioned assignment + results ingest API
 
 - Add the central-side ingest + versioned assignment API for the push-only

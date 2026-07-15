@@ -103,6 +103,26 @@ connector-related release-notes line.
   outside `meho_backplane.connectors.*`. Runner chassis only; the central
   assignment/ingest API (#2499) and long-poll command plane (#2498) land
   separately. (#2497)
+### Tooling — SonarCloud scanner-scope hygiene (#2511)
+
+- Stop SonarCloud from misrepresenting the codebase, without hiding real risk
+  (G0.35-T1). Rule-scoped `# NOSONAR(Sxxxx)` comments now mark the 5 by-design
+  CRITICAL TLS lines (`net/tls.py` inspection-only handshake S4423/S4830/S5527;
+  `adapters/http.py` per-target `verify_tls=false` opt-out S5527/S4830), each
+  pointing at the module docstring that justifies it — scoped so only the named
+  rule is muted and future insecure-TLS code still gets flagged.
+  `sonar-project.properties` gains `sonar.coverage.exclusions=**/*_test.go,
+  scripts/**` (coverage denominator only — issues still analyzed), descopes the
+  generated `cli/api/openapi.json` (~27k ncloc) via `sonar.exclusions`, and adds
+  a `go:S1313` test-IP suppression (`t_ip`) that drops the MQR security-impact
+  count from 43 to 12. `quality-gate.yml` now analyzes **main pushes only**
+  (`workflow_run.event == 'push'`), so PR-branch scans no longer overwrite the
+  main analysis; `docs/codebase/sonarcloud.md` is reconciled to the shipped
+  `previous_version` new-code period + push-only trigger — `sonar-project.
+  properties`, `.github/workflows/quality-gate.yml`,
+  `backend/src/meho_backplane/connectors/net/tls.py`,
+  `backend/src/meho_backplane/connectors/adapters/http.py`,
+  `docs/codebase/sonarcloud.md` (#2511).
 
 ## [0.22.0] - 2026-07-13
 

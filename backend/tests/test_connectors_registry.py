@@ -346,6 +346,14 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     scheduler_enabled=False,
                     agent_run_reaper_enabled=False,
                     event_drain_enabled=False,
+                    # Initiative #2415 (#2501) added the gateway dead-man
+                    # sweeper, gated on GATEWAY_DEADMAN_ENABLED (default on).
+                    # Pin it off (a bare MagicMock attribute is truthy, so
+                    # without this the gate reads True and the real
+                    # start_gateway_deadman_sweeper runs _sweeper_loop, which
+                    # hits the real get_settings() -> KeyError on
+                    # KEYCLOAK_ISSUER_URL, since this test pins no env).
+                    gateway_deadman_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -382,6 +390,9 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # back into this env-free test.
                 start_approval_expiry_sweeper=MagicMock(),
                 stop_approval_expiry_sweeper=AsyncMock(),
+                # #2501 gateway dead-man sweeper — same defensive patch.
+                start_gateway_deadman_sweeper=MagicMock(),
+                stop_gateway_deadman_sweeper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),
@@ -448,6 +459,11 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     scheduler_enabled=False,
                     agent_run_reaper_enabled=False,
                     event_drain_enabled=False,
+                    # #2501 gateway dead-man sweeper — pin off; a bare
+                    # MagicMock attribute is truthy, which would start the
+                    # real sweeper and KeyError on KEYCLOAK_ISSUER_URL (this
+                    # env-free test pins no env). Same shape as the sibling.
+                    gateway_deadman_enabled=False,
                 ),
             ),
             patch("meho_backplane.main.start_memory_expiry_sweeper"),
@@ -481,6 +497,9 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # sweeper can never start in this env-free test.
                 start_approval_expiry_sweeper=MagicMock(),
                 stop_approval_expiry_sweeper=AsyncMock(),
+                # #2501 gateway dead-man sweeper — same defensive patch.
+                start_gateway_deadman_sweeper=MagicMock(),
+                stop_gateway_deadman_sweeper=AsyncMock(),
                 load_catalog=MagicMock(),
                 validate_catalog_registry_coverage=MagicMock(),
                 stamp_catalog_profiled_connectors=AsyncMock(),

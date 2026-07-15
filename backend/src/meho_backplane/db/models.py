@@ -3625,6 +3625,21 @@ class RunnerPrincipal(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+    # #2501 dead-man switch. Refreshed on every authenticated runner-plane
+    # request (the single choke-point is
+    # :func:`~meho_backplane.auth.runner_guard.assert_runner_scope`) on the
+    # central clock, never a client-supplied value -- the exact discipline
+    # ``web_session.last_seen_at`` follows (``models.py`` above). The central
+    # dead-man sweeper flips a runner's workloads stale once this falls behind
+    # ``gateway_runner_stale_after_multiplier x GATEWAY_LONGPOLL_MAX_WAIT_SECONDS``.
+    # ``0061`` carries the ``NOT NULL`` server-default ``now()`` so pre-existing
+    # and freshly-registered rows are initialised; the ORM ``default`` supplies
+    # the tz-aware value on ORM inserts.
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
 
     __table_args__ = (
         Index(
@@ -3638,6 +3653,13 @@ class RunnerPrincipal(Base):
             "runner_principal_keycloak_client_id_idx",
             "keycloak_client_id",
             unique=True,
+            postgresql_using="btree",
+        ),
+        # Backs the dead-man sweeper's ``last_seen_at < cutoff`` scan (#2501);
+        # index-rationale mould: ``web_session_expires_at_idx``.
+        Index(
+            "runner_principal_last_seen_at_idx",
+            "last_seen_at",
             postgresql_using="btree",
         ),
     )
@@ -3709,6 +3731,20 @@ class RunnerAssignmentRow(Base):
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(UTC),
+    )
+    # #2501 dead-man flip marker. ``NULL`` = fresh; non-``NULL`` = the moment
+    # the central sweeper declared this runner's workloads unknown (its
+    # ``runner_principal.last_seen_at`` fell behind
+    # ``multiplier x GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`` on the central clock).
+    # Per-runner granularity (one assignment row per ``(tenant_id,
+    # runner_name)``); an accepted result ingestion clears it, the sweeper
+    # only ever sets it. Timestamp-marker shape mirrors
+    # ``web_session.revoked_at`` (NULL = active). ``stale_at IS NOT NULL``
+    # maps to the ``UNKNOWN`` state in #2416's five-state rollup (#2506).
+    stale_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
     )
 
     __table_args__ = (

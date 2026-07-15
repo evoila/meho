@@ -68,6 +68,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.runner_guard import assert_runner_scope, require_runner
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GatewayCommand, GatewayCommandStatus
+from meho_backplane.gateway.deadman import clear_runner_stale
 from meho_backplane.gateway.queue import (
     GATEWAY_LONGPOLL_DEFAULT_WAIT_SECONDS,
     GATEWAY_LONGPOLL_MAX_WAIT_SECONDS,
@@ -274,6 +275,10 @@ async def report_command_result(
                 result=body.result,
                 error=body.error,
             )
+            # Recovery clear seam (#2501): an accepted command result proves
+            # the runner is alive and reporting, so reset any dead-man flip
+            # marker the central sweeper set (sweeper only flips; this clears).
+            await clear_runner_stale(session, tenant_id=operator.tenant_id, runner_name=runner)
             ack = GatewayResultAck(
                 command_id=command.id,
                 status=command.status,

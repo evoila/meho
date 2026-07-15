@@ -91,21 +91,36 @@ from typing import Final
 from uuid import uuid4
 
 import structlog
-from fastapi import Depends
+from fastapi import Depends, HTTPException, Request, status
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from meho_backplane.auth.jwt import verify_jwt
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.metrics import HTTP_REQUESTS_TOTAL
 from meho_backplane.tenancy import ensure_tenant
 
 __all__ = [
+    "RUNNER_ALLOWED_PATH_PREFIXES",
     "SENSITIVE_HEADERS",
     "BroadcastDetailMiddleware",
     "RequestContextMiddleware",
     "verify_jwt_and_bind",
 ]
+
+#: Path-prefix allowlist for ``principal_kind=runner`` tokens (Initiative
+#: #2415, #2502). A runner is a dumb, push-only executor with a read-only
+#: credential scope: its token may reach **only** the outbound gateway
+#: command plane (#2498, mounted under ``/api/v1/gateway/``) and the
+#: assignment / result-ingest API (#2499, mounted under ``/api/v1/checks/``);
+#: :func:`verify_jwt_and_bind` fail-closed 403s a runner token on every
+#: other authenticated REST route. The two sibling tasks that build those
+#: routes MUST mount them under these prefixes. Kept here — the single
+#: authenticated-route seam — so the cage and the allowlist live together.
+RUNNER_ALLOWED_PATH_PREFIXES: Final[tuple[str, ...]] = (
+    "/api/v1/gateway/",
+    "/api/v1/checks/",
+)
 
 #: Lower-cased header names whose values must never appear in logs or
 #: metrics. The set is intentionally tiny — every entry is paid for in
@@ -342,7 +357,36 @@ class BroadcastDetailMiddleware:
         await self.app(scope, receive, send)
 
 
+def _reject_runner_outside_gateway(operator: Operator, request: Request) -> None:
+    """Fail-closed 403 a runner-kind token off the gateway allowlist (Initiative #2415, #2502).
+
+    A ``principal_kind=runner`` token is a dumb, push-only executor with a
+    read-only credential scope. It is accepted only on the gateway allowlist
+    prefixes (:data:`RUNNER_ALLOWED_PATH_PREFIXES`) that the outbound command
+    plane (#2498) and assignment API (#2499) mount under; every other
+    authenticated REST route is 403 ``runner_scope_violation``. Keyed on the
+    unforgeable ``principal_kind`` discriminator (a hardcoded Keycloak
+    mapper), so a runner client that lost any other mapper still cannot roam
+    the read API — the fail-open silent-carve-out failure #2489 documents.
+    A no-op for every non-runner principal.
+    """
+    if operator.principal_kind is PrincipalKind.RUNNER and not request.url.path.startswith(
+        RUNNER_ALLOWED_PATH_PREFIXES
+    ):
+        structlog.get_logger(__name__).warning(
+            "runner_scope_violation",
+            operator_sub=operator.sub,
+            path=request.url.path,
+            surface="rest",
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="runner_scope_violation",
+        )
+
+
 async def verify_jwt_and_bind(
+    request: Request,
     operator: Operator = Depends(verify_jwt),
 ) -> Operator:
     """Validate the Bearer token and bind ``operator_sub`` + ``tenant_id``.
@@ -422,6 +466,10 @@ async def verify_jwt_and_bind(
         tenant_id=str(operator.tenant_id),
         target_id=None,  # slot; resolve_target mutates on success (G0.3-T4)
     )
+    # Negative runner cage: runs after contextvar binding so a 403 is
+    # attributable in the audit trail, and before tenant seeding so a caged
+    # request does no DB write. See :func:`_reject_runner_outside_gateway`.
+    _reject_runner_outside_gateway(operator, request)
     async with get_sessionmaker()() as session, session.begin():
         await ensure_tenant(operator.tenant_id, session)
     return operator

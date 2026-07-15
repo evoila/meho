@@ -92,6 +92,9 @@ from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_reti
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
+from meho_backplane.api.v1.runner_principals import (
+    router as api_v1_runner_principals_router,
+)
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
@@ -879,6 +882,14 @@ app.include_router(api_v1_agents_router)
 # Reads gated to operator+; writes gated to tenant_admin.
 # Tenant-scoped via the JWT; cross-tenant probes return 404.
 app.include_router(api_v1_agent_principals_router)
+# Initiative #2415 (#2502) -- runner-principal lifecycle (register / list /
+# show / revoke). register creates a Keycloak client tagged kind=runner
+# (principal_kind=runner, tenant_role=read_only, hardcoded runner_id) + a DB
+# row; revoke disables the client (kill switch) + marks the row revoked.
+# Reads gated to operator+; writes gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. The minted runner token is caged
+# to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_runner_principals_router)
 # G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
 # (list, paginated, operator-level), POST /scheduler/triggers (create,
 # tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).

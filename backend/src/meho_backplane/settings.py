@@ -265,6 +265,16 @@ class Settings(BaseModel):
         token and every agent / service principal is non-platform-admin
         unless a realm explicitly grants the claim. Override only when
         the realm exposes the flag under a different attribute.
+    jwt_runner_id_claim_name:
+        Name of the JWT claim that carries a satellite runner principal's
+        row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
+        the hardcoded ``runner_id`` mapper the ``meho runner-principal
+        register`` path stamps on the runner client. The claim is
+        **optional** at extraction — user / service / agent tokens carry
+        no claim and resolve to ``runner_id=None``; a ``principal_kind=
+        runner`` token *without* it is rejected 401
+        (``missing_runner_id_claim``). Override only when the realm
+        exposes the id under a different attribute.
     keycloak_admin_url:
         Base URL of the Keycloak Admin REST API for the realm managing
         MEHO principals, e.g.
@@ -876,6 +886,7 @@ class Settings(BaseModel):
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
+    jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
     keycloak_admin_client_secret: str = Field(default="", repr=False)
@@ -1509,6 +1520,10 @@ def get_settings() -> Settings:
         jwt_platform_admin_claim_name=os.environ.get(
             "JWT_PLATFORM_ADMIN_CLAIM_NAME",
             "platform_admin",
+        ),
+        jwt_runner_id_claim_name=os.environ.get(
+            "JWT_RUNNER_ID_CLAIM_NAME",
+            "runner_id",
         ),
         keycloak_admin_url=os.environ.get("KEYCLOAK_ADMIN_URL", "").strip(),
         keycloak_admin_client_id=os.environ.get("KEYCLOAK_ADMIN_CLIENT_ID", "").strip(),

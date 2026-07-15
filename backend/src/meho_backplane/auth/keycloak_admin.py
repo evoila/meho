@@ -147,8 +147,10 @@ def _agent_protocol_mappers(
     audience: str,
     tenant_id: str,
     tenant_role: str,
+    principal_kind: str = "agent",
+    extra_hardcoded_claims: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the protocol mappers an agent client needs to authenticate.
+    """Return the protocol mappers a MEHO principal client needs to authenticate.
 
     Clones the mapper set the working ``meho-backplane`` client / the
     ``agent:test-bot`` integration-realm fixture carry (#1487):
@@ -158,10 +160,21 @@ def _agent_protocol_mappers(
       arbitrary audience on a ``client_credentials`` token — the RFC 8707
       request param is ignored without a configured mapper);
     * hardcoded-claim mappers for ``tenant_id`` / ``tenant_role`` and
-      ``principal_kind=agent`` so the Operator chain resolves the agent's
-      tenant scope and ``PrincipalKind.AGENT`` discriminator.
+      ``principal_kind`` so the Operator chain resolves the principal's
+      tenant scope and its :class:`~meho_backplane.auth.operator.PrincipalKind`
+      discriminator.
+
+    Parametrised for Initiative #2415 (#2502): *principal_kind* defaults to
+    ``"agent"`` and *extra_hardcoded_claims* to ``None`` so the agent
+    call site is **byte-for-byte unchanged**. The runner-principal register
+    path passes ``principal_kind="runner"`` and
+    ``extra_hardcoded_claims={"runner_id": "<uuid>"}`` — the ``runner_id``
+    stamp is what the negative route cage and gateway guard bind on, and
+    hardcoding it (not accepting it from the token request) is what makes
+    the cage unforgeable. Each extra claim ``k`` becomes a hardcoded-claim
+    mapper named ``<k-with-dashes>-claim``.
     """
-    return [
+    mappers: list[dict[str, Any]] = [
         {
             "name": "audience-mapper",
             "protocol": "openid-connect",
@@ -174,8 +187,58 @@ def _agent_protocol_mappers(
         },
         _hardcoded_claim_mapper("tenant-id-claim", "tenant_id", tenant_id),
         _hardcoded_claim_mapper("tenant-role-claim", "tenant_role", tenant_role),
-        _hardcoded_claim_mapper("principal-kind-claim", "principal_kind", "agent"),
+        _hardcoded_claim_mapper("principal-kind-claim", "principal_kind", principal_kind),
     ]
+    for claim_name, claim_value in (extra_hardcoded_claims or {}).items():
+        mapper_name = f"{claim_name.replace('_', '-')}-claim"
+        mappers.append(_hardcoded_claim_mapper(mapper_name, claim_name, claim_value))
+    return mappers
+
+
+def _client_create_representation(
+    *,
+    client_id: str,
+    name: str,
+    tenant_id: str,
+    owner_sub: str,
+    audience: str,
+    tenant_role: str,
+    principal_kind: str,
+    kind_attribute: str,
+    extra_hardcoded_claims: dict[str, str] | None,
+) -> dict[str, Any]:
+    """Build the Keycloak client representation :meth:`create_client` POSTs.
+
+    A confidential service-account client (``serviceAccountsEnabled=true``,
+    ``publicClient=false``, no browser flows) carrying the ``kind`` attribute,
+    the audience + tenant/kind/extra hardcoded-claim mappers, and the realm
+    default client scopes that carry ``sub``. Split out of
+    :meth:`KeycloakAdminClient.create_client` so the representation shape is
+    a testable unit distinct from the HTTP transport.
+    """
+    return {
+        "clientId": client_id,
+        "name": name,
+        "enabled": True,
+        "publicClient": False,
+        "serviceAccountsEnabled": True,
+        "standardFlowEnabled": False,
+        "implicitFlowEnabled": False,
+        "directAccessGrantsEnabled": False,
+        "attributes": {
+            "kind": kind_attribute,
+            "tenant_id": tenant_id,
+            "owner_sub": owner_sub,
+        },
+        "protocolMappers": _agent_protocol_mappers(
+            audience=audience,
+            tenant_id=tenant_id,
+            tenant_role=tenant_role,
+            principal_kind=principal_kind,
+            extra_hardcoded_claims=extra_hardcoded_claims,
+        ),
+        "defaultClientScopes": list(_AGENT_DEFAULT_CLIENT_SCOPES),
+    }
 
 
 class KeycloakAdminClient:
@@ -318,8 +381,11 @@ class KeycloakAdminClient:
         owner_sub: str,
         audience: str,
         tenant_role: str,
+        principal_kind: str = "agent",
+        kind_attribute: str = "agent",
+        extra_hardcoded_claims: dict[str, str] | None = None,
     ) -> str:
-        """Register a new Keycloak client tagged ``kind=agent``.
+        """Register a new Keycloak client for a MEHO principal.
 
         Returns the Keycloak-assigned *internal* UUID (the ``id`` field in
         the representation, distinct from the OAuth ``clientId``). The
@@ -331,30 +397,29 @@ class KeycloakAdminClient:
         service-account** (``serviceAccountsEnabled=true``,
         ``publicClient=false``) with no redirect URIs — it authenticates
         via ``client_credentials`` and never involves a browser. Custom
-        attributes ``kind=agent``, ``tenant_id``, ``owner_sub`` are added
-        so the realm admin console and IaC tooling can identify agent clients.
+        attributes ``kind=<kind_attribute>``, ``tenant_id``, ``owner_sub``
+        are added so the realm admin console and IaC tooling can identify
+        the client's kind.
 
-        Token-claim provisioning (the fix for #1487): the client is created
-        with the **same** protocol-mapper + default-client-scope set the
-        working ``meho-backplane`` client carries, so its
+        Parametrised for Initiative #2415 (#2502): *principal_kind*,
+        *kind_attribute*, and *extra_hardcoded_claims* all default to the
+        agent shape (``"agent"`` / ``"agent"`` / no extra claims), so the
+        agent-principal register path is unchanged byte-for-byte. The
+        runner-principal register path passes ``principal_kind="runner"``,
+        ``kind_attribute="runner"``, ``tenant_role="read_only"``, and
+        ``extra_hardcoded_claims={"runner_id": "<uuid>"}``.
+
+        Token-claim provisioning (the fix for #1487): the representation is
+        built by :func:`_client_create_representation` with the audience +
+        tenant/kind/extra hardcoded-claim mappers
+        (:func:`_agent_protocol_mappers`) and the realm default client scopes
+        (:data:`_AGENT_DEFAULT_CLIENT_SCOPES`) that carry ``sub`` — the same
+        set the working ``meho-backplane`` client carries — so the
         ``client_credentials`` token validates through
         :func:`~meho_backplane.auth.jwt.verify_jwt_for_audience` with no
-        manual Keycloak surgery. Without these, a scheduled agent run dies
-        at JWT verify (pre-dispatch) because the token lacks ``aud``
-        (``missing_audience``), ``sub`` (carried by the ``basic`` scope's
-        subject mapper — Keycloak 25+ moved it out of the hardcoded path),
-        and the ``tenant_id`` / ``tenant_role`` claims the Operator chain
-        requires:
-
-        * an ``oidc-audience-mapper`` stamping *audience* into ``aud`` —
-          stock Keycloak does **not** honour the RFC 8707 ``audience``
-          request param on a ``client_credentials`` grant without this
-          mapper, so requesting the audience at mint time is not enough;
-        * ``oidc-hardcoded-claim-mapper`` rows for ``tenant_id`` /
-          ``tenant_role`` / ``principal_kind=agent`` (the same shape the
-          live-Keycloak integration realm injects on ``agent:test-bot``);
-        * the realm default client scopes
-          (:data:`_AGENT_DEFAULT_CLIENT_SCOPES`) that carry ``sub``.
+        manual Keycloak surgery (without them the token would lack ``aud`` /
+        ``sub`` / ``tenant_id`` / ``tenant_role`` and 401 at pre-dispatch
+        verify).
 
         Raises :class:`KeycloakClientConflictError` when a client with the
         same ``clientId`` already exists (Keycloak 409).
@@ -362,27 +427,17 @@ class KeycloakAdminClient:
         assert self._http is not None
         assert self._token
         log = structlog.get_logger(__name__)
-        payload: dict[str, Any] = {
-            "clientId": client_id,
-            "name": name,
-            "enabled": True,
-            "publicClient": False,
-            "serviceAccountsEnabled": True,
-            "standardFlowEnabled": False,
-            "implicitFlowEnabled": False,
-            "directAccessGrantsEnabled": False,
-            "attributes": {
-                "kind": "agent",
-                "tenant_id": tenant_id,
-                "owner_sub": owner_sub,
-            },
-            "protocolMappers": _agent_protocol_mappers(
-                audience=audience,
-                tenant_id=tenant_id,
-                tenant_role=tenant_role,
-            ),
-            "defaultClientScopes": list(_AGENT_DEFAULT_CLIENT_SCOPES),
-        }
+        payload = _client_create_representation(
+            client_id=client_id,
+            name=name,
+            tenant_id=tenant_id,
+            owner_sub=owner_sub,
+            audience=audience,
+            tenant_role=tenant_role,
+            principal_kind=principal_kind,
+            kind_attribute=kind_attribute,
+            extra_hardcoded_claims=extra_hardcoded_claims,
+        )
         try:
             resp = await self._http.post(
                 f"{self._admin_url}/clients",

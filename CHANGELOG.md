@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — scoped runner principal (gateway v1)
+
+- Add the identity substrate of the remote-execution gateway (Initiative
+  #2415): a scoped, **read-only** service principal per satellite runner.
+  New `PrincipalKind.RUNNER` discriminator + a `runner_id` JWT claim on the
+  `Operator` chain (fail-closed pairing — a `principal_kind=runner` token
+  without `runner_id` is 401 `missing_runner_id_claim`; a non-UUID value is
+  401 `malformed_runner_id_claim`). A negative **route cage** in
+  `verify_jwt_and_bind` fail-closed 403s a runner token on every
+  authenticated REST route outside `RUNNER_ALLOWED_PATH_PREFIXES`
+  (`/api/v1/gateway/`, `/api/v1/checks/`), and the MCP surface rejects
+  runner tokens outright — both with the `runner_scope_violation` code. The
+  cage keys on the unforgeable `principal_kind` mapper, not on claim
+  presence, so a mis-provisioned runner client cannot fail open (the #2489
+  lesson). A `require_runner()` dependency + `assert_runner_scope()` helper
+  give the not-yet-built gateway routes (#2498/#2499) a name→`runner_id`
+  binding with no existence oracle. Register/list/show/revoke lifecycle
+  (REST `/api/v1/runner-principals` + `meho runner-principal` Go verbs)
+  moulded on the agent-principal lifecycle (#815): Keycloak-first two-phase
+  with orphan rollback, Keycloak `enabled=false` before the row flips
+  revoked, `runner:<name>` client-id convention, hardcoded
+  `tenant_role=read_only` + `runner_id`=row-id mappers. Migration `0058`
+  creates `runner_principal` (#2502).
 ### Gateway — satellite runner mode (#2415)
 
 - Add a headless, push-only **satellite runner** deploy mode of the

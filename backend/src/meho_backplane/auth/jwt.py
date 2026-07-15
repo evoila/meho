@@ -797,6 +797,44 @@ def _extract_platform_admin(claims: Any, settings: Settings) -> bool:
     return False
 
 
+def _extract_runner_id(claims: Any, settings: Settings) -> UUID | None:
+    """Extract the optional ``runner_id`` claim as a :class:`UUID`.
+
+    Initiative #2415 (#2502): the ``runner_id`` claim carries the
+    satellite runner principal's row UUID. It is **optional** at this
+    layer — a token that carries no claim resolves to ``None`` so every
+    user / service / agent token authenticates unchanged (regression
+    contract). A **present** claim must parse as a UUID; a non-UUID value
+    is rejected 401 (``malformed_runner_id_claim``), mirroring
+    :func:`_extract_tenant_id`'s malformed arm.
+
+    The kind/claim *pairing* — a ``principal_kind=runner`` token that
+    carries no ``runner_id`` — is enforced fail-closed in
+    :func:`_operator_from_claims`, not here, because that check needs the
+    already-extracted principal kind. Keeping this extractor kind-agnostic
+    mirrors the other optional-claim extractors (``capabilities`` /
+    ``platform_admin``) that also do not couple to ``principal_kind``.
+
+    The claim name is configurable via ``JWT_RUNNER_ID_CLAIM_NAME``
+    (default ``runner_id``) so realms that surface the id under a
+    different attribute are accommodated without a code change.
+    """
+    claim_name = settings.jwt_runner_id_claim_name
+    raw = claims.get(claim_name)
+    if raw is None:
+        return None
+    try:
+        return UUID(raw) if isinstance(raw, str) else UUID(str(raw))
+    except (ValueError, TypeError, AttributeError) as exc:
+        log = structlog.get_logger(__name__)
+        log.warning(
+            "malformed_runner_id_claim",
+            claim_name=claim_name,
+            value=raw,
+        )
+        raise _http_401("malformed_runner_id_claim") from exc
+
+
 def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Operator:
     """Project the validated claims into the public :class:`Operator` shape.
 
@@ -848,6 +886,17 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
     principal_kind = _extract_principal_kind(claims, settings)
     capabilities = _extract_capabilities(claims, settings)
     platform_admin = _extract_platform_admin(claims, settings)
+    runner_id = _extract_runner_id(claims, settings)
+    if principal_kind is PrincipalKind.RUNNER and runner_id is None:
+        # Fail-closed pairing (Initiative #2415, #2502): a runner-kind
+        # token with no ``runner_id`` cannot be scoped by the gateway
+        # guard, so it must never materialise. A mis-provisioned runner
+        # client that carries ``principal_kind=runner`` but lost its
+        # ``runner_id`` mapper is rejected here rather than roaming the
+        # gateway with an unbindable identity.
+        log = structlog.get_logger(__name__)
+        log.warning("missing_runner_id_claim", claim_name=settings.jwt_runner_id_claim_name)
+        raise _http_401("missing_runner_id_claim")
     try:
         return Operator(
             sub=sub,
@@ -859,6 +908,7 @@ def _operator_from_claims(claims: Any, raw_jwt: str, settings: Settings) -> Oper
             principal_kind=principal_kind,
             capabilities=capabilities,
             platform_admin=platform_admin,
+            runner_id=runner_id,
         )
     except pydantic.ValidationError as exc:
         raise _http_401("invalid_token") from exc

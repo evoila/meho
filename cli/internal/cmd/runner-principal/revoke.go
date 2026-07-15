@@ -71,6 +71,10 @@ func runRevoke(cmd *cobra.Command, opts revokeOptions) error {
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	entry := resp.JSON200
+	if entry == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("revoke: empty response body"), opts.JSONOut)
+	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}

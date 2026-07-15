@@ -70,6 +70,10 @@ func runShow(cmd *cobra.Command, opts showOptions) error {
 		return renderHTTPStatus(cmd, backplaneURL, resp.StatusCode(), resp.Body, opts.JSONOut)
 	}
 	entry := resp.JSON200
+	if entry == nil {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected("show: empty response body"), opts.JSONOut)
+	}
 	if opts.JSONOut {
 		return output.PrintJSON(cmd.OutOrStdout(), entry)
 	}

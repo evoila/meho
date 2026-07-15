@@ -7221,6 +7221,138 @@
         }
       }
     },
+    "/api/v1/gateway/{runner}/next": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Poll Next Command",
+        "description": "Long-poll for the next command queued for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard):\na runner may only poll its own queue. Holds up to ``wait`` seconds\n(clamped to the exported ceiling) claiming the oldest ``pending``\ncommand; returns ``200`` with the envelope on a claim or ``204`` on\ntimeout. The claim flips the row ``pending -> delivered`` durably.\n\nThe hold opens a fresh short-lived session per attempt and never holds\na DB transaction across the inter-attempt sleep (binding decision\n#2498-2). A client disconnect cancels the handler; the\n``CancelledError`` is logged and re-raised per the asyncio contract.",
+        "operationId": "poll_next_command_api_v1_gateway__runner__next_get",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected \u2014 the runner asking for a longer hold gets a bounded one.",
+              "default": 25,
+              "title": "Wait"
+            },
+            "description": "Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected \u2014 the runner asking for a longer hold gets a bounded one."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A command was claimed; the envelope is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayCommandEnvelope"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No command became claimable before the wait deadline."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/{runner}/result": {
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Report Command Result",
+        "description": "Report the outcome of a delivered command for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard).\nFlips the command ``delivered -> succeeded|failed``, stamping the\nresult/error and ``completed_at``. Returns ``200`` with an ack; ``404``\nwhen the command id is unknown or was enqueued for another runner /\ntenant (no existence oracle); ``409`` when the command is not\n``delivered`` (a duplicate report or a never-claimed row).",
+        "operationId": "report_command_result_api_v1_gateway__runner__result_post",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GatewayResultBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayResultAck"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/checks/assignment/{runner}": {
       "put": {
         "tags": [
@@ -23148,6 +23280,104 @@
         ],
         "title": "ForkInfo",
         "description": "Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
+      },
+      "GatewayCommandEnvelope": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "target_descriptor": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Target Descriptor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "op_id",
+          "params",
+          "target_descriptor"
+        ],
+        "title": "GatewayCommandEnvelope",
+        "description": "The claimed-command envelope returned by ``GET .../next`` (200)."
+      },
+      "GatewayResultAck": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Command Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "completed_at": {
+            "type": "string",
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "command_id",
+          "status",
+          "completed_at"
+        ],
+        "title": "GatewayResultAck",
+        "description": "Response for a successful ``.../result`` report (200)."
+      },
+      "GatewayResultBody": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Command Id",
+            "description": "The delivered command's id."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed"
+            ],
+            "title": "Outcome",
+            "description": "Terminal outcome to record for the command."
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Result",
+            "description": "Structured success payload (for a 'succeeded' outcome)."
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error",
+            "description": "Failure summary (for a 'failed' outcome)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "command_id",
+          "outcome"
+        ],
+        "title": "GatewayResultBody",
+        "description": "POST body for ``.../result`` \u2014 the runner's outcome report."
       },
       "GraphEdgeKind": {
         "type": "string",

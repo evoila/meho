@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0059_create_runner_assignment_tables``.
+"""Behavioural tests for Alembic migration ``0060_create_runner_assignment_tables``.
 
 Initiative #2415, Task #2499. Creates the two gateway-owned tables —
 ``runner_assignments`` (one authored document per runner) and
 ``runner_check_results`` (ingested execution reports). The **third**
-migration in the initiative's serialized chain; extends the then-current
-single head ``0058`` (``runner_principal``).
+migration in the initiative's serialized chain; renumbered 0059->0060 at
+drain time to sit after the sibling #2498 ``gateway_command`` migration, so
+it now extends the then-current single head ``0059`` (``gateway_command``).
 
 **Idempotency pinning (0049/0050/0053/0055/0057/0058 footgun).** Every
 forward / round-trip / stamp-replay step targets this migration's **own**
-revision (``0059``) and its ``down_revision`` (``0058``), never ``head`` —
+revision (``0060``) and its ``down_revision`` (``0059``), never ``head`` —
 so a future head migration cannot make ``upgrade("head")`` re-run these
 ``create_table`` calls on a schema that already has them. SQLite drives the
 test and the migration uses only generic DDL, so PG parity holds.
@@ -32,8 +33,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0059"
-_DOWN_REVISION = "0058"
+_REVISION = "0060"
+_DOWN_REVISION = "0059"
 
 _ASSIGNMENTS_TABLE = "runner_assignments"
 _RESULTS_TABLE = "runner_check_results"
@@ -145,7 +146,7 @@ def _table_sql(sync_url: str, table: str) -> str:
 
 
 def test_upgrade_creates_both_tables(alembic_cfg: tuple[Config, str]) -> None:
-    """``upgrade 0059`` creates both gateway tables with the full column sets."""
+    """``upgrade 0060`` creates both gateway tables with the full column sets."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
 
@@ -182,10 +183,10 @@ def test_results_status_check_constraint(alembic_cfg: tuple[Config, str]) -> Non
 def test_stamp_down_revision_then_upgrade_is_idempotent(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """Stamp ``0058`` then upgrade to ``0059`` — pinned to own revisions, never ``head``.
+    """Stamp ``0059`` then upgrade to ``0060`` — pinned to own revisions, never ``head``.
 
     Builds the schema through the parent revision, stamps the version table
-    to ``0058``, then replays **only** this migration to its own revision.
+    to ``0059``, then replays **only** this migration to its own revision.
     A future head migration cannot make this step re-run the ``create_table``
     on an already-migrated schema, since no leg targets ``"head"``.
     """
@@ -199,7 +200,7 @@ def test_stamp_down_revision_then_upgrade_is_idempotent(
 
 
 def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade "0058"`` drops both tables; ``upgrade "0059"`` recreates them.
+    """``downgrade "0059"`` drops both tables; ``upgrade "0060"`` recreates them.
 
     Pinned to this migration's own revision on both legs (never ``head``).
     """

@@ -157,7 +157,7 @@ set +e
   OP="$OP" CONNECTOR="$CONNECTOR" EVIDENCE_DIR="$EVIDENCE_DIR" \
   IDEMPOTENT="$IDEMPOTENT" SOAK_CLEAN="$SOAK_CLEAN" \
   EXPLAINED_FILE="$EXPLAINED_FILE" REPORT="$REPORT" \
-  uv run python - <<'PY'
+  uv run --locked python - <<'PY'
 import json
 import os
 from pathlib import Path

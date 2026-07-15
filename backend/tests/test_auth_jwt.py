@@ -1183,3 +1183,126 @@ def test_existing_tenant_claim_paths_unchanged_by_decode_stage_codes() -> None:
             )
         assert response.status_code == 401
         assert response.json() == {"detail": expected_detail}
+
+
+# ---------------------------------------------------------------------------
+# runner_id claim extraction (Initiative #2415, #2502)
+# ---------------------------------------------------------------------------
+
+import uuid as _uuid  # noqa: E402
+
+from meho_backplane.auth.operator import PrincipalKind  # noqa: E402
+
+
+def _build_runner_probe_app() -> FastAPI:
+    """App exposing one ``verify_jwt``-protected route that echoes runner fields.
+
+    ``verify_jwt`` (not ``verify_jwt_and_bind``) is used deliberately: this
+    suite exercises **claim extraction**, so it must be isolated from the
+    negative route cage that ``verify_jwt_and_bind`` layers on top.
+    """
+    app = FastAPI()
+
+    @app.get("/whoami-runner")
+    async def whoami_runner(operator: Operator = Depends(verify_jwt)) -> dict[str, Any]:
+        return {
+            "principal_kind": operator.principal_kind.value,
+            "runner_id": str(operator.runner_id) if operator.runner_id is not None else None,
+        }
+
+    return app
+
+
+def test_runner_kind_token_populates_principal_kind_and_runner_id() -> None:
+    """A ``principal_kind=runner`` + UUID ``runner_id`` token materialises both fields."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    runner_id = str(_uuid.uuid4())
+    token = _mint_token(
+        key,
+        extra_claims={"principal_kind": "runner", "runner_id": runner_id},
+    )
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_runner_probe_app())
+        response = client.get(
+            "/whoami-runner",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["principal_kind"] == PrincipalKind.RUNNER.value
+    assert body["runner_id"] == runner_id
+
+
+def test_runner_kind_token_without_runner_id_returns_401(log_buffer: io.StringIO) -> None:
+    """A runner-kind token carrying no ``runner_id`` fails closed with telemetry."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(key, extra_claims={"principal_kind": "runner"})
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_runner_probe_app())
+        response = client.get(
+            "/whoami-runner",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "missing_runner_id_claim"}
+    _assert_event_logged(log_buffer, "missing_runner_id_claim", claim_name="runner_id")
+
+
+def test_runner_kind_token_malformed_runner_id_returns_401(log_buffer: io.StringIO) -> None:
+    """A runner-kind token with a non-UUID ``runner_id`` is ``malformed_runner_id_claim``."""
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(
+        key,
+        extra_claims={"principal_kind": "runner", "runner_id": "not-a-uuid"},
+    )
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_runner_probe_app())
+        response = client.get(
+            "/whoami-runner",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "malformed_runner_id_claim"}
+    _assert_event_logged(log_buffer, "malformed_runner_id_claim", claim_name="runner_id")
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [None, {"principal_kind": "service"}, {"principal_kind": "agent"}],
+)
+def test_non_runner_tokens_authenticate_with_runner_id_none(extra: dict[str, str] | None) -> None:
+    """User / service / agent tokens (no ``runner_id``) authenticate with ``runner_id is None``.
+
+    Regression guard: the optional ``runner_id`` extractor must not disturb
+    any non-runner token — the missing-claim pairing only fires for
+    ``principal_kind=runner``.
+    """
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(key, extra_claims=extra)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(_build_runner_probe_app())
+        response = client.get(
+            "/whoami-runner",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    expected_kind = extra["principal_kind"] if extra else PrincipalKind.USER.value
+    assert body["principal_kind"] == expected_kind
+    assert body["runner_id"] is None

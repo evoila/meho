@@ -218,7 +218,7 @@ def _parse_token_response(payload: Any) -> tuple[str, float]:
     token = payload.get("access_token") if isinstance(payload, dict) else None
     if not isinstance(token, str) or not token:
         raise KeycloakAdminTokenError("token response carried no usable 'access_token' field")
-    expires_in = payload.get("expires_in") if isinstance(payload, dict) else None
+    expires_in = payload.get("expires_in")
     ttl = float(expires_in) if isinstance(expires_in, (int, float)) else _DEFAULT_TOKEN_TTL_SECONDS
     effective = max(1.0, ttl - _TOKEN_REFRESH_MARGIN_SECONDS)
     return token, effective

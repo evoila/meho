@@ -39,6 +39,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/pfsense"
 	"github.com/evoila/meho/cli/internal/cmd/retrieval"
 	"github.com/evoila/meho/cli/internal/cmd/runbook"
+	runnerprincipal "github.com/evoila/meho/cli/internal/cmd/runner-principal"
 	"github.com/evoila/meho/cli/internal/cmd/scheduler"
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/secret"
@@ -237,6 +238,16 @@ func newRootCmd() *cobra.Command {
 	// before registerDynamicSubcommands so the backplane manifest
 	// cannot shadow the built-in `agent-principal` parent.
 	root.AddCommand(agentprincipal.NewRootCmd())
+
+	// Initiative #2415 (#2502) -- runner-principal lifecycle verbs (list /
+	// show / register / revoke) for the remote-execution gateway. Wraps the
+	// four /api/v1/runner-principals routes. register creates a Keycloak
+	// client tagged kind=runner (principal_kind=runner, tenant_role=read_only)
+	// + a DB row; revoke disables the client (kill switch). Read verbs are
+	// operator-level; write verbs require tenant_admin. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot shadow the
+	// built-in `runner-principal` parent.
+	root.AddCommand(runnerprincipal.NewRootCmd())
 
 	// G11.2-T5 (#818) -- approval surfacing channel verbs (list / show /
 	// approve / reject) for Initiative #803. Wraps the merged T4/T5 REST

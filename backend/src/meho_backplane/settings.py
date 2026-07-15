@@ -265,6 +265,16 @@ class Settings(BaseModel):
         token and every agent / service principal is non-platform-admin
         unless a realm explicitly grants the claim. Override only when
         the realm exposes the flag under a different attribute.
+    jwt_runner_id_claim_name:
+        Name of the JWT claim that carries a satellite runner principal's
+        row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
+        the hardcoded ``runner_id`` mapper the ``meho runner-principal
+        register`` path stamps on the runner client. The claim is
+        **optional** at extraction — user / service / agent tokens carry
+        no claim and resolve to ``runner_id=None``; a ``principal_kind=
+        runner`` token *without* it is rejected 401
+        (``missing_runner_id_claim``). Override only when the realm
+        exposes the id under a different attribute.
     keycloak_admin_url:
         Base URL of the Keycloak Admin REST API for the realm managing
         MEHO principals, e.g.
@@ -876,6 +886,7 @@ class Settings(BaseModel):
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
+    jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
     keycloak_admin_client_secret: str = Field(default="", repr=False)
@@ -1063,6 +1074,21 @@ class Settings(BaseModel):
     agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
     agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
+    # Initiative #2415 (#2501) -- gateway runner dead-man switch. Same
+    # opt-out shape as AGENT_RUN_REAPER_ENABLED, but default-on is what
+    # "mandatory" means: a runner cannot opt out of heartbeating (the stamp
+    # is a request side effect) and central enforcement is on by default.
+    # The stale threshold is ``gateway_runner_stale_after_multiplier x
+    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`` (30s) -- default 3x = 90s. It must
+    # clear the runner's real idle cadence: the runner fetches its assignment
+    # every ``tick_interval_seconds`` (#2499, default 60s), re-stamping
+    # last_seen_at each tick even when idle, so 90s > 60s leaves ~1.5 poll
+    # cadences of slack. Invariant: keep multiplier x
+    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS >= the runner tick_interval_seconds
+    # or a healthy idle runner false-trips.
+    gateway_deadman_enabled: bool = True
+    gateway_deadman_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    gateway_runner_stale_after_multiplier: int = Field(default=3, ge=1, le=100)
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -1510,6 +1536,10 @@ def get_settings() -> Settings:
             "JWT_PLATFORM_ADMIN_CLAIM_NAME",
             "platform_admin",
         ),
+        jwt_runner_id_claim_name=os.environ.get(
+            "JWT_RUNNER_ID_CLAIM_NAME",
+            "runner_id",
+        ),
         keycloak_admin_url=os.environ.get("KEYCLOAK_ADMIN_URL", "").strip(),
         keycloak_admin_client_id=os.environ.get("KEYCLOAK_ADMIN_CLIENT_ID", "").strip(),
         keycloak_admin_client_secret=os.environ.get("KEYCLOAK_ADMIN_CLIENT_SECRET", "").strip(),
@@ -1649,6 +1679,15 @@ def get_settings() -> Settings:
         ),
         agent_run_lease_ttl_seconds=int(
             os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
+        gateway_deadman_enabled=parse_bool_env(
+            os.environ.get("GATEWAY_DEADMAN_ENABLED", "true"),
+        ),
+        gateway_deadman_tick_interval_seconds=int(
+            os.environ.get("GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        gateway_runner_stale_after_multiplier=int(
+            os.environ.get("GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER", "3"),
         ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),

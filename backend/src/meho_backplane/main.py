@@ -73,6 +73,7 @@ from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_route
 from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
+from meho_backplane.api.v1.checks import router as api_v1_checks_router
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -82,6 +83,7 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
+from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
@@ -92,6 +94,9 @@ from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_reti
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
+from meho_backplane.api.v1.runner_principals import (
+    router as api_v1_runner_principals_router,
+)
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
@@ -114,6 +119,10 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.gateway.deadman import (
+    start_gateway_deadman_sweeper,
+    stop_gateway_deadman_sweeper,
+)
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -434,6 +443,7 @@ class _BackgroundTasks:
     scheduler: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
+    gateway_deadman: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -493,6 +503,14 @@ def _start_background_tasks() -> _BackgroundTasks:
     event_drain: asyncio.Task[None] | None = None
     if settings.event_drain_enabled:
         event_drain = start_event_drain()
+    # Initiative #2415 (#2501) — gateway runner dead-man switch. Gated on
+    # GATEWAY_DEADMAN_ENABLED; default-on is what "mandatory" means (a
+    # runner cannot opt out of heartbeating — the stamp is a request side
+    # effect — so central enforcement is on by default). Operators running
+    # an external liveness sweep can disable the in-tree one via the flag.
+    gateway_deadman: asyncio.Task[None] | None = None
+    if settings.gateway_deadman_enabled:
+        gateway_deadman = start_gateway_deadman_sweeper()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
@@ -502,6 +520,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         scheduler=scheduler,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
+        gateway_deadman=gateway_deadman,
     )
 
 
@@ -513,6 +532,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.gateway_deadman is not None:
+        await stop_gateway_deadman_sweeper(tasks.gateway_deadman)
     if tasks.event_drain is not None:
         await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:
@@ -879,6 +900,30 @@ app.include_router(api_v1_agents_router)
 # Reads gated to operator+; writes gated to tenant_admin.
 # Tenant-scoped via the JWT; cross-tenant probes return 404.
 app.include_router(api_v1_agent_principals_router)
+# Initiative #2415 (#2502) -- runner-principal lifecycle (register / list /
+# show / revoke). register creates a Keycloak client tagged kind=runner
+# (principal_kind=runner, tenant_role=read_only, hardcoded runner_id) + a DB
+# row; revoke disables the client (kill switch) + marks the row revoked.
+# Reads gated to operator+; writes gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. The minted runner token is caged
+# to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_runner_principals_router)
+# Initiative #2415 (#2498) -- outbound long-poll command plane (runner-facing).
+# GET /gateway/{runner}/next (blocking long-poll: 200 with a claimed command
+# envelope or 204 on timeout) + POST /gateway/{runner}/result (200 / 404 / 409).
+# Both gate on the runner principal (#2502's require_runner + assert_runner_scope),
+# NOT an operator JWT -- a runner may only poll/report its own queue; every query
+# filters tenant_id. No HTTP enqueue endpoint (central enqueues via
+# gateway.queue.enqueue_command so authorization stays central). Mounted under the
+# /api/v1/gateway/ cage prefix (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_gateway_router)
+# Initiative #2415 (#2499) -- gateway assignment + result-ingest API, mounted
+# under /api/v1/checks/ (inside the runner route cage). PUT /checks/assignment/
+# {runner} authors a runner's checks (operator); GET /checks/assignment (runner,
+# own-only) returns the digest-versioned assignment with resolved target
+# descriptors + handler_ref/safety_level; POST /checks/results (runner, own-only)
+# idempotently ingests results with a central-stamped received_at.
+app.include_router(api_v1_checks_router)
 # G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
 # (list, paginated, operator-level), POST /scheduler/triggers (create,
 # tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).

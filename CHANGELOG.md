@@ -107,6 +107,152 @@ connector-related release-notes line.
   dependency) — `.github/workflows/quality-gate.yml`, `.github/workflows/ci.yml`,
   `docs/codebase/sonarcloud.md` (#2513).
 
+### Gateway — runner dead-man switch + mandatory heartbeat
+
+- Add the runner dead-man switch + mandatory heartbeat for the push-only
+  satellite runner (Initiative #2415, #2501). Every authenticated
+  runner-plane request now stamps `runner_principal.last_seen_at` on the
+  central clock through the single shared choke-point (`assert_runner_scope`)
+  — keyed by the token's `runner_id` claim, never a client value, and with
+  no dedicated heartbeat endpoint (a healthy idle runner already fetches its
+  assignment once per ~60 s tick — `tick_interval_seconds`, #2499 — so the
+  idle work cycle *is* the heartbeat; the #1501 lesson).
+  A central interval-tick sweeper (`gateway/deadman.py`, gated on
+  `GATEWAY_DEADMAN_ENABLED`, default on) flips a lapsed runner's
+  `runner_assignments.stale_at` once its `last_seen_at` falls behind
+  `GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER × GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`
+  (default 3 × 30 s = 90 s, deliberately above the runner's ~60 s poll
+  cadence so a healthy idle runner never false-trips) judged on the central
+  clock, writing one
+  `gateway.runner.stale` audit row per flip; a fixed advisory lock plus a
+  conditional `WHERE stale_at IS NULL` flip keep it exactly-once under
+  concurrent replicas. Recovery is data-driven — an accepted result
+  ingestion clears the marker; the sweeper only ever flips. `stale_at IS NOT
+  NULL` maps to the `UNKNOWN` rollup state (#2416 / #2506). Migration `0061`
+  adds `runner_principal.last_seen_at` (+ index) and
+  `runner_assignments.stale_at` (#2501).
+
+### Added — single-use gateway capability commands (#2500)
+
+- Add the authorization keystone of the remote-execution gateway (Initiative
+  #2415, T4): single-use **capability commands** bound to `(runner, op,
+  target, args-hash, expiry)`, minted centrally **after** the policy gate and
+  executed at most once. `mint_gateway_command` re-runs the dispatcher's
+  pre-execution ladder (`lookup_descriptor` → `validate_params` → **safe-only
+  wall** → `policy_gate`) and mints a `gateway_command` row **only** on an
+  explicit `AUTO_EXECUTE` for a `safety_level=='safe'` op — a non-`safe` op,
+  or a `DENY` / `NEEDS_APPROVAL` verdict, is a structured refusal that writes
+  no command row and never parks into the approval queue (change-ops over the
+  gateway are v2). The capability *is* the command row's opaque UUID (not a
+  JWT). Delivery re-hashes the stored params against `params_hash` and refuses
+  on mismatch (post-mint substitution defence); the claim predicate skips
+  expired (`expires_at > now`, bounded at mint against a module-constant
+  default TTL) and consumed rows. A one-way `consumed_at` latch
+  (`consume_command`) makes result acceptance at-most-once with central replay
+  refusal (`gateway_command_already_consumed` + a `gateway_command_replay_refused`
+  log), and the accepted result's audit row links back to the mint audit row
+  (`parent_audit_id = mint_audit_id`) so a remote execution forms one audit
+  subtree. Runner-side, `ExecutedCommandStore` + `execute_command_once` record
+  the command id before dispatch so a redelivery re-submits the spooled result
+  instead of re-executing. Migration `0061` adds the four binding columns to
+  `gateway_command` —
+  `backend/src/meho_backplane/operations/gateway_commands.py` (#2500).
+
+### Accessibility — operator-console a11y + soak/keycloak hardening (#2512)
+
+- Fix ~10 real static-analysis findings triaged out of the SonarCloud noise
+  (G0.35-T2): every `<th>` in the topology table head now carries
+  `scope="col"` and the empty action column gets a visually-hidden
+  `<span class="sr-only">Actions</span>`; the connectors review-row
+  custom-description input and the ingest-modal spec-URL repeater input gain
+  accessible names via `aria-label`; the keycloak token parser drops a
+  provably-dead `isinstance` re-check; and `scripts/soak/soak-harness.sh`
+  pins its embedded `uv run` to `--locked` so a stale lockfile fails closed,
+  matching the repo-wide CI posture — `backend/src/meho_backplane/ui/
+  templates/topology/_table_head.html`, `.../connectors/_review_op_row.html`,
+  `.../connectors/_ingest_modal.html`,
+  `backend/src/meho_backplane/connectors/keycloak/connector.py`,
+  `scripts/soak/soak-harness.sh` (#2512).
+### Gateway — versioned assignment + results ingest API
+
+- Add the central-side ingest + versioned assignment API for the push-only
+  satellite runner (Initiative #2415, #2499), mounted under `/api/v1/checks/`
+  (inside the runner route cage). `PUT /api/v1/checks/assignment/{runner}`
+  (operator) authors a runner's checks with create-time validation — each
+  item's target must resolve and its op must resolve to an enabled
+  `safety_level=='safe'` descriptor, else a structured 422
+  (`assignment_op_not_safe` / `assignment_op_unknown` /
+  `assignment_target_unknown`) and nothing is stored. `GET
+  /api/v1/checks/assignment?runner=…[&known_version=…]` (runner, own-only)
+  returns a digest-versioned `RunnerAssignment` whose items carry resolved
+  target descriptors (host/port/TLS + the `secret_ref` **reference**, never a
+  credential value), `handler_ref` + `safety_level`, and the runner principal
+  context — all materialised from live rows, so target-row drift (e.g. a
+  rotated `tls_ca_pin`) shifts the sha256 content digest and the runner
+  self-heals; a matching `known_version` yields `304 Not Modified`. `POST
+  /api/v1/checks/results` (runner, own-only) ingests a result batch
+  idempotently — `(tenant, runner, result_uid)` dedups on-disk-spool re-posts
+  and `received_at` is stamped by the central clock. The `runner/wire.py`
+  models are widened in place, not forked (one schema on both ends). Migration
+  `0059` creates `runner_assignments` + `runner_check_results` (#2499).
+### Added — outbound long-poll gateway command plane (#2498)
+
+- Add the central command plane of the remote-execution gateway
+  (Initiative #2415, T2): a durable `gateway_command` queue (migration
+  `0059`) plus two runner-facing routes. `GET /api/v1/gateway/{runner}/next`
+  is a blocking long-poll — it holds up to `wait` seconds (default 25,
+  clamped to a 30 s ceiling; `wait=0` = one immediate claim attempt) and
+  returns `200` with the claimed command envelope (`id`, `op_id`, `params`,
+  resolved `target_descriptor`) or `204` on timeout.
+  `POST /api/v1/gateway/{runner}/result` records the outcome (`200`, or
+  `404` for an unknown/foreign command, `409` for a non-`delivered` row).
+  Both gate on the scoped runner principal (#2502) — a runner may only poll
+  and report its **own** queue — and every query filters `tenant_id`. The
+  claim is exactly-once under concurrent pollers (`SELECT … FOR UPDATE SKIP
+  LOCKED` on PostgreSQL, a conditional `UPDATE` on the SQLite test path),
+  and the hold is a bounded DB claim-poll loop that never holds a
+  transaction across its sleep (multi-replica-safe, no in-process
+  `asyncio.Event`). There is deliberately **no** HTTP enqueue endpoint —
+  central code enqueues via `gateway.queue.enqueue_command` so all
+  authorization stays central — `backend/src/meho_backplane/gateway/queue.py`,
+  `backend/src/meho_backplane/api/v1/gateway.py` (#2498).
+
+### Added — scoped runner principal (gateway v1)
+
+- Add the identity substrate of the remote-execution gateway (Initiative
+  #2415): a scoped, **read-only** service principal per satellite runner.
+  New `PrincipalKind.RUNNER` discriminator + a `runner_id` JWT claim on the
+  `Operator` chain (fail-closed pairing — a `principal_kind=runner` token
+  without `runner_id` is 401 `missing_runner_id_claim`; a non-UUID value is
+  401 `malformed_runner_id_claim`). A negative **route cage** in
+  `verify_jwt_and_bind` fail-closed 403s a runner token on every
+  authenticated REST route outside `RUNNER_ALLOWED_PATH_PREFIXES`
+  (`/api/v1/gateway/`, `/api/v1/checks/`), and the MCP surface rejects
+  runner tokens outright — both with the `runner_scope_violation` code. The
+  cage keys on the unforgeable `principal_kind` mapper, not on claim
+  presence, so a mis-provisioned runner client cannot fail open (the #2489
+  lesson). A `require_runner()` dependency + `assert_runner_scope()` helper
+  give the not-yet-built gateway routes (#2498/#2499) a name→`runner_id`
+  binding with no existence oracle. Register/list/show/revoke lifecycle
+  (REST `/api/v1/runner-principals` + `meho runner-principal` Go verbs)
+  moulded on the agent-principal lifecycle (#815): Keycloak-first two-phase
+  with orphan rollback, Keycloak `enabled=false` before the row flips
+  revoked, `runner:<name>` client-id convention, hardcoded
+  `tenant_role=read_only` + `runner_id`=row-id mappers. Migration `0058`
+  creates `runner_principal` (#2502).
+### Gateway — satellite runner mode (#2415)
+
+- Add a headless, push-only **satellite runner** deploy mode of the
+  backplane image, started as `python -m meho_backplane.runner`. It runs
+  an in-process interval-tick loop (no local Postgres, Valkey, UI, MCP,
+  or inbound listener), polls the central instance over client-initiated
+  HTTP for its assignment, executes read-only (`safety_level == "safe"`)
+  operations locally against the same connector surface, and reports
+  results back — with an on-disk retry spool covering uplink outages and
+  a fail-closed executor that refuses non-`safe` ops and any handler
+  outside `meho_backplane.connectors.*`. Runner chassis only; the central
+  assignment/ingest API (#2499) and long-poll command plane (#2498) land
+  separately. (#2497)
 ### Tooling — SonarCloud scanner-scope hygiene (#2511)
 
 - Stop SonarCloud from misrepresenting the codebase, without hiding real risk

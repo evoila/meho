@@ -172,6 +172,7 @@
           class="input input-bordered input-xs grow"
           maxlength="4096"
           placeholder="custom description (overrides the spec)"
+          aria-label="Custom description for {{ op.op_id }}"
           value="{{ op.custom_description or '' }}"
           data-control="custom_description"
           autocomplete="off"

@@ -170,6 +170,12 @@ const (
 	EvalResultOverallVerdictYellow EvalResultOverallVerdict = "yellow"
 )
 
+// Defines values for GatewayResultBodyOutcome.
+const (
+	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
+	GatewayResultBodyOutcomeSucceeded GatewayResultBodyOutcome = "succeeded"
+)
+
 // Defines values for GraphEdgeKind.
 const (
 	AuthenticatesVia GraphEdgeKind = "authenticates-via"
@@ -231,6 +237,14 @@ const (
 	AutoExecute   PermissionVerdict = "auto-execute"
 	Deny          PermissionVerdict = "deny"
 	NeedsApproval PermissionVerdict = "needs-approval"
+)
+
+// Defines values for PrincipalKind.
+const (
+	PrincipalKindAgent   PrincipalKind = "agent"
+	PrincipalKindRunner  PrincipalKind = "runner"
+	PrincipalKindService PrincipalKind = "service"
+	PrincipalKindUser    PrincipalKind = "user"
 )
 
 // Defines values for RetireChecklistReportOverallVerdict.
@@ -380,6 +394,13 @@ const (
 	TemplateSummaryStatusPublished  TemplateSummaryStatus = "published"
 )
 
+// Defines values for TenantRole.
+const (
+	Operator    TenantRole = "operator"
+	ReadOnly    TenantRole = "read_only"
+	TenantAdmin TenantRole = "tenant_admin"
+)
+
 // Defines values for TopologyDiffEntryChangeKind.
 const (
 	Created TopologyDiffEntryChangeKind = "created"
@@ -455,8 +476,8 @@ const (
 
 // Defines values for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer.
 const (
-	Builtin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
-	Tenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferBuiltin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferTenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
 )
 
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
@@ -512,9 +533,9 @@ const (
 
 // Defines values for RunbooksRunsUiRunbooksRunsGetParamsStatus.
 const (
-	RunbooksRunsUiRunbooksRunsGetParamsStatusAbandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
-	RunbooksRunsUiRunbooksRunsGetParamsStatusCompleted  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
-	RunbooksRunsUiRunbooksRunsGetParamsStatusInProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
+	Abandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
+	Completed  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
+	InProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
 )
 
 // AbortRunRequest Request body for “meho.runbook.abort“ -- terminate the run mid-flight.
@@ -1078,6 +1099,17 @@ type AskDocsResponse struct {
 	Citations []map[string]interface{} `json:"citations"`
 }
 
+// AssignmentDocument Full-document “PUT“ body: replaces a runner's assignment wholesale.
+type AssignmentDocument struct {
+	Items *[]AuthoredCheckItem `json:"items,omitempty"`
+}
+
+// AssignmentDocumentResponse Echo returned by “PUT“: the stored authored document + runner name.
+type AssignmentDocumentResponse struct {
+	Items  []AuthoredCheckItem `json:"items"`
+	Runner string              `json:"runner"`
+}
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -1219,6 +1251,23 @@ type AuthConfigResponse struct {
 
 // AuthModel Per-target identity model per v0.1-spec L447-454.
 type AuthModel string
+
+// AuthoredCheckItem One operator-authored check in a runner's assignment document.
+//
+// The runner-facing “GET“ materialises each of these into a wire
+// :class:`~meho_backplane.runner.wire.RunnerWorkItem` at request time:
+// “target_name“ is resolved to a live target descriptor, “op“ to the
+// resolved connector's enabled descriptor (yielding “handler_ref“ +
+// “safety_level“ + the “(product, version, impl_id)“ key). “op“ is
+// the connector-side op id (e.g. “"vsphere.host.list"“); the connector
+// triple is derived from the resolved target, not authored here.
+type AuthoredCheckItem struct {
+	CadenceSeconds int                     `json:"cadence_seconds"`
+	CheckRef       string                  `json:"check_ref"`
+	Op             string                  `json:"op"`
+	Params         *map[string]interface{} `json:"params,omitempty"`
+	TargetName     string                  `json:"target_name"`
+}
 
 // BackendReadiness Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).
 //
@@ -3689,6 +3738,39 @@ type ForkInfo struct {
 	Version          int    `json:"version"`
 }
 
+// GatewayCommandEnvelope The claimed-command envelope returned by “GET .../next“ (200).
+type GatewayCommandEnvelope struct {
+	Id               openapi_types.UUID      `json:"id"`
+	OpId             string                  `json:"op_id"`
+	Params           map[string]interface{}  `json:"params"`
+	TargetDescriptor *map[string]interface{} `json:"target_descriptor"`
+}
+
+// GatewayResultAck Response for a successful “.../result“ report (200).
+type GatewayResultAck struct {
+	CommandId   openapi_types.UUID `json:"command_id"`
+	CompletedAt string             `json:"completed_at"`
+	Status      string             `json:"status"`
+}
+
+// GatewayResultBody POST body for “.../result“ — the runner's outcome report.
+type GatewayResultBody struct {
+	// CommandId The delivered command's id.
+	CommandId openapi_types.UUID `json:"command_id"`
+
+	// Error Failure summary (for a 'failed' outcome).
+	Error *string `json:"error"`
+
+	// Outcome Terminal outcome to record for the command.
+	Outcome GatewayResultBodyOutcome `json:"outcome"`
+
+	// Result Structured success payload (for a 'succeeded' outcome).
+	Result *map[string]interface{} `json:"result"`
+}
+
+// GatewayResultBodyOutcome Terminal outcome to record for the command.
+type GatewayResultBodyOutcome string
+
 // GraphEdgeKind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
 //
 // Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
@@ -4563,6 +4645,42 @@ type PreviewOperationBody_Target struct {
 	union json.RawMessage
 }
 
+// PrincipalKind Discriminator that distinguishes what authenticated this request.
+//
+// G11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,
+// audit, and the approval gate can tell a human operator apart from
+// a service account or an agent without re-examining the JWT payload.
+//
+// Values are the literal strings the Keycloak “principal_kind“
+// protocol mapper emits on the agent client (or that the v0.3 token
+// exchange layer will emit). Existing tokens that carry no
+// “principal_kind“ claim default to :attr:`USER` — the graceful-
+// fallback contract means all pre-G11.2 human-operator flows are
+// unaffected.
+//
+// Members:
+//
+//   - :attr:`USER` — a human operator authenticated via the interactive
+//     device-code flow. Default when no claim is present.
+//   - :attr:`SERVICE` — a non-interactive service account client that
+//     uses client-credentials flow but is not a MEHO-managed agent.
+//   - :attr:`AGENT` — a Keycloak client registered by
+//     “meho agent-principal register“; the token carries
+//     “principal_kind=agent“. G11.2-T2 (RFC 8693 delegation) and
+//     G11.2-T3 (per-principal permission model) branch on this value
+//     to apply agent-specific authz.
+//   - :attr:`RUNNER` — a satellite runner's service principal registered
+//     by “meho runner-principal register“ (Initiative #2415, #2502);
+//     the token carries “principal_kind=runner“ plus a “runner_id“
+//     claim. A runner is a dumb, push-only executor with a **read-only**
+//     credential scope: its token is fail-closed 403'd on every
+//     authenticated route outside the gateway allowlist prefixes
+//     (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)
+//     and on the MCP surface. The unforgeable discriminator is what the
+//     negative cage keys on, so a runner client missing any other mapper
+//     still cannot roam the read API.
+type PrincipalKind string
+
 // PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
 //
 // G5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a
@@ -4779,6 +4897,60 @@ type ReplayNode struct {
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
+}
+
+// ResolvedTargetDescriptor Centrally-resolved target attributes a connector handler reads.
+//
+// The runner has no local target table, so the central resolver
+// (:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises
+// the fields a handler duck-reads off a “Target“ row and ships them
+// on the assignment. It carries the resolver-read attributes
+// (“product“ / “fingerprint“ / “version“ / “preferred_impl_id“)
+// the tie-break ladder consumes **and** the connection-routing set
+// (“host“ / “port“ / “fqdn“ / “secret_ref“ / “auth_model“ /
+// TLS flags) the HTTP adapter reads, so on the runner the descriptor
+// feeds :func:`~meho_backplane.connectors.resolver.resolve_connector`
+// and the connector adapters directly — no DB session, no second
+// resolution mechanism.
+//
+// The full field set is moulded on the central
+// :class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the
+// same identification + connection-routing projection of the
+// “Target“ row, minus the server-managed timestamps and the
+// operator-authored “notes“ (neither drives connector routing).
+//
+// Credential discipline: “secret_ref“ is the **reference** the runner
+// resolves outbound under its own read-only scope; no credential value
+// is ever embedded (the runner spools assignments on disk, so a value
+// would durably persist — a locked no-durable-artifact violation).
+type ResolvedTargetDescriptor struct {
+	Aliases         *[]string               `json:"aliases,omitempty"`
+	AuthModel       *string                 `json:"auth_model,omitempty"`
+	Extras          *map[string]interface{} `json:"extras,omitempty"`
+	Fingerprint     *map[string]interface{} `json:"fingerprint"`
+	Fqdn            *string                 `json:"fqdn"`
+	Host            string                  `json:"host"`
+	Id              openapi_types.UUID      `json:"id"`
+	Name            string                  `json:"name"`
+	Port            *int                    `json:"port"`
+	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         string                  `json:"product"`
+	SecretRef       *string                 `json:"secret_ref"`
+	TenantId        openapi_types.UUID      `json:"tenant_id"`
+	TlsCaPin        *string                 `json:"tls_ca_pin"`
+	TlsServerName   *string                 `json:"tls_server_name"`
+	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
+	Version         *string                 `json:"version"`
+}
+
+// ResultIngestResponse “POST /checks/results“ response — idempotency accounting.
+//
+// “accepted“ counts rows newly persisted; “duplicates“ counts rows
+// whose “result_uid“ was already ingested for this runner (a re-posted
+// spool batch). “accepted + duplicates“ equals the batch length.
+type ResultIngestResponse struct {
+	Accepted   int `json:"accepted"`
+	Duplicates int `json:"duplicates"`
 }
 
 // RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
@@ -5048,6 +5220,191 @@ type RunbookTemplateBody_Steps_Item struct {
 type RunbookTemplateListResponse struct {
 	Items      []TemplateSummary `json:"items"`
 	NextCursor *string           `json:"next_cursor"`
+}
+
+// RunnerAssignment The runner's current work assignment, fetched each tick.
+//
+// “assignment_version“ is an opaque digest the runner echoes back as
+// “known_version“ so central can answer an unchanged assignment with a
+// “304“ (see :meth:`RunnerClient.fetch_assignment`).
+type RunnerAssignment struct {
+	AssignmentVersion string            `json:"assignment_version"`
+	Items             *[]RunnerWorkItem `json:"items,omitempty"`
+}
+
+// RunnerPrincipal Principal context an executed op runs under, carried on each item.
+//
+// Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
+// on the runner without a JWT: the runner never sees a bearer token for
+// the acting principal (the op was already authorized centrally), so the
+// reconstructed operator's “raw_jwt“ is empty.
+type RunnerPrincipal struct {
+	// PrincipalKind Discriminator that distinguishes what authenticated this request.
+	//
+	// G11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,
+	// audit, and the approval gate can tell a human operator apart from
+	// a service account or an agent without re-examining the JWT payload.
+	//
+	// Values are the literal strings the Keycloak ``principal_kind``
+	// protocol mapper emits on the agent client (or that the v0.3 token
+	// exchange layer will emit). Existing tokens that carry no
+	// ``principal_kind`` claim default to :attr:`USER` — the graceful-
+	// fallback contract means all pre-G11.2 human-operator flows are
+	// unaffected.
+	//
+	// Members:
+	//
+	// * :attr:`USER` — a human operator authenticated via the interactive
+	//   device-code flow. Default when no claim is present.
+	// * :attr:`SERVICE` — a non-interactive service account client that
+	//   uses client-credentials flow but is not a MEHO-managed agent.
+	// * :attr:`AGENT` — a Keycloak client registered by
+	//   ``meho agent-principal register``; the token carries
+	//   ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and
+	//   G11.2-T3 (per-principal permission model) branch on this value
+	//   to apply agent-specific authz.
+	// * :attr:`RUNNER` — a satellite runner's service principal registered
+	//   by ``meho runner-principal register`` (Initiative #2415, #2502);
+	//   the token carries ``principal_kind=runner`` plus a ``runner_id``
+	//   claim. A runner is a dumb, push-only executor with a **read-only**
+	//   credential scope: its token is fail-closed 403'd on every
+	//   authenticated route outside the gateway allowlist prefixes
+	//   (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)
+	//   and on the MCP surface. The unforgeable discriminator is what the
+	//   negative cage keys on, so a runner client missing any other mapper
+	//   still cannot roam the read API.
+	PrincipalKind *PrincipalKind     `json:"principal_kind,omitempty"`
+	Sub           string             `json:"sub"`
+	TenantId      openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
+}
+
+// RunnerPrincipalCreate Input shape for :meth:`RunnerPrincipalService.register`.
+type RunnerPrincipalCreate struct {
+	Name     string  `json:"name"`
+	OwnerSub *string `json:"owner_sub"`
+}
+
+// RunnerPrincipalListResponse Response envelope for “GET /api/v1/runner-principals“.
+type RunnerPrincipalListResponse struct {
+	Principals []RunnerPrincipalRead `json:"principals"`
+}
+
+// RunnerPrincipalRead Row representation returned by every accessor.
+type RunnerPrincipalRead struct {
+	CreatedAt          time.Time          `json:"created_at"`
+	CreatedBySub       string             `json:"created_by_sub"`
+	Id                 openapi_types.UUID `json:"id"`
+	KeycloakClientId   string             `json:"keycloak_client_id"`
+	KeycloakInternalId string             `json:"keycloak_internal_id"`
+	Name               string             `json:"name"`
+	OwnerSub           string             `json:"owner_sub"`
+	Revoked            bool               `json:"revoked"`
+	TenantId           openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+}
+
+// RunnerResult The outcome of executing one :class:`RunnerWorkItem`.
+//
+// “result_uid“ is generated on the runner (a uuid4 hex) so central
+// ingest can deduplicate spool re-posts idempotently — a batch written
+// to the retry spool carries the same uids when it is re-posted.
+//
+// “status“ is a runner-level tri-state, distinct from any status
+// inside “result“:
+//
+//   - “ok“ — the handler ran and returned its structured payload
+//     (which may itself report a failed probe; a failed check is a
+//     result, not a runner error).
+//   - “refused“ — the runner declined to execute (unsafe safety_level,
+//     or a handler_ref outside the connector tree).
+//   - “error“ — the handler raised; the exception is summarised in
+//     “error“ and never re-raised into the tick loop.
+type RunnerResult struct {
+	CheckRef  string                  `json:"check_ref"`
+	Error     *string                 `json:"error"`
+	OpId      string                  `json:"op_id"`
+	Result    *map[string]interface{} `json:"result"`
+	ResultUid string                  `json:"result_uid"`
+	Status    string                  `json:"status"`
+}
+
+// RunnerResultBatch A batch of results the runner reports (or spools) in one POST.
+type RunnerResultBatch struct {
+	Results  *[]RunnerResult `json:"results,omitempty"`
+	RunnerId string          `json:"runner_id"`
+}
+
+// RunnerWorkItem One centrally-authorized operation for the runner to execute.
+//
+// Carries the fields the runner needs to resolve and invoke a handler
+// entirely locally: the dotted “handler_ref“ (resolved via
+// :func:`~meho_backplane.operations._handler_resolve.import_handler`),
+// the “(product, version, impl_id)“ registry key used to rebind a
+// bound-method handler against its connector instance, the validated
+// “params“, the “safety_level“ the runner re-checks (defence in
+// depth), the principal context, and the resolved target descriptor
+// (“None“ for targetless synthetic ops such as “net.*“).
+type RunnerWorkItem struct {
+	CheckRef   string                  `json:"check_ref"`
+	HandlerRef string                  `json:"handler_ref"`
+	ImplId     *string                 `json:"impl_id,omitempty"`
+	OpId       string                  `json:"op_id"`
+	Params     *map[string]interface{} `json:"params,omitempty"`
+
+	// Principal Principal context an executed op runs under, carried on each item.
+	//
+	// Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
+	// on the runner without a JWT: the runner never sees a bearer token for
+	// the acting principal (the op was already authorized centrally), so the
+	// reconstructed operator's ``raw_jwt`` is empty.
+	Principal   RunnerPrincipal `json:"principal"`
+	Product     string          `json:"product"`
+	SafetyLevel string          `json:"safety_level"`
+
+	// TargetDescriptor Centrally-resolved target attributes a connector handler reads.
+	//
+	// The runner has no local target table, so the central resolver
+	// (:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises
+	// the fields a handler duck-reads off a ``Target`` row and ships them
+	// on the assignment. It carries the resolver-read attributes
+	// (``product`` / ``fingerprint`` / ``version`` / ``preferred_impl_id``)
+	// the tie-break ladder consumes **and** the connection-routing set
+	// (``host`` / ``port`` / ``fqdn`` / ``secret_ref`` / ``auth_model`` /
+	// TLS flags) the HTTP adapter reads, so on the runner the descriptor
+	// feeds :func:`~meho_backplane.connectors.resolver.resolve_connector`
+	// and the connector adapters directly — no DB session, no second
+	// resolution mechanism.
+	//
+	// The full field set is moulded on the central
+	// :class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the
+	// same identification + connection-routing projection of the
+	// ``Target`` row, minus the server-managed timestamps and the
+	// operator-authored ``notes`` (neither drives connector routing).
+	//
+	// Credential discipline: ``secret_ref`` is the **reference** the runner
+	// resolves outbound under its own read-only scope; no credential value
+	// is ever embedded (the runner spools assignments on disk, so a value
+	// would durably persist — a locked no-durable-artifact violation).
+	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
+	Version          *string                   `json:"version,omitempty"`
 }
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
@@ -5957,6 +6314,24 @@ type TemplateSummary struct {
 
 // TemplateSummaryStatus defines model for TemplateSummary.Status.
 type TemplateSummaryStatus string
+
+// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+//
+// The set is intentionally small in v0.2: a closed three-value enum
+// lets the RBAC primitive (Task #234, “require_role“) make
+// exhaustive comparisons without leaking arbitrary string handling
+// into route code. A richer policy engine — topology-aware
+// permissions, ABAC, approval workflows — is a separate v0.2.next
+// Goal; widening this enum is the only ratcheting mechanism in the
+// interim.
+//
+// Values are the literal strings the Keycloak protocol-mapper recipe
+// (Task #235) emits, so a JWT carrying “"tenant_admin"“ materialises
+// cleanly as :attr:`TENANT_ADMIN`. “StrEnum“ (PEP 663, stdlib in
+// 3.11+) gives the members “str“ semantics for free, so
+// “f"role={role}"“ renders as “"role=tenant_admin"“ rather than
+// “"role=TenantRole.TENANT_ADMIN"“.
+type TenantRole string
 
 // Thresholds Per-metric green-band thresholds for a verdict computation.
 //
@@ -6884,6 +7259,23 @@ type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// GetAssignmentApiV1ChecksAssignmentGetParams defines parameters for GetAssignmentApiV1ChecksAssignmentGet.
+type GetAssignmentApiV1ChecksAssignmentGetParams struct {
+	Runner        string  `form:"runner" json:"runner"`
+	KnownVersion  *string `form:"known_version,omitempty" json:"known_version,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
+type PutAssignmentApiV1ChecksAssignmentRunnerPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
+type PostResultsApiV1ChecksResultsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
 type ListEndpointApiV1ConnectorsGetParams struct {
 	Status        *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
@@ -7026,6 +7418,18 @@ type FeedEndpointApiV1FeedGetParams struct {
 
 	// Since Explicit replay cursor; superseded by Last-Event-Id when present.
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PollNextCommandApiV1GatewayRunnerNextGetParams defines parameters for PollNextCommandApiV1GatewayRunnerNextGet.
+type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
+	// Wait Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected — the runner asking for a longer hold gets a bounded one.
+	Wait          *int    `form:"wait,omitempty" json:"wait,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
+type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -7250,6 +7654,29 @@ type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams struct {
 
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams defines parameters for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost.
 type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams defines parameters for ListRunnerPrincipalsApiV1RunnerPrincipalsGet.
+type ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams struct {
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset         *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	IncludeRevoked *bool   `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
+}
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams defines parameters for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost.
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams defines parameters for ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet.
+type ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams defines parameters for RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete.
+type RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -7797,6 +8224,12 @@ type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 // CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody defines body for CreateOverrideApiV1BroadcastOverridesPost for application/json ContentType.
 type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrideCreate
 
+// PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody defines body for PutAssignmentApiV1ChecksAssignmentRunnerPut for application/json ContentType.
+type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocument
+
+// PostResultsApiV1ChecksResultsPostJSONRequestBody defines body for PostResultsApiV1ChecksResultsPost for application/json ContentType.
+type PostResultsApiV1ChecksResultsPostJSONRequestBody = RunnerResultBatch
+
 // IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody defines body for IngestEndpointApiV1ConnectorsIngestPost for application/json ContentType.
 type IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody = IngestRequest
 
@@ -7814,6 +8247,9 @@ type UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody = ConventionUpdate
 
 // CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody defines body for CreateDocCollectionEndpointApiV1DocCollectionsPost for application/json ContentType.
 type CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody = DocCollectionCreate
+
+// ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody defines body for ReportCommandResultApiV1GatewayRunnerResultPost for application/json ContentType.
+type ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody = GatewayResultBody
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
@@ -7868,6 +8304,9 @@ type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody = Under
 
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody defines body for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost for application/json ContentType.
 type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = UnderscoreVersionBody
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody defines body for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost for application/json ContentType.
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody = RunnerPrincipalCreate
 
 // CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
 type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
@@ -9236,6 +9675,19 @@ type ClientInterface interface {
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetAssignmentApiV1ChecksAssignmentGet request
+	GetAssignmentApiV1ChecksAssignmentGet(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody request with any body
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostResultsApiV1ChecksResultsPostWithBody request with any body
+	PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostResultsApiV1ChecksResultsPost(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListEndpointApiV1ConnectorsGet request
 	ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -9316,6 +9768,14 @@ type ClientInterface interface {
 
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PollNextCommandApiV1GatewayRunnerNextGet request
+	PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReportCommandResultApiV1GatewayRunnerResultPostWithBody request with any body
+	ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReportCommandResultApiV1GatewayRunnerResultPost(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AuthenticatedHealthApiV1HealthGet request
 	AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -9451,6 +9911,20 @@ type ClientInterface interface {
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListRunnerPrincipalsApiV1RunnerPrincipalsGet request
+	ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody request with any body
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet request
+	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete request
+	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTriggersApiV1SchedulerTriggersGet request
 	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -10974,6 +11448,66 @@ func (c *Client) DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx conte
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetAssignmentApiV1ChecksAssignmentGet(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAssignmentApiV1ChecksAssignmentGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(c.Server, runner, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(c.Server, runner, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultsApiV1ChecksResultsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultsApiV1ChecksResultsPost(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultsApiV1ChecksResultsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListEndpointApiV1ConnectorsGetRequest(c.Server, params)
 	if err != nil {
@@ -11312,6 +11846,42 @@ func (c *Client) ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePos
 
 func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFeedEndpointApiV1FeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPollNextCommandApiV1GatewayRunnerNextGetRequest(c.Server, runner, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(c.Server, runner, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReportCommandResultApiV1GatewayRunnerResultPost(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReportCommandResultApiV1GatewayRunnerResultPostRequest(c.Server, runner, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -11924,6 +12494,66 @@ func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ct
 
 func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -18380,6 +19010,199 @@ func NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(server stri
 	return req, nil
 }
 
+// NewGetAssignmentApiV1ChecksAssignmentGetRequest generates requests for GetAssignmentApiV1ChecksAssignmentGet
+func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetAssignmentApiV1ChecksAssignmentGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/assignment")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "runner", runtime.ParamLocationQuery, params.Runner); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.KnownVersion != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "known_version", runtime.ParamLocationQuery, *params.KnownVersion); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest calls the generic PutAssignmentApiV1ChecksAssignmentRunnerPut builder with application/json body
+func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(server string, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server, runner, params, "application/json", bodyReader)
+}
+
+// NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody generates requests for PutAssignmentApiV1ChecksAssignmentRunnerPut with any type of body
+func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server string, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/assignment/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPostResultsApiV1ChecksResultsPostRequest calls the generic PostResultsApiV1ChecksResultsPost builder with application/json body
+func NewPostResultsApiV1ChecksResultsPostRequest(server string, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostResultsApiV1ChecksResultsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostResultsApiV1ChecksResultsPostRequestWithBody generates requests for PostResultsApiV1ChecksResultsPost with any type of body
+func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/results")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListEndpointApiV1ConnectorsGetRequest generates requests for ListEndpointApiV1ConnectorsGet
 func NewListEndpointApiV1ConnectorsGetRequest(server string, params *ListEndpointApiV1ConnectorsGetParams) (*http.Request, error) {
 	var err error
@@ -19736,6 +20559,139 @@ func NewFeedEndpointApiV1FeedGetRequest(server string, params *FeedEndpointApiV1
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPollNextCommandApiV1GatewayRunnerNextGetRequest generates requests for PollNextCommandApiV1GatewayRunnerNextGet
+func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/gateway/%s/next", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Wait != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wait", runtime.ParamLocationQuery, *params.Wait); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReportCommandResultApiV1GatewayRunnerResultPostRequest calls the generic ReportCommandResultApiV1GatewayRunnerResultPost builder with application/json body
+func NewReportCommandResultApiV1GatewayRunnerResultPostRequest(server string, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server, runner, params, "application/json", bodyReader)
+}
+
+// NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody generates requests for ReportCommandResultApiV1GatewayRunnerResultPost with any type of body
+func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server string, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/gateway/%s/result", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -22061,6 +23017,255 @@ func NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequestWithBody(serv
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest generates requests for ListRunnerPrincipalsApiV1RunnerPrincipalsGet
+func NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest(server string, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeRevoked != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_revoked", runtime.ParamLocationQuery, *params.IncludeRevoked); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest calls the generic RegisterRunnerPrincipalApiV1RunnerPrincipalsPost builder with application/json body
+func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(server string, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody generates requests for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost with any type of body
+func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server string, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest generates requests for ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet
+func NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest(server string, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest generates requests for RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete
+func NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(server string, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -34105,6 +35310,19 @@ type ClientWithResponsesInterface interface {
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse, error)
 
+	// GetAssignmentApiV1ChecksAssignmentGetWithResponse request
+	GetAssignmentApiV1ChecksAssignmentGetWithResponse(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error)
+
+	// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse request with any body
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
+
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
+
+	// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with any body
+	PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
+
+	PostResultsApiV1ChecksResultsPostWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
+
 	// ListEndpointApiV1ConnectorsGetWithResponse request
 	ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error)
 
@@ -34185,6 +35403,14 @@ type ClientWithResponsesInterface interface {
 
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
+
+	// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request
+	PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error)
+
+	// ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse request with any body
+	ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error)
+
+	ReportCommandResultApiV1GatewayRunnerResultPostWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error)
 
 	// AuthenticatedHealthApiV1HealthGetWithResponse request
 	AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error)
@@ -34320,6 +35546,20 @@ type ClientWithResponsesInterface interface {
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
 
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
+
+	// ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse request
+	ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error)
+
+	// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse request with any body
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
+
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
+
+	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request
+	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error)
+
+	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse request
+	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error)
 
 	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
 	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
@@ -36087,6 +37327,75 @@ func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) StatusCod
 	return 0
 }
 
+type GetAssignmentApiV1ChecksAssignmentGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerAssignment
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAssignmentApiV1ChecksAssignmentGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAssignmentApiV1ChecksAssignmentGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PutAssignmentApiV1ChecksAssignmentRunnerPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AssignmentDocumentResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostResultsApiV1ChecksResultsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ResultIngestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PostResultsApiV1ChecksResultsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostResultsApiV1ChecksResultsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListEndpointApiV1ConnectorsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -36606,6 +37915,52 @@ func (r FeedEndpointApiV1FeedGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r FeedEndpointApiV1FeedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PollNextCommandApiV1GatewayRunnerNextGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *GatewayCommandEnvelope
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PollNextCommandApiV1GatewayRunnerNextGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PollNextCommandApiV1GatewayRunnerNextGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReportCommandResultApiV1GatewayRunnerResultPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *GatewayResultAck
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ReportCommandResultApiV1GatewayRunnerResultPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReportCommandResultApiV1GatewayRunnerResultPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -37382,6 +38737,98 @@ func (r PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -42777,6 +44224,49 @@ func (c *ClientWithResponses) DeleteOverrideApiV1BroadcastOverridesOverrideIdDel
 	return ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp)
 }
 
+// GetAssignmentApiV1ChecksAssignmentGetWithResponse request returning *GetAssignmentApiV1ChecksAssignmentGetResponse
+func (c *ClientWithResponses) GetAssignmentApiV1ChecksAssignmentGetWithResponse(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error) {
+	rsp, err := c.GetAssignmentApiV1ChecksAssignmentGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAssignmentApiV1ChecksAssignmentGetResponse(rsp)
+}
+
+// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse request with arbitrary body returning *PutAssignmentApiV1ChecksAssignmentRunnerPutResponse
+func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	rsp, err := c.PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx, runner, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	rsp, err := c.PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx, runner, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
+}
+
+// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with arbitrary body returning *PostResultsApiV1ChecksResultsPostResponse
+func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	rsp, err := c.PostResultsApiV1ChecksResultsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultsApiV1ChecksResultsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	rsp, err := c.PostResultsApiV1ChecksResultsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultsApiV1ChecksResultsPostResponse(rsp)
+}
+
 // ListEndpointApiV1ConnectorsGetWithResponse request returning *ListEndpointApiV1ConnectorsGetResponse
 func (c *ClientWithResponses) ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error) {
 	rsp, err := c.ListEndpointApiV1ConnectorsGet(ctx, params, reqEditors...)
@@ -43030,6 +44520,32 @@ func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.C
 		return nil, err
 	}
 	return ParseFeedEndpointApiV1FeedGetResponse(rsp)
+}
+
+// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request returning *PollNextCommandApiV1GatewayRunnerNextGetResponse
+func (c *ClientWithResponses) PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
+	rsp, err := c.PollNextCommandApiV1GatewayRunnerNextGet(ctx, runner, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePollNextCommandApiV1GatewayRunnerNextGetResponse(rsp)
+}
+
+// ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse request with arbitrary body returning *ReportCommandResultApiV1GatewayRunnerResultPostResponse
+func (c *ClientWithResponses) ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	rsp, err := c.ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx, runner, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReportCommandResultApiV1GatewayRunnerResultPostWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	rsp, err := c.ReportCommandResultApiV1GatewayRunnerResultPost(ctx, runner, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp)
 }
 
 // AuthenticatedHealthApiV1HealthGetWithResponse request returning *AuthenticatedHealthApiV1HealthGetResponse
@@ -43471,6 +44987,50 @@ func (c *ClientWithResponses) PublishTemplateApiV1RunbooksTemplatesSlugPublishPo
 		return nil, err
 	}
 	return ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp)
+}
+
+// ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse request returning *ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse
+func (c *ClientWithResponses) ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error) {
+	rsp, err := c.ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse(rsp)
+}
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse request with arbitrary body returning *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse
+func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request returning *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse
+func (c *ClientWithResponses) ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error) {
+	rsp, err := c.ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse(rsp)
+}
+
+// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse request returning *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse
+func (c *ClientWithResponses) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error) {
+	rsp, err := c.RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp)
 }
 
 // ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
@@ -47666,6 +49226,105 @@ func ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp *htt
 	return response, nil
 }
 
+// ParseGetAssignmentApiV1ChecksAssignmentGetResponse parses an HTTP response from a GetAssignmentApiV1ChecksAssignmentGetWithResponse call
+func ParseGetAssignmentApiV1ChecksAssignmentGetResponse(rsp *http.Response) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAssignmentApiV1ChecksAssignmentGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerAssignment
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse parses an HTTP response from a PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse call
+func ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp *http.Response) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutAssignmentApiV1ChecksAssignmentRunnerPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AssignmentDocumentResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostResultsApiV1ChecksResultsPostResponse parses an HTTP response from a PostResultsApiV1ChecksResultsPostWithResponse call
+func ParsePostResultsApiV1ChecksResultsPostResponse(rsp *http.Response) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostResultsApiV1ChecksResultsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ResultIngestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListEndpointApiV1ConnectorsGetResponse parses an HTTP response from a ListEndpointApiV1ConnectorsGetWithResponse call
 func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpointApiV1ConnectorsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -48368,6 +50027,72 @@ func ParseFeedEndpointApiV1FeedGetResponse(rsp *http.Response) (*FeedEndpointApi
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePollNextCommandApiV1GatewayRunnerNextGetResponse parses an HTTP response from a PollNextCommandApiV1GatewayRunnerNextGetWithResponse call
+func ParsePollNextCommandApiV1GatewayRunnerNextGetResponse(rsp *http.Response) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PollNextCommandApiV1GatewayRunnerNextGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GatewayCommandEnvelope
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReportCommandResultApiV1GatewayRunnerResultPostResponse parses an HTTP response from a ReportCommandResultApiV1GatewayRunnerResultPostWithResponse call
+func ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp *http.Response) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReportCommandResultApiV1GatewayRunnerResultPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GatewayResultAck
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -49473,6 +51198,138 @@ func ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PublishTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse parses an HTTP response from a ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse call
+func ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse(rsp *http.Response) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse parses an HTTP response from a RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse call
+func ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp *http.Response) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest RunnerPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse parses an HTTP response from a ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse call
+func ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse(rsp *http.Response) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse parses an HTTP response from a RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse call
+func ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp *http.Response) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

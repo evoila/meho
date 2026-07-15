@@ -425,11 +425,14 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   FK to ``tenant(id)``; omitting it causes PG to reject the
         #   TRUNCATE with ``cannot truncate a table referenced in a foreign
         #   key constraint`` (the recurring fixture gotcha #1064 / #1065 hit).
+        # * ``gateway_command`` — migration 0059 (Initiative #2415 T2, #2498)
+        #   carries a real ``REFERENCES tenant(id)`` FK; same rule, must be
+        #   listed here or PG rejects the per-test TRUNCATE.
         await conn.execute(
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
                 "agent_principal, runner_principal, "
-                "scheduled_trigger, event_outbox, "
+                "scheduled_trigger, event_outbox, gateway_command, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "
@@ -494,7 +497,7 @@ async def pg_engine_empty_tenant(
             text(
                 "TRUNCATE TABLE approval_request, agent_permission, "
                 "agent_principal, runner_principal, "
-                "scheduled_trigger, event_outbox, "
+                "scheduled_trigger, event_outbox, gateway_command, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
                 "graph_edge_history, graph_node, graph_node_history, "

@@ -82,6 +82,7 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
+from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
@@ -890,6 +891,15 @@ app.include_router(api_v1_agent_principals_router)
 # the JWT; cross-tenant probes return 404. The minted runner token is caged
 # to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
 app.include_router(api_v1_runner_principals_router)
+# Initiative #2415 (#2498) -- outbound long-poll command plane (runner-facing).
+# GET /gateway/{runner}/next (blocking long-poll: 200 with a claimed command
+# envelope or 204 on timeout) + POST /gateway/{runner}/result (200 / 404 / 409).
+# Both gate on the runner principal (#2502's require_runner + assert_runner_scope),
+# NOT an operator JWT -- a runner may only poll/report its own queue; every query
+# filters tenant_id. No HTTP enqueue endpoint (central enqueues via
+# gateway.queue.enqueue_command so authorization stays central). Mounted under the
+# /api/v1/gateway/ cage prefix (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_gateway_router)
 # G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
 # (list, paginated, operator-level), POST /scheduler/triggers (create,
 # tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).

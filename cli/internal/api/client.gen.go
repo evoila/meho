@@ -170,6 +170,12 @@ const (
 	EvalResultOverallVerdictYellow EvalResultOverallVerdict = "yellow"
 )
 
+// Defines values for GatewayResultBodyOutcome.
+const (
+	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
+	GatewayResultBodyOutcomeSucceeded GatewayResultBodyOutcome = "succeeded"
+)
+
 // Defines values for GraphEdgeKind.
 const (
 	AuthenticatesVia GraphEdgeKind = "authenticates-via"
@@ -512,9 +518,9 @@ const (
 
 // Defines values for RunbooksRunsUiRunbooksRunsGetParamsStatus.
 const (
-	RunbooksRunsUiRunbooksRunsGetParamsStatusAbandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
-	RunbooksRunsUiRunbooksRunsGetParamsStatusCompleted  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
-	RunbooksRunsUiRunbooksRunsGetParamsStatusInProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
+	Abandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
+	Completed  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
+	InProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
 )
 
 // AbortRunRequest Request body for “meho.runbook.abort“ -- terminate the run mid-flight.
@@ -3688,6 +3694,39 @@ type ForkInfo struct {
 	Slug             string `json:"slug"`
 	Version          int    `json:"version"`
 }
+
+// GatewayCommandEnvelope The claimed-command envelope returned by “GET .../next“ (200).
+type GatewayCommandEnvelope struct {
+	Id               openapi_types.UUID      `json:"id"`
+	OpId             string                  `json:"op_id"`
+	Params           map[string]interface{}  `json:"params"`
+	TargetDescriptor *map[string]interface{} `json:"target_descriptor"`
+}
+
+// GatewayResultAck Response for a successful “.../result“ report (200).
+type GatewayResultAck struct {
+	CommandId   openapi_types.UUID `json:"command_id"`
+	CompletedAt string             `json:"completed_at"`
+	Status      string             `json:"status"`
+}
+
+// GatewayResultBody POST body for “.../result“ — the runner's outcome report.
+type GatewayResultBody struct {
+	// CommandId The delivered command's id.
+	CommandId openapi_types.UUID `json:"command_id"`
+
+	// Error Failure summary (for a 'failed' outcome).
+	Error *string `json:"error"`
+
+	// Outcome Terminal outcome to record for the command.
+	Outcome GatewayResultBodyOutcome `json:"outcome"`
+
+	// Result Structured success payload (for a 'succeeded' outcome).
+	Result *map[string]interface{} `json:"result"`
+}
+
+// GatewayResultBodyOutcome Terminal outcome to record for the command.
+type GatewayResultBodyOutcome string
 
 // GraphEdgeKind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
 //
@@ -7054,6 +7093,18 @@ type FeedEndpointApiV1FeedGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// PollNextCommandApiV1GatewayRunnerNextGetParams defines parameters for PollNextCommandApiV1GatewayRunnerNextGet.
+type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
+	// Wait Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected — the runner asking for a longer hold gets a bounded one.
+	Wait          *int    `form:"wait,omitempty" json:"wait,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
+type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // AuthenticatedHealthApiV1HealthGetParams defines parameters for AuthenticatedHealthApiV1HealthGet.
 type AuthenticatedHealthApiV1HealthGetParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -7862,6 +7913,9 @@ type UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody = ConventionUpdate
 
 // CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody defines body for CreateDocCollectionEndpointApiV1DocCollectionsPost for application/json ContentType.
 type CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody = DocCollectionCreate
+
+// ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody defines body for ReportCommandResultApiV1GatewayRunnerResultPost for application/json ContentType.
+type ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody = GatewayResultBody
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
@@ -9367,6 +9421,14 @@ type ClientInterface interface {
 
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PollNextCommandApiV1GatewayRunnerNextGet request
+	PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReportCommandResultApiV1GatewayRunnerResultPostWithBody request with any body
+	ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReportCommandResultApiV1GatewayRunnerResultPost(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AuthenticatedHealthApiV1HealthGet request
 	AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11377,6 +11439,42 @@ func (c *Client) ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePos
 
 func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFeedEndpointApiV1FeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPollNextCommandApiV1GatewayRunnerNextGetRequest(c.Server, runner, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(c.Server, runner, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReportCommandResultApiV1GatewayRunnerResultPost(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReportCommandResultApiV1GatewayRunnerResultPostRequest(c.Server, runner, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -19861,6 +19959,139 @@ func NewFeedEndpointApiV1FeedGetRequest(server string, params *FeedEndpointApiV1
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPollNextCommandApiV1GatewayRunnerNextGetRequest generates requests for PollNextCommandApiV1GatewayRunnerNextGet
+func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/gateway/%s/next", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Wait != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wait", runtime.ParamLocationQuery, *params.Wait); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReportCommandResultApiV1GatewayRunnerResultPostRequest calls the generic ReportCommandResultApiV1GatewayRunnerResultPost builder with application/json body
+func NewReportCommandResultApiV1GatewayRunnerResultPostRequest(server string, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server, runner, params, "application/json", bodyReader)
+}
+
+// NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody generates requests for ReportCommandResultApiV1GatewayRunnerResultPost with any type of body
+func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server string, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/gateway/%s/result", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -34560,6 +34791,14 @@ type ClientWithResponsesInterface interface {
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
 
+	// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request
+	PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error)
+
+	// ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse request with any body
+	ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error)
+
+	ReportCommandResultApiV1GatewayRunnerResultPostWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error)
+
 	// AuthenticatedHealthApiV1HealthGetWithResponse request
 	AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error)
 
@@ -36994,6 +37233,52 @@ func (r FeedEndpointApiV1FeedGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r FeedEndpointApiV1FeedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PollNextCommandApiV1GatewayRunnerNextGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *GatewayCommandEnvelope
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PollNextCommandApiV1GatewayRunnerNextGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PollNextCommandApiV1GatewayRunnerNextGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReportCommandResultApiV1GatewayRunnerResultPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *GatewayResultAck
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ReportCommandResultApiV1GatewayRunnerResultPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReportCommandResultApiV1GatewayRunnerResultPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -43512,6 +43797,32 @@ func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.C
 	return ParseFeedEndpointApiV1FeedGetResponse(rsp)
 }
 
+// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request returning *PollNextCommandApiV1GatewayRunnerNextGetResponse
+func (c *ClientWithResponses) PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
+	rsp, err := c.PollNextCommandApiV1GatewayRunnerNextGet(ctx, runner, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePollNextCommandApiV1GatewayRunnerNextGetResponse(rsp)
+}
+
+// ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse request with arbitrary body returning *ReportCommandResultApiV1GatewayRunnerResultPostResponse
+func (c *ClientWithResponses) ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	rsp, err := c.ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx, runner, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReportCommandResultApiV1GatewayRunnerResultPostWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	rsp, err := c.ReportCommandResultApiV1GatewayRunnerResultPost(ctx, runner, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp)
+}
+
 // AuthenticatedHealthApiV1HealthGetWithResponse request returning *AuthenticatedHealthApiV1HealthGetResponse
 func (c *ClientWithResponses) AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error) {
 	rsp, err := c.AuthenticatedHealthApiV1HealthGet(ctx, params, reqEditors...)
@@ -48892,6 +49203,72 @@ func ParseFeedEndpointApiV1FeedGetResponse(rsp *http.Response) (*FeedEndpointApi
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePollNextCommandApiV1GatewayRunnerNextGetResponse parses an HTTP response from a PollNextCommandApiV1GatewayRunnerNextGetWithResponse call
+func ParsePollNextCommandApiV1GatewayRunnerNextGetResponse(rsp *http.Response) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PollNextCommandApiV1GatewayRunnerNextGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GatewayCommandEnvelope
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReportCommandResultApiV1GatewayRunnerResultPostResponse parses an HTTP response from a ReportCommandResultApiV1GatewayRunnerResultPostWithResponse call
+func ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp *http.Response) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReportCommandResultApiV1GatewayRunnerResultPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GatewayResultAck
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

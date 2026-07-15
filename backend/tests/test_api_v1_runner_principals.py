@@ -44,6 +44,7 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminNotConfiguredError,
 )
 from meho_backplane.auth.operator import TenantRole
+from meho_backplane.auth.runner_principals import NAME_MAX_LENGTH
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import RunnerPrincipal, Tenant
 from meho_backplane.main import app
@@ -363,6 +364,31 @@ async def test_duplicate_register_returns_409(client: TestClient) -> None:
 
 
 @pytest.mark.asyncio
+async def test_register_rejects_overlong_name_422(client: TestClient) -> None:
+    """A name past the 128-char bound is rejected at the schema boundary (422).
+
+    show / revoke bound the by-name lookup at ``NAME_MAX_LENGTH``
+    (``Path(max_length=...)`` -> 422), so a longer name that registered would
+    be un-showable and un-revocable by name — the #2501 kill switch would be
+    unreachable. The intake schema must reject it symmetrically, before any
+    Keycloak call, so intake and lookup limits cannot drift apart.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-toolong")
+    overlong = "r" * (NAME_MAX_LENGTH + 1)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals",
+            json={"name": overlong},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 422, resp.text
+    # The rejection is at the request boundary — no row is written.
+    assert await _fetch_principals(_TENANT_A) == []
+
+
+@pytest.mark.asyncio
 async def test_show_missing_returns_404(client: TestClient) -> None:
     """GET on an unknown name returns 404."""
     await _seed_tenants()
@@ -523,6 +549,54 @@ async def test_keycloak_admin_error_returns_502(client: TestClient) -> None:
         )
     assert resp.status_code == 502, resp.text
     assert resp.json()["detail"] == "keycloak_admin_error"
+
+
+@pytest.mark.asyncio
+async def test_register_rolls_back_keycloak_client_when_secret_fetch_fails(
+    client: TestClient,
+) -> None:
+    """A failure after ``create_client`` rolls the just-created client back.
+
+    Regression for the orphan gap: ``create_client`` succeeds, then the
+    immediately following ``get_client_secret`` raises. The live, enabled
+    Keycloak client must be deleted before the error propagates (the module's
+    "Keycloak failure -> no row" contract) and no DB row may be written.
+    Without the rollback the runner would be an orphan — token-issuing yet
+    un-listable and un-revocable through MEHO — which is exactly the
+    unreachable-kill-switch failure this lifecycle exists to prevent.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-orphan")
+
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
+    mock_client.get_client_secret = AsyncMock(side_effect=KeycloakAdminError("secret fetch failed"))
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    with (
+        patch(
+            "meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals",
+            json={"name": "orphan-runner"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    # The post-create failure surfaces as 502 (generic KeycloakAdminError) ...
+    assert resp.status_code == 502, resp.text
+    # ... the orphaned client is deleted (rolled back) — not merely disabled ...
+    mock_client.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+    mock_client.disable_client.assert_not_awaited()
+    # ... and no DB row was written.
+    assert await _fetch_principals(_TENANT_A) == []
 
 
 # ---------------------------------------------------------------------------

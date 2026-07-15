@@ -25026,6 +25026,7 @@
         "properties": {
           "name": {
             "type": "string",
+            "maxLength": 128,
             "title": "Name"
           },
           "owner_sub": {

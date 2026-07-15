@@ -64,6 +64,7 @@ from meho_backplane.auth.keycloak_admin import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.auth.runner_principals import (
+    NAME_MAX_LENGTH,
     RunnerPrincipalCreate,
     RunnerPrincipalExistsError,
     RunnerPrincipalNotFoundError,
@@ -85,8 +86,6 @@ _OP_IDS: Final[dict[str, str]] = {
     "register": "runner_principal.register",
     "revoke": "runner_principal.revoke",
 }
-
-_NAME_MAX_LENGTH: Final[int] = 128
 
 
 class RunnerPrincipalListResponse(BaseModel):
@@ -141,7 +140,7 @@ async def list_runner_principals(
 
 @router.get("/{name}", response_model=RunnerPrincipalRead)
 async def show_runner_principal(
-    name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
     operator: Operator = _require_operator,
 ) -> RunnerPrincipalRead:
     """Return one runner principal by name."""
@@ -213,7 +212,7 @@ async def register_runner_principal(
 
 @router.delete("/{name}/revoke", response_model=RunnerPrincipalRead)
 async def revoke_runner_principal(
-    name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
     operator: Operator = _require_admin,
 ) -> RunnerPrincipalRead:
     """Revoke a runner principal (kill switch).

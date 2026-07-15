@@ -38,10 +38,12 @@ Runner-specific carve-outs (vs the agent mould)
   token level).
 
 Consistency strategy (identical to the agent mould): register creates the
-Keycloak client then inserts the DB row (Keycloak failure -> no row; DB
-failure -> the just-created client is rolled back); revoke disables the
-Keycloak client (``enabled=false``) *before* it commits ``revoked=true``,
-so MEHO never reports a still-live, token-issuing runner as revoked.
+Keycloak client then inserts the DB row (Keycloak failure -> no row; any
+failure *after* the client is created — secret capture, Vault persist, or
+the DB write — rolls the just-created client back before the error
+propagates); revoke disables the Keycloak client (``enabled=false``)
+*before* it commits ``revoked=true``, so MEHO never reports a still-live,
+token-issuing runner as revoked.
 """
 
 from __future__ import annotations
@@ -49,9 +51,10 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
+from typing import Final
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -70,6 +73,7 @@ from meho_backplane.scheduler.vault_credentials import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "NAME_MAX_LENGTH",
     "RunnerPrincipalCreate",
     "RunnerPrincipalExistsError",
     "RunnerPrincipalNotFoundError",
@@ -80,6 +84,16 @@ __all__ = [
 #: Regex for the runner name: letters, digits, hyphen, underscore, dot.
 #: Mirrors the agent-principal name pattern.
 _NAME_PATTERN: re.Pattern[str] = re.compile(r"^[A-Za-z0-9_\-\.]+$")
+
+#: Maximum length of a runner-principal name. Shared by the intake schema
+#: (:class:`RunnerPrincipalCreate`) and the REST by-name lookup ``Path``
+#: params in :mod:`meho_backplane.api.v1.runner_principals`. The #2501 kill
+#: switch keys on the name, and show / revoke bound the name at this length
+#: (``Path(max_length=...)`` -> 422); without the same cap on intake a name
+#: past this length would register (201) yet be un-showable and un-revocable
+#: by name — an orphaned kill switch. Sourcing both bounds from one constant
+#: is what stops the intake and lookup limits from drifting apart.
+NAME_MAX_LENGTH: Final[int] = 128
 
 #: Convention: the Keycloak clientId for a runner principal.
 _CLIENT_ID_PREFIX: str = "runner:"
@@ -125,7 +139,7 @@ class RunnerPrincipalCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
+    name: str = Field(max_length=NAME_MAX_LENGTH)
     owner_sub: str | None = None
 
 
@@ -195,29 +209,17 @@ class RunnerPrincipalService:
         # (token claim == row id is the guard's binding invariant).
         runner_id = uuid.uuid4()
 
-        # Phase 1: create the Keycloak client + capture its generated secret
-        # in the same admin session. The runner client carries the
-        # runner-kind mapper set (principal_kind=runner, tenant_role=read_only,
-        # runner_id=<runner_id>) so its client_credentials token validates
-        # through the JWT chain as a caged, read-only runner Operator with
-        # no manual Keycloak surgery. Fail before any DB write on error.
-        kc_client = KeycloakAdminClient.from_settings()
-        try:
-            async with kc_client:
-                internal_id = await kc_client.create_client(
-                    client_id=client_id,
-                    name=payload.name,
-                    tenant_id=str(tenant_id),
-                    owner_sub=owner,
-                    audience=audience,
-                    tenant_role=_RUNNER_TENANT_ROLE,
-                    principal_kind="runner",
-                    kind_attribute="runner",
-                    extra_hardcoded_claims={"runner_id": str(runner_id)},
-                )
-                client_secret = await kc_client.get_client_secret(internal_id)
-        except KeycloakClientConflictError as exc:
-            raise RunnerPrincipalExistsError(payload.name) from exc
+        # Phase 1: create the Keycloak client + capture its generated secret.
+        # Any failure after create_client rolls the just-created client back
+        # (see _provision_keycloak_client) so register never orphans an
+        # un-revocable identity before any DB row exists.
+        internal_id, client_secret = await self._provision_keycloak_client(
+            name=payload.name,
+            tenant_id=tenant_id,
+            owner_sub=owner,
+            audience=audience,
+            runner_id=runner_id,
+        )
 
         # Phase 1b: persist the captured secret to Vault under the runner
         # client-id. Same posture as agents: an unset scheduler token is a
@@ -253,6 +255,63 @@ class RunnerPrincipalService:
             created_by_sub=created_by_sub,
         )
         return entry
+
+    async def _provision_keycloak_client(
+        self,
+        *,
+        name: str,
+        tenant_id: uuid.UUID,
+        owner_sub: str,
+        audience: str,
+        runner_id: uuid.UUID,
+    ) -> tuple[str, str]:
+        """Create the runner's Keycloak client and read back its secret.
+
+        Phase 1 of :meth:`register`, isolated so its rollback contract is a
+        single unit. Creates the confidential client (clientId
+        ``runner:<name>``) with the runner-kind mapper set
+        (``principal_kind=runner``, ``tenant_role=read_only``, hardcoded
+        ``runner_id``) so its ``client_credentials`` token validates through
+        the JWT chain as a caged, read-only runner, then reads back the
+        generated secret in the same admin session.
+
+        Rollback contract: if *anything* after ``create_client`` raises — most
+        importantly ``get_client_secret`` — the just-created, live client is
+        deleted before the error propagates, so register never orphans an
+        un-revocable identity. ``internal_id`` is still ``None`` when
+        ``create_client`` itself failed (nothing created, nothing to roll
+        back). A 409 conflict surfaces as :class:`RunnerPrincipalExistsError`
+        — the conflicting client belongs to a prior registration and is not
+        ours to delete.
+
+        Returns the ``(keycloak_internal_id, client_secret)`` pair.
+        """
+        client_id = _keycloak_client_id(name)
+        internal_id: str | None = None
+        kc_client = KeycloakAdminClient.from_settings()
+        try:
+            async with kc_client:
+                internal_id = await kc_client.create_client(
+                    client_id=client_id,
+                    name=name,
+                    tenant_id=str(tenant_id),
+                    owner_sub=owner_sub,
+                    audience=audience,
+                    tenant_role=_RUNNER_TENANT_ROLE,
+                    principal_kind="runner",
+                    kind_attribute="runner",
+                    extra_hardcoded_claims={"runner_id": str(runner_id)},
+                )
+                client_secret = await kc_client.get_client_secret(internal_id)
+        except KeycloakClientConflictError as exc:
+            raise RunnerPrincipalExistsError(name) from exc
+        except BaseException as exc:
+            if internal_id is not None:
+                await self._rollback_orphan_client(
+                    internal_id, tenant_id=tenant_id, name=name, cause=exc
+                )
+            raise
+        return internal_id, client_secret
 
     async def _insert_row(
         self,

@@ -8,13 +8,14 @@
 # "Clean as You Code" model is meant to gate new code only — existing
 # issues don't block PRs.
 #
-# NEW-CODE BASELINE: the orphan-commit reset left SonarCloud with a
-# baseline that predates *all* commits, so the entire repo is scored as
-# "new code" (every new_* metric equals its all-time twin and the gate
-# fails on the whole codebase, not the diff). It does NOT reset itself.
-# Fix is a one-time project setting — New Code = "Reference branch: main"
-# — documented in docs/codebase/sonarcloud.md. continue-on-error below
-# keeps the (currently meaningless) gate advisory until that lands.
+# NEW-CODE BASELINE: this workflow analyzes main pushes only (see the
+# `if:` on the job — the event filter stops PR completions from
+# overwriting the main-branch analysis). The new-code period is left at
+# SonarCloud's default `previous_version`, NOT a reference branch: pinning
+# New Code = "Reference branch: main" would make main's own new-code
+# window permanently ~empty (main is diffed against itself). Rationale +
+# how to read the dashboard live in docs/codebase/sonarcloud.md.
+# continue-on-error below keeps the gate advisory.
 #
 # Prerequisite: SONAR_TOKEN repo secret. Verified present pre-merge.
 #
@@ -43,7 +44,15 @@ jobs:
     runs-on: meho-runners-ci
     timeout-minutes: 20
     continue-on-error: true
-    if: github.event.workflow_run.conclusion == 'success'
+    # Only analyze main pushes. CI runs on both `push` and `pull_request`,
+    # so without the event filter every PR-branch CI completion triggered a
+    # scan that overwrote the main-branch analysis (SonarCloud stores one
+    # analysis per project, keyed by branch — PR scans churned the activity
+    # history and the "new code" window never lined up with a real merge).
+    # See docs/codebase/sonarcloud.md.
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:

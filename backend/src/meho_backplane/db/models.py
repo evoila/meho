@@ -4617,6 +4617,199 @@ class ApprovalRequest(Base):
 
 
 # ---------------------------------------------------------------------------
+# Gateway command queue (Initiative #2415 / #2498)
+# ---------------------------------------------------------------------------
+
+
+class GatewayCommandStatus(StrEnum):
+    """Closed lifecycle status of a :class:`GatewayCommand`.
+
+    Initiative #2415 (Remote execution gateway), Task #2498. The gateway
+    command plane parks a centrally-enqueued, pre-authorized operation
+    durably; the row walks a simple four-state lifecycle enforced by the
+    service (:mod:`meho_backplane.gateway.queue`).
+
+    Members:
+
+    * :attr:`PENDING` -- enqueued centrally, awaiting a runner claim
+      (initial state on insert).
+    * :attr:`DELIVERED` -- claimed by the runner's long-poll
+      (``pending`` flips to ``delivered`` under ``SELECT ... FOR UPDATE
+      SKIP LOCKED`` on PG / a conditional ``UPDATE`` on the SQLite test
+      path); ``delivered_at`` is stamped. A row that is claimed but never
+      reported stays here (lost, not redelivered -- the v1 at-most-once
+      failure mode).
+    * :attr:`SUCCEEDED` -- the runner reported a successful outcome via
+      ``POST .../result``; ``result`` + ``completed_at`` stamped. Terminal.
+    * :attr:`FAILED` -- the runner reported a failure; ``error`` +
+      ``completed_at`` stamped. Terminal.
+
+    The enum and the ``CHECK (status IN (...))`` constraint on the DB
+    table move in lock-step (migration ``0059``); the drift guard
+    :func:`tests.migrations.test_migration_0059_create_gateway_command.test_status_check_matches_enum`
+    asserts equality at unit-test time.
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+#: Closed ``gateway_command.status`` vocabulary derived from the enum --
+#: kept in sync with migration ``0059``'s ``_GATEWAY_COMMAND_STATUSES``
+#: literal. The drift guard asserts equality so the two never diverge.
+_GATEWAY_COMMAND_STATUSES: tuple[str, ...] = tuple(s.value for s in GatewayCommandStatus)
+
+
+class GatewayCommand(Base):
+    """One centrally-enqueued operation queued for a satellite runner.
+
+    Initiative #2415 (Remote execution gateway), Task #2498. Central code
+    enqueues a pre-authorized operation (via
+    :func:`meho_backplane.gateway.queue.enqueue_command`); the runner
+    claims it over the outbound long-poll
+    (``GET /api/v1/gateway/{runner}/next``) and reports the outcome back
+    (``POST /api/v1/gateway/{runner}/result``). The row is the durable
+    transport state that lets a central instance relay an operation to a
+    runner it cannot dial directly, without holding the request across a
+    process restart. Moulded on the ``approval_request`` durable-queue row
+    (#817): closed status enum + DB CHECK + drift guard, real tenant FK,
+    caller-owns-commit service functions.
+
+    Transport-only (binding decision, #2498): this schema stays strictly
+    transport. Capability binding (args-hash, expiry, request-id dedup) is
+    sibling #2500's own migration; nothing speculative lands here.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. PG-side ``gen_random_uuid()``; ORM
+      ``default=uuid.uuid4`` for SQLite.
+
+    * ``tenant_id`` -- UUID NOT NULL, real FK to ``tenant.id``. Clean-slate
+      table; hard FK enforced (no ondelete). Same discipline as
+      ``approval_request`` (0023) and ``runner_principal`` (0058).
+
+    * ``runner_id`` -- Text NOT NULL. The runner principal **name** (the
+      wire identity: #2498's ``{runner}`` path segment, ``MEHO_RUNNER_ID``
+      on the runner, ``RunnerResultBatch.runner_id`` on the wire). Named
+      ``runner_id`` to match that wire field; the guard binds the token's
+      ``runner_id`` UUID claim to the named ``runner_principal`` row before
+      any queue access, so filtering by name is correctly scoped.
+
+    * ``op_id`` -- Text NOT NULL. The operation the runner executes.
+
+    * ``params`` -- portable JSON NOT NULL DEFAULT ``{}`` (JSONB on PG).
+      The validated op params.
+
+    * ``target_descriptor`` -- portable JSON **nullable** (JSONB on PG).
+      The centrally-resolved target descriptor a connector handler
+      duck-reads (the runner has no local target table). Nullable because
+      targetless synthetic ops (``net.*``) carry no descriptor, which the
+      wire model encodes as ``RunnerWorkItem.target_descriptor:
+      ResolvedTargetDescriptor | None`` (#2497) -- NULL is the
+      wire-compatible encoding of "targetless".
+
+    * ``status`` -- Closed enum, DB ``CHECK``, default ``'pending'``.
+
+    * ``result`` -- portable JSON nullable (JSONB on PG). The runner's
+      success payload; NULL until reported.
+
+    * ``error`` -- Text nullable. The runner's failure summary; NULL until
+      a failure is reported.
+
+    * ``enqueued_by_sub`` -- Text NOT NULL. The ``sub`` of the principal
+      whose central dispatch enqueued the command (audit provenance).
+
+    * ``enqueued_at`` -- ``timestamptz`` NOT NULL. Drives the FIFO claim
+      order.
+
+    * ``delivered_at`` / ``completed_at`` -- ``timestamptz`` nullable.
+      Stamped on the ``pending -> delivered`` claim and the
+      ``delivered -> terminal`` report respectively.
+
+    Index
+    -----
+
+    * ``gateway_command_claim_idx`` -- composite ``(tenant_id, runner_id,
+      status, enqueued_at)``. Serves the hot claim query (oldest
+      ``pending`` row for a runner in a tenant) and the tenant/runner-scoped
+      result lookup.
+    """
+
+    __tablename__ = "gateway_command"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK -- clean-slate substrate (see class docstring).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # The runner principal NAME (wire identity), not the UUID row id.
+    runner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    # Nullable -- NULL is the wire-compatible "targetless" encoding.
+    target_descriptor: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=GatewayCommandStatus.PENDING.value,
+    )
+    result: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    enqueued_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    enqueued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "gateway_command_claim_idx",
+            "tenant_id",
+            "runner_id",
+            "status",
+            "enqueued_at",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _GATEWAY_COMMAND_STATUSES),
+            name="ck_gateway_command_status",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Event outbox (G11.3-T3 / #824)
 # ---------------------------------------------------------------------------
 

@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — base-image digest unfreeze + Trivy SARIF (#2491)
+
+- Unfreeze the backplane image's base pin and stop CVEs accruing on a stale
+  snapshot (G0.34-T1). `backend/Dockerfile` now pins `python:3.12-slim` by a
+  **literal, tag-qualified digest** (`FROM python:3.12-slim@sha256:c3d81d25…`)
+  inline on both the builder and runtime `FROM` lines instead of via an
+  `ARG PYTHON_BASE_DIGEST`, because Dependabot's docker ecosystem only bumps
+  literal `FROM` references (it does not resolve an ARG-held digest —
+  dependabot-core#2057 / #4597). `.github/dependabot.yml` gains an active
+  `docker` block for `/backend` (weekly, `chore(deps)` prefix), so upstream
+  base rebuilds now arrive as automatic PRs. The runtime stage also
+  `pip uninstall -y pip`s the base image's own unused pip (5 alerts incl.
+  CVE-2026-8643 — nothing runs it; deps live in the uv-built `/app/.venv`).
+  Finally, `.github/workflows/image.yml`'s Trivy step adds
+  `limit-severities-for-sarif: true` (so the `severity: CRITICAL,HIGH`
+  filter actually applies to SARIF, dropping the LOW/MEDIUM noise the input
+  never suppressed) and flips `exit-code: '0' → '1'` to make a post-push
+  main/tag scan a **red-main alarm** against silent CVE accumulation (not a
+  PR merge gate). Stale "bookworm"/"v0.2 will flip this" comments corrected —
+  `backend/Dockerfile`, `.github/workflows/image.yml`, `.github/dependabot.yml`
+  (#2491).
+
 ### CI — coverage fail-visible contract (#2513)
 
 - Make a missing backend coverage import **loud instead of silent** (G0.35-T3).

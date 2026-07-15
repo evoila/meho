@@ -436,9 +436,9 @@ def _blocking_tls_inspect(
     deadline = time.monotonic() + timeout
     raw = socket.create_connection((host, port), timeout=timeout)
     try:
-        context = SSL.Context(SSL.TLS_CLIENT_METHOD)
-        context.set_verify(SSL.VERIFY_NONE)
-        connection = SSL.Connection(context, raw)
+        context = SSL.Context(SSL.TLS_CLIENT_METHOD)  # NOSONAR(S4423) — probe negotiates whatever the appliance offers; protocol version is reported output  # noqa: E501  # fmt: skip
+        context.set_verify(SSL.VERIFY_NONE)  # NOSONAR(S4830) — inspection-only handshake; verification-off is the op's purpose (module docstring)  # noqa: E501  # fmt: skip
+        connection = SSL.Connection(context, raw)  # NOSONAR(S5527) — hostname match is computed and REPORTED by the handler, not enforced  # noqa: E501  # fmt: skip
         connection.set_connect_state()
         sni = _encode_sni(server_name)
         if sni is not None:

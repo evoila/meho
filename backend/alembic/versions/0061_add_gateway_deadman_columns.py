@@ -77,14 +77,23 @@ def upgrade() -> None:
     is_postgres = bind.dialect.name == "postgresql"
 
     if is_postgres:
-        last_seen_default: sa.sql.elements.TextClause = sa.text("now()")
+        last_seen_default: str | sa.sql.elements.TextClause = sa.text("now()")
     else:
         # SQLite rejects CURRENT_TIMESTAMP / expressions as an ADD COLUMN
         # default (only constant literals are allowed). Pin a migration-time
         # literal so the NOT NULL add succeeds and any pre-existing row
         # initialises to ~now (treated as freshly-seen, not epoch-stale).
-        _now_literal = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
-        last_seen_default = sa.text(f"'{_now_literal}'")
+        #
+        # Pass the literal as a plain ``str`` server_default -- SQLAlchemy
+        # renders it as a properly-quoted SQL literal, giving DDL identical
+        # to ``sa.text(f"'{value}'")`` -- rather than wrapping it in an
+        # interpolated ``sa.text(...)``. A non-literal ``text()`` argument
+        # trips Semgrep's ``avoid-sqlalchemy-text`` rule, and CI's
+        # registry-pack Semgrep does not honour an inline ``# nosemgrep``
+        # for it, so the repo convention (``events/outbox.py``,
+        # ``retrieval/retriever.py``, ``topology/query.py``) is to keep the
+        # value off ``text()`` entirely.
+        last_seen_default = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")
 
     op.add_column(
         "runner_principal",

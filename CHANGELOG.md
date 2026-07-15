@@ -115,6 +115,47 @@ connector-related release-notes line.
   adds `runner_principal.last_seen_at` (+ index) and
   `runner_assignments.stale_at` (#2501).
 
+### Added — single-use gateway capability commands (#2500)
+
+- Add the authorization keystone of the remote-execution gateway (Initiative
+  #2415, T4): single-use **capability commands** bound to `(runner, op,
+  target, args-hash, expiry)`, minted centrally **after** the policy gate and
+  executed at most once. `mint_gateway_command` re-runs the dispatcher's
+  pre-execution ladder (`lookup_descriptor` → `validate_params` → **safe-only
+  wall** → `policy_gate`) and mints a `gateway_command` row **only** on an
+  explicit `AUTO_EXECUTE` for a `safety_level=='safe'` op — a non-`safe` op,
+  or a `DENY` / `NEEDS_APPROVAL` verdict, is a structured refusal that writes
+  no command row and never parks into the approval queue (change-ops over the
+  gateway are v2). The capability *is* the command row's opaque UUID (not a
+  JWT). Delivery re-hashes the stored params against `params_hash` and refuses
+  on mismatch (post-mint substitution defence); the claim predicate skips
+  expired (`expires_at > now`, bounded at mint against a module-constant
+  default TTL) and consumed rows. A one-way `consumed_at` latch
+  (`consume_command`) makes result acceptance at-most-once with central replay
+  refusal (`gateway_command_already_consumed` + a `gateway_command_replay_refused`
+  log), and the accepted result's audit row links back to the mint audit row
+  (`parent_audit_id = mint_audit_id`) so a remote execution forms one audit
+  subtree. Runner-side, `ExecutedCommandStore` + `execute_command_once` record
+  the command id before dispatch so a redelivery re-submits the spooled result
+  instead of re-executing. Migration `0061` adds the four binding columns to
+  `gateway_command` —
+  `backend/src/meho_backplane/operations/gateway_commands.py` (#2500).
+
+### Accessibility — operator-console a11y + soak/keycloak hardening (#2512)
+
+- Fix ~10 real static-analysis findings triaged out of the SonarCloud noise
+  (G0.35-T2): every `<th>` in the topology table head now carries
+  `scope="col"` and the empty action column gets a visually-hidden
+  `<span class="sr-only">Actions</span>`; the connectors review-row
+  custom-description input and the ingest-modal spec-URL repeater input gain
+  accessible names via `aria-label`; the keycloak token parser drops a
+  provably-dead `isinstance` re-check; and `scripts/soak/soak-harness.sh`
+  pins its embedded `uv run` to `--locked` so a stale lockfile fails closed,
+  matching the repo-wide CI posture — `backend/src/meho_backplane/ui/
+  templates/topology/_table_head.html`, `.../connectors/_review_op_row.html`,
+  `.../connectors/_ingest_modal.html`,
+  `backend/src/meho_backplane/connectors/keycloak/connector.py`,
+  `scripts/soak/soak-harness.sh` (#2512).
 ### Gateway — versioned assignment + results ingest API
 
 - Add the central-side ingest + versioned assignment API for the push-only

@@ -1,18 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0061_add_gateway_deadman_columns``.
+"""Behavioural tests for Alembic migration ``0062_add_gateway_deadman_columns``.
 
 Initiative #2415, Task #2501. Adds the dead-man-switch liveness columns:
 ``runner_principal.last_seen_at`` (``NOT NULL``, server-default ``now()``,
 + a b-tree index) and ``runner_assignments.stale_at`` (``NULL``). The
-**fifth** migration in the initiative's serialized chain; extends the
-then-current single head ``0060`` (``runner_assignments`` /
-``runner_check_results``).
+**fifth** migration in the initiative's serialized chain; renumbered
+0061->0062 at drain time to sit after the sibling #2500 ``gateway_command``
+capability migration, so it now extends the then-current single head
+``0061`` (``gateway_command`` capability-binding columns).
 
-**Idempotency pinning (0049/0050/0053/0055/0057/0058/0060 footgun).** Every
+**Idempotency pinning (0049/0050/0053/0055/0057/0058/0060/0061 footgun).** Every
 forward / round-trip / stamp-replay step targets this migration's **own**
-revision (``0061``) and its ``down_revision`` (``0060``), never ``head`` —
+revision (``0062``) and its ``down_revision`` (``0061``), never ``head`` —
 so a future head migration cannot make ``upgrade("head")`` re-run these
 ``add_column`` calls on a schema that already has them. SQLite drives the
 test; the migration branches the ``last_seen_at`` default per dialect
@@ -35,8 +36,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0061"
-_DOWN_REVISION = "0060"
+_REVISION = "0062"
+_DOWN_REVISION = "0061"
 
 _PRINCIPAL_TABLE = "runner_principal"
 _ASSIGNMENTS_TABLE = "runner_assignments"
@@ -51,7 +52,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL (sync fixture)."""
-    db_path = tmp_path / "migration_0061.db"
+    db_path = tmp_path / "migration_0062.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -105,7 +106,7 @@ def _index_names(sync_url: str, table: str) -> set[str]:
 
 
 def test_upgrade_adds_both_columns(alembic_cfg: tuple[Config, str]) -> None:
-    """``upgrade 0061`` adds ``last_seen_at`` + ``stale_at`` to the gateway tables."""
+    """``upgrade 0062`` adds ``last_seen_at`` + ``stale_at`` to the gateway tables."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
 
@@ -148,10 +149,10 @@ def test_upgrade_creates_last_seen_index(alembic_cfg: tuple[Config, str]) -> Non
 def test_stamp_down_revision_then_upgrade_is_idempotent(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """Stamp ``0060`` then upgrade to ``0061`` — pinned to own revisions, never ``head``.
+    """Stamp ``0061`` then upgrade to ``0062`` — pinned to own revisions, never ``head``.
 
     Builds the schema through the parent revision, stamps the version table
-    to ``0060``, then replays **only** this migration to its own revision. A
+    to ``0061``, then replays **only** this migration to its own revision. A
     future head migration cannot make this step re-run the ``add_column`` on
     an already-migrated schema, since no leg targets ``"head"``.
     """
@@ -165,7 +166,7 @@ def test_stamp_down_revision_then_upgrade_is_idempotent(
 
 
 def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade "0060"`` drops the columns + index; ``upgrade "0061"`` re-adds them.
+    """``downgrade "0061"`` drops the columns + index; ``upgrade "0062"`` re-adds them.
 
     Pinned to this migration's own revision on both legs (never ``head``).
     """

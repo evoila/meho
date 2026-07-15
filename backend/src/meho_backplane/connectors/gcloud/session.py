@@ -15,8 +15,9 @@ SA-JSON-key refusal
 Org policy ``constraints/iam.disableServiceAccountKeyCreation`` is active
 on the consumer's GCP organisation. The connector enforces this policy in
 code: if the Vault ``secret_ref`` payload contains fields that look like a
-service-account JSON key (``"type": "service_account"`` + ``"private_key"``,
-or any of the JSON-key field names), ``auth_headers()`` raises
+service-account JSON key (a ``type`` field of ``service_account`` plus a
+``private_key`` field, or any of the ``_SA_KEY_FIELDS`` JSON-key field
+names — see :func:`_contains_sa_key_fields`), ``auth_headers()`` raises
 :exc:`ValueError` with a clear message and no token is built.
 
 The only accepted credential material in ``secret_ref`` is:

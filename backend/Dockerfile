@@ -236,7 +236,7 @@ USER 1001:0
 
 EXPOSE 8000
 
-# Two execution modes share this image:
+# Three execution modes share this image:
 #
 # 1. **Serve** (default) — uvicorn runs the FastAPI app on :8000. This
 #    is what the Deployment rolls; the CMD below is the unmodified
@@ -260,6 +260,24 @@ EXPOSE 8000
 #    plus ``env: [{name: DATABASE_URL, valueFrom: ...}]``. The runner
 #    exits 0 on success, 1 on failure; ``backoffLimit`` on the Job
 #    handles retries.
+#
+# 3. **Runner** — the push-only satellite runner (Initiative #2415)
+#    overrides the container command to run
+#    ``python -m meho_backplane.runner``. It is headless: no FastAPI
+#    app, no uvicorn, no inbound listener, and no local Postgres /
+#    Valkey. It dials the central instance outbound, executes
+#    centrally-authorized read-only operations locally against the same
+#    connector surface, and reports results back — with an on-disk retry
+#    spool covering uplink outages. Like Migrate, it runs from this same
+#    image via command override; no extra Dockerfile stage is needed.
+#
+#    The runner Deployment spec passes:
+#        command: ["python"]
+#        args: ["-m", "meho_backplane.runner"]
+#    plus ``env: [{name: MEHO_RUNNER_CENTRAL_URL, ...}, ...]`` (the
+#    ``MEHO_RUNNER_*`` namespace; no chassis env). It exits 0 on
+#    SIGTERM (clean tick-loop unwind) and 1 on a configuration error
+#    naming the missing/invalid variable.
 #
 # Exec form forwards SIGTERM cleanly to uvicorn (k8s pod-shutdown contract).
 #

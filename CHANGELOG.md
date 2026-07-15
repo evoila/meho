@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Gateway — satellite runner mode (#2415)
+
+- Add a headless, push-only **satellite runner** deploy mode of the
+  backplane image, started as `python -m meho_backplane.runner`. It runs
+  an in-process interval-tick loop (no local Postgres, Valkey, UI, MCP,
+  or inbound listener), polls the central instance over client-initiated
+  HTTP for its assignment, executes read-only (`safety_level == "safe"`)
+  operations locally against the same connector surface, and reports
+  results back — with an on-disk retry spool covering uplink outages and
+  a fail-closed executor that refuses non-`safe` ops and any handler
+  outside `meho_backplane.connectors.*`. Runner chassis only; the central
+  assignment/ingest API (#2499) and long-poll command plane (#2498) land
+  separately. (#2497)
+
 ## [0.22.0] - 2026-07-13
 
 ### Added — rke2.etcd-snapshot.save safe managed-etcd snapshot op (#2431)

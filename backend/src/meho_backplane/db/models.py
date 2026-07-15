@@ -3554,6 +3554,95 @@ class AgentPrincipal(Base):
     )
 
 
+class RunnerPrincipal(Base):
+    """A satellite runner's service principal — a Keycloak client tagged ``kind=runner``.
+
+    Initiative #2415 (#2502) under Goal #221. Each row represents one
+    satellite runner identity registered by ``meho runner-principal
+    register``. It is the direct structural twin of
+    :class:`AgentPrincipal` (same columns, same two-index shape,
+    same register/revoke lifecycle contract) — the runner lifecycle is
+    moulded on the agent lifecycle (#815) — but carves out a distinct
+    identity kind with a **read-only** credential scope:
+
+    * **register** creates a Keycloak client (confidential,
+      service-accounts-enabled, ``kind=runner`` attribute) whose access
+      token carries ``principal_kind=runner``, ``tenant_role=read_only``,
+      and a hardcoded ``runner_id=<this row's id>`` mapper, then inserts
+      this row with an explicit ``id`` equal to that ``runner_id``.
+    * **revoke** sets ``enabled=false`` on the Keycloak client (kill
+      switch) then marks ``revoked=true`` on this row. The row is never
+      hard-deleted so the audit trail stays intact.
+
+    Why a separate table rather than a ``kind`` column on
+    ``agent_principal``: the negative route cage
+    (:func:`~meho_backplane.middleware.verify_jwt_and_bind`) and the
+    gateway guard (:mod:`~meho_backplane.auth.runner_guard`) reason about
+    runners as a first-class identity with its own name→id binding; a
+    dedicated table keeps the unique ``(tenant_id, name)`` runner
+    namespace independent of the agent namespace and lets #2499/#2501
+    reference a runner by ``runner_name`` soft-FK without colliding with
+    agent names.
+
+    Columns mirror :class:`AgentPrincipal`; see that class for the
+    per-column rationale. The wire/route identity across the gateway set
+    is the principal **name** (``{runner}`` path segment in #2498,
+    ``?runner=`` in #2499), while the unforgeable token claim carries this
+    row's ``id`` — :func:`~meho_backplane.auth.runner_guard.assert_runner_scope`
+    is the single point that binds the two.
+    """
+
+    __tablename__ = "runner_principal"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK to tenant.id -- brand-new table, no chassis-era rows.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_client_id: Mapped[str] = mapped_column(Text, nullable=False)
+    keycloak_internal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    owner_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked: Mapped[bool] = mapped_column(
+        sa.Boolean(),
+        nullable=False,
+        default=False,
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        Index(
+            "runner_principal_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        Index(
+            "runner_principal_keycloak_client_id_idx",
+            "keycloak_client_id",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # G11.2-T3 — per-(principal, op, target) permission model
 # ---------------------------------------------------------------------------

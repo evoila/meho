@@ -5050,6 +5050,31 @@ type RunbookTemplateListResponse struct {
 	NextCursor *string           `json:"next_cursor"`
 }
 
+// RunnerPrincipalCreate Input shape for :meth:`RunnerPrincipalService.register`.
+type RunnerPrincipalCreate struct {
+	Name     string  `json:"name"`
+	OwnerSub *string `json:"owner_sub"`
+}
+
+// RunnerPrincipalListResponse Response envelope for “GET /api/v1/runner-principals“.
+type RunnerPrincipalListResponse struct {
+	Principals []RunnerPrincipalRead `json:"principals"`
+}
+
+// RunnerPrincipalRead Row representation returned by every accessor.
+type RunnerPrincipalRead struct {
+	CreatedAt          time.Time          `json:"created_at"`
+	CreatedBySub       string             `json:"created_by_sub"`
+	Id                 openapi_types.UUID `json:"id"`
+	KeycloakClientId   string             `json:"keycloak_client_id"`
+	KeycloakInternalId string             `json:"keycloak_internal_id"`
+	Name               string             `json:"name"`
+	OwnerSub           string             `json:"owner_sub"`
+	Revoked            bool               `json:"revoked"`
+	TenantId           openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+}
+
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
 //
 // Discriminated by *kind*: exactly one of “cron_expr“ / “fire_at“
@@ -7253,6 +7278,29 @@ type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams defines parameters for ListRunnerPrincipalsApiV1RunnerPrincipalsGet.
+type ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams struct {
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset         *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	IncludeRevoked *bool   `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
+}
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams defines parameters for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost.
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams defines parameters for ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet.
+type ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams defines parameters for RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete.
+type RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListTriggersApiV1SchedulerTriggersGetParams defines parameters for ListTriggersApiV1SchedulerTriggersGet.
 type ListTriggersApiV1SchedulerTriggersGetParams struct {
 	Limit         *int                                               `form:"limit,omitempty" json:"limit,omitempty"`
@@ -7868,6 +7916,9 @@ type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody = Under
 
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody defines body for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost for application/json ContentType.
 type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = UnderscoreVersionBody
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody defines body for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost for application/json ContentType.
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody = RunnerPrincipalCreate
 
 // CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
 type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
@@ -9451,6 +9502,20 @@ type ClientInterface interface {
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListRunnerPrincipalsApiV1RunnerPrincipalsGet request
+	ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody request with any body
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet request
+	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete request
+	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTriggersApiV1SchedulerTriggersGet request
 	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11924,6 +11989,66 @@ func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ct
 
 func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -22061,6 +22186,255 @@ func NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequestWithBody(serv
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest generates requests for ListRunnerPrincipalsApiV1RunnerPrincipalsGet
+func NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest(server string, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeRevoked != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_revoked", runtime.ParamLocationQuery, *params.IncludeRevoked); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest calls the generic RegisterRunnerPrincipalApiV1RunnerPrincipalsPost builder with application/json body
+func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(server string, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody generates requests for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost with any type of body
+func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server string, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest generates requests for ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet
+func NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest(server string, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest generates requests for RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete
+func NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(server string, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -34321,6 +34695,20 @@ type ClientWithResponsesInterface interface {
 
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
 
+	// ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse request
+	ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error)
+
+	// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse request with any body
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
+
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
+
+	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request
+	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error)
+
+	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse request
+	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error)
+
 	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
 	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
 
@@ -37382,6 +37770,98 @@ func (r PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse) Status() s
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -43473,6 +43953,50 @@ func (c *ClientWithResponses) PublishTemplateApiV1RunbooksTemplatesSlugPublishPo
 	return ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp)
 }
 
+// ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse request returning *ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse
+func (c *ClientWithResponses) ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error) {
+	rsp, err := c.ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse(rsp)
+}
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse request with arbitrary body returning *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse
+func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request returning *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse
+func (c *ClientWithResponses) ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error) {
+	rsp, err := c.ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse(rsp)
+}
+
+// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse request returning *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse
+func (c *ClientWithResponses) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error) {
+	rsp, err := c.RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp)
+}
+
 // ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
 func (c *ClientWithResponses) ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error) {
 	rsp, err := c.ListTriggersApiV1SchedulerTriggersGet(ctx, params, reqEditors...)
@@ -49473,6 +49997,138 @@ func ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PublishTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse parses an HTTP response from a ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse call
+func ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse(rsp *http.Response) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse parses an HTTP response from a RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse call
+func ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp *http.Response) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest RunnerPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse parses an HTTP response from a ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse call
+func ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse(rsp *http.Response) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse parses an HTTP response from a RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse call
+func ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp *http.Response) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

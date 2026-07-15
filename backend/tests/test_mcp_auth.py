@@ -63,6 +63,8 @@ def _mint_mcp_token(
     sub: str = "mcp-op-42",
     tenant_id: str = DEFAULT_TENANT_ID,
     tenant_role: str = DEFAULT_TENANT_ROLE,
+    principal_kind: str | None = None,
+    runner_id: str | None = None,
 ) -> str:
     """Mint a JWT signed by *private_key* with the given audience.
 
@@ -88,6 +90,10 @@ def _mint_mcp_token(
             "name": "MCP Test",
             "email": "mcp-test@example.com",
         }
+        if principal_kind is not None:
+            payload["principal_kind"] = principal_kind
+        if runner_id is not None:
+            payload["runner_id"] = runner_id
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, private_key)
         return token.decode("ascii") if isinstance(token, bytes) else token
@@ -264,6 +270,37 @@ def test_token_with_mcp_audience_is_accepted(
     body = response.json()
     assert body["id"] == 4
     assert body["result"] == {}
+
+
+def test_runner_kind_token_is_rejected_at_mcp(
+    client: TestClient,
+    keypair: Any,
+    jwks: dict[str, Any],
+) -> None:
+    """A ``principal_kind=runner`` token with the MCP audience is 403'd (Initiative #2415, #2502).
+
+    The MCP chain bypasses the REST negative cage
+    (:func:`~meho_backplane.middleware.verify_jwt_and_bind`), so
+    :func:`~meho_backplane.mcp.auth.verify_mcp_jwt_and_bind` rejects runner
+    principals outright — no MCP surface is in a runner's read-only
+    credential scope. Even a token that clears the MCP audience binding is
+    refused with the shared ``runner_scope_violation`` detail code.
+    """
+    with respx.mock as router:
+        _mock_discovery_and_jwks(router, jwks)
+        runner_token = _mint_mcp_token(
+            keypair,
+            principal_kind="runner",
+            runner_id="33333333-3333-3333-3333-333333333333",
+        )
+        response = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 12, "method": "ping"},
+            headers={"Authorization": f"Bearer {runner_token}"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "runner_scope_violation"}
 
 
 # ---------------------------------------------------------------------------

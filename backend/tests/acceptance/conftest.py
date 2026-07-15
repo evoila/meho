@@ -226,6 +226,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # table referenced in a foreign key constraint``.
     "identity_budget",
     "operation_group",
+    # ``runner_principal.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
+    # from migration ``0058`` (Initiative #2415 T6, #2502). Same rule: PG
+    # rejects truncating ``tenant`` unless every referencing table is listed
+    # in the same statement, so ``runner_principal`` must appear here or
+    # every PG-backed acceptance test errors at setup with ``cannot truncate
+    # a table referenced in a foreign key constraint``.
+    "runner_principal",
     # ``scheduled_trigger.tenant_id`` and ``.agent_definition_id`` are real
     # ``REFERENCES`` FKs from migration ``0020`` (G11.3-T1 #822); the table
     # must be listed so the non-cascading multi-table TRUNCATE can drop

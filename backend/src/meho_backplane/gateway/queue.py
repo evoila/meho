@@ -47,7 +47,7 @@ route clamps the caller's ``wait`` to it via :func:`clamp_longpoll_wait`.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 import structlog
@@ -55,19 +55,56 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.models import GatewayCommand, GatewayCommandStatus
+from meho_backplane.operations._validate import compute_params_hash
 
 __all__ = [
+    "GATEWAY_COMMAND_DEFAULT_TTL",
     "GATEWAY_LONGPOLL_DEFAULT_WAIT_SECONDS",
     "GATEWAY_LONGPOLL_MAX_WAIT_SECONDS",
     "GatewayCommandNotDeliveredError",
     "GatewayCommandNotFoundError",
+    "bound_capability_expiry",
     "claim_next_command",
     "clamp_longpoll_wait",
     "enqueue_command",
     "record_result",
 ]
 
-_log = structlog.get_logger(__name__)
+# NOTE: the structlog logger is resolved per-call at each log site below
+# rather than held as a module-level proxy -- production's
+# ``cache_logger_on_first_use=True`` orphans a cached BoundLogger's
+# processor chain from ``structlog.testing.capture_logs`` (the #738
+# ``-n 3 --dist loadscope`` flake). Same convention as
+# :mod:`meho_backplane.auth.jwt` / :mod:`meho_backplane.operations.gateway_commands`.
+
+#: Default capability-command TTL (#2500). A minted command stays
+#: claimable for this window; the mint caller may only *shorten* it
+#: (:func:`bound_capability_expiry`), never extend it — the single default
+#: doubles as the ceiling, exactly like the approval queue's
+#: ``_bounded_expires_at`` (#2322). A module constant, not a settings knob:
+#: substrate minimalism (#1177), and the bound is a security property that
+#: should not be operator-tunable per environment. Sized well above the
+#: long-poll hold + a few runner ticks so a briefly-offline runner can
+#: still claim a fresh command, but short enough to bound the replay window.
+GATEWAY_COMMAND_DEFAULT_TTL: Final[timedelta] = timedelta(minutes=5)
+
+
+def bound_capability_expiry(requested: datetime | None, *, now: datetime | None = None) -> datetime:
+    """Resolve the ``expires_at`` a minted capability command is stamped with.
+
+    ``None`` defaults to ``now + GATEWAY_COMMAND_DEFAULT_TTL``. An explicit
+    caller deadline is honoured but **capped** at that same ceiling, so no
+    caller can mint an unbounded-lived capability while a shorter (probe /
+    already-past) deadline is respected as-is. No lower bound (substrate
+    minimalism). Moulded on
+    :func:`meho_backplane.operations.approval_queue._bounded_expires_at`.
+    """
+    current = now if now is not None else datetime.now(UTC)
+    ceiling = current + GATEWAY_COMMAND_DEFAULT_TTL
+    if requested is None:
+        return ceiling
+    return min(requested, ceiling)
+
 
 #: Ceiling on a single long-poll hold, in seconds. Sizing mirrors the SSE
 #: feed's intermediary-idle-timeout rationale (nginx ``proxy_read_timeout``
@@ -134,12 +171,24 @@ async def enqueue_command(
     params: dict[str, Any],
     enqueued_by_sub: str,
     target_descriptor: dict[str, Any] | None = None,
+    params_hash: str | None = None,
+    expires_at: datetime | None = None,
+    mint_audit_id: uuid.UUID | None = None,
 ) -> GatewayCommand:
     """Insert a ``pending`` :class:`GatewayCommand` for a runner.
 
     The single central enqueue path (no HTTP surface). Flushes, not
     committed — the caller owns the commit so the enqueue can compose with
     the minting transaction (#2500).
+
+    Every row carries its capability binding (#2500): ``params_hash``
+    (defaulting to ``compute_params_hash(params)`` so it always matches the
+    stored params), ``expires_at`` (bounded by
+    :func:`bound_capability_expiry`), and the optional ``mint_audit_id``
+    lineage. The mint path (:func:`meho_backplane.operations.gateway_commands.mint_gateway_command`)
+    passes an explicit ``params_hash`` (the one it also stamped on the mint
+    audit row) and ``mint_audit_id``; direct enqueues (tests) get the
+    computed hash and a default TTL.
 
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed.
@@ -153,6 +202,12 @@ async def enqueue_command(
         target_descriptor: The centrally-resolved target descriptor a
             handler duck-reads, or ``None`` for a targetless synthetic op
             (``net.*``).
+        params_hash: The args-hash binding; computed from *params* when
+            omitted so it always matches the stored params.
+        expires_at: A caller deadline (bounded down to the default-TTL
+            ceiling); the default TTL when omitted.
+        mint_audit_id: The id of the synchronous ``gateway.command.mint``
+            audit row, stamped for result → mint audit lineage.
 
     Returns:
         The flushed :class:`GatewayCommand` row (with its generated ``id``).
@@ -167,15 +222,19 @@ async def enqueue_command(
         status=GatewayCommandStatus.PENDING.value,
         enqueued_by_sub=enqueued_by_sub,
         enqueued_at=datetime.now(UTC),
+        params_hash=params_hash if params_hash is not None else compute_params_hash(params),
+        expires_at=bound_capability_expiry(expires_at),
+        mint_audit_id=mint_audit_id,
     )
     session.add(command)
     await session.flush()
-    _log.info(
+    structlog.get_logger(__name__).info(
         "gateway_command_enqueued",
         command_id=str(command.id),
         tenant_id=str(tenant_id),
         runner_id=runner_id,
         op_id=op_id,
+        expires_at=command.expires_at.isoformat(),
     )
     return command
 
@@ -202,6 +261,14 @@ async def claim_next_command(
     stamped) on a win, or ``None`` when the queue is empty **or** a
     concurrent claimer won the row between the SELECT and the UPDATE.
 
+    Capability predicate (#2500): only an **unexpired** (``expires_at >
+    now``), **unconsumed** (``consumed_at IS NULL``) ``pending`` row is
+    claimable, so an expired or already-consumed capability is never
+    delivered. Before flipping the row the stored ``params`` are re-hashed
+    against ``params_hash``; a mismatch (post-mint substitution) refuses
+    delivery (returns ``None`` + an error log) — the same swap defence
+    ``approve_request`` runs, here guarding the params column.
+
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed. The
             caller commits to persist the ``pending -> delivered`` flip.
@@ -209,12 +276,17 @@ async def claim_next_command(
         runner_id: The runner principal name whose queue to claim from.
     """
     conn = await session.connection()
+    now = datetime.now(UTC)
     stmt = (
         select(GatewayCommand)
         .where(
             GatewayCommand.tenant_id == tenant_id,
             GatewayCommand.runner_id == runner_id,
             GatewayCommand.status == GatewayCommandStatus.PENDING.value,
+            # Capability binding (#2500): never deliver an expired or an
+            # already-consumed command.
+            GatewayCommand.expires_at > now,
+            GatewayCommand.consumed_at.is_(None),
         )
         .order_by(GatewayCommand.enqueued_at.asc())
         .limit(1)
@@ -225,7 +297,21 @@ async def claim_next_command(
     if row is None:
         return None
 
-    now = datetime.now(UTC)
+    # Post-mint substitution defence (#2500): the stored params must still
+    # hash to the bound params_hash, else refuse delivery. A mismatch means
+    # the params column was mutated after mint — a tamper signal, not a race
+    # — so it is fail-closed (the row stays pending, undelivered) and logged
+    # at error level for an operator to investigate.
+    if compute_params_hash(row.params) != row.params_hash:
+        structlog.get_logger(__name__).error(
+            "gateway_command_params_hash_mismatch",
+            command_id=str(row.id),
+            tenant_id=str(tenant_id),
+            runner_id=runner_id,
+            op_id=row.op_id,
+        )
+        return None
+
     # Conditional flip: the predicate + write commit together, so a second
     # in-process claimer that SELECTed the same pending row loses (0 rows).
     result = await session.execute(
@@ -244,7 +330,7 @@ async def claim_next_command(
     # re-query (mould: advance_cron_trigger).
     row.status = GatewayCommandStatus.DELIVERED.value
     row.delivered_at = now
-    _log.info(
+    structlog.get_logger(__name__).info(
         "gateway_command_delivered",
         command_id=str(row.id),
         tenant_id=str(tenant_id),
@@ -326,7 +412,7 @@ async def record_result(
     row.result = result
     row.error = error
     row.completed_at = now
-    _log.info(
+    structlog.get_logger(__name__).info(
         "gateway_command_reported",
         command_id=str(command_id),
         tenant_id=str(tenant_id),

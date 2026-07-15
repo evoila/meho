@@ -39,9 +39,10 @@ from meho_backplane.operations._handler_resolve import (
     import_handler,
     is_unbound_method,
 )
+from meho_backplane.runner.spool import ExecutedCommandStore
 from meho_backplane.runner.wire import RunnerResult, RunnerWorkItem
 
-__all__ = ["execute_work_item"]
+__all__ = ["execute_command_once", "execute_work_item"]
 
 _log = structlog.get_logger(__name__)
 
@@ -97,6 +98,54 @@ async def _invoke(handler: Callable[..., Awaitable[Any]], item: RunnerWorkItem) 
             item, "error", payload=None, error=f"handler returned non-dict {type(payload).__name__}"
         )
     return _result(item, "ok", payload=payload, error=None)
+
+
+async def execute_command_once(
+    command_id: str,
+    item: RunnerWorkItem,
+    store: ExecutedCommandStore,
+) -> RunnerResult:
+    """Execute a gateway command at most once, keyed on its UUID request id.
+
+    The runner's half of the at-most-once guarantee (#2500): *command_id* is
+    recorded in *store* **before** the local dispatch (record-before-execute),
+    so a redelivery is never re-executed —
+
+    * a redelivery whose result was spooled is re-submitted (the centre's
+      ``consumed_at`` latch refuses a double-accept, so re-submission is safe);
+    * a redelivery recorded but with no stored result (a crash mid-dispatch)
+      returns a structured ``duplicate_delivery`` refusal — still no re-run.
+
+    A first delivery records the id, executes via :func:`execute_work_item`,
+    stores the result, and returns it.
+    """
+    if not store.record(command_id):
+        prior = store.load_result(command_id)
+        if prior is not None:
+            _log.info(
+                "runner_command_duplicate_resubmit",
+                command_id=command_id,
+                op_id=item.op_id,
+                check_ref=item.check_ref,
+            )
+            return prior
+        _log.warning(
+            "runner_command_duplicate_no_result",
+            command_id=command_id,
+            op_id=item.op_id,
+            check_ref=item.check_ref,
+        )
+        return _result(
+            item,
+            "refused",
+            payload=None,
+            error=f"duplicate_delivery: command {command_id} already recorded, "
+            "no spooled result to re-submit",
+        )
+
+    result = await execute_work_item(item)
+    store.store_result(command_id, result)
+    return result
 
 
 async def execute_work_item(item: RunnerWorkItem) -> RunnerResult:

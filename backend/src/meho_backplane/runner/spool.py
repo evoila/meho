@@ -36,9 +36,9 @@ from pathlib import Path
 
 import structlog
 
-from meho_backplane.runner.wire import RunnerResultBatch
+from meho_backplane.runner.wire import RunnerResult, RunnerResultBatch
 
-__all__ = ["ResultSpool"]
+__all__ = ["ExecutedCommandStore", "ResultSpool"]
 
 _log = structlog.get_logger(__name__)
 
@@ -105,3 +105,81 @@ class ResultSpool:
                 path=str(oldest),
                 max_files=self._max_files,
             )
+
+
+class ExecutedCommandStore:
+    """Persisted record-before-execute set of gateway command ids (#2500).
+
+    The runner's half of the at-most-once guarantee: a gateway command's
+    UUID is the request id, and it is recorded on disk **before** the
+    handler is dispatched, so a crash between record and execute still
+    refuses re-execution on redelivery. The produced :class:`RunnerResult`
+    is persisted alongside the marker so a redelivery whose central
+    consumption latch has not yet closed can be **re-submitted** rather than
+    re-run (the centre's ``consumed_at`` latch makes re-submission safe).
+
+    One file per command id, ``<command_id>.json``, in a dedicated subdir of
+    the runner's spool directory:
+
+    * :meth:`record` atomically creates an empty marker (``O_CREAT|O_EXCL``),
+      returning ``True`` only for the caller that created it — the
+      record-before-execute step.
+    * :meth:`store_result` atomically overwrites the marker with the result
+      JSON (tmp + :func:`os.replace`), after the handler ran.
+    * :meth:`load_result` returns the stored result, or ``None`` when the id
+      is unknown **or** the marker is still empty (recorded but the execution
+      never produced a stored result — e.g. a crash mid-dispatch).
+    """
+
+    def __init__(self, executed_dir: str | os.PathLike[str]) -> None:
+        self._dir = Path(executed_dir)
+
+    def _path(self, command_id: str) -> Path:
+        return self._dir / f"{command_id}.json"
+
+    def record(self, command_id: str) -> bool:
+        """Atomically record *command_id* before execution.
+
+        Returns ``True`` when this call created the marker (proceed to
+        execute), ``False`` when it already existed (a duplicate delivery —
+        never re-execute).
+        """
+        self._dir.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(self._path(command_id), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            return False
+        os.close(fd)
+        return True
+
+    def has(self, command_id: str) -> bool:
+        """Whether *command_id* has been recorded (executed or in-flight)."""
+        return self._path(command_id).exists()
+
+    def store_result(self, command_id: str, result: RunnerResult) -> None:
+        """Persist *result* for a recorded *command_id* (atomic overwrite)."""
+        self._dir.mkdir(parents=True, exist_ok=True)
+        final = self._path(command_id)
+        tmp = final.with_suffix(final.suffix + _TMP_SUFFIX)
+        tmp.write_text(result.model_dump_json(), encoding="utf-8")
+        os.replace(tmp, final)
+
+    def load_result(self, command_id: str) -> RunnerResult | None:
+        """Return the stored result for *command_id*, or ``None``.
+
+        ``None`` covers both an unknown id and a recorded-but-empty marker
+        (recorded before execute, no result stored yet). A corrupt file is
+        logged and treated as absent rather than raising into the tick loop.
+        """
+        path = self._path(command_id)
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        if not raw:
+            return None
+        try:
+            return RunnerResult.model_validate_json(raw)
+        except ValueError as exc:
+            _log.warning("runner_executed_store_unreadable", path=str(path), error=str(exc))
+            return None

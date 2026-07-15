@@ -7,9 +7,9 @@ Copyright (c) 2026 evoila Group
 
 MEHO is analysed by [SonarCloud](https://sonarcloud.io/project/overview?id=evoila_meho)
 (project `evoila_meho`, organisation `evoila`, **public** project — read APIs
-need no token). This doc is the operator runbook: what the analysis covers, the
-one project setting that currently makes the dashboard misleading, and how to
-triage results without drowning in false positives.
+need no token). This doc is the operator runbook: what the analysis covers, how
+the new-code period and scan trigger are configured, and how to triage results
+without drowning in false positives.
 
 ## How analysis runs
 
@@ -46,33 +46,40 @@ never fails the CI run conclusion (which would also suppress this gate's
 
 Coverage is the **unit sweep only** (`--cov`-equivalent over `meho_backplane`);
 integration tests run in a separate job without coverage. The gate is
-`continue-on-error: true` — it is **advisory**, never blocks merges, until the
-baseline below is fixed.
+`continue-on-error: true` — it is **advisory** and never blocks merges (see the
+new-code-period + scan-trigger section below for why it is kept advisory).
 
-## ⚠️ The new-code baseline is broken — fix it once
+## New-code period + scan trigger — how they're configured
 
-SonarCloud's "Clean as You Code" model is supposed to gate only **changed** code.
-Right now it gates the **entire 186k-line repo** because the orphan-commit history
-reset left the new-code baseline predating every commit. The tell:
+SonarCloud's "Clean as You Code" model gates only **changed** code, relative to a
+configurable *new-code period*. Two decisions shape what the dashboard shows:
 
-- `new_lines` (~296k) **exceeds** total `ncloc` (~187k), and
-- every `new_*` metric exactly equals its all-time twin (`new_bugs == bugs`, etc.).
+**New-code period = `previous_version` (SonarCloud default — kept deliberately).**
+The tempting alternative — New Code = "Reference branch: `main`" — was considered
+and rejected: because this project analyzes `main` (see the trigger below), pinning
+the reference branch to `main` would diff `main` against **itself**, so main's
+new-code window would be permanently ~empty and the CaYC signal would go dark on
+the one branch that is actually analyzed. `previous_version` instead resets the
+new-code window at each `sonar.projectVersion` bump (the scan stamps it with the
+analyzed commit SHA — see `quality-gate.yml`'s `SonarCloud Scan` step), which keeps
+"new code" meaningful across merges. The gate is left **advisory**
+(`continue-on-error: true`) regardless.
 
-Until this is fixed the Quality Gate verdict is **meaningless** (it fails the whole
-codebase as if it were one giant PR), which is why it's kept advisory.
+> Historical note: the orphan-commit history reset once left the baseline
+> predating every commit, so `new_lines` (~296k) exceeded total `ncloc` (~187k)
+> and every `new_*` metric equalled its all-time twin. That artefact clears as
+> `previous_version` windows accrue from real merges; no manual reference-branch
+> setting is applied.
 
-**Fix (one-time, requires project admin — it is a SonarCloud setting, not a file):**
-
-1. UI: **Project → Administration → New Code → Reference branch → `main`**, *or*
-2. API:
-   ```bash
-   curl -s -u "$SONAR_TOKEN:" -X POST \
-     "https://sonarcloud.io/api/new_code_periods/set" \
-     -d project=evoila_meho -d type=REFERENCE_BRANCH -d value=main
-   ```
-
-After this, PRs are diffed against `main` and the gate scores only the real diff.
-Coverage/duplication/ratings on new code then become trustworthy signals.
+**Scan trigger = main pushes only.** `quality-gate.yml`'s job carries
+`if: … && github.event.workflow_run.event == 'push'`. CI runs on both `push` and
+`pull_request`, and SonarCloud stores a single analysis per project keyed by
+branch — so before the filter, every PR-branch CI completion triggered a scan that
+**overwrote** the main-branch analysis, churning the activity history and
+misaligning the new-code window with real merges. With the filter, only `main`
+pushes are analyzed; PR completions are skipped (the job shows as skipped in the
+Actions run). PR-level decoration is therefore not produced — an accepted
+trade-off while the gate is advisory.
 
 ## Reading the dashboard without drowning
 
@@ -110,6 +117,22 @@ Other accepted issue-level false positives: `go:S4830`/`S5527` on
 `python:S5443` on `bind9/_atomic.py` (CSPRNG-random `/tmp` name, runs as a remote
 shell script). Mark these *Accepted* / *Won't fix* in SonarCloud with the rationale
 above so the ratings reflect real risk.
+
+The 5 production CRITICAL TLS findings are **by-design and suppressed in code**
+via rule-scoped `# NOSONAR(Sxxxx)` comments (rule-scoped so only the named rule is
+muted, not every issue on the line), each pointing at the module docstring that
+carries the justification:
+
+| Line | Rule | Why by-design |
+|---|---|---|
+| `connectors/net/tls.py:439` | S4423 | probe negotiates whatever the appliance offers; protocol version is *reported* output |
+| `connectors/net/tls.py:440` | S4830 | inspection-only handshake; verification-off is the operation's purpose |
+| `connectors/net/tls.py:441` | S5527 | hostname match is computed and *reported* by the handler, not enforced |
+| `connectors/adapters/http.py:125` | S5527 | per-target `verify_tls=false` opt-out (default `True`); WARN-logged + audited; `tls_ca_pin` is the secure supersession |
+| `connectors/adapters/http.py:127` | S4830 | same justification; see the module docstring's TLS-trust precedence |
+
+These are deliberately **not** muted project-wide (no source-tree multicriteria on
+the TLS rules) so future genuinely-insecure TLS code still gets flagged.
 
 ## Real backlog (not noise)
 

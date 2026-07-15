@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — workflow token hardening (#2492)
+
+- Least-privilege the two workflows CodeQL flagged as token/isolation gaps
+  (G0.34-T2). `runner-smoke.yml` gains a top-level `permissions: {}` — the
+  smoke job uses zero `GITHUB_TOKEN` capability (no checkout, no `gh`,
+  anonymous Harbor probe), so it no longer carries the repo-default write-all
+  token on the self-hosted `meho-runners-ci` pool (CodeQL alert #36). In
+  `quality-gate.yml` the `sonarcloud` job moves **off** the self-hosted pool
+  to the ephemeral GitHub-hosted `ubuntu-latest`, so the untrusted
+  `workflow_run` `head_sha` checkout never lands on persistent internal
+  infrastructure (CodeQL alert #109); its token is scoped at job level to
+  `contents: read` + `actions: read` (the latter required by the cross-run
+  `actions/download-artifact`), the workflow-level floor drops to
+  `contents: read`, and a load-bearing invariant comment above the checkout
+  documents that no step may execute code from the checkout. `pull-requests:
+  write` is retained conservatively pending empirical verification that
+  SonarCloud PR decoration (GitHub App + `SONAR_TOKEN`, not `GITHUB_TOKEN`) is
+  unaffected — `.github/workflows/runner-smoke.yml`,
+  `.github/workflows/quality-gate.yml` (#2492).
 ### Security — base-image digest unfreeze + Trivy SARIF (#2491)
 
 - Unfreeze the backplane image's base pin and stop CVEs accruing on a stale

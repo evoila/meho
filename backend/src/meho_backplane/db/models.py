@@ -4841,9 +4841,13 @@ class GatewayCommand(Base):
     (#817): closed status enum + DB CHECK + drift guard, real tenant FK,
     caller-owns-commit service functions.
 
-    Transport-only (binding decision, #2498): this schema stays strictly
-    transport. Capability binding (args-hash, expiry, request-id dedup) is
-    sibling #2500's own migration; nothing speculative lands here.
+    Capability binding (#2500) layers on top of the #2498 transport row:
+    ``params_hash`` / ``expires_at`` / ``consumed_at`` / ``mint_audit_id``
+    are added by migration ``0061`` so a delivered command is bound to
+    ``(runner, op, target, args-hash, expiry)`` and consumed at most once.
+    The row *is* the capability token — an opaque UUID PK, verified by DB
+    lookup and revoked/consumed by a conditional UPDATE, never a signed
+    stateless artifact (at-most-once inherently needs central state).
 
     Schema decisions
     ----------------
@@ -4892,6 +4896,35 @@ class GatewayCommand(Base):
     * ``delivered_at`` / ``completed_at`` -- ``timestamptz`` nullable.
       Stamped on the ``pending -> delivered`` claim and the
       ``delivered -> terminal`` report respectively.
+
+    Capability binding (#2500, migration ``0061``)
+    ----------------------------------------------
+
+    * ``params_hash`` -- Text NOT NULL. ``compute_params_hash(params)`` at
+      mint. The delivery path re-hashes the stored ``params`` against it
+      and refuses delivery on mismatch (post-mint substitution defence,
+      moulded on ``approve_request``). The migration sentinel default
+      ``''`` only satisfies the NOT NULL ADD COLUMN on the empty
+      clean-slate table; every real row is stamped by ``enqueue_command``.
+
+    * ``expires_at`` -- ``timestamptz`` NOT NULL. Bounded at mint against a
+      module-constant default TTL (caller may only shorten). The claim
+      predicate requires ``expires_at > now``, so an expired capability is
+      never delivered. The sentinel default (epoch) is fail-closed
+      (already expired) for the same ADD COLUMN reason as ``params_hash``.
+
+    * ``consumed_at`` -- ``timestamptz`` nullable one-way latch. Won by a
+      single conditional ``UPDATE ... SET consumed_at = now WHERE
+      consumed_at IS NULL AND status = 'delivered'`` (``consume_command``,
+      moulded on ``claim_resume``): the loser of a replayed result is
+      refused (``command_already_consumed``), so a result is accepted at
+      most once. A consumed row is also excluded from claiming.
+
+    * ``mint_audit_id`` -- UUID nullable **soft** FK to ``audit_log.id``
+      (no DB FK, same discipline as ``audit_log.parent_audit_id``). The id
+      of the synchronous ``gateway.command.mint`` audit row; the accepted
+      result's audit row stamps ``parent_audit_id = mint_audit_id`` so a
+      remote execution forms one audit subtree.
 
     Index
     -----
@@ -4953,6 +4986,34 @@ class GatewayCommand(Base):
     )
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # --- Capability binding (#2500, migration 0061) --------------------
+    # NOT NULL with a sentinel server_default: the ADD COLUMN lands on the
+    # empty clean-slate table across PG + SQLite (SQLite forbids a
+    # CURRENT_TIMESTAMP / expression default on ADD COLUMN, so the default
+    # is a constant), and both sentinels are fail-closed. ``enqueue_command``
+    # stamps the real values on every minted row.
+    params_hash: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=sa.text("''"),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=sa.text("'1970-01-01 00:00:00+00:00'"),
+    )
+    # One-way consumption latch (NULL until the result is accepted once).
+    consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Soft FK to audit_log.id -- the mint audit row's id (mint lineage).
+    mint_audit_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(),
         nullable=True,
         default=None,
     )

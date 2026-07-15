@@ -7296,7 +7296,7 @@
           "gateway"
         ],
         "summary": "Report Command Result",
-        "description": "Report the outcome of a delivered command for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard).\nFlips the command ``delivered -> succeeded|failed``, stamping the\nresult/error and ``completed_at``. Returns ``200`` with an ack; ``404``\nwhen the command id is unknown or was enqueued for another runner /\ntenant (no existence oracle); ``409`` when the command is not\n``delivered`` (a duplicate report or a never-claimed row).",
+        "description": "Report the outcome of a delivered command for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard).\nWins the single-use consumption latch (#2500) **before** recording, then\nflips the command ``delivered -> succeeded|failed``, stamping the\nresult/error and ``completed_at`` and writing the result audit row (linked\nto the mint audit row). Returns ``200`` with an ack; ``404`` when the\ncommand id is unknown or was enqueued for another runner / tenant (no\nexistence oracle); ``409`` when the command is not ``delivered`` (a\nnever-claimed row) or was **already consumed** (a replayed result \u2014\ncentrally refused, at-most-once).",
         "operationId": "report_command_result_api_v1_gateway__runner__result_post",
         "parameters": [
           {

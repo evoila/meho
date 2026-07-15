@@ -75,7 +75,10 @@ from meho_backplane.gateway.queue import (
     GatewayCommandNotFoundError,
     claim_next_command,
     clamp_longpoll_wait,
-    record_result,
+)
+from meho_backplane.operations.gateway_commands import (
+    GatewayCommandAlreadyConsumedError,
+    accept_command_result,
 )
 
 __all__ = ["router"]
@@ -247,20 +250,24 @@ async def report_command_result(
     """Report the outcome of a delivered command for ``{runner}``.
 
     Authenticated as the runner principal for ``{runner}`` (#2502's guard).
-    Flips the command ``delivered -> succeeded|failed``, stamping the
-    result/error and ``completed_at``. Returns ``200`` with an ack; ``404``
-    when the command id is unknown or was enqueued for another runner /
-    tenant (no existence oracle); ``409`` when the command is not
-    ``delivered`` (a duplicate report or a never-claimed row).
+    Wins the single-use consumption latch (#2500) **before** recording, then
+    flips the command ``delivered -> succeeded|failed``, stamping the
+    result/error and ``completed_at`` and writing the result audit row (linked
+    to the mint audit row). Returns ``200`` with an ack; ``404`` when the
+    command id is unknown or was enqueued for another runner / tenant (no
+    existence oracle); ``409`` when the command is not ``delivered`` (a
+    never-claimed row) or was **already consumed** (a replayed result —
+    centrally refused, at-most-once).
     """
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session:
-            # Scope gate first (#2502), then record on the same session.
+            # Scope gate first (#2502), then consume + record + audit on the
+            # same session (#2500's accept path).
             await assert_runner_scope(operator, runner_name=runner, session=session)
-            command = await record_result(
+            command = await accept_command_result(
                 session,
-                tenant_id=operator.tenant_id,
+                operator=operator,
                 runner_id=runner,
                 command_id=body.command_id,
                 outcome=GatewayCommandStatus(body.outcome),
@@ -279,6 +286,11 @@ async def report_command_result(
         raise HTTPException(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="gateway_command_not_found",
+        ) from exc
+    except GatewayCommandAlreadyConsumedError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_409_CONFLICT,
+            detail="gateway_command_already_consumed",
         ) from exc
     except GatewayCommandNotDeliveredError as exc:
         raise HTTPException(

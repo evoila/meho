@@ -6984,6 +6984,243 @@
         }
       }
     },
+    "/api/v1/runner-principals": {
+      "get": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "List Runner Principals",
+        "description": "List runner principals for the operator's tenant.",
+        "operationId": "list_runner_principals_api_v1_runner_principals_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Register Runner Principal",
+        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is\nnot configured.",
+        "operationId": "register_runner_principal_api_v1_runner_principals_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunnerPrincipalCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runner-principals/{name}": {
+      "get": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Show Runner Principal",
+        "description": "Return one runner principal by name.",
+        "operationId": "show_runner_principal_api_v1_runner_principals__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runner-principals/{name}/revoke": {
+      "delete": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Revoke Runner Principal",
+        "description": "Revoke a runner principal (kill switch).\n\nDisables the Keycloak client (blocks new token grants) and marks the DB\nrow ``revoked=true``. Returns the updated row. ``tenant_admin`` only.\nReturns 404 when absent or already revoked.",
+        "operationId": "revoke_runner_principal_api_v1_runner_principals__name__revoke_delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/scheduler/triggers": {
       "get": {
         "tags": [
@@ -24784,6 +25021,106 @@
         ],
         "title": "RunbookTemplateListResponse",
         "description": "Unified list envelope for ``GET /api/v1/runbooks/templates``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. Per-entry shape is the\nsubstrate's :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.\nThe listing is not cursor-paginated (``limit`` truncates), so\n``next_cursor`` is always ``None`` but present so the endpoint can\ngrow pagination later without a further breaking change."
+      },
+      "RunnerPrincipalCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "owner_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Owner Sub"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "RunnerPrincipalCreate",
+        "description": "Input shape for :meth:`RunnerPrincipalService.register`."
+      },
+      "RunnerPrincipalListResponse": {
+        "properties": {
+          "principals": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerPrincipalRead"
+            },
+            "type": "array",
+            "title": "Principals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "principals"
+        ],
+        "title": "RunnerPrincipalListResponse",
+        "description": "Response envelope for ``GET /api/v1/runner-principals``."
+      },
+      "RunnerPrincipalRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RunnerPrincipalRead",
+        "description": "Row representation returned by every accessor."
       },
       "ScheduledTriggerCreate": {
         "properties": {

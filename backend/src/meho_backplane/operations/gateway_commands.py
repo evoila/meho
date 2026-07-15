@@ -91,7 +91,16 @@ __all__ = [
     "mint_gateway_command",
 ]
 
-_log = structlog.get_logger(__name__)
+# NOTE: the structlog logger is resolved per-call at each log site below
+# rather than held as a module-level proxy. Production sets
+# ``cache_logger_on_first_use=True`` in
+# ``meho_backplane.logging.configure_logging``; a cached BoundLogger pins a
+# reference to the processor chain it was built with, and later
+# ``structlog.configure(...)`` calls *replace* (not mutate) that reference --
+# so test fixtures using ``structlog.testing.capture_logs`` cannot observe
+# events written through the orphaned cached proxy (the ``-n 3 --dist
+# loadscope`` flake originally seen in #738). Same precedent + rationale as
+# :mod:`meho_backplane.auth.jwt` and :mod:`meho_backplane.mcp.tools.memory`.
 
 #: ``audit_log`` bookkeeping for the gateway command lifecycle. ``GATEWAY``
 #: sits alongside ``DISPATCH`` / ``APPROVAL`` as the synthetic method for a
@@ -275,7 +284,7 @@ async def mint_gateway_command(
         op_id=op_id,
     )
     if descriptor is None:
-        _log.info(
+        structlog.get_logger(__name__).info(
             "gateway_command_mint_refused",
             reason=MintRefusalCode.DESCRIPTOR_UNKNOWN.value,
             op_id=op_id,
@@ -290,7 +299,7 @@ async def mint_gateway_command(
     # --- Step 3: parameter_schema validation -----------------------------
     validation_errors = validate_params(descriptor.parameter_schema, params)
     if validation_errors:
-        _log.info(
+        structlog.get_logger(__name__).info(
             "gateway_command_mint_refused",
             reason=MintRefusalCode.INVALID_PARAMS.value,
             op_id=op_id,
@@ -307,7 +316,7 @@ async def mint_gateway_command(
     # before the policy gate so a non-'safe' op is refused centrally and is
     # never parked — change-ops-over-gateway is a v2 follow-on (#2415).
     if descriptor.safety_level != "safe":
-        _log.warning(
+        structlog.get_logger(__name__).warning(
             "gateway_command_mint_refused_non_safe",
             reason=MintRefusalCode.OP_NOT_SAFE.value,
             op_id=op_id,
@@ -331,7 +340,7 @@ async def mint_gateway_command(
             if verdict is PermissionVerdict.NEEDS_APPROVAL
             else MintRefusalCode.POLICY_DENIED
         )
-        _log.info(
+        structlog.get_logger(__name__).info(
             "gateway_command_mint_refused",
             reason=code.value,
             verdict=verdict.value,
@@ -374,7 +383,7 @@ async def mint_gateway_command(
             "result_status": "minted",
         },
     )
-    _log.info(
+    structlog.get_logger(__name__).info(
         "gateway_command_minted",
         command_id=str(command.id),
         mint_audit_id=str(mint_audit_id),
@@ -431,7 +440,7 @@ async def consume_command(
         # never-delivered row.
         await session.refresh(row)
         if row.consumed_at is not None:
-            _log.warning(
+            structlog.get_logger(__name__).warning(
                 "gateway_command_replay_refused",
                 command_id=str(command_id),
                 tenant_id=str(tenant_id),

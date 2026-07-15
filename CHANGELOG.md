@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — gcloud docstring reword to clear FP secret alert (#2493)
+
+- Reword the SA-JSON-key-refusal docstring in
+  `backend/src/meho_backplane/connectors/gcloud/session.py` so it no longer
+  embeds the literal JSON-shaped `"type": "service_account"` marker that made
+  Trivy's builtin `gcp-service-account` secret rule raise a permanently-open
+  CRITICAL false positive (code-scanning alert #39, open since 2026-05-23) on
+  the in-image copy of the file. The prose now describes *a `type` field of
+  `service_account`* and names the `_SA_KEY_FIELDS` / `_contains_sa_key_fields`
+  refusal gate — meaning unchanged, no key material ever present. The
+  `gcp-service-account` rule is deliberately **not** suppressed via trivyignore
+  (that would blind the scan to a real future leak) — G0.34-T3 (#2493).
+
 ### CI — coverage fail-visible contract (#2513)
 
 - Make a missing backend coverage import **loud instead of silent** (G0.35-T3).

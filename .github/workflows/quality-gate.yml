@@ -34,14 +34,37 @@ concurrency:
   group: quality-gate-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
+# Workflow-level floor: read-only. The sonarcloud job below declares its
+# own explicit token scope (job-level `permissions:`), so this floor caps
+# any future job that forgets to.
 permissions:
   contents: read
-  pull-requests: write  # required for PR decoration (Sonar comment with the gate result)
 
 jobs:
   sonarcloud:
     name: SonarCloud Analysis
-    runs-on: meho-runners-ci
+    # GitHub-hosted, ephemeral runner — deliberately NOT the self-hosted
+    # meho-runners-ci pool. This job checks out an untrusted
+    # workflow_run head_sha (see the checkout invariant below), so it must
+    # never land on persistent internal infrastructure (CodeQL
+    # actions/untrusted-checkout, alert #109). SonarCloud + apt mirrors are
+    # reachable from GitHub-hosted runners (the vendor-default topology);
+    # Harbor / internal network are not needed here.
+    runs-on: ubuntu-latest
+    # Job-scoped least-privilege token. contents:read = checkout the
+    # analyzed commit; actions:read = cross-run actions/download-artifact
+    # pulling coverage from the triggering CI run (per download-artifact
+    # docs). pull-requests:write is retained CONSERVATIVELY: SonarCloud
+    # decorates PRs via its GitHub App + SONAR_TOKEN, not the workflow
+    # GITHUB_TOKEN, and this job is push-only (see `if:` below) so no
+    # GITHUB_TOKEN PR-decoration path actually runs here — but the drop is
+    # UNVERIFIED (no live PR-decoration test is possible pre-merge). Kept
+    # until decoration is empirically confirmed unaffected, then dropped as
+    # a follow-up (#2492).
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
     timeout-minutes: 20
     continue-on-error: true
     # Only analyze main pushes. CI runs on both `push` and `pull_request`,
@@ -54,6 +77,14 @@ jobs:
       github.event.workflow_run.conclusion == 'success'
       && github.event.workflow_run.event == 'push'
     steps:
+      # SECURITY INVARIANT — load-bearing: no step in this workflow may
+      # execute code from the checkout (no make/pytest/npm/scripts/
+      # build-wrapper); artifacts downloaded from the triggering run are
+      # untrusted input. This checkout is a workflow_run head_sha, which on
+      # a fork PR is attacker-controlled source. The Sonar scanner only
+      # reads source; every `run:` step invokes fixed sed/grep/apt-get/
+      # command -v. Adding any step that runs a file from the checkout turns
+      # this into arbitrary code execution with SONAR_TOKEN in scope.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0  # full history for accurate blame + new-code detection

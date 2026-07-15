@@ -24,6 +24,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# The smoke job uses zero GITHUB_TOKEN capability: no checkout, no `gh`,
+# no API call that authenticates as the workflow (the Harbor probe is
+# anonymous against a public project). An empty map is the honest
+# minimum — it drops the repo-default write-all token this job would
+# otherwise carry on the self-hosted meho-runners-ci pool (CodeQL
+# actions/missing-workflow-permissions, alert #36).
+permissions: {}
+
 env:
   # Pinned image used for the smoke pull. Bump deliberately as part of an
   # alpine upgrade ticket; the smoke is verifying the cache pipeline, not

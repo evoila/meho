@@ -54,10 +54,11 @@
 #     attestation is content-addressed (bound to the digest, not a tag) so
 #     verification works for every tag alias.
 #   - aquasecurity/trivy-action scans the same digest for CVEs and emits SARIF.
-#     v0.1 is report-only (`exit-code: 0`) — the workflow never fails on
-#     findings. SARIF results land both on the GitHub Security tab (Code
-#     scanning alerts) and as a 30-day workflow artefact. v0.2 will flip on a
-#     severity-based gate once the baseline noise level is known.
+#     It runs post-push on main/tags with `exit-code: '1'`, so a CRITICAL/HIGH
+#     fixed CVE fails the run as a red-main alarm against silent CVE
+#     accumulation on a stale base image (it is not a PR merge gate — the step
+#     is skipped on pull_request). SARIF results land both on the GitHub
+#     Security tab (Code scanning alerts) and as a 30-day workflow artefact.
 #
 # Cross-repo deploy trigger (Task #51):
 #   - After image push on main, the workflow POSTs a `repository_dispatch`
@@ -301,12 +302,19 @@ jobs:
         # including the uv-installed Python wheels in /app/.venv). Emits
         # SARIF for upload to the GitHub Security tab.
         #
-        # v0.1 is *report-only*:
-        #   - `severity: CRITICAL,HIGH` filters the SARIF to the levels that
-        #     actually matter (LOW/MEDIUM are noise at this stage).
-        #   - `exit-code: '0'` keeps the workflow green regardless of
-        #     findings. v0.2 will flip this to fail on a defined policy once
-        #     the baseline noise is known (deliberate split per Goal #11).
+        #   - `severity: CRITICAL,HIGH` restricts the scan to the levels that
+        #     actually matter. `limit-severities-for-sarif: true` makes the
+        #     SARIF honour that filter — without it the trivy-action emits
+        #     ALL severities into SARIF regardless of `severity` (its
+        #     documented default), which is why the Security tab previously
+        #     showed LOW/MEDIUM alerts the `severity` input was meant to drop.
+        #   - `exit-code: '1'` makes the step FAIL when a CRITICAL/HIGH fixed
+        #     CVE is present. This scan runs POST-PUSH on main/tags against the
+        #     already-pushed digest — it is a red-main alarm against silent
+        #     CVE accumulation on a stale base image, NOT a PR merge gate (the
+        #     `if:` below skips it on pull_request). A red run means "the base
+        #     image drifted; bump the digest (Dependabot docker PR) and
+        #     re-push", not "this merge is blocked".
         #   - `ignore-unfixed: true` drops CVEs with no upstream fix
         #     available, which would otherwise dominate the SARIF without
         #     any operator action to take.
@@ -317,8 +325,9 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
           ignore-unfixed: true
-          exit-code: '0'
+          exit-code: '1'
 
       - name: Upload trivy SARIF to GitHub Security tab
         # SARIF upload surfaces findings under repo -> Security -> Code

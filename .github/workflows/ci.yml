@@ -536,6 +536,14 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(github.event.pull_request.labels.*.name, 'ci-coverage-validate'))
     runs-on: meho-runners-ci-heavy
+    # TODO(ops): the durable fix for the recurring ~47-min OOM / runner-loss on
+    # this pool (which silently killed coverage on every main push from
+    # 2026-06-20, collapsing SonarCloud coverage 65.8% -> ~24%; see the memory
+    # table above and docs/codebase/sonarcloud.md) is a larger-memory runner pool
+    # — a gha-runner-scale-set on the rke2-ci cluster (ops-owned, out of band).
+    # Move this `runs-on:` to the new pool once provisioned. Until then an OOM
+    # skips one coverage upload; quality-gate.yml now makes that skip
+    # fail-visible via an error annotation (#2513).
     # ~36-min serial wall + headroom. This job is push-only and non-blocking,
     # so a long wall is acceptable (it never gates a PR). The cap is a hang
     # backstop, not a perf budget.

@@ -105,6 +105,50 @@ connector-related release-notes line.
   `.../connectors/_ingest_modal.html`,
   `backend/src/meho_backplane/connectors/keycloak/connector.py`,
   `scripts/soak/soak-harness.sh` (#2512).
+### Gateway — versioned assignment + results ingest API
+
+- Add the central-side ingest + versioned assignment API for the push-only
+  satellite runner (Initiative #2415, #2499), mounted under `/api/v1/checks/`
+  (inside the runner route cage). `PUT /api/v1/checks/assignment/{runner}`
+  (operator) authors a runner's checks with create-time validation — each
+  item's target must resolve and its op must resolve to an enabled
+  `safety_level=='safe'` descriptor, else a structured 422
+  (`assignment_op_not_safe` / `assignment_op_unknown` /
+  `assignment_target_unknown`) and nothing is stored. `GET
+  /api/v1/checks/assignment?runner=…[&known_version=…]` (runner, own-only)
+  returns a digest-versioned `RunnerAssignment` whose items carry resolved
+  target descriptors (host/port/TLS + the `secret_ref` **reference**, never a
+  credential value), `handler_ref` + `safety_level`, and the runner principal
+  context — all materialised from live rows, so target-row drift (e.g. a
+  rotated `tls_ca_pin`) shifts the sha256 content digest and the runner
+  self-heals; a matching `known_version` yields `304 Not Modified`. `POST
+  /api/v1/checks/results` (runner, own-only) ingests a result batch
+  idempotently — `(tenant, runner, result_uid)` dedups on-disk-spool re-posts
+  and `received_at` is stamped by the central clock. The `runner/wire.py`
+  models are widened in place, not forked (one schema on both ends). Migration
+  `0059` creates `runner_assignments` + `runner_check_results` (#2499).
+### Added — outbound long-poll gateway command plane (#2498)
+
+- Add the central command plane of the remote-execution gateway
+  (Initiative #2415, T2): a durable `gateway_command` queue (migration
+  `0059`) plus two runner-facing routes. `GET /api/v1/gateway/{runner}/next`
+  is a blocking long-poll — it holds up to `wait` seconds (default 25,
+  clamped to a 30 s ceiling; `wait=0` = one immediate claim attempt) and
+  returns `200` with the claimed command envelope (`id`, `op_id`, `params`,
+  resolved `target_descriptor`) or `204` on timeout.
+  `POST /api/v1/gateway/{runner}/result` records the outcome (`200`, or
+  `404` for an unknown/foreign command, `409` for a non-`delivered` row).
+  Both gate on the scoped runner principal (#2502) — a runner may only poll
+  and report its **own** queue — and every query filters `tenant_id`. The
+  claim is exactly-once under concurrent pollers (`SELECT … FOR UPDATE SKIP
+  LOCKED` on PostgreSQL, a conditional `UPDATE` on the SQLite test path),
+  and the hold is a bounded DB claim-poll loop that never holds a
+  transaction across its sleep (multi-replica-safe, no in-process
+  `asyncio.Event`). There is deliberately **no** HTTP enqueue endpoint —
+  central code enqueues via `gateway.queue.enqueue_command` so all
+  authorization stays central — `backend/src/meho_backplane/gateway/queue.py`,
+  `backend/src/meho_backplane/api/v1/gateway.py` (#2498).
+
 ### Added — scoped runner principal (gateway v1)
 
 - Add the identity substrate of the remote-execution gateway (Initiative

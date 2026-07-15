@@ -3644,6 +3644,170 @@ class RunnerPrincipal(Base):
 
 
 # ---------------------------------------------------------------------------
+# Initiative #2415 (#2499) — gateway assignment + result-ingest storage
+# ---------------------------------------------------------------------------
+
+
+#: Closed set of runner-reported result statuses, mirrored in the
+#: ``runner_check_results.status`` CHECK constraint. Tri-state to match
+#: the ``runner/wire.py`` ``RunnerResult.status`` vocabulary (#2497): a
+#: handler that ran (``ok``), a runner that declined an unsafe item
+#: (``refused``), or a handler that raised (``error``). A bare
+#: ``ok``/``error`` CHECK would reject the ``refused`` rows #2497's runner
+#: legitimately posts.
+_RUNNER_RESULT_STATUSES: tuple[str, ...] = ("ok", "refused", "error")
+
+
+class RunnerAssignmentRow(Base):
+    """One satellite runner's current check assignment (Initiative #2415, #2499).
+
+    A single operator-authored document per ``(tenant_id, runner_name)``:
+    the ``PUT /api/v1/checks/assignment/{runner}`` route replaces the row
+    wholesale. ``items`` stores the *authored* checks
+    (``check_ref`` / ``target_name`` / ``op`` / ``params`` /
+    ``cadence_seconds``) as JSONB; the runner-facing ``GET`` materialises
+    each authored item into a wire ``RunnerWorkItem`` at request time
+    (resolving the live target descriptor + the op's ``handler_ref`` /
+    ``safety_level``), so target-row drift is picked up on the next poll
+    rather than frozen at authoring time.
+
+    ``runner_name`` is a soft-FK to :attr:`RunnerPrincipal.name` (no DB
+    FK — the same soft-reference discipline the gateway set uses so
+    #2499/#2501 reference a runner by name without coupling to the
+    principal table's lifecycle). ``tenant_id`` **is** a real
+    ``REFERENCES tenant(id)`` FK: a brand-new clean-slate table, mould
+    parity with :class:`RunnerPrincipal` (#2502).
+    """
+
+    __tablename__ = "runner_assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK -- clean-slate table, mould parity with runner_principal.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Soft-FK to runner_principal.name (no DB FK): the gateway set keys
+    # runners by name and references them across #2499/#2501 by name.
+    runner_name: Mapped[str] = mapped_column(Text, nullable=False)
+    items: Mapped[list[dict[str, object]]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=list,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # One assignment document per runner within a tenant; the upsert
+        # path keys on this pair.
+        Index(
+            "runner_assignments_tenant_runner_idx",
+            "tenant_id",
+            "runner_name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
+class RunnerCheckResult(Base):
+    """One ingested runner check-execution report (Initiative #2415, #2499).
+
+    Persisted by ``POST /api/v1/checks/results`` — one row per accepted
+    result in the runner's batch. ``received_at`` is stamped by the
+    central clock at ingest (never accepted from the client), because the
+    dead-man's switch (#2501) flips workloads stale on the central clock.
+
+    Idempotency: ``(tenant_id, runner_name, result_uid)`` is unique, so a
+    re-POST from the runner's on-disk retry spool (#2497) inserts nothing
+    and is reported as a duplicate rather than double-counted.
+    ``check_ref`` is an opaque per-item string (a soft reference — a
+    Sensor UUID from #2416 may ride in it later, with no FK), and the
+    ``(tenant_id, runner_name, check_ref, received_at)`` index serves
+    #2501's per-check staleness reads.
+
+    ``tenant_id`` is a real ``REFERENCES tenant(id)`` FK (clean-slate
+    table, mould parity with :class:`RunnerPrincipal`).
+    """
+
+    __tablename__ = "runner_check_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    runner_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Runner-generated uuid4 hex: the dedup key that makes spool re-posts
+    # idempotent.
+    result_uid: Mapped[str] = mapped_column(Text, nullable=False)
+    check_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Runner-level tri-state (ok / refused / error); see
+    # ``_RUNNER_RESULT_STATUSES``.
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # The handler's structured payload (a failed probe is still a result,
+    # not a runner error). Nullable: refused/error rows carry none.
+    result_payload: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Central-stamped at ingest -- NOT accepted from the client.
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Ingest idempotency: a re-posted spool batch collides here and is
+        # counted as a duplicate.
+        Index(
+            "runner_check_results_uid_idx",
+            "tenant_id",
+            "runner_name",
+            "result_uid",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        # #2501 staleness reads: latest result per (runner, check).
+        Index(
+            "runner_check_results_staleness_idx",
+            "tenant_id",
+            "runner_name",
+            "check_ref",
+            "received_at",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            "status IN ('ok', 'refused', 'error')",
+            name="ck_runner_check_results_status",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # G11.2-T3 — per-(principal, op, target) permission model
 # ---------------------------------------------------------------------------
 
@@ -4612,6 +4776,199 @@ class ApprovalRequest(Base):
         sa.CheckConstraint(
             _ck_in("status", _APPROVAL_REQUEST_STATUSES),
             name="ck_approval_request_status",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Gateway command queue (Initiative #2415 / #2498)
+# ---------------------------------------------------------------------------
+
+
+class GatewayCommandStatus(StrEnum):
+    """Closed lifecycle status of a :class:`GatewayCommand`.
+
+    Initiative #2415 (Remote execution gateway), Task #2498. The gateway
+    command plane parks a centrally-enqueued, pre-authorized operation
+    durably; the row walks a simple four-state lifecycle enforced by the
+    service (:mod:`meho_backplane.gateway.queue`).
+
+    Members:
+
+    * :attr:`PENDING` -- enqueued centrally, awaiting a runner claim
+      (initial state on insert).
+    * :attr:`DELIVERED` -- claimed by the runner's long-poll
+      (``pending`` flips to ``delivered`` under ``SELECT ... FOR UPDATE
+      SKIP LOCKED`` on PG / a conditional ``UPDATE`` on the SQLite test
+      path); ``delivered_at`` is stamped. A row that is claimed but never
+      reported stays here (lost, not redelivered -- the v1 at-most-once
+      failure mode).
+    * :attr:`SUCCEEDED` -- the runner reported a successful outcome via
+      ``POST .../result``; ``result`` + ``completed_at`` stamped. Terminal.
+    * :attr:`FAILED` -- the runner reported a failure; ``error`` +
+      ``completed_at`` stamped. Terminal.
+
+    The enum and the ``CHECK (status IN (...))`` constraint on the DB
+    table move in lock-step (migration ``0059``); the drift guard
+    :func:`tests.migrations.test_migration_0059_create_gateway_command.test_status_check_matches_enum`
+    asserts equality at unit-test time.
+    """
+
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+#: Closed ``gateway_command.status`` vocabulary derived from the enum --
+#: kept in sync with migration ``0059``'s ``_GATEWAY_COMMAND_STATUSES``
+#: literal. The drift guard asserts equality so the two never diverge.
+_GATEWAY_COMMAND_STATUSES: tuple[str, ...] = tuple(s.value for s in GatewayCommandStatus)
+
+
+class GatewayCommand(Base):
+    """One centrally-enqueued operation queued for a satellite runner.
+
+    Initiative #2415 (Remote execution gateway), Task #2498. Central code
+    enqueues a pre-authorized operation (via
+    :func:`meho_backplane.gateway.queue.enqueue_command`); the runner
+    claims it over the outbound long-poll
+    (``GET /api/v1/gateway/{runner}/next``) and reports the outcome back
+    (``POST /api/v1/gateway/{runner}/result``). The row is the durable
+    transport state that lets a central instance relay an operation to a
+    runner it cannot dial directly, without holding the request across a
+    process restart. Moulded on the ``approval_request`` durable-queue row
+    (#817): closed status enum + DB CHECK + drift guard, real tenant FK,
+    caller-owns-commit service functions.
+
+    Transport-only (binding decision, #2498): this schema stays strictly
+    transport. Capability binding (args-hash, expiry, request-id dedup) is
+    sibling #2500's own migration; nothing speculative lands here.
+
+    Schema decisions
+    ----------------
+
+    * ``id`` -- UUID primary key. PG-side ``gen_random_uuid()``; ORM
+      ``default=uuid.uuid4`` for SQLite.
+
+    * ``tenant_id`` -- UUID NOT NULL, real FK to ``tenant.id``. Clean-slate
+      table; hard FK enforced (no ondelete). Same discipline as
+      ``approval_request`` (0023) and ``runner_principal`` (0058).
+
+    * ``runner_id`` -- Text NOT NULL. The runner principal **name** (the
+      wire identity: #2498's ``{runner}`` path segment, ``MEHO_RUNNER_ID``
+      on the runner, ``RunnerResultBatch.runner_id`` on the wire). Named
+      ``runner_id`` to match that wire field; the guard binds the token's
+      ``runner_id`` UUID claim to the named ``runner_principal`` row before
+      any queue access, so filtering by name is correctly scoped.
+
+    * ``op_id`` -- Text NOT NULL. The operation the runner executes.
+
+    * ``params`` -- portable JSON NOT NULL DEFAULT ``{}`` (JSONB on PG).
+      The validated op params.
+
+    * ``target_descriptor`` -- portable JSON **nullable** (JSONB on PG).
+      The centrally-resolved target descriptor a connector handler
+      duck-reads (the runner has no local target table). Nullable because
+      targetless synthetic ops (``net.*``) carry no descriptor, which the
+      wire model encodes as ``RunnerWorkItem.target_descriptor:
+      ResolvedTargetDescriptor | None`` (#2497) -- NULL is the
+      wire-compatible encoding of "targetless".
+
+    * ``status`` -- Closed enum, DB ``CHECK``, default ``'pending'``.
+
+    * ``result`` -- portable JSON nullable (JSONB on PG). The runner's
+      success payload; NULL until reported.
+
+    * ``error`` -- Text nullable. The runner's failure summary; NULL until
+      a failure is reported.
+
+    * ``enqueued_by_sub`` -- Text NOT NULL. The ``sub`` of the principal
+      whose central dispatch enqueued the command (audit provenance).
+
+    * ``enqueued_at`` -- ``timestamptz`` NOT NULL. Drives the FIFO claim
+      order.
+
+    * ``delivered_at`` / ``completed_at`` -- ``timestamptz`` nullable.
+      Stamped on the ``pending -> delivered`` claim and the
+      ``delivered -> terminal`` report respectively.
+
+    Index
+    -----
+
+    * ``gateway_command_claim_idx`` -- composite ``(tenant_id, runner_id,
+      status, enqueued_at)``. Serves the hot claim query (oldest
+      ``pending`` row for a runner in a tenant) and the tenant/runner-scoped
+      result lookup.
+    """
+
+    __tablename__ = "gateway_command"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK -- clean-slate substrate (see class docstring).
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # The runner principal NAME (wire identity), not the UUID row id.
+    runner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    params: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    # Nullable -- NULL is the wire-compatible "targetless" encoding.
+    target_descriptor: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=GatewayCommandStatus.PENDING.value,
+    )
+    result: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    enqueued_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    enqueued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+
+    __table_args__ = (
+        Index(
+            "gateway_command_claim_idx",
+            "tenant_id",
+            "runner_id",
+            "status",
+            "enqueued_at",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _GATEWAY_COMMAND_STATUSES),
+            name="ck_gateway_command_status",
         ),
     )
 

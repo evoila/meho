@@ -7221,6 +7221,320 @@
         }
       }
     },
+    "/api/v1/gateway/{runner}/next": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Poll Next Command",
+        "description": "Long-poll for the next command queued for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard):\na runner may only poll its own queue. Holds up to ``wait`` seconds\n(clamped to the exported ceiling) claiming the oldest ``pending``\ncommand; returns ``200`` with the envelope on a claim or ``204`` on\ntimeout. The claim flips the row ``pending -> delivered`` durably.\n\nThe hold opens a fresh short-lived session per attempt and never holds\na DB transaction across the inter-attempt sleep (binding decision\n#2498-2). A client disconnect cancels the handler; the\n``CancelledError`` is logged and re-raised per the asyncio contract.",
+        "operationId": "poll_next_command_api_v1_gateway__runner__next_get",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected \u2014 the runner asking for a longer hold gets a bounded one.",
+              "default": 25,
+              "title": "Wait"
+            },
+            "description": "Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected \u2014 the runner asking for a longer hold gets a bounded one."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A command was claimed; the envelope is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayCommandEnvelope"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No command became claimable before the wait deadline."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/{runner}/result": {
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Report Command Result",
+        "description": "Report the outcome of a delivered command for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard).\nFlips the command ``delivered -> succeeded|failed``, stamping the\nresult/error and ``completed_at``. Returns ``200`` with an ack; ``404``\nwhen the command id is unknown or was enqueued for another runner /\ntenant (no existence oracle); ``409`` when the command is not\n``delivered`` (a duplicate report or a never-claimed row).",
+        "operationId": "report_command_result_api_v1_gateway__runner__result_post",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GatewayResultBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayResultAck"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/assignment/{runner}": {
+      "put": {
+        "tags": [
+          "checks"
+        ],
+        "summary": "Put Assignment",
+        "description": "Replace runner *runner*'s assignment document (operator-authenticated).\n\nValidates every authored item before storing; a failing item is a\nstructured 422 (``assignment_target_unknown`` / ``assignment_op_unknown``\n/ ``assignment_op_not_safe``) and nothing is written.",
+        "operationId": "put_assignment_api_v1_checks_assignment__runner__put",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentDocument"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentDocumentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/assignment": {
+      "get": {
+        "tags": [
+          "checks"
+        ],
+        "summary": "Get Assignment",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "operationId": "get_assignment_api_v1_checks_assignment_get",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "known_version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Known Version"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerAssignment"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/results": {
+      "post": {
+        "tags": [
+          "checks"
+        ],
+        "summary": "Post Results",
+        "description": "Ingest a runner's result batch idempotently (runner-authenticated).\n\nThe runner submits only its own results (``batch.runner_id`` is the\nrunner name; :func:`assert_runner_scope` binds it to the token's\n``runner_id``). ``received_at`` is central-stamped; re-posts from the\nrunner's retry spool are deduped by ``result_uid``.",
+        "operationId": "post_results_api_v1_checks_results_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunnerResultBatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultIngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/scheduler/triggers": {
       "get": {
         "tags": [
@@ -18918,6 +19232,42 @@
         "title": "AskDocsResponse",
         "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract."
       },
+      "AssignmentDocument": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuthoredCheckItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "AssignmentDocument",
+        "description": "Full-document ``PUT`` body: replaces a runner's assignment wholesale."
+      },
+      "AssignmentDocumentResponse": {
+        "properties": {
+          "runner": {
+            "type": "string",
+            "title": "Runner"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuthoredCheckItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runner",
+          "items"
+        ],
+        "title": "AssignmentDocumentResponse",
+        "description": "Echo returned by ``PUT``: the stored authored document + runner name."
+      },
       "AuditEntry": {
         "properties": {
           "id": {
@@ -19230,6 +19580,44 @@
         ],
         "title": "AuthModel",
         "description": "Per-target identity model per v0.1-spec L447-454."
+      },
+      "AuthoredCheckItem": {
+        "properties": {
+          "check_ref": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Check Ref"
+          },
+          "target_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Target Name"
+          },
+          "op": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Op"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "cadence_seconds": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Cadence Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "check_ref",
+          "target_name",
+          "op",
+          "cadence_seconds"
+        ],
+        "title": "AuthoredCheckItem",
+        "description": "One operator-authored check in a runner's assignment document.\n\nThe runner-facing ``GET`` materialises each of these into a wire\n:class:`~meho_backplane.runner.wire.RunnerWorkItem` at request time:\n``target_name`` is resolved to a live target descriptor, ``op`` to the\nresolved connector's enabled descriptor (yielding ``handler_ref`` +\n``safety_level`` + the ``(product, version, impl_id)`` key). ``op`` is\nthe connector-side op id (e.g. ``\"vsphere.host.list\"``); the connector\ntriple is derived from the resolved target, not authored here."
       },
       "BackendReadiness": {
         "properties": {
@@ -22893,6 +23281,104 @@
         "title": "ForkInfo",
         "description": "Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
       },
+      "GatewayCommandEnvelope": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "target_descriptor": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Target Descriptor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "op_id",
+          "params",
+          "target_descriptor"
+        ],
+        "title": "GatewayCommandEnvelope",
+        "description": "The claimed-command envelope returned by ``GET .../next`` (200)."
+      },
+      "GatewayResultAck": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Command Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "completed_at": {
+            "type": "string",
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "command_id",
+          "status",
+          "completed_at"
+        ],
+        "title": "GatewayResultAck",
+        "description": "Response for a successful ``.../result`` report (200)."
+      },
+      "GatewayResultBody": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Command Id",
+            "description": "The delivered command's id."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed"
+            ],
+            "title": "Outcome",
+            "description": "Terminal outcome to record for the command."
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Result",
+            "description": "Structured success payload (for a 'succeeded' outcome)."
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error",
+            "description": "Failure summary (for a 'failed' outcome)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "command_id",
+          "outcome"
+        ],
+        "title": "GatewayResultBody",
+        "description": "POST body for ``.../result`` \u2014 the runner's outcome report."
+      },
       "GraphEdgeKind": {
         "type": "string",
         "enum": [
@@ -24090,6 +24576,17 @@
         "title": "PreviewOperationBody",
         "description": "Request body for the ``POST /api/v1/operations/preview`` route.\n\nSame field shape as :class:`CallOperationBody` (#1683) -- a preview\nresolves the *same* op + target + params a real ``call_operation``\nwould, then returns the literal would-be HTTP request instead of\nsending it. Keeping the body identical means an operator who hit a\nwrite 4xx can re-issue the exact arguments against ``/preview`` to see\nwhat was put on the wire (the audit row persists only a hashed\n``params_hash``, so the request shape is otherwise unrecoverable).\n\n``target`` accepts the same three shapes as ``call_operation`` (bare\nstring, dict ``{\"name\": ...}``, or ``None``); see\n:class:`CallOperationBody` for the convention. A wrong-JSON-typed\n``target`` rides the ``target_invalid_type`` envelope instead of a 422\n(#2110; see :data:`_TargetArg`), identical to ``/call``.\n``extra=\"forbid\"`` keeps a typo in ``connector_id`` failing loud rather\nthan silently previewing nothing."
       },
+      "PrincipalKind": {
+        "type": "string",
+        "enum": [
+          "user",
+          "service",
+          "agent",
+          "runner"
+        ],
+        "title": "PrincipalKind",
+        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a human operator authenticated via the interactive\n  device-code flow. Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
+      },
       "PromoteBody": {
         "properties": {
           "to": {
@@ -24544,6 +25041,125 @@
         ],
         "title": "ReplayNode",
         "description": "One node of a per-session audit-replay tree (G8.2-T3).\n\nSubclasses :class:`AuditEntry` so it carries every audit field verbatim \u2014\nforward-compatible with the v0.2.next compliance-export contract, which\ntreats a replay node as an audit row plus its position in the session\ngraph. Two structural fields are added:\n\n* ``depth`` \u2014 distance from the session root. ``0`` for roots; assigned\n  during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.\n* ``children`` \u2014 the node's direct children, ordered by ``(occurred_at,\n  id)``. Self-referential \u2014 the forward reference is resolved by the\n  module-level :func:`ReplayNode.model_rebuild` call below.\n\nFrozen like its parent: a node handed to a caller cannot mutate after the\ntree is built."
+      },
+      "ResolvedTargetDescriptor": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases",
+            "default": []
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
+          "fingerprint": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Fingerprint"
+          },
+          "preferred_impl_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preferred Impl Id"
+          },
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Port"
+          },
+          "fqdn": {
+            "type": "string",
+            "nullable": true,
+            "title": "Fqdn"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "verify_tls": {
+            "type": "boolean",
+            "title": "Verify Tls",
+            "default": true
+          },
+          "tls_ca_pin": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Ca Pin"
+          },
+          "tls_server_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Server Name"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "product",
+          "host"
+        ],
+        "title": "ResolvedTargetDescriptor",
+        "description": "Centrally-resolved target attributes a connector handler reads.\n\nThe runner has no local target table, so the central resolver\n(:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises\nthe fields a handler duck-reads off a ``Target`` row and ships them\non the assignment. It carries the resolver-read attributes\n(``product`` / ``fingerprint`` / ``version`` / ``preferred_impl_id``)\nthe tie-break ladder consumes **and** the connection-routing set\n(``host`` / ``port`` / ``fqdn`` / ``secret_ref`` / ``auth_model`` /\nTLS flags) the HTTP adapter reads, so on the runner the descriptor\nfeeds :func:`~meho_backplane.connectors.resolver.resolve_connector`\nand the connector adapters directly \u2014 no DB session, no second\nresolution mechanism.\n\nThe full field set is moulded on the central\n:class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the\nsame identification + connection-routing projection of the\n``Target`` row, minus the server-managed timestamps and the\noperator-authored ``notes`` (neither drives connector routing).\n\nCredential discipline: ``secret_ref`` is the **reference** the runner\nresolves outbound under its own read-only scope; no credential value\nis ever embedded (the runner spools assignments on disk, so a value\nwould durably persist \u2014 a locked no-durable-artifact violation)."
+      },
+      "ResultIngestResponse": {
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "title": "Accepted"
+          },
+          "duplicates": {
+            "type": "integer",
+            "title": "Duplicates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "accepted",
+          "duplicates"
+        ],
+        "title": "ResultIngestResponse",
+        "description": "``POST /checks/results`` response \u2014 idempotency accounting.\n\n``accepted`` counts rows newly persisted; ``duplicates`` counts rows\nwhose ``result_uid`` was already ingested for this runner (a re-posted\nspool batch). ``accepted + duplicates`` equals the batch length."
       },
       "RetireChecklistReport": {
         "properties": {
@@ -25022,6 +25638,55 @@
         "title": "RunbookTemplateListResponse",
         "description": "Unified list envelope for ``GET /api/v1/runbooks/templates``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. Per-entry shape is the\nsubstrate's :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.\nThe listing is not cursor-paginated (``limit`` truncates), so\n``next_cursor`` is always ``None`` but present so the endpoint can\ngrow pagination later without a further breaking change."
       },
+      "RunnerAssignment": {
+        "properties": {
+          "assignment_version": {
+            "type": "string",
+            "title": "Assignment Version"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerWorkItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "assignment_version"
+        ],
+        "title": "RunnerAssignment",
+        "description": "The runner's current work assignment, fetched each tick.\n\n``assignment_version`` is an opaque digest the runner echoes back as\n``known_version`` so central can answer an unchanged assignment with a\n``304`` (see :meth:`RunnerClient.fetch_assignment`)."
+      },
+      "RunnerPrincipal": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "tenant_role": {
+            "$ref": "#/components/schemas/TenantRole"
+          },
+          "principal_kind": {
+            "$ref": "#/components/schemas/PrincipalKind",
+            "default": "service"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "tenant_id",
+          "tenant_role"
+        ],
+        "title": "RunnerPrincipal",
+        "description": "Principal context an executed op runs under, carried on each item.\n\nEnough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`\non the runner without a JWT: the runner never sees a bearer token for\nthe acting principal (the op was already authorized centrally), so the\nreconstructed operator's ``raw_jwt`` is empty."
+      },
       "RunnerPrincipalCreate": {
         "properties": {
           "name": {
@@ -25122,6 +25787,124 @@
         ],
         "title": "RunnerPrincipalRead",
         "description": "Row representation returned by every accessor."
+      },
+      "RunnerResult": {
+        "properties": {
+          "result_uid": {
+            "type": "string",
+            "title": "Result Uid"
+          },
+          "check_ref": {
+            "type": "string",
+            "title": "Check Ref"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Result"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "result_uid",
+          "check_ref",
+          "op_id",
+          "status"
+        ],
+        "title": "RunnerResult",
+        "description": "The outcome of executing one :class:`RunnerWorkItem`.\n\n``result_uid`` is generated on the runner (a uuid4 hex) so central\ningest can deduplicate spool re-posts idempotently \u2014 a batch written\nto the retry spool carries the same uids when it is re-posted.\n\n``status`` is a runner-level tri-state, distinct from any status\ninside ``result``:\n\n* ``ok`` \u2014 the handler ran and returned its structured payload\n  (which may itself report a failed probe; a failed check is a\n  result, not a runner error).\n* ``refused`` \u2014 the runner declined to execute (unsafe safety_level,\n  or a handler_ref outside the connector tree).\n* ``error`` \u2014 the handler raised; the exception is summarised in\n  ``error`` and never re-raised into the tick loop."
+      },
+      "RunnerResultBatch": {
+        "properties": {
+          "runner_id": {
+            "type": "string",
+            "title": "Runner Id"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerResult"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runner_id"
+        ],
+        "title": "RunnerResultBatch",
+        "description": "A batch of results the runner reports (or spools) in one POST."
+      },
+      "RunnerWorkItem": {
+        "properties": {
+          "check_ref": {
+            "type": "string",
+            "title": "Check Ref"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "default": ""
+          },
+          "impl_id": {
+            "type": "string",
+            "title": "Impl Id",
+            "default": ""
+          },
+          "handler_ref": {
+            "type": "string",
+            "title": "Handler Ref"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "safety_level": {
+            "type": "string",
+            "title": "Safety Level"
+          },
+          "principal": {
+            "$ref": "#/components/schemas/RunnerPrincipal"
+          },
+          "target_descriptor": {
+            "$ref": "#/components/schemas/ResolvedTargetDescriptor",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "check_ref",
+          "op_id",
+          "product",
+          "handler_ref",
+          "safety_level",
+          "principal"
+        ],
+        "title": "RunnerWorkItem",
+        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``)."
       },
       "ScheduledTriggerCreate": {
         "properties": {
@@ -26430,6 +27213,16 @@
         ],
         "title": "TemplateSummary",
         "description": "Operator-readable summary row surfaced by ``meho.runbook.list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
+      },
+      "TenantRole": {
+        "type": "string",
+        "enum": [
+          "tenant_admin",
+          "operator",
+          "read_only"
+        ],
+        "title": "TenantRole",
+        "description": "Per-tenant role granted to the operator by the JWT issuer.\n\nThe set is intentionally small in v0.2: a closed three-value enum\nlets the RBAC primitive (Task #234, ``require_role``) make\nexhaustive comparisons without leaking arbitrary string handling\ninto route code. A richer policy engine \u2014 topology-aware\npermissions, ABAC, approval workflows \u2014 is a separate v0.2.next\nGoal; widening this enum is the only ratcheting mechanism in the\ninterim.\n\nValues are the literal strings the Keycloak protocol-mapper recipe\n(Task #235) emits, so a JWT carrying ``\"tenant_admin\"`` materialises\ncleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in\n3.11+) gives the members ``str`` semantics for free, so\n``f\"role={role}\"`` renders as ``\"role=tenant_admin\"`` rather than\n``\"role=TenantRole.TENANT_ADMIN\"``."
       },
       "Thresholds": {
         "properties": {

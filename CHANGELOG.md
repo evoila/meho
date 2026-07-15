@@ -97,13 +97,16 @@ connector-related release-notes line.
   runner-plane request now stamps `runner_principal.last_seen_at` on the
   central clock through the single shared choke-point (`assert_runner_scope`)
   — keyed by the token's `runner_id` claim, never a client value, and with
-  no dedicated heartbeat endpoint (a healthy idle runner already polls once
-  per window, so the idle work cycle *is* the heartbeat; the #1501 lesson).
+  no dedicated heartbeat endpoint (a healthy idle runner already fetches its
+  assignment once per ~60 s tick — `tick_interval_seconds`, #2499 — so the
+  idle work cycle *is* the heartbeat; the #1501 lesson).
   A central interval-tick sweeper (`gateway/deadman.py`, gated on
   `GATEWAY_DEADMAN_ENABLED`, default on) flips a lapsed runner's
   `runner_assignments.stale_at` once its `last_seen_at` falls behind
   `GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER × GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`
-  (default 3 × 30 s = 90 s) judged on the central clock, writing one
+  (default 3 × 30 s = 90 s, deliberately above the runner's ~60 s poll
+  cadence so a healthy idle runner never false-trips) judged on the central
+  clock, writing one
   `gateway.runner.stale` audit row per flip; a fixed advisory lock plus a
   conditional `WHERE stale_at IS NULL` flip keep it exactly-once under
   concurrent replicas. Recovery is data-driven — an accepted result

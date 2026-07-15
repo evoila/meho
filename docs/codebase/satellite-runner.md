@@ -139,9 +139,10 @@ else does). It is keyed by the token's unforgeable `runner_id` claim and
 reads no request field, so `last_seen_at` is never client-controlled
 (the same discipline `web_session.last_seen_at` follows). There is
 deliberately **no** `POST /gateway/{runner}/heartbeat`: a healthy idle
-runner still issues at least one authenticated request per poll window
-(its tick loop fetches the assignment every cadence even with no work),
-so the idle work cycle *is* the heartbeat. This is the #1501 lesson — a
+runner still issues at least one authenticated request per tick (its tick
+loop fetches the assignment every `tick_interval_seconds` — #2499's `GET
+/checks/assignment`, default 60 s — even with no work), so the idle work
+cycle *is* the heartbeat. This is the #1501 lesson — a
 dedicated heartbeat loop can stay alive while the work loops are wedged,
 which is exactly the zombie state to avoid; stamping the real work
 requests measures the liveness that matters.
@@ -160,11 +161,17 @@ advisory lock is a no-op or two replicas race, and make an immediate
 second tick a natural no-op.
 
 **Threshold.** `threshold_seconds = gateway_runner_stale_after_multiplier
-× GATEWAY_LONGPOLL_MAX_WAIT_SECONDS` — the multiplier (default 3) times
-#2498's exported long-poll window (30 s), i.e. the maximum quiet interval
-of a healthy idle runner. The number is never re-hardcoded here; it is
-imported from the gateway queue package. Default 90 s gives a healthy
-runner ~3 windows of slack.
+× GATEWAY_LONGPOLL_MAX_WAIT_SECONDS` — the multiplier (default 3) times the
+gateway queue's exported `GATEWAY_LONGPOLL_MAX_WAIT_SECONDS` (30 s), i.e. a
+default 90 s. The number is never re-hardcoded here; it is imported from the
+gateway queue package. What 90 s must clear is the runner's real idle
+cadence: the satellite runner is a sweep-then-sleep interval-tick loop
+(`runner/loop.py`) that fetches its assignment every `tick_interval_seconds`
+(#2499, default 60 s) — an authenticated request that re-stamps
+`last_seen_at` — even when idle. There is no long-poll client on the runner,
+so the 30 s unit is a convenient multiplicand, not the runner cadence.
+**Invariant:** keep `multiplier × GATEWAY_LONGPOLL_MAX_WAIT_SECONDS ≥ runner
+tick_interval_seconds` (90 s ≥ 60 s) or a healthy idle runner false-trips.
 
 **Recovery is data-driven, never sweeper-driven.** The sweeper only ever
 *sets* `stale_at`. An accepted result ingestion (`POST /checks/results`

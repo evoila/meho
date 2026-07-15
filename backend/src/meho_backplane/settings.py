@@ -1079,9 +1079,13 @@ class Settings(BaseModel):
     # "mandatory" means: a runner cannot opt out of heartbeating (the stamp
     # is a request side effect) and central enforcement is on by default.
     # The stale threshold is ``gateway_runner_stale_after_multiplier x
-    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`` (30s) -- the default 3x = 90s gives
-    # a healthy idle runner (which authenticates at least once per long-poll
-    # window) ~3 windows of slack before its workloads flip to unknown.
+    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`` (30s) -- default 3x = 90s. It must
+    # clear the runner's real idle cadence: the runner fetches its assignment
+    # every ``tick_interval_seconds`` (#2499, default 60s), re-stamping
+    # last_seen_at each tick even when idle, so 90s > 60s leaves ~1.5 poll
+    # cadences of slack. Invariant: keep multiplier x
+    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS >= the runner tick_interval_seconds
+    # or a healthy idle runner false-trips.
     gateway_deadman_enabled: bool = True
     gateway_deadman_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     gateway_runner_stale_after_multiplier: int = Field(default=3, ge=1, le=100)

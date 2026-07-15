@@ -115,14 +115,21 @@ _DEADMAN_ADVISORY_LOCK_KEY: int = (
 
 
 def _threshold_seconds() -> int:
-    """Central-clock staleness threshold: ``multiplier x cadence``.
+    """Central-clock staleness threshold: ``multiplier x unit``.
 
-    ``cadence`` is #2498's exported
+    The threshold is ``gateway_runner_stale_after_multiplier`` times
     :data:`~meho_backplane.gateway.queue.GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`
-    — the maximum quiet interval of a healthy idle runner (its long-poll
-    client re-issues the blocking GET immediately after every response or
-    timeout, so a healthy idle runner authenticates at least once per
-    window). Never re-hardcode the number here.
+    (30 s) — 3 x 30 s = 90 s by default. What it must clear is the runner's
+    real idle cadence: the satellite runner is a sweep-then-sleep
+    interval-tick loop (:func:`meho_backplane.runner.loop.run_one_tick`)
+    that fetches its assignment every ``tick_interval_seconds`` (#2499's
+    ``GET /checks/assignment``, default 60 s) — an authenticated
+    runner-plane request that re-stamps ``last_seen_at`` — even when idle.
+    There is no long-poll client on the runner, so the 30 s unit is a
+    convenient multiplicand, not the runner's cadence. Invariant: keep
+    ``multiplier x GATEWAY_LONGPOLL_MAX_WAIT_SECONDS >= runner
+    tick_interval_seconds`` (90 s >= 60 s) or a healthy idle runner
+    false-trips. Never re-hardcode the number here.
     """
     return get_settings().gateway_runner_stale_after_multiplier * GATEWAY_LONGPOLL_MAX_WAIT_SECONDS
 

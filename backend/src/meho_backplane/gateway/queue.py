@@ -70,7 +70,12 @@ __all__ = [
     "record_result",
 ]
 
-_log = structlog.get_logger(__name__)
+# NOTE: the structlog logger is resolved per-call at each log site below
+# rather than held as a module-level proxy -- production's
+# ``cache_logger_on_first_use=True`` orphans a cached BoundLogger's
+# processor chain from ``structlog.testing.capture_logs`` (the #738
+# ``-n 3 --dist loadscope`` flake). Same convention as
+# :mod:`meho_backplane.auth.jwt` / :mod:`meho_backplane.operations.gateway_commands`.
 
 #: Default capability-command TTL (#2500). A minted command stays
 #: claimable for this window; the mint caller may only *shorten* it
@@ -223,7 +228,7 @@ async def enqueue_command(
     )
     session.add(command)
     await session.flush()
-    _log.info(
+    structlog.get_logger(__name__).info(
         "gateway_command_enqueued",
         command_id=str(command.id),
         tenant_id=str(tenant_id),
@@ -298,7 +303,7 @@ async def claim_next_command(
     # — so it is fail-closed (the row stays pending, undelivered) and logged
     # at error level for an operator to investigate.
     if compute_params_hash(row.params) != row.params_hash:
-        _log.error(
+        structlog.get_logger(__name__).error(
             "gateway_command_params_hash_mismatch",
             command_id=str(row.id),
             tenant_id=str(tenant_id),
@@ -325,7 +330,7 @@ async def claim_next_command(
     # re-query (mould: advance_cron_trigger).
     row.status = GatewayCommandStatus.DELIVERED.value
     row.delivered_at = now
-    _log.info(
+    structlog.get_logger(__name__).info(
         "gateway_command_delivered",
         command_id=str(row.id),
         tenant_id=str(tenant_id),
@@ -407,7 +412,7 @@ async def record_result(
     row.result = result
     row.error = error
     row.completed_at = now
-    _log.info(
+    structlog.get_logger(__name__).info(
         "gateway_command_reported",
         command_id=str(command_id),
         tenant_id=str(tenant_id),

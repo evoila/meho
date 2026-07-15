@@ -39,7 +39,7 @@
 {% if oob %}<template>{% endif %}
 <thead id="topology-table-head"{% if oob %} hx-swap-oob="true"{% endif %}>
   <tr>
-    <th class="w-8">
+    <th class="w-8" scope="col">
       <input
         type="checkbox"
         class="checkbox checkbox-sm"
@@ -70,7 +70,7 @@
           ``urlencode`` filter (see https://jinja.palletsprojects.com/en/stable/templates/#jinja-filters.urlencode)
           encodes the unreserved-byte set the same way
           ``urllib.parse.quote(safe='')`` does on the Python side. -#}
-      <th>
+      <th scope="col">
         <a
           href="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
           hx-get="/ui/topology?sort={{ col_value }}&direction={{ next_dir }}{% if kind_filter %}&kind={{ kind_filter | urlencode }}{% endif %}{% if name_filter %}&q={{ name_filter | urlencode }}{% endif %}{% if selected_id %}&selected={{ selected_id }}{% endif %}"
@@ -87,10 +87,10 @@
         </a>
       </th>
     {% endfor %}
-    <th>Product</th>
-    <th>Parents</th>
-    <th class="text-right">Children</th>
-    <th class="w-12"></th>
+    <th scope="col">Product</th>
+    <th scope="col">Parents</th>
+    <th class="text-right" scope="col">Children</th>
+    <th class="w-12" scope="col"><span class="sr-only">Actions</span></th>
   </tr>
 </thead>
 {% if oob %}</template>{% endif %}

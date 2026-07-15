@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### CI — coverage fail-visible contract (#2513)
+
+- Make a missing backend coverage import **loud instead of silent** (G0.35-T3).
+  When the push-only `python-coverage` job fails to upload `backend/coverage.xml`
+  — historically an invisible OOM / runner-loss on `meho-runners-ci-heavy` that
+  collapsed SonarCloud coverage from 65.8% to ~24% on 2026-06-20 and stayed
+  hidden for 3+ weeks — `quality-gate.yml` now emits an **error-level workflow
+  annotation** plus a clearly-named non-required failing step naming the missing
+  artifact. Resilience is preserved (the SonarCloud scan still runs advisory);
+  only the invisibility is removed. `ci.yml` gains a greppable `# TODO(ops)` at
+  the coverage job's `runs-on:` naming the durable fix (a larger-memory
+  gha-runner-scale-set pool on the rke2-ci cluster, ops-owned / out of band), and
+  `docs/codebase/sonarcloud.md` gains a coverage-collapse runbook (the ~24% chip
+  failure mode, the 2026-06-20 worked example, where to look, and the runner-pool
+  dependency) — `.github/workflows/quality-gate.yml`, `.github/workflows/ci.yml`,
+  `docs/codebase/sonarcloud.md` (#2513).
+
 ### Gateway — runner dead-man switch + mandatory heartbeat
 
 - Add the runner dead-man switch + mandatory heartbeat for the push-only

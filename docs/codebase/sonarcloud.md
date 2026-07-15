@@ -49,6 +49,48 @@ integration tests run in a separate job without coverage. The gate is
 `continue-on-error: true` — it is **advisory** and never blocks merges (see the
 new-code-period + scan-trigger section below for why it is kept advisory).
 
+## When coverage collapses to ~24% — the invisible-import failure mode
+
+**Symptom.** The SonarCloud overall-coverage chip drops sharply (e.g. from ~66%
+to ~24%) and stays there, with no matching drop in real test coverage.
+
+**What it means.** The push-only `python-coverage` job (ci.yml) died before
+uploading `backend/coverage.xml`, so the Quality Gate scan ran *without* backend
+coverage and SonarCloud imported ~0% for the backend tree — dragging the blended
+Python+Go number down to roughly what Go coverage alone contributes. Because both
+the coverage job and the artifact download are non-blocking
+(`continue-on-error`), the failure produces no red check anywhere; the collapsed
+chip is the only symptom.
+
+**Worked example — the 2026-06-20 incident.** Last good import:
+2026-06-19T18:55Z at **65.8%**. First collapsed import: 2026-06-20T10:46Z at
+**24.9%** — and it stayed collapsed for 3+ weeks. Root cause: the
+`python-coverage` job was OOM-killed / evicted (runner lost, null step
+conclusions) at ~47 min on the memory-limited `meho-runners-ci-heavy` pool —
+*before* its 50-min timeout, so raising `timeout-minutes` is a no-op. The unit
+lane had already dropped `--cov` for the same OOM reason (#1982), so this
+dedicated job was the sole coverage producer and nothing else caught the gap.
+
+**Where to look.**
+
+1. The most recent `python-coverage` job on a main push (CI workflow) — did it
+   reach `Upload Python coverage artifact`, or die/OOM before it?
+2. The Quality Gate run for that push — its `Assert python-coverage artifact
+   present (fail-visible)` step emits an **error annotation** naming the missing
+   artifact whenever the upload is absent (added in #2513). That annotation is
+   the loud signal the 2026-06-20 collapse lacked.
+3. The artifact list on the CI run — a present `python-coverage` artifact rules
+   out this failure mode.
+
+**The durable fix is ops-owned.** The coverage tax is intrinsic (~12.5 GiB peak
+at `-n 1`, only ~1.2 GiB under the pod limit) and barely moves with parallelism,
+so the job is one suite-growth increment away from OOM again. The durable fix —
+named in both the job's own header comment and its `# TODO(ops)` at `runs-on:` —
+is a **larger-memory runner pool** (a gha-runner-scale-set on the rke2-ci
+cluster, provisioned out of band); once it exists, move the job's `runs-on:` to
+it. Until then the job stays non-blocking and the fail-visible annotation above
+surfaces every skipped upload instead of letting it rot silently.
+
 ## New-code period + scan trigger — how they're configured
 
 SonarCloud's "Clean as You Code" model gates only **changed** code, relative to a

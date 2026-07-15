@@ -72,6 +72,25 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true  # missing artifact degrades to "no coverage", never blocks
 
+      - name: Assert python-coverage artifact present (fail-visible)
+        # Fail-visible contract (#2513). The job-level `if:` above already scopes
+        # this workflow to main-push analyses, so a missing backend/coverage.xml
+        # here means the push-only python-coverage job (ci.yml) did not upload
+        # coverage — historically an invisible OOM / runner-loss on
+        # meho-runners-ci-heavy that collapsed SonarCloud coverage from 65.8% to
+        # ~24% on 2026-06-20 and stayed hidden for 3+ weeks (the download above is
+        # continue-on-error, so the scan silently ran without coverage). This step
+        # makes that degradation LOUD: an error-level workflow annotation naming
+        # the missing artifact plus a clearly-named failed step. Its own
+        # continue-on-error keeps it non-blocking, so the SonarCloud scan below
+        # still runs (resilience preserved) — only the invisibility is removed.
+        # See docs/codebase/sonarcloud.md (coverage-collapse runbook).
+        if: hashFiles('backend/coverage.xml') == ''
+        continue-on-error: true
+        run: |
+          echo "::error title=python-coverage artifact missing::No backend/coverage.xml on this main-push analysis — the push-only python-coverage job (ci.yml) did not upload coverage (likely an OOM / runner-loss on meho-runners-ci-heavy). SonarCloud will import 0% backend coverage for commit ${{ github.event.workflow_run.head_sha }}. See docs/codebase/sonarcloud.md (coverage-collapse runbook)."
+          exit 1
+
       - name: Point coverage report at the backend/ source root
         # coverage.py (relative_files=true) writes an empty <source></source>
         # and filenames like `src/meho_backplane/...` relative to backend/.

@@ -122,9 +122,9 @@ def _build_insecure_ssl_context() -> ssl.SSLContext:
     ``ValueError`` on Python 3.12 ("Cannot set verify_mode to CERT_NONE
     when check_hostname is enabled.").
     """
-    ctx = ssl.create_default_context()
+    ctx = ssl.create_default_context()  # NOSONAR(S5527) — per-target verify_tls=false opt-out (default TRUE); WARN-logged + audited; tls_ca_pin is the secure supersession  # noqa: E501  # fmt: skip
     ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    ctx.verify_mode = ssl.CERT_NONE  # NOSONAR(S4830) — same justification; see module docstring TLS-trust precedence  # noqa: E501  # fmt: skip
     return ctx
 
 

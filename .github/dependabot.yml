@@ -3,11 +3,11 @@
 
 # Dependabot configuration.
 #
-# Initial v0.1 scope: GitHub Actions only. Pip / npm / docker
-# ecosystems land when their manifests do (pyproject.toml,
-# package.json, Dockerfile). Adding them now would silently no-op
-# but invites confusion when manifests appear later — the schedule
-# would already be running.
+# Active ecosystems: GitHub Actions (workflows), uv (backend Python
+# deps), and docker (backend/Dockerfile base image). Pip / npm land
+# when their manifests do (a root pyproject.toml, a package.json).
+# Adding an ecosystem before its manifest exists silently no-ops but
+# invites confusion later — the schedule would already be running.
 
 version: 2
 updates:
@@ -56,6 +56,27 @@ updates:
     commit-message:
       prefix: "chore(deps)"
 
+  # The backplane image's base is `FROM python:3.12-slim@sha256:…` in
+  # backend/Dockerfile. Dependabot's docker ecosystem bumps that literal,
+  # tag-qualified digest when upstream rebuilds the tag, so newly disclosed
+  # base-OS CVEs arrive as an automatic PR instead of silently accumulating
+  # on a frozen digest. `directory` points at the Dockerfile's directory.
+  # Only literal `FROM image:tag@sha256:` references are tracked — an
+  # ARG-held digest is not resolved (dependabot-core#2057 / #4597), which
+  # is why the Dockerfile inlines the pin on both FROM lines.
+  - package-ecosystem: "docker"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "docker"
+    commit-message:
+      prefix: "chore(deps)"
+
   # When other language manifests land, add per-ecosystem blocks below.
   # Reference (MEHO.X conventions):
   #
@@ -74,14 +95,5 @@ updates:
   #     interval: "weekly"
   #     day: "monday"
   #   labels: ["dependencies", "frontend"]
-  #   commit-message:
-  #     prefix: "chore(deps)"
-  #
-  # - package-ecosystem: "docker"
-  #   directory: "/<docker-context>"
-  #   schedule:
-  #     interval: "weekly"
-  #     day: "monday"
-  #   labels: ["dependencies", "docker"]
   #   commit-message:
   #     prefix: "chore(deps)"

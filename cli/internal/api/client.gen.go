@@ -233,6 +233,14 @@ const (
 	NeedsApproval PermissionVerdict = "needs-approval"
 )
 
+// Defines values for PrincipalKind.
+const (
+	PrincipalKindAgent   PrincipalKind = "agent"
+	PrincipalKindRunner  PrincipalKind = "runner"
+	PrincipalKindService PrincipalKind = "service"
+	PrincipalKindUser    PrincipalKind = "user"
+)
+
 // Defines values for RetireChecklistReportOverallVerdict.
 const (
 	RetireChecklistReportOverallVerdictNOTYET         RetireChecklistReportOverallVerdict = "NOT YET"
@@ -380,6 +388,13 @@ const (
 	TemplateSummaryStatusPublished  TemplateSummaryStatus = "published"
 )
 
+// Defines values for TenantRole.
+const (
+	Operator    TenantRole = "operator"
+	ReadOnly    TenantRole = "read_only"
+	TenantAdmin TenantRole = "tenant_admin"
+)
+
 // Defines values for TopologyDiffEntryChangeKind.
 const (
 	Created TopologyDiffEntryChangeKind = "created"
@@ -455,8 +470,8 @@ const (
 
 // Defines values for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer.
 const (
-	Builtin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
-	Tenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferBuiltin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferTenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
 )
 
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
@@ -1078,6 +1093,17 @@ type AskDocsResponse struct {
 	Citations []map[string]interface{} `json:"citations"`
 }
 
+// AssignmentDocument Full-document “PUT“ body: replaces a runner's assignment wholesale.
+type AssignmentDocument struct {
+	Items *[]AuthoredCheckItem `json:"items,omitempty"`
+}
+
+// AssignmentDocumentResponse Echo returned by “PUT“: the stored authored document + runner name.
+type AssignmentDocumentResponse struct {
+	Items  []AuthoredCheckItem `json:"items"`
+	Runner string              `json:"runner"`
+}
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -1219,6 +1245,23 @@ type AuthConfigResponse struct {
 
 // AuthModel Per-target identity model per v0.1-spec L447-454.
 type AuthModel string
+
+// AuthoredCheckItem One operator-authored check in a runner's assignment document.
+//
+// The runner-facing “GET“ materialises each of these into a wire
+// :class:`~meho_backplane.runner.wire.RunnerWorkItem` at request time:
+// “target_name“ is resolved to a live target descriptor, “op“ to the
+// resolved connector's enabled descriptor (yielding “handler_ref“ +
+// “safety_level“ + the “(product, version, impl_id)“ key). “op“ is
+// the connector-side op id (e.g. “"vsphere.host.list"“); the connector
+// triple is derived from the resolved target, not authored here.
+type AuthoredCheckItem struct {
+	CadenceSeconds int                     `json:"cadence_seconds"`
+	CheckRef       string                  `json:"check_ref"`
+	Op             string                  `json:"op"`
+	Params         *map[string]interface{} `json:"params,omitempty"`
+	TargetName     string                  `json:"target_name"`
+}
 
 // BackendReadiness Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).
 //
@@ -4563,6 +4606,42 @@ type PreviewOperationBody_Target struct {
 	union json.RawMessage
 }
 
+// PrincipalKind Discriminator that distinguishes what authenticated this request.
+//
+// G11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,
+// audit, and the approval gate can tell a human operator apart from
+// a service account or an agent without re-examining the JWT payload.
+//
+// Values are the literal strings the Keycloak “principal_kind“
+// protocol mapper emits on the agent client (or that the v0.3 token
+// exchange layer will emit). Existing tokens that carry no
+// “principal_kind“ claim default to :attr:`USER` — the graceful-
+// fallback contract means all pre-G11.2 human-operator flows are
+// unaffected.
+//
+// Members:
+//
+//   - :attr:`USER` — a human operator authenticated via the interactive
+//     device-code flow. Default when no claim is present.
+//   - :attr:`SERVICE` — a non-interactive service account client that
+//     uses client-credentials flow but is not a MEHO-managed agent.
+//   - :attr:`AGENT` — a Keycloak client registered by
+//     “meho agent-principal register“; the token carries
+//     “principal_kind=agent“. G11.2-T2 (RFC 8693 delegation) and
+//     G11.2-T3 (per-principal permission model) branch on this value
+//     to apply agent-specific authz.
+//   - :attr:`RUNNER` — a satellite runner's service principal registered
+//     by “meho runner-principal register“ (Initiative #2415, #2502);
+//     the token carries “principal_kind=runner“ plus a “runner_id“
+//     claim. A runner is a dumb, push-only executor with a **read-only**
+//     credential scope: its token is fail-closed 403'd on every
+//     authenticated route outside the gateway allowlist prefixes
+//     (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)
+//     and on the MCP surface. The unforgeable discriminator is what the
+//     negative cage keys on, so a runner client missing any other mapper
+//     still cannot roam the read API.
+type PrincipalKind string
+
 // PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
 //
 // G5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a
@@ -4779,6 +4858,60 @@ type ReplayNode struct {
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
+}
+
+// ResolvedTargetDescriptor Centrally-resolved target attributes a connector handler reads.
+//
+// The runner has no local target table, so the central resolver
+// (:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises
+// the fields a handler duck-reads off a “Target“ row and ships them
+// on the assignment. It carries the resolver-read attributes
+// (“product“ / “fingerprint“ / “version“ / “preferred_impl_id“)
+// the tie-break ladder consumes **and** the connection-routing set
+// (“host“ / “port“ / “fqdn“ / “secret_ref“ / “auth_model“ /
+// TLS flags) the HTTP adapter reads, so on the runner the descriptor
+// feeds :func:`~meho_backplane.connectors.resolver.resolve_connector`
+// and the connector adapters directly — no DB session, no second
+// resolution mechanism.
+//
+// The full field set is moulded on the central
+// :class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the
+// same identification + connection-routing projection of the
+// “Target“ row, minus the server-managed timestamps and the
+// operator-authored “notes“ (neither drives connector routing).
+//
+// Credential discipline: “secret_ref“ is the **reference** the runner
+// resolves outbound under its own read-only scope; no credential value
+// is ever embedded (the runner spools assignments on disk, so a value
+// would durably persist — a locked no-durable-artifact violation).
+type ResolvedTargetDescriptor struct {
+	Aliases         *[]string               `json:"aliases,omitempty"`
+	AuthModel       *string                 `json:"auth_model,omitempty"`
+	Extras          *map[string]interface{} `json:"extras,omitempty"`
+	Fingerprint     *map[string]interface{} `json:"fingerprint"`
+	Fqdn            *string                 `json:"fqdn"`
+	Host            string                  `json:"host"`
+	Id              openapi_types.UUID      `json:"id"`
+	Name            string                  `json:"name"`
+	Port            *int                    `json:"port"`
+	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         string                  `json:"product"`
+	SecretRef       *string                 `json:"secret_ref"`
+	TenantId        openapi_types.UUID      `json:"tenant_id"`
+	TlsCaPin        *string                 `json:"tls_ca_pin"`
+	TlsServerName   *string                 `json:"tls_server_name"`
+	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
+	Version         *string                 `json:"version"`
+}
+
+// ResultIngestResponse “POST /checks/results“ response — idempotency accounting.
+//
+// “accepted“ counts rows newly persisted; “duplicates“ counts rows
+// whose “result_uid“ was already ingested for this runner (a re-posted
+// spool batch). “accepted + duplicates“ equals the batch length.
+type ResultIngestResponse struct {
+	Accepted   int `json:"accepted"`
+	Duplicates int `json:"duplicates"`
 }
 
 // RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
@@ -5050,6 +5183,80 @@ type RunbookTemplateListResponse struct {
 	NextCursor *string           `json:"next_cursor"`
 }
 
+// RunnerAssignment The runner's current work assignment, fetched each tick.
+//
+// “assignment_version“ is an opaque digest the runner echoes back as
+// “known_version“ so central can answer an unchanged assignment with a
+// “304“ (see :meth:`RunnerClient.fetch_assignment`).
+type RunnerAssignment struct {
+	AssignmentVersion string            `json:"assignment_version"`
+	Items             *[]RunnerWorkItem `json:"items,omitempty"`
+}
+
+// RunnerPrincipal Principal context an executed op runs under, carried on each item.
+//
+// Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
+// on the runner without a JWT: the runner never sees a bearer token for
+// the acting principal (the op was already authorized centrally), so the
+// reconstructed operator's “raw_jwt“ is empty.
+type RunnerPrincipal struct {
+	// PrincipalKind Discriminator that distinguishes what authenticated this request.
+	//
+	// G11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,
+	// audit, and the approval gate can tell a human operator apart from
+	// a service account or an agent without re-examining the JWT payload.
+	//
+	// Values are the literal strings the Keycloak ``principal_kind``
+	// protocol mapper emits on the agent client (or that the v0.3 token
+	// exchange layer will emit). Existing tokens that carry no
+	// ``principal_kind`` claim default to :attr:`USER` — the graceful-
+	// fallback contract means all pre-G11.2 human-operator flows are
+	// unaffected.
+	//
+	// Members:
+	//
+	// * :attr:`USER` — a human operator authenticated via the interactive
+	//   device-code flow. Default when no claim is present.
+	// * :attr:`SERVICE` — a non-interactive service account client that
+	//   uses client-credentials flow but is not a MEHO-managed agent.
+	// * :attr:`AGENT` — a Keycloak client registered by
+	//   ``meho agent-principal register``; the token carries
+	//   ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and
+	//   G11.2-T3 (per-principal permission model) branch on this value
+	//   to apply agent-specific authz.
+	// * :attr:`RUNNER` — a satellite runner's service principal registered
+	//   by ``meho runner-principal register`` (Initiative #2415, #2502);
+	//   the token carries ``principal_kind=runner`` plus a ``runner_id``
+	//   claim. A runner is a dumb, push-only executor with a **read-only**
+	//   credential scope: its token is fail-closed 403'd on every
+	//   authenticated route outside the gateway allowlist prefixes
+	//   (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)
+	//   and on the MCP surface. The unforgeable discriminator is what the
+	//   negative cage keys on, so a runner client missing any other mapper
+	//   still cannot roam the read API.
+	PrincipalKind *PrincipalKind     `json:"principal_kind,omitempty"`
+	Sub           string             `json:"sub"`
+	TenantId      openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
+}
+
 // RunnerPrincipalCreate Input shape for :meth:`RunnerPrincipalService.register`.
 type RunnerPrincipalCreate struct {
 	Name     string  `json:"name"`
@@ -5073,6 +5280,92 @@ type RunnerPrincipalRead struct {
 	Revoked            bool               `json:"revoked"`
 	TenantId           openapi_types.UUID `json:"tenant_id"`
 	UpdatedAt          time.Time          `json:"updated_at"`
+}
+
+// RunnerResult The outcome of executing one :class:`RunnerWorkItem`.
+//
+// “result_uid“ is generated on the runner (a uuid4 hex) so central
+// ingest can deduplicate spool re-posts idempotently — a batch written
+// to the retry spool carries the same uids when it is re-posted.
+//
+// “status“ is a runner-level tri-state, distinct from any status
+// inside “result“:
+//
+//   - “ok“ — the handler ran and returned its structured payload
+//     (which may itself report a failed probe; a failed check is a
+//     result, not a runner error).
+//   - “refused“ — the runner declined to execute (unsafe safety_level,
+//     or a handler_ref outside the connector tree).
+//   - “error“ — the handler raised; the exception is summarised in
+//     “error“ and never re-raised into the tick loop.
+type RunnerResult struct {
+	CheckRef  string                  `json:"check_ref"`
+	Error     *string                 `json:"error"`
+	OpId      string                  `json:"op_id"`
+	Result    *map[string]interface{} `json:"result"`
+	ResultUid string                  `json:"result_uid"`
+	Status    string                  `json:"status"`
+}
+
+// RunnerResultBatch A batch of results the runner reports (or spools) in one POST.
+type RunnerResultBatch struct {
+	Results  *[]RunnerResult `json:"results,omitempty"`
+	RunnerId string          `json:"runner_id"`
+}
+
+// RunnerWorkItem One centrally-authorized operation for the runner to execute.
+//
+// Carries the fields the runner needs to resolve and invoke a handler
+// entirely locally: the dotted “handler_ref“ (resolved via
+// :func:`~meho_backplane.operations._handler_resolve.import_handler`),
+// the “(product, version, impl_id)“ registry key used to rebind a
+// bound-method handler against its connector instance, the validated
+// “params“, the “safety_level“ the runner re-checks (defence in
+// depth), the principal context, and the resolved target descriptor
+// (“None“ for targetless synthetic ops such as “net.*“).
+type RunnerWorkItem struct {
+	CheckRef   string                  `json:"check_ref"`
+	HandlerRef string                  `json:"handler_ref"`
+	ImplId     *string                 `json:"impl_id,omitempty"`
+	OpId       string                  `json:"op_id"`
+	Params     *map[string]interface{} `json:"params,omitempty"`
+
+	// Principal Principal context an executed op runs under, carried on each item.
+	//
+	// Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
+	// on the runner without a JWT: the runner never sees a bearer token for
+	// the acting principal (the op was already authorized centrally), so the
+	// reconstructed operator's ``raw_jwt`` is empty.
+	Principal   RunnerPrincipal `json:"principal"`
+	Product     string          `json:"product"`
+	SafetyLevel string          `json:"safety_level"`
+
+	// TargetDescriptor Centrally-resolved target attributes a connector handler reads.
+	//
+	// The runner has no local target table, so the central resolver
+	// (:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises
+	// the fields a handler duck-reads off a ``Target`` row and ships them
+	// on the assignment. It carries the resolver-read attributes
+	// (``product`` / ``fingerprint`` / ``version`` / ``preferred_impl_id``)
+	// the tie-break ladder consumes **and** the connection-routing set
+	// (``host`` / ``port`` / ``fqdn`` / ``secret_ref`` / ``auth_model`` /
+	// TLS flags) the HTTP adapter reads, so on the runner the descriptor
+	// feeds :func:`~meho_backplane.connectors.resolver.resolve_connector`
+	// and the connector adapters directly — no DB session, no second
+	// resolution mechanism.
+	//
+	// The full field set is moulded on the central
+	// :class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the
+	// same identification + connection-routing projection of the
+	// ``Target`` row, minus the server-managed timestamps and the
+	// operator-authored ``notes`` (neither drives connector routing).
+	//
+	// Credential discipline: ``secret_ref`` is the **reference** the runner
+	// resolves outbound under its own read-only scope; no credential value
+	// is ever embedded (the runner spools assignments on disk, so a value
+	// would durably persist — a locked no-durable-artifact violation).
+	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
+	Version          *string                   `json:"version,omitempty"`
 }
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
@@ -5982,6 +6275,24 @@ type TemplateSummary struct {
 
 // TemplateSummaryStatus defines model for TemplateSummary.Status.
 type TemplateSummaryStatus string
+
+// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+//
+// The set is intentionally small in v0.2: a closed three-value enum
+// lets the RBAC primitive (Task #234, “require_role“) make
+// exhaustive comparisons without leaking arbitrary string handling
+// into route code. A richer policy engine — topology-aware
+// permissions, ABAC, approval workflows — is a separate v0.2.next
+// Goal; widening this enum is the only ratcheting mechanism in the
+// interim.
+//
+// Values are the literal strings the Keycloak protocol-mapper recipe
+// (Task #235) emits, so a JWT carrying “"tenant_admin"“ materialises
+// cleanly as :attr:`TENANT_ADMIN`. “StrEnum“ (PEP 663, stdlib in
+// 3.11+) gives the members “str“ semantics for free, so
+// “f"role={role}"“ renders as “"role=tenant_admin"“ rather than
+// “"role=TenantRole.TENANT_ADMIN"“.
+type TenantRole string
 
 // Thresholds Per-metric green-band thresholds for a verdict computation.
 //
@@ -6906,6 +7217,23 @@ type CreateOverrideApiV1BroadcastOverridesPostParams struct {
 
 // DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams defines parameters for DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete.
 type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// GetAssignmentApiV1ChecksAssignmentGetParams defines parameters for GetAssignmentApiV1ChecksAssignmentGet.
+type GetAssignmentApiV1ChecksAssignmentGetParams struct {
+	Runner        string  `form:"runner" json:"runner"`
+	KnownVersion  *string `form:"known_version,omitempty" json:"known_version,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
+type PutAssignmentApiV1ChecksAssignmentRunnerPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
+type PostResultsApiV1ChecksResultsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -7844,6 +8172,12 @@ type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 
 // CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody defines body for CreateOverrideApiV1BroadcastOverridesPost for application/json ContentType.
 type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrideCreate
+
+// PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody defines body for PutAssignmentApiV1ChecksAssignmentRunnerPut for application/json ContentType.
+type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocument
+
+// PostResultsApiV1ChecksResultsPostJSONRequestBody defines body for PostResultsApiV1ChecksResultsPost for application/json ContentType.
+type PostResultsApiV1ChecksResultsPostJSONRequestBody = RunnerResultBatch
 
 // IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody defines body for IngestEndpointApiV1ConnectorsIngestPost for application/json ContentType.
 type IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody = IngestRequest
@@ -9286,6 +9620,19 @@ type ClientInterface interface {
 
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetAssignmentApiV1ChecksAssignmentGet request
+	GetAssignmentApiV1ChecksAssignmentGet(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody request with any body
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostResultsApiV1ChecksResultsPostWithBody request with any body
+	PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostResultsApiV1ChecksResultsPost(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListEndpointApiV1ConnectorsGet request
 	ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11029,6 +11376,66 @@ func (c *Client) CreateOverrideApiV1BroadcastOverridesPost(ctx context.Context, 
 
 func (c *Client) DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(c.Server, overrideId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetAssignmentApiV1ChecksAssignmentGet(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAssignmentApiV1ChecksAssignmentGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(c.Server, runner, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(c.Server, runner, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultsApiV1ChecksResultsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultsApiV1ChecksResultsPost(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultsApiV1ChecksResultsPostRequest(c.Server, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -18486,6 +18893,199 @@ func NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(server stri
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetAssignmentApiV1ChecksAssignmentGetRequest generates requests for GetAssignmentApiV1ChecksAssignmentGet
+func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetAssignmentApiV1ChecksAssignmentGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/assignment")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "runner", runtime.ParamLocationQuery, params.Runner); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.KnownVersion != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "known_version", runtime.ParamLocationQuery, *params.KnownVersion); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest calls the generic PutAssignmentApiV1ChecksAssignmentRunnerPut builder with application/json body
+func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(server string, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server, runner, params, "application/json", bodyReader)
+}
+
+// NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody generates requests for PutAssignmentApiV1ChecksAssignmentRunnerPut with any type of body
+func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server string, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/assignment/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPostResultsApiV1ChecksResultsPostRequest calls the generic PostResultsApiV1ChecksResultsPost builder with application/json body
+func NewPostResultsApiV1ChecksResultsPostRequest(server string, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostResultsApiV1ChecksResultsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostResultsApiV1ChecksResultsPostRequestWithBody generates requests for PostResultsApiV1ChecksResultsPost with any type of body
+func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/results")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -34479,6 +35079,19 @@ type ClientWithResponsesInterface interface {
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse, error)
 
+	// GetAssignmentApiV1ChecksAssignmentGetWithResponse request
+	GetAssignmentApiV1ChecksAssignmentGetWithResponse(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error)
+
+	// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse request with any body
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
+
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
+
+	// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with any body
+	PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
+
+	PostResultsApiV1ChecksResultsPostWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
+
 	// ListEndpointApiV1ConnectorsGetWithResponse request
 	ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error)
 
@@ -36469,6 +37082,75 @@ func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) Status() 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetAssignmentApiV1ChecksAssignmentGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerAssignment
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAssignmentApiV1ChecksAssignmentGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAssignmentApiV1ChecksAssignmentGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PutAssignmentApiV1ChecksAssignmentRunnerPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AssignmentDocumentResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostResultsApiV1ChecksResultsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ResultIngestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PostResultsApiV1ChecksResultsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostResultsApiV1ChecksResultsPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -43257,6 +43939,49 @@ func (c *ClientWithResponses) DeleteOverrideApiV1BroadcastOverridesOverrideIdDel
 	return ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp)
 }
 
+// GetAssignmentApiV1ChecksAssignmentGetWithResponse request returning *GetAssignmentApiV1ChecksAssignmentGetResponse
+func (c *ClientWithResponses) GetAssignmentApiV1ChecksAssignmentGetWithResponse(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error) {
+	rsp, err := c.GetAssignmentApiV1ChecksAssignmentGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAssignmentApiV1ChecksAssignmentGetResponse(rsp)
+}
+
+// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse request with arbitrary body returning *PutAssignmentApiV1ChecksAssignmentRunnerPutResponse
+func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	rsp, err := c.PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx, runner, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	rsp, err := c.PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx, runner, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
+}
+
+// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with arbitrary body returning *PostResultsApiV1ChecksResultsPostResponse
+func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	rsp, err := c.PostResultsApiV1ChecksResultsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultsApiV1ChecksResultsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	rsp, err := c.PostResultsApiV1ChecksResultsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultsApiV1ChecksResultsPostResponse(rsp)
+}
+
 // ListEndpointApiV1ConnectorsGetWithResponse request returning *ListEndpointApiV1ConnectorsGetResponse
 func (c *ClientWithResponses) ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error) {
 	rsp, err := c.ListEndpointApiV1ConnectorsGet(ctx, params, reqEditors...)
@@ -48178,6 +48903,105 @@ func ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp *htt
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetAssignmentApiV1ChecksAssignmentGetResponse parses an HTTP response from a GetAssignmentApiV1ChecksAssignmentGetWithResponse call
+func ParseGetAssignmentApiV1ChecksAssignmentGetResponse(rsp *http.Response) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAssignmentApiV1ChecksAssignmentGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerAssignment
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse parses an HTTP response from a PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse call
+func ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp *http.Response) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutAssignmentApiV1ChecksAssignmentRunnerPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AssignmentDocumentResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostResultsApiV1ChecksResultsPostResponse parses an HTTP response from a PostResultsApiV1ChecksResultsPostWithResponse call
+func ParsePostResultsApiV1ChecksResultsPostResponse(rsp *http.Response) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostResultsApiV1ChecksResultsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ResultIngestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

@@ -73,6 +73,7 @@ from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_route
 from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
+from meho_backplane.api.v1.checks import router as api_v1_checks_router
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -890,6 +891,13 @@ app.include_router(api_v1_agent_principals_router)
 # the JWT; cross-tenant probes return 404. The minted runner token is caged
 # to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
 app.include_router(api_v1_runner_principals_router)
+# Initiative #2415 (#2499) -- gateway assignment + result-ingest API, mounted
+# under /api/v1/checks/ (inside the runner route cage). PUT /checks/assignment/
+# {runner} authors a runner's checks (operator); GET /checks/assignment (runner,
+# own-only) returns the digest-versioned assignment with resolved target
+# descriptors + handler_ref/safety_level; POST /checks/results (runner, own-only)
+# idempotently ingests results with a central-stamped received_at.
+app.include_router(api_v1_checks_router)
 # G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
 # (list, paginated, operator-level), POST /scheduler/triggers (create,
 # tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).

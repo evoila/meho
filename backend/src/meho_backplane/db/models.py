@@ -3644,6 +3644,170 @@ class RunnerPrincipal(Base):
 
 
 # ---------------------------------------------------------------------------
+# Initiative #2415 (#2499) — gateway assignment + result-ingest storage
+# ---------------------------------------------------------------------------
+
+
+#: Closed set of runner-reported result statuses, mirrored in the
+#: ``runner_check_results.status`` CHECK constraint. Tri-state to match
+#: the ``runner/wire.py`` ``RunnerResult.status`` vocabulary (#2497): a
+#: handler that ran (``ok``), a runner that declined an unsafe item
+#: (``refused``), or a handler that raised (``error``). A bare
+#: ``ok``/``error`` CHECK would reject the ``refused`` rows #2497's runner
+#: legitimately posts.
+_RUNNER_RESULT_STATUSES: tuple[str, ...] = ("ok", "refused", "error")
+
+
+class RunnerAssignmentRow(Base):
+    """One satellite runner's current check assignment (Initiative #2415, #2499).
+
+    A single operator-authored document per ``(tenant_id, runner_name)``:
+    the ``PUT /api/v1/checks/assignment/{runner}`` route replaces the row
+    wholesale. ``items`` stores the *authored* checks
+    (``check_ref`` / ``target_name`` / ``op`` / ``params`` /
+    ``cadence_seconds``) as JSONB; the runner-facing ``GET`` materialises
+    each authored item into a wire ``RunnerWorkItem`` at request time
+    (resolving the live target descriptor + the op's ``handler_ref`` /
+    ``safety_level``), so target-row drift is picked up on the next poll
+    rather than frozen at authoring time.
+
+    ``runner_name`` is a soft-FK to :attr:`RunnerPrincipal.name` (no DB
+    FK — the same soft-reference discipline the gateway set uses so
+    #2499/#2501 reference a runner by name without coupling to the
+    principal table's lifecycle). ``tenant_id`` **is** a real
+    ``REFERENCES tenant(id)`` FK: a brand-new clean-slate table, mould
+    parity with :class:`RunnerPrincipal` (#2502).
+    """
+
+    __tablename__ = "runner_assignments"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real FK -- clean-slate table, mould parity with runner_principal.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Soft-FK to runner_principal.name (no DB FK): the gateway set keys
+    # runners by name and references them across #2499/#2501 by name.
+    runner_name: Mapped[str] = mapped_column(Text, nullable=False)
+    items: Mapped[list[dict[str, object]]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=list,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # One assignment document per runner within a tenant; the upsert
+        # path keys on this pair.
+        Index(
+            "runner_assignments_tenant_runner_idx",
+            "tenant_id",
+            "runner_name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+    )
+
+
+class RunnerCheckResult(Base):
+    """One ingested runner check-execution report (Initiative #2415, #2499).
+
+    Persisted by ``POST /api/v1/checks/results`` — one row per accepted
+    result in the runner's batch. ``received_at`` is stamped by the
+    central clock at ingest (never accepted from the client), because the
+    dead-man's switch (#2501) flips workloads stale on the central clock.
+
+    Idempotency: ``(tenant_id, runner_name, result_uid)`` is unique, so a
+    re-POST from the runner's on-disk retry spool (#2497) inserts nothing
+    and is reported as a duplicate rather than double-counted.
+    ``check_ref`` is an opaque per-item string (a soft reference — a
+    Sensor UUID from #2416 may ride in it later, with no FK), and the
+    ``(tenant_id, runner_name, check_ref, received_at)`` index serves
+    #2501's per-check staleness reads.
+
+    ``tenant_id`` is a real ``REFERENCES tenant(id)`` FK (clean-slate
+    table, mould parity with :class:`RunnerPrincipal`).
+    """
+
+    __tablename__ = "runner_check_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    runner_name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Runner-generated uuid4 hex: the dedup key that makes spool re-posts
+    # idempotent.
+    result_uid: Mapped[str] = mapped_column(Text, nullable=False)
+    check_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Runner-level tri-state (ok / refused / error); see
+    # ``_RUNNER_RESULT_STATUSES``.
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    # The handler's structured payload (a failed probe is still a result,
+    # not a runner error). Nullable: refused/error rows carry none.
+    result_payload: Mapped[dict[str, object] | None] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=True,
+        default=None,
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Central-stamped at ingest -- NOT accepted from the client.
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Ingest idempotency: a re-posted spool batch collides here and is
+        # counted as a duplicate.
+        Index(
+            "runner_check_results_uid_idx",
+            "tenant_id",
+            "runner_name",
+            "result_uid",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        # #2501 staleness reads: latest result per (runner, check).
+        Index(
+            "runner_check_results_staleness_idx",
+            "tenant_id",
+            "runner_name",
+            "check_ref",
+            "received_at",
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            "status IN ('ok', 'refused', 'error')",
+            name="ck_runner_check_results_status",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # G11.2-T3 — per-(principal, op, target) permission model
 # ---------------------------------------------------------------------------
 

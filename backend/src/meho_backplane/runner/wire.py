@@ -58,24 +58,52 @@ class ResolvedTargetDescriptor(BaseModel):
     The runner has no local target table, so the central resolver
     (:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises
     the fields a handler duck-reads off a ``Target`` row and ships them
-    on the assignment. The v1 seed carries exactly the resolver-read
-    attributes (product / fingerprint / version / preferred_impl_id) plus
-    the human-facing ``name`` and the ``extras`` escape hatch.
+    on the assignment. It carries the resolver-read attributes
+    (``product`` / ``fingerprint`` / ``version`` / ``preferred_impl_id``)
+    the tie-break ladder consumes **and** the connection-routing set
+    (``host`` / ``port`` / ``fqdn`` / ``secret_ref`` / ``auth_model`` /
+    TLS flags) the HTTP adapter reads, so on the runner the descriptor
+    feeds :func:`~meho_backplane.connectors.resolver.resolve_connector`
+    and the connector adapters directly — no DB session, no second
+    resolution mechanism.
 
-    #2499 widens this class with the connection-routing set
-    (host, port, secret_ref, TLS flags) moulded on the central
-    ``TargetSummary``. The runner tolerates the wider shape because a
-    handler only reads the attributes it needs.
+    The full field set is moulded on the central
+    :class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the
+    same identification + connection-routing projection of the
+    ``Target`` row, minus the server-managed timestamps and the
+    operator-authored ``notes`` (neither drives connector routing).
+
+    Credential discipline: ``secret_ref`` is the **reference** the runner
+    resolves outbound under its own read-only scope; no credential value
+    is ever embedded (the runner spools assignments on disk, so a value
+    would durably persist — a locked no-durable-artifact violation).
     """
 
     model_config = ConfigDict(frozen=True)
 
+    # Identity (stable cross-system keys the runner echoes in reports /
+    # audit; ``id`` + ``tenant_id`` mirror the ``Target`` row PK + scope).
+    id: UUID
+    tenant_id: UUID
     name: str
+    aliases: tuple[str, ...] = ()
+    # Resolver inputs: the tie-break ladder reads ``product`` +
+    # ``fingerprint.version`` / ``version`` + ``preferred_impl_id``.
     product: str
     version: str | None = None
     fingerprint: dict[str, Any] | None = None
-    extras: dict[str, Any] = Field(default_factory=dict)
     preferred_impl_id: str | None = None
+    # Connection routing: the HTTP adapter builds ``https://{host}[:{port}]``
+    # and reads the TLS trust knobs off these fields.
+    host: str
+    port: int | None = None
+    fqdn: str | None = None
+    secret_ref: str | None = None
+    auth_model: str = "shared_service_account"
+    verify_tls: bool = True
+    tls_ca_pin: str | None = None
+    tls_server_name: str | None = None
+    extras: dict[str, Any] = Field(default_factory=dict)
 
 
 class RunnerPrincipal(BaseModel):

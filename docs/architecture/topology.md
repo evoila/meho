@@ -93,8 +93,10 @@ separators. A novel kind (`dns-record`, `database`, `certificate`,
 normal write — no migration, no registry, no per-tenant governance
 table ("dumb substrate, smart agent"). Human `tenant_admin` writes
 stay zero-friction on every front; for AGENT principals the write
-itself is approval-gated (T3 [#2537](https://github.com/evoila/meho/issues/2537)),
-so a human sees a novel agent-invented kind at the moment it is
+itself becomes approval-gated when T3
+[#2537](https://github.com/evoila/meho/issues/2537) lands (until
+then agent writes are immediate, like human writes), at which point
+a human sees a novel agent-invented kind at the moment it is
 proposed.
 
 Enforcement layers:

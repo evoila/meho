@@ -444,9 +444,13 @@ async def _list_recent_events_core(
     require a Lua script and isn't worth the complexity for ``limit
     <= 1000``).
 
-    Returns ``{"events": [<event dict with id>, ...], "next_cursor":
-    <str or None>}``. ``next_cursor`` is the **stream entry id of the
-    last fetched entry** (NOT the last *matched* one) -- the caller
+    Returns ``{"events": [<event dict with id + cursor>, ...],
+    "next_cursor": <str or None>}``. Each event dict carries the
+    entry's Valkey stream id twice: as ``cursor`` (self-labelled to
+    match the tool-input arg it round-trips through, #2479) and as
+    ``id`` (the historical alias). ``next_cursor`` is the **stream
+    entry id of the last fetched entry** (NOT the last *matched* one)
+    -- the caller
     can pass it back as ``since`` to walk forward without overlap or
     gaps even when the filter dropped every entry in this page. The
     cursor is ``None`` when the stream returned fewer entries than
@@ -482,15 +486,19 @@ async def _list_recent_events_core(
             target=target,
         ):
             continue
-        # ``id`` is the Valkey stream entry id; the cursor a caller
-        # round-trips. The remaining fields come from the event model
+        # ``cursor`` is the Valkey stream entry id, self-labelled to
+        # match the ``cursor`` input arg it round-trips through
+        # (#2479); ``id`` is the historical alias of the same value —
+        # kept because every other MCP surface uses ``id`` for the
+        # row's domain UUID and broadcast rows predate that
+        # convention. The remaining fields come from the event model
         # (including ``event_id`` as the durable UUID for BroadcastEvent
         # or the announcement-id equivalent for AgentAnnouncementEvent).
-        # Both coexist so the caller can correlate a stream-cursor walk
+        # All coexist so the caller can correlate a stream-cursor walk
         # with the canonical audit row via ``event_id`` / ``audit_id``.
         # ``dump_event_wire`` wraps announcement free-text in the
         # untrusted-content envelope (stored-prompt-injection guard).
-        matched.append({"id": entry_id, **dump_event_wire(event)})
+        matched.append({"id": entry_id, "cursor": entry_id, **dump_event_wire(event)})
 
     # next_cursor pages forward from the LAST FETCHED entry, not the
     # last matched one -- a page where every entry was filtered out

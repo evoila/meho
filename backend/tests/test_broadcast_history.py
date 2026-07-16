@@ -131,6 +131,8 @@ async def test_fail_soft_returns_dict_shape_on_success() -> None:
     assert len(result["events"]) == 1
     assert result["events"][0]["op_id"] == "vsphere.vm.list"
     assert result["events"][0]["id"] == "1747800000000-0"
+    # ``cursor`` self-labels the same stream entry id (#2479).
+    assert result["events"][0]["cursor"] == "1747800000000-0"
 
 
 async def test_strict_returns_dict_shape_on_success() -> None:

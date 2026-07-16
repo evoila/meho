@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import meho_backplane.audit as _audit_module
+from meho_backplane.auth.agent_principals import NAME_MAX_LENGTH
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
     KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
@@ -320,6 +321,31 @@ async def test_duplicate_register_returns_409(client: TestClient) -> None:
         second = client.post("/api/v1/agent-principals", json={"name": "dup-bot"}, headers=headers)
     assert second.status_code == 409, second.text
     assert second.json()["detail"] == "agent_principal_already_exists"
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_overlong_name_422(client: TestClient) -> None:
+    """A name past the 128-char bound is rejected at the schema boundary (422).
+
+    show / revoke bound the by-name lookup at ``NAME_MAX_LENGTH``
+    (``Path(max_length=...)`` -> 422), so a longer name that registered would
+    be un-showable and un-revocable by name — the kill switch would be
+    unreachable. The intake schema must reject it symmetrically, before any
+    Keycloak call, so intake and lookup limits cannot drift apart.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-toolong")
+    overlong = "a" * (NAME_MAX_LENGTH + 1)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": overlong},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 422, resp.text
+    # The rejection is at the request boundary — no row is written.
+    assert await _fetch_principals(_TENANT_A) == []
 
 
 @pytest.mark.asyncio
@@ -670,6 +696,55 @@ async def test_register_rolls_back_orphan_client_on_db_failure(client: TestClien
     assert resp.status_code == 409, resp.text
     # The just-created (now orphaned) Keycloak client must be deleted.
     mock_client.delete_client.assert_awaited_once_with(new_internal_id)
+
+
+@pytest.mark.asyncio
+async def test_register_rolls_back_keycloak_client_when_secret_fetch_fails(
+    client: TestClient,
+) -> None:
+    """A failure after ``create_client`` rolls the just-created client back.
+
+    Regression for the orphan gap: ``create_client`` succeeds, then the
+    immediately following ``get_client_secret`` raises. The live, enabled
+    Keycloak client must be deleted before the error propagates (the module's
+    "Keycloak failure -> no row" contract) and no DB row may be written.
+    Without the rollback the agent would be an orphan — token-issuing yet
+    un-listable and un-revocable through MEHO — the unreachable-kill-switch
+    failure this lifecycle exists to prevent. Before #2523 the ``except`` here
+    only handled the 409-conflict path, leaving this case orphaned.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-secret-orphan")
+
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
+    mock_client.get_client_secret = AsyncMock(side_effect=KeycloakAdminError("secret fetch failed"))
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "secret-orphan-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    # The post-create failure surfaces as 502 (generic KeycloakAdminError) ...
+    assert resp.status_code == 502, resp.text
+    # ... the orphaned client is deleted (rolled back) — not merely disabled ...
+    mock_client.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+    mock_client.disable_client.assert_not_awaited()
+    # ... and no DB row was written.
+    assert await _fetch_principals(_TENANT_A) == []
 
 
 # ---------------------------------------------------------------------------

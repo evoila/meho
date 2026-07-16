@@ -53,6 +53,7 @@ from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.agent_principals import (
+    NAME_MAX_LENGTH,
     AgentPrincipalCreate,
     AgentPrincipalExistsError,
     AgentPrincipalNotFoundError,
@@ -81,8 +82,6 @@ _OP_IDS: Final[dict[str, str]] = {
     "register": "agent_principal.register",
     "revoke": "agent_principal.revoke",
 }
-
-_NAME_MAX_LENGTH: Final[int] = 128
 
 
 class AgentPrincipalListResponse(BaseModel):
@@ -150,7 +149,7 @@ async def list_agent_principals(
 
 @router.get("/{name}", response_model=AgentPrincipalRead)
 async def show_agent_principal(
-    name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
     operator: Operator = _require_operator,
 ) -> AgentPrincipalRead:
     """Return one agent principal by name."""
@@ -220,7 +219,7 @@ async def register_agent_principal(
 
 @router.delete("/{name}/revoke", response_model=AgentPrincipalRead)
 async def revoke_agent_principal(
-    name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
     operator: Operator = _require_admin,
 ) -> AgentPrincipalRead:
     """Revoke an agent principal (kill switch).

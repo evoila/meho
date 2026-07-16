@@ -223,7 +223,28 @@ def _extract_session_cookie(scope: Scope) -> str | None:
     return None
 
 
-def _redirect_to_login(original_path_with_query: str) -> tuple[int, list[tuple[bytes, bytes]]]:
+def _request_is_htmx(scope: Scope) -> bool:
+    """True when the request carries htmx's ``HX-Request: true`` header.
+
+    Read straight off the raw ASGI headers (ASGI lower-cases header names
+    per spec, so we match ``b"hx-request"``) to keep the redirect path
+    allocation-light -- no :class:`Request` construction needed.
+    """
+    headers = scope.get("headers")
+    if not isinstance(headers, list):
+        return False
+    for name, value in headers:
+        if not isinstance(name, (bytes, bytearray)) or name != b"hx-request":
+            continue
+        if not isinstance(value, (bytes, bytearray)):
+            continue
+        return value.strip().lower() == b"true"
+    return False
+
+
+def _redirect_to_login(
+    original_path_with_query: str, *, is_htmx: bool = False
+) -> tuple[int, list[tuple[bytes, bytes]]]:
     """Build the ASGI ``http.response.start`` shape for the login redirect.
 
     Returns the status code + the encoded headers list. Constructing
@@ -236,9 +257,31 @@ def _redirect_to_login(original_path_with_query: str) -> tuple[int, list[tuple[b
     characters round-trips cleanly. The login route's
     :func:`_safe_return_to` validates the decoded value before it
     lands in any subsequent redirect.
+
+    Two response shapes, one ``return_to`` (byte-identical between them):
+
+    * **Non-htmx** (``is_htmx=False``) -- a plain ``302`` + ``Location``.
+      A full-document navigation follows it and lands on the login page.
+    * **htmx** (``is_htmx=True``) -- a ``204`` + ``HX-Redirect`` (#161).
+      An htmx XHR follows a ``302`` transparently, so the browser silently
+      fetches the login HTML and htmx swaps it into the target slot (or
+      no-ops) -- the operator sees a dead control instead of the login
+      bounce. ``HX-Redirect`` makes htmx perform a full-page navigation to
+      the same login URL instead, reusing the repo's 204+``HX-Redirect``
+      precedent (e.g. ``ui/routes/connectors/forms.py``).
     """
     encoded = quote(original_path_with_query, safe="")
     location = f"{LOGIN_PATH}?return_to={encoded}"
+    if is_htmx:
+        # No ``content-length`` here: RFC 9110 §8.6 forbids it on a 204,
+        # and this middleware writes the raw ASGI response (no framework
+        # header sanitisation), so an invalid header would reach h11 /
+        # strict proxies and can raise ``LocalProtocolError``. The 302
+        # branch below keeps ``content-length: 0`` -- that status permits it.
+        return status.HTTP_204_NO_CONTENT, [
+            (b"hx-redirect", location.encode("ascii")),
+            (b"cache-control", b"no-store"),
+        ]
     return status.HTTP_302_FOUND, [
         (b"location", location.encode("ascii")),
         (b"cache-control", b"no-store"),
@@ -405,11 +448,13 @@ class UISessionMiddleware:
                 else ""
             )
             full_path = f"{path}?{query_string}" if query_string else path
-            status_code, headers = _redirect_to_login(full_path)
+            is_htmx = _request_is_htmx(scope)
+            status_code, headers = _redirect_to_login(full_path, is_htmx=is_htmx)
             log.info(
                 "ui_session_missing_or_invalid",
                 path=path,
                 had_cookie=cookie_value is not None,
+                is_htmx=is_htmx,
             )
             await send(
                 {

@@ -104,6 +104,27 @@ connector-related release-notes line.
   Initiative #2416 check layer; the evaluator never raises on payload data
   (every mismatch becomes `unknown` with a reason) and emits only the four
   observable states.
+### Security — agent-principal Keycloak-orphan rollback + bounded name (#2523)
+
+- Close the two credential-lifecycle gaps in the agent-principal register
+  path, mirroring the runner-principal fix (#2502 / PR #2508). **(1) Orphan
+  rollback:** previously, if `create_client` succeeded but the following
+  `get_client_secret` failed, the just-created, enabled Keycloak client was
+  left orphaned — a live, token-issuing identity un-listable and un-revocable
+  through MEHO — because the `except` only handled the 409-conflict path. The
+  Phase-1 create+secret-capture is now extracted into a
+  `_provision_keycloak_client` helper whose `except BaseException` arm deletes
+  the just-created client on **any** post-create failure before re-raising
+  (its own cleanup errors are caught + logged so they never mask the original
+  cause), honouring the module's "Keycloak failure → no DB row" contract.
+  **(2) Bounded name:** `AgentPrincipalCreate.name` gains a `max_length`
+  bound sourced from the shared `NAME_MAX_LENGTH = 128` constant reused from
+  the runner path (not a second literal), applied to the intake `Field` **and**
+  the show/revoke `Path` params so intake and by-name lookup cannot drift — a
+  name past 128 chars is now rejected 422 at the schema boundary instead of
+  registering into an unreachable kill switch —
+  `backend/src/meho_backplane/auth/agent_principals.py`,
+  `backend/src/meho_backplane/api/v1/agent_principals.py` (#2523).
 
 ### Security — gcloud docstring reword to clear FP secret alert (#2493)
 
@@ -341,6 +362,20 @@ connector-related release-notes line.
   `backend/src/meho_backplane/connectors/net/tls.py`,
   `backend/src/meho_backplane/connectors/adapters/http.py`,
   `docs/codebase/sonarcloud.md` (#2511).
+
+### Fixed — broadcast rows self-label their stream cursor (#2479)
+
+- `meho.broadcast.recent` / `meho.broadcast.watch` event rows and the
+  `meho.broadcast.announce` return now carry a self-labelled `cursor` field —
+  the Valkey stream entry id that round-trips as the tools' `cursor` input
+  arg. Previously the cursor was only exposed under misleading names: `id` on
+  rows (where every other MCP surface uses `id` for the row's domain UUID)
+  and `event_id` on the announce return (which is NOT a durable event UUID —
+  announcements carry none). Additive and backward-compatible: `id` and the
+  announce `event_id` remain as legacy aliases of the same value, now
+  documented as such in the tool descriptions —
+  `backend/src/meho_backplane/broadcast/history.py`,
+  `backend/src/meho_backplane/mcp/tools/broadcast.py` (#2479).
 
 ## [0.22.0] - 2026-07-13
 

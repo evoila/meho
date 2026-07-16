@@ -201,7 +201,12 @@ register_mcp_tool(
         description=(
             "Read the operator's tenant's recent broadcast events from "
             "meho:feed:{tenant_id} (Initiative #1090, Task #1091). "
-            "Returns {events, next_cursor}. Default window is the last "
+            "Returns {events, next_cursor}. Each event row carries "
+            "'cursor' -- its Valkey stream entry id, usable as this "
+            "tool's (or meho.broadcast.watch's) 'cursor' arg -- plus "
+            "'id' as a legacy alias of the same stream cursor (NOT "
+            "the event's UUID; that is 'event_id' on operation rows). "
+            "Default window is the last "
             "30 minutes when 'cursor' is omitted; pass an ISO-8601 "
             "timestamp ('2026-05-25T10:00:00Z') or a Valkey stream "
             "cursor ('1747800000000-0') to override. The 'filter' "
@@ -312,7 +317,7 @@ async def _publish_agent_announcement_impl(
     scope: str | None,
     phase: str,
 ) -> dict[str, Any]:
-    """Build + publish one :class:`AgentAnnouncementEvent`, return ``{event_id}``.
+    """Build + publish one :class:`AgentAnnouncementEvent`, return ``{event_id, cursor}``.
 
     Internal helper for ``meho.broadcast.announce``. Kept separate from
     :func:`_handler_announce` so the construction-and-publish seam is
@@ -344,7 +349,13 @@ async def _publish_agent_announcement_impl(
         ts=datetime.now(UTC),
     )
     entry_id = await publish_agent_announcement(event)
-    return {"event_id": entry_id}
+    # Both keys carry the Valkey stream entry id of the appended
+    # announcement. ``cursor`` is the self-labelled canonical name
+    # (round-trips through recent/watch's ``cursor`` arg, #2479);
+    # ``event_id`` is the historical alias — a misnomer kept for wire
+    # compatibility: it is the stream cursor, NOT a durable event
+    # UUID (announcements carry no UUID today; #2547 mints one).
+    return {"event_id": entry_id, "cursor": entry_id}
 
 
 async def _handler_announce(
@@ -435,9 +446,13 @@ register_mcp_tool(
             "audit-driven publisher which fail-opens). Tenant scoping "
             "is structural -- the input schema has no tenant_id "
             "argument; the event always writes to the operator's own "
-            "tenant stream. Returns {event_id} -- the Valkey stream "
-            "entry id, round-trip-able through meho.broadcast.recent's "
-            "'since' cursor for verification."
+            "tenant stream. Returns {event_id, cursor} -- both the "
+            "Valkey stream entry id of the appended announcement. "
+            "'cursor' is the canonical self-labelled name and "
+            "round-trips through meho.broadcast.recent/watch's "
+            "'cursor' arg for verification; 'event_id' is a legacy "
+            "alias of the same stream cursor, NOT a durable event "
+            "UUID (announcements carry no UUID)."
         ),
         inputSchema={
             "type": "object",
@@ -666,8 +681,10 @@ def _filter_xread_items(
 ) -> list[dict[str, Any]]:
     """Parse + filter the XREAD batch into the wire-shape events list.
 
-    Each surviving entry carries ``id`` (the Valkey stream cursor, the
-    round-trip handle) plus every :class:`BroadcastEvent` field
+    Each surviving entry carries the Valkey stream entry id twice --
+    as ``cursor`` (self-labelled to match the ``cursor`` input arg it
+    round-trips through, #2479) and as ``id`` (the historical alias)
+    -- plus every :class:`BroadcastEvent` field
     (including the durable ``event_id`` UUID and the ``audit_id`` for
     audit-log correlation). Entries that fail :func:`parse_entry` (bad
     field shape, malformed JSON) are logged + skipped inside the helper
@@ -692,7 +709,7 @@ def _filter_xread_items(
             target=target,
         ):
             continue
-        matched.append({"id": entry_id, **dump_event_wire(event)})
+        matched.append({"id": entry_id, "cursor": entry_id, **dump_event_wire(event)})
     return matched
 
 
@@ -817,7 +834,12 @@ register_mcp_tool(
             "'timeout_ms' as the block window (default 10000, cap "
             "30000 -- the chassis worker is tied up for up to that long, "
             "so the cap is a hard backpressure boundary, not a hint). "
-            "Returns {events, next_cursor}. When no events arrive within "
+            "Returns {events, next_cursor}. Each event row carries "
+            "'cursor' -- its Valkey stream entry id, usable as this "
+            "tool's (or meho.broadcast.recent's) 'cursor' arg -- plus "
+            "'id' as a legacy alias of the same stream cursor (NOT "
+            "the event's UUID; that is 'event_id' on operation rows). "
+            "When no events arrive within "
             "the window: returns {events: [], next_cursor: <unchanged>} -- "
             "re-poll with the same cursor. When events arrive: "
             "'next_cursor' advances to the last *fetched* entry id (NOT "

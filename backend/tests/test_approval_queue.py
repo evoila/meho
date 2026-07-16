@@ -648,6 +648,41 @@ async def test_approve_request_raises_on_hash_mismatch(session: AsyncSession) ->
 
 
 @pytest.mark.asyncio
+async def test_approve_request_hash_mismatch_on_topology_op(session: AsyncSession) -> None:
+    """The params-substitution defence covers the #2537 topology ops.
+
+    A parked ``topology.annotate`` (targetless typed op, ``target=None``)
+    approved with swapped params raises :class:`ParamsMismatchError` —
+    the gated graph writes inherit the same hash defence every other
+    queued op has.
+    """
+    requester = _make_operator(sub="agent:proposer")
+    operator = _make_operator(sub="reviewer-sub")
+    original_params = {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"}
+
+    pending = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="topology-graph-1.x",
+        op_id="topology.annotate",
+        target=None,
+        params=original_params,
+        params_hash=compute_params_hash(original_params),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        with pytest.raises(ParamsMismatchError):
+            await approve_request(
+                s2,
+                pending.id,
+                operator=operator,
+                # Same shape, different edge — the swap the hash defence exists for.
+                params={"from_name": "svc-x", "kind": "depends-on", "to_name": "db-z"},
+            )
+
+
+@pytest.mark.asyncio
 async def test_approve_request_params_none_skips_hash_check(
     session: AsyncSession,
 ) -> None:

@@ -31,7 +31,14 @@ CLAUDE.md narrow-waist agent surface (postulate 5):
   sees neither in ``tools/list`` and a direct ``tools/call`` is
   rejected at the dispatcher's call-time RBAC re-check
   (``handlers._operator_meets_required_role`` → JSON-RPC ``-32602``
-  ``forbidden``; there is no HTTP-403 on the MCP transport).
+  ``forbidden``; there is no HTTP-403 on the MCP transport). Since
+  #2537 the two write handlers route through
+  :func:`~meho_backplane.operations.dispatch` (op_ids
+  ``topology.annotate`` / ``topology.unannotate`` on the synthetic
+  ``topology-graph-1.x`` connector) so the policy gate runs per call:
+  an AGENT principal's write parks as a durable approval request
+  (``status: awaiting_approval`` in the tool result) while a human
+  ``tenant_admin`` keeps the default-allow immediate path.
 
 Why direct substrate calls, not REST wrappers
 =============================================
@@ -89,26 +96,24 @@ from typing import Any, Final
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import (
-    KIND_SLUG_MAX_LENGTH,
-    KIND_SLUG_MIN_LENGTH,
-    KIND_SLUG_PATTERN,
-    GraphEdgeKind,
-    Tenant,
+from meho_backplane.connectors.topology.ops import (
+    TOPOLOGY_ANNOTATE_OP_ID,
+    TOPOLOGY_GRAPH_CONNECTOR_ID,
+    TOPOLOGY_UNANNOTATE_OP_ID,
 )
+from meho_backplane.connectors.topology.schemas import (
+    ANNOTATE_PARAMETER_SCHEMA,
+    ANNOTATE_RESPONSE_SCHEMA,
+    UNANNOTATE_PARAMETER_SCHEMA,
+    UNANNOTATE_RESPONSE_SCHEMA,
+)
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import GraphEdgeKind, Tenant
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInternalError, McpInvalidParamsError
 from meho_backplane.operations._lookup import parse_connector_id
-from meho_backplane.topology.annotate import (
-    AutoEdgeDeletionError,
-    InvalidEdgeKindError,
-    NodeRef,
-    UnannotateSelectorError,
-    annotate_edge,
-    unannotate_edge,
-)
+from meho_backplane.operations.dispatcher import dispatch
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
     find_dependencies,
@@ -1384,14 +1389,20 @@ register_mcp_tool(
 # meho.topology.annotate / meho.topology.unannotate — admin namespace
 # ---------------------------------------------------------------------------
 #
-# Task #598 (G9.2-T7). Two admin meta-tools in the ``meho.*`` namespace
-# expose the curated-edge write half (#595) to a ``tenant_admin``-scoped
-# MCP session. The handlers call :func:`annotate_edge` /
-# :func:`unannotate_edge` directly — the service primitive owns its own
-# resolve / validate / upsert / §6 conflict scan / audit / broadcast — so
-# the MCP front is a thin parameter shim, not a re-derivation of the
-# write path. CLAUDE.md "What MEHO is NOT" bullet 2: REST / CLI / MCP are
-# sibling fronts on one backplane; none is a thin wrapper of another.
+# Task #598 (G9.2-T7), rerouted through the dispatcher by #2537. Two
+# admin meta-tools in the ``meho.*`` namespace expose the curated-edge
+# write half (#595) to a ``tenant_admin``-scoped MCP session. The
+# handlers call :func:`~meho_backplane.operations.dispatch` with the
+# targetless typed op ids registered by
+# :mod:`meho_backplane.connectors.topology.ops` — the single seam where
+# ``policy_gate`` runs, so an AGENT principal's write parks as a durable
+# approval request while a human ``tenant_admin`` executes immediately
+# (default-allow). The typed-op handler unwraps params and calls the
+# service primitive (which owns resolve / validate / upsert / §6
+# conflict scan / audit / broadcast), so the MCP front stays a thin
+# parameter shim, not a re-derivation of the write path. CLAUDE.md
+# "What MEHO is NOT" bullet 2: REST / CLI / MCP are sibling fronts on
+# one backplane; none is a thin wrapper of another.
 #
 # Naming: ``from_name`` / ``to_name`` (not ``from`` / ``to``) — ``from``
 # is a Python keyword the wider topology module already aliases (see
@@ -1404,108 +1415,123 @@ register_mcp_tool(
 _ANNOTATE_TOOL_NAME: Final[str] = "meho.topology.annotate"
 _UNANNOTATE_TOOL_NAME: Final[str] = "meho.topology.unannotate"
 
-
-_ANNOTATE_INPUT_SCHEMA: Final[dict[str, Any]] = {
+#: Result shape of a parked (agent-principal) topology write. The
+#: policy gate returned ``needs-approval``: a durable ApprovalRequest
+#: row exists and the write executes only when a human approves it
+#: (``/ui/approvals``, ``meho approvals list``, ``meho.approvals.*``).
+PARKED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
-        "from_name": {
+        "status": {"const": "awaiting_approval"},
+        "approval_request_id": {
             "type": "string",
-            "minLength": 1,
-            "maxLength": 256,
-            "description": (
-                "`graph_node.name` of the edge's `from` endpoint. "
-                "Resolved against the operator's tenant (cross-tenant "
-                "is structurally impossible — no `tenant_id` argument)."
-            ),
+            "description": "UUID of the pending ApprovalRequest row.",
         },
-        "kind": {
-            "type": "string",
-            "pattern": KIND_SLUG_PATTERN,
-            "minLength": KIND_SLUG_MIN_LENGTH,
-            "maxLength": KIND_SLUG_MAX_LENGTH,
-            "description": (
-                "Edge kind: a lowercase slug (letters/digits joined "
-                "by `.`, `_` or `-`; 2-63 chars). The vocabulary is "
-                "open — any slug matching the pattern is accepted — "
-                "but prefer a well-known kind when one fits. "
-                "Operator-curated well-known kinds "
-                "(`authenticates-via`, `depends-on`, "
-                "`replicates-to`, `backed-up-by`, `routes-via`, "
-                "`policy-binds`) cover the cross-system relationships "
-                "auto-discovery cannot infer — those are the canonical "
-                "use cases. The four auto-discoverable kinds "
-                "(`runs-on`, `mounts`, `routes-through`, `belongs-to`) "
-                "are accepted too, as are novel kinds "
-                "(`resolves-to`, `same-as`, ...) when no well-known "
-                "kind describes the relationship — `same-as` is the "
-                "documented convention for cross-system identity "
-                "stitching. A curated assertion of an auto-kind "
-                "lands as a §6 conflict marker *only when a competing "
-                "**auto** edge already exists for that pair* — i.e. on "
-                "a pair a probe covers (today, only the Kubernetes "
-                "connector populates auto edges; G0.18-T4 #1357). For "
-                "a non-k8s pair, or any pair no probe covers, the "
-                "curated row inserts clean with "
-                "`source: curated, conflicts: []` and is the right way "
-                "to assert e.g. `runs-on` against vault / vcenter / "
-                "nsx / sddc-manager / gh targets until non-k8s "
-                "populators land. The over-cautious 'annotating "
-                "auto-kinds is noise' wording the pre-G0.18-T4 doc "
-                "carried steered operators away from this legitimate "
-                "path."
-            ),
-        },
-        "to_name": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256,
-            "description": (
-                "`graph_node.name` of the edge's `to` endpoint. Same "
-                "resolution rules as `from_name`."
-            ),
-        },
-        "from_node_kind": {
-            "type": ["string", "null"],
-            "description": (
-                "Optional `graph_node.kind` pin for the `from_name` "
-                "endpoint. Required only when the bare name resolves to "
-                "multiple kinds in the tenant (e.g. a `target` and a "
-                "`vm` both named `app`); an ambiguous bare name returns "
-                "-32602 naming the candidate kinds."
-            ),
-            "maxLength": 64,
-        },
-        "to_node_kind": {
-            "type": ["string", "null"],
-            "description": (
-                "Optional `graph_node.kind` pin for the `to_name` "
-                "endpoint. Same contract as `from_node_kind`."
-            ),
-            "maxLength": 64,
-        },
-        "note": {
-            "type": ["string", "null"],
-            "maxLength": 2048,
-            "description": (
-                "Optional free-text annotation stored on "
-                "`graph_edge.properties.note`. Use to record the "
-                "operational rationale — 'Vault role `k8s-prod-read` "
-                "binds to namespace `prod`; rotated 2026-04-22'."
-            ),
-        },
-        "evidence_url": {
-            "type": ["string", "null"],
-            "maxLength": 2048,
-            "description": (
-                "Optional URL the operator attached as evidence "
-                "(typically an INVENTORY.md anchor / runbook). Stored "
-                "on `graph_edge.properties.evidence_url`."
-            ),
-        },
+        "op_id": {"type": "string"},
+        "message": {"type": "string"},
     },
-    "required": ["from_name", "kind", "to_name"],
-    "additionalProperties": False,
+    "required": ["status", "approval_request_id", "op_id", "message"],
 }
+
+#: Handler exceptions the dispatcher wraps as ``connector_error`` that
+#: are operator-actionable input problems on the three topology writes.
+#: Mapped back to JSON-RPC ``-32602`` so the MCP surface keeps the
+#: pre-#2537 error contract (same classes the direct-call handlers
+#: caught, plus the plain ``ValueError`` the unannotate service raises
+#: for a selector that resolves to no row).
+_TOPOLOGY_WRITE_INVALID_PARAM_EXCEPTIONS: Final[frozenset[str]] = frozenset(
+    {
+        "AmbiguousNodeError",
+        "AutoEdgeDeletionError",
+        "InvalidEdgeKindError",
+        "InvalidNodeKindError",
+        "NodeNotFoundError",
+        "UnannotateSelectorError",
+        "ValueError",
+    }
+)
+
+
+def with_parked_shape(response_schema: dict[str, Any]) -> dict[str, Any]:
+    """Widen an executed-result outputSchema with the parked alternative.
+
+    Every gated topology write returns either the executed domain shape
+    (human principal, or approved re-dispatch) or the
+    :data:`PARKED_OUTPUT_SCHEMA` envelope (agent principal parked by the
+    policy gate) — a tagged union the schema expresses as ``oneOf``.
+    """
+    return {"type": "object", "oneOf": [response_schema, PARKED_OUTPUT_SCHEMA]}
+
+
+async def dispatch_topology_write(
+    operator: Operator,
+    op_id: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch one gated topology write and translate the result for MCP.
+
+    The single dispatch shim behind ``meho.topology.annotate`` /
+    ``meho.topology.unannotate`` / ``meho.topology.create_node``
+    (imported by :mod:`meho_backplane.mcp.tools.topology_create_node`).
+    Routes through :func:`~meho_backplane.operations.dispatch` with
+    ``target=None`` (the graph is tenant-scoped state, not a probed
+    target) so the policy gate, audit, and broadcast run on the same
+    path every other governed op uses.
+
+    Result translation:
+
+    * ``ok`` — return the typed-op handler's domain payload verbatim
+      (byte-identical to the pre-#2537 direct-call return shape).
+    * ``awaiting_approval`` — the AGENT-principal park. Returned as a
+      structured envelope (not an error): the proposal succeeded and
+      the approval id is what the agent needs to reference next.
+    * ``denied`` — policy refusal → ``-32602`` (mirrors the transport's
+      ``forbidden`` RBAC rejections, which also ride invalid-params).
+    * ``error`` with a known domain ``exception_class`` (or a schema
+      ``invalid_params``) → ``-32602`` with the service's message —
+      the same taxonomy the direct-call handlers surfaced.
+    * anything else — ``-32603`` with the dispatcher's error code in
+      ``error.data`` (misconfiguration, e.g. the registrar never ran).
+    """
+    result = await dispatch(
+        operator=operator,
+        connector_id=TOPOLOGY_GRAPH_CONNECTOR_ID,
+        op_id=op_id,
+        target=None,
+        params=dict(arguments),
+    )
+    if result.status == "ok":
+        if not isinstance(result.result, dict):
+            raise McpInternalError(f"{op_id}: unexpected non-object result payload")
+        return result.result
+    if result.status == "awaiting_approval":
+        approval_request_id = str(result.extras.get("approval_request_id"))
+        return {
+            "status": "awaiting_approval",
+            "approval_request_id": approval_request_id,
+            "op_id": op_id,
+            "message": (
+                f"{op_id} parked for approval (request "
+                f"{approval_request_id}): the write executes with these "
+                "exact params once a tenant operator approves it via "
+                "/ui/approvals, `meho approvals list`, or the "
+                "meho.approvals.* MCP tools."
+            ),
+        }
+    if result.status == "denied":
+        raise McpInvalidParamsError(f"denied: {result.error or 'policy denied'}")
+
+    exception_class = result.extras.get("exception_class")
+    message = str(result.extras.get("exception_message") or result.error or f"{op_id} failed")
+    if (
+        exception_class in _TOPOLOGY_WRITE_INVALID_PARAM_EXCEPTIONS
+        or result.extras.get("error_code") == "invalid_params"
+    ):
+        raise McpInvalidParamsError(message)
+    raise McpInternalError(
+        message,
+        data={"error_code": result.extras.get("error_code"), "op_id": op_id},
+    )
 
 
 _ANNOTATE_DESCRIPTION: Final[str] = (
@@ -1555,6 +1581,14 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "`properties.superseded_by` on the database row and recorded in the "
     "audit/broadcast payload, but are not surfaced on the tool's return "
     "shape — inspect them with `query_topology {kind: edges}` if needed.)"
+    "\n\n"
+    "AGENT PRINCIPALS: the write does not execute immediately — it "
+    "parks as a durable approval request and the tool returns "
+    "`{status: awaiting_approval, approval_request_id, ...}`. A human "
+    "operator approves it from the approvals surfaces (`/ui/approvals`, "
+    "`meho approvals list`, `meho.approvals.*`), which re-executes the "
+    "write with the exact original params. Human tenant_admin calls "
+    "execute immediately as before."
 )
 
 
@@ -1562,114 +1596,22 @@ async def _annotate_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Dispatch a ``meho.topology.annotate`` call to :func:`annotate_edge`.
+    """Route a ``meho.topology.annotate`` call through the dispatcher (#2537).
 
-    Opens a session, builds the two :class:`NodeRef` objects, and
-    forwards to the substrate. The service primitive owns the resolve /
-    validate / upsert / §6 conflict scan / audit / broadcast — this
-    shim does not duplicate any of it.
-
-    Failure-mode translation:
-
-    * :class:`AmbiguousNodeError` and :class:`NodeNotFoundError` →
-      ``-32602`` (operator-actionable input problem; same shape the
-      closure kinds use).
-    * :class:`InvalidEdgeKindError` is structurally unreachable —
-      ``kind`` is pattern-pinned by the inputSchema and the service
-      validates the same slug grammar — but the catch is retained as
-      a belt-and-suspenders guard against a future drift between the
-      schema's ``pattern`` and the service-side
-      :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`.
+    :func:`dispatch_topology_write` owns the whole translation: policy
+    gate (agents park, humans execute), the typed-op handler's call into
+    :func:`~meho_backplane.topology.annotate.annotate_edge`, and the
+    result / error mapping back to the MCP wire contract.
     """
-    sessionmaker = get_sessionmaker()
-    from_name: str = arguments["from_name"]
-    to_name: str = arguments["to_name"]
-    kind: str = arguments["kind"]
-    try:
-        async with sessionmaker() as session:
-            edge = await annotate_edge(
-                session,
-                operator,
-                NodeRef(from_name, arguments.get("from_node_kind")),
-                kind,
-                NodeRef(to_name, arguments.get("to_node_kind")),
-                note=arguments.get("note"),
-                evidence_url=arguments.get("evidence_url"),
-            )
-            # Re-load the endpoint nodes for the response shape. The
-            # service returns the edge only; mapping back to the
-            # human-readable `(kind, name)` pair is the front's job.
-            from meho_backplane.db.models import GraphNode
-
-            from_node = await session.get(GraphNode, edge.from_node_id)
-            to_node = await session.get(GraphNode, edge.to_node_id)
-    except (AmbiguousNodeError, NodeNotFoundError, InvalidEdgeKindError) as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
-
-    if from_node is None or to_node is None:
-        # Endpoint resolution succeeded inside the service transaction
-        # but the post-commit reload missed — graph in inconsistent
-        # state. Surface as -32602 with a diagnostic; the audit /
-        # broadcast emitted inside annotate_edge is already committed.
-        raise McpInvalidParamsError(f"annotated edge {edge.id} endpoint lookup failed post-commit")
-
-    props = edge.properties or {}
-    raw_conflicts = props.get("conflicts_with")
-    conflicts = list(raw_conflicts) if isinstance(raw_conflicts, list) else []
-    return {
-        "edge_id": str(edge.id),
-        "from": {
-            "id": str(from_node.id),
-            "kind": from_node.kind,
-            "name": from_node.name,
-        },
-        "to": {
-            "id": str(to_node.id),
-            "kind": to_node.kind,
-            "name": to_node.name,
-        },
-        "kind": edge.kind,
-        "source": edge.source,
-        "conflicts": conflicts,
-    }
+    return await dispatch_topology_write(operator, TOPOLOGY_ANNOTATE_OP_ID, arguments)
 
 
 register_mcp_tool(
     definition=ToolDefinition(
         name=_ANNOTATE_TOOL_NAME,
         description=_ANNOTATE_DESCRIPTION,
-        inputSchema=_ANNOTATE_INPUT_SCHEMA,
-        outputSchema={
-            "type": "object",
-            "properties": {
-                "edge_id": {"type": "string"},
-                "from": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string"},
-                        "kind": {"type": "string"},
-                        "name": {"type": "string"},
-                    },
-                    "required": ["id", "kind", "name"],
-                },
-                "to": {
-                    "type": "object",
-                    "properties": {
-                        "id": {"type": "string"},
-                        "kind": {"type": "string"},
-                        "name": {"type": "string"},
-                    },
-                    "required": ["id", "kind", "name"],
-                },
-                "kind": {"type": "string"},
-                "source": {"type": "string"},
-                "conflicts": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                },
-            },
-            "required": ["edge_id", "from", "to", "kind", "source", "conflicts"],
-        },
+        inputSchema=ANNOTATE_PARAMETER_SCHEMA,
+        outputSchema=with_parked_shape(ANNOTATE_RESPONSE_SCHEMA),
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
     ),
@@ -1678,96 +1620,6 @@ register_mcp_tool(
 
 
 # --- unannotate ----------------------------------------------------------
-
-
-_UNANNOTATE_INPUT_SCHEMA: Final[dict[str, Any]] = {
-    "type": "object",
-    "properties": {
-        "edge_id": {
-            "type": "string",
-            "description": (
-                "UUID of the curated `graph_edge` to remove. Mutually "
-                "exclusive with the `(from_name, kind, to_name)` triple — "
-                "pass exactly one selector form."
-            ),
-            "minLength": 1,
-            "maxLength": 64,
-        },
-        "from_name": {
-            "type": "string",
-            "description": (
-                "Triple selector: the edge's `from` endpoint name. Must "
-                "appear together with `kind` and `to_name` (or with "
-                "neither, when using `edge_id`)."
-            ),
-            "minLength": 1,
-            "maxLength": 256,
-        },
-        "kind": {
-            "type": "string",
-            "pattern": KIND_SLUG_PATTERN,
-            "minLength": KIND_SLUG_MIN_LENGTH,
-            "maxLength": KIND_SLUG_MAX_LENGTH,
-            "description": (
-                "Triple selector: the edge's `graph_edge.kind` (any "
-                "lowercase kind slug; the vocabulary is open). Must "
-                "appear together with `from_name` and `to_name`."
-            ),
-        },
-        "to_name": {
-            "type": "string",
-            "description": (
-                "Triple selector: the edge's `to` endpoint name. Must "
-                "appear together with `from_name` and `kind`."
-            ),
-            "minLength": 1,
-            "maxLength": 256,
-        },
-        "from_node_kind": {
-            "type": ["string", "null"],
-            "description": (
-                "Optional `graph_node.kind` pin for the `from_name` "
-                "endpoint, used for ambiguity disambiguation. Only "
-                "meaningful with the triple selector form."
-            ),
-            "minLength": 1,
-            "maxLength": 64,
-        },
-        "to_node_kind": {
-            "type": ["string", "null"],
-            "description": (
-                "Optional `graph_node.kind` pin for the `to_name` "
-                "endpoint, used for ambiguity disambiguation. Only "
-                "meaningful with the triple selector form."
-            ),
-            "minLength": 1,
-            "maxLength": 64,
-        },
-    },
-    "additionalProperties": False,
-    # XOR at the wire boundary: either `edge_id` alone, or the full
-    # `(from_name, kind, to_name)` triple. Partial triples, both
-    # selectors, or neither are rejected by jsonschema (Draft 2020-12)
-    # before reaching the service. The substrate-level XOR guard in
-    # `_unannotate_handler` stays as belt-and-suspenders for the
-    # never-validated path (direct in-process callers).
-    "oneOf": [
-        {
-            "required": ["edge_id"],
-            "not": {
-                "anyOf": [
-                    {"required": ["from_name"]},
-                    {"required": ["kind"]},
-                    {"required": ["to_name"]},
-                ],
-            },
-        },
-        {
-            "required": ["from_name", "kind", "to_name"],
-            "not": {"required": ["edge_id"]},
-        },
-    ],
-}
 
 
 _UNANNOTATE_DESCRIPTION: Final[str] = (
@@ -1788,7 +1640,12 @@ _UNANNOTATE_DESCRIPTION: Final[str] = (
     "surfaces as a structured -32602 with `auto-discovered` in the "
     "message so the operator sees the diagnostic without a separate "
     "listing call.\n\n"
-    'Returns `{edge_id: "<removed-uuid>"}`.'
+    'Returns `{edge_id: "<removed-uuid>"}`.\n\n'
+    "AGENT PRINCIPALS: the removal does not execute immediately — it "
+    "parks as a durable approval request and the tool returns "
+    "`{status: awaiting_approval, approval_request_id, ...}`; a human "
+    "operator approves it from the approvals surfaces. Human "
+    "tenant_admin calls execute immediately as before."
 )
 
 
@@ -1796,80 +1653,26 @@ async def _unannotate_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Dispatch a ``meho.topology.unannotate`` call to :func:`unannotate_edge`.
+    """Route a ``meho.topology.unannotate`` call through the dispatcher (#2537).
 
     The two selector forms (UUID primary key vs. ``(from, kind, to)``
-    triple) are mutually exclusive at the wire boundary — the tool's
-    ``inputSchema`` rejects partial triples, both selectors, and the
-    empty-arguments case with a -32602 jsonschema error before reaching
-    this handler. The service-layer :class:`UnannotateSelectorError`
-    guard stays for the never-validated path (direct in-process
-    callers), so the matrix is fully covered.
-
-    :class:`AutoEdgeDeletionError` is the §6 auto-vs-curated refusal —
-    surfaces as ``-32602`` with the substrate's "auto edges resurrect
-    on next refresh" message so the operator gets the diagnostic
-    inline.
+    triple) stay mutually exclusive at the wire boundary — this tool's
+    ``inputSchema`` and the typed op's ``parameter_schema`` are the same
+    document, so both validation layers reject partial triples, both
+    selectors, and the empty-arguments case before the service runs.
+    :func:`dispatch_topology_write` maps the service's domain refusals
+    (:class:`~meho_backplane.topology.annotate.AutoEdgeDeletionError`,
+    selector faults, not-found ``ValueError``) back to ``-32602``.
     """
-    edge_id_arg = arguments.get("edge_id")
-    from_name = arguments.get("from_name")
-    kind = arguments.get("kind")
-    to_name = arguments.get("to_name")
-
-    edge_uuid: uuid.UUID | None = None
-    if edge_id_arg is not None:
-        try:
-            edge_uuid = uuid.UUID(edge_id_arg)
-        except ValueError as exc:
-            raise McpInvalidParamsError(
-                f"meho.topology.unannotate: edge_id is not a valid UUID: {edge_id_arg!r}",
-            ) from exc
-
-    from_ref = NodeRef(from_name, arguments.get("from_node_kind")) if from_name else None
-    to_ref = NodeRef(to_name, arguments.get("to_node_kind")) if to_name else None
-
-    sessionmaker = get_sessionmaker()
-    try:
-        async with sessionmaker() as session:
-            removed_id = await unannotate_edge(
-                session,
-                operator,
-                edge_id=edge_uuid,
-                from_ref=from_ref,
-                kind=kind,
-                to_ref=to_ref,
-            )
-    except (
-        AmbiguousNodeError,
-        NodeNotFoundError,
-        InvalidEdgeKindError,
-        UnannotateSelectorError,
-        AutoEdgeDeletionError,
-    ) as exc:
-        raise McpInvalidParamsError(str(exc)) from exc
-    except ValueError as exc:
-        # ``unannotate_edge`` raises plain ``ValueError`` when the
-        # selector resolves to no row (or to a row in another tenant —
-        # the boundary case the service treats as not-found). That is
-        # an operator-actionable input problem, so surface as -32602
-        # rather than letting it become -32603 Internal Error.
-        raise McpInvalidParamsError(str(exc)) from exc
-
-    return {"edge_id": str(removed_id)}
+    return await dispatch_topology_write(operator, TOPOLOGY_UNANNOTATE_OP_ID, arguments)
 
 
 register_mcp_tool(
     definition=ToolDefinition(
         name=_UNANNOTATE_TOOL_NAME,
         description=_UNANNOTATE_DESCRIPTION,
-        inputSchema=_UNANNOTATE_INPUT_SCHEMA,
-        outputSchema={
-            "type": "object",
-            "properties": {
-                "edge_id": {"type": "string"},
-            },
-            "required": ["edge_id"],
-        },
+        inputSchema=UNANNOTATE_PARAMETER_SCHEMA,
+        outputSchema=with_parked_shape(UNANNOTATE_RESPONSE_SCHEMA),
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",
     ),

@@ -39,6 +39,16 @@
 (function () {
   "use strict";
 
+  // Per-tick wheel zoom step (#167). Cytoscape scales the per-tick zoom
+  // exponent LINEARLY by this value (default 1.0), so bigger = more zoom
+  // per scroll notch — there's no diminishing-returns ceiling until a
+  // single tick would span the whole minZoom..maxZoom range (~80 here).
+  // The original 0.2 was sluggish; 25.0 gives a large, brisk step per
+  // scroll. This is the single knob to tune: raise for faster, lower for
+  // gentler. (Any non-1.0 value emits Cytoscape's "custom wheel
+  // sensitivity" console warning by design — expected, not a regression.)
+  const WHEEL_SENSITIVITY = 25.0;
+
   function readJsonIsland(id) {
     const el = document.getElementById(id);
     if (!el) {
@@ -135,8 +145,11 @@
     if (name === "cose-bilkent") {
       return {
         name: "cose-bilkent",
-        nodeRepulsion: 4500,
-        idealEdgeLength: 80,
+        // Wider spacing so the graph reads as distinct nodes rather than a
+        // tangled clump: more inter-node repulsion + longer ideal edges push
+        // neighbours apart and reduce edge crossings.
+        nodeRepulsion: 8000,
+        idealEdgeLength: 120,
         edgeElasticity: 0.45,
         nestingFactor: 0.1,
         gravity: 0.25,
@@ -294,7 +307,7 @@
       container: container,
       elements: elements,
       style: buildStyle().concat(buildOverlayStyle()),
-      wheelSensitivity: 0.2,
+      wheelSensitivity: WHEEL_SENSITIVITY,
       minZoom: 0.1,
       maxZoom: 4,
     });

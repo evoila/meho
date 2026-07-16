@@ -959,3 +959,36 @@ def test_topology_graph_js_defines_node_highlight_style() -> None:
     # And it carries a non-empty visual treatment (bold red border
     # matches the path-edge stroke colour for visual consistency).
     assert '"border-color": "#dc2626"' in source
+
+
+def test_topology_graph_js_wheel_sensitivity_raised_via_named_constant() -> None:
+    """Wheel-zoom sensitivity is raised from the sluggish 0.2 (#167).
+
+    Anchors:
+
+    * The controller no longer hardcodes ``wheelSensitivity: 0.2`` —
+      0.2 applied ~1/5 the zoom delta per wheel tick, so zoom read as
+      unresponsive.
+    * The value is a single named constant (``WHEEL_SENSITIVITY``) so it
+      stays tunable, and the Cytoscape init references the constant
+      rather than a literal.
+
+    The exact constant value is intentionally NOT pinned here — it is an
+    operator-tunable feel knob (raised well above the sluggish 0.2). The
+    test guards the mechanism (sluggish literal gone, value carried by a
+    named constant the init references), not a specific float.
+    """
+    import pathlib
+
+    js_path = (
+        pathlib.Path(__file__).parent.parent
+        / "src/meho_backplane/ui/static/src/app/topology-graph.js"
+    )
+    source = js_path.read_text(encoding="utf-8")
+
+    # The sluggish literal is gone.
+    assert "wheelSensitivity: 0.2" not in source
+    # A single tunable named constant carries the rate.
+    assert "const WHEEL_SENSITIVITY = " in source
+    # The Cytoscape constructor references the constant, not a literal.
+    assert "wheelSensitivity: WHEEL_SENSITIVITY," in source

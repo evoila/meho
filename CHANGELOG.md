@@ -349,6 +349,20 @@ connector-related release-notes line.
   `backend/src/meho_backplane/connectors/adapters/http.py`,
   `docs/codebase/sonarcloud.md` (#2511).
 
+### Fixed — broadcast rows self-label their stream cursor (#2479)
+
+- `meho.broadcast.recent` / `meho.broadcast.watch` event rows and the
+  `meho.broadcast.announce` return now carry a self-labelled `cursor` field —
+  the Valkey stream entry id that round-trips as the tools' `cursor` input
+  arg. Previously the cursor was only exposed under misleading names: `id` on
+  rows (where every other MCP surface uses `id` for the row's domain UUID)
+  and `event_id` on the announce return (which is NOT a durable event UUID —
+  announcements carry none). Additive and backward-compatible: `id` and the
+  announce `event_id` remain as legacy aliases of the same value, now
+  documented as such in the tool descriptions —
+  `backend/src/meho_backplane/broadcast/history.py`,
+  `backend/src/meho_backplane/mcp/tools/broadcast.py` (#2479).
+
 ## [0.22.0] - 2026-07-13
 
 ### Added — rke2.etcd-snapshot.save safe managed-etcd snapshot op (#2431)

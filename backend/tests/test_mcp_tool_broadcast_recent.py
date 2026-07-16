@@ -672,11 +672,13 @@ def test_empty_stream_returns_empty_events_null_cursor(
 def test_event_dict_carries_stream_entry_id_and_event_fields(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """Each event surfaces both ``id`` (stream cursor) and BroadcastEvent fields.
+    """Each event surfaces ``cursor`` + ``id`` (stream cursor) and BroadcastEvent fields.
 
-    ``id`` is the Valkey stream entry id (the cursor a caller
-    round-trips); ``event_id`` / ``ts`` / ``audit_id`` / ``payload``
-    are the durable fields from :class:`BroadcastEvent`.
+    ``cursor`` is the Valkey stream entry id self-labelled to match
+    the tool-input arg it round-trips through (#2479); ``id`` is the
+    legacy alias of the same value; ``event_id`` / ``ts`` /
+    ``audit_id`` / ``payload`` are the durable fields from
+    :class:`BroadcastEvent`.
     """
     client, op = client_with_operator
     event = _make_event(op_id="vsphere.vm.list")
@@ -691,6 +693,7 @@ def test_event_dict_carries_stream_entry_id_and_event_fields(
     assert len(result["events"]) == 1
     e = result["events"][0]
     assert e["id"] == "1747800000000-0"
+    assert e["cursor"] == "1747800000000-0"
     assert e["event_id"] == str(event.event_id)
     assert e["tenant_id"] == str(op.tenant_id)
     assert e["op_id"] == "vsphere.vm.list"

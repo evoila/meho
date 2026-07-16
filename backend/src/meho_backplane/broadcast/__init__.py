@@ -11,7 +11,14 @@ foundation.
 
 from meho_backplane.broadcast.agent_events import (
     ACTIVITY_MAX_CHARS,
+    MAX_TARGETS,
+    PLANNED_OP_CLASS_VALUES,
+    TARGET_MAX_CHARS,
+    TTL_MAX_MINUTES,
+    TTL_MIN_MINUTES,
+    WORK_REF_MAX_CHARS,
     AgentAnnouncementEvent,
+    PlannedOpClass,
 )
 from meho_backplane.broadcast.client import (
     BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS,
@@ -58,10 +65,17 @@ __all__ = [
     "BROADCAST_MAXLEN",
     "BROADCAST_PUBLISH_ERRORS_TOTAL",
     "DEFAULT_WINDOW_MINUTES",
+    "MAX_TARGETS",
     "OP_CLASS_ENUM",
+    "PLANNED_OP_CLASS_VALUES",
+    "TARGET_MAX_CHARS",
+    "TTL_MAX_MINUTES",
+    "TTL_MIN_MINUTES",
+    "WORK_REF_MAX_CHARS",
     "AgentAnnouncementEvent",
     "BroadcastEvent",
     "InvalidSinceError",
+    "PlannedOpClass",
     "broadcast_readiness_probe",
     "classify_op",
     "compute_effective_broadcast_detail",

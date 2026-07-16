@@ -105,9 +105,22 @@ def _disable_announce_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     Runs after ``_isolated_broadcast_client`` (which clears the settings
     cache) via the explicit dependency below, so the ``0`` is what the
     next ``get_settings()`` reads.
+
+    The env knob documents intent, but the load-bearing guard is the
+    ``enforce_announce_rate_limit`` patch: the env->``get_settings``
+    route alone is fragile under the app fixture, which can repopulate
+    the ``lru_cache`` with the default limit after the cache clear
+    (passed single-process locally, tripped a real socket ->
+    ``-32603 ConnectionError`` under xdist ``loadscope`` in CI on the
+    sibling ``test_broadcast_structured_claims.py``). Patching the
+    function bypasses settings caching entirely.
     """
     monkeypatch.setenv("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "0")
     get_settings.cache_clear()
+    monkeypatch.setattr(
+        "meho_backplane.mcp.tools.broadcast.enforce_announce_rate_limit",
+        AsyncMock(return_value=None),
+    )
 
 
 # ---------------------------------------------------------------------------

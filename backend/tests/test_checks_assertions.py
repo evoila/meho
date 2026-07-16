@@ -331,6 +331,102 @@ def test_threshold_bound_ordering_validated(op: str, degraded: float, critical: 
 
 
 # --------------------------------------------------------------------------- #
+# Non-finite (NaN / Infinity) handling  (#2504 review B1)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_threshold_non_finite_value_is_unknown(value: float) -> None:
+    # A non-finite observed value cannot be judged: `nan <op> bound` is False on
+    # every side (a silent false-negative reading as ok) and +/-inf is degenerate,
+    # so it must route to unknown like any other unjudgeable value.
+    out = _eval(
+        {"path": "$.v"},
+        {"type": "threshold", "op": "gt", "degraded": 80, "critical": 95},
+        {"v": value},
+    )
+    assert out.state == "unknown"
+    assert "finite" in out.evidence["reason"]
+
+
+def test_threshold_nan_from_json_payload_is_unknown() -> None:
+    # Reachable in production: stdlib json.loads accepts the bare NaN token.
+    payload = json.loads('{"v": NaN}')
+    out = _eval({"path": "$.v"}, {"type": "threshold", "op": "lt", "critical": 5}, payload)
+    assert out.state == "unknown"
+
+
+@pytest.mark.parametrize("aggregate", ["sum", "max", "min"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_numeric_aggregate_non_finite_element_is_unknown(aggregate: str, bad: float) -> None:
+    out = _eval(
+        {"path": "$.xs[*]", "aggregate": aggregate},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        {"xs": [1.0, bad, 2.0]},
+    )
+    assert out.state == "unknown"
+    assert "finite" in out.evidence["reason"]
+
+
+def test_sum_aggregate_non_finite_result_is_unknown() -> None:
+    # Finite elements whose sum overflows the float range to +inf are unknown too.
+    out = _eval(
+        {"path": "$.xs[*]", "aggregate": "sum"},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        {"xs": [1.5e308, 1.5e308]},
+    )
+    assert out.state == "unknown"
+    assert "finite" in out.evidence["reason"]
+
+
+@pytest.mark.parametrize("field", ["degraded", "critical"])
+@pytest.mark.parametrize("bound", [float("nan"), float("inf"), float("-inf")])
+def test_threshold_non_finite_bound_rejected_at_parse(field: str, bound: float) -> None:
+    # A non-finite bound is a 422 at Sensor create (#2503), not an eval-time surprise.
+    with pytest.raises(ValidationError):
+        AssertionSpec.model_validate(
+            {
+                "select": {"path": "$.v"},
+                "compare": {"type": "threshold", "op": "gt", field: bound},
+            }
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Spec models forbid unknown fields  (#2504 review M1)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("select", "compare"),
+    [
+        # A typo'd field beside valid ones must fail, not be silently dropped
+        # (dropping `expectt` would leave `expect` defaulted to True, inverting it).
+        ({"path": "$.v"}, {"type": "bool", "expect": True, "expectt": False}),
+        # A misspelled bound must fail, not leave the real bound unset.
+        ({"path": "$.v"}, {"type": "threshold", "op": "gt", "critical": 5, "criticl": 9}),
+        # Unknown key on the select stage.
+        ({"path": "$.v", "aggregate": "sum", "aggregat": "min"}, {"type": "bool"}),
+        # Unknown key on the equality comparators.
+        ({"path": "$.v"}, {"type": "equals", "value": 1, "valeu": 2}),
+        ({"path": "$.v"}, {"type": "in", "values": [1], "vals": [2]}),
+        # Unknown key on freshness.
+        ({"path": "$.v"}, {"type": "freshness", "max_age_seconds": 60, "maxage": 1}),
+    ],
+)
+def test_spec_models_forbid_unknown_fields(select: dict[str, Any], compare: dict[str, Any]) -> None:
+    with pytest.raises(ValidationError):
+        AssertionSpec.model_validate({"select": select, "compare": compare})
+
+
+def test_assertion_spec_forbids_unknown_top_level_field() -> None:
+    with pytest.raises(ValidationError):
+        AssertionSpec.model_validate(
+            {"select": {"path": "$.v"}, "compare": {"type": "bool"}, "severty": "critical"}
+        )
+
+
+# --------------------------------------------------------------------------- #
 # Equality comparators
 # --------------------------------------------------------------------------- #
 

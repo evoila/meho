@@ -38,6 +38,7 @@ are pure.
 
 from __future__ import annotations
 
+import math
 import re
 from typing import Annotated, Any, Literal, NamedTuple
 
@@ -150,7 +151,7 @@ class SelectSpec(BaseModel):
     a 422, not an evaluation-time surprise.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     path: str
     aggregate: Literal["max", "min", "sum", "count", "any", "all"] | None = None
@@ -172,7 +173,7 @@ class ThresholdCompare(BaseModel):
     ``degraded >= critical``). Non-numeric (or boolean) input is ``unknown``.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: Literal["threshold"]
     op: Literal["gt", "gte", "lt", "lte"]
@@ -181,6 +182,9 @@ class ThresholdCompare(BaseModel):
 
     @model_validator(mode="after")
     def _check_bounds(self) -> ThresholdCompare:
+        for name, bound in (("degraded", self.degraded), ("critical", self.critical)):
+            if bound is not None and not math.isfinite(bound):
+                raise ValueError(f"threshold {name} bound must be finite, got {bound!r}")
         if self.degraded is None and self.critical is None:
             raise ValueError("threshold requires at least one of 'degraded' / 'critical'")
         if self.degraded is not None and self.critical is not None:
@@ -205,7 +209,7 @@ class EqualsCompare(BaseModel):
     smart-union preserves it) and the evaluator compares with matching strictness.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: Literal["equals"]
     value: Scalar
@@ -217,7 +221,7 @@ class InCompare(BaseModel):
     Same boolean strictness as :class:`EqualsCompare`, applied per member.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: Literal["in"]
     values: list[Scalar] = Field(min_length=1)
@@ -230,7 +234,7 @@ class BoolCompare(BaseModel):
     a boolean that does not match :attr:`expect` is ``critical``.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: Literal["bool"]
     expect: bool = True
@@ -249,7 +253,7 @@ class FreshnessCompare(BaseModel):
     field of its own.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     type: Literal["freshness"]
     max_age_seconds: float = Field(gt=0)
@@ -286,7 +290,7 @@ class AssertionSpec(BaseModel):
     op-result payload; #2506 rolls the outcomes up into a Dashboard.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     select: SelectSpec
     compare: Compare

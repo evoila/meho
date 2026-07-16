@@ -28,6 +28,7 @@ fixed by contract: ``count`` -> ``0``, ``sum`` -> ``0``, ``any`` -> ``False``,
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -182,8 +183,15 @@ def _aggregate(values: list[Any], aggregate: str) -> tuple[Any, str | None]:
         for element in values:
             if isinstance(element, bool) or not isinstance(element, (int, float)):
                 return None, f"aggregate {aggregate!r} requires numbers, found {_typename(element)}"
+            # Only a float can be non-finite; an int is always finite (and passing
+            # a huge int to math.isfinite would itself raise OverflowError).
+            if isinstance(element, float) and not math.isfinite(element):
+                return None, f"aggregate {aggregate!r} requires finite numbers, found {element!r}"
         if aggregate == "sum":
-            return sum(values), None
+            total = sum(values)
+            if isinstance(total, float) and not math.isfinite(total):
+                return None, f"aggregate 'sum' is non-finite ({total!r})"
+            return total, None
         if not values:
             return None, f"aggregate {aggregate!r} is undefined on an empty list"
         return (max(values) if aggregate == "max" else min(values)), None
@@ -230,6 +238,10 @@ def _compare_threshold(
         return _unknown(
             evidence, f"threshold comparator requires a number, found {_typename(value)}"
         )
+    # A non-finite value (NaN/+-Inf, reachable via json.loads) cannot be judged:
+    # every `value <op> bound` is False for NaN, so it would silently read as ok.
+    if isinstance(value, float) and not math.isfinite(value):
+        return _unknown(evidence, f"threshold comparator requires a finite number, found {value!r}")
     state: CheckState = "ok"
     if compare.critical is not None and _violates(value, compare.op, compare.critical):
         state = "critical"

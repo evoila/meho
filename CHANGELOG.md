@@ -102,8 +102,12 @@ connector-related release-notes line.
   language and no new dependency. The five-state check vocabulary
   (`ok`/`degraded`/`critical`/`unknown`/`skip`) is declared once here for the
   Initiative #2416 check layer; the evaluator never raises on payload data
-  (every mismatch becomes `unknown` with a reason) and emits only the four
-  observable states.
+  (every mismatch becomes `unknown` with a reason -- including a non-finite
+  `NaN`/`Infinity` observed or aggregated value, which cannot be judged) and
+  emits only the four observable states. The spec models reject unknown fields
+  (`extra="forbid"`) and non-finite threshold bounds, so a typo'd assertion
+  field is a 422 at create rather than a silently dropped key.
+
 ### Security — agent-principal Keycloak-orphan rollback + bounded name (#2523)
 
 - Close the two credential-lifecycle gaps in the agent-principal register

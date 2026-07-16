@@ -432,6 +432,18 @@ class VcfLogsConnector(HttpConnector):
         """
         await self._invalidate_session(target)
 
+    async def invalidate_credentials(self, target: VcfLogsTargetLike) -> None:
+        """Public duck-typed credential-eviction hook for the dispatch path (#2396).
+
+        Delegates to the shared :class:`CredentialsCache.invalidate` so the
+        next credential read re-reads Vault. :meth:`invalidate_session`
+        deliberately leaves the credential cache intact (a 440/401 means the
+        *token* expired); the dispatcher calls this hook on an establish-auth
+        failure so an operator's out-of-band restage converges on the next
+        dispatch without a backplane restart.
+        """
+        await self._credentials.invalidate(target)
+
     async def _invalidate_session(self, target: VcfLogsTargetLike) -> None:
         """Drop the cached session token for *target*.
 
@@ -492,6 +504,35 @@ class VcfLogsConnector(HttpConnector):
                     f"GET {path} returned HTTP {status_code} after refresh"
                 ) from exc
             raise
+
+    async def event_query(
+        self,
+        operator: Operator,
+        target: VcfLogsTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vrli.event.query`` -- constraint-filtered raw event search (#2295).
+
+        vRLI's first ``source_kind="typed"`` op: a bound method the dispatcher
+        binds to this connector instance and invokes with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Issues
+        ``GET /api/v2/events/<constraints>`` directly on the connector session
+        through :meth:`_get_json_with_session_retry` -- so it works on a fresh
+        boot with zero catalog ingest and recovers a 440 / 401 session expiry
+        with one re-login + retry (the #1909 / #1135 scenario). Retires the
+        hand-edited production overlay: the two canonical-spec blockers the
+        overlay worked around (#2066 ``{+path}`` render, #1796 ``servers[]``
+        base path) are fixed in v0.20.0.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vcf_logs.typed_ops.event_query_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{"events": [...], "complete": bool}``.
+        """
+        from meho_backplane.connectors.vcf_logs.typed_ops import event_query_impl
+
+        return await event_query_impl(self, operator, target, params)
 
     async def fingerprint(
         self,

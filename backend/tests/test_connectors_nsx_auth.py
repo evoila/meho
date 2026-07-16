@@ -347,8 +347,10 @@ async def test_same_name_targets_in_different_tenants_get_distinct_sessions() ->
 
 
 @pytest.mark.asyncio
-async def test_session_create_401_surfaces_runtime_error_naming_target() -> None:
-    """401 from POST /api/session/create raises RuntimeError naming the target."""
+async def test_session_create_401_surfaces_connector_auth_error_naming_target() -> None:
+    """401 from POST /api/session/create raises the structured ConnectorAuthError (#2329)."""
+    from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+
     connector = _make_connector()
 
     async with respx.mock(base_url="https://nsx-a.test.invalid") as mock:
@@ -356,7 +358,10 @@ async def test_session_create_401_surfaces_runtime_error_naming_target() -> None
         with pytest.raises(RuntimeError, match=r"nsx-a") as exc_info:
             await connector.auth_headers(_TARGET_A, operator=_make_operator())
 
-    assert "401" in str(exc_info.value)
+    err = exc_info.value
+    assert isinstance(err, ConnectorAuthError)
+    assert err.cause == "session_establish_401"
+    assert "401" in str(err)
     await connector.aclose()
 
 
@@ -625,9 +630,9 @@ async def test_fingerprint_unreachable_returns_reachable_false_with_error() -> N
     connector = _make_connector()
 
     async with respx.mock(base_url="https://nsx-a.test.invalid") as mock:
-        # Session-create itself fails 401 -- the RuntimeError from
-        # ``_session_token`` must surface as a clean reachable=False
-        # rather than propagating up.
+        # Session-create itself fails 401 -- the session-establish error from
+        # ``_session_token`` (a ``ConnectorAuthError`` since #2329) must
+        # surface as a clean reachable=False rather than propagating up.
         mock.post("/api/session/create").respond(401, json={"error": "invalid_credentials"})
         fp = await connector.fingerprint(_TARGET_A)
 
@@ -635,9 +640,10 @@ async def test_fingerprint_unreachable_returns_reachable_false_with_error() -> N
     assert fp.product == "nsx"
     assert fp.reachable is False
     assert fp.probe_method == "GET /api/v1/node"
-    # Structured error: ``"<ExcType>: <message>"``.
+    # Structured error: ``"<ExcType>: <message>"`` -- #2329 makes the
+    # establish 401 a ``ConnectorAuthError`` (still a RuntimeError subclass).
     error = fp.extras["error"]
-    assert "RuntimeError" in error
+    assert "ConnectorAuthError" in error
     assert "nsx-a" in error
     assert "401" in error
     await connector.aclose()

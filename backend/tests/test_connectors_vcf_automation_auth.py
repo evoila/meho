@@ -636,8 +636,10 @@ async def test_provider_secret_ref_override_invokes_loader_for_distinct_provider
 
 
 @pytest.mark.asyncio
-async def test_provider_login_401_surfaces_runtime_error_naming_target() -> None:
-    """401 from provider login raises RuntimeError naming the target + status."""
+async def test_provider_login_401_surfaces_connector_auth_error_naming_target() -> None:
+    """401 from provider login raises the structured ConnectorAuthError (#2329)."""
+    from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
@@ -646,8 +648,11 @@ async def test_provider_login_401_surfaces_runtime_error_naming_target() -> None
             await connector.auth_headers(
                 _TARGET_A, operator=_make_operator(), path="/cloudapi/1.0.0/orgs"
             )
-    assert "401" in str(exc_info.value)
-    assert "provider" in str(exc_info.value)
+    err = exc_info.value
+    assert isinstance(err, ConnectorAuthError)
+    assert err.cause == "session_establish_401"
+    assert "401" in str(err)
+    assert "provider" in str(err)
     await connector.aclose()
 
 
@@ -667,8 +672,10 @@ async def test_provider_login_missing_token_header_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tenant_login_401_surfaces_runtime_error_naming_target() -> None:
-    """401 from tenant login raises RuntimeError naming the target + plane."""
+async def test_tenant_login_401_surfaces_connector_auth_error_naming_target() -> None:
+    """401 from tenant login raises the structured ConnectorAuthError (#2329)."""
+    from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vcfa-a.test.invalid") as mock:
@@ -677,8 +684,11 @@ async def test_tenant_login_401_surfaces_runtime_error_naming_target() -> None:
             await connector.auth_headers(
                 _TARGET_A, operator=_make_operator(), path="/iaas/api/projects"
             )
-    assert "401" in str(exc_info.value)
-    assert "tenant" in str(exc_info.value)
+    err = exc_info.value
+    assert isinstance(err, ConnectorAuthError)
+    assert err.cause == "session_establish_401"
+    assert "401" in str(err)
+    assert "tenant" in str(err)
     await connector.aclose()
 
 

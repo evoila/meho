@@ -233,6 +233,20 @@ def _load_trigger_status(tenant_id: uuid.UUID, trigger_id: uuid.UUID) -> str | N
     return asyncio.run(_do())
 
 
+def _load_trigger_fire_at(tenant_id: uuid.UUID) -> datetime | None:
+    from sqlalchemy import select
+
+    async def _do() -> datetime | None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            stmt = select(ScheduledTrigger.fire_at).where(
+                ScheduledTrigger.tenant_id == tenant_id,
+            )
+            return (await session.execute(stmt)).scalars().first()
+
+    return asyncio.run(_do())
+
+
 def _trigger_count(tenant_id: uuid.UUID) -> int:
     from sqlalchemy import func, select
 
@@ -569,6 +583,35 @@ def test_create_modal_renders_for_tenant_admin() -> None:
     assert 'hx-post="/ui/scheduler/create"' in body
     assert str(_AGENT_ID) in body  # agent dropdown option
     assert 'hx-post="/ui/scheduler/validate-cron"' in body  # live cron validation
+    # #2340: the form's `find button[type=submit]` disabled-elt must be
+    # disinherited so the descendant validate-cron POST does not inherit it
+    # and log `... returned no matches!` on every debounced keystroke.
+    assert 'hx-disinherit="hx-disabled-elt"' in body
+
+
+def test_create_modal_carries_fire_at_utc_conversion() -> None:
+    """The one_off fire_at field ships the client-side local->UTC submit conversion (#2339).
+
+    The datetime-local picker posts a naive local wall-clock string the engine
+    stores verbatim as UTC; the modal must carry the ``htmx:configRequest``
+    handler that rewrites ``fire_at`` to a UTC ISO instant plus the live hint
+    that makes the conversion visible. Asserts the load-bearing markers rather
+    than exercising the JS (covered by the Playwright regression in CI).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, _ = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.get("/ui/scheduler/create")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "data-fire-at" in body  # the picker + its live hint are wired
+    assert "htmx:configRequest" in body  # submit-time param rewrite hook
+    assert "toISOString" in body  # DST-aware browser-native UTC conversion
 
 
 def test_create_modal_rejects_operator_with_403() -> None:
@@ -662,6 +705,7 @@ def test_create_submit_persists_cron_trigger_and_redirects() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers=_form_headers(csrf),
@@ -671,6 +715,43 @@ def test_create_submit_persists_cron_trigger_and_redirects() -> None:
     assert response.status_code == 204, response.text
     assert response.headers["HX-Redirect"] == "/ui/scheduler"
     assert _trigger_count(_TENANT_A) == 1
+
+
+def test_create_submit_one_off_utc_fire_at_persists_instant() -> None:
+    """A one_off create with the JS-converted UTC ``fire_at`` stores that instant (#2339).
+
+    The submit handler's client-side conversion posts a UTC ISO-8601 string
+    (``...Z``) rather than the naive datetime-local value; the server honours
+    the offset as-is. A CEST operator picking 11:00 local -> 09:00Z must land
+    exactly 09:00Z, not 11:00Z (the 2h-off defect).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "one_off",
+                "agent_definition_id": str(_AGENT_ID),
+                "fire_at": "2026-07-01T09:00:00.000Z",
+                "inputs": '{"prompt": "scheduled run"}',
+                "in_flight_policy": "fail_into_audit",
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 204, response.text
+    assert _trigger_count(_TENANT_A) == 1
+    stored = _load_trigger_fire_at(_TENANT_A)
+    assert stored is not None
+    # Normalise to an aware UTC instant (the column may hydrate naive-UTC).
+    if stored.tzinfo is None:
+        stored = stored.replace(tzinfo=UTC)
+    assert stored == datetime(2026, 7, 1, 9, 0, tzinfo=UTC)
 
 
 def test_create_submit_invalid_cron_rerenders_modal_with_error() -> None:
@@ -701,6 +782,60 @@ def test_create_submit_invalid_cron_rerenders_modal_with_error() -> None:
     assert _trigger_count(_TENANT_A) == 0
 
 
+def test_create_submit_input_less_cron_rerenders_modal_with_error() -> None:
+    """A cron create with no inputs surfaces the 422 as a form-error banner (#2244)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "cron",
+                "agent_definition_id": str(_AGENT_ID),
+                "cron_expr": "0 9 * * *",
+                "timezone": "UTC",
+                "in_flight_policy": "fail_into_audit",
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "alert-error" in response.text
+    assert "non-empty user prompt" in response.text
+    assert _trigger_count(_TENANT_A) == 0
+
+
+def test_create_submit_event_rerenders_modal_with_error() -> None:
+    """A kind=event create surfaces the 422 as a banner naming #826 (#2325)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A)
+    client, mock, csrf = _client_with_role(
+        tenant_id=_TENANT_A, operator_sub=_OP_ADMIN, role=TenantRole.TENANT_ADMIN
+    )
+    try:
+        response = client.post(
+            "/ui/scheduler/create",
+            data={
+                "kind": "event",
+                "agent_definition_id": str(_AGENT_ID),
+                "event_filter": '{"connector_id": "bind9", "op_class": "write"}',
+                "timezone": "UTC",
+                "in_flight_policy": "fail_into_audit",
+            },
+            headers=_form_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    assert "alert-error" in response.text
+    assert "#826" in response.text
+    assert _trigger_count(_TENANT_A) == 0
+
+
 def test_create_submit_rejects_operator_with_403() -> None:
     """An operator POST to create is 403'd server-side (the hidden button is UX only)."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -716,6 +851,7 @@ def test_create_submit_rejects_operator_with_403() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers=_form_headers(csrf),
@@ -741,6 +877,7 @@ def test_create_submit_unknown_agent_rerenders_modal() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers=_form_headers(csrf),
@@ -767,6 +904,7 @@ def test_create_submit_without_csrf_is_403() -> None:
                 "agent_definition_id": str(_AGENT_ID),
                 "cron_expr": "0 9 * * *",
                 "timezone": "UTC",
+                "inputs": '{"prompt": "scheduled run"}',
                 "in_flight_policy": "fail_into_audit",
             },
             headers={"HX-Request": "true"},  # no X-CSRF-Token

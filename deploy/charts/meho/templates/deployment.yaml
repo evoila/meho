@@ -29,6 +29,19 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- /*
+        Optional unprivileged-ICMP-ping knob for the net.ping diagnostic
+        (Initiative #2405). Default-off: when empty, NO sysctl is rendered
+        and NO pod-security posture changes — net.trace / net.path_mtu are
+        unprivileged everywhere and net.ping degrades to available=false.
+        SECURITY-REVIEW: setting this widens who may open ICMP sockets in
+        the pod; see values.yaml `netdiag.pingGroupRange`.
+        */}}
+        {{- with .Values.netdiag.pingGroupRange }}
+        sysctls:
+          - name: net.ipv4.ping_group_range
+            value: {{ . | quote }}
+        {{- end }}
       containers:
         - name: backplane
           # Image reference deliberately offers no `default .Chart.AppVersion`
@@ -124,6 +137,23 @@ spec:
           # would mask startup deadlocks and let an unready Pod accept
           # traffic. Every probe field is operator-tunable via
           # `.Values.probes.<kind>.<field>`.
+          #
+          # `startupProbe` gates liveness/readiness until first boot succeeds
+          # (Issue #2393). First boot runs the full typed-op catalog
+          # registration plus the fastembed model preload before the app binds
+          # :8000 — ~2-3 min, longer on a cold install that downloads model
+          # weights into an empty cache PVC. Without this probe the kubelet
+          # starts liveness-checking mid-registration and CrashLoopBackOffs a
+          # slow-but-healthy pod. The default budget is
+          # `failureThreshold × periodSeconds` = 30 × 10s = 300s (5 min); the
+          # kubelet disables liveness/readiness until it passes, then the
+          # short-delay liveness probe takes over for fast hang detection. The
+          # `with` guard lets an operator opt out on a fast cluster by clearing
+          # `.Values.probes.startup`.
+          {{- with .Values.probes.startup }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           livenessProbe:
             {{- toYaml .Values.probes.liveness | nindent 12 }}
           readinessProbe:

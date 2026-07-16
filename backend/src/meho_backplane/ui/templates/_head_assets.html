@@ -22,6 +22,11 @@
    paint or light-theme operators get a dark flash. External file,
    not inline, to preserve the zero-inline-script CSP posture. #}
 <script src="/ui/static/src/app/theme.js"></script>
+{# Tab mark — the "Graphite & Signal" wordmark distilled to a monogram
+   (static/src/brand/favicon.svg). SVG-only: every browser the console
+   targets renders SVG favicons, and one vector scales across tab sizes.
+   A <link> element, so it keeps the zero-inline-script CSP posture. #}
+<link rel="icon" href="/ui/static/src/brand/favicon.svg" type="image/svg+xml" />
 {# Compiled Tailwind 4 + DaisyUI 5 bundle; built by the ``tailwindcss``
    CLI step in backend/Dockerfile from static/src/styles.css. #}
 <link rel="stylesheet" href="/ui/static/dist/tailwind.css" />
@@ -33,6 +38,15 @@
 <link rel="preload" href="/ui/static/src/fonts/ibm-plex-mono-latin-400.woff2" as="font" type="font/woff2" crossorigin />
 {# Vendored JS — pinned SHA256 in static/src/vendor/VENDOR.md. #}
 <script src="/ui/static/src/vendor/htmx.min.js" defer></script>
+{# App-shell CSRF double-submit header hook (#2345). Registers a single
+   global ``htmx:configRequest`` listener on <body> that re-reads the live
+   ``meho_csrf`` cookie at request time and overrides ``X-CSRF-Token`` on
+   every outgoing htmx request, so a modal's baked-in echoed token can never
+   drift out of sync with the cookie (the "403s the 3rd write" symptom).
+   ``defer`` after ``htmx.min.js`` so the listener attaches before the first
+   htmx request can resolve, and after the document is parsed so
+   ``document.body`` exists. #}
+<script src="/ui/static/src/app/csrf-token.js" defer></script>
 {# App-shell session-expiry safety net (#122). Registers a single global
    ``htmx:beforeOnLoad`` listener on <body> that surfaces a recovery banner
    on any ``401`` from an htmx request (a session-expiry that would otherwise

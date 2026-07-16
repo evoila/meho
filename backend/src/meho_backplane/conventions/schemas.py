@@ -396,27 +396,29 @@ class BudgetStatus(BaseModel):
 
 
 class ConventionListResponse(BaseModel):
-    """Response envelope for ``GET /api/v1/conventions``.
+    """Unified list envelope for ``GET /api/v1/conventions``.
 
-    Wrapped in ``{"entries": [...]}`` so a future cursor / total
-    field can land non-breakingly. Same shape the kb + memory list
-    surfaces adopted; consistency across the v0.2 read APIs keeps
-    the CLI's list renderer one switch statement, not three.
+    The `{items, next_cursor, ...sidecars}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. ``items`` carries the
+    :class:`ConventionSummary` rows; ``next_cursor`` is always ``None``
+    (the listing is not cursor-paginated) but present so the endpoint
+    can grow pagination later without a further breaking change.
 
-    ``budget_status`` (T7 #1094) carries the preamble budget
-    arithmetic for the operator's tenant. Always populated; the
-    underlying :func:`~meho_backplane.conventions.preamble.assemble_preamble`
-    call is one indexed SELECT + an in-memory pack -- cheap enough
-    to run on every list request. Exposing it on the list
-    response (rather than on a separate
-    ``/api/v1/conventions/budget-status`` route the issue body
-    explicitly rejects) keeps the CLI / dashboard consumer paths
-    to one HTTP round-trip.
+    ``budget_status`` (T7 #1094) is the §2 top-level *sidecar*: it
+    carries the preamble budget arithmetic for the operator's tenant.
+    Always populated; the underlying
+    :func:`~meho_backplane.conventions.preamble.assemble_preamble` call
+    is one indexed SELECT + an in-memory pack -- cheap enough to run on
+    every list request. Exposing it on the list response (rather than on
+    a separate ``/api/v1/conventions/budget-status`` route the issue
+    body explicitly rejects) keeps the CLI / dashboard consumer paths to
+    one HTTP round-trip.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    entries: list[ConventionSummary]
+    items: list[ConventionSummary]
+    next_cursor: str | None = None
     budget_status: BudgetStatus
 
 

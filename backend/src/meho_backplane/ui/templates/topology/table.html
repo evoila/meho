@@ -123,23 +123,23 @@
     aria-label="Filter topology nodes"
     onsubmit="return false;"
   >
-    <div class="card-body grid gap-3 md:grid-cols-4">
-      <label class="form-control md:col-span-2">
-        <span class="label-text">Search by name</span>
+    <div class="card-body grid gap-3 md:grid-cols-4 md:items-end">
+      <label class="flex flex-col gap-1 md:col-span-2">
+        <span class="text-sm font-medium">Search by name</span>
         <input
           type="search"
           name="q"
           value="{{ name_filter }}"
           placeholder="Substring match (case-insensitive)"
-          class="input input-bordered input-sm"
+          class="input input-sm w-full"
           aria-label="Filter nodes by name"
         />
       </label>
-      <label class="form-control">
-        <span class="label-text">Kind</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Kind</span>
         <select
           name="kind"
-          class="select select-bordered select-sm"
+          class="select select-sm w-full"
           aria-label="Filter nodes by kind"
         >
           <option value="">All kinds</option>
@@ -168,9 +168,14 @@
      drawer lands *beside* the table on ``lg:`` viewports instead of
      stacking ~1300px below it (issue #141: the "View" button swapped
      the drawer off-screen, hiding the Annotate-edge affordance with
-     it). ``lg:grid-cols-[1fr_28rem]`` gives the table the flexible
-     column and the drawer a fixed 28rem sidebar; on narrower
-     viewports the single-column grid stacks table over drawer.
+     it). ``lg:grid-cols-[minmax(0,1fr)_28rem]`` gives the table the
+     flexible column and the drawer a fixed 28rem sidebar; on narrower
+     viewports the single-column grid stacks table over drawer. The
+     ``minmax(0,1fr)`` (not a bare ``1fr``, which resolves to
+     ``minmax(auto,1fr)``) lets the table cell shrink below the table's
+     min-content width so the ``overflow-x-auto`` wrapper scrolls instead
+     of the table blowing the column out and overlapping the drawer
+     (issue #164).
 
      ``hx-on::after-swap`` handles the narrow-viewport case: when a
      row's "View" swap settles the drawer fragment in (target
@@ -180,12 +185,12 @@
      is a harmless no-op; on a stacked layout it brings the freshly
      rendered detail into the viewport. -#}
   <div
-    class="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_28rem]"
+    class="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_28rem]"
     hx-on::after-swap="if (event.detail.target && event.detail.target.id === 'node-drawer') event.detail.target.scrollIntoView({ block: 'nearest', behavior: 'smooth' })"
   >
   {# ---------- Table ---------- #}
   <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100 min-w-0">
-    <table class="table table-sm">
+    <table class="table table-sm min-w-max whitespace-nowrap">
       {#- Sortable head, rendered in-place on the full page (``oob`` unset).
           The HTMX sort / filter swap re-emits this same partial out-of-band
           from ``_table_rows.html`` so the recomputed ``next_dir`` links +
@@ -211,7 +216,7 @@
     aria-label="Node detail drawer"
   >
     <div class="card-body text-sm opacity-70">
-      Select a row's <em>view</em> button to inspect a node.
+      Click <strong>View</strong> on any row for details.
     </div>
   </aside>
   </div>

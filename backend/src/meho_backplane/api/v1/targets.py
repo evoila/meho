@@ -139,11 +139,6 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from meho_backplane.api.v1._envelope import (
-    ENVELOPE_QUERY,
-    EnvelopeVersion,
-    wrap_v2_envelope,
-)
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
@@ -165,7 +160,7 @@ from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.targets.schemas import (
     Target,
     TargetCreate,
-    TargetSummary,
+    TargetListResponse,
     TargetUpdate,
     project_target_to_summary,
 )
@@ -922,15 +917,14 @@ def _enforce_secret_ref_tenant_scope(
     )
 
 
-@router.get("")
+@router.get("", response_model=TargetListResponse)
 async def list_targets(
     product: str | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     cursor: str | None = Query(default=None),
-    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
     session: AsyncSession = Depends(get_session),
-) -> list[TargetSummary] | dict[str, object]:
+) -> TargetListResponse:
     """List targets for the requesting tenant.
 
     Results are keyset-paginated by ``name`` (lexicographic order).
@@ -943,18 +937,15 @@ async def list_targets(
     so list and dispatch never disagree about which targets are
     visible to the tenant.
 
-    G0.16-T6 Finding A (#1312) — non-breaking shape opt-in. The
-    default response stays the v0.8.0 bare list ``[TargetSummary,
-    ...]``; passing ``?envelope=v2`` returns the unified envelope
-    ``{"items": [...], "next_cursor": <opaque str | null>}`` per
-    ``docs/codebase/api-shape-conventions.md`` §2. The cursor on the
-    v2 envelope is the last-row ``name`` of the page when the page
-    filled to ``limit`` (so a re-issue carries pagination), and
-    ``None`` when the page exhausted the matching set (so callers
-    see "no more pages" without inspecting list length). The opt-in
-    semantics let SDK / CLI / MCP sister surfaces adopt the v2
-    shape at their own cadence; the v0.8.0 default flips after two
-    release cycles per the §2 migration recipe.
+    Returns the unified ``{"items": [...], "next_cursor": <opaque str |
+    null>}`` list envelope per ``docs/codebase/api-shape-conventions.md``
+    §2 (#2338 breaking pass — the response shape converged from the
+    v0.8.0 bare list onto the reference envelope; the ``?envelope=v2``
+    opt-in that bridged the migration was retired). ``next_cursor`` is
+    the last-row ``name`` of the page when the page filled to ``limit``
+    (so a re-issue carries pagination), and ``None`` when the page
+    exhausted the matching set (so callers see "no more pages" without
+    inspecting list length).
     """
     stmt = select(TargetORM).where(
         TargetORM.tenant_id == operator.tenant_id,
@@ -969,21 +960,14 @@ async def list_targets(
     # rather than inferring from ``len(rows) >= limit`` (which produces
     # a false-positive non-null ``next_cursor`` on the terminal page
     # when the matching set size is an exact multiple of ``limit``).
-    # The bare-list branch slices back to ``limit`` so the v0.8.0 shape
-    # is unchanged.
     stmt = stmt.order_by(TargetORM.name).limit(limit + 1)
     result = await session.execute(stmt)
     fetched = list(result.scalars().all())
     has_more = len(fetched) > limit
     rows = fetched[:limit]
     summaries = [project_target_to_summary(t) for t in rows]
-    if envelope is None:
-        return summaries
     next_cursor = rows[-1].name if has_more else None
-    return wrap_v2_envelope(
-        [s.model_dump(mode="json") for s in summaries],
-        next_cursor=next_cursor,
-    )
+    return TargetListResponse(items=summaries, next_cursor=next_cursor)
 
 
 @router.get("/discover", response_model=TargetsDiscoverResult)

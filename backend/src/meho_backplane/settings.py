@@ -135,8 +135,14 @@ class Settings(BaseModel):
         without giving meaningful runway to a stolen-token replay.
     vault_addr:
         Base URL of the Vault server, e.g. ``https://vault.evba.lab``.
-        Required — the backplane refuses to start without it. The OIDC
-        forward-auth chain hangs entirely off this endpoint.
+        Required **only** for the Vault credential backend
+        (``CREDENTIAL_BACKEND=vault``) and the Vault OIDC forward-auth
+        chain, both of which hang off this endpoint. A GCP-native
+        install (``CREDENTIAL_BACKEND=gsm``) runs no Vault, so this is
+        optional and defaults to ``None``; a blank ``VAULT_ADDR`` env
+        value coerces to ``None``. When ``None``, the first actual Vault
+        use raises :class:`~meho_backplane.auth.vault.VaultNotConfiguredError`
+        rather than the backplane refusing to start.
     vault_oidc_role:
         Vault role bound to the JWT auth method that the backplane
         forwards tokens against. Default ``meho-mcp`` matches Goal #11's
@@ -184,6 +190,16 @@ class Settings(BaseModel):
         surfaced in API responses. Operators wanting AppRole instead of a
         static token can wrap a Vault Agent sidecar that writes the token
         to this env var — additive, no code change.
+    vault_scheduler_token_file:
+        Optional filesystem path the scheduler reads its Vault token from,
+        **fresh on every read/write** (#2328). When set and non-empty it
+        takes precedence over :attr:`vault_scheduler_token`; an
+        unreadable/empty file falls through to the env-var token. This is
+        the sink a Vault Agent sidecar writes renewed/re-minted tokens to:
+        because the contents are re-read per use (only the path is cached),
+        a re-mint is picked up **without a pod restart** — the manual
+        remediation the ~32-day periodic-token fuse otherwise forced.
+        Default ``""`` (use the env-var token). Never logged.
     database_url:
         SQLAlchemy URL for the PostgreSQL database, e.g.
         ``postgresql+asyncpg://meho:<password>@<host>:5432/meho``.
@@ -249,6 +265,16 @@ class Settings(BaseModel):
         token and every agent / service principal is non-platform-admin
         unless a realm explicitly grants the claim. Override only when
         the realm exposes the flag under a different attribute.
+    jwt_runner_id_claim_name:
+        Name of the JWT claim that carries a satellite runner principal's
+        row UUID (Initiative #2415, #2502). Default ``runner_id`` matches
+        the hardcoded ``runner_id`` mapper the ``meho runner-principal
+        register`` path stamps on the runner client. The claim is
+        **optional** at extraction — user / service / agent tokens carry
+        no claim and resolve to ``runner_id=None``; a ``principal_kind=
+        runner`` token *without* it is rejected 401
+        (``missing_runner_id_claim``). Override only when the realm
+        exposes the id under a different attribute.
     keycloak_admin_url:
         Base URL of the Keycloak Admin REST API for the realm managing
         MEHO principals, e.g.
@@ -860,6 +886,7 @@ class Settings(BaseModel):
     jwt_principal_kind_claim_name: str = Field(default="principal_kind", min_length=1)
     jwt_capabilities_claim_name: str = Field(default="capabilities", min_length=1)
     jwt_platform_admin_claim_name: str = Field(default="platform_admin", min_length=1)
+    jwt_runner_id_claim_name: str = Field(default="runner_id", min_length=1)
     keycloak_admin_url: str = ""
     keycloak_admin_client_id: str = ""
     keycloak_admin_client_secret: str = Field(default="", repr=False)
@@ -893,12 +920,75 @@ class Settings(BaseModel):
     test_amortize_typed_op_registrars: bool = False
     backplane_url: str = ""
     mcp_resource_uri: str = ""
-    vault_addr: HttpUrl
+    vault_addr: HttpUrl | None = Field(default=None)
     vault_oidc_role: str = Field(default="meho-mcp", min_length=1)
     vault_oidc_mount_path: str = Field(default="jwt", min_length=1)
     vault_namespace: str | None = None
     vault_timeout_seconds: float = Field(default=10.0, gt=0)
     vault_scheduler_token: str = Field(default="", repr=False)
+    # #2328 — optional path to a file the scheduler's Vault token is read
+    # **fresh from on every use**, so a Vault-Agent sidecar (or an
+    # operator) that re-mints the token into this sink is picked up
+    # without a pod restart. Takes precedence over ``vault_scheduler_token``
+    # when set and non-empty; an unreadable/empty file falls through to the
+    # env-var token. Only the path is config (safe to cache); the contents
+    # are re-read per read/write. Never logged.
+    vault_scheduler_token_file: str = Field(default="", repr=False)
+    # #2229 (Initiative #2227) — names the credential backend a schemeless
+    # target ``secret_ref`` resolves through. ``vault`` (the default) keeps
+    # every existing install on today's Vault KV-v2 read with no config
+    # change: a schemeless ``targets/<id>`` ref and an explicit
+    # ``vault:targets/<id>`` ref both dispatch to the Vault backend. A
+    # scheme-prefixed ref (``gsm:<project>/<secret>`` once #2230 registers
+    # the GSM backend) overrides this per-target. Setting it is a no-op for
+    # Vault installs. Chart wiring (``config.credentialBackend`` →
+    # ``CREDENTIAL_BACKEND``) lands with the GSM Helm surface in #2231.
+    credential_backend: str = Field(default="vault", min_length=1)
+    # #2230 (Initiative #2227) — optional service account the GCP Secret
+    # Manager credential backend impersonates when resolving a
+    # ``gsm:<project>/<secret>`` ref. Empty (the default) reads Secret
+    # Manager directly under the pod's own GKE Workload Identity ADC
+    # (``google.auth.default()``); a non-empty SA email wraps that ADC
+    # source in ``google.auth.impersonated_credentials`` targeting the SA,
+    # reusing the GcloudConnector impersonation chain. No effect on Vault
+    # installs. Chart wiring lands with the GSM Helm surface in #2231.
+    gsm_impersonate_sa: str = Field(default="")
+    # #2231 (Initiative #2227) — the GCP project the GSM credential backend
+    # reads under when a ``secret_ref`` (or the ``/api/v1/health`` federation
+    # probe) names no explicit project. Empty (the default) is correct for
+    # every Vault install; a ``gsm``-backend install sets it via
+    # ``config.gsmProject`` → ``GSM_PROJECT`` so the health federation proof
+    # can address ``gsm:<project>/<probe-secret>`` without a hard-coded
+    # project. No effect on Vault installs.
+    gsm_project: str = Field(default="")
+    # #2232 (Initiative #2227) — GCP Workload Identity Federation (WIF) for
+    # the GSM credential backend's per-operator path. When
+    # ``gsm_wif_audience`` is set, a ``gsm:`` read exchanges the operator's
+    # Keycloak JWT at ``sts.googleapis.com`` for a short-lived federated
+    # token (google-auth ``identity_pool.Credentials``) so GCP's own audit
+    # attributes ``secretmanager.versions.access`` to the operator — mirroring
+    # the Vault ``vault_client_for_operator`` JIT contract. Empty (the
+    # default) leaves the Phase-1 SA-direct ADC path untouched (no behaviour
+    # change for Phase-1 installs). ``gsm_wif_audience`` is the full WIF
+    # provider resource name google-auth consumes (``//iam.googleapis.com/
+    # projects/<number>/locations/global/workloadIdentityPools/<pool>/
+    # providers/<provider>``); it already encodes the pool + provider.
+    # ``gsm_wif_pool_id`` /
+    # ``gsm_wif_provider_id`` are the ``gsm.workloadIdentityFederation.{poolId,providerId}``
+    # chart keys, threaded through for a fail-closed consistency check
+    # against the audience (a copy-paste mismatch fails the read with an
+    # actionable error) and for non-secret log attribution.
+    # ``gsm_wif_service_account`` optionally impersonates a target SA for the
+    # final read (reusing the Phase-1 impersonation intent at the STS layer);
+    # empty skips impersonation. ``gsm_wif_subject_token_type`` is the STS
+    # subject-token type for a Keycloak OIDC JWT. Chart wiring lands in #2231.
+    gsm_wif_audience: str = Field(default="")
+    gsm_wif_pool_id: str = Field(default="")
+    gsm_wif_provider_id: str = Field(default="")
+    gsm_wif_service_account: str = Field(default="")
+    gsm_wif_subject_token_type: str = Field(
+        default="urn:ietf:params:oauth:token-type:jwt", min_length=1
+    )
     database_url: str = Field(min_length=1)
     database_pool_size: int = Field(default=10, gt=0)
     database_pool_timeout: float = Field(default=30.0, gt=0)
@@ -953,6 +1043,21 @@ class Settings(BaseModel):
     # docs/codebase/approvals.md "Single-operator tenants: use an
     # agent-requester, not break-glass".
     approval_allow_self_approval: bool = False
+    # #2322 (G0.31 #2364) -- approval-TTL lifecycle. Every parked approval
+    # is stamped ``expires_at = created_at + APPROVAL_DEFAULT_TTL_SECONDS``
+    # (default 14 days); an explicit caller override is honoured but capped
+    # at that same ceiling so no surface can park an unbounded-lived
+    # approval. The default TTL is the single knob -- there is deliberately
+    # no per-op TTL policy (substrate minimalism, #1177). The periodic
+    # sweeper (``operations.approval_expiry``) drives
+    # ``expire_stale_requests`` per tenant on its own cadence; gated on
+    # APPROVAL_EXPIRY_ENABLED so an operator running an external sweep does
+    # not double-expire, and the 300s (5 min) default cadence matches the
+    # sibling GRANT_EXPIRY sweeper so a just-past-deadline row leaves the
+    # pending view within one tick.
+    approval_default_ttl_seconds: int = Field(default=14 * 24 * 3600, ge=60)
+    approval_expiry_enabled: bool = True
+    approval_expiry_tick_interval_seconds: int = Field(default=300, ge=60, le=86400)
     # G11.3-T4 #825 -- agent_run reaper knobs. Same opt-out shape as
     # GRANT_EXPIRY_ENABLED / MEMORY_EXPIRY_ENABLED so an operator
     # running an external lease-reclaim mechanism (DBOS Transact, a
@@ -969,6 +1074,21 @@ class Settings(BaseModel):
     agent_run_reaper_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
     agent_run_reaper_max_per_tick: int = Field(default=50, ge=1, le=1000)
     agent_run_lease_ttl_seconds: int = Field(default=60, ge=10, le=3600)
+    # Initiative #2415 (#2501) -- gateway runner dead-man switch. Same
+    # opt-out shape as AGENT_RUN_REAPER_ENABLED, but default-on is what
+    # "mandatory" means: a runner cannot opt out of heartbeating (the stamp
+    # is a request side effect) and central enforcement is on by default.
+    # The stale threshold is ``gateway_runner_stale_after_multiplier x
+    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`` (30s) -- default 3x = 90s. It must
+    # clear the runner's real idle cadence: the runner fetches its assignment
+    # every ``tick_interval_seconds`` (#2499, default 60s), re-stamping
+    # last_seen_at each tick even when idle, so 90s > 60s leaves ~1.5 poll
+    # cadences of slack. Invariant: keep multiplier x
+    # GATEWAY_LONGPOLL_MAX_WAIT_SECONDS >= the runner tick_interval_seconds
+    # or a healthy idle runner false-trips.
+    gateway_deadman_enabled: bool = True
+    gateway_deadman_tick_interval_seconds: int = Field(default=30, ge=5, le=3600)
+    gateway_runner_stale_after_multiplier: int = Field(default=3, ge=1, le=100)
     ui_keycloak_client_id: str = ""
     ui_keycloak_client_secret: str = ""
     ui_session_encryption_key: str = ""
@@ -1416,6 +1536,10 @@ def get_settings() -> Settings:
             "JWT_PLATFORM_ADMIN_CLAIM_NAME",
             "platform_admin",
         ),
+        jwt_runner_id_claim_name=os.environ.get(
+            "JWT_RUNNER_ID_CLAIM_NAME",
+            "runner_id",
+        ),
         keycloak_admin_url=os.environ.get("KEYCLOAK_ADMIN_URL", "").strip(),
         keycloak_admin_client_id=os.environ.get("KEYCLOAK_ADMIN_CLIENT_ID", "").strip(),
         keycloak_admin_client_secret=os.environ.get("KEYCLOAK_ADMIN_CLIENT_SECRET", "").strip(),
@@ -1430,7 +1554,11 @@ def get_settings() -> Settings:
         ),
         backplane_url=os.environ.get("BACKPLANE_URL", ""),
         mcp_resource_uri=os.environ.get("MCP_RESOURCE_URI", ""),
-        vault_addr=os.environ["VAULT_ADDR"],  # type: ignore[arg-type]
+        # Optional: a GSM-backend (Vault-free) install sets no VAULT_ADDR,
+        # and the configmap renders it blank for a `gsm` deploy — both
+        # coerce to None here so construction stays clean; the first
+        # actual Vault use raises VaultNotConfiguredError instead.
+        vault_addr=os.environ.get("VAULT_ADDR") or None,  # type: ignore[arg-type]
         vault_oidc_role=os.environ.get("VAULT_OIDC_ROLE", "meho-mcp"),
         vault_oidc_mount_path=os.environ.get("VAULT_OIDC_MOUNT_PATH", "jwt"),
         # ``VAULT_NAMESPACE`` distinguishes "unset" (OSS deployment, no
@@ -1445,6 +1573,32 @@ def get_settings() -> Settings:
             os.environ.get("VAULT_TIMEOUT_SECONDS", "10.0"),
         ),
         vault_scheduler_token=os.environ.get("VAULT_SCHEDULER_TOKEN", "").strip(),
+        vault_scheduler_token_file=os.environ.get("VAULT_SCHEDULER_TOKEN_FILE", "").strip(),
+        # Empty / whitespace-only ``CREDENTIAL_BACKEND`` falls back to the
+        # ``vault`` default so a blank chart value never yields an unknown
+        # ("") backend kind (``min_length=1`` on the field would reject it).
+        credential_backend=(os.environ.get("CREDENTIAL_BACKEND", "").strip() or "vault"),
+        # Optional impersonation SA for the GSM credential backend (#2230).
+        # Empty/whitespace-only ⇒ direct-ADC read (no impersonation).
+        gsm_impersonate_sa=os.environ.get("GSM_IMPERSONATE_SA", "").strip(),
+        # GCP project the GSM backend + health federation probe read under
+        # (#2231). Empty is correct for Vault installs; a gsm-backend install
+        # sets it via ``config.gsmProject``. Whitespace is stripped so a
+        # blank chart value round-trips as empty.
+        gsm_project=os.environ.get("GSM_PROJECT", "").strip(),
+        # GSM Workload Identity Federation (#2232). All optional; an empty
+        # ``GSM_WIF_AUDIENCE`` (the default) leaves the Phase-1 SA-direct path
+        # in force. ``GSM_WIF_SUBJECT_TOKEN_TYPE`` falls back to the OIDC-JWT
+        # type so a blank chart value never yields an empty (``min_length=1``
+        # rejected) token type.
+        gsm_wif_audience=os.environ.get("GSM_WIF_AUDIENCE", "").strip(),
+        gsm_wif_pool_id=os.environ.get("GSM_WIF_POOL_ID", "").strip(),
+        gsm_wif_provider_id=os.environ.get("GSM_WIF_PROVIDER_ID", "").strip(),
+        gsm_wif_service_account=os.environ.get("GSM_WIF_SERVICE_ACCOUNT", "").strip(),
+        gsm_wif_subject_token_type=(
+            os.environ.get("GSM_WIF_SUBJECT_TOKEN_TYPE", "").strip()
+            or "urn:ietf:params:oauth:token-type:jwt"
+        ),
         database_url=os.environ["DATABASE_URL"],
         database_pool_size=int(os.environ.get("DATABASE_POOL_SIZE", "10")),
         database_pool_timeout=float(
@@ -1504,6 +1658,16 @@ def get_settings() -> Settings:
         approval_allow_self_approval=parse_bool_env(
             os.environ.get("APPROVAL_ALLOW_SELF_APPROVAL", "false"),
         ),
+        # #2322 — approval-TTL default + sweeper knobs.
+        approval_default_ttl_seconds=int(
+            os.environ.get("APPROVAL_DEFAULT_TTL_SECONDS", str(14 * 24 * 3600)),
+        ),
+        approval_expiry_enabled=parse_bool_env(
+            os.environ.get("APPROVAL_EXPIRY_ENABLED", "true"),
+        ),
+        approval_expiry_tick_interval_seconds=int(
+            os.environ.get("APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS", "300"),
+        ),
         agent_run_reaper_enabled=parse_bool_env(
             os.environ.get("AGENT_RUN_REAPER_ENABLED", "true"),
         ),
@@ -1515,6 +1679,15 @@ def get_settings() -> Settings:
         ),
         agent_run_lease_ttl_seconds=int(
             os.environ.get("AGENT_RUN_LEASE_TTL_SECONDS", "60"),
+        ),
+        gateway_deadman_enabled=parse_bool_env(
+            os.environ.get("GATEWAY_DEADMAN_ENABLED", "true"),
+        ),
+        gateway_deadman_tick_interval_seconds=int(
+            os.environ.get("GATEWAY_DEADMAN_TICK_INTERVAL_SECONDS", "30"),
+        ),
+        gateway_runner_stale_after_multiplier=int(
+            os.environ.get("GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER", "3"),
         ),
         ui_keycloak_client_id=os.environ.get("UI_KEYCLOAK_CLIENT_ID", "").strip(),
         ui_keycloak_client_secret=os.environ.get("UI_KEYCLOAK_CLIENT_SECRET", "").strip(),

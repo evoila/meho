@@ -221,6 +221,61 @@ def test_mcp_require_session_id_non_truthy_stays_false(
         get_settings.cache_clear()
 
 
+# ---------------------------------------------------------------------------
+# #2277 — VAULT_ADDR optional for a Vault-free (gsm) install
+# ---------------------------------------------------------------------------
+
+
+def test_vault_addr_defaults_to_none_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A GSM-backend install sets no ``VAULT_ADDR`` → ``vault_addr is None``.
+
+    ``get_settings()`` must construct cleanly (no ``KeyError``,
+    no ``HttpUrl`` validation error) so the app lifespan boots
+    Vault-free.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.delenv("VAULT_ADDR", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().vault_addr is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vault_addr_blank_env_coerces_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank ``VAULT_ADDR`` (the configmap's ``""`` for a gsm deploy) → ``None``.
+
+    The Helm configmap now omits the key for a gsm install, but an
+    explicit empty string must still coerce to ``None`` rather than
+    tripping ``HttpUrl`` validation — belt-and-suspenders with the
+    chart guard.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("VAULT_ADDR", "")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().vault_addr is None
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vault_addr_set_env_is_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Vault install with ``VAULT_ADDR`` set is unchanged — value flows through."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("VAULT_ADDR", "https://vault.example")
+    get_settings.cache_clear()
+    try:
+        assert str(get_settings().vault_addr).startswith("https://vault.example")
+    finally:
+        get_settings.cache_clear()
+
+
 def test_result_handle_max_spill_rows_defaults_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -380,3 +435,189 @@ def test_vault_tenant_scope_prefix_rejects_malformed_templates(raw: str) -> None
             vault_kv_tenant_scope_prefix=raw,
         )
     assert "VAULT_KV_TENANT_SCOPE_PREFIX" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# #2229 (Initiative #2227) — CREDENTIAL_BACKEND env knob
+# ---------------------------------------------------------------------------
+
+
+def test_credential_backend_defaults_to_vault_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``CREDENTIAL_BACKEND`` → ``vault`` (zero migration for existing installs)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("CREDENTIAL_BACKEND", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().credential_backend == "vault"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_credential_backend_reads_env_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set ``CREDENTIAL_BACKEND`` names the schemeless default backend."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().credential_backend == "gsm"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("raw", ["", "   ", "\n"])
+def test_credential_backend_blank_env_falls_back_to_vault(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """A blank / whitespace-only value falls back to ``vault``, never an empty kind.
+
+    A blank chart value must not yield an unknown ("") backend kind — the
+    ``min_length=1`` field would reject it and every credential read would
+    fail. The env loader coerces blank to the ``vault`` default.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("CREDENTIAL_BACKEND", raw)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().credential_backend == "vault"
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #2230 (Initiative #2227) — GSM_IMPERSONATE_SA env knob
+# ---------------------------------------------------------------------------
+
+
+def test_gsm_impersonate_sa_defaults_to_empty_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``GSM_IMPERSONATE_SA`` → empty (direct-ADC read, no impersonation)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("GSM_IMPERSONATE_SA", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_impersonate_sa == ""
+    finally:
+        get_settings.cache_clear()
+
+
+def test_gsm_impersonate_sa_reads_and_strips_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set ``GSM_IMPERSONATE_SA`` names the SA to impersonate; whitespace is stripped."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("GSM_IMPERSONATE_SA", "  reader@proj.iam.gserviceaccount.com \n")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_impersonate_sa == "reader@proj.iam.gserviceaccount.com"
+    finally:
+        get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #2231 (Initiative #2227) — GSM_PROJECT env knob
+# ---------------------------------------------------------------------------
+
+
+def test_gsm_project_defaults_to_empty_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``GSM_PROJECT`` → empty (correct for every Vault install)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("GSM_PROJECT", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_project == ""
+    finally:
+        get_settings.cache_clear()
+
+
+# #2232 (Initiative #2227) — GSM_WIF_* Workload Identity Federation knobs
+# ---------------------------------------------------------------------------
+
+
+def test_gsm_wif_defaults_are_empty_or_oidc_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset GSM_WIF_* ⇒ empty audience/pool/provider/SA (SA-direct path) and
+    the OIDC-JWT subject-token type default."""
+    _base_env(monkeypatch)
+    for key in (
+        "GSM_WIF_AUDIENCE",
+        "GSM_WIF_POOL_ID",
+        "GSM_WIF_PROVIDER_ID",
+        "GSM_WIF_SERVICE_ACCOUNT",
+        "GSM_WIF_SUBJECT_TOKEN_TYPE",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.gsm_wif_audience == ""
+        assert settings.gsm_wif_pool_id == ""
+        assert settings.gsm_wif_provider_id == ""
+        assert settings.gsm_wif_service_account == ""
+        assert settings.gsm_wif_subject_token_type == "urn:ietf:params:oauth:token-type:jwt"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_gsm_project_reads_and_strips_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set ``GSM_PROJECT`` names the GCP project the GSM backend reads under; stripped."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("GSM_PROJECT", "  my-gcp-project \n")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_project == "my-gcp-project"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_gsm_wif_reads_and_strips_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Set GSM_WIF_* values are read and surrounding whitespace stripped."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv(
+        "GSM_WIF_AUDIENCE",
+        "  //iam.googleapis.com/projects/123/locations/global/"
+        "workloadIdentityPools/meho-pool/providers/keycloak \n",
+    )
+    monkeypatch.setenv("GSM_WIF_POOL_ID", " meho-pool ")
+    monkeypatch.setenv("GSM_WIF_PROVIDER_ID", " keycloak ")
+    monkeypatch.setenv("GSM_WIF_SERVICE_ACCOUNT", " reader@proj.iam.gserviceaccount.com ")
+    monkeypatch.setenv("GSM_WIF_SUBJECT_TOKEN_TYPE", " urn:ietf:params:oauth:token-type:id_token ")
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.gsm_wif_audience == (
+            "//iam.googleapis.com/projects/123/locations/global/"
+            "workloadIdentityPools/meho-pool/providers/keycloak"
+        )
+        assert settings.gsm_wif_pool_id == "meho-pool"
+        assert settings.gsm_wif_provider_id == "keycloak"
+        assert settings.gsm_wif_service_account == "reader@proj.iam.gserviceaccount.com"
+        assert settings.gsm_wif_subject_token_type == "urn:ietf:params:oauth:token-type:id_token"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_gsm_wif_subject_token_type_blank_falls_back_to_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank GSM_WIF_SUBJECT_TOKEN_TYPE falls back to the OIDC-JWT type
+    rather than an empty (min_length=1 rejected) value."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("GSM_WIF_SUBJECT_TOKEN_TYPE", "   ")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().gsm_wif_subject_token_type == "urn:ietf:params:oauth:token-type:jwt"
+    finally:
+        get_settings.cache_clear()

@@ -1,26 +1,36 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for :class:`VcfOperationsConnector` (G3.6-T1 #829).
+"""Unit tests for :class:`VcfOperationsConnector` (G3.6-T1 #829, rebuilt #2395).
 
-Exercises HTTP Basic auth, the optional ``auth-source`` query parameter,
-per-target credential isolation, the auth_model boundary gate, and the
-fingerprint/probe shapes against mocked vROps ``/suite-api/api/*`` endpoints.
+Exercises the acquired-token (``OpsToken``) session auth VCF Operations
+9.0.2 requires — stateless HTTP Basic is rejected by the live appliance:
 
-Auth: no session token — HTTP Basic sent on every request. Credentials
-cached per target so Vault is only queried once per target per connector
-instance lifetime. The ``auth-source`` query parameter rides on every
-authenticated request when ``target.auth_source`` is set; absent when unset.
+* ``POST /suite-api/api/auth/token/acquire`` with a JSON body
+  ``{username, password}`` (plus ``authSource`` when the target federates
+  identity).
+* Response body ``{"token": "<t>", "validity": ..., "expiresAt": ...,
+  "roles": []}`` — ``token`` is extracted and cached per target.
+* Downstream auth header: ``Authorization: OpsToken <token>`` (never Basic,
+  never Bearer).
+* ``invalidate_session`` — the duck-typed dispatch-path eviction hook (#2067).
+* Per-target token isolation, the ``auth_model`` boundary gate, and the
+  fingerprint/probe shapes against a mocked vROps ``/suite-api/api/*``.
+
+The contract mirrors :mod:`tests.test_connectors_vcf_logs_auth` with vROps
+divergence: the acquire path/body/response shape, the ``authSource`` field on
+the acquire body (not a per-request query param), and the ``OpsToken`` scheme.
 """
 
 from __future__ import annotations
 
-import asyncio
-import base64
+import json
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from typing import Any
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
 import respx
 
@@ -37,6 +47,24 @@ from meho_backplane.connectors.vcf_operations import (
     VcfOperationsConnector,
     VcfOperationsTargetLike,
 )
+
+# ---------------------------------------------------------------------------
+# OpsToken session-establish path + canned acquire response (#2395).
+# ---------------------------------------------------------------------------
+
+_ACQUIRE_PATH = "/suite-api/api/auth/token/acquire"
+_VERSIONS_PATH = "/suite-api/api/versions/current"
+_OPS_TOKEN = "vrops-ops-token-abc-123"
+
+
+def _acquire_response(token: str = _OPS_TOKEN) -> dict[str, Any]:
+    """A canonical ``token/acquire`` 200 body carrying *token*."""
+    return {
+        "token": token,
+        "validity": 1470421325035,
+        "expiresAt": "Friday, August 5, 2016 6:22:05 PM UTC",
+        "roles": [],
+    }
 
 
 def _make_operator(raw_jwt: str = "op.test.jwt") -> Operator:
@@ -128,14 +156,6 @@ def _make_connector() -> VcfOperationsConnector:
     return VcfOperationsConnector(credentials_loader=_stub_loader)
 
 
-def _decode_basic_auth(authorization_header: str) -> tuple[str, str]:
-    """Decode an ``Authorization: Basic <b64>`` header into (username, password)."""
-    assert authorization_header.startswith("Basic ")
-    decoded = base64.b64decode(authorization_header[6:]).decode()
-    username, _, password = decoded.partition(":")
-    return username, password
-
-
 # ---------------------------------------------------------------------------
 # ABC + registration plumbing
 # ---------------------------------------------------------------------------
@@ -170,6 +190,8 @@ def test_default_credentials_loader_fails_closed_without_operator_jwt(
     silently falling back to a backplane identity. End-to-end coverage
     of the wired read lives in ``test_connectors_vcf_operations_credread.py``.
     """
+    import asyncio
+
     from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
     from meho_backplane.connectors.vcf_operations.session import (
         load_credentials_from_vault,
@@ -196,76 +218,233 @@ def test_default_credentials_loader_fails_closed_without_operator_jwt(
 
 
 # ---------------------------------------------------------------------------
-# HTTP Basic auth header
+# Session establishment — happy path (OpsToken)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_auth_headers_sends_basic_auth() -> None:
-    """auth_headers() produces Authorization: Basic with stub credentials."""
-    connector = _make_connector()
-    headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+async def test_auth_headers_acquires_token_and_returns_opstoken() -> None:
+    """First auth_headers call POSTs JSON creds to token/acquire and returns OpsToken.
 
-    assert "Authorization" in headers
-    assert headers["Authorization"].startswith("Basic ")
-    username, password = _decode_basic_auth(headers["Authorization"])
-    assert username == "admin"
-    assert password == "stub-password"
+    Asserts the load-bearing auth contract: a JSON body (NOT form, NOT HTTP
+    Basic) with ``username`` + ``password`` (no ``authSource`` for a
+    local-realm target), the acquire POST carrying no stale Authorization
+    header, and the returned token presented as ``Authorization: OpsToken``.
+    """
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert acquire_route.called and acquire_route.call_count == 1
+    assert headers == {"Authorization": f"OpsToken {_OPS_TOKEN}"}
+
+    request = acquire_route.calls[0].request
+    assert request.headers.get("content-type", "").startswith("application/json")
+    body = json.loads(request.read().decode())
+    assert body == {"username": "admin", "password": "stub-password"}
+    # The acquire POST itself must NOT carry a stale Authorization header.
+    assert "authorization" not in {k.lower() for k in request.headers}
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_carries_authsource_in_acquire_body_when_set() -> None:
+    """target.auth_source lands as ``authSource`` in the token/acquire body."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vrops-ad.test.invalid") as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        headers = await connector.auth_headers(_TARGET_WITH_AUTH_SOURCE, operator=_make_operator())
+
+    assert headers == {"Authorization": f"OpsToken {_OPS_TOKEN}"}
+    body = json.loads(acquire_route.calls[0].request.read().decode())
+    assert body == {
+        "username": "admin",
+        "password": "stub-password",
+        "authSource": "corp-ad",
+    }
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_auth_headers_reuses_cached_session_across_calls() -> None:
+    """Second auth_headers call against the same target does NOT re-POST token/acquire."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert h1 == h2 == {"Authorization": f"OpsToken {_OPS_TOKEN}"}
+    # The load-bearing assertion — exactly one token/acquire for two calls.
+    assert acquire_route.call_count == 1
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_per_target_isolation_keeps_session_tokens_separate() -> None:
+    """Two targets get two distinct cached tokens; no cross-target leakage."""
+    connector = _make_connector()
+
+    async with respx.mock() as mock:
+        route_a = mock.post("https://vrops-a.test.invalid" + _ACQUIRE_PATH).respond(
+            200, json=_acquire_response("token-a")
+        )
+        route_b = mock.post("https://vrops-b.test.invalid" + _ACQUIRE_PATH).respond(
+            200, json=_acquire_response("token-b")
+        )
+
+        h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
+
+    assert route_a.called and route_b.called
+    assert h_a == {"Authorization": "OpsToken token-a"}
+    assert h_b == {"Authorization": "OpsToken token-b"}
+    assert connector._session_tokens == {
+        target_cache_key(_TARGET_A): "token-a",
+        target_cache_key(_TARGET_B): "token-b",
+    }
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_public_invalidate_session_evicts_only_the_targets_slot() -> None:
+    """Public ``invalidate_session`` (the #2067 dispatch-path hook) evicts one slot.
+
+    Delegates to ``_invalidate_session``; seeds two targets and asserts only
+    A's token is dropped, so the dispatcher's re-acquire of a dispatched vROps
+    op preserves per-``(tenant_id, target.id)`` isolation.
+    """
+    connector = _make_connector()
+    key_a = target_cache_key(_TARGET_A)
+    key_b = target_cache_key(_TARGET_B)
+    connector._session_tokens[key_a] = "token-a"
+    connector._session_tokens[key_b] = "token-b"
+
+    await connector.invalidate_session(_TARGET_A)
+
+    assert connector._session_tokens == {key_b: "token-b"}
+    # No-op on an already-evicted target.
+    await connector.invalidate_session(_TARGET_A)
+    assert connector._session_tokens == {key_b: "token-b"}
     await connector.aclose()
 
 
 # ---------------------------------------------------------------------------
-# Credential caching
+# Session establishment — failure modes
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_auth_headers_reuses_cached_credentials_across_calls() -> None:
-    """Second auth_headers call against the same target does NOT re-invoke the loader."""
-    call_count = 0
+async def test_acquire_401_surfaces_session_login_error_naming_target() -> None:
+    """401 from token/acquire raises SessionLoginError (ConnectorAuthError) naming the target."""
+    from meho_backplane.connectors.vcf_operations import SessionLoginError
 
-    async def _counting_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(401, json={"message": "invalid_credentials"})
+        with pytest.raises(SessionLoginError, match=r"vrops-a") as exc_info:
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert "401" in str(exc_info.value)
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_invalidate_credentials_reloads_after_restage() -> None:
+    """#2396: invalidate_credentials drops the credential cache so a restage is re-read.
+
+    Establish-failure flow (post-#2395 OpsToken session): the first acquire is
+    rejected because the staged credential is wrong, so no session token is
+    cached and the connector still holds the wrong credential bytes in the
+    shared :class:`CredentialsCache` (read at line 314 *before* the acquire).
+    Without eviction the next ``auth_headers`` re-reads that cached wrong
+    credential (loader call-count stays 1) and re-acquires with it forever —
+    the bug #2396 fixes. The dispatcher's establish-auth arm calls the new
+    duck-typed ``invalidate_credentials`` hook (which delegates to
+    :meth:`CredentialsCache.invalidate`); after the operator restages, the next
+    ``auth_headers`` re-runs the loader (call-count 2), reads the corrected
+    credential, and the acquire succeeds — with **no backplane restart**. Red
+    before #2396: ``invalidate_credentials`` did not exist.
+    """
+    from meho_backplane.connectors.vcf_operations import SessionLoginError
+
+    call_count = 0
+    creds = {"username": "svc-old", "password": "old-pass"}
+
+    async def _swappable_loader(_target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
         nonlocal call_count
         call_count += 1
-        return {"username": "admin", "password": "stub-password"}
+        return dict(creds)
 
-    connector = VcfOperationsConnector(credentials_loader=_counting_loader)
-    h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    connector = VcfOperationsConnector(credentials_loader=_swappable_loader)
 
-    assert h1 == h2
+    # The staged credential is wrong: the first token/acquire is rejected.
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(401, json={"message": "invalid_credentials"})
+        with pytest.raises(SessionLoginError):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    # Loader ran once and the wrong credential is now cached (read before acquire).
     assert call_count == 1
+
+    # The dispatcher evicts the cached (wrong) credential on the establish-auth failure.
+    await connector.invalidate_credentials(_TARGET_A)
+
+    # The operator restages the corrected credential out of band.
+    creds.update(username="svc-new", password="new-pass")
+
+    # Next dispatch re-reads Vault (loader call-count 2) and the acquire succeeds.
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        headers = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert call_count == 2
+    assert acquire_route.called
+    assert headers == {"Authorization": f"OpsToken {_OPS_TOKEN}"}
     await connector.aclose()
-
-
-# ---------------------------------------------------------------------------
-# Per-target isolation
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_per_target_isolation_keeps_credentials_separate() -> None:
-    """Two targets get two distinct credential cache entries; no cross-target leakage."""
-    call_log: list[str] = []
+async def test_acquire_missing_token_in_body_raises() -> None:
+    """A 2xx response without a ``token`` field raises naming the target.
 
-    async def _tracking_loader(target: VcfTargetLike, _operator: Operator) -> dict[str, str]:
-        call_log.append(target.name)
-        return {"username": f"svc-{target.name}", "password": "pass"}
+    A misbehaving proxy can 200 with an empty body or the wrong field name;
+    the connector fails loudly rather than caching an empty token that would
+    silently 401 every subsequent call.
+    """
+    from meho_backplane.connectors.vcf_operations import SessionLoginError
 
-    connector = VcfOperationsConnector(credentials_loader=_tracking_loader)
-    h_a = await connector.auth_headers(_TARGET_A, operator=_make_operator())
-    h_b = await connector.auth_headers(_TARGET_B, operator=_make_operator())
+    connector = _make_connector()
 
-    username_a, _ = _decode_basic_auth(h_a["Authorization"])
-    username_b, _ = _decode_basic_auth(h_b["Authorization"])
-    assert username_a == "svc-vrops-a"
-    assert username_b == "svc-vrops-b"
-    assert call_log == ["vrops-a", "vrops-b"]
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"validity": 1470421325035})
+        with pytest.raises(SessionLoginError, match=r"vrops-a"):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_acquire_empty_token_raises() -> None:
+    """A 2xx response with an empty-string token raises naming the target."""
+    from meho_backplane.connectors.vcf_operations import SessionLoginError
+
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json={"token": "", "validity": 1})
+        with pytest.raises(SessionLoginError, match=r"vrops-a"):
+            await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
     await connector.aclose()
 
 
 # ---------------------------------------------------------------------------
-# Credential loading failure modes
+# Credential loading failure modes (raised before any acquire round-trip)
 # ---------------------------------------------------------------------------
 
 
@@ -296,7 +475,7 @@ async def test_loader_missing_username_key_raises_runtime_error_naming_target() 
 
 
 # ---------------------------------------------------------------------------
-# Auth model gating
+# Auth model gating (rejected before any acquire round-trip)
 # ---------------------------------------------------------------------------
 
 
@@ -331,14 +510,16 @@ async def test_auth_headers_accepts_none_auth_model_for_pre_g03_targets() -> Non
     """auth_model=None (pre-G0.3 column-not-yet-populated) is accepted."""
     target = _StubTarget(
         name="vrops-pre-g03",
-        host="vrops.test.invalid",
+        host="vrops-pre-g03.test.invalid",
         port=443,
         secret_ref="vrops/pre-g03",
         auth_model=None,
     )
     connector = _make_connector()
-    headers = await connector.auth_headers(target, operator=_make_operator())
-    assert headers["Authorization"].startswith("Basic ")
+    async with respx.mock(base_url="https://vrops-pre-g03.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response("pre-g03-token"))
+        headers = await connector.auth_headers(target, operator=_make_operator())
+    assert headers == {"Authorization": "OpsToken pre-g03-token"}
     await connector.aclose()
 
 
@@ -347,80 +528,16 @@ async def test_auth_headers_accepts_enum_member_for_auth_model() -> None:
     """An AuthModel enum member (not just its string value) is accepted."""
     target = _StubTarget(
         name="vrops-enum",
-        host="vrops.test.invalid",
+        host="vrops-enum.test.invalid",
         port=443,
         secret_ref="vrops/enum",
     )
     target.auth_model = AuthModel.SHARED_SERVICE_ACCOUNT  # type: ignore[assignment]
     connector = _make_connector()
-    headers = await connector.auth_headers(target, operator=_make_operator())
-    assert headers["Authorization"].startswith("Basic ")
-    await connector.aclose()
-
-
-# ---------------------------------------------------------------------------
-# auth-source query parameter (vROps-specific)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_auth_source_appended_as_query_param_when_set() -> None:
-    """An authenticated request against a target with auth_source carries ?auth-source=..."""
-    connector = _make_connector()
-
-    async with respx.mock(base_url="https://vrops-ad.test.invalid") as mock:
-        route = mock.get("/suite-api/api/versions/current").respond(
-            200,
-            json={"releaseName": "9.0.0", "buildNumber": 12345678},
-        )
-        await connector.fingerprint(_TARGET_WITH_AUTH_SOURCE)
-
-    assert route.called
-    sent_url = route.calls[0].request.url
-    assert sent_url.params.get("auth-source") == "corp-ad"
-    await connector.aclose()
-
-
-@pytest.mark.asyncio
-async def test_auth_source_omitted_from_query_when_unset() -> None:
-    """Targets without auth_source send no auth-source query parameter."""
-    connector = _make_connector()
-
-    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
-        route = mock.get("/suite-api/api/versions/current").respond(
-            200,
-            json={"releaseName": "9.0.0", "buildNumber": 12345678},
-        )
-        await connector.fingerprint(_TARGET_A)
-
-    assert route.called
-    sent_url = route.calls[0].request.url
-    assert "auth-source" not in sent_url.params
-    await connector.aclose()
-
-
-@pytest.mark.asyncio
-async def test_auth_source_empty_string_is_treated_as_unset() -> None:
-    """``auth_source=""`` is silent-omitted — vROps rejects ?auth-source= empty values."""
-    target = _StubTarget(
-        name="vrops-empty-source",
-        host="vrops-empty-source.test.invalid",
-        port=443,
-        secret_ref="vrops/empty-source",
-        auth_source="",
-    )
-    connector = _make_connector()
-
-    async with respx.mock(base_url="https://vrops-empty-source.test.invalid") as mock:
-        route = mock.get("/suite-api/api/versions/current").respond(
-            200,
-            json={"releaseName": "9.0.0", "buildNumber": 12345678},
-        )
-        await connector.fingerprint(target)
-
-    assert route.called
-    sent_url = route.calls[0].request.url
-    assert "auth-source" not in sent_url.params
+    async with respx.mock(base_url="https://vrops-enum.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response("enum-token"))
+        headers = await connector.auth_headers(target, operator=_make_operator())
+    assert headers == {"Authorization": "OpsToken enum-token"}
     await connector.aclose()
 
 
@@ -435,7 +552,8 @@ async def test_fingerprint_canonical_shape_on_reachable_target() -> None:
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
-        mock.get("/suite-api/api/versions/current").respond(
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        mock.get(_VERSIONS_PATH).respond(
             200,
             json={
                 "releaseName": "9.0.0",
@@ -461,7 +579,8 @@ async def test_fingerprint_without_humanly_readable_name() -> None:
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
-        mock.get("/suite-api/api/versions/current").respond(
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        mock.get(_VERSIONS_PATH).respond(
             200,
             json={"releaseName": "9.0.0", "buildNumber": 23456789},
         )
@@ -476,14 +595,12 @@ async def test_fingerprint_without_humanly_readable_name() -> None:
 
 @pytest.mark.asyncio
 async def test_fingerprint_unreachable_returns_reachable_false_with_structured_error() -> None:
-    """Transport/status failure returns reachable=False with extras['error']."""
+    """A 401 on the read (after a successful acquire) returns reachable=False with error."""
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
-        mock.get("/suite-api/api/versions/current").respond(
-            401,
-            json={"error": "unauthorised"},
-        )
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        mock.get(_VERSIONS_PATH).respond(401, json={"error": "unauthorised"})
         fp = await connector.fingerprint(_TARGET_A)
 
     assert fp.vendor == "vmware"
@@ -492,6 +609,20 @@ async def test_fingerprint_unreachable_returns_reachable_false_with_structured_e
     assert fp.probe_method == "GET /suite-api/api/versions/current"
     error = fp.extras["error"]
     assert "HTTPStatusError" in error or "401" in error
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_unreachable_on_acquire_failure() -> None:
+    """A 401 at token/acquire also yields reachable=False (session establish failed)."""
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(401, json={"message": "invalid_credentials"})
+        fp = await connector.fingerprint(_TARGET_A)
+
+    assert fp.reachable is False
+    assert "error" in fp.extras
     await connector.aclose()
 
 
@@ -506,7 +637,8 @@ async def test_probe_returns_ok_true_on_reachable_target() -> None:
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
-        mock.get("/suite-api/api/versions/current").respond(
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        mock.get(_VERSIONS_PATH).respond(
             200,
             json={"releaseName": "9.0.0", "buildNumber": 23456789},
         )
@@ -523,9 +655,10 @@ async def test_probe_returns_ok_false_with_reason_on_transport_error() -> None:
     connector = _make_connector()
 
     async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
         # 401 is non-retryable (4xx) — surfaces immediately on the
         # fingerprint call which probe() delegates to.
-        mock.get("/suite-api/api/versions/current").respond(401)
+        mock.get(_VERSIONS_PATH).respond(401)
         result = await connector.probe(_TARGET_A)
 
     assert result.ok is False
@@ -540,23 +673,61 @@ async def test_probe_returns_ok_false_with_reason_on_transport_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_aclose_clears_credential_cache_and_pool() -> None:
-    """aclose() clears the in-memory credential cache and tears down the httpx pool."""
+async def test_aclose_clears_session_and_credential_caches_and_pool() -> None:
+    """aclose() clears the in-memory session + credential caches and tears down the pool."""
     connector = _make_connector()
-    await connector.auth_headers(_TARGET_A, operator=_make_operator())
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert connector._session_tokens == {target_cache_key(_TARGET_A): _OPS_TOKEN}
     assert target_cache_key(_TARGET_A) in connector._creds.cached_targets
     await connector.aclose()
+    assert connector._session_tokens == {}
     assert connector._creds.cached_targets == frozenset()
     assert connector._clients == {}
 
 
 @pytest.mark.asyncio
-async def test_aclose_with_no_cached_credentials_is_a_noop() -> None:
-    """A fresh connector with no credentials established closes cleanly."""
+async def test_aclose_with_no_cached_session_is_a_noop() -> None:
+    """A fresh connector with no session established closes cleanly."""
     connector = _make_connector()
     await connector.aclose()
     assert connector._clients == {}
+    assert connector._session_tokens == {}
     assert connector._creds.cached_targets == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# Downstream 401 re-acquire — belt-and-suspenders on the httpx side
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_invalidate_then_auth_headers_reacquires_a_fresh_token() -> None:
+    """After ``invalidate_session``, the next auth_headers re-acquires a fresh token.
+
+    The unit-level shape of the #2067 dispatch-path recovery: evicting the
+    cached token forces a fresh ``token/acquire`` on the next call. The
+    end-to-end 401 → re-dispatch recovery is pinned in
+    ``test_connectors_vcf_operations_credread.py``.
+    """
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vrops-a.test.invalid") as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH)
+        acquire_route.side_effect = [
+            httpx.Response(200, json=_acquire_response("token-first")),
+            httpx.Response(200, json=_acquire_response("token-second")),
+        ]
+        h1 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+        await connector.invalidate_session(_TARGET_A)
+        h2 = await connector.auth_headers(_TARGET_A, operator=_make_operator())
+
+    assert h1 == {"Authorization": "OpsToken token-first"}
+    assert h2 == {"Authorization": "OpsToken token-second"}
+    assert acquire_route.call_count == 2
+    await connector.aclose()
 
 
 # ---------------------------------------------------------------------------

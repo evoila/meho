@@ -3,23 +3,28 @@
 
 # syntax=docker/dockerfile:1.7
 
-# ---------- Base image (digest-pinned manifest list) ------------------------
+# ---------- Base image (digest-pinned, tag-qualified manifest list) ---------
 # Pin the base image by its OCI manifest-list digest, not by the floating
-# `:3.12-slim` tag. The manifest-list digest indirects into the per-arch
-# image (amd64, arm64, …) automatically when buildx builds for multiple
-# `--platform` targets — same line, correct arch, byte-identical input.
+# `:3.12-slim` tag alone. The manifest-list digest indirects into the
+# per-arch image (amd64, arm64, …) automatically when buildx builds for
+# multiple `--platform` targets — same line, correct arch, byte-identical
+# input.
 #
-# Refresh policy: every digest bump lands in a dedicated PR titled
-# "chore(backend): bump python:3.12-slim base digest to <new>" so the
-# supply-chain audit trail records when and why the input moved. Run
-# `docker manifest inspect python:3.12-slim` (or the Docker Hub `tags`
-# API for the current digest) to verify before bumping.
+# The pin is written *inline on both FROM lines* as
+# `python:3.12-slim@sha256:<digest>` (tag + digest) rather than via an
+# `ARG`, because Dependabot's docker ecosystem only bumps literal,
+# tag-qualified `FROM` references — it does not resolve an ARG-held
+# digest (dependabot-core#2057 / #4597). With the literal form the
+# docker block in `.github/dependabot.yml` opens an automatic
+# `chore(deps)` PR whenever upstream rebuilds the tag, so the digest no
+# longer silently ages. Both FROM lines carry the SAME digest and move
+# together in that PR. The uv installer image pin below is refreshed via
+# the separate dedicated-PR convention documented there.
 #
-# Pinned digest : sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe
-# Recorded on   : 2026-05-10
-# Source        : docker.io/library/python:3.12-slim (Debian bookworm,
+# Pinned digest : sha256:c3d81d25b3154142b0b42eb1e61300024426268edeb5b5a26dd7ddf64d9daf28
+# Recorded on   : 2026-07-15
+# Source        : docker.io/library/python:3.12-slim (Debian trixie,
 #                 Python 3.12.x, multi-arch manifest list)
-ARG PYTHON_BASE_DIGEST=sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe
 
 # ---------- Builder ----------------------------------------------------------
 # Resolves and installs locked dependencies into /app/.venv. The two-step
@@ -38,7 +43,7 @@ ARG PYTHON_BASE_DIGEST=sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa
 # `docs/codebase/backend.md`). `BUILDPLATFORM` and `TARGETPLATFORM` are
 # auto-populated by BuildKit and surfaced in the build log so CI runs
 # show which arch each layer compiled on.
-FROM python@${PYTHON_BASE_DIGEST} AS builder
+FROM python:3.12-slim@sha256:c3d81d25b3154142b0b42eb1e61300024426268edeb5b5a26dd7ddf64d9daf28 AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -46,8 +51,9 @@ RUN echo "Builder running on BUILDPLATFORM=${BUILDPLATFORM} for TARGETPLATFORM=$
 
 # uv installer image — pinned to a specific version AND manifest-list digest
 # so the build is byte-identical across rebuilds and the supply-chain audit
-# names the exact uv binary. Refresh in the same dedicated PR that bumps
-# PYTHON_BASE_DIGEST when the surrounding toolchain moves.
+# names the exact uv binary. Refresh in a dedicated PR when the surrounding
+# toolchain moves (this pin is NOT tracked by the Dependabot docker block,
+# which watches the `python:3.12-slim` base FROM lines).
 #
 # Pinned uv     : 0.11.12
 # Manifest-list : sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7
@@ -144,10 +150,18 @@ RUN set -eux; \
     test -s "${UI_SP}/static/dist/tailwind.css"
 
 # ---------- Runtime ----------------------------------------------------------
-FROM python@${PYTHON_BASE_DIGEST} AS runtime
+FROM python:3.12-slim@sha256:c3d81d25b3154142b0b42eb1e61300024426268edeb5b5a26dd7ddf64d9daf28 AS runtime
 
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).
 RUN useradd --system --uid 1001 --gid 0 --no-create-home --shell /usr/sbin/nologin meho
+
+# Remove the base image's own pip (site-packages pip 25.0.1) while still
+# root. Nothing in this stage runs pip — dependencies are installed into
+# /app/.venv by the builder via uv, and the runtime is a uvicorn CMD — so
+# the base pip is dead weight whose CVEs (e.g. CVE-2026-8643) accrue on
+# every Trivy scan with no code path to reach. Uninstalling is strictly
+# better than upgrading: it needs no recurring re-bump.
+RUN python -m pip uninstall -y pip
 
 # Build-identity stamps surfaced via GET /version. CI passes these via
 # `docker build --build-arg GIT_SHA=$(git rev-parse HEAD) \
@@ -236,7 +250,7 @@ USER 1001:0
 
 EXPOSE 8000
 
-# Two execution modes share this image:
+# Three execution modes share this image:
 #
 # 1. **Serve** (default) — uvicorn runs the FastAPI app on :8000. This
 #    is what the Deployment rolls; the CMD below is the unmodified
@@ -260,6 +274,24 @@ EXPOSE 8000
 #    plus ``env: [{name: DATABASE_URL, valueFrom: ...}]``. The runner
 #    exits 0 on success, 1 on failure; ``backoffLimit`` on the Job
 #    handles retries.
+#
+# 3. **Runner** — the push-only satellite runner (Initiative #2415)
+#    overrides the container command to run
+#    ``python -m meho_backplane.runner``. It is headless: no FastAPI
+#    app, no uvicorn, no inbound listener, and no local Postgres /
+#    Valkey. It dials the central instance outbound, executes
+#    centrally-authorized read-only operations locally against the same
+#    connector surface, and reports results back — with an on-disk retry
+#    spool covering uplink outages. Like Migrate, it runs from this same
+#    image via command override; no extra Dockerfile stage is needed.
+#
+#    The runner Deployment spec passes:
+#        command: ["python"]
+#        args: ["-m", "meho_backplane.runner"]
+#    plus ``env: [{name: MEHO_RUNNER_CENTRAL_URL, ...}, ...]`` (the
+#    ``MEHO_RUNNER_*`` namespace; no chassis env). It exits 0 on
+#    SIGTERM (clean tick-loop unwind) and 1 on a configuration error
+#    naming the missing/invalid variable.
 #
 # Exec form forwards SIGTERM cleanly to uvicorn (k8s pod-shutdown contract).
 #

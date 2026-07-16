@@ -32,6 +32,63 @@ truth:
 The durable state is one `approval_request` row (table created by
 `backend/alembic/versions/0023_create_approval_request.py`, T4 #817).
 
+## Approval-TTL lifecycle (#2322)
+
+Parked approvals expire on a TTL so a pending queue cannot grow without
+bound. The lifecycle has two halves, both wired end-to-end by #2322 (the
+`expired` status, the `expires_at` column, and `expire_stale_requests`
+all pre-existed but had **zero production callers** and no park path ever
+stamped a deadline — the machinery was shipped but inert):
+
+1. **Stamp at park.** `create_pending_request` now stamps every parked
+   row with `expires_at = created_at + APPROVAL_DEFAULT_TTL` (setting
+   `approval_default_ttl_seconds`, default 14 days) so no row is ever
+   parked with a null deadline. This covers **every** transport
+   uniformly — REST, MCP, and run-bound dispatches all park through the
+   dispatcher's `_handle_needs_approval` → `create_pending_request`, and
+   the composite park path calls the same function. An explicit caller
+   `expires_at` is honoured but **capped** at that same ceiling
+   (`_bounded_expires_at`): the single configured TTL doubles as the
+   upper bound, so a surface can ask for a *shorter* deadline (e.g. a
+   preflight probe) but not an unbounded-lived one. There is deliberately
+   no per-op TTL policy — one global default is the whole knob (substrate
+   minimalism, #1177).
+
+2. **Sweep periodically.** `operations/approval_expiry.py` runs a
+   dedicated background sweeper (mirroring the sibling
+   `agents/grant_expiry.py` and `memory/expiry.py` sweepers): a
+   lifespan-owned `asyncio` task on a fixed cadence
+   (`approval_expiry_tick_interval_seconds`, default 300s), gated on
+   `APPROVAL_EXPIRY_ENABLED` so an operator running an external sweep does
+   not double-expire. Each tick enumerates tenants and calls
+   `expire_stale_requests` under a per-tenant **system operator**
+   (`system:approval-expiry`, `OPERATOR` role) — the same per-tenant
+   system-operator shape `topology/scheduler.py` uses, required because
+   `expire_stale_requests` is tenant-scoped on `operator.tenant_id`. It
+   is a *separate* loop from the cron/one-off agent scheduler
+   (`scheduler/loop.py`), independent of `SCHEDULER_ENABLED`, because the
+   established convention for a governance-surface expiry sweeper is its
+   own opt-out + cadence.
+
+**Legacy null-expiry rows.** Rows parked before #2322 carry
+`expires_at IS NULL`. `expire_stale_requests` takes an optional
+`default_ttl`; when the sweeper passes it, a null-expiry row is coalesced
+against `created_at + default_ttl` (expressed as
+`created_at <= now - default_ttl` so the predicate binds two plain
+datetimes and stays dialect-portable, the same discipline the
+grant-expiry sweeper uses) and, when that coalesced deadline has passed,
+the row is expired and its `expires_at` is backfilled to the coalesced
+value so the decision audit row and the persisted row agree. No schema
+change or migration is needed — the coalesce lives entirely in the query
+predicate.
+
+Expired rows leave the default `?status=pending` view (the status filter
+already excludes non-pending rows) and are visible under `?status=expired`
+on every read surface (REST, MCP, UI queue). An `expired` row is
+terminal, so it cannot be approved (the pending guard raises
+`ApprovalRequestAlreadyDecidedError`) — an expired run-bound request can
+never be claimed or re-dispatched (#2293).
+
 ## Subject + actor attribution on the request row (#1481)
 
 The `approval_request` row carries the RFC 8693 two-claim attribution
@@ -596,7 +653,7 @@ a phantom event cannot outlive a failed transaction:
 | Create | `approval.pending` | `create_pending_request` (dispatcher parks a `needs-approval` verdict). | `operations/dispatcher.py::_handle_needs_approval` |
 | Approve | `approval.approved` | `approve_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
 | Reject | `approval.rejected` | `reject_request` succeeds. | `api/v1/approvals.py` (REST), `mcp/tools/approvals.py` (MCP) |
-| Expire | `approval.expired` | `expire_stale_requests` (sweeper / CLI sweep) per expired row. | sweeper caller (commits then publishes per returned row's `_audit_id`) |
+| Expire | `approval.expired` | `expire_stale_requests` (periodic sweeper) per expired row. | `operations/approval_expiry.py::_sweep_one_tenant` (commits then publishes per returned row's `_audit_id`) |
 
 Payload: `approval_request_id`, `decision`, `connector_id`,
 `approval_op_id`. The event's `audit_id` field is the decision row's
@@ -639,14 +696,32 @@ re-hydrate later. Two columns on `approval_request` (migration `0053`):
 `approval_queue._write_audit_row` reads both off the row (never the
 approver's contextvars): the request row anchors on the session with no
 parent (chain root); decision rows anchor on the same session and
-parent-link to `request_audit_id`. `resume_dispatch_after_approval`
-re-binds `agent_session_id_var` + `parent_audit_id_var` (token-scoped,
-alongside `work_ref_var`) around the `dispatch(..., _approved=True)`, so
-the executed op's DISPATCH row anchors in the originating session and
-back-links to the parking row. Net result: >= 3 session-anchored rows
-per approved chain, tree shape `approval.request` → {`approval.decision`,
-`<op_id>`}. Pre-0053 rows keep NULLs and simply stay out of replay (the
-pre-fix behaviour).
+parent-link to `request_audit_id`.
+
+The executed-dispatch row must also carry `parent_audit_id` for the
+chain to replay as one subtree, and both resume paths bind it:
+
+- **Operator surfaces** (REST `/approve` + `/decide`, MCP, UI) —
+  `resume_dispatch_after_approval` →
+  `_dispatch_resume_with_bound_context` re-binds `agent_session_id_var`
+  \+ `parent_audit_id_var` (token-scoped, alongside `work_ref_var`)
+  around the `dispatch(..., _approved=True)`, because the approver runs
+  on a fresh task whose contextvars are unset.
+- **In-process agent-run resume** (#2323, completing #2086) — the
+  broadcast-driven agent waiter
+  (`agent/approval_wait.py::_resume_approved_or_already_resumed`)
+  re-dispatches on the agent's *own* task, where `agent_session_id_var`
+  is still bound but `parent_audit_id_var` holds the original top-level
+  value (`None` for a plain tool call). It loads the parked row's
+  `request_audit_id` (tenant-isolated `get_request`) and binds
+  `parent_audit_id_var` around `call_operation_with_approval`, so the
+  agent-run chain no longer orphans its executed dispatch as a second
+  root.
+
+Net result on either path: >= 3 session-anchored rows per approved
+chain, tree shape `approval.request` → {`approval.decision`, `<op_id>`}.
+Pre-0053 rows keep NULLs and simply stay out of replay (the pre-fix
+behaviour).
 
 ## MCP elicitation URL-mode (forward-looking)
 
@@ -679,7 +754,8 @@ fail-open semantics on broadcast outage.
 
 ## References
 
-- `backend/src/meho_backplane/operations/approval_queue.py` — queue lifecycle (T4) + read helpers + broadcast (T5).
+- `backend/src/meho_backplane/operations/approval_queue.py` — queue lifecycle (T4) + read helpers + broadcast (T5) + park-time `expires_at` stamping and `expire_stale_requests` coalesce (#2322).
+- `backend/src/meho_backplane/operations/approval_expiry.py` — periodic per-tenant approval-TTL sweeper (#2322).
 - `backend/src/meho_backplane/api/v1/approvals.py` — REST routes.
 - `backend/src/meho_backplane/mcp/tools/approvals.py` — MCP tools.
 - `cli/internal/cmd/approvals/` — CLI verbs.

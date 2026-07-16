@@ -34,7 +34,7 @@ func newWorkflowListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List in-flight or recent VCF workflow tasks",
-		Long: "list dispatches GET:/v1/tasks against connector_id=\"sddc-rest-9.0\".\n" +
+		Long: "list dispatches sddc.task.list against connector_id=\"sddc-rest-9.0\".\n" +
 			"Pass --status to filter (Successful, Failed, In_Progress, Pending, Cancelled).\n\n" +
 			"Exit codes: 0=ok, 1=error/denied, 2=auth_expired, 3=unreachable, 4=unexpected.",
 		Example: "  meho sddc-manager workflow list --target rdc-sddc-manager\n" +
@@ -64,17 +64,17 @@ func runWorkflowList(cmd *cobra.Command, targetName, statusFilter string, jsonOu
 	if statusFilter != "" {
 		params = map[string]any{"status": statusFilter}
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/v1/tasks", targetName, params)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "sddc.task.list", targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/v1/tasks", r, jsonOut, printWorkflowList)
+	return conn.Render(cmd, "sddc.task.list", r, jsonOut, printWorkflowList)
 }
 
 func printWorkflowList(w io.Writer, r *CallResult) {
 	entries, err := decodeElementsResult(r.Result)
 	if err != nil || r.Status != "ok" {
-		conn.PrintGeneric(w, "GET:/v1/tasks", r)
+		conn.PrintGeneric(w, "sddc.task.list", r)
 		return
 	}
 	fmt.Fprintf(w, "VCF workflow tasks (%d)\n", len(entries))

@@ -15,13 +15,21 @@ write surface on top:
   :class:`~meho_backplane.agents.schemas.AgentDefinitionCreate` from the
   form fields and persists via
   :meth:`~meho_backplane.agents.service.AgentDefinitionService.create`.
-  Success -> 204 + ``HX-Redirect: /ui/agents``. A Pydantic
-  :class:`~pydantic.ValidationError`, a duplicate-name
-  :class:`~meho_backplane.agents.service.AgentDefinitionExistsError`
-  (409), or an
-  :class:`~meho_backplane.agents.service.AgentIdentityRefInvalidError`
-  (422) all re-render the modal with per-field messages and the
-  matching HTTP status.
+  Success -> 204 + ``HX-Redirect: /ui/agents``. Any recoverable input
+  error -- a Pydantic :class:`~pydantic.ValidationError`, a duplicate-name
+  :class:`~meho_backplane.agents.service.AgentDefinitionExistsError`, or
+  an :class:`~meho_backplane.agents.service.AgentIdentityRefInvalidError`
+  -- re-renders the modal as a **200** fragment carrying a top-of-form
+  error banner plus the per-field messages, and HTMX swaps it back into
+  the modal container in place. The 200 is load-bearing: HTMX's default
+  response handling silently drops a non-2xx fragment (``swap: false``),
+  so the earlier 409 / 422 re-renders were computed by the server but
+  never shown to the operator -- the button appeared to "do nothing"
+  (#2346). This mirrors the shipped error mold of the runbooks start-run
+  modal (:func:`~meho_backplane.ui.routes.runbooks.runs._render_start_error`)
+  and the conventions author modal
+  (:func:`~meho_backplane.ui.routes.conventions.write._render_create_error`),
+  both of which re-render inline errors as 200.
 * **``GET /ui/agents/{name}/edit``** -- HTMX-loaded edit modal, fields
   pre-populated server-side. ``name`` is read-only (not updatable per
   :class:`~meho_backplane.agents.schemas.AgentDefinitionUpdate`).
@@ -259,11 +267,13 @@ async def submit_create(
 ) -> HTMLResponse:
     """Build an :class:`AgentDefinitionCreate` and persist it via the service.
 
-    A Pydantic :class:`ValidationError` re-renders the modal with
-    per-field messages + 422; a duplicate ``(tenant, name)`` re-renders
-    with a 409 ``name`` field error; an unknown / revoked
-    ``identity_ref`` re-renders with a 422 ``identity_ref`` field error.
-    A clean create returns 204 + ``HX-Redirect: /ui/agents``.
+    Any recoverable input error re-renders the modal as a **200**
+    fragment (so HTMX swaps it back in place) carrying a top-of-form
+    error banner + per-field messages: a Pydantic :class:`ValidationError`
+    surfaces the offending fields, a duplicate ``(tenant, name)`` a
+    ``name`` error, and an unknown / revoked ``identity_ref`` an
+    ``identity_ref`` error. A clean create returns 204 +
+    ``HX-Redirect: /ui/agents``.
     """
     raw_values = {
         "name": name,
@@ -305,7 +315,6 @@ async def submit_create(
             mode="create",
             field_errors={"name": "an agent with this name already exists"},
             values=raw_values,
-            status_code=status.HTTP_409_CONFLICT,
         )
     except AgentIdentityRefInvalidError:
         return _render_form_with_errors(
@@ -319,7 +328,6 @@ async def submit_create(
                 )
             },
             values=raw_values,
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
 
     _log.info(
@@ -394,7 +402,6 @@ async def submit_edit(
                 )
             },
             values=raw_values,
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
     if entry is None:
         from fastapi import HTTPException
@@ -483,16 +490,24 @@ def _render_form_with_errors(
     values: dict[str, object],
     exc: ValidationError | ValueError | None = None,
     field_errors: dict[str, str] | None = None,
-    status_code: int = status.HTTP_422_UNPROCESSABLE_CONTENT,
 ) -> HTMLResponse:
-    """Re-render the modal fragment carrying per-field errors + a status.
+    """Re-render the modal fragment carrying a top-of-form error banner + per-field errors.
 
     The HTMX form targets the modal container with
     ``hx-swap="innerHTML"`` so the error body replaces the dialog in
     place; the operator keeps their typed values (echoed via ``values``)
-    and sees the field-level messages. ``exc`` covers the Pydantic /
-    coercion path; ``field_errors`` covers the service-raised
-    duplicate-name (409) and identity_ref (422) cases.
+    and sees a summary banner plus the field-level messages. ``exc``
+    covers the Pydantic / coercion path; ``field_errors`` covers the
+    service-raised duplicate-name and identity_ref cases.
+
+    The fragment is returned as **200**, not the semantically-matching
+    409 / 422: HTMX's default response handling does not swap a non-2xx
+    response (``swap: false``), so a 4xx re-render is computed but never
+    shown -- the invisible-error defect #2346 fixes. Returning 200 is the
+    same inline-error mold the runbooks start-run and conventions author
+    modals already ship. These ``/ui`` routes are HTMX-only (the REST
+    agents API carries the machine-readable status contract), so the
+    fragment status is a rendering concern, not an external contract.
     """
     if field_errors is not None:
         errors = field_errors
@@ -510,7 +525,7 @@ def _render_form_with_errors(
         request,
         template,
         context,
-        status_code=status_code,
+        status_code=status.HTTP_200_OK,
     )
     _set_csrf_cookie(response, csrf_token)
     return response

@@ -388,7 +388,7 @@ async def _seed_incompatible_kinds_fixture(
     """
     svc = await _seed_node(tenant_id=tenant_id, kind="service", name="svc")
     # ``volume`` is the closest in-vocabulary kind to "stateful storage
-    # node" for this scenario; the closed v0.2 ``_GRAPH_NODE_KINDS``
+    # node" for this scenario; the well-known ``WELL_KNOWN_NODE_KINDS``
     # (mirrored in migration 0007's ``_NODE_KINDS``) does not include
     # ``database``. Widening the vocabulary is a coordinated DB + model
     # migration scoped to G9.2's curated extensions, not a test-only
@@ -638,7 +638,7 @@ async def test_conflict_incompatible_kinds_persists_both_rows_with_bidirectional
                     "kind": "depends-on",
                     # ``volume`` matches the seed in
                     # :func:`_seed_incompatible_kinds_fixture`; ``database``
-                    # is not in the closed v0.2 ``_GRAPH_NODE_KINDS``.
+                    # is not in the well-known ``WELL_KNOWN_NODE_KINDS`` set.
                     "to": {"name": "db", "kind": "volume"},
                 },
                 headers=_authed(token),
@@ -986,6 +986,95 @@ async def test_audit_and_broadcast_one_per_write(
 
     # Broadcast was called exactly twice (one annotate + one unannotate).
     assert publish_mock.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# T1 #2534 — open kind vocabulary, end-to-end against PostgreSQL
+# ---------------------------------------------------------------------------
+
+
+@_skip_no_docker
+async def test_novel_kinds_flow_end_to_end_on_postgres(
+    annotate_app: FastAPI,
+) -> None:
+    """Novel node + edge kinds land end-to-end against the PG shape CHECK.
+
+    The T1 #2534 acceptance path on the production dialect:
+
+    1. :func:`create_or_get_node` (the service primitive behind
+       ``meho.topology.create_node``) seeds a ``dns-record`` node and
+       a ``keycloak-realm`` node — both outside the old closed
+       14-kind vocabulary, the latter being the pre-T1 doc-vs-enum
+       drift example that must now round-trip.
+    2. ``POST /api/v1/topology/edges`` asserts a ``resolves-to`` edge
+       (outside the old closed ten-kind vocabulary) between the novel
+       node and a well-known-kind node → 201, row persisted with the
+       novel kind intact.
+
+    Proves migration ``0063``'s minimal shape CHECK accepts
+    well-formed novel slugs on real PostgreSQL (the unit suite covers
+    the same contract on SQLite).
+    """
+    from meho_backplane.auth.operator import Operator
+    from meho_backplane.topology.nodes import create_or_get_node
+    from tests._oidc_jwt_helpers import mock_discovery_and_jwks, public_jwks
+
+    operator = Operator(
+        sub="op-a",
+        name=None,
+        email=None,
+        raw_jwt="not-a-real-jwt",
+        tenant_id=uuid.UUID(TENANT_A_ID),
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+
+    sm = get_sessionmaker()
+    with patch(
+        "meho_backplane.topology.nodes.publish_event",
+        new_callable=AsyncMock,
+    ):
+        async with sm() as session:
+            created = await create_or_get_node(
+                session,
+                operator,
+                kind="dns-record",
+                name="www.example.com",
+            )
+        async with sm() as session:
+            realm = await create_or_get_node(
+                session,
+                operator,
+                kind="keycloak-realm",
+                name="master",
+            )
+    assert created.was_created is True
+    assert created.node.kind == "dns-record"
+    assert realm.node.kind == "keycloak-realm"
+
+    await _seed_node(tenant_id=TENANT_A_ID, kind="service", name="frontend-svc")
+
+    key, token = _token(role=TenantRole.TENANT_ADMIN, tenant_id=TENANT_A_ID, sub="op-a")
+
+    with patch(_PUBLISH_PATCH, new_callable=AsyncMock), respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        async with _make_async_client(annotate_app) as client:
+            ann = await client.post(
+                "/api/v1/topology/edges",
+                json={
+                    "from": {"name": "www.example.com", "kind": "dns-record"},
+                    "kind": "resolves-to",
+                    "to": {"name": "frontend-svc", "kind": "service"},
+                },
+                headers=_authed(token),
+            )
+            assert ann.status_code == 201, ann.text
+            assert ann.json()["kind"] == "resolves-to"
+            edge_id = uuid.UUID(ann.json()["id"])
+
+    async with sm() as session:
+        row = (await session.execute(select(GraphEdge).where(GraphEdge.id == edge_id))).scalar_one()
+    assert row.kind == "resolves-to"
+    assert row.source == "curated"
 
 
 # ---------------------------------------------------------------------------

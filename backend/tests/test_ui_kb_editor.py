@@ -271,6 +271,10 @@ def test_kb_index_renders_new_entry_button() -> None:
     assert "kb-editor-modal" in body
     # CodeMirror bundle script tag present.
     assert "codemirror-bundle.min.js" in body
+    # Negative assertion (#2384): a fresh render carries no error banner --
+    # the ``alert-error`` block only appears when the save handler
+    # re-renders the modal with an ``error_message`` set.
+    assert "alert-error" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +407,14 @@ def test_editor_save_operator_role_returns_403() -> None:
     assert response.status_code == 403, response.text
 
 
-def test_editor_save_invalid_slug_returns_422_with_error() -> None:
-    """``POST /ui/kb/new`` with an invalid slug re-renders the modal with an error."""
+def test_editor_save_invalid_slug_returns_200_with_error() -> None:
+    """``POST /ui/kb/new`` with an invalid slug re-renders the modal with an error.
+
+    The re-render returns 200, not 422: the form posts with
+    ``hx-swap="outerHTML"`` and HTMX 2 does not swap a non-2xx response,
+    so a 4xx error fragment would be computed but silently dropped
+    (#2384, the 200-on-recoverable-error mold from #2346).
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     csrf = _csrf_token(session_id)
@@ -432,8 +442,10 @@ def test_editor_save_invalid_slug_returns_422_with_error() -> None:
                 headers={CSRF_HEADER_NAME: csrf},
             )
 
-    assert response.status_code == 422, response.text
+    assert response.status_code == 200, response.text
     assert "BAD SLUG" in response.text or "invalid slug" in response.text.lower()
+    # The error banner is rendered in the swapped fragment.
+    assert "alert-error" in response.text
     # Re-renders the editor modal (not full page).
     assert "kb-editor-modal" in response.text
     assert "<!doctype html>" not in response.text.lower()
@@ -552,12 +564,12 @@ def test_detail_page_kb_body_class_present() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B1 — CSRF cookie refreshed on 422 re-render (fix verification)
+# B1 — CSRF cookie refreshed on error re-render (fix verification)
 # ---------------------------------------------------------------------------
 
 
-def test_editor_save_422_sets_fresh_csrf_cookie() -> None:
-    """422 re-render must set a fresh CSRF cookie so subsequent POSTs succeed.
+def test_editor_save_error_rerender_sets_fresh_csrf_cookie() -> None:
+    """Error re-render must set a fresh CSRF cookie so subsequent POSTs succeed.
 
     Without the fix, ``kb_editor_save`` minted a fresh token for the
     template context but never called ``response.set_cookie``.  The browser
@@ -566,10 +578,13 @@ def test_editor_save_422_sets_fresh_csrf_cookie() -> None:
     every follow-up HTMX POST to receive 403 from CSRFMiddleware.
 
     This test asserts:
-    1. The 422 response carries a ``Set-Cookie`` header for ``csrf_token``.
+    1. The error re-render carries a ``Set-Cookie`` header for ``csrf_token``.
     2. The cookie value is a non-empty string (a freshly minted token).
     3. A subsequent ``POST /ui/kb/editor-preview`` using the new token
        succeeds (200), proving the refreshed cookie round-trips correctly.
+
+    The re-render returns 200 (the #2384 mold) so HTMX swaps the fragment
+    back into the modal; the CSRF cookie refresh is preserved.
     """
     from meho_backplane.kb.schemas import InvalidKbSlugError
 
@@ -581,7 +596,7 @@ def test_editor_save_422_sets_fresh_csrf_cookie() -> None:
         client = _authenticated_client(session_id)
         client.cookies.set(CSRF_COOKIE_NAME, csrf)
 
-        # --- Step 1: trigger a 422 ---
+        # --- Step 1: trigger a validation-error re-render ---
         with (
             patch(
                 "meho_backplane.ui.routes.kb.routes.verify_access_token_with_refresh",
@@ -594,17 +609,17 @@ def test_editor_save_422_sets_fresh_csrf_cookie() -> None:
                 side_effect=InvalidKbSlugError("invalid slug: 'BAD'"),
             ),
         ):
-            r422 = client.post(
+            r_err = client.post(
                 "/ui/kb/new",
                 data={"slug": "BAD", "body": "body text", "tags": ""},
                 headers={CSRF_HEADER_NAME: csrf},
             )
 
-    assert r422.status_code == 422, r422.text
+    assert r_err.status_code == 200, r_err.text
 
     # The response must set a fresh CSRF cookie.
-    new_csrf = r422.cookies.get(CSRF_COOKIE_NAME)
-    assert new_csrf is not None, "422 response did not set a fresh CSRF cookie"
+    new_csrf = r_err.cookies.get(CSRF_COOKIE_NAME)
+    assert new_csrf is not None, "error re-render did not set a fresh CSRF cookie"
     assert len(new_csrf) > 0
 
     # --- Step 2: use the new token for a follow-up preview POST ---
@@ -621,12 +636,12 @@ def test_editor_save_422_sets_fresh_csrf_cookie() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B2 — Re-rendered modal contains editor anchor and fresh CSRF token
+# B2 — Re-rendered modal (200) contains editor anchor and fresh CSRF token
 # ---------------------------------------------------------------------------
 
 
-def test_editor_save_422_rerenders_modal_with_editor_anchor_and_csrf() -> None:
-    """422 fragment must contain ``#kb-editor-cm`` and a non-empty CSRF token.
+def test_editor_save_error_rerenders_modal_with_editor_anchor_and_csrf() -> None:
+    """Error fragment must contain ``#kb-editor-cm`` and a non-empty CSRF token.
 
     This verifies the server side of the B2 fix: after a failed save the
     re-rendered ``_editor_modal.html`` fragment must include the CodeMirror
@@ -661,7 +676,7 @@ def test_editor_save_422_rerenders_modal_with_editor_anchor_and_csrf() -> None:
                 headers={CSRF_HEADER_NAME: csrf},
             )
 
-    assert response.status_code == 422, response.text
+    assert response.status_code == 200, response.text
     html = response.text
 
     # Modal root element present (HTMX outerHTML swap target).
@@ -672,7 +687,7 @@ def test_editor_save_422_rerenders_modal_with_editor_anchor_and_csrf() -> None:
     # The token is rendered by Jinja2 into the two hx-headers strings;
     # it must be non-empty so the re-mounted editor can POST successfully.
     new_csrf_cookie = response.cookies.get(CSRF_COOKIE_NAME)
-    assert new_csrf_cookie, "422 fragment must carry a fresh CSRF cookie"
+    assert new_csrf_cookie, "error fragment must carry a fresh CSRF cookie"
     assert new_csrf_cookie in html, (
         "Fresh CSRF token must appear inside the re-rendered modal fragment"
     )

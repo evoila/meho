@@ -23,7 +23,7 @@ func TestRunOverridesListEmptyResult(t *testing.T) {
 			t.Errorf("method: got %s; want GET", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -47,11 +47,11 @@ func TestRunOverridesListJSON(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/broadcast/overrides", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"11111111-1111-1111-1111-111111111111",` +
+		_, _ = w.Write([]byte(`{"items":[{"id":"11111111-1111-1111-1111-111111111111",` +
 			`"tenant_id":"22222222-2222-2222-2222-222222222222",` +
 			`"op_id_pattern":"vault.kv.*","scope_field":null,"scope_value":null,` +
 			`"detail":"aggregate","created_by_sub":"op-1",` +
-			`"created_at":"2026-05-19T12:00:00Z","updated_at":"2026-05-19T12:00:00Z"}]`))
+			`"created_at":"2026-05-19T12:00:00Z","updated_at":"2026-05-19T12:00:00Z"}],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -86,7 +86,7 @@ func TestRunOverridesListBindsPatternQuery(t *testing.T) {
 			t.Errorf("op_id_pattern query: got %q; want %q", got, "k8s.configmap.info")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -114,7 +114,7 @@ func TestRunOverridesListGlobPatternEncoded(t *testing.T) {
 			t.Errorf("op_id_pattern query: got %q; want %q", got, "vault.kv.*")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -136,11 +136,11 @@ func TestRunOverridesListRendersTable(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/broadcast/overrides", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[{"id":"11111111-1111-1111-1111-111111111111",` +
+		_, _ = w.Write([]byte(`{"items":[{"id":"11111111-1111-1111-1111-111111111111",` +
 			`"tenant_id":"22222222-2222-2222-2222-222222222222",` +
 			`"op_id_pattern":"vault.kv.*","scope_field":null,"scope_value":null,` +
 			`"detail":"aggregate","created_by_sub":"op-1",` +
-			`"created_at":"2026-05-19T12:00:00Z","updated_at":"2026-05-19T12:00:00Z"}]`))
+			`"created_at":"2026-05-19T12:00:00Z","updated_at":"2026-05-19T12:00:00Z"}],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

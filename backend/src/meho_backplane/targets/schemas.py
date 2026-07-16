@@ -62,6 +62,7 @@ __all__ = [
     "AuthModel",
     "Target",
     "TargetCreate",
+    "TargetListResponse",
     "TargetSummary",
     "TargetUpdate",
     "project_target_to_summary",
@@ -177,6 +178,25 @@ class TargetSummary(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None = None
+
+
+class TargetListResponse(BaseModel):
+    """Unified list envelope for ``GET /api/v1/targets``.
+
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. ``items`` carries the
+    keyset-paginated page of :class:`TargetSummary` rows; ``next_cursor``
+    is the last-row ``name`` of the page when a further page exists and
+    ``None`` when this page exhausted the matching set (so callers see
+    "no more pages" without inspecting list length). The field is always
+    present so a client reads ``response["next_cursor"]`` without a
+    ``KeyError`` guard.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    items: list[TargetSummary]
+    next_cursor: str | None = None
 
 
 class Target(BaseModel):

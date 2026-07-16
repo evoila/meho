@@ -134,7 +134,7 @@
           onclick="
             const el = document.getElementById('node-drawer');
             if (el) {
-              el.outerHTML = '<aside id=\'node-drawer\' class=\'card bg-base-100 border-base-300 border shadow-sm\' aria-live=\'polite\' aria-label=\'Node detail drawer\'><div class=\'card-body text-sm opacity-70\'>Select a row to inspect a node.</div></aside>';
+              el.outerHTML = '<aside id=\'node-drawer\' class=\'card bg-base-100 border-base-300 border shadow-sm\' aria-live=\'polite\' aria-label=\'Node detail drawer\'><div class=\'card-body text-sm opacity-70\'>Click <strong>View</strong> on any row for details.</div></aside>';
             }
             return false;
           "
@@ -150,36 +150,38 @@
       shares this id so the swap is stable, and a successful POST swaps the
       created-edge fragment back into the same slot.
     -#}
-    <div id="topology-edge-modal" data-test="edge-modal-slot"></div>
+    <div id="topology-edge-modal" data-test="edge-modal-slot" class="empty:hidden"></div>
 
     {#- Refresh-result mount slot (Task #1954). Empty until the "Refresh"
         button POSTs; the synchronous ``RefreshResult`` counts (or the 404
         near-miss hint) swap in here. -#}
     {% if node.kind == "target" %}
-      <div id="topology-refresh-result" data-test="refresh-result-slot"></div>
+      <div id="topology-refresh-result" data-test="refresh-result-slot" class="empty:hidden"></div>
     {% endif %}
 
     {# ---------- Properties ---------- #}
     <section aria-label="Node properties">
       <h3 class="text-sm font-semibold uppercase opacity-60">Properties</h3>
       <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="opacity-60">id</dt>
-        <dd class="font-mono">{{ node.id }}</dd>
-        <dt class="opacity-60">kind</dt>
+        <dt class="opacity-60">Kind</dt>
         <dd>{{ node.kind }}</dd>
-        <dt class="opacity-60">name</dt>
+        <dt class="opacity-60">Name</dt>
         <dd class="font-mono">{{ node.name }}</dd>
-        <dt class="opacity-60">discovered_by</dt>
+        <dt class="opacity-60">Discovered by</dt>
         <dd>{{ node.discovered_by }}</dd>
-        {% if node.target_id %}
-          <dt class="opacity-60">target_id</dt>
-          <dd class="font-mono">{{ node.target_id }}</dd>
-        {% endif %}
-        <dt class="opacity-60">first_seen</dt>
-        <dd>{{ node.first_seen.isoformat() }}</dd>
-        <dt class="opacity-60">last_seen</dt>
+        {#- Console-standard timestamp format (matches the table surface):
+            the machine-readable ISO stays in the ``datetime`` attribute; the
+            display uses ``%Y-%m-%d %H:%M UTC``. Timestamps are stored
+            tz-aware UTC. -#}
+        <dt class="opacity-60">First seen</dt>
         <dd>
-          {% if node.last_seen %}{{ node.last_seen.isoformat() }}{% else %}<span class="opacity-50">—</span>{% endif %}
+          <time datetime="{{ node.first_seen.isoformat() }}">{{ node.first_seen.strftime("%Y-%m-%d %H:%M UTC") }}</time>
+        </dd>
+        <dt class="opacity-60">Last seen</dt>
+        <dd>
+          {% if node.last_seen %}
+            <time datetime="{{ node.last_seen.isoformat() }}">{{ node.last_seen.strftime("%Y-%m-%d %H:%M UTC") }}</time>
+          {% else %}<span class="opacity-50">—</span>{% endif %}
         </dd>
       </dl>
       {% if node.properties %}

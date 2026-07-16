@@ -158,16 +158,15 @@ func runListEdges(cmd *cobra.Command, opts listEdgesOptions) error {
 // `auto` or `curated`); the route's regex pattern enforces the same
 // closed pair.
 //
-// `Kind` rides as the typed `*GraphEdgeKind` enum because the
-// generator narrowed the wire pattern to the closed vocabulary; we
-// reuse the operator-typed string verbatim — invalid kinds round-
-// trip to a 422 with the per-row message rather than failing
-// client-side, matching the pre-migration contract where the CLI
-// didn't second-guess the substrate's vocabulary check.
+// `Kind` rides as a plain `*string` (the wire schema is an open
+// slug-patterned string since T1 #2534); we reuse the operator-typed
+// string verbatim — malformed kinds round-trip to a 422 with the
+// pattern message rather than failing client-side, so the CLI never
+// second-guesses the substrate's vocabulary check.
 func buildListEdgesParams(opts listEdgesOptions) *api.ListEdgesRouteApiV1TopologyEdgesGetParams {
 	params := &api.ListEdgesRouteApiV1TopologyEdgesGetParams{}
 	if opts.Kind != "" {
-		k := api.GraphEdgeKind(opts.Kind)
+		k := opts.Kind
 		params.Kind = &k
 	}
 	if opts.Source != "" {

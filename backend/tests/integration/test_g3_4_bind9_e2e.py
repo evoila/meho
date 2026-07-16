@@ -1277,8 +1277,8 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
     Python list / tuple argv (e.g. ``["sudo", "-S", ...]``,
     ``("sudo",)``).
 
-    Two files are whitelisted by absolute path because they own the
-    safe-sudo primitive:
+    Three files are whitelisted by absolute path because they own a
+    sanctioned safe-sudo primitive:
 
     * :mod:`~meho_backplane.connectors.bind9.connector` — the
       ``_remote_bash_with_sudo`` helper, the single legitimate
@@ -1289,6 +1289,12 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
       script body to ``_remote_bash_with_sudo``); whitelisting it keeps
       the contract explicit so a future refactor that hoists a sudo
       argv there is still a deliberate, reviewed step.
+    * :mod:`~meho_backplane.connectors.rke2._sudo` — the rke2
+      connector's own sanctioned safe-sudo primitive, identical in
+      wire shape to bind9's helper: it stdin-streams a bash script
+      body to ``sudo -S -p "" bash`` so the password never lands in
+      argv / logs. The single legitimate sudo-argv site in the rke2
+      tree.
 
     Every sibling connector (and every other bind9 module —
     ``ops.py`` / ``ops_record.py`` / ``ops_config.py`` /
@@ -1321,7 +1327,7 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
     assert connectors_root.is_dir(), (
         f"connectors root not found at {connectors_root}; test layout drifted"
     )
-    # Narrow whitelist: only the two files that own the safe-sudo
+    # Narrow whitelist: only the files that own a sanctioned safe-sudo
     # primitive. Everything else under bind9/ (ops_*.py) is held to
     # the invariant; they reference sudo only via docstrings / error
     # messages / the ``"sudo_password"`` dict key, all of which the
@@ -1329,6 +1335,7 @@ def test_remote_bash_with_sudo_is_only_sudo_construction_in_connectors_tree() ->
     allowed_files = {
         connectors_root / "bind9" / "connector.py",
         connectors_root / "bind9" / "_atomic.py",
+        connectors_root / "rke2" / "_sudo.py",
     }
     # Match `sudo` only as the first token of a string literal — the
     # universal shape of sudo argv construction, whether it's

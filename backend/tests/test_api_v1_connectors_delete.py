@@ -348,7 +348,7 @@ def _stub_llm_factory() -> Iterator[None]:
 
 def _connector_ids(list_response: httpx.Response) -> set[str]:
     assert list_response.status_code == 200, list_response.text
-    return {item["connector_id"] for item in list_response.json()["connectors"]}
+    return {item["connector_id"] for item in list_response.json()["items"]}
 
 
 @pytest.mark.asyncio

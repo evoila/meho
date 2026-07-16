@@ -12,9 +12,12 @@ acceptance criteria on issue #1825 are:
 * Operators see read-only views; create / edit / enable-disable /
   delete affordances are hidden for non-admins (soft) AND 403
   server-side (hard).
-* Create / edit go through a CSRF-double-submit BFF; 409 (duplicate
-  name) / 422 (unknown identity_ref) render inline, not as a generic
-  error.
+* Create / edit go through a CSRF-double-submit BFF; a duplicate name
+  or an unknown identity_ref re-renders the modal inline -- a
+  top-of-form error banner + per-field messages -- not as a generic
+  error. The re-render is a 200 fragment so HTMX swaps it back in place;
+  a non-2xx fragment would be silently dropped and the error never shown
+  (#2346).
 
 Suite shape mirrors :mod:`backend.tests.test_ui_memory_list`: a minimal
 FastAPI app wired with the chassis middlewares + the BFF auth router +
@@ -430,6 +433,51 @@ def test_list_shows_new_agent_button_for_admin() -> None:
     assert 'hx-get="/ui/agents/create"' in response.text
 
 
+def test_list_card_shows_toggle_for_admin_with_flipped_state() -> None:
+    """Each card carries a one-click enable/disable toggle for a tenant_admin.
+
+    The card toggle POSTs the *flipped* ``enabled`` value to the same
+    ``/ui/agents/{name}/toggle`` route the detail view uses, so an admin can
+    flip an agent's state without opening the detail page (#2347).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="on-agent", enabled=True)
+    _seed_agent(tenant_id=_TENANT_A, name="off-agent", enabled=False)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_session(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    body = response.text
+    assert 'data-action="toggle"' in body
+    # An enabled agent's toggle disables it; a disabled agent's enables it.
+    assert 'hx-post="/ui/agents/on-agent/toggle"' in body
+    assert 'hx-post="/ui/agents/off-agent/toggle"' in body
+    assert '"enabled": "false"' in body  # on-agent -> disable
+    assert '"enabled": "true"' in body  # off-agent -> enable
+
+
+def test_list_card_hides_toggle_for_operator() -> None:
+    """A non-admin operator sees no card-level toggle (soft gate)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="on-agent", enabled=True)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_session(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    assert 'data-action="toggle"' not in response.text
+    assert "/ui/agents/on-agent/toggle" not in response.text
+
+
 # ---------------------------------------------------------------------------
 # Detail view
 # ---------------------------------------------------------------------------
@@ -541,6 +589,8 @@ def test_create_modal_renders_for_admin() -> None:
     assert 'id="agents-create-modal"' in body
     assert 'name="identity_ref"' in body
     assert 'name="system_prompt"' in body
+    # A fresh (error-free) render carries no error summary banner.
+    assert "data-form-error-summary" not in body
 
 
 def test_create_persists_and_redirects() -> None:
@@ -578,8 +628,8 @@ def test_create_persists_and_redirects() -> None:
     assert "new-agent" in follow.text
 
 
-def test_create_duplicate_name_renders_409_inline() -> None:
-    """A duplicate (tenant, name) re-renders the modal with a 409 name error."""
+def test_create_duplicate_name_renders_inline() -> None:
+    """A duplicate (tenant, name) re-renders the modal inline with a name error."""
     _seed_tenant(_TENANT_A, "tenant-a")
     _seed_principal(tenant_id=_TENANT_A, keycloak_client_id="agent-dup")
     _seed_agent(tenant_id=_TENANT_A, name="dup", identity_ref="agent-dup")
@@ -601,16 +651,20 @@ def test_create_duplicate_name_renders_409_inline() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 409, response.text
+    # 200 (not 409) so HTMX swaps the re-rendered modal back in place;
+    # a non-2xx fragment would be silently dropped and the error never
+    # shown (#2346).
+    assert response.status_code == 200, response.text
     body = response.text
-    # The modal re-renders inline with a field-level error, not a
-    # generic error page.
+    # The modal re-renders inline with a top-of-form summary banner and a
+    # field-level error, not a generic error page.
+    assert "data-form-error-summary" in body
     assert 'data-error-for="name"' in body
     assert "already exists" in body
 
 
-def test_create_unknown_identity_ref_renders_422_inline() -> None:
-    """An identity_ref with no matching principal re-renders the modal with a 422."""
+def test_create_unknown_identity_ref_renders_inline() -> None:
+    """An identity_ref with no matching principal re-renders the modal inline."""
     _seed_tenant(_TENANT_A, "tenant-a")
     keypair, jwks = _make_keypair_and_jwks()
     token = _admin_session(keypair)
@@ -630,12 +684,13 @@ def test_create_unknown_identity_ref_renders_422_inline() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 422, response.text
+    assert response.status_code == 200, response.text
     body = response.text
+    assert "data-form-error-summary" in body
     assert 'data-error-for="identity_ref"' in body
 
 
-def test_create_invalid_turn_budget_renders_422_inline() -> None:
+def test_create_invalid_turn_budget_renders_inline() -> None:
     """An out-of-range turn_budget re-renders the modal with a field error."""
     _seed_tenant(_TENANT_A, "tenant-a")
     keypair, jwks = _make_keypair_and_jwks()
@@ -656,7 +711,8 @@ def test_create_invalid_turn_budget_renders_422_inline() -> None:
         )
     finally:
         mock.stop()
-    assert response.status_code == 422, response.text
+    assert response.status_code == 200, response.text
+    assert "data-form-error-summary" in response.text
     assert 'data-error-for="turn_budget"' in response.text
 
 

@@ -59,6 +59,30 @@ as untrusted:
   envelope (:mod:`meho_backplane.untrusted_text`) on every LLM-facing
   re-serve.
 
+Structure is trusted; prose is quarantined (load-bearing)
+=========================================================
+
+The trust boundary above quarantines free *prose* because prose can
+carry instructions a reading agent might absorb. It does NOT extend to
+**server-validated structured metadata**. The typed coordination fields
+this model carries -- ``planned_op_class`` (a bounded enum),
+``ttl_minutes`` (a bounded int), ``run_id`` (a UUID), ``phase`` (an
+enum), ``ts`` / ``expires_at`` (timestamps) -- are validated by pydantic
+at construction: a value that is not a member of its type is rejected at
+the boundary, never stored, never served. Such a field cannot express an
+injection payload, so it is serialised **unwrapped** and other agents
+may read it as trustworthy coordination data. This is the same split the
+``target`` equality filter already relies on -- it runs on the unwrapped
+model before :func:`~meho_backplane.broadcast.history.dump_event_wire`
+wraps the prose (see that module).
+
+The string fields stay quarantined even when they look structured:
+``activity`` / ``scope`` / ``target`` / ``targets[]`` / ``work_ref`` are
+all agent-authored text, so every LLM-facing dump wraps them (the
+list-valued ``targets`` per-element). Equality filtering on ``target`` /
+``targets`` / ``work_ref`` runs on the raw model value *before* the wrap,
+so narrowing is unaffected by the envelope.
+
 Publish semantics
 =================
 
@@ -99,15 +123,22 @@ References
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Final, Literal
+from datetime import datetime, timedelta
+from typing import Annotated, Final, Literal, get_args
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 __all__ = [
     "ACTIVITY_MAX_CHARS",
+    "MAX_TARGETS",
+    "PLANNED_OP_CLASS_VALUES",
+    "TARGET_MAX_CHARS",
+    "TTL_MAX_MINUTES",
+    "TTL_MIN_MINUTES",
+    "WORK_REF_MAX_CHARS",
     "AgentAnnouncementEvent",
+    "PlannedOpClass",
 ]
 
 
@@ -122,6 +153,59 @@ __all__ = [
 #: a 10kB activity string ever lands on the stream and propagates to
 #: every subscriber.
 ACTIVITY_MAX_CHARS: Final[int] = 500
+
+#: Per-string cap on ``target`` / ``targets[]`` attribution values.
+#: Matches the announce inputSchema's 256-char ceiling on ``target``.
+TARGET_MAX_CHARS: Final[int] = 256
+
+#: Per-claim cap on the number of ``targets`` an announcement may name.
+#: A single announcement is a coordination signal, not a bulk fleet
+#: sweep -- an agent claiming ten targets at once is already stretching
+#: the "avoid crossfire" contract; beyond that the entry stops being
+#: legible on the feed. Over-long lists reject at the boundary with
+#: ``-32602``.
+MAX_TARGETS: Final[int] = 10
+
+#: Cap on the opaque ``work_ref`` change-ticket reference. Mirrors the
+#: convention on :attr:`meho_backplane.db.models.AgentRun.work_ref`
+#: (an opaque string such as ``"gh:evoila/meho#123"``).
+WORK_REF_MAX_CHARS: Final[int] = 256
+
+#: Lower / upper bounds on a claim's ``ttl_minutes``. 1 minute floor
+#: (a sub-minute claim is noise); 1440-minute (24h) ceiling matches the
+#: broadcast stream's ~24h retention heuristic
+#: (:data:`meho_backplane.broadcast.publisher.BROADCAST_MAXLEN`) -- a
+#: claim outliving the substrate that carries it is a false promise.
+#: Kubernetes Events default ``--event-ttl`` is 1h, a point inside this
+#: band.
+TTL_MIN_MINUTES: Final[int] = 1
+TTL_MAX_MINUTES: Final[int] = 1440
+
+#: The op-class an agent may *declare* it is about to run. Spans the
+#: full :func:`meho_backplane.broadcast.events.classify_op` output
+#: taxonomy -- deliberately wider than the recent/watch read-filter
+#: :data:`meho_backplane.broadcast.history.OP_CLASS_ENUM` (which omits
+#: ``credential_write`` / ``approval``): a *declaration* must be able to
+#: name the sensitive write classes precisely because those are the
+#: highest-crossfire operations to warn peers about, whereas the read
+#: filter narrows already-classified :class:`BroadcastEvent` rows. The
+#: value is trusted structured metadata (a bounded enum, not prose), so
+#: it is served UNWRAPPED.
+PlannedOpClass = Literal[
+    "read",
+    "write",
+    "credential_read",
+    "credential_write",
+    "credential_mint",
+    "audit_query",
+    "approval",
+    "other",
+]
+
+#: Tuple form of :data:`PlannedOpClass`, derived from the Literal so the
+#: JSON-Schema enum on the announce tool and the model type stay a
+#: single source of truth.
+PLANNED_OP_CLASS_VALUES: Final[tuple[str, ...]] = get_args(PlannedOpClass)
 
 
 class AgentAnnouncementEvent(BaseModel):
@@ -158,12 +242,43 @@ class AgentAnnouncementEvent(BaseModel):
     * ``activity`` -- the free-text body. UNTRUSTED, agent-authored.
       Capped at :data:`ACTIVITY_MAX_CHARS`; longer strings surface as
       JSON-RPC ``-32602``.
-    * ``target`` -- optional target_name attribution. Caller passes
-      a string when the announcement scopes to a specific managed
+    * ``target`` -- optional single target_name attribution. Caller
+      passes a string when the announcement scopes to a specific managed
       target (``"prod-vc-1"``, ``"kube-prod"``); ``None`` when the
       activity is target-less (e.g. cross-cluster investigation).
+      Retained for backward compatibility; ``targets`` supersedes it
+      for multi-target claims. UNTRUSTED prose.
+    * ``targets`` -- optional list of target_name attributions (each
+      1..:data:`TARGET_MAX_CHARS` chars, at most :data:`MAX_TARGETS`
+      entries). Supersedes -- does not replace -- the single ``target``:
+      a claim spanning several targets names them all here, and the
+      ``target`` filter on recent/watch matches an event when the query
+      value equals ``target`` OR appears in ``targets``. UNTRUSTED prose
+      (each element wrapped on display).
     * ``scope`` -- optional free-form scope hint (``"investigating
-      cluster X latency"``). Also UNTRUSTED.
+      cluster X latency"``). Also UNTRUSTED prose.
+    * ``planned_op_class`` -- optional declared intent: the
+      :data:`PlannedOpClass` the agent is about to run
+      (``"write"`` / ``"credential_read"`` / ...). TRUSTED structured
+      metadata (a validated enum), served unwrapped so peers can reason
+      about crossfire without absorbing prose.
+    * ``ttl_minutes`` -- optional claim lifetime in minutes
+      (:data:`TTL_MIN_MINUTES`..:data:`TTL_MAX_MINUTES`). Consumers
+      derive ``expires_at = ts + ttl``; the ``active_only`` read filter
+      drops claims whose ``expires_at`` has elapsed. TRUSTED int.
+    * ``work_ref`` -- optional opaque change-ticket reference
+      (``"gh:evoila/meho#123"``), same convention + cap
+      (:data:`WORK_REF_MAX_CHARS`) as
+      :attr:`meho_backplane.db.models.AgentRun.work_ref`. Joins an
+      announcement to the out-of-band record that authorised the work;
+      the recent/watch ``work_ref`` filter matches on it. UNTRUSTED
+      prose (wrapped on display), but exact-match filterable pre-wrap.
+    * ``run_id`` -- optional :class:`~uuid.UUID` of the agent run the
+      announcement belongs to, so a human or peer can group a run's
+      announcements. TRUSTED UUID, served unwrapped.
+    * ``expires_at`` -- derived (computed) ``ts + ttl_minutes``, or
+      ``None`` when ``ttl_minutes`` is unset. TRUSTED timestamp, served
+      unwrapped.
     * ``phase`` -- ``"start"`` / ``"update"`` / ``"completion"``.
       ``"update"`` is the default; ``"start"`` marks an intent
       announcement at the beginning of a task, ``"completion"`` marks
@@ -193,6 +308,30 @@ class AgentAnnouncementEvent(BaseModel):
     principal_sub: str
     activity: str = Field(min_length=1, max_length=ACTIVITY_MAX_CHARS)
     target: str | None = None
+    targets: list[Annotated[str, Field(min_length=1, max_length=TARGET_MAX_CHARS)]] = Field(
+        default_factory=list,
+        max_length=MAX_TARGETS,
+    )
     scope: str | None = None
+    planned_op_class: PlannedOpClass | None = None
+    ttl_minutes: int | None = Field(default=None, ge=TTL_MIN_MINUTES, le=TTL_MAX_MINUTES)
+    work_ref: str | None = Field(default=None, min_length=1, max_length=WORK_REF_MAX_CHARS)
+    run_id: UUID | None = None
     phase: Literal["start", "update", "completion"] = "update"
     ts: datetime
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def expires_at(self) -> datetime | None:
+        """Wall-clock instant the claim's TTL elapses, or ``None`` if unbounded.
+
+        Derived, never stored: ``ts + ttl_minutes``. ``None`` when
+        ``ttl_minutes`` is unset (the announcement is not a
+        time-bounded claim). Served UNWRAPPED on the wire -- a derived
+        timestamp cannot carry an injection -- and drives the
+        ``active_only`` read filter
+        (:func:`meho_backplane.broadcast.history.event_matches`).
+        """
+        if self.ttl_minutes is None:
+            return None
+        return self.ts + timedelta(minutes=self.ttl_minutes)

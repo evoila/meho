@@ -53,6 +53,16 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   this field yet; it is the substrate a later cross-tenant authorization
   gate will check, so that a ``tenant_admin`` cannot be mistaken for a
   platform operator on the strength of role rank alone.
+* ``runner_id`` — the satellite runner principal's row UUID, lifted from
+  a configurable JWT claim (default ``runner_id``) when
+  ``principal_kind`` is :attr:`PrincipalKind.RUNNER`. Optional and
+  defaults to ``None`` so every non-runner token (user / service /
+  agent) materialises with ``runner_id is None``. The claim/kind pair is
+  fail-closed at extraction: a ``principal_kind=runner`` token that
+  carries no ``runner_id`` is rejected 401 (``missing_runner_id_claim``).
+  The gateway guard (:func:`~meho_backplane.auth.runner_guard.assert_runner_scope`)
+  binds this value to the runner named by the route so a runner token can
+  only fetch its own assignment and submit its own results.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -117,11 +127,22 @@ class PrincipalKind(StrEnum):
       ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and
       G11.2-T3 (per-principal permission model) branch on this value
       to apply agent-specific authz.
+    * :attr:`RUNNER` — a satellite runner's service principal registered
+      by ``meho runner-principal register`` (Initiative #2415, #2502);
+      the token carries ``principal_kind=runner`` plus a ``runner_id``
+      claim. A runner is a dumb, push-only executor with a **read-only**
+      credential scope: its token is fail-closed 403'd on every
+      authenticated route outside the gateway allowlist prefixes
+      (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)
+      and on the MCP surface. The unforgeable discriminator is what the
+      negative cage keys on, so a runner client missing any other mapper
+      still cannot roam the read API.
     """
 
     USER = "user"
     SERVICE = "service"
     AGENT = "agent"
+    RUNNER = "runner"
 
 
 class Operator(BaseModel):
@@ -147,3 +168,4 @@ class Operator(BaseModel):
     principal_kind: PrincipalKind = PrincipalKind.USER
     capabilities: frozenset[str] = frozenset()
     platform_admin: bool = False
+    runner_id: UUID | None = None

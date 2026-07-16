@@ -1274,6 +1274,224 @@ async def test_expire_stale_requests_publishes_approval_expired_broadcast(
 
 
 # ---------------------------------------------------------------------------
+# Approval-TTL: park-time expires_at stamping + bounding (#2322)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_stamps_default_expires_at(
+    session: AsyncSession,
+) -> None:
+    """A parked row with no caller deadline defaults to created_at + APPROVAL_DEFAULT_TTL."""
+    operator = _make_operator()
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.ttl-default",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    assert request.expires_at is not None
+    ttl = timedelta(seconds=get_settings().approval_default_ttl_seconds)
+    # Deadline is created_at + the configured default TTL (allow a small
+    # clock-skew window between the two _now() reads).
+    assert abs((request.expires_at - request.created_at) - ttl) < timedelta(seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_caps_over_long_override(
+    session: AsyncSession,
+) -> None:
+    """A caller deadline longer than the ceiling is capped at created_at + default TTL."""
+    operator = _make_operator()
+    ttl = timedelta(seconds=get_settings().approval_default_ttl_seconds)
+    over_long = datetime.now(UTC) + ttl + timedelta(days=30)
+
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.ttl-cap",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        expires_at=over_long,
+    )
+    await session.commit()
+
+    assert request.expires_at is not None
+    assert request.expires_at < over_long
+    # Capped to the ceiling (created_at + default TTL), not the caller value.
+    assert abs((request.expires_at - request.created_at) - ttl) < timedelta(seconds=2)
+
+
+@pytest.mark.asyncio
+async def test_create_pending_request_honours_shorter_override(
+    session: AsyncSession,
+) -> None:
+    """A caller deadline shorter than the ceiling is respected as-is."""
+    operator = _make_operator()
+    shorter = datetime.now(UTC) + timedelta(hours=1)
+
+    request = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.ttl-short",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        expires_at=shorter,
+    )
+    await session.commit()
+
+    assert request.expires_at == shorter
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_requests_coalesces_legacy_null_expiry(
+    session: AsyncSession,
+) -> None:
+    """With default_ttl, a legacy null-expires_at row past created_at+TTL ages out.
+
+    Rows parked before #2322 carry ``expires_at IS NULL``. The sweeper
+    passes ``default_ttl`` so they are coalesced against
+    ``created_at + default_ttl`` and expired once that deadline passes;
+    the null deadline is backfilled to the coalesced value.
+    """
+    operator = _make_operator()
+    ttl = timedelta(days=14)
+
+    # A legacy row: null expiry, created 15 days ago (past created_at + 14d).
+    old = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.legacy-old",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    # A legacy row: null expiry, created 1 day ago (still within the TTL).
+    recent = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.legacy-recent",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    # Rewrite both to the pre-#2322 shape (null expiry) with backdated created_at.
+    async with get_sessionmaker()() as setup:
+        old_row = await setup.get(ApprovalRequest, old.id)
+        recent_row = await setup.get(ApprovalRequest, recent.id)
+        assert old_row is not None and recent_row is not None
+        old_row.expires_at = None
+        old_row.created_at = datetime.now(UTC) - timedelta(days=15)
+        recent_row.expires_at = None
+        recent_row.created_at = datetime.now(UTC) - timedelta(days=1)
+        await setup.commit()
+
+    async with get_sessionmaker()() as s2:
+        expired = await expire_stale_requests(s2, operator=operator, default_ttl=ttl)
+        await s2.commit()
+
+    assert [r.id for r in expired] == [old.id]
+
+    async with get_sessionmaker()() as fresh:
+        old_final = await fresh.get(ApprovalRequest, old.id)
+        recent_final = await fresh.get(ApprovalRequest, recent.id)
+        assert old_final is not None and recent_final is not None
+        assert old_final.status == ApprovalRequestStatus.EXPIRED.value
+        # Backfilled deadline == created_at + default TTL.
+        assert old_final.expires_at is not None
+        assert abs((old_final.expires_at - old_final.created_at) - ttl) < timedelta(seconds=2)
+        # The still-within-TTL legacy row is untouched.
+        assert recent_final.status == ApprovalRequestStatus.PENDING.value
+        assert recent_final.expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_expire_stale_requests_without_default_ttl_ignores_null_rows(
+    session: AsyncSession,
+) -> None:
+    """The historical contract: with no default_ttl, null-expiry rows are never swept."""
+    operator = _make_operator()
+    row = await create_pending_request(
+        session,
+        operator=operator,
+        connector_id="vault-1.x",
+        op_id="vault.kv.legacy-ignored",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as setup:
+        r = await setup.get(ApprovalRequest, row.id)
+        assert r is not None
+        r.expires_at = None
+        r.created_at = datetime.now(UTC) - timedelta(days=999)
+        await setup.commit()
+
+    async with get_sessionmaker()() as s2:
+        expired = await expire_stale_requests(s2, operator=operator)
+        await s2.commit()
+
+    assert expired == []
+    async with get_sessionmaker()() as fresh:
+        final = await fresh.get(ApprovalRequest, row.id)
+        assert final is not None
+        assert final.status == ApprovalRequestStatus.PENDING.value
+
+
+@pytest.mark.asyncio
+async def test_expired_run_bound_request_cannot_be_approved(
+    session: AsyncSession,
+) -> None:
+    """An expired run-bound request is terminal — it cannot be approved or resumed (#2293).
+
+    Pins that once the TTL sweep flips a pending run-bound request to
+    ``expired``, no approval surface can revive it: ``approve_request``
+    hits the already-decided guard, so the op is never claimed or
+    re-dispatched.
+    """
+    requester = _make_operator(sub="agent-requester")
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    past = datetime.now(UTC) - timedelta(hours=1)
+
+    request = await create_pending_request(
+        session,
+        operator=requester,
+        connector_id="vault-1.x",
+        op_id="vault.kv.expired-resume",
+        target=None,
+        params={},
+        params_hash=compute_params_hash({}),
+        run_id=uuid.uuid4(),
+        expires_at=past,
+    )
+    await session.commit()
+
+    async with get_sessionmaker()() as s2:
+        expired = await expire_stale_requests(s2, operator=requester)
+        await s2.commit()
+    assert [r.id for r in expired] == [request.id]
+
+    async with get_sessionmaker()() as approve_session:
+        with pytest.raises(ApprovalRequestAlreadyDecidedError):
+            await approve_request(approve_session, request.id, operator=reviewer)
+
+
+# ---------------------------------------------------------------------------
 # pause → approve → resume → execute (integration-style)
 # ---------------------------------------------------------------------------
 
@@ -2043,37 +2261,26 @@ async def test_mcp_approve_redispatches_direct_op_with_stored_params(
     clear_registry()
 
 
-@pytest.mark.asyncio
-async def test_decide_approve_does_not_redispatch_agent_run_request(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An agent-run request approved via ``/decide`` is NOT re-dispatched (#1503, AC3).
-
-    The in-process agent runtime resumes an agent-run op off the
-    ``approval.approved`` broadcast. ``/decide`` re-dispatching it too
-    would execute the op twice. For a request with ``run_id`` set,
-    ``/decide`` must record the decision only and leave the
-    ``dispatch_*`` fields empty — the must-not-regress guard.
-    """
-    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
-    from meho_backplane.connectors.registry import clear_registry
-    from meho_backplane.operations import reset_dispatcher_caches
-
+async def _park_agent_run_request(monkeypatch: pytest.MonkeyPatch) -> uuid.UUID:
+    """Register the recording op + commit an agent-run (run_id set) parked row."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     get_settings.cache_clear()
 
     _RECORDED_EXECUTIONS.clear()
+    from meho_backplane.operations import reset_dispatcher_caches
+
     reset_dispatcher_caches()
+    from meho_backplane.connectors.registry import clear_registry
+
     clear_registry()
     await _register_recording_requires_approval_op(monkeypatch)
 
-    # Park an agent-run request directly (run_id set) — the realistic
-    # shape the agent runtime parks via the contextvar.
+    # Park an agent-run request directly (run_id set) — the realistic shape
+    # the agent runtime parks via the contextvar.
     requester = _make_operator(sub="agent-run-sub", principal_kind=PrincipalKind.AGENT)
     params = {"path": "secret/agent"}
-    run_id = uuid.uuid4()
     async with get_sessionmaker()() as s:
         pending = await create_pending_request(
             s,
@@ -2083,10 +2290,30 @@ async def test_decide_approve_does_not_redispatch_agent_run_request(
             target=None,
             params=params,
             params_hash=compute_params_hash(params),
-            run_id=run_id,
+            run_id=uuid.uuid4(),
         )
         await s.commit()
-    approval_request_id = pending.id
+    return pending.id
+
+
+@pytest.mark.asyncio
+async def test_decide_redispatches_agent_run_request_when_claim_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/decide re-dispatches an agent-run approval on a free claim (#2293).
+
+    The waiter-gone fallback (AC3). Before #2293, ``/decide`` skipped
+    re-dispatch whenever ``run_id`` was set, assuming the in-process agent
+    waiter would resume — so an approval whose waiter had died (timeout,
+    pod restart, run cancelled) committed the decision but executed
+    nothing. With the exactly-one-resumer claim free, ``/decide`` now wins
+    it and executes the op exactly once, closing that silent-skip seam.
+    """
+    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
+    from meho_backplane.connectors.registry import clear_registry
+    from meho_backplane.operations import reset_dispatcher_caches
+
+    approval_request_id = await _park_agent_run_request(monkeypatch)
 
     reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
     response = await decide_approval_request(
@@ -2096,10 +2323,46 @@ async def test_decide_approve_does_not_redispatch_agent_run_request(
     )
 
     assert response.decision == "approved"
-    # No inline re-dispatch — the agent runtime owns that path.
-    assert response.dispatch_status is None
-    assert response.dispatch_op_id is None
-    assert _RECORDED_EXECUTIONS == [], "agent-run op must NOT execute from /decide"
+    assert response.dispatch_status == "ok"
+    assert response.dispatch_op_id == "rectest.write"
+    assert len(_RECORDED_EXECUTIONS) == 1, "agent-run op must execute once via the /decide fallback"
+
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.mark.asyncio
+async def test_decide_agent_run_request_no_ops_when_claim_already_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """/decide no-ops (no second execution) when the waiter already claimed (#2293).
+
+    The waiter-alive dedup polarity (AC2): the in-process agent waiter has
+    already won the exactly-one-resumer claim and executed the approved op.
+    ``/decide`` for the same run-bound request then loses the claim and
+    reports ``dispatch_status="already_resumed"`` — the op must NOT execute
+    a second time (no double-dispatch of the approved write).
+    """
+    from meho_backplane.api.v1.approvals import DecideRequestBody, decide_approval_request
+    from meho_backplane.connectors.registry import clear_registry
+    from meho_backplane.operations import reset_dispatcher_caches
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    approval_request_id = await _park_agent_run_request(monkeypatch)
+
+    # The in-process waiter won the claim first (and executed the op).
+    assert await claim_resume(approval_request_id) is True
+
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    response = await decide_approval_request(
+        approval_request_id,
+        DecideRequestBody(decision="approved"),
+        operator=reviewer,
+    )
+
+    assert response.decision == "approved"
+    assert response.dispatch_status == "already_resumed"
+    assert _RECORDED_EXECUTIONS == [], "no second execution once the claim is taken"
 
     reset_dispatcher_caches()
     clear_registry()
@@ -2547,3 +2810,148 @@ async def test_mcp_session_lineage_park_approve_resume_replays_as_tree(
 
     reset_dispatcher_caches()
     clear_registry()
+
+
+# ---------------------------------------------------------------------------
+# Exactly-one-resumer claim (#2293)
+# ---------------------------------------------------------------------------
+
+
+async def _commit_pending(
+    *,
+    operator: Operator,
+    op_id: str = "vault.kv.write",
+    connector_id: str = "vault-1.x",
+    params: dict[str, Any] | None = None,
+    run_id: uuid.UUID | None = None,
+) -> ApprovalRequest:
+    """Insert + commit a pending request so a fresh session can claim it."""
+    call_params = params if params is not None else {"key": "value"}
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        request = await create_pending_request(
+            s,
+            operator=operator,
+            connector_id=connector_id,
+            op_id=op_id,
+            target=None,
+            params=call_params,
+            params_hash=compute_params_hash(call_params),
+            run_id=run_id,
+        )
+        await s.commit()
+    return request
+
+
+async def _reload_resumed_at(request_id: uuid.UUID) -> datetime | None:
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, request_id)
+        assert row is not None
+        return row.resumed_at
+
+
+@pytest.mark.asyncio
+async def test_claim_resume_wins_once_then_loses() -> None:
+    """The conditional-UPDATE claim is won by exactly one caller (#2293).
+
+    First :func:`claim_resume` on a fresh (``resumed_at IS NULL``) request
+    wins (returns True) and stamps ``resumed_at``; every subsequent claim
+    on the same row loses (returns False) and leaves the stamp untouched.
+    This is the sequential proof of the exactly-once latch; the concurrent
+    proof lives in the Postgres integration suite.
+    """
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    operator = _make_operator(sub="agent-claim")
+    request = await _commit_pending(operator=operator)
+
+    assert await _reload_resumed_at(request.id) is None
+
+    first = await claim_resume(request.id)
+    assert first is True, "the first resumer must win the free claim"
+    stamped = await _reload_resumed_at(request.id)
+    assert stamped is not None, "winning the claim must stamp resumed_at"
+
+    second = await claim_resume(request.id)
+    assert second is False, "a second resumer must lose the taken claim"
+    # The stamp is a one-way latch — the loser never overwrites it.
+    assert await _reload_resumed_at(request.id) == stamped
+
+
+@pytest.mark.asyncio
+async def test_resume_dispatch_after_approval_noops_when_claim_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumer that lost the claim returns already_resumed, never dispatches.
+
+    #2293 AC4: a second resumer arriving after the claim is taken no-ops
+    cleanly — ``resume_dispatch_after_approval`` returns the benign
+    ``already_resumed`` result and does **not** call the dispatcher (no
+    second execution of the approved write).
+    """
+    import meho_backplane.operations.dispatcher as dispatcher_module
+    from meho_backplane.operations.approval_queue import (
+        claim_resume,
+        resume_dispatch_after_approval,
+    )
+
+    operator = _make_operator(sub="agent-noop")
+    request = await _commit_pending(operator=operator)
+
+    # Simulate the winning resumer (e.g. the in-process waiter) having
+    # already taken the claim.
+    assert await claim_resume(request.id) is True
+
+    dispatch_calls = 0
+
+    async def _spy_dispatch(*_args: Any, **_kwargs: Any) -> Any:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        raise AssertionError("dispatch must not run for a lost claim")
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _spy_dispatch)
+
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    result = await resume_dispatch_after_approval(operator=reviewer, request=request)
+
+    assert result.status == "already_resumed"
+    assert result.error is None
+    assert result.extras["approval_request_id"] == str(request.id)
+    assert dispatch_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_resume_dispatch_after_approval_wins_free_claim_and_stamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the claim is free the resumer wins it, stamps it, and dispatches.
+
+    The waiter-gone fallback polarity (#2293 AC3) at the service layer:
+    with no prior claim, ``resume_dispatch_after_approval`` wins the
+    conditional UPDATE (``resumed_at`` transitions NULL → set) and proceeds
+    to the single ``dispatch(..., _approved=True)``.
+    """
+    import meho_backplane.operations.dispatcher as dispatcher_module
+    from meho_backplane.connectors.schemas import OperationResult
+    from meho_backplane.operations.approval_queue import resume_dispatch_after_approval
+
+    operator = _make_operator(sub="agent-win")
+    request = await _commit_pending(operator=operator)
+    assert await _reload_resumed_at(request.id) is None
+
+    dispatch_calls = 0
+
+    async def _ok_dispatch(*_args: Any, **kwargs: Any) -> OperationResult:
+        nonlocal dispatch_calls
+        dispatch_calls += 1
+        assert kwargs.get("_approved") is True, "resume must bypass the gate"
+        return OperationResult(status="ok", op_id=kwargs["op_id"], duration_ms=0.1)
+
+    monkeypatch.setattr(dispatcher_module, "dispatch", _ok_dispatch)
+
+    reviewer = _make_operator(sub="human-reviewer", principal_kind=PrincipalKind.USER)
+    result = await resume_dispatch_after_approval(operator=reviewer, request=request)
+
+    assert result.status == "ok"
+    assert dispatch_calls == 1
+    assert await _reload_resumed_at(request.id) is not None

@@ -51,6 +51,15 @@
         </td>
         <td>
           <span class="badge {{ row.status_badge }} badge-sm">{{ row.status }}</span>
+          {# Skip-state signal (#2327): a silently-skipping 'active' trigger
+             gets a warning badge here so the row no longer reads as healthy
+             at a glance. Tooltip carries the machine-tag cause. #}
+          {% if row.skip_count and row.skip_count > 0 %}
+            <span
+              class="badge badge-warning badge-sm"
+              title="Skipped {{ row.skip_count }} consecutive tick(s){% if row.last_skip_reason %}: {{ row.last_skip_reason }}{% endif %}"
+            >⚠ {{ row.skip_count }}</span>
+          {% endif %}
         </td>
         <td class="font-mono text-xs">
           {{ row.schedule_summary }}

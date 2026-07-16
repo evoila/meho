@@ -3,106 +3,84 @@
 
 """NsxConnector -- hand-rolled HttpConnector subclass for NSX.
 
-Skeleton-only -- auth + fingerprint + probe + the G0.6 dispatch shim.
-Operations arrive in #614 via G0.7 spec ingestion against the NSX
-``policy.yaml`` + ``manager.yaml`` corpus the appliance serves.
-
-Registered against the v2 registry at module-import time via
+Auth + fingerprint + probe + the G0.6 dispatch shim, plus the #2302
+typed audited-read shims. Registered against the v2 registry at
+module-import time via
 :func:`~meho_backplane.connectors.registry.register_connector_v2` in
-:mod:`meho_backplane.connectors.nsx.__init__`. The G0.7 auto-shim's
-idempotency check (in
-:func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
-once #408's pipeline lands in main) no-ops on subsequent ingests
-against the same ``(product="nsx", version="9.0", impl_id="nsx-rest")``
-triple.
+:mod:`meho_backplane.connectors.nsx.__init__`; re-ingests against the
+same ``(product="nsx", version="9.0", impl_id="nsx-rest")`` triple no-op.
 
 VCF-9 version renumber (#1530)
 ------------------------------
 
-NSX-T 4.x was renumbered onto the VCF train at VCF 9.0 -- a live
-VCF-9 appliance reports NSX 9.0.x and the vendor spec carries
-``info.version`` in the 9.x scheme. The :attr:`supported_version_range`
-spans ``>=4.0,<10.0`` so a single class covers both the standalone
-NSX-T 4.x line and the VCF-9-aligned 9.x line; dispatch and the
-ingest version-range pre-flight key on the
+NSX-T 4.x was renumbered onto the VCF train at VCF 9.0 -- a live VCF-9
+appliance reports NSX 9.0.x. The :attr:`supported_version_range`
+``>=4.0,<10.0`` keeps one class covering both the standalone NSX-T 4.x
+line and the VCF-9-aligned 9.x line; dispatch and the ingest
+version-range pre-flight key on the
 :class:`packaging.specifiers.SpecifierSet`, not the class-pinned
-:attr:`version`, so the one class resolves every label in the band.
-Same renumber posture :class:`VmwareRestConnector` took for the
-vSphere 8.x -> 9.0 jump (``version="9.0"``,
-``supported_version_range=">=8.5,<10.0"``).
+:attr:`version`. Same posture :class:`VmwareRestConnector` took for the
+vSphere 8.x -> 9.0 jump.
 
 Auth divergence from the vSphere precedent
 ------------------------------------------
 
 NSX rejects HTTP Basic on the canonical FQDN behind the VCF 9 envoy
 proxy; session-cookie + X-XSRF-TOKEN is the only mode that works across
-both VCF 9 and standalone NSX-T (per ``scripts/nsx.sh`` in the
-consumer wrapper repo). The flow:
+both VCF 9 and standalone NSX-T (per ``scripts/nsx.sh`` in the consumer
+wrapper repo). The flow:
 
-1. ``POST /api/session/create`` with **form-encoded** body
-   ``j_username`` / ``j_password`` (``httpx.AsyncClient.post(url,
-   data=<dict>)`` = ``application/x-www-form-urlencoded``; NOT JSON,
-   NOT HTTP Basic).
-2. The response's ``Set-Cookie`` header (``JSESSIONID=...``) lands in
-   :attr:`httpx.AsyncClient.cookies` automatically -- httpx calls
-   ``self.cookies.extract_cookies(response)`` on every response, so
-   subsequent requests through the same per-target client carry the
-   cookie without manual plumbing.
-3. The response's ``X-XSRF-TOKEN`` header is captured into
-   :attr:`_session_tokens` keyed on the tenant-unique
-   ``(tenant_id, target.id)`` tuple (#1642), so two same-named targets in
+1. ``POST /api/session/create`` with **form-encoded** ``j_username`` /
+   ``j_password`` (``client.post(url, data=<dict>)``; NOT JSON, NOT
+   HTTP Basic).
+2. The response ``Set-Cookie: JSESSIONID=...`` lands in
+   :attr:`httpx.AsyncClient.cookies` automatically, so subsequent
+   requests through the same per-target client carry the cookie.
+3. The response ``X-XSRF-TOKEN`` header is cached in
+   :attr:`_session_tokens`, keyed on the tenant-unique
+   ``(tenant_id, target.id)`` tuple (#1642) so two same-named targets in
    different tenants never share a cached session.
 4. :meth:`auth_headers` returns ``{"X-XSRF-TOKEN": <cached>}`` on
    subsequent calls; the cookie travels via the client jar.
-5. On HTTP 401 from a downstream call, :meth:`_get_json_with_session_retry`
-   clears the cached token + the client cookies, re-establishes the
-   session via ``_session_token``, and retries once. A second 401
-   surfaces as :exc:`RuntimeError` naming the target -- the consumer
-   wrapper's posture (re-login + retry once, not a loop) so a
-   misconfigured credential pair fails fast instead of hammering
-   NSX's audit log.
+5. On HTTP 401 from a downstream call,
+   :meth:`_get_json_with_session_retry` invalidates the cached token +
+   client cookies, re-establishes the session, and retries once. A
+   second 401 raises :exc:`RuntimeError` naming the target (re-login
+   once, not a loop) so a bad credential pair fails fast.
 
 Auth model gating
 -----------------
 
 v0.2 locks the connector to :attr:`AuthModel.SHARED_SERVICE_ACCOUNT`
-(or ``None`` for pre-G0.3 targets where the column hasn't been
-populated yet). :meth:`auth_headers` rejects any other value with a
-clear :exc:`NotImplementedError` naming the target + the requested
-mode. Per-user and impersonation modes are deferred to v0.2.next,
-same posture the vSphere precedent established.
-
-The operator's validated Keycloak JWT is forwarded through
+(or ``None`` for pre-G0.3 targets); :meth:`auth_headers` rejects any
+other value with a :exc:`NotImplementedError` naming the target + mode.
+Per-user and impersonation modes are deferred to v0.2.next. The
+operator's validated Keycloak JWT is forwarded through
 :meth:`auth_headers` -> :meth:`_session_token` -> the
-:class:`NsxSessionLoader` so the live default loader reads the
-per-target Vault secret under the operator's identity (G3.10-T1 #945,
-following the G3.9 vmware-rest precedent). The NSX session establish
-itself stays HTTP-form against the resolved service account -- the
-operator's JWT authenticates the Vault read, not the NSX login.
+:class:`NsxSessionLoader` so the live loader reads the per-target Vault
+secret under the operator's identity (G3.10-T1 #945); the NSX session
+establish itself stays HTTP-form against the resolved service account.
 
 Session lifecycle
 -----------------
 
-NSX session has a documented idle timeout (default ~30 minutes for NSX
-Manager); the connector does not proactively refresh tokens. The
-401-retry layer above re-establishes on demand. :meth:`aclose` clears
-the in-memory caches and tears down the httpx pool but does NOT
-issue a DELETE-revoke -- NSX has a ``POST /api/session/destroy``
-endpoint, but graceful shutdown is bounded by Kubernetes'
-``terminationGracePeriod`` and a network-call-per-target during
-lifespan exit is more risk than benefit. Same posture vSphere takes
-for proactive refresh: revoke-on-close is v0.2.next.
+NSX sessions have a documented idle timeout (~30 min); the connector
+does not proactively refresh -- the 401-retry layer re-establishes on
+demand. :meth:`aclose` clears the caches and tears down the httpx pool
+but issues no DELETE-revoke: a network-call-per-target during lifespan
+exit is more risk than benefit under Kubernetes'
+``terminationGracePeriod``.
 
 Operations
 ----------
 
-This module ships zero operations -- the G0.6 dispatch shim
-:meth:`execute` exists for ABC compatibility but operations land in
-the ``endpoint_descriptor`` table via #614's spec ingestion. Until
-then, the connector is registered and discoverable but
-``execute(target, op_id, ...)`` against any ``op_id`` will resolve to
-"unknown operation" at the dispatcher layer -- which is the correct
-behaviour for a registered-but-empty connector at this Task's stage.
+The audited read set (#2302) ships as **typed** ops
+(``source_kind="typed"``) via the bound-method shims below, registered
+through :mod:`meho_backplane.connectors.nsx.typed_ops`; they dispatch on
+a fresh boot with zero catalog ingest. The remaining reads stay as
+ingested browse breadth, enable-able through the generic review flow
+(``ReviewService.enable_reads``). The G0.6 :meth:`execute`
+shim remains for ABC compatibility.
 """
 
 from __future__ import annotations
@@ -117,10 +95,12 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
+from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.nsx.session import (
     NsxSessionLoader,
     NsxTargetLike,
+    is_acceptable_auth_model,
     load_session_credentials_from_vault,
 )
 from meho_backplane.connectors.schemas import (
@@ -153,23 +133,6 @@ _XSRF_HEADER = "X-XSRF-TOKEN"
 # rather than carrying the magic strings inline.
 _FORM_USERNAME_KEY = "j_username"
 _FORM_PASSWORD_KEY = "j_password"
-
-
-def _is_acceptable_auth_model(value: Any) -> bool:
-    """Return ``True`` iff *value* is the SHARED_SERVICE_ACCOUNT mode or unset.
-
-    Accepts the enum member, the equivalent string, and ``None`` (the
-    "auth_model column not yet populated" sentinel for pre-G0.3
-    targets). Any other value (``"per_user"``, ``"impersonation"``, a
-    typo, an int) is rejected by the caller. Same predicate the
-    vSphere precedent uses; lifted into this module rather than
-    imported to keep the two connectors decoupled.
-    """
-    if value is None:
-        return True
-    if value is AuthModel.SHARED_SERVICE_ACCOUNT:
-        return True
-    return bool(value == AuthModel.SHARED_SERVICE_ACCOUNT.value)
 
 
 class NsxConnector(HttpConnector):
@@ -234,7 +197,7 @@ class NsxConnector(HttpConnector):
         anything other than ``shared_service_account`` or ``None``.
         """
         auth_model = getattr(target, "auth_model", None)
-        if not _is_acceptable_auth_model(auth_model):
+        if not is_acceptable_auth_model(auth_model):
             raise NotImplementedError(
                 f"NsxConnector only supports auth_model="
                 f"{AuthModel.SHARED_SERVICE_ACCOUNT.value!r}; target "
@@ -297,9 +260,16 @@ class NsxConnector(HttpConnector):
                 # httpx's default str() shows only the URL/status, which
                 # loses the per-target identification the dispatcher's
                 # audit row needs.
-                raise RuntimeError(
+                message = (
                     f"nsx session establish failed for target {target.name!r}: "
                     f"POST {_SESSION_CREATE_PATH} returned HTTP {exc.response.status_code}"
+                )
+                # #2329: 401/403 at establish -> structured
+                # ``connector_auth_failed`` (restage remediation); other
+                # statuses keep the bare RuntimeError shape.
+                raise (
+                    session_establish_auth_error(exc, message=message, target=target)
+                    or RuntimeError(message)
                 ) from exc
             xsrf: str | None = resp.headers.get(_XSRF_HEADER)
             if not xsrf:
@@ -320,11 +290,27 @@ class NsxConnector(HttpConnector):
             )
             return xsrf
 
+    # #2396: NSX deliberately exposes NO ``invalidate_credentials`` hook. It
+    # caches only the session token (evicted by ``invalidate_session`` below);
+    # the service-account credentials are re-read from Vault via
+    # ``_session_loader`` on every establish, so a restage already converges on
+    # the next cold-session dispatch with no credential cache to evict.
+    async def invalidate_session(self, target: NsxTargetLike) -> None:
+        """Public duck-typed session-eviction hook for the dispatch path.
+
+        The seam the generic dispatch path calls on an auth-class status
+        (NSX's 401) before re-dispatching once (G0.29-T2 #2067) -- the path
+        the typed read ops (#2302) traverse. Delegates to
+        :meth:`_invalidate_session`, mirroring the vmware-rest / vcf-logs seam.
+        """
+        await self._invalidate_session(target)
+
     async def _invalidate_session(self, target: NsxTargetLike) -> None:
         """Drop the cached XSRF token + clear the client cookie jar for *target*.
 
         Called by :meth:`_get_json_with_session_retry` on 401 from a
-        downstream call so the subsequent :meth:`_session_token`
+        downstream call, and by the public :meth:`invalidate_session`
+        dispatch-path hook (#2067), so the subsequent :meth:`_session_token`
         re-issues ``POST /api/session/create`` from a clean state.
         Holds the lock so a concurrent re-establish doesn't race with
         the invalidation.
@@ -511,6 +497,67 @@ class NsxConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    # Typed read ops (#2302): thin bound-method shims delegating to
+    # ``nsx.typed_reads`` bodies (kept in a sibling module for the
+    # file-length budget). All read-only; a raw 401 propagates to the
+    # dispatcher's #2067 arm (see :meth:`invalidate_session`).
+
+    async def node_status(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.node.status`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_node_status_impl
+
+        return await nsx_node_status_impl(self, operator, target, params)
+
+    async def cluster_status(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.cluster.status`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_cluster_status_impl
+
+        return await nsx_cluster_status_impl(self, operator, target, params)
+
+    async def backup_config(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.backup.config`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_backup_config_impl
+
+        return await nsx_backup_config_impl(self, operator, target, params)
+
+    async def backup_status(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.backup.status`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_backup_status_impl
+
+        return await nsx_backup_status_impl(self, operator, target, params)
+
+    async def transport_zone_list(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.transport_zone.list`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_transport_zone_list_impl
+
+        return await nsx_transport_zone_list_impl(self, operator, target, params)
+
+    async def tier1_list(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.tier1.list`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_tier1_list_impl
+
+        return await nsx_tier1_list_impl(self, operator, target, params)
+
+    async def alarm_list(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.alarm.list`` shim (#2302)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_alarm_list_impl
+
+        return await nsx_alarm_list_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Clear cached XSRF tokens, then tear down the httpx pool.

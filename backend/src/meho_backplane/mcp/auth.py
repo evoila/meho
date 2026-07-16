@@ -48,10 +48,10 @@ Spec citations
 from __future__ import annotations
 
 import structlog
-from fastapi import Depends, Header, HTTPException
+from fastapi import Depends, Header, HTTPException, status
 
 from meho_backplane.auth.jwt import verify_jwt_for_audience
-from meho_backplane.auth.operator import Operator
+from meho_backplane.auth.operator import Operator, PrincipalKind
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
@@ -192,7 +192,24 @@ async def verify_mcp_jwt_and_bind(
     ``tenant_id`` is bound as ``str(operator.tenant_id)`` for the same
     JSON-renderer reason the chassis wrapper documents — see
     :func:`~meho_backplane.middleware.verify_jwt_and_bind`.
+
+    Runner cage (Initiative #2415, #2502)
+    -------------------------------------
+    A ``principal_kind=runner`` token is fail-closed 403'd here. The REST
+    seam (:func:`~meho_backplane.middleware.verify_jwt_and_bind`) cages
+    runner tokens to the gateway path prefixes, but the MCP chain is a
+    **separate** seam that never passes through it — an audience-mapper
+    misconfiguration is one realm edit away from letting a runner token
+    reach ``/mcp``. No MCP surface is in a runner's read-only credential
+    scope, so the rejection is unconditional (not path-scoped) and shares
+    the REST cage's ``runner_scope_violation`` detail code.
     """
+    if operator.principal_kind is PrincipalKind.RUNNER:
+        _log.warning("runner_scope_violation", operator_sub=operator.sub, surface="mcp")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="runner_scope_violation",
+        )
     structlog.contextvars.bind_contextvars(
         operator_sub=operator.sub,
         tenant_id=str(operator.tenant_id),

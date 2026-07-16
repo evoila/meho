@@ -119,21 +119,33 @@ def test_create_node_tool_registers_with_tenant_admin_and_write() -> None:
     assert defn.op_class == "write"
 
 
-def test_create_node_input_schema_enums_against_graph_node_kinds() -> None:
-    """The inputSchema's ``kind`` enum mirrors ``_GRAPH_NODE_KINDS`` verbatim.
+def test_create_node_input_schema_kind_is_pattern_constrained() -> None:
+    """The inputSchema's ``kind`` carries the slug pattern, not an enum.
 
-    Drift guard: a future widening of the node-kind vocabulary should
-    surface in the tool's schema automatically (sourced from the
-    constant). The test pins the expected v0.2 vocabulary so a silent
-    widening lands a visible diff.
+    T1 #2534 drift guard: the open vocabulary means the schema
+    constrains by shape (``pattern`` + length bounds mirroring
+    :data:`KIND_SLUG_PATTERN`) and the well-known kinds appear only as
+    description suggestions. A reintroduced ``enum`` would silently
+    re-close the vocabulary at the MCP boundary.
     """
-    from meho_backplane.db.models import _GRAPH_NODE_KINDS
+    from meho_backplane.db.models import (
+        KIND_SLUG_MAX_LENGTH,
+        KIND_SLUG_MIN_LENGTH,
+        KIND_SLUG_PATTERN,
+        WELL_KNOWN_NODE_KINDS,
+    )
 
     entry = get_tool("meho.topology.create_node")
     assert entry is not None
     defn, _ = entry
-    schema_enum = defn.inputSchema["properties"]["kind"]["enum"]
-    assert sorted(schema_enum) == sorted(_GRAPH_NODE_KINDS)
+    kind_schema = defn.inputSchema["properties"]["kind"]
+    assert "enum" not in kind_schema
+    assert kind_schema["pattern"] == KIND_SLUG_PATTERN
+    assert kind_schema["minLength"] == KIND_SLUG_MIN_LENGTH
+    assert kind_schema["maxLength"] == KIND_SLUG_MAX_LENGTH
+    # The well-known kinds survive as description suggestions.
+    for kind in WELL_KNOWN_NODE_KINDS:
+        assert kind in kind_schema["description"]
 
 
 def test_annotate_description_states_bootstrap_precondition() -> None:
@@ -276,13 +288,34 @@ async def test_create_node_is_idempotent_on_repeat(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_create_node_rejects_unknown_kind_at_schema_layer(
+def test_create_node_rejects_malformed_kind_at_schema_layer(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A made-up `kind` fails the inputSchema enum (-32602) before the service runs."""
+    """A malformed `kind` slug fails the inputSchema pattern (-32602)."""
     client, _op = client_with_operator
-    response = _create_node_call(client, 30, {"kind": "quantum-blob", "name": "entangled"})
+    response = _create_node_call(client, 30, {"kind": "DNS Record!", "name": "entangled"})
     assert response.json()["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+def test_create_node_accepts_novel_kind_keycloak_realm(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """`keycloak-realm` — the pre-T1 #2534 doc-vs-enum drift — now round-trips.
+
+    The annotate tool's description advertised `keycloak-realm` as a
+    seedable kind while the closed enum rejected it at the inputSchema
+    layer. With the open vocabulary the advertised example must work
+    end-to-end.
+    """
+    client, _op = client_with_operator
+    response = _create_node_call(client, 32, {"kind": "keycloak-realm", "name": "master"})
+    body = response.json()
+    assert "error" not in body, body
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "keycloak-realm"
+    assert payload["name"] == "master"
+    assert payload["was_created"] is True
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

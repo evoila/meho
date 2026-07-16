@@ -75,6 +75,8 @@ def mint_token(
     audience: str | None = None,
     capabilities: list[str] | None = None,
     platform_admin: bool | None = None,
+    principal_kind: str | None = None,
+    runner_id: str | None = None,
 ) -> str:
     """Mint a happy-path JWT signed by *private_key*.
 
@@ -92,6 +94,13 @@ def mint_token(
     ``_extract_capabilities`` reads onto ``Operator.capabilities`` (G4.5-T1
     add-on / G4.6-T3 per-collection entitlement). ``None`` omits the claim
     entirely so pre-capability call sites are unchanged.
+
+    ``principal_kind`` / ``runner_id`` populate the ``principal_kind`` and
+    ``runner_id`` claims the backend's ``_extract_principal_kind`` /
+    ``_extract_runner_id`` read (Initiative #2415, #2502). Both default to
+    ``None`` so every existing call site is unchanged; pass
+    ``principal_kind="runner"`` + ``runner_id="<uuid>"`` to mint a
+    satellite-runner token.
     """
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
@@ -115,6 +124,10 @@ def mint_token(
             payload["capabilities"] = capabilities
         if platform_admin is not None:
             payload["platform_admin"] = platform_admin
+        if principal_kind is not None:
+            payload["principal_kind"] = principal_kind
+        if runner_id is not None:
+            payload["runner_id"] = runner_id
         header = {"alg": "RS256", "kid": private_key.as_dict()["kid"], "typ": "JWT"}
         token: bytes | str = jwt.encode(header, payload, private_key)
         return token.decode("ascii") if isinstance(token, bytes) else token

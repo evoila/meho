@@ -35,15 +35,15 @@ from typing import Any, Literal
 import httpx
 
 from meho_backplane.connectors import OperationResult, ResultHandle
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.redaction.engine import redact
 from meho_backplane.redaction.resolver import get_default_policy
 
 __all__ = [
+    "result_already_resumed",
     "result_ambiguous_connector",
     "result_ambiguous_target",
     "result_awaiting_approval",
-    "result_composite_l2_disabled",
-    "result_composite_l2_missing",
     "result_connector_auth_failed",
     "result_connector_error",
     "result_connector_http_403",
@@ -51,6 +51,7 @@ __all__ = [
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
     "result_connector_vault_forbidden",
+    "result_connector_vault_write_forbidden",
     "result_denied",
     "result_handler_unreachable",
     "result_invalid_params",
@@ -439,156 +440,40 @@ def result_awaiting_approval(
     )
 
 
-def result_composite_l2_missing(
+def result_already_resumed(
     op_id: str,
-    missing_op_ids: tuple[str, ...],
-    catalog_command: str,
+    approval_request_id: uuid.UUID,
     duration_ms: float,
 ) -> OperationResult:
-    """Composite handler pre-flight detected missing L2 sub-op descriptors.
+    """Another resumer already won the exactly-one-resumer claim (#2293).
 
-    G0.14-T10 (#1151). A composite (``vmware.composite.*``) declares the
-    raw-REST sub-ops it dispatches into via
-    :func:`~meho_backplane.connectors.vmware_rest.composites._preflight.preflight_l2_dependencies`.
-    When one or more are not registered in ``endpoint_descriptor`` --
-    no operator has run ``meho connector ingest --catalog
-    <product>/<version>`` yet for this connector -- the helper raises
-    :class:`~meho_backplane.operations.composite.CompositeL2DependencyMissing`
-    and the dispatcher converts it to this structured result.
+    Task #2293 (Initiative #2286). Every dispatcher of an approved op --
+    the in-process agent waiter (#1117), the shared
+    :func:`~meho_backplane.operations.approval_queue.resume_dispatch_after_approval`
+    operator path, any future resumer -- must first win the atomic claim
+    (:func:`~meho_backplane.operations.approval_queue.claim_resume`: a
+    conditional ``UPDATE ... WHERE resumed_at IS NULL``). This result is
+    what a **loser** returns: the approved op is already executing /
+    executed via the resumer that won the claim, so this caller must
+    no-op rather than re-dispatch the write a second time.
 
-    Wording is the v0.9 reframe from G0.16-T1 (#1303), refined by
-    G0.18-T7 (#1360) and #1386 to state that the escape-hatch ingest
-    needs ``ANTHROPIC_API_KEY`` set for its grouping pass. The v0.8.0
-    envelope cast
-    the catalog command as "the remediation path" and operators read
-    it as the recommended next step; reality is the opposite (per
-    ``docs/codebase/api-shape-conventions.md`` §1) -- the curated
-    daily-driver is the recommended path and the OpenAPI ingest is
-    the escape hatch operators reach for when they're willing to
-    handle vendor-shape responses without operator-shape envelopes
-    or ``requires_approval`` annotations.
-
-    The escape-hatch ingest needs an ``ANTHROPIC_API_KEY`` to run its
-    grouping pass: #1386 wires a production ``LlmClient`` at FastAPI
-    lifespan startup
-    (``build_anthropic_ingest_llm_client``, reusing
-    ``settings.anthropic_api_key``), so non-dry-run ``meho connector
-    ingest --catalog ...`` groups successfully on a deploy with the key
-    set. A deploy that configured no key still fails closed with HTTP
-    503 / ``LlmClientUnavailable`` (RDC #789 N9 surfaced operators
-    following the escape-hatch hint into a silent 503), so the human
-    message names the key requirement rather than claiming the path is
-    build-time-only.
-
-    The error shape still complies with the
-    ``docs/codebase/error-message-shape.md`` convention (G0.14-T11
-    #1141): a stable ``composite_l2_missing`` code, a
-    diagnostic-bearing human message (curation gap + the missing
-    op-ids + the escape-hatch recipe + the key requirement +
-    two doc references), and a structured ``data`` payload
-    (``missing_op_ids`` + ``catalog_command``) so an agent can branch
-    on the diagnostic without re-parsing the human text.
+    It is deliberately **not** an error and **not** ``denied`` -- the
+    governance loop succeeded, just on the other surface. The distinct
+    ``status="already_resumed"`` lets the approving surface (REST
+    ``/approve`` / ``/decide`` ``dispatch_status``, the MCP ``dispatch``
+    block) report "already executed" to the approver without surfacing a
+    failure (AC #4). Callers that only handled ``"ok"`` treat it as an
+    unrecognised terminal status, which is the correct benign semantics.
+    :func:`status_code_for_result` maps it to ``200``.
     """
-    missing_repr = ", ".join(missing_op_ids) if missing_op_ids else "(none)"
     return OperationResult(
-        status="error",
+        status="already_resumed",
         op_id=op_id,
-        error=(
-            f"composite_l2_missing: composite {op_id!r} depends on sub-ops "
-            f"not curated for this connector: [{missing_repr}]. The curated "
-            f"daily-driver is the recommended path -- file an issue for an "
-            f"L1 wrapper that exposes these ops in operator shape. As an "
-            f"escape hatch, run {catalog_command!r} to ingest the raw "
-            f"vendor ops (vendor-shape responses, no approval annotations) "
-            f"and retry -- note that ingest grouping needs ANTHROPIC_API_KEY "
-            f"set (the chassis wires the grouping LlmClient at lifespan "
-            f"startup, reusing that key); a deploy with no key configured "
-            f"fails closed with 503 / LlmClientUnavailable (#1386). See "
-            f"docs/codebase/api-shape-conventions.md "
-            f"section 1 for the strategic framing, "
-            f"docs/codebase/spec-ingestion.md section 'LLM-client wiring' "
-            f"for the key requirement, and "
-            f"docs/codebase/connectors-vmware-rest.md for the L1+L2 "
-            f"dispatch contract."
-        ),
+        error=None,
         duration_ms=duration_ms,
         extras={
-            "error_code": "composite_l2_missing",
-            "missing_op_ids": list(missing_op_ids),
-            "catalog_command": catalog_command,
-        },
-    )
-
-
-def result_composite_l2_disabled(
-    op_id: str,
-    disabled_op_ids: tuple[str, ...],
-    connector_id: str,
-    duration_ms: float,
-) -> OperationResult:
-    """Composite pre-flight found L2 sub-ops present in the catalog but **disabled**.
-
-    #1601. The sibling of :func:`result_composite_l2_missing` for the
-    *ingested-but-disabled* deploy state. A composite's L2 sub-op has a
-    descriptor row in ``endpoint_descriptor`` whose ``is_enabled = false``,
-    so :func:`~meho_backplane.operations._lookup.lookup_descriptor`
-    (which hard-filters ``is_enabled = TRUE``) cannot resolve it and the
-    composite is non-dispatchable -- but the catalog has already been
-    ingested, so the ``composite_l2_missing`` remediation
-    (``meho connector ingest --catalog ...``) would send the operator in
-    the wrong direction.
-
-    The pre-flight classifies the non-dispatchable sub-op via the
-    ``is_enabled``-agnostic
-    :func:`~meho_backplane.operations._lookup.descriptor_exists_any_state`
-    probe and raises
-    :class:`~meho_backplane.operations.composite.CompositeL2DependencyDisabled`
-    when the row is present; the dispatcher converts it to this result.
-
-    Remediation contract: name only verbs that **exist**. The reliable
-    path is per-op ``meho connector edit-op <connector_id> <op_id>
-    --enable``. Connector-level ``meho connector enable <connector_id>``
-    is named only as the broad-strokes alternative **with the caveat that
-    it does not re-enable spec-ingested ops** -- those land
-    ``group_id = NULL`` and the enable cascade filters on ``group_id``
-    (see ``ingest/_internals.py`` / ``ingest/_upsert.py``), so for an L2
-    surface ingested from a spec, only the per-op ``edit-op --enable`` is
-    deterministic. The original report proposed a group-level enable verb;
-    no such verb exists, so this message must never reference one (the
-    ``connector edit-group`` CLI command patches ``when_to_use`` / ``name``
-    only -- it has no enable flag).
-
-    The shape complies with the ``docs/codebase/error-message-shape.md``
-    convention (#1141): a stable ``composite_l2_disabled`` code, a
-    diagnostic-bearing human message (disabled op-ids + the real per-op
-    enable verb + the connector-level caveat + a doc reference), and a
-    structured ``extras`` payload (``disabled_op_ids`` + ``connector_id``)
-    so an agent can branch on the diagnostic without re-parsing the text.
-    """
-    disabled_repr = ", ".join(disabled_op_ids) if disabled_op_ids else "(none)"
-    return OperationResult(
-        status="error",
-        op_id=op_id,
-        error=(
-            f"composite_l2_disabled: composite {op_id!r} depends on sub-ops "
-            f"that are present in this connector's catalog but disabled: "
-            f"[{disabled_repr}]. The catalog is already ingested, so re-ingest "
-            f"is not the fix -- re-enable each op per-op with "
-            f"'meho connector edit-op {connector_id} <op_id> --enable' (the "
-            f"reliable path), then retry. Note: connector-level "
-            f"'meho connector enable {connector_id}' does NOT re-enable "
-            f"spec-ingested ops -- they land with group_id=NULL and the enable "
-            f"cascade filters on group_id, so per-op edit-op --enable is the "
-            f"deterministic remediation. See "
-            f"docs/codebase/connectors-vmware-rest.md for the L1+L2 dispatch "
-            f"contract and docs/codebase/error-message-shape.md for the error "
-            f"convention."
-        ),
-        duration_ms=duration_ms,
-        extras={
-            "error_code": "composite_l2_disabled",
-            "disabled_op_ids": list(disabled_op_ids),
-            "connector_id": connector_id,
+            "result_status": "already_resumed",
+            "approval_request_id": str(approval_request_id),
         },
     )
 
@@ -1022,11 +907,124 @@ def is_auth_failed_status(
     return status_code in recognised
 
 
+def _auth_restage_remediation(target_name: str | None, secret_ref: str | None) -> str:
+    """The restage-the-stale-credential remediation clause (#2329).
+
+    Names the target and its ``secret_ref`` when known, mirroring the #2091
+    ``connector_vault_forbidden`` remediation shape (state the likely cause,
+    name the exact thing to fix, give the command). The credential is most
+    likely stale because the target's service-account password was rotated
+    upstream while the backplane-side Vault copy lagged -- the routine event
+    the filing (#2329) documents -- so the fix is to restage the credential,
+    not to widen a policy.
+
+    #2400: names the **real** staging surface. The prior text pointed at
+    ``meho target credential set <name>``, which does not exist in the CLI --
+    it sent both MFC 401 reporters (#2395, #2396) down a credential rabbit
+    hole citing a phantom command. A target's credential is staged by writing
+    it back to its Vault ``secret_ref`` with ``meho vault kv put``.
+    """
+    who = f"target {target_name!r}" if target_name else "this target"
+    ref_clause = f" (secret_ref {secret_ref!r})" if secret_ref else ""
+    return (
+        f"the credential for {who}{ref_clause} appears stale or wrong -- most "
+        f"likely the upstream service-account password was rotated while the "
+        f"backplane-side Vault copy lagged. Restage it by writing the corrected "
+        f"secret back to its Vault path with "
+        f"`meho vault kv put <mount> <path> --data <field>=<value>`, then retry."
+    )
+
+
+def _auth_scheme_remediation(target_name: str | None) -> str:
+    """The check-the-auth-scheme remediation clause (#2400).
+
+    Emitted only on the ``after_relogin`` stage: a forced re-login SUCCEEDED
+    yet the fresh session was still rejected, so the credential logs in fine
+    and restaging it is the wrong fix. The actionable cause is a mismatched
+    auth scheme / ``auth_model`` between the connector and the appliance (the
+    #2395 vROps class, where stateless Basic was presented to an appliance
+    that only accepts an acquired-token session). Names no CLI command --
+    the fix is a connector/target-config correction, not a Vault write.
+    """
+    who = f"target {target_name!r}" if target_name else "this target"
+    return (
+        f"the credential for {who} logs in fine (the forced re-login "
+        f"succeeded) but the fresh session was still rejected, so this is not a "
+        f"stale credential -- do NOT restage. Verify the target's auth_model / "
+        f"authorization scheme against what the connector and the appliance "
+        f"expect."
+    )
+
+
+#: Shared doc-reference tail every ``connector_auth_failed`` summary ends with.
+_AUTH_FAILED_DOC_TAIL = (
+    "See docs/architecture/connector-auth.md for the connector auth contract "
+    "and docs/codebase/error-message-shape.md for the dispatch error convention."
+)
+
+
+def _auth_failed_summary(
+    *,
+    stage: Literal["establish", "dispatch", "after_relogin"],
+    status_code: int,
+    host: str,
+    remediation: str,
+    relogin: Literal["not_available", "attempted_failed", "reestablished"],
+) -> str:
+    """Compose the stage-aware operator-facing ``connector_auth_failed`` summary (#2400).
+
+    The text describes what the dispatcher **actually did**, not a
+    one-size-fits-all story. Three stages:
+
+    * ``establish`` -- the login POST itself was rejected (a
+      :class:`ConnectorAuthError`). ``relogin == "attempted_failed"`` narrows
+      it to a re-login POST rejected after a mid-session expiry.
+    * ``dispatch`` -- an auth-class status from a connector with **no**
+      ``invalidate_session`` hook: no session stage happened, so no re-login
+      was attempted. The old "already re-logged-in and retried once" claim
+      was false here and is dropped.
+    * ``after_relogin`` -- the **only** stage that re-logged in: the forced
+      re-establish SUCCEEDED and the fresh session was still rejected, so the
+      "already re-logged-in and retried once" sentence lives here alone.
+    """
+    if stage == "establish":
+        lead = (
+            f"connector_auth_failed: the login itself was rejected (HTTP "
+            f"{status_code}) for {host} -- the credential was refused at "
+            f"session establish."
+        )
+        if relogin == "attempted_failed":
+            lead = (
+                f"{lead} This followed a forced re-login after a mid-session "
+                f"auth-class status; the re-login POST was itself rejected."
+            )
+        return f"{lead} {remediation} {_AUTH_FAILED_DOC_TAIL}"
+    if stage == "after_relogin":
+        return (
+            f"connector_auth_failed: the upstream returned an auth/session "
+            f"failure (HTTP {status_code}) for {host}. The session was already "
+            f"re-logged-in and retried once on a session-expiry status, and the "
+            f"fresh session was still rejected. {remediation} "
+            f"{_AUTH_FAILED_DOC_TAIL}"
+        )
+    return (
+        f"connector_auth_failed: the upstream returned an auth/session failure "
+        f"(HTTP {status_code}) for {host}. The connector reached the host but "
+        f"its per-request credential was rejected; this connector holds no "
+        f"re-loginable session (no invalidate_session hook), so no re-login was "
+        f"attempted. {remediation} If this persists after restaging, verify the "
+        f"target's auth scheme / auth_model against what the appliance expects. "
+        f"{_AUTH_FAILED_DOC_TAIL}"
+    )
+
+
 def result_connector_auth_failed(
     op_id: str,
-    exc: httpx.HTTPStatusError,
+    exc: httpx.HTTPStatusError | ConnectorAuthError,
     target: Any,
     duration_ms: float,
+    *,
+    relogin: Literal["not_available", "attempted_failed", "reestablished"] = "not_available",
 ) -> OperationResult:
     """Connector raised an upstream **auth/session failure** on dispatch.
 
@@ -1038,17 +1036,34 @@ def result_connector_auth_failed(
     :exc:`httpx.HTTPStatusError` with an auth-class status
     (:data:`_AUTH_FAILED_STATUSES`: ``401``, plus vRLI's ``440``).
 
-    ``401`` is the load-bearing case and is connector-agnostic. The
-    dispatch path itself now re-logs-in and retries once on an auth-class
-    status when the connector advertises ``invalidate_session`` (G0.29-T2
-    #2067), so a status that reaches *this* builder means **re-login also
-    failed** -- not a transient blip but a credential / ``auth_model``
-    problem the operator must fix. Routing
+    ``401`` is the load-bearing case and is connector-agnostic. Routing
     it through :func:`result_connector_error` flattened that into an
     opaque ``connector_error: HTTPStatusError`` with the cause buried in
     ``extras["exception_message"]``, which is exactly the diagnosability
     gap that made the #1798 vRLI dispatch (seen as ``connector_error
     (440)``) look like a stub-auth problem.
+
+    #2400 makes the ``cause`` and the summary **stage-aware** so the text
+    describes what the dispatcher actually did, keyed on the ``relogin``
+    discriminator the dispatcher threads in:
+
+    * ``session_establish_<status>`` (``ConnectorAuthError``) -- the login
+      POST itself was rejected; restaging the credential is the right fix.
+    * ``dispatch_<status>`` (``relogin="not_available"``) -- an auth-class
+      status on a connector with **no** ``invalidate_session`` hook. No
+      session stage happened, so no re-login was attempted; the earlier
+      blanket "the session was already re-logged-in and retried once" claim
+      was false here (the #2067 retry is gated on the hook) and is dropped.
+    * ``session_dispatch_<status>_after_relogin``
+      (``relogin="reestablished"``) -- the dispatcher forced a re-login that
+      SUCCEEDED and the fresh session was still rejected. The credential logs
+      in fine, so this is a scheme / ``auth_model`` problem, NOT a stale
+      credential -- the remediation says do NOT restage. This is the only
+      stage that carries the "already re-logged-in and retried once" sentence.
+
+    The old ambiguous ``session_dispatch_<status>`` (no qualifier) is no
+    longer emitted on any path; consumers that matched on ``session_dispatch_``
+    now match only the genuinely-had-a-session ``_after_relogin`` case.
 
     This builder names the **host** (read from ``target.host`` -- the
     operator's own configured value, so not an info-leak per
@@ -1064,37 +1079,93 @@ def result_connector_auth_failed(
     it degrades to a bare host label rather than raising inside the
     never-raises error path.
 
+    #2329 makes this builder serve **both** the mid-session recovery path
+    (an :exc:`httpx.HTTPStatusError` reaching the dispatcher's
+    ``except httpx.HTTPStatusError`` arm after the #2067 re-login retry
+    exhausts) **and** the *session-establish* path (a
+    :class:`~meho_backplane.connectors._shared.vcf_auth.ConnectorAuthError`
+    raised family-wide when a login POST returns 401/403). Both surface the
+    same ``connector_auth_failed`` code, so a consumer switches on it
+    regardless of *when* auth died -- the convergence the filing asked for.
+    The ``extras.cause`` sub-code distinguishes the stages (#2400):
+    ``session_establish_<status>`` vs ``dispatch_<status>`` vs
+    ``session_dispatch_<status>_after_relogin``.
+
     ``extras`` carries the machine-usable fields an agent can branch on
-    without re-parsing the transport error: ``http_status`` (the actual
-    auth-class status the upstream returned), ``host``, and the upstream
-    ``upstream_message`` (the body's ``message`` when JSON, else capped
-    raw text, ``None`` when the body was empty -- shared with the 403/422
-    builders via :func:`_http_upstream_message`).
+    without re-parsing the transport error: ``error_code``, ``cause`` (the
+    stage-and-status sub-code), ``http_status`` (the actual auth-class
+    status), ``target`` (the target name), ``host``, ``secret_ref`` (the
+    Vault ref to restage, when known), ``remediation`` (the restage hint),
+    ``raw_message`` (the connector's original establish message, preserved
+    for debugging per #2329), and ``upstream_message`` (the upstream body's
+    ``message`` when JSON, else capped raw text, ``None`` when empty --
+    shared with the 403/422 builders via :func:`_http_upstream_message`).
     """
-    response = exc.response
-    status_code = response.status_code
-    upstream_message = _http_upstream_message(response)
-    host = getattr(target, "host", None) or "the target host"
-    summary = (
-        f"connector_auth_failed: the upstream returned an auth/session "
-        f"failure (HTTP {status_code}) for {host}. The connector reached the "
-        f"host but its credential or session was rejected. The dispatch path "
-        f"already re-logged-in and retried once on a session-expiry status "
-        f"(401 or vRLI's 440), so when this reaches you the re-login also "
-        f"failed: the credential is most likely missing, invalid, or expired "
-        f"in Vault, or the target's auth_model is wrong. Verify the target's "
-        f"Vault credential and its auth_model against what the connector "
-        f"expects, then retry. See docs/architecture/connector-auth.md "
-        f"for the connector auth contract and "
-        f"docs/codebase/error-message-shape.md for the dispatch error "
-        f"convention."
+    stage: Literal["establish", "dispatch", "after_relogin"]
+    if isinstance(exc, ConnectorAuthError):
+        # A login POST was rejected -- the establish stage, whichever call
+        # site raised it (first establish, or a forced re-login whose POST
+        # was itself rejected -- ``relogin == "attempted_failed"``). The
+        # ``session_establish_<status>`` cause is unchanged (#2400).
+        stage = "establish"
+        status_code = exc.status_code
+        cause = exc.cause
+        raw_message: str | None = _sanitize_free_text(str(exc))
+        target_name = exc.target_name or getattr(target, "name", None)
+        host = exc.host or getattr(target, "host", None) or "the target host"
+        secret_ref = (
+            exc.secret_ref if exc.secret_ref is not None else getattr(target, "secret_ref", None)
+        )
+        # The underlying transport error (chained via ``raise ... from``)
+        # may carry a useful upstream body message; read it opportunistically.
+        underlying = exc.__cause__
+        upstream_message = (
+            _http_upstream_message(underlying.response)
+            if isinstance(underlying, httpx.HTTPStatusError)
+            else None
+        )
+    else:
+        response = exc.response
+        status_code = response.status_code
+        raw_message = None
+        target_name = getattr(target, "name", None)
+        host = getattr(target, "host", None) or "the target host"
+        secret_ref = getattr(target, "secret_ref", None)
+        upstream_message = _http_upstream_message(response)
+        # #2400: the HTTPStatusError branch is stage-aware on ``relogin``.
+        # ``reestablished`` -- the dispatcher forced a re-login that SUCCEEDED
+        # and the fresh session was still rejected (keep the ``session_``
+        # prefix + the ``_after_relogin`` qualifier). Anything else means no
+        # session stage happened (no ``invalidate_session`` hook), so the
+        # cause drops the misleading ``session_`` prefix entirely.
+        if relogin == "reestablished":
+            stage = "after_relogin"
+            cause = f"session_dispatch_{status_code}_after_relogin"
+        else:
+            stage = "dispatch"
+            cause = f"dispatch_{status_code}"
+    if stage == "after_relogin":
+        remediation = _auth_scheme_remediation(target_name)
+    else:
+        remediation = _auth_restage_remediation(target_name, secret_ref)
+    summary = _auth_failed_summary(
+        stage=stage,
+        status_code=status_code,
+        host=host,
+        remediation=remediation,
+        relogin=relogin,
     )
     if upstream_message is not None:
         summary = f"{summary} Upstream said: {upstream_message}"
     extras: dict[str, Any] = {
         "error_code": "connector_auth_failed",
+        "cause": cause,
         "http_status": status_code,
+        "target": target_name,
         "host": host,
+        "secret_ref": secret_ref,
+        "remediation": remediation,
+        "raw_message": raw_message,
         "upstream_message": upstream_message,
     }
     return OperationResult(
@@ -1211,6 +1282,93 @@ def result_connector_vault_forbidden(
             "error_code": "connector_vault_forbidden",
             "secret_ref": secret_ref,
             "expected_secret_ref": expected_secret_ref,
+            "exception_class": type(exc).__name__,
+            "exception_message": msg,
+        },
+    )
+
+
+#: Setup-doc anchor the write-identity-forbidden remediation points at.
+#: Kept as a module constant so the operator-facing text and the machine
+#: ``extras["doc_ref"]`` stay single-sourced.
+_VAULT_WRITE_POLICY_DOC = "docs/cross-repo/connector-vault-policy.md"
+
+
+def result_connector_vault_write_forbidden(
+    op_id: str,
+    exc: BaseException,
+    duration_ms: float,
+    *,
+    write_path: str | None,
+    identity_hint: str | None = None,
+) -> OperationResult:
+    """A KV-v2 write was denied by Vault RBAC (post-approval write-identity gap).
+
+    #2331 (Initiative #2364). The write-side sibling of
+    :func:`result_connector_vault_forbidden` (#2091). The four-eyes flow
+    can succeed end to end — park → approve → re-dispatch — and the write
+    still fails at Vault's ACL because the identity the connector dispatches
+    with lacks ``create`` / ``update`` on the target ``<mount>/data/<path>``.
+    Routing that denial through the read-oriented
+    :func:`result_connector_vault_forbidden` mis-describes it: that builder
+    talks about a target's ``secret_ref`` being outside the readable
+    per-tenant subtree, which does not apply to a typed ``vault.kv.*`` write
+    (the write authorizes against the operator's own templated write path,
+    not a target credential read). This builder names the **write** cause
+    instead — the exact data path Vault denied, the acting identity, the
+    write-policy stanza to add — so the operator sees the actionable
+    problem rather than a bare ``permission denied`` or a misleading
+    read-path diagnosis.
+
+    Unlike the read builder there is no ``secret_ref`` to fabricate: the
+    path is the op's own ``<mount>/data/<path>`` (rendered by the caller
+    via :func:`~meho_backplane.connectors.vault.ops.vault_kv_write_target_path`),
+    and the identity hint is the dispatching / reviewing operator's ``sub``.
+    The remediation points at the write-capability stanza (§6.1) and the
+    ``sys/capabilities-self`` probe (§6.2) of the policy doc, and repeats
+    the do-NOT-widen-the-shared-policy warning: the grant is per-operator
+    templated, not a role-wide widen.
+
+    ``extras`` carries the machine-usable fields
+    (``error_code`` / ``path`` / ``identity_hint`` / ``doc_ref`` /
+    ``exception_class`` / ``exception_message``) so an agent can branch on
+    the write-identity gap without re-parsing the text (#1141 convention).
+    The hvac ``Forbidden`` text names only the operator-supplied path — no
+    secret material — and tails the operator-facing string under the
+    :data:`_EXC_MESSAGE_CAP` discipline.
+    """
+    msg = str(exc)
+    if len(msg) > _EXC_MESSAGE_CAP:
+        msg = msg[:_EXC_MESSAGE_CAP] + "...<truncated>"
+    path_clause = f" on {write_path!r}" if write_path else ""
+    identity_clause = (
+        f" The write dispatched under identity {identity_hint!r}." if identity_hint else ""
+    )
+    summary = (
+        f"vault_write_identity_forbidden: Vault denied the KV-v2 write{path_clause} "
+        f"(permission denied). The approval handshake succeeded, but the identity "
+        f"the connector dispatched the write with lacks 'create'/'update' on that "
+        f"data path.{identity_clause} This is a deploy write-identity gap, not a bug "
+        f"in the approve→execute flow: add the per-operator write-capability stanza "
+        f"(§6.1) so the dispatching/reviewing operator's token can write the path, "
+        f"and verify it with the 'sys/capabilities-self' probe (§6.2). Do NOT widen "
+        f"the backplane's shared Vault policy — the write grant is per-operator "
+        f"templated. See {_VAULT_WRITE_POLICY_DOC} §6 for the write-identity contract."
+    )
+    if msg:
+        # hvac renders Forbidden as "permission denied, on POST <url>" — the
+        # URL is the operator-supplied data path, never secret material.
+        summary = f"{summary} Vault said: {msg}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "vault_write_identity_forbidden",
+            "path": write_path,
+            "identity_hint": identity_hint,
+            "doc_ref": f"{_VAULT_WRITE_POLICY_DOC}#6-kv-v2-write-surface",
             "exception_class": type(exc).__name__,
             "exception_message": msg,
         },
@@ -1347,14 +1505,17 @@ def status_code_for_result(result_status: str) -> int:
 
     The ``audit_log.status_code`` column is NOT NULL :class:`int` --
     optimised for the HTTP middleware path. The dispatcher contract is
-    not HTTP, so the dispatcher synthesises one: ``200`` for ok,
-    ``202`` for awaiting approval / pending (accepted but not yet
-    executed — the agent needs-approval path), ``403`` for denied,
-    ``500`` for error. The synthetic values are not surfaced to
-    operators; the canonical signal lives in
+    not HTTP, so the dispatcher synthesises one: ``200`` for ok (and for
+    ``already_resumed`` -- the exactly-one-resumer no-op #2293, a benign
+    "executed elsewhere", not a failure), ``202`` for awaiting approval /
+    pending (accepted but not yet executed — the agent needs-approval
+    path), ``403`` for denied, ``500`` for error. The synthetic values
+    are not surfaced to operators; the canonical signal lives in
     ``payload["result_status"]`` on the audit row.
     """
     if result_status == "ok":
+        return 200
+    if result_status == "already_resumed":
         return 200
     if result_status == "awaiting_approval":
         return 202

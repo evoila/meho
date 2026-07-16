@@ -29,7 +29,9 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 - `annotate_edge(session, operator, from_ref, kind, to_ref, *, note=None, evidence_url=None) -> GraphEdge`
   — create or refresh a curated edge. Resolves both endpoints via
-  `resolve_node`, validates `kind` against `GraphEdgeKind`,
+  `resolve_node`, validates `kind` against the open slug grammar
+  (`KIND_SLUG_PATTERN`, T1 #2534 — any lowercase slug, 2–63 chars;
+  `GraphEdgeKind` is the documented well-known set, not a gate),
   idempotent on `(tenant_id, from_node_id, to_node_id, kind)`. Runs
   §6 conflict detection (sticky `superseded_by` for
   same-kind/different-endpoint auto edges; bidirectional
@@ -52,8 +54,10 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 - `create_or_get_node(session, operator, *, kind, name, note=None, evidence_url=None) -> CreateNodeResult`
   — manually seed a `graph_node` row in the operator's tenant.
-  Validates `kind` against `_GRAPH_NODE_KINDS` (raise
-  `InvalidNodeKindError` *before* any DB write), then idempotent
+  Validates `kind` against the open slug grammar
+  (`KIND_SLUG_PATTERN`; raise `InvalidNodeKindError` *before* any DB
+  write — `WELL_KNOWN_NODE_KINDS` is the documented core set, not a
+  gate), then idempotent
   upsert on the `graph_node_tenant_kind_name_idx`
   (`(tenant_id, kind, name)`) unique key. Manual seeds set
   `discovered_by=operator.sub`; a re-seed over an auto-discovered row
@@ -98,7 +102,8 @@ funnel through these primitives.
   filter-composable edge listing. Joins both endpoint nodes so
   `from` / `to` carry `(id, kind, name)` without a second round
   trip. Filters compose: `kind=` restricts to one
-  `GraphEdgeKind`, `source=` selects `'auto'` vs `'curated'`,
+  kind slug (any well-formed slug; the vocabulary is open), `source=`
+  selects `'auto'` vs `'curated'`,
   `from_ref` / `to_ref` resolve via `resolve_node` (a ref that maps
   to no node yields an empty list, not an error; an ambiguous bare
   name raises `AmbiguousNodeError`), `conflicts_only=True` returns
@@ -189,7 +194,7 @@ as a warning callout next to the counts (#2210).
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | `UUID` | `graph_node.id`. |
-| `kind` | `str` | `graph_node.kind` (closed enum from migration 0007). |
+| `kind` | `str` | `graph_node.kind` (open slug vocabulary since migration 0063 / T1 #2534; `WELL_KNOWN_NODE_KINDS` is the documented core set). |
 | `name` | `str` | `graph_node.name`, unique within `(tenant_id, kind)`. |
 | `properties` | `dict` | `graph_node.properties` JSONB; wrapped in `MappingProxyType` after validation so the frozen model is deeply immutable, serialised back to a plain `dict`. |
 | `depth` | `int` | Distance from the query root: root = 0, immediate = 1, transitive = 2, … |
@@ -223,7 +228,7 @@ separately via `resolve_node`.
 | `id` | `UUID` | `graph_edge.id`. |
 | `from_endpoint` | `TopologyEdgeEndpoint` | The edge's source node identity. The route layer (T5) applies the `from` / `to` alias on `model_dump(by_alias=True)` for the wire shape — the substrate model itself keeps plain attribute names so mypy/static checkers don't lose the kwarg signature. |
 | `to_endpoint` | `TopologyEdgeEndpoint` | The edge's destination node identity. |
-| `kind` | `str` | One of the ten `GraphEdgeKind` values (closed enum since G9.2-T1 #593). |
+| `kind` | `str` | Any kind slug (open vocabulary since migration 0063 / T1 #2534); the ten `GraphEdgeKind` values are the documented well-known set. |
 | `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-asserted). |
 | `properties` | `dict` | `graph_edge.properties` JSONB; deep-frozen (same discipline as `TopologyNode.properties`). Carries the conflict markers `conflicts_with` (array, G9.2-T3 #595) and `superseded_by` (UUID, also #595). |
 | `last_seen` | `datetime \| None` | The refresh service's "I observed this edge at" timestamp. NULL after a soft-delete; soft-deleted edges are excluded from `list_edges` by default. Also the stable total-order key the helper paginates against. |
@@ -428,6 +433,27 @@ LIMIT 1` yields a shortest path. A second query materialises the
 winning path's node rows; `_build_path_nodes` re-orders them into path
 sequence and attaches `depth` / `via_edge_kind`.
 
+**Per-branch target pruning (#2535).** The walk enumerates simple
+paths, so on a dense mesh its row count grows ~branch_factor^hops. A
+non-recursive `target` CTE resolves the destination id once, and the
+recursive term carries `NOT EXISTS (SELECT 1 FROM target t WHERE t.id
+= w.node_id)` — a branch that reaches the target stops growing.
+Extending past a hit can never shorten a path to that same hit (and
+the CYCLE guard already forbids re-entering the target on the same
+branch), so pruning removes only rows the final select could never
+pick: results are identical, cost is bounded per branch. Referencing
+the non-recursive `target` CTE from the recursive term's subquery is
+legal — PostgreSQL's recursive-term restrictions cover only the
+recursive self-reference (`walk`), which must appear exactly once and
+not inside a subquery. That same restriction is why **global**
+cross-branch early termination cannot be written, and `ORDER BY hops
+LIMIT 1` cannot stop evaluation early because the sort consumes the
+full walk. The unreachable-target worst case therefore still
+enumerates the whole ≤`max_hops` ball; its envelope is pinned by
+`tests/integration/test_topology_path_pruning.py` on a dense
+`MeshSpec` mesh (row-count pin + load-invariant timing ratio, see
+`docs/architecture/topology.md` §Performance expectations).
+
 ### Cycle safety
 
 The `CYCLE` clause makes PostgreSQL track the visited-node set per
@@ -469,8 +495,10 @@ so the guard runs only where the column is JSONB.
 
 ### `annotate_edge`
 
-1. Validate `kind` against `GraphEdgeKind` (raise
-   `InvalidEdgeKindError` *before* any DB read).
+1. Validate `kind` against the open slug grammar
+   (`KIND_SLUG_PATTERN` via `is_valid_kind_slug`; raise
+   `InvalidEdgeKindError` *before* any DB read — the error message
+   names the pattern and echoes the well-known kinds as suggestions).
 2. `async with session.begin()` — one transaction wraps the whole
    resolve + write + conflict-scan + audit-row.
 3. `resolve_node` for both endpoints (`operator.tenant_id` is the
@@ -823,8 +851,11 @@ SSE / Slack feed.
 
 ### `create_or_get_node`
 
-1. Validate `kind` against `_GRAPH_NODE_KINDS` (raise
-   `InvalidNodeKindError` *before* any DB read).
+1. Validate `kind` against the open slug grammar
+   (`KIND_SLUG_PATTERN` via `is_valid_kind_slug`; raise
+   `InvalidNodeKindError` *before* any DB read — the error message
+   names the pattern and echoes `WELL_KNOWN_NODE_KINDS` as
+   suggestions).
 2. Pre-allocate `audit_id = uuid.uuid4()` (chassis "audit-id
    pre-allocation" pattern shared with `refresh` / `annotate` —
    the same uuid is threaded into the `audit_log` row and the
@@ -1075,12 +1106,14 @@ Load-bearing details:
   broadcast event would under-emit per §10. `GET /edges` binds
   `op_class="read"`.
 - **`POST /edges` body shape.** The request body is
-  `{"from": {"name": ..., "kind"?}, "kind": <GraphEdgeKind>,
+  `{"from": {"name": ..., "kind"?}, "kind": <kind-slug>,
     "to": {"name": ..., "kind"?}, "note"?, "evidence_url"?}` —
   `from` / `to` are nested `_EdgeEndpoint` objects (mirrors the
   service-layer `NodeRef` dataclass on the wire). `kind` is typed
-  against `GraphEdgeKind` so Pydantic rejects unknown kinds at the
-  boundary with 422 before the service runs. `extra="forbid"` rejects
+  against the `_EdgeKindSlug` `StringConstraints` alias
+  (`KIND_SLUG_PATTERN`, 2–63 chars) so Pydantic rejects malformed
+  kinds at the boundary with 422 before the service runs; any
+  well-formed slug — well-known or novel — passes through. `extra="forbid"` rejects
   typo'd keys at the boundary too.
 - **`GET /edges` query params** are forwarded straight through to
   `list_edges` (`kind?`, `source?` constrained to `auto|curated` by a
@@ -1175,9 +1208,10 @@ and broadcast event.
 **Wire shape.** The REST body is
 `{"edges": [{"from", "kind", "to", "note"?, "evidence_url"?}, ...], "dry_run"?: bool}`.
 `from` / `to` accept the same `_EdgeEndpoint` `{name, kind?}` shape
-the single-edge endpoint uses; `kind` is the closed `GraphEdgeKind`
-enum so an unknown kind is rejected at the Pydantic boundary (422)
-before any service runs. `extra="forbid"` rejects typo'd fields at
+the single-edge endpoint uses; `kind` is the `_EdgeKindSlug`
+`StringConstraints` alias so a malformed kind slug is rejected at the
+Pydantic boundary (422) before any service runs (the vocabulary is
+open — well-known and novel slugs both pass). `extra="forbid"` rejects typo'd fields at
 the boundary. The response is
 `{dry_run, created, updated, conflicts, rows: [...]}` where each row
 carries `{index, action, edge_id?, from_name, from_kind, to_name,
@@ -1393,8 +1427,12 @@ shape.
 - **PostgreSQL-only read path.** The `WITH RECURSIVE ... CYCLE` clause
   is not implemented by SQLite, so the query verbs cannot run on the
   unit suite's per-test SQLite DB. Tests live in
-  `backend/tests/integration/test_topology_query.py` against a real
-  `pgvector/pgvector:pg16` testcontainer (Docker-gated skip on
+  `backend/tests/integration/test_topology_query.py` (plus the
+  dense-mesh pruning/worst-case suite in
+  `backend/tests/integration/test_topology_path_pruning.py` and the
+  refresh-vs-annotate concurrency suite in
+  `backend/tests/integration/test_topology_concurrency.py`) against a
+  real `pgvector/pgvector:pg16` testcontainer (Docker-gated skip on
   no-Docker sandboxes; runs in CI). The pure Pydantic result-model
   contracts (deep `properties` immutability, `TopologyPath` invariants)
   have no DB dependency and are unit-tested in
@@ -1423,6 +1461,10 @@ shape.
 - Per-connector `discover_topology` overrides — each G3.x Initiative.
 - The advisory lock is a multi-replica stampede guard only; a single
   process serialises naturally and the SQLite test path no-ops it.
+  The real-PG lock path (skip while held, proceed after release) is
+  pinned by
+  `test_scheduler_advisory_lock_skips_and_releases_on_real_pg` in
+  `backend/tests/integration/test_topology_concurrency.py`.
 
 ## References
 

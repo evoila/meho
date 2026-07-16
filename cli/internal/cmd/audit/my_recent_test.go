@@ -61,8 +61,8 @@ func TestRunMyRecentSendsParamsToWire(t *testing.T) {
 				r.URL.Query().Get("principal"))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.AuditQueryResult{
-			Rows: []api.AuditEntry{{
+		_ = json.NewEncoder(w).Encode(api.MyRecentPage{
+			Items: []api.AuditEntry{{
 				Id:           mustUUID(t, "00000000-0000-0000-0000-000000000001"),
 				Ts:           mustTS(t, "2026-05-15T09:00:00Z"),
 				PrincipalSub: "damir",
@@ -106,7 +106,7 @@ func TestRunMyRecentOmitsEmptyParamsOnWire(t *testing.T) {
 			t.Errorf("no-flag form should send empty query; got %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"rows":[],"next_cursor":null}`))
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -128,12 +128,12 @@ func TestRunMyRecentRejectsOutOfRangeLimit(t *testing.T) {
 }
 
 // TestRunMyRecentJSONRoundTrips — --json emits the raw server bytes
-// verbatim; the typed-AuditQueryResult shape parses back cleanly.
+// verbatim; the typed-MyRecentPage shape parses back cleanly.
 func TestRunMyRecentJSONRoundTrips(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/audit/my-recent", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"rows":[],"next_cursor":null}`))
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -144,7 +144,7 @@ func TestRunMyRecentJSONRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runMyRecent --json: %v", err)
 	}
-	var decoded api.AuditQueryResult
+	var decoded api.MyRecentPage
 	if err := json.Unmarshal(stdout.Bytes(), &decoded); err != nil {
 		t.Fatalf("stdout not valid JSON: %v\n%s", err, stdout.String())
 	}

@@ -72,12 +72,12 @@ where a malicious approver swaps the params between the "request" and the
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import CursorResult, and_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.delegation import resolve_actor_sub
@@ -95,7 +95,7 @@ from meho_backplane.operations._audit import (
     resolve_broadcast_lineage,
     work_ref_var,
 )
-from meho_backplane.operations._errors import result_denied
+from meho_backplane.operations._errors import result_already_resumed, result_denied
 from meho_backplane.operations._validate import compute_params_hash
 
 __all__ = [
@@ -106,6 +106,7 @@ __all__ = [
     "SelfApprovalForbiddenError",
     "UnauthorizedApprovalError",
     "approve_request",
+    "claim_resume",
     "create_pending_request",
     "expire_stale_requests",
     "get_request",
@@ -220,6 +221,41 @@ class UnauthorizedApprovalError(ApprovalError):
 def _now() -> datetime:
     """Return the current UTC datetime. Isolated for testing."""
     return datetime.now(UTC)
+
+
+def _resolve_default_ttl() -> timedelta:
+    """The configured default approval TTL as a :class:`~datetime.timedelta`.
+
+    Read lazily off :func:`~meho_backplane.settings.get_settings` (mirrors
+    the local settings import in :func:`_check_self_approval`) so the queue
+    module stays decoupled from settings at import time.
+    """
+    from meho_backplane.settings import get_settings
+
+    return timedelta(seconds=get_settings().approval_default_ttl_seconds)
+
+
+def _bounded_expires_at(
+    created_at: datetime,
+    requested: datetime | None,
+    default_ttl: timedelta,
+) -> datetime:
+    """Resolve the deadline a parked approval is stamped with (#2322).
+
+    The TTL lifecycle is inert unless every parked row carries a concrete
+    ``expires_at`` for the sweep to act on, so a ``None`` request defaults
+    to ``created_at + default_ttl``. An explicit caller deadline is
+    honoured but **capped** at that same ceiling — the single configured
+    TTL doubles as the upper bound, so no surface can park an
+    unbounded-lived approval, while a shorter (e.g. preflight-probe) or
+    already-past deadline the caller asked for is respected as-is. There
+    is deliberately no lower bound / per-op policy (substrate minimalism,
+    #1177).
+    """
+    ceiling = created_at + default_ttl
+    if requested is None:
+        return ceiling
+    return min(requested, ceiling)
 
 
 async def _write_audit_row(
@@ -363,7 +399,10 @@ async def create_pending_request(
             for non-agent-run dispatches.
         proposed_effect: Human-readable summary for the reviewer.
             Defaults to ``{"op_id": op_id, "connector_id": connector_id}``.
-        expires_at: Optional deadline. ``None`` means no expiry.
+        expires_at: Optional caller deadline (#2322). ``None`` defaults to
+            ``created_at + APPROVAL_DEFAULT_TTL``; an explicit value is
+            honoured but capped at that ceiling. The row is never parked
+            with a null deadline — the TTL sweep depends on it.
 
     Returns:
         The flushed :class:`ApprovalRequest` row.
@@ -405,7 +444,13 @@ async def create_pending_request(
     # context (agent run var, or the MCP transport's session binding)
     # is still live; the approve / resume surfaces run on a different
     # operator's task and re-hydrate it from the row.
+    # Stamp the approval-TTL deadline (#2322): default to
+    # ``created_at + APPROVAL_DEFAULT_TTL`` and cap any caller override at
+    # that ceiling, so every parked row — REST, MCP, and run-bound — leaves
+    # the queue with a concrete ``expires_at`` for the sweeper to act on.
     request_audit_id = uuid.uuid4()
+    created_at = _now()
+    bounded_expires_at = _bounded_expires_at(created_at, expires_at, _resolve_default_ttl())
     request = ApprovalRequest(
         id=uuid.uuid4(),
         tenant_id=operator.tenant_id,
@@ -419,8 +464,8 @@ async def create_pending_request(
         params=params,
         proposed_effect=proposed_effect,
         status=ApprovalRequestStatus.PENDING.value,
-        created_at=_now(),
-        expires_at=expires_at,
+        created_at=created_at,
+        expires_at=bounded_expires_at,
         work_ref=work_ref_var.get(),
         agent_session_id=resolve_agent_session_id(),
         request_audit_id=request_audit_id,
@@ -632,6 +677,67 @@ async def reject_request(
     return request
 
 
+async def claim_resume(
+    request_id: uuid.UUID,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Win the exactly-one-resumer claim for *request_id* (#2293, G0.30).
+
+    A single conditional ``UPDATE approval_request SET resumed_at = :now
+    WHERE id = :request_id AND resumed_at IS NULL`` -- the atomic claim
+    every resumer of an approved op must win before it re-dispatches
+    ``dispatch(..., _approved=True)``: the in-process agent waiter
+    (:mod:`meho_backplane.agent.approval_wait`), the shared
+    :func:`resume_dispatch_after_approval` operator path (REST ``/approve``
+    + ``/decide``, MCP by-id approve, UI approve), and any future resumer.
+    Returns ``True`` when this caller set ``resumed_at`` (one row touched)
+    and therefore owns the single execution; ``False`` when another
+    resumer already claimed it (zero rows touched) and this caller must
+    no-op cleanly.
+
+    Why a conditional ``UPDATE`` rather than a Python ``if`` + edit (the
+    same reasoning as :func:`~meho_backplane.operations.agent_run.extend_lease`'s
+    lease claim): a read-then-write would race a concurrent resumer -- the
+    agent waiter woken by the ``approval.approved`` broadcast vs. the
+    operator surface that published it -- with both reading
+    ``resumed_at IS NULL`` and both dispatching the write. The predicate
+    and the write commit together in one statement, so at most one resumer
+    wins even across processes / pods: a concurrent claim blocks on the
+    row lock, then re-evaluates the predicate after commit and loses. No
+    advisory locks.
+
+    Runs in its **own committed transaction** so the latch is durable the
+    instant it is won -- the decision commit and the re-dispatch happen in
+    separate sessions, and the claim must be visible to a racing resumer
+    independently of either. The column is a one-way latch (never cleared),
+    so a dispatch that fails after a won claim is not silently retried into
+    a possible double write; the residual expiry follow-up (out of scope
+    here) makes such a void approval visibly "expired".
+    """
+    from meho_backplane.db.engine import get_sessionmaker
+
+    stamp = now or _now()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        # ``session.execute()`` on an ``UPDATE`` returns a ``CursorResult``
+        # (carrying the DBAPI ``rowcount``) at runtime; the static stub is
+        # the generic ``Result`` so mypy needs the cast to read ``rowcount``.
+        # ``synchronize_session=False`` -- no ORM identity map to keep in
+        # step, this is a bare claim probe. Read ``rowcount`` before the
+        # commit closes the cursor.
+        raw_result = await session.execute(
+            update(ApprovalRequest)
+            .where(ApprovalRequest.id == request_id)
+            .where(ApprovalRequest.resumed_at.is_(None))
+            .values(resumed_at=stamp)
+            .execution_options(synchronize_session=False)
+        )
+        won = cast(CursorResult[Any], raw_result).rowcount == 1
+        await session.commit()
+    return won
+
+
 async def resume_dispatch_after_approval(
     *,
     operator: Operator,
@@ -679,43 +785,103 @@ async def resume_dispatch_after_approval(
     the re-dispatch would re-queue (a human/service principal now routes
     ``requires_approval`` to ``needs-approval`` per G11.7-T1; an agent
     re-hits ``needs-approval``), so the approved op would never execute.
+
+    Exactly-one-resumer claim (#2293): every operator surface routes
+    through here, and for a run-bound request the in-process agent waiter
+    (:mod:`meho_backplane.agent.approval_wait`) also resumes off the
+    ``approval.approved`` broadcast. Both must win :func:`claim_resume`
+    before dispatching, so the approved op executes exactly once: this
+    path wins the claim right before :func:`dispatch` (after the
+    fail-closed checks, so a refused resume never burns the claim) and, if
+    a racing resumer already claimed it, returns a benign
+    ``already_resumed`` result instead of re-dispatching the write. This
+    is what lets ``/decide`` + MCP fall back to a server-side re-dispatch
+    when the claim is free (covering waiter-gone -- timeout / restart /
+    cancel) while the claim blocks the ``/approve`` / UI double-dispatch
+    when the waiter is alive.
     """
     effective_params = params if params is not None else request.params
     if effective_params is None:
-        # Pre-0036 row (params not stored) approved via a surface that
-        # carries no params (/decide, MCP by-id). Nothing to re-dispatch.
-        _log.warning(
-            "approval_resume_params_unavailable",
-            approval_request_id=str(request.id),
-            op_id=request.op_id,
-            connector_id=request.connector_id,
-            operator_sub=operator.sub,
-        )
-        return result_denied(
-            request.op_id,
-            (
-                f"approval request {request.id} has no stored params "
-                "(parked before migration 0036); re-dispatch refused — "
-                "approve via REST /approve with the original params instead"
-            ),
-            0.0,
-        )
+        return _resume_pre0036_denied(operator, request)
 
     resolved_target, denied = await _rehydrate_resume_target(operator, request)
     if denied is not None:
         return denied
 
+    # Exactly-one-resumer claim (#2293): win the atomic conditional UPDATE
+    # right before executing -- after the fail-closed checks above, so a
+    # refused resume (pre-0036 params gap, unresolvable target) never burns
+    # the claim and leaves the op un-executable. A lost claim means another
+    # resumer already executed the approved op (the in-process agent waiter
+    # woken by the same approval.approved broadcast, or a racing operator
+    # surface), so no-op with a benign already_resumed result rather than
+    # double-dispatching the approved write.
+    if not await claim_resume(request.id):
+        _log.info(
+            "approval_resume_already_claimed",
+            approval_request_id=str(request.id),
+            op_id=request.op_id,
+            connector_id=request.connector_id,
+            operator_sub=operator.sub,
+        )
+        return result_already_resumed(request.op_id, request.id, 0.0)
+
+    return await _dispatch_resume_with_bound_context(
+        operator=operator,
+        request=request,
+        resolved_target=resolved_target,
+        effective_params=effective_params,
+    )
+
+
+def _resume_pre0036_denied(operator: Operator, request: ApprovalRequest) -> Any:
+    """Fail-closed result for a pre-0036 row with no stored params to re-dispatch.
+
+    A row parked before migration 0036 has ``params IS NULL`` and is
+    approved via a surface that carries no params (/decide, MCP by-id), so
+    there is nothing to re-dispatch — refuse rather than dispatch an empty
+    call. Reached before the claim, so it never burns it. Extracted to keep
+    :func:`resume_dispatch_after_approval` under the function-size budget.
+    """
+    _log.warning(
+        "approval_resume_params_unavailable",
+        approval_request_id=str(request.id),
+        op_id=request.op_id,
+        connector_id=request.connector_id,
+        operator_sub=operator.sub,
+    )
+    return result_denied(
+        request.op_id,
+        (
+            f"approval request {request.id} has no stored params "
+            "(parked before migration 0036); re-dispatch refused — "
+            "approve via REST /approve with the original params instead"
+        ),
+        0.0,
+    )
+
+
+async def _dispatch_resume_with_bound_context(
+    *,
+    operator: Operator,
+    request: ApprovalRequest,
+    resolved_target: Any,
+    effective_params: dict[str, Any],
+) -> Any:
+    """Re-bind the parked row's stored context, then dispatch ``_approved=True``.
+
+    The decision surfaces run on a fresh task whose vars are unset, so the
+    executed op's audit row would otherwise lose everything the parked
+    request carried. Three row-sourced, token-reset bindings: ``work_ref``
+    (#1659, the authorising ticket), ``agent_session_id`` (#2086, anchors
+    the row in the requester's replay tree), and ``parent_audit_id`` (#2086,
+    back-links it to the parking row). The in-process agent-run resume keeps
+    its own bound vars and does not call this helper; pre-0053 NULLs bind
+    ``None``, the vars' defaults. Only reached after the exactly-one-resumer
+    claim is won (#2293), so it dispatches exactly once.
+    """
     from meho_backplane.operations.dispatcher import dispatch
 
-    # Re-bind the request's stored context for the re-dispatch: the
-    # decision surfaces run on a fresh task whose vars are unset, so the
-    # executed op's audit row would otherwise lose everything the parked
-    # request carried. Three row-sourced, token-reset bindings:
-    # ``work_ref`` (#1659, the authorising ticket), ``agent_session_id``
-    # (#2086, anchors the row in the requester's replay tree), and
-    # ``parent_audit_id`` (#2086, back-links it to the parking row). The
-    # in-process agent-run resume keeps its own bound vars and does not
-    # call this helper; pre-0053 NULLs bind ``None``, the vars' defaults.
     work_ref_token = work_ref_var.set(request.work_ref)
     session_token = agent_session_id_var.set(request.agent_session_id)
     parent_token = parent_audit_id_var.set(request.request_audit_id)
@@ -783,11 +949,41 @@ async def _rehydrate_resume_target(
     return None, denied
 
 
+def _deadline_passed_clause(cutoff: datetime, default_ttl: timedelta | None) -> Any:
+    """Build the "expiry deadline has passed" WHERE clause for the sweep (#2322).
+
+    A concrete ``expires_at`` compares directly. When *default_ttl* is
+    supplied, legacy null-expiry rows (parked before #2322) are coalesced
+    against ``created_at + default_ttl`` — expressed as
+    ``created_at <= cutoff - default_ttl`` rather than SQL
+    column+interval arithmetic so the predicate binds two plain Python
+    datetimes and stays dialect-portable (PG ``timestamptz`` + the SQLite
+    test path both compare cleanly), the same bound-parameter discipline
+    the grant-expiry sweeper uses. With no *default_ttl* only rows with a
+    concrete deadline are considered (the historical contract).
+    """
+    concrete = and_(
+        ApprovalRequest.expires_at.is_not(None),
+        ApprovalRequest.expires_at <= cutoff,
+    )
+    if default_ttl is None:
+        return concrete
+    legacy_cutoff = cutoff - default_ttl
+    return or_(
+        concrete,
+        and_(
+            ApprovalRequest.expires_at.is_(None),
+            ApprovalRequest.created_at <= legacy_cutoff,
+        ),
+    )
+
+
 async def expire_stale_requests(
     session: AsyncSession,
     *,
     operator: Operator,
     now: datetime | None = None,
+    default_ttl: timedelta | None = None,
 ) -> list[ApprovalRequest]:
     """Transition all ``pending`` rows past their ``expires_at`` to ``expired``.
 
@@ -795,8 +991,16 @@ async def expire_stale_requests(
     session (caller commits). Intended to be called from a background
     task / CLI sweep on a periodic interval.
 
-    Only rows with ``expires_at IS NOT NULL AND expires_at <= now`` and
-    ``status = 'pending'`` are affected.
+    Rows with ``expires_at IS NOT NULL AND expires_at <= now`` and
+    ``status = 'pending'`` are always affected. When *default_ttl* is
+    supplied (the periodic sweeper passes ``APPROVAL_DEFAULT_TTL``),
+    legacy rows parked before #2322 with ``expires_at IS NULL`` are also
+    aged out via a sweep-time coalesce: a null-expiry row is treated as
+    if its deadline were ``created_at + default_ttl`` and, when that
+    coalesced deadline has passed, the row is expired and its
+    ``expires_at`` is backfilled to that value so the decision row and
+    the persisted deadline agree. No schema change is needed — the
+    coalesce lives entirely in this predicate.
 
     Args:
         session: Open :class:`AsyncSession``; flushed, not committed.
@@ -805,6 +1009,10 @@ async def expire_stale_requests(
             ``operator`` role.
         now: Override for "current time" (used in tests). Defaults to
             :func:`datetime.now(UTC)`.
+        default_ttl: When set, null-``expires_at`` legacy rows are
+            coalesced against ``created_at + default_ttl`` (#2322). When
+            ``None`` (the historical contract), only rows with a concrete
+            ``expires_at`` are considered.
 
     Returns:
         List of the expired :class:`ApprovalRequest` rows (may be empty).
@@ -823,14 +1031,17 @@ async def expire_stale_requests(
     stmt = (
         select(ApprovalRequest)
         .where(ApprovalRequest.status == ApprovalRequestStatus.PENDING.value)
-        .where(ApprovalRequest.expires_at.is_not(None))
-        .where(ApprovalRequest.expires_at <= cutoff)
+        .where(_deadline_passed_clause(cutoff, default_ttl))
         .where(ApprovalRequest.tenant_id == operator.tenant_id)
     )
     result = await session.execute(stmt)
     rows = list(result.scalars().all())
 
     for request in rows:
+        # Backfill a legacy null deadline to the coalesced value so the
+        # decision audit row and the persisted row agree on when it expired.
+        if request.expires_at is None and default_ttl is not None:
+            request.expires_at = request.created_at + default_ttl
         request.status = ApprovalRequestStatus.EXPIRED.value
         request.decided_at = cutoff
         await session.flush()

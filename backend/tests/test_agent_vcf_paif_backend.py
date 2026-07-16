@@ -40,6 +40,7 @@ via :mod:`respx`. Acceptance criteria from #1078 map onto the tests as:
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import cast
 from uuid import UUID
 
 import httpx
@@ -120,10 +121,10 @@ def test_vcf_paif_chat_profile_matches_vllm_quirks() -> None:
     ``messages[]`` array verbatim; only Ollama collapses them).
     """
     profile = vcf_paif_chat_profile()
-    assert isinstance(profile, OpenAIModelProfile)
-    assert profile.openai_supports_strict_tool_definition is False
-    assert profile.openai_chat_supports_multiple_system_messages is True
-    assert profile.json_schema_transformer is None
+    assert isinstance(profile, dict)
+    assert profile["openai_supports_strict_tool_definition"] is False
+    assert profile["openai_chat_supports_multiple_system_messages"] is True
+    assert profile["json_schema_transformer"] is None
 
 
 def test_vcf_paif_capabilities_declare_tools_streaming_no_cache() -> None:
@@ -344,10 +345,10 @@ def test_paif_backend_builder_constructs_openai_chat_model_with_paif_profile() -
     model = builder()
 
     assert isinstance(model, OpenAIChatModel)
-    profile = model.profile
-    assert isinstance(profile, OpenAIModelProfile)
-    assert profile.openai_supports_strict_tool_definition is False
-    assert profile.openai_chat_supports_multiple_system_messages is True
+    profile = cast(OpenAIModelProfile, model.profile)
+    assert isinstance(profile, dict)
+    assert profile["openai_supports_strict_tool_definition"] is False
+    assert profile["openai_chat_supports_multiple_system_messages"] is True
 
 
 def test_paif_backend_builder_is_lazy_about_provider_resolution() -> None:
@@ -536,9 +537,9 @@ def test_default_paif_builder_constructs_when_settings_complete(
     model = default_vcf_paif_backend_builder()
 
     assert isinstance(model, OpenAIChatModel)
-    profile = model.profile
-    assert isinstance(profile, OpenAIModelProfile)
-    assert profile.openai_supports_strict_tool_definition is False
+    profile = cast(OpenAIModelProfile, model.profile)
+    assert isinstance(profile, dict)
+    assert profile["openai_supports_strict_tool_definition"] is False
 
 
 # ---------------------------------------------------------------------------

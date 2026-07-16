@@ -324,7 +324,11 @@ async def test_bulk_import_dry_run_writes_nothing() -> None:
 
 @pytest.mark.asyncio
 async def test_bulk_import_rejects_whole_batch_on_invalid_kind() -> None:
-    """One bad ``kind`` aborts the entire batch — no partial apply."""
+    """One malformed ``kind`` slug aborts the entire batch — no partial apply.
+
+    T1 #2534: the vocabulary is open, so the invalid row is a
+    shape-violating slug, not a non-member.
+    """
     tenant_id = await _seed_tenant()
     await _seed_node(tenant_id, kind="vm", name="vm-1")
     await _seed_node(tenant_id, kind="host", name="host-1")
@@ -339,7 +343,7 @@ async def test_bulk_import_rejects_whole_batch_on_invalid_kind() -> None:
         ),
         BulkImportRow(
             from_ref=NodeRef("svc-1", "service"),
-            kind="not-a-real-kind",
+            kind="Not A Real Kind!",
             to_ref=NodeRef("db-1", "service"),
         ),
     ]
@@ -354,7 +358,7 @@ async def test_bulk_import_rejects_whole_batch_on_invalid_kind() -> None:
     err = exc_info.value.errors[0]
     assert err.index == 1
     assert err.error == "invalid_kind"
-    assert err.kind == "not-a-real-kind"
+    assert err.kind == "Not A Real Kind!"
 
     async with sessionmaker() as session:
         edges = (

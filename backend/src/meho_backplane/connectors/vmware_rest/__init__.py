@@ -80,8 +80,23 @@ register_connector_v2(
 # during ``run_typed_op_registrars`` -- same lifecycle phase the typed
 # Vault ops use.
 from meho_backplane.connectors.vmware_rest import composites  # noqa: E402
+from meho_backplane.connectors.vmware_rest.typed_ops import (  # noqa: E402
+    VMWARE_TYPED_OPS,
+    register_vmware_typed_operations,
+)
+from meho_backplane.operations.typed_register import (  # noqa: E402
+    register_typed_op_registrar,
+)
+
+# Queue the typed-op upsert onto the lifespan-driven registrar list
+# (#2257). ``vmware.host.usage`` is the first vmware ``source_kind="typed"``
+# op -- a bound-method read on the connector session, independent of the
+# composite/ingested path, so it registers via its own registrar the same
+# way argocd's typed reads do.
+register_typed_op_registrar(register_vmware_typed_operations)
 
 __all__ = [
+    "VMWARE_TYPED_OPS",
     "SessionCredentials",
     "VmwareRestConnector",
     "VsphereSessionLoader",
@@ -89,4 +104,5 @@ __all__ = [
     "composites",
     "load_session_credentials_from_vault",
     "product_from_line_id",
+    "register_vmware_typed_operations",
 ]

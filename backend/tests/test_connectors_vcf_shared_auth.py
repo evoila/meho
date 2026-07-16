@@ -34,6 +34,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors._shared.vcf_auth import (
+    ConnectorAuthError,
     CredentialsCache,
     SessionLoginError,
     VcfTargetLike,
@@ -563,10 +564,17 @@ async def test_vcf_session_login_payload_builder_takes_precedence(
 
 
 @pytest.mark.asyncio
-async def test_vcf_session_login_401_raises_session_login_error_naming_target(
+async def test_vcf_session_login_401_raises_connector_auth_error_naming_target(
     _client: httpx.AsyncClient,
 ) -> None:
-    """A 401 on the login round-trip surfaces :exc:`SessionLoginError`.
+    """A 401 on the login round-trip surfaces the structured :exc:`ConnectorAuthError`.
+
+    #2329: a 401 (rotated/stale password) at establish is an auth-class
+    failure, so ``vcf_session_login`` now raises the structured
+    ``ConnectorAuthError`` -- a subclass of :exc:`SessionLoginError`, so
+    existing ``except SessionLoginError`` callers are unaffected -- carrying
+    the status + establish cause sub-code the dispatcher maps to
+    ``connector_auth_failed``.
 
     Note: the *retry-once on 401 around downstream calls* is a separate
     layer the consumer (vRLI #830) owns. The login round-trip itself
@@ -583,18 +591,44 @@ async def test_vcf_session_login_401_raises_session_login_error_naming_target(
                 target_name="vrli-a",
                 token_extractor=lambda r: r.headers.get("sessionId"),
             )
-    msg = str(exc_info.value)
+    err = exc_info.value
+    assert isinstance(err, ConnectorAuthError)
+    assert err.status_code == 401
+    assert err.cause == "session_establish_401"
+    assert err.target_name == "vrli-a"
+    msg = str(err)
     assert "vrli-a" in msg
     assert "401" in msg
     # The cause chain carries the underlying httpx error so callers can
     # introspect status / response if they need to.
-    assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
+    assert isinstance(err.__cause__, httpx.HTTPStatusError)
 
 
 @pytest.mark.asyncio
-async def test_vcf_session_login_500_also_raises_session_login_error(
+async def test_vcf_session_login_403_raises_connector_auth_error(
     _client: httpx.AsyncClient,
 ) -> None:
+    """A 403 (locked-out / scope-stripped account) also classifies as auth-class (#2329)."""
+    with respx.mock(base_url="https://vrli-a.test.invalid") as mock:
+        mock.post("/api/v2/sessions").respond(403, json={"error": "account_locked"})
+        with pytest.raises(ConnectorAuthError) as exc_info:
+            await vcf_session_login(
+                _client,
+                "/api/v2/sessions",
+                username="admin",
+                password="p",
+                target_name="vrli-a",
+                token_extractor=lambda r: r.headers.get("sessionId"),
+            )
+    assert exc_info.value.cause == "session_establish_403"
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_vcf_session_login_500_raises_plain_session_login_error(
+    _client: httpx.AsyncClient,
+) -> None:
+    """A 500 is NOT auth-class -- it keeps the plain :exc:`SessionLoginError` shape (#2329)."""
     with respx.mock(base_url="https://vrli-a.test.invalid") as mock:
         mock.post("/api/v2/sessions").respond(500)
         with pytest.raises(SessionLoginError) as exc_info:
@@ -606,6 +640,7 @@ async def test_vcf_session_login_500_also_raises_session_login_error(
                 target_name="vrli-a",
                 token_extractor=lambda r: r.headers.get("sessionId"),
             )
+    assert not isinstance(exc_info.value, ConnectorAuthError)
     assert "500" in str(exc_info.value)
 
 

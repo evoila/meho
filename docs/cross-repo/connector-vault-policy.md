@@ -426,6 +426,53 @@ Expected outcomes:
 > or the write fails post-approval despite a clean preflight. Verify the
 > reviewer's token with the same command above when in doubt.
 
+### 6.3 The write-identity contract (which identity writes, and its two signals)
+
+The read path (§2–§5) and the write path use the **same** federated
+identity model: every KV op runs under the acting **operator's**
+OIDC-federated Vault token (the `meho-mcp` role), never a shared god-mode
+backplane token. There is no separate service-account identity for agent
+writes in this model — an *agent-initiated* `vault.kv.put` still parks and
+executes under a human operator's token (the dispatcher's at park time,
+the reviewer's on approved re-dispatch; see the §6.2 reviewer-token
+caveat). The contract a deploy must satisfy is therefore:
+
+| Path | Acting identity | Required Vault capabilities on the templated path |
+|------|-----------------|---------------------------------------------------|
+| Read (`vault.kv.read`, credential resolution) | Operator's OIDC-federated token | `read` on `secret/data/…/{{identity…}}/*` (§2) |
+| Write (`vault.kv.put` / `patch`) | Operator's OIDC-federated token (dispatcher at park; **reviewer** on approved re-dispatch) | `create` + `update` on `secret/data/…/{{identity…}}/*` (§6.1) |
+| Write (`vault.kv.delete` version soft-delete) | same | `update` on the data path (§6.1) |
+
+A deploy that follows only the §2 read grant provisions **read-only** and
+discovers the missing write grant *after* an operator approves a parked
+write. Two product signals make that gap visible without reading Vault's
+logs:
+
+- **Park-time warning (before Approve).** The dispatcher runs the §6.2
+  `sys/capabilities-self` probe under the dispatching operator's token and,
+  when the token lacks `create`/`update`, stamps
+  `proposed_effect.write_capability_warning =
+  "connector_identity_may_lack_write"` on the approval row alongside the
+  `permission_preflight` banner (`will_be_denied: true` with the lacking
+  capabilities). This is a **warning, not a gate** — the park still
+  proceeds and the operator may approve anyway (e.g. the write policy is
+  landing in the same change). It surfaces the gap while a human is still
+  in the loop.
+- **Post-approval structured error (after Approve).** If the write is
+  approved and Vault still denies it, the op result is **not** a bare
+  `permission denied` or the read-oriented `connector_vault_forbidden`; it
+  is the write-specific `error_code: "vault_write_identity_forbidden"` with
+  `path` (the denied `secret/data/<path>`), `identity_hint` (the acting
+  operator's `sub`), and `doc_ref` pointing back at this §6. It names the
+  §6.1 write stanza as the fix and repeats the do-NOT-widen-the-shared-policy
+  warning (the grant is per-operator templated, not role-wide).
+
+To verify the contract for a given operator + target before wiring an
+approval flow, run the §6.2 `sys/capabilities-self` probe under **that
+operator's** token (and, once a reviewer is designated, theirs too).
+Both must return `["create","read","update"]` on the target's
+`secret/data/…` path for an approved write to land.
+
 ## Scope note — `shared_service_account` only; `per_user`/`impersonation` deferred
 
 This runbook covers the **`shared_service_account`** auth model: one

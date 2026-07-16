@@ -862,7 +862,7 @@
           "targets"
         ],
         "summary": "List Targets",
-        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.\n\nG0.16-T6 Finding A (#1312) \u2014 non-breaking shape opt-in. The\ndefault response stays the v0.8.0 bare list ``[TargetSummary,\n...]``; passing ``?envelope=v2`` returns the unified envelope\n``{\"items\": [...], \"next_cursor\": <opaque str | null>}`` per\n``docs/codebase/api-shape-conventions.md`` \u00a72. The cursor on the\nv2 envelope is the last-row ``name`` of the page when the page\nfilled to ``limit`` (so a re-issue carries pagination), and\n``None`` when the page exhausted the matching set (so callers\nsee \"no more pages\" without inspecting list length). The opt-in\nsemantics let SDK / CLI / MCP sister surfaces adopt the v2\nshape at their own cadence; the v0.8.0 default flips after two\nrelease cycles per the \u00a72 migration recipe.",
+        "description": "List targets for the requesting tenant.\n\nResults are keyset-paginated by ``name`` (lexicographic order).\nPass ``cursor=<last-name-seen>`` to fetch the next page. The\n``product`` filter is exact-match; pass it to narrow by product\nslug. ``limit`` defaults to 100, max 500.\n\nSoft-deleted targets (``deleted_at IS NOT NULL``, G0.14-T4 #1145)\nare excluded from the list \u2014 the same filter the resolver applies\nso list and dispatch never disagree about which targets are\nvisible to the tenant.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": <opaque str |\nnull>}`` list envelope per ``docs/codebase/api-shape-conventions.md``\n\u00a72 (#2338 breaking pass \u2014 the response shape converged from the\nv0.8.0 bare list onto the reference envelope; the ``?envelope=v2``\nopt-in that bridged the migration was retired). ``next_cursor`` is\nthe last-row ``name`` of the page when the page filled to ``limit``\n(so a re-issue carries pagination), and ``None`` when the page\nexhausted the matching set (so callers see \"no more pages\" without\ninspecting list length).",
         "operationId": "list_targets_api_v1_targets_get",
         "parameters": [
           {
@@ -898,19 +898,6 @@
             }
           },
           {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
-          },
-          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -927,19 +914,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/TargetSummary"
-                      }
-                    },
-                    {
-                      "type": "object",
-                      "additionalProperties": true
-                    }
-                  ],
-                  "title": "Response List Targets Api V1 Targets Get"
+                  "$ref": "#/components/schemas/TargetListResponse"
                 }
               }
             }
@@ -1389,10 +1364,10 @@
               "const": "v2",
               "type": "string",
               "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).",
               "title": "Envelope"
             },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+            "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312)."
           },
           {
             "name": "authorization",
@@ -1575,10 +1550,10 @@
               "const": "v2",
               "type": "string",
               "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
+              "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).",
               "title": "Envelope"
             },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
+            "description": "Opt into the unified REST\u2194MCP envelope shape per docs/codebase/api-shape-conventions.md \u00a74. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312)."
           },
           {
             "name": "authorization",
@@ -1993,7 +1968,7 @@
           "topology"
         ],
         "summary": "List Edges Route",
-        "description": "Flat filterable listing of edges in the caller's tenant.\n\nWraps :func:`~meho_backplane.topology.query.list_edges` (G9.2-T4\n#596). The query params are forwarded straight through (``from`` /\n``to`` are bound via :class:`Query` ``alias`` because ``from`` is a\nPython keyword); the tenant boundary comes from ``operator.tenant_id``\nand is non-overrideable by query string or body.\n\n``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind\nis rejected at the HTTP boundary (422) before the helper runs;\n``source`` is constrained to the two ``graph_edge.source`` values\nby a regex pattern; ``conflicts=true`` forwards\n``conflicts_only=True`` to surface the recoverability listing for\na wrong annotation (\u00a76 of Initiative #364).\n\nA bare ``from`` / ``to`` name that resolves to multiple kinds in\nthe tenant surfaces as **409 ambiguous_node** (same shape as the\ntraversal verbs) so the caller can re-issue with a kind-qualified\nendpoint. A name that does not resolve at all yields an empty\nlist, not a 404 \u2014 consistent with the helper's \"missing anchor \u2192\nempty result\" shape.\n\nThe route binds ``audit_op_id=\"topology.list_edges\"`` /\n``audit_op_class=\"read\"`` so the audit row + broadcast event carry\nthe canonical identity. ``.list_edges`` is not in the broadcast\nclassifier's read/write suffix tables, so the explicit override is\nload-bearing (same rationale as the traversal verbs' ``.dependents``\n/ ``.dependencies`` / ``.path`` bindings).",
+        "description": "Flat filterable listing of edges in the caller's tenant.\n\nWraps :func:`~meho_backplane.topology.query.list_edges` (G9.2-T4\n#596). The query params are forwarded straight through (``from`` /\n``to`` are bound via :class:`Query` ``alias`` because ``from`` is a\nPython keyword); the tenant boundary comes from ``operator.tenant_id``\nand is non-overrideable by query string or body.\n\n``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind\nis rejected at the HTTP boundary (422) before the helper runs\n(any well-formed slug is a legal filter \u2014 the vocabulary is open);\n``source`` is constrained to the two ``graph_edge.source`` values\nby a regex pattern; ``conflicts=true`` forwards\n``conflicts_only=True`` to surface the recoverability listing for\na wrong annotation (\u00a76 of Initiative #364).\n\nA bare ``from`` / ``to`` name that resolves to multiple kinds in\nthe tenant surfaces as **409 ambiguous_node** (same shape as the\ntraversal verbs) so the caller can re-issue with a kind-qualified\nendpoint. A name that does not resolve at all yields an empty\nlist, not a 404 \u2014 consistent with the helper's \"missing anchor \u2192\nempty result\" shape.\n\nThe route binds ``audit_op_id=\"topology.list_edges\"`` /\n``audit_op_class=\"read\"`` so the audit row + broadcast event carry\nthe canonical identity. ``.list_edges`` is not in the broadcast\nclassifier's read/write suffix tables, so the explicit override is\nload-bearing (same rationale as the traversal verbs' ``.dependents``\n/ ``.dependencies`` / ``.path`` bindings).",
         "operationId": "list_edges_route_api_v1_topology_edges_get",
         "parameters": [
           {
@@ -2001,7 +1976,10 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/GraphEdgeKind",
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 63,
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
               "nullable": true,
               "title": "Kind"
             }
@@ -3232,7 +3210,7 @@
           "connectors"
         ],
         "summary": "List Endpoint",
-        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nThe default response is wrapped in ``{\"connectors\": [...]}`` so\nfuture paging / cursor fields can land non-breakingly. The route\nbuilds the payload by calling :meth:`ConnectorListItem.model_dump`\n(with ``mode=\"json\"``) on each item returned by\n:func:`list_ingested_connectors` rather than annotating\n``response_model=ConnectorListResponse`` \u2014 per-item ``tenant_id``\nUUIDs need to render as strings in JSON, and the per-item\n``mode=\"json\"`` dump is the simplest way to get that without\nintroducing a custom serializer.\n\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": ...}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is\nnot cursor-paginated, so ``next_cursor`` is always ``None`` under\nthe opt-in. Omitting the param keeps the v0.8.0 default shape so\nno client breaks (G0.18-T3 #1356, completing #1312 acceptance A).",
+        "description": "List ingested connectors visible to the operator.\n\nVisibility scope (per\n:func:`list_ingested_connectors`): operator's-tenant rows +\nbuilt-ins. The optional ``status`` filter narrows by aggregated\nreview status; ``all`` (or omission) returns everything.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n``{\"connectors\": [...]}`` keyed shape onto the reference envelope;\nthe ``?envelope=v2`` opt-in that bridged the migration was retired).\nPer-item ``tenant_id`` UUIDs render as JSON strings via FastAPI's\n``response_model`` serialization. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``null``.",
         "operationId": "list_endpoint_api_v1_connectors_get",
         "parameters": [
           {
@@ -3252,19 +3230,6 @@
             }
           },
           {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
-          },
-          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -3281,23 +3246,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "type": "object",
-                      "additionalProperties": {
-                        "type": "array",
-                        "items": {
-                          "type": "object",
-                          "additionalProperties": true
-                        }
-                      }
-                    },
-                    {
-                      "type": "object",
-                      "additionalProperties": true
-                    }
-                  ],
-                  "title": "Response List Endpoint Api V1 Connectors Get"
+                  "$ref": "#/components/schemas/ConnectorListResponse"
                 }
               }
             }
@@ -4138,7 +4087,7 @@
           "runbooks"
         ],
         "summary": "List Templates",
-        "description": "List the latest version of each template slug for the operator's tenant.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant\nid from the query string. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler; ``operator`` and\n``tenant_admin`` both pass.\n\nThe optional ``status`` / ``target_kind`` filters narrow the rows\nconsidered before the latest-per-slug projection; ``limit`` is capped\nat 500. ``status`` is typed as the closed ``draft`` / ``published`` /\n``deprecated`` vocabulary, so an out-of-vocabulary value trips a clean\n422 at FastAPI's query-parameter validation boundary (before the\nhandler body runs) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`\ninternally.\n\nThe default response is the v0.8.0 keyed\n:class:`RunbookTemplateListResponse` shape (``{\"templates\": [...]}``).\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72 -- the listing is not\ncursor-paginated (``limit`` truncates), so ``next_cursor`` is always\n``null`` under the opt-in, matching the sibling unpaged adopters.\nOmitting the param keeps the keyed default so no client breaks\n(G0.22-T6 #1611, joining the shape unified in #1356/#1366).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as the named :class:`RunbookTemplateListResponse` while\nstill letting the opt-in branch return the unified shape.\n\nBinds ``audit_op_id=\"runbook.list_templates\"`` + ``audit_op_class=\n\"read\"`` before the service call.",
+        "description": "List the latest version of each template slug for the operator's tenant.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a tenant\nid from the query string. ``read_only`` operators get 403 via\n:func:`require_role` before reaching this handler; ``operator`` and\n``tenant_admin`` both pass.\n\nThe optional ``status`` / ``target_kind`` filters narrow the rows\nconsidered before the latest-per-slug projection; ``limit`` is capped\nat 500. ``status`` is typed as the closed ``draft`` / ``published`` /\n``deprecated`` vocabulary, so an out-of-vocabulary value trips a clean\n422 at FastAPI's query-parameter validation boundary (before the\nhandler body runs) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.schemas.ListTemplatesFilter`\ninternally.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass -- the response shape converged from the v0.8.0\n``{\"templates\": [...]}`` keyed shape onto the reference envelope,\nrenaming ``templates`` -> ``items``; the ``?envelope=v2`` opt-in\nthat bridged the migration was retired). The listing is not\ncursor-paginated (``limit`` truncates), so ``next_cursor`` is always\n``null``, matching the sibling unpaged adopters.\n\nBinds ``audit_op_id=\"runbook.list_templates\"`` + ``audit_op_class=\n\"read\"`` before the service call.",
         "operationId": "list_templates_api_v1_runbooks_templates_get",
         "parameters": [
           {
@@ -4177,19 +4126,6 @@
               "default": 100,
               "title": "Limit"
             }
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -4273,6 +4209,72 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ShowTemplateResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The stored template body fails the current step schema and cannot be hydrated -- e.g. an empty step body predating the v0.20.0 non-empty-body requirement. Apply Alembic migration 0054 to backfill legacy rows; see docs/codebase/runbook-template-hydration.md.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "properties": {
+                        "error": {
+                          "type": "string",
+                          "enum": [
+                            "template_body_validation_failed"
+                          ]
+                        },
+                        "slug": {
+                          "type": "string"
+                        },
+                        "version": {
+                          "type": "integer",
+                          "nullable": true
+                        },
+                        "errors": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "properties": {
+                              "type": {
+                                "type": "string"
+                              },
+                              "loc": {
+                                "type": "array",
+                                "items": {}
+                              },
+                              "msg": {
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "type",
+                              "loc",
+                              "msg"
+                            ]
+                          }
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "error",
+                        "slug",
+                        "version",
+                        "errors",
+                        "message"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "detail"
+                  ]
                 }
               }
             }
@@ -4613,7 +4615,7 @@
           "runbooks"
         ],
         "summary": "List Runs",
-        "description": "List runs for the operator's tenant, scoped by role.\n\nRole floor: ``operator``. The handler computes\n``caller_is_admin`` from ``operator.tenant_role`` and passes it\nto the service:\n\n* ``caller_is_admin=False`` (operator path) -- the service forces\n  ``assignee=operator.sub`` regardless of what the query string\n  says, so an ``OPERATOR`` only ever sees their own runs even if\n  they try to filter to another assignee. The filter is a\n  *narrow* surface for their own view, never an *escape* into\n  another operator's.\n* ``caller_is_admin=True`` (admin path) -- the filter is honoured\n  as-is, so a ``TENANT_ADMIN`` can pass ``?assignee=<other-sub>``\n  to inspect a junior's runs.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``status`` is typed as the\nclosed ``in_progress`` / ``completed`` / ``abandoned`` vocabulary,\nso an out-of-vocabulary value trips a clean 422 at FastAPI's\nquery-parameter validation boundary (before the handler body\nruns) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.runs_schemas.ListRunsFilter`\ninternally.\n\nThe default response is the v0.8.0 keyed\n:class:`RunbookListRunsResponse` shape (``{\"runs\": [...]}``).\nPassing ``?envelope=v2`` returns the unified ``{\"items\": [...],\n\"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72 -- the listing is\nnot cursor-paginated (``limit`` truncates), so ``next_cursor`` is\nalways ``null`` under the opt-in, matching the sibling unpaged\nadopters. Omitting the param keeps the keyed default so no client\nbreaks (G0.22-T6 #1611, joining the shape unified in #1356/#1366).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so\nthe documented OpenAPI 200 schema, and the typed CLI client\ngenerated from it) as the named :class:`RunbookListRunsResponse`\nwhile still letting the opt-in branch return the unified shape.\n\nBinds ``audit_op_id=\"runbook.list_runs\"`` + ``audit_op_class=\n\"read\"`` before the service call. ``runbook.list_runs`` matches\nno ``.list`` / ``.get`` suffix the broadcast classifier\nrecognises, so the explicit override is load-bearing to keep\nclassification from defaulting to ``op_class=\"other\"`` (same\ngotcha :mod:`meho_backplane.api.v1.runbook_templates`'s\n``list_templates`` documents).",
+        "description": "List runs for the operator's tenant, scoped by role.\n\nRole floor: ``operator``. The handler computes\n``caller_is_admin`` from ``operator.tenant_role`` and passes it\nto the service:\n\n* ``caller_is_admin=False`` (operator path) -- the service forces\n  ``assignee=operator.sub`` regardless of what the query string\n  says, so an ``OPERATOR`` only ever sees their own runs even if\n  they try to filter to another assignee. The filter is a\n  *narrow* surface for their own view, never an *escape* into\n  another operator's.\n* ``caller_is_admin=True`` (admin path) -- the filter is honoured\n  as-is, so a ``TENANT_ADMIN`` can pass ``?assignee=<other-sub>``\n  to inspect a junior's runs.\n\nTenant-scoped to ``operator.tenant_id`` -- no surface accepts a\ntenant id from the query string. ``status`` is typed as the\nclosed ``in_progress`` / ``completed`` / ``abandoned`` vocabulary,\nso an out-of-vocabulary value trips a clean 422 at FastAPI's\nquery-parameter validation boundary (before the handler body\nruns) rather than a 500 from constructing the\n:class:`~meho_backplane.runbooks.runs_schemas.ListRunsFilter`\ninternally.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass -- the response shape converged from the v0.8.0\n``{\"runs\": [...]}`` keyed shape onto the reference envelope,\nrenaming ``runs`` -> ``items``; the ``?envelope=v2`` opt-in that\nbridged the migration was retired). The listing is not\ncursor-paginated (``limit`` truncates), so ``next_cursor`` is always\n``null``, matching the sibling unpaged adopters.\n\nBinds ``audit_op_id=\"runbook.list_runs\"`` + ``audit_op_class=\n\"read\"`` before the service call. ``runbook.list_runs`` matches\nno ``.list`` / ``.get`` suffix the broadcast classifier\nrecognises, so the explicit override is load-bearing to keep\nclassification from defaulting to ``op_class=\"other\"`` (same\ngotcha :mod:`meho_backplane.api.v1.runbook_templates`'s\n``list_templates`` documents).",
         "operationId": "list_runs_api_v1_runbooks_runs_get",
         "parameters": [
           {
@@ -4672,19 +4674,6 @@
               "default": 100,
               "title": "Limit"
             }
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -5513,7 +5502,7 @@
           "audit"
         ],
         "summary": "My Recent",
-        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.\n\nThe default response is the v0.8.0 :class:`AuditQueryResult` shape\n(``rows`` + ``next_cursor``). Passing ``?envelope=v2`` returns the\nunified ``{\"items\": [...], \"next_cursor\": ...}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72, carrying the same\nforward-only cursor. Omitting the param keeps the v0.8.0 default so\nno client breaks (G0.18-T3 #1356, completing #1312 acceptance A).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as the named :class:`AuditQueryResult` while still letting\nthe opt-in branch return the unified shape.",
+        "description": "Audit rows the calling operator produced within the *since* window.\n\nPrincipal is taken from ``operator.sub`` (the JWT subject); an\noperator cannot see another operator's recent activity through\nthis route \u2014 for that, the full POST surface filters on\n``principal``.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": ...}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0\n:class:`AuditQueryResult` ``{\"rows\": [...]}`` shape onto the\nreference envelope, renaming ``rows`` -> ``items``; the\n``?envelope=v2`` opt-in that bridged the migration was retired),\ncarrying the same forward-only cursor. The sibling audit-query\nendpoints (``/query`` / ``/who-touched`` / ``/by-work-ref``) keep\nthe :class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set.",
         "operationId": "my_recent_api_v1_audit_my_recent_get",
         "parameters": [
           {
@@ -5540,19 +5529,6 @@
             }
           },
           {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
-          },
-          {
             "name": "authorization",
             "in": "header",
             "required": false,
@@ -5569,7 +5545,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AuditQueryResult"
+                  "$ref": "#/components/schemas/MyRecentPage"
                 }
               }
             }
@@ -5701,7 +5677,7 @@
           "broadcast"
         ],
         "summary": "List Overrides",
-        "description": "List override rules owned by the operator's tenant.\n\nThe default response is the v0.8.0 bare list of\n:class:`BroadcastOverrideRead`. Passing ``?envelope=v2`` returns\nthe unified ``{\"items\": [...], \"next_cursor\": null}`` shape per\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``null`` under the\nopt-in. Omitting the param keeps the v0.8.0 default so no client\nbreaks (G0.18-T3 #1356, completing #1312 acceptance A).\n\nThe v2 envelope is emitted via a raw :class:`JSONResponse` rather\nthan a union return type: that keeps ``response_model`` (and so the\ndocumented OpenAPI 200 schema, and the typed CLI client generated\nfrom it) as ``list[BroadcastOverrideRead]`` while still letting the\nopt-in branch return the unified shape.",
+        "description": "List override rules owned by the operator's tenant.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null}`` list\nenvelope per ``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338\nbreaking pass \u2014 the response shape converged from the v0.8.0 bare\n``[BroadcastOverrideRead, ...]`` array onto the reference envelope;\nthe ``?envelope=v2`` opt-in that bridged the migration was retired).\nThis listing is not cursor-paginated, so ``next_cursor`` is always\n``null``.",
         "operationId": "list_overrides_api_v1_broadcast_overrides_get",
         "parameters": [
           {
@@ -5716,19 +5692,6 @@
               "title": "Op Id Pattern"
             },
             "description": "Exact-match filter on op_id_pattern (not a glob match)."
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -5747,11 +5710,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/BroadcastOverrideRead"
-                  },
-                  "title": "Response List Overrides Api V1 Broadcast Overrides Get"
+                  "$ref": "#/components/schemas/BroadcastOverridesListResponse"
                 }
               }
             }
@@ -7028,6 +6987,557 @@
         }
       }
     },
+    "/api/v1/runner-principals": {
+      "get": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "List Runner Principals",
+        "description": "List runner principals for the operator's tenant.",
+        "operationId": "list_runner_principals_api_v1_runner_principals_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "include_revoked",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Revoked"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Register Runner Principal",
+        "description": "Register a new runner principal (creates Keycloak client + DB row).\n\n``tenant_admin`` only. The minted Keycloak client's token carries a\nhardcoded ``principal_kind=runner`` mapper and a read-only\n``tenant_role``, so the resulting principal is caged to the gateway\npath prefixes and rejected everywhere else (see the module docstring).\nReturns 409 on duplicate ``(tenant, name)``; 503 when Keycloak admin is\nnot configured.",
+        "operationId": "register_runner_principal_api_v1_runner_principals_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunnerPrincipalCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runner-principals/{name}": {
+      "get": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Show Runner Principal",
+        "description": "Return one runner principal by name.",
+        "operationId": "show_runner_principal_api_v1_runner_principals__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/runner-principals/{name}/revoke": {
+      "delete": {
+        "tags": [
+          "runner-principals"
+        ],
+        "summary": "Revoke Runner Principal",
+        "description": "Revoke a runner principal (kill switch).\n\nDisables the Keycloak client (blocks new token grants) and marks the DB\nrow ``revoked=true``. Returns the updated row. ``tenant_admin`` only.\nReturns 404 when absent or already revoked.",
+        "operationId": "revoke_runner_principal_api_v1_runner_principals__name__revoke_delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "title": "Name"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerPrincipalRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/{runner}/next": {
+      "get": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Poll Next Command",
+        "description": "Long-poll for the next command queued for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard):\na runner may only poll its own queue. Holds up to ``wait`` seconds\n(clamped to the exported ceiling) claiming the oldest ``pending``\ncommand; returns ``200`` with the envelope on a claim or ``204`` on\ntimeout. The claim flips the row ``pending -> delivered`` durably.\n\nThe hold opens a fresh short-lived session per attempt and never holds\na DB transaction across the inter-attempt sleep (binding decision\n#2498-2). A client disconnect cancels the handler; the\n``CancelledError`` is logged and re-raised per the asyncio contract.",
+        "operationId": "poll_next_command_api_v1_gateway__runner__next_get",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "wait",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected \u2014 the runner asking for a longer hold gets a bounded one.",
+              "default": 25,
+              "title": "Wait"
+            },
+            "description": "Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected \u2014 the runner asking for a longer hold gets a bounded one."
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A command was claimed; the envelope is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayCommandEnvelope"
+                }
+              }
+            }
+          },
+          "204": {
+            "description": "No command became claimable before the wait deadline."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/gateway/{runner}/result": {
+      "post": {
+        "tags": [
+          "gateway"
+        ],
+        "summary": "Report Command Result",
+        "description": "Report the outcome of a delivered command for ``{runner}``.\n\nAuthenticated as the runner principal for ``{runner}`` (#2502's guard).\nWins the single-use consumption latch (#2500) **before** recording, then\nflips the command ``delivered -> succeeded|failed``, stamping the\nresult/error and ``completed_at`` and writing the result audit row (linked\nto the mint audit row). Returns ``200`` with an ack; ``404`` when the\ncommand id is unknown or was enqueued for another runner / tenant (no\nexistence oracle); ``409`` when the command is not ``delivered`` (a\nnever-claimed row) or was **already consumed** (a replayed result \u2014\ncentrally refused, at-most-once).",
+        "operationId": "report_command_result_api_v1_gateway__runner__result_post",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GatewayResultBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GatewayResultAck"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/assignment/{runner}": {
+      "put": {
+        "tags": [
+          "checks"
+        ],
+        "summary": "Put Assignment",
+        "description": "Replace runner *runner*'s assignment document (operator-authenticated).\n\nValidates every authored item before storing; a failing item is a\nstructured 422 (``assignment_target_unknown`` / ``assignment_op_unknown``\n/ ``assignment_op_not_safe``) and nothing is written.",
+        "operationId": "put_assignment_api_v1_checks_assignment__runner__put",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignmentDocument"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignmentDocumentResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/assignment": {
+      "get": {
+        "tags": [
+          "checks"
+        ],
+        "summary": "Get Assignment",
+        "description": "Return runner *runner*'s versioned assignment (runner-authenticated).\n\nA runner may fetch only its own assignment\n(:func:`assert_runner_scope`). ``known_version`` matching the current\ncontent digest yields ``304 Not Modified`` (empty body); the runner\nkeeps its cache.",
+        "operationId": "get_assignment_api_v1_checks_assignment_get",
+        "parameters": [
+          {
+            "name": "runner",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "title": "Runner"
+            }
+          },
+          {
+            "name": "known_version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Known Version"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunnerAssignment"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/results": {
+      "post": {
+        "tags": [
+          "checks"
+        ],
+        "summary": "Post Results",
+        "description": "Ingest a runner's result batch idempotently (runner-authenticated).\n\nThe runner submits only its own results (``batch.runner_id`` is the\nrunner name; :func:`assert_runner_scope` binds it to the token's\n``runner_id``). ``received_at`` is central-stamped; re-posts from the\nrunner's retry spool are deduped by ``result_uid``.",
+        "operationId": "post_results_api_v1_checks_results_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RunnerResultBatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResultIngestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/scheduler/triggers": {
       "get": {
         "tags": [
@@ -7517,7 +8027,7 @@
           "approvals"
         ],
         "summary": "Decide Approval Request",
-        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and publishes the ``approval.{approved,rejected}``\nbroadcast event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **approval of a direct operator op** (``run_id IS NULL``), the\ndecision then drives a re-dispatch using the params stored on the row\nat park time (#1503) \u2014 so a parked direct write approved here lands\nits effect exactly once, rather than being silently re-parked on the\nnext call. The request is already in a terminal ``approved`` state\nbefore the re-dispatch, so a concurrent second decide hits the\nalready-decided guard (409) and cannot double-execute.\n\nOn approval of an **agent-run** request (``run_id`` set), ``/decide``\nrecords the decision only and does **not** re-dispatch: the\nin-process agent runtime awaits the ``approval.approved`` broadcast\nand re-dispatches from its own in-memory params (the must-not-regress\npath). Re-dispatching here too would execute the op twice.",
+        "description": "Capture an operator decision, re-dispatching a direct op (G11.2-T5, #1503).\n\nFlips the request to ``approved`` or ``rejected``, writes the\ndecision audit row, and publishes the ``approval.{approved,rejected}``\nbroadcast event. Backs the CLI/MCP operator-decision flow where the\noperator approves by id alone.\n\nOn **every approval** the decision then drives a re-dispatch using the\nparams stored on the row at park time (#1503) \u2014 the direct operator op\n(``run_id IS NULL``) and, since #2293, the **agent-run** request\n(``run_id`` set) alike. The exactly-one-resumer claim\n(:func:`~meho_backplane.operations.approval_queue.claim_resume`, won\ninside ``resume_dispatch_after_approval``) makes this safe for\nrun-bound requests: when the in-process agent waiter is alive it wins\nthe claim and ``/decide``'s re-dispatch no-ops with\n``dispatch_status=\"already_resumed\"``; when the waiter is gone\n(wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim\nand executes the approved op, closing the silent-non-execution seam\nwhere the approval committed but nothing ran. Two independent guards\ncoexist: the already-decided 409 prevents a second *decision*, and the\nclaim prevents a second *dispatch* of one decision.",
         "operationId": "decide_approval_request_api_v1_approvals__request_id__decide_post",
         "parameters": [
           {
@@ -7581,7 +8091,7 @@
           "conventions"
         ],
         "summary": "List Conventions",
-        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.\n\nThe default response is the v0.8.0 keyed\n:class:`ConventionListResponse` shape (``entries`` +\n``budget_status``). Passing ``?envelope=v2`` returns the unified\n``{\"items\": [...], \"next_cursor\": null, \"budget_status\": {...}}``\nshape per ``docs/codebase/api-shape-conventions.md`` \u00a72 -- the\nconvention list is unpaginated, so ``next_cursor`` is always\n``null`` and ``budget_status`` rides as a top-level sidecar\n(not nested under ``meta``). Omitting the param keeps the v0.8.0\ndefault so no client breaks (G0.18-T3 #1356, completing #1312\nacceptance A).\n\nThe response also carries ``budget_status`` (T7 #1094): the\npreamble budget arithmetic for the operator's tenant, computed\nby a call to :func:`~meho_backplane.conventions.preamble.assemble_preamble`.\nThe ``--kind`` query filter narrows the ``entries`` list only;\n``budget_status`` always reflects the full ``operational``\nset (a ``--kind=workflow`` list call still wants the truthful\nbudget signal). The assembler runs an indexed SELECT + an\nin-memory pack -- O(N) per call where N is the tenant's\noperational-convention count (~10-20 in practice), so the\ncost is negligible against the list round-trip.",
+        "description": "List the operator's tenant's conventions, optionally filtered by kind.\n\nReturns the lighter :class:`ConventionSummary` shape (no full\n``body``). Ordering is ``priority DESC, created_at ASC`` --\nthe same key T4's preamble assembler uses for packing, so the\nlist view surfaces conventions in T4's consideration order.\n\nReturns the unified ``{\"items\": [...], \"next_cursor\": null,\n\"budget_status\": {...}}`` list envelope per\n``docs/codebase/api-shape-conventions.md`` \u00a72 (#2338 breaking pass --\nthe response shape converged from the v0.8.0 ``{\"entries\": [...]}``\nkeyed shape onto the reference envelope, renaming ``entries`` ->\n``items``; the ``?envelope=v2`` opt-in that bridged the migration\nwas retired). The convention list is unpaginated, so ``next_cursor``\nis always ``null`` and ``budget_status`` rides as a top-level\nsidecar (not nested under ``meta``).\n\n``budget_status`` (T7 #1094) is the preamble budget arithmetic for\nthe operator's tenant, computed by a call to\n:func:`~meho_backplane.conventions.preamble.assemble_preamble`. The\n``--kind`` query filter narrows the ``items`` list only;\n``budget_status`` always reflects the full ``operational`` set (a\n``--kind=workflow`` list call still wants the truthful budget\nsignal). The assembler runs an indexed SELECT + an in-memory pack --\nO(N) per call where N is the tenant's operational-convention count\n(~10-20 in practice), so the cost is negligible against the list\nround-trip.",
         "operationId": "list_conventions_api_v1_conventions_get",
         "parameters": [
           {
@@ -7595,19 +8105,6 @@
               "title": "Kind"
             },
             "description": "Filter by kind (operational / workflow / reference)."
-          },
-          {
-            "name": "envelope",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "const": "v2",
-              "type": "string",
-              "nullable": true,
-              "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).",
-              "title": "Envelope"
-            },
-            "description": "Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md \u00a72. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles \u2014 the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312)."
           },
           {
             "name": "authorization",
@@ -13502,7 +13999,7 @@
           "ui-kb"
         ],
         "summary": "Kb Editor Save",
-        "description": "Save a new KB entry from the editor modal.\n\nRequires ``tenant_admin`` role \u2014 enforced by re-verifying the\nsession's access token through\n:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`. Plain\n``operator`` role receives 403. The CSRF middleware gate runs\nbefore this handler (``POST /ui/*`` passes through\n:class:`~meho_backplane.ui.csrf.CSRFMiddleware`).\n\nOn success, returns ``HX-Redirect`` to the new entry's detail\npage so HTMX swaps the page without a full navigation. On\nvalidation failure (invalid slug, empty body) re-renders the\neditor modal with an inline error message.\n\nTag parsing: the ``tags`` field is a comma-separated string\n(``\"tag-a, tag-b\"``); individual values are stripped of\nwhitespace and empty strings are dropped. Tags are stored as\n``metadata[\"tags\"]`` on the entry.",
+        "description": "Save a new KB entry from the editor modal.\n\nRequires ``tenant_admin`` role \u2014 enforced by re-verifying the\nsession's access token through\n:func:`~meho_backplane.auth.jwt.verify_jwt_for_audience`. Plain\n``operator`` role receives 403. The CSRF middleware gate runs\nbefore this handler (``POST /ui/*`` passes through\n:class:`~meho_backplane.ui.csrf.CSRFMiddleware`).\n\nOn success, returns ``HX-Redirect`` to the new entry's detail\npage so HTMX swaps the page without a full navigation. On\nvalidation failure (invalid slug, empty body) re-renders the\neditor modal with an inline error message as a **200** fragment\nso HTMX swaps it back in place -- a non-2xx re-render is silently\ndropped by HTMX 2 (#2384; the mold established in #2346).\n\nTag parsing: the ``tags`` field is a comma-separated string\n(``\"tag-a, tag-b\"``); individual values are stripped of\nwhitespace and empty strings are dropped. Tags are stored as\n``metadata[\"tags\"]`` on the entry.",
         "operationId": "kb_editor_save_ui_kb_new_post",
         "requestBody": {
           "content": {
@@ -14592,6 +15089,58 @@
             "application/x-www-form-urlencoded": {
               "schema": {
                 "$ref": "#/components/schemas/Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runbooks/{slug}/discard": {
+      "post": {
+        "tags": [
+          "ui-runbooks"
+        ],
+        "summary": "Runbooks Discard",
+        "description": "Discard (delete) ``(slug, version)`` draft; admin only.\n\nOn success the draft row is deleted, so there is no fragment to\nre-render -- return an empty ``204`` carrying ``HX-Redirect:\n/ui/runbooks`` so HTMX navigates back to the catalog (HTMX honours the\nredirect header before the 204-no-swap rule). A non-draft version\nre-renders the inline ``alert-error`` fragment instead (the engine\nrejects discard-on-non-draft), so a stale detail page surfaces the\ntyped-400 rather than silently navigating away.",
+        "operationId": "runbooks_discard_ui_runbooks__slug__discard_post",
+        "parameters": [
+          {
+            "name": "slug",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Slug"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_runbooks_discard_ui_runbooks__slug__discard_post"
               }
             }
           }
@@ -18186,6 +18735,7 @@
         "properties": {
           "name": {
             "type": "string",
+            "maxLength": 128,
             "title": "Name"
           },
           "owner_sub": {
@@ -18686,6 +19236,42 @@
         "title": "AskDocsResponse",
         "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract."
       },
+      "AssignmentDocument": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuthoredCheckItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "title": "AssignmentDocument",
+        "description": "Full-document ``PUT`` body: replaces a runner's assignment wholesale."
+      },
+      "AssignmentDocumentResponse": {
+        "properties": {
+          "runner": {
+            "type": "string",
+            "title": "Runner"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuthoredCheckItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runner",
+          "items"
+        ],
+        "title": "AssignmentDocumentResponse",
+        "description": "Echo returned by ``PUT``: the stored authored document + runner name."
+      },
       "AuditEntry": {
         "properties": {
           "id": {
@@ -18998,6 +19584,44 @@
         ],
         "title": "AuthModel",
         "description": "Per-target identity model per v0.1-spec L447-454."
+      },
+      "AuthoredCheckItem": {
+        "properties": {
+          "check_ref": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Check Ref"
+          },
+          "target_name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Target Name"
+          },
+          "op": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Op"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "cadence_seconds": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Cadence Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "check_ref",
+          "target_name",
+          "op",
+          "cadence_seconds"
+        ],
+        "title": "AuthoredCheckItem",
+        "description": "One operator-authored check in a runner's assignment document.\n\nThe runner-facing ``GET`` materialises each of these into a wire\n:class:`~meho_backplane.runner.wire.RunnerWorkItem` at request time:\n``target_name`` is resolved to a live target descriptor, ``op`` to the\nresolved connector's enabled descriptor (yielding ``handler_ref`` +\n``safety_level`` + the ``(product, version, impl_id)`` key). ``op`` is\nthe connector-side op id (e.g. ``\"vsphere.host.list\"``); the connector\ntriple is derived from the resolved target, not authored here."
       },
       "BackendReadiness": {
         "properties": {
@@ -19590,6 +20214,18 @@
         },
         "type": "object",
         "title": "Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post"
+      },
+      "Body_runbooks_discard_ui_runbooks__slug__discard_post": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "maxLength": 16,
+            "title": "Version",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "title": "Body_runbooks_discard_ui_runbooks__slug__discard_post"
       },
       "Body_runbooks_editor_create_ui_runbooks_new_post": {
         "properties": {
@@ -20822,6 +21458,28 @@
         "title": "BroadcastOverrideRead",
         "description": "Outgoing row representation.\n\n``model_config = ConfigDict(from_attributes=True)`` lets the\nhandler return the SQLAlchemy ORM object directly; FastAPI\nserialises via this model rather than the ORM's ``__dict__``."
       },
+      "BroadcastOverridesListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/BroadcastOverrideRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "BroadcastOverridesListResponse",
+        "description": "Unified list envelope for ``GET /api/v1/broadcast/overrides``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``None`` but present\nso the endpoint can grow keyset pagination later without a further\nbreaking change."
+      },
       "BudgetStatus": {
         "properties": {
           "max_tokens": {
@@ -21004,6 +21662,123 @@
         "title": "ConfirmVerifyResponse",
         "description": "Operator's answer to a ``confirm``-typed verify step.\n\nOnly :attr:`answer` ``= \"yes\"`` advances the run. ``\"no\"`` transitions\nthe step to ``failed``; ``\"escalate\"`` transitions to ``failed`` with\n``verify_response.escalated=true`` semantics so the senior's review\npath is explicit in the persisted state (per Initiative #1198)."
       },
+      "ConnectorListItem": {
+        "properties": {
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "impl_id": {
+            "type": "string",
+            "title": "Impl Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          },
+          "group_count": {
+            "type": "integer",
+            "title": "Group Count"
+          },
+          "staged_group_count": {
+            "type": "integer",
+            "title": "Staged Group Count"
+          },
+          "enabled_group_count": {
+            "type": "integer",
+            "title": "Enabled Group Count"
+          },
+          "disabled_group_count": {
+            "type": "integer",
+            "title": "Disabled Group Count"
+          },
+          "operation_count": {
+            "type": "integer",
+            "title": "Operation Count"
+          },
+          "enabled_operation_count": {
+            "type": "integer",
+            "title": "Enabled Operation Count"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ingested",
+              "registered"
+            ],
+            "title": "State",
+            "default": "ingested"
+          },
+          "next_step": {
+            "$ref": "#/components/schemas/NextStep",
+            "nullable": true
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "typed",
+              "ingested-shim",
+              "profiled",
+              "profiled-but-unreviewed"
+            ],
+            "title": "Kind",
+            "default": "ingested-shim"
+          },
+          "dispatchable": {
+            "type": "boolean",
+            "title": "Dispatchable",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "connector_id",
+          "product",
+          "version",
+          "impl_id",
+          "tenant_id",
+          "group_count",
+          "staged_group_count",
+          "enabled_group_count",
+          "disabled_group_count",
+          "operation_count",
+          "enabled_operation_count"
+        ],
+        "title": "ConnectorListItem",
+        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho.connector.list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`."
+      },
+      "ConnectorListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorListItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "ConnectorListResponse",
+        "description": "Unified list envelope for ``GET /api/v1/connectors``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. This listing is not\ncursor-paginated, so ``next_cursor`` is always ``None``; the field\nis present so a client reads it without a ``KeyError`` guard and so\nthe endpoint can grow keyset pagination later without a further\nbreaking change."
+      },
       "ConnectorReviewGroup": {
         "properties": {
           "group_key": {
@@ -21156,6 +21931,14 @@
             "type": "boolean",
             "title": "Dispatchable",
             "default": false
+          },
+          "provenance": {
+            "items": {
+              "$ref": "#/components/schemas/ConnectorReviewProvenance"
+            },
+            "type": "array",
+            "title": "Provenance",
+            "default": []
           }
         },
         "type": "object",
@@ -21170,6 +21953,42 @@
         ],
         "title": "ConnectorReviewPayload",
         "description": "Top-level review payload returned by :meth:`ReviewService.get_review_payload`.\n\n``connector_id`` is the operator-facing string the request\ntargeted (echoed back verbatim for round-trip clarity).\n``product`` / ``version`` / ``impl_id`` are the parsed triple\nderived via\n:func:`~meho_backplane.operations.ingest.parser.parse_connector_id`;\nthe CLI / API layers surface them in operator output so the\nconvention is self-documenting. ``tenant_id`` is the scope the\npayload was queried under (``None`` for built-in).\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014\nprojected from the v2 resolver's\n:data:`~meho_backplane.connectors.base.ShimKind` tier for this\nconnector's ``(product, version)`` crossed with the review-gate\nstate, and ``dispatchable`` is its boolean roll-up (``True`` for\ntyped / profiled). They mirror the same-named fields on\n:class:`~meho_backplane.operations.ingest.api_schemas.ConnectorListItem`\nso the list and review surfaces agree on how a connector reads.\nBoth default to the bare-shim reading\n(``kind=\"ingested-shim\"``, ``dispatchable=False``) so existing\nconstruction call sites keep working; the service always sets them\nexplicitly. The per-scheme auth detail is deliberately **not**\nsurfaced here yet \u2014 deferred until #1969 freezes the\n:class:`~meho_backplane.connectors.schemas.ExecutionProfile` schema\n(the Goal flags secret-handling sensitivity). See\n:data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`."
+      },
+      "ConnectorReviewProvenance": {
+        "properties": {
+          "uri": {
+            "type": "string",
+            "title": "Uri"
+          },
+          "sha256": {
+            "type": "string",
+            "title": "Sha256"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin"
+          },
+          "operator_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Operator Sub"
+          },
+          "ingested_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Ingested At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "uri",
+          "sha256",
+          "origin",
+          "operator_sub",
+          "ingested_at"
+        ],
+        "title": "ConnectorReviewProvenance",
+        "description": "Provenance for one spec ingested under this connector (#2291).\n\nSurfaces the durable\n:class:`~meho_backplane.db.models.SpecProvenance` record so an\noperator reviewing a connector can tell a vendor artifact from a\nhand-mutated one before enabling reads:\n\n* ``uri`` \u2014 the audit label as presented at ingest\n  (``spec:`` / ``https://`` / ``file:///`` / ``docs:`` form).\n* ``sha256`` \u2014 hex digest over the raw spec bytes. Two ingests of\n  the *same* label with different digests mean the content changed.\n* ``origin`` \u2014 ``fetched`` (https GET) vs ``inline`` (operator\n  upload) vs ``shipped`` (MEHO-authored catalog data). An inline\n  upload labelled with a vendor URL is thus distinguishable from a\n  genuine fetch of that URL.\n* ``operator_sub`` \u2014 who ingested it (``None`` for boot-time\n  shipped ingests with no operator).\n* ``ingested_at`` \u2014 when the provenance row was last written.\n\nConnectors ingested before this table landed have no provenance\nrows; the surfaces render that as \"unknown (pre-provenance)\" rather\nthan a fabricated record."
       },
       "ConnectorSpecEntry": {
         "properties": {
@@ -21439,12 +22258,17 @@
       },
       "ConventionListResponse": {
         "properties": {
-          "entries": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/ConventionSummary"
             },
             "type": "array",
-            "title": "Entries"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           },
           "budget_status": {
             "$ref": "#/components/schemas/BudgetStatus"
@@ -21452,11 +22276,11 @@
         },
         "type": "object",
         "required": [
-          "entries",
+          "items",
           "budget_status"
         ],
         "title": "ConventionListResponse",
-        "description": "Response envelope for ``GET /api/v1/conventions``.\n\nWrapped in ``{\"entries\": [...]}`` so a future cursor / total\nfield can land non-breakingly. Same shape the kb + memory list\nsurfaces adopted; consistency across the v0.2 read APIs keeps\nthe CLI's list renderer one switch statement, not three.\n\n``budget_status`` (T7 #1094) carries the preamble budget\narithmetic for the operator's tenant. Always populated; the\nunderlying :func:`~meho_backplane.conventions.preamble.assemble_preamble`\ncall is one indexed SELECT + an in-memory pack -- cheap enough\nto run on every list request. Exposing it on the list\nresponse (rather than on a separate\n``/api/v1/conventions/budget-status`` route the issue body\nexplicitly rejects) keeps the CLI / dashboard consumer paths\nto one HTTP round-trip."
+        "description": "Unified list envelope for ``GET /api/v1/conventions``.\n\nThe `{items, next_cursor, ...sidecars}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. ``items`` carries the\n:class:`ConventionSummary` rows; ``next_cursor`` is always ``None``\n(the listing is not cursor-paginated) but present so the endpoint\ncan grow pagination later without a further breaking change.\n\n``budget_status`` (T7 #1094) is the \u00a72 top-level *sidecar*: it\ncarries the preamble budget arithmetic for the operator's tenant.\nAlways populated; the underlying\n:func:`~meho_backplane.conventions.preamble.assemble_preamble` call\nis one indexed SELECT + an in-memory pack -- cheap enough to run on\nevery list request. Exposing it on the list response (rather than on\na separate ``/api/v1/conventions/budget-status`` route the issue\nbody explicitly rejects) keeps the CLI / dashboard consumer paths to\none HTTP round-trip."
       },
       "ConventionSummary": {
         "properties": {
@@ -21764,7 +22588,7 @@
           "reason"
         ],
         "title": "DecideResponseBody",
-        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated only when ``/decide``\nre-dispatched the approved op \u2014 i.e. an approved **direct** operator\nop (no ``run_id``) whose stored params drove a fresh execution\n(#1503). They stay ``None`` on a rejection and on an approved\n**agent-run** request (``run_id`` set), where the in-process agent\nruntime owns the re-dispatch and ``/decide`` only records the\ndecision (avoiding a double execution)."
+        "description": "Response for a successful operator decision.\n\nThe ``dispatch_*`` fields are populated whenever ``/decide`` attempted\nthe approved op's re-dispatch \u2014 for **every** approved request now, not\nonly direct operator ops (#2293). ``dispatch_status`` is ``\"ok\"`` when\n``/decide`` won the exactly-one-resumer claim and executed (the direct\nop, or the run-bound fallback when the in-process waiter was gone), or\n``\"already_resumed\"`` when the in-process agent waiter won the claim\nfirst (the run-bound waiter-alive case) \u2014 a benign \"executed elsewhere\"\nthat keeps the approver from double-dispatching. They stay ``None``\nonly on a rejection."
       },
       "DeprecateTemplateResponse": {
         "properties": {
@@ -22461,22 +23285,103 @@
         "title": "ForkInfo",
         "description": "Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
       },
-      "GraphEdgeKind": {
-        "type": "string",
-        "enum": [
-          "runs-on",
-          "mounts",
-          "routes-through",
-          "belongs-to",
-          "authenticates-via",
-          "depends-on",
-          "replicates-to",
-          "backed-up-by",
-          "routes-via",
-          "policy-binds"
+      "GatewayCommandEnvelope": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "target_descriptor": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Target Descriptor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "op_id",
+          "params",
+          "target_descriptor"
         ],
-        "title": "GraphEdgeKind",
-        "description": "Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.\n\nInitiative #364 (G9.2) locks the edge-kind vocabulary at ten members:\nthe four auto-discoverable kinds G9.1 (#363) shipped, plus six\noperator-curated cross-system kinds that auto-discovery cannot infer\n(decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary\nis closed -- widening it is a coordinated DB + model change (new\nmigration, new enum member, new decision row) so the v0.2.next\npolicy-engine grammar parsing ``kind`` stays portable across tenants.\n\nThe four auto-discoverable kinds (refresh service writes these on\nevery probe-derived edge):\n\n* :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``\n  ``node``: the physical / scheduling host of a workload.\n* :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``\n  ``volume``: storage attachment.\n* :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,\n  ``service`` ``routes-through`` ``pod``: network routing path.\n* :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``\n  ``belongs-to`` ``host`` (logical group membership).\n\nThe six curated-only kinds (operator-asserted via\n``meho topology annotate``; cannot be derived from probes):\n\n* :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node\n  (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical\n  cross-system example.\n* :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.\n  ``service-X`` -> ``database-Y`` where neither side knows about the\n  other in its own probe output).\n* :attr:`REPLICATES_TO` -- operator-asserted replication relationship\n  between two storage / database nodes.\n* :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.\n* :attr:`ROUTES_VIA` -- operator-asserted network path through an\n  intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the\n  probes only see point-to-point reachability).\n* :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses\n  connector boundaries (e.g., ``kubernetes-namespace-prod`` ->\n  ``vault-policy-prod-read``).\n\nMirrors the closed-enum pattern :class:`AuthModel`\n(:mod:`meho_backplane.connectors.schemas`) sets: a Python\n:class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,\nboth moved in lock-step by one Alembic migration so the enum and the\nconstraint cannot drift."
+        "title": "GatewayCommandEnvelope",
+        "description": "The claimed-command envelope returned by ``GET .../next`` (200)."
+      },
+      "GatewayResultAck": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Command Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "completed_at": {
+            "type": "string",
+            "title": "Completed At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "command_id",
+          "status",
+          "completed_at"
+        ],
+        "title": "GatewayResultAck",
+        "description": "Response for a successful ``.../result`` report (200)."
+      },
+      "GatewayResultBody": {
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Command Id",
+            "description": "The delivered command's id."
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "succeeded",
+              "failed"
+            ],
+            "title": "Outcome",
+            "description": "Terminal outcome to record for the command."
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Result",
+            "description": "Structured success payload (for a 'succeeded' outcome)."
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error",
+            "description": "Failure summary (for a 'failed' outcome)."
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "command_id",
+          "outcome"
+        ],
+        "title": "GatewayResultBody",
+        "description": "POST body for ``.../result`` \u2014 the runner's outcome report."
       },
       "GroupingResultModel": {
         "properties": {
@@ -22757,6 +23662,30 @@
             "maxItems": 16,
             "nullable": true,
             "title": "Spec Info Versions Compatible"
+          },
+          "auth_scheme": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "static_header",
+              "session_login",
+              "session_login_basic",
+              "session_login_token",
+              "oauth2_mint"
+            ],
+            "nullable": true,
+            "title": "Auth Scheme",
+            "description": "Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config \u2014 selection only. Mutually exclusive with catalog_entry."
+          },
+          "auth_secret_fields": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 8,
+            "nullable": true,
+            "title": "Auth Secret Fields",
+            "description": "Optional override of the secret-field NAMES the auth_scheme reads at dispatch (never the values \u2014 those stay in the target's secret_ref). Omit for the per-scheme defaults. Requires auth_scheme."
           },
           "dry_run": {
             "type": "boolean",
@@ -23181,6 +24110,51 @@
         "title": "MemoryScope",
         "description": "One of the five memory scopes from consumer-needs.md \u00a7G5 L137-141.\n\nThe string value is the wire-level identifier (route path segment,\nCLI flag value, MCP tool arg). Each value maps to a single\n``documents.kind`` row prefixed with ``memory-`` --\n:func:`kind_for_scope` is the canonical translation. The mapping is\none-to-one and bijective with :func:`scope_for_kind`, so callers\nnever round-trip through ad-hoc string-prefixing.\n\n``StrEnum`` (PEP 663, stdlib in 3.11+) gives the members ``str``\nsemantics for free: ``f\"scope={MemoryScope.USER}\"`` renders as\n``\"scope=user\"`` rather than ``\"scope=MemoryScope.USER\"``, matching\nthe :class:`~meho_backplane.auth.operator.TenantRole` convention."
       },
+      "MyRecentPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "MyRecentPage",
+        "description": "Unified list envelope for ``GET /api/v1/audit/my-recent``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. It carries the same\naudit rows and forward-only cursor as :class:`AuditQueryResult`, but\nnames the list field ``items`` (not ``rows``) so the reference list\nendpoints agree on one envelope. The sibling audit-query endpoints\n(``/query`` / ``/who-touched`` / ``/by-work-ref``) keep the\n:class:`AuditQueryResult` ``rows`` shape and are out of the \u00a72\nreference set."
+      },
+      "NextStep": {
+        "properties": {
+          "verb": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Verb"
+          },
+          "rationale": {
+            "type": "string",
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Rationale"
+          }
+        },
+        "type": "object",
+        "required": [
+          "verb",
+          "rationale"
+        ],
+        "title": "NextStep",
+        "description": "Self-describing in-product hint pointing at the verb that closes the workflow.\n\nSurfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`\nis ``\"registered\"`` (G0.13-T3 / #1133). An ``\"ingested\"`` row sets\n:attr:`ConnectorListItem.next_step` to ``None`` because the dispatcher\nalready resolves operations against it -- there is nothing left for the\noperator to do.\n\nTwo ``verb`` shapes ship:\n\n* ``meho connector ingest --catalog <product>/<version>`` -- when the\n  connector-spec catalog (G0.7-T8 / #743) carries an entry for the\n  registry's ``(product, version)``. The operator copies the verb,\n  ``meho connector ingest`` looks up the upstream spec URL, and\n  dispatchability follows after operator review.\n* ``meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>``\n  -- when the catalog has no entry. The ``rationale`` makes the\n  missing-catalog branch explicit so the operator knows they need\n  to source the OpenAPI spec themselves.\n\nFrozen for the same reason every wire shape in this module is frozen:\nresponses are read-only and any in-place mutation should surface as a\nPydantic error rather than a silently-modified payload."
+      },
       "NextStepRequest": {
         "properties": {
           "last_verified": {
@@ -23588,6 +24562,17 @@
         ],
         "title": "PreviewOperationBody",
         "description": "Request body for the ``POST /api/v1/operations/preview`` route.\n\nSame field shape as :class:`CallOperationBody` (#1683) -- a preview\nresolves the *same* op + target + params a real ``call_operation``\nwould, then returns the literal would-be HTTP request instead of\nsending it. Keeping the body identical means an operator who hit a\nwrite 4xx can re-issue the exact arguments against ``/preview`` to see\nwhat was put on the wire (the audit row persists only a hashed\n``params_hash``, so the request shape is otherwise unrecoverable).\n\n``target`` accepts the same three shapes as ``call_operation`` (bare\nstring, dict ``{\"name\": ...}``, or ``None``); see\n:class:`CallOperationBody` for the convention. A wrong-JSON-typed\n``target`` rides the ``target_invalid_type`` envelope instead of a 422\n(#2110; see :data:`_TargetArg`), identical to ``/call``.\n``extra=\"forbid\"`` keeps a typo in ``connector_id`` failing loud rather\nthan silently previewing nothing."
+      },
+      "PrincipalKind": {
+        "type": "string",
+        "enum": [
+          "user",
+          "service",
+          "agent",
+          "runner"
+        ],
+        "title": "PrincipalKind",
+        "description": "Discriminator that distinguishes what authenticated this request.\n\nG11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,\naudit, and the approval gate can tell a human operator apart from\na service account or an agent without re-examining the JWT payload.\n\nValues are the literal strings the Keycloak ``principal_kind``\nprotocol mapper emits on the agent client (or that the v0.3 token\nexchange layer will emit). Existing tokens that carry no\n``principal_kind`` claim default to :attr:`USER` \u2014 the graceful-\nfallback contract means all pre-G11.2 human-operator flows are\nunaffected.\n\nMembers:\n\n* :attr:`USER` \u2014 a human operator authenticated via the interactive\n  device-code flow. Default when no claim is present.\n* :attr:`SERVICE` \u2014 a non-interactive service account client that\n  uses client-credentials flow but is not a MEHO-managed agent.\n* :attr:`AGENT` \u2014 a Keycloak client registered by\n  ``meho agent-principal register``; the token carries\n  ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and\n  G11.2-T3 (per-principal permission model) branch on this value\n  to apply agent-specific authz.\n* :attr:`RUNNER` \u2014 a satellite runner's service principal registered\n  by ``meho runner-principal register`` (Initiative #2415, #2502);\n  the token carries ``principal_kind=runner`` plus a ``runner_id``\n  claim. A runner is a dumb, push-only executor with a **read-only**\n  credential scope: its token is fail-closed 403'd on every\n  authenticated route outside the gateway allowlist prefixes\n  (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)\n  and on the MCP surface. The unforgeable discriminator is what the\n  negative cage keys on, so a runner client missing any other mapper\n  still cannot roam the read API."
       },
       "PromoteBody": {
         "properties": {
@@ -24044,6 +25029,125 @@
         "title": "ReplayNode",
         "description": "One node of a per-session audit-replay tree (G8.2-T3).\n\nSubclasses :class:`AuditEntry` so it carries every audit field verbatim \u2014\nforward-compatible with the v0.2.next compliance-export contract, which\ntreats a replay node as an audit row plus its position in the session\ngraph. Two structural fields are added:\n\n* ``depth`` \u2014 distance from the session root. ``0`` for roots; assigned\n  during tree assembly in :func:`~meho_backplane.audit_query.replay.replay_session`.\n* ``children`` \u2014 the node's direct children, ordered by ``(occurred_at,\n  id)``. Self-referential \u2014 the forward reference is resolved by the\n  module-level :func:`ReplayNode.model_rebuild` call below.\n\nFrozen like its parent: a node handed to a caller cannot mutate after the\ntree is built."
       },
+      "ResolvedTargetDescriptor": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "aliases": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Aliases",
+            "default": []
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "nullable": true,
+            "title": "Version"
+          },
+          "fingerprint": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Fingerprint"
+          },
+          "preferred_impl_id": {
+            "type": "string",
+            "nullable": true,
+            "title": "Preferred Impl Id"
+          },
+          "host": {
+            "type": "string",
+            "title": "Host"
+          },
+          "port": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Port"
+          },
+          "fqdn": {
+            "type": "string",
+            "nullable": true,
+            "title": "Fqdn"
+          },
+          "secret_ref": {
+            "type": "string",
+            "nullable": true,
+            "title": "Secret Ref"
+          },
+          "auth_model": {
+            "type": "string",
+            "title": "Auth Model",
+            "default": "shared_service_account"
+          },
+          "verify_tls": {
+            "type": "boolean",
+            "title": "Verify Tls",
+            "default": true
+          },
+          "tls_ca_pin": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Ca Pin"
+          },
+          "tls_server_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Tls Server Name"
+          },
+          "extras": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Extras"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "product",
+          "host"
+        ],
+        "title": "ResolvedTargetDescriptor",
+        "description": "Centrally-resolved target attributes a connector handler reads.\n\nThe runner has no local target table, so the central resolver\n(:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises\nthe fields a handler duck-reads off a ``Target`` row and ships them\non the assignment. It carries the resolver-read attributes\n(``product`` / ``fingerprint`` / ``version`` / ``preferred_impl_id``)\nthe tie-break ladder consumes **and** the connection-routing set\n(``host`` / ``port`` / ``fqdn`` / ``secret_ref`` / ``auth_model`` /\nTLS flags) the HTTP adapter reads, so on the runner the descriptor\nfeeds :func:`~meho_backplane.connectors.resolver.resolve_connector`\nand the connector adapters directly \u2014 no DB session, no second\nresolution mechanism.\n\nThe full field set is moulded on the central\n:class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the\nsame identification + connection-routing projection of the\n``Target`` row, minus the server-managed timestamps and the\noperator-authored ``notes`` (neither drives connector routing).\n\nCredential discipline: ``secret_ref`` is the **reference** the runner\nresolves outbound under its own read-only scope; no credential value\nis ever embedded (the runner spools assignments on disk, so a value\nwould durably persist \u2014 a locked no-durable-artifact violation)."
+      },
+      "ResultIngestResponse": {
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "title": "Accepted"
+          },
+          "duplicates": {
+            "type": "integer",
+            "title": "Duplicates"
+          }
+        },
+        "type": "object",
+        "required": [
+          "accepted",
+          "duplicates"
+        ],
+        "title": "ResultIngestResponse",
+        "description": "``POST /checks/results`` response \u2014 idempotency accounting.\n\n``accepted`` counts rows newly persisted; ``duplicates`` counts rows\nwhose ``result_uid`` was already ingested for this runner (a re-posted\nspool batch). ``accepted + duplicates`` equals the batch length."
+      },
       "RetireChecklistReport": {
         "properties": {
           "ran_at": {
@@ -24433,20 +25537,25 @@
       },
       "RunbookListRunsResponse": {
         "properties": {
-          "runs": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/RunSummary"
             },
             "type": "array",
-            "title": "Runs"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "runs"
+          "items"
         ],
         "title": "RunbookListRunsResponse",
-        "description": "Response envelope for ``GET /api/v1/runbooks/runs``.\n\nWrapped in ``{\"runs\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- same shape\n:mod:`meho_backplane.api.v1.runbook_templates` adopted for its\nlist response. Per-entry shape is the substrate's\n:class:`~meho_backplane.runbooks.runs_schemas.RunSummary` (no\nstep body content, only the run-level coordinates)."
+        "description": "Unified list envelope for ``GET /api/v1/runbooks/runs``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. Per-entry shape is the\nsubstrate's :class:`~meho_backplane.runbooks.runs_schemas.RunSummary`\n(no step body content, only the run-level coordinates). The listing\nis not cursor-paginated (``limit`` truncates), so ``next_cursor`` is\nalways ``None`` but present so the endpoint can grow pagination later\nwithout a further breaking change."
       },
       "RunbookTemplateBody": {
         "properties": {
@@ -24496,20 +25605,293 @@
       },
       "RunbookTemplateListResponse": {
         "properties": {
-          "templates": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/TemplateSummary"
             },
             "type": "array",
-            "title": "Templates"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "templates"
+          "items"
         ],
         "title": "RunbookTemplateListResponse",
-        "description": "Response envelope for ``GET /api/v1/runbooks/templates``.\n\nWrapped in ``{\"templates\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`\nadopted for its list response. Per-entry shape is the substrate's\n:class:`~meho_backplane.runbooks.schemas.TemplateSummary`."
+        "description": "Unified list envelope for ``GET /api/v1/runbooks/templates``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. Per-entry shape is the\nsubstrate's :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.\nThe listing is not cursor-paginated (``limit`` truncates), so\n``next_cursor`` is always ``None`` but present so the endpoint can\ngrow pagination later without a further breaking change."
+      },
+      "RunnerAssignment": {
+        "properties": {
+          "assignment_version": {
+            "type": "string",
+            "title": "Assignment Version"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerWorkItem"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "assignment_version"
+        ],
+        "title": "RunnerAssignment",
+        "description": "The runner's current work assignment, fetched each tick.\n\n``assignment_version`` is an opaque digest the runner echoes back as\n``known_version`` so central can answer an unchanged assignment with a\n``304`` (see :meth:`RunnerClient.fetch_assignment`)."
+      },
+      "RunnerPrincipal": {
+        "properties": {
+          "sub": {
+            "type": "string",
+            "title": "Sub"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "tenant_role": {
+            "$ref": "#/components/schemas/TenantRole"
+          },
+          "principal_kind": {
+            "$ref": "#/components/schemas/PrincipalKind",
+            "default": "service"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sub",
+          "tenant_id",
+          "tenant_role"
+        ],
+        "title": "RunnerPrincipal",
+        "description": "Principal context an executed op runs under, carried on each item.\n\nEnough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`\non the runner without a JWT: the runner never sees a bearer token for\nthe acting principal (the op was already authorized centrally), so the\nreconstructed operator's ``raw_jwt`` is empty."
+      },
+      "RunnerPrincipalCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "title": "Name"
+          },
+          "owner_sub": {
+            "type": "string",
+            "nullable": true,
+            "title": "Owner Sub"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "RunnerPrincipalCreate",
+        "description": "Input shape for :meth:`RunnerPrincipalService.register`."
+      },
+      "RunnerPrincipalListResponse": {
+        "properties": {
+          "principals": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerPrincipalRead"
+            },
+            "type": "array",
+            "title": "Principals"
+          }
+        },
+        "type": "object",
+        "required": [
+          "principals"
+        ],
+        "title": "RunnerPrincipalListResponse",
+        "description": "Response envelope for ``GET /api/v1/runner-principals``."
+      },
+      "RunnerPrincipalRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "keycloak_client_id": {
+            "type": "string",
+            "title": "Keycloak Client Id"
+          },
+          "keycloak_internal_id": {
+            "type": "string",
+            "title": "Keycloak Internal Id"
+          },
+          "owner_sub": {
+            "type": "string",
+            "title": "Owner Sub"
+          },
+          "revoked": {
+            "type": "boolean",
+            "title": "Revoked"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "keycloak_client_id",
+          "keycloak_internal_id",
+          "owner_sub",
+          "revoked",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "RunnerPrincipalRead",
+        "description": "Row representation returned by every accessor."
+      },
+      "RunnerResult": {
+        "properties": {
+          "result_uid": {
+            "type": "string",
+            "title": "Result Uid"
+          },
+          "check_ref": {
+            "type": "string",
+            "title": "Check Ref"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "result": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Result"
+          },
+          "error": {
+            "type": "string",
+            "nullable": true,
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "result_uid",
+          "check_ref",
+          "op_id",
+          "status"
+        ],
+        "title": "RunnerResult",
+        "description": "The outcome of executing one :class:`RunnerWorkItem`.\n\n``result_uid`` is generated on the runner (a uuid4 hex) so central\ningest can deduplicate spool re-posts idempotently \u2014 a batch written\nto the retry spool carries the same uids when it is re-posted.\n\n``status`` is a runner-level tri-state, distinct from any status\ninside ``result``:\n\n* ``ok`` \u2014 the handler ran and returned its structured payload\n  (which may itself report a failed probe; a failed check is a\n  result, not a runner error).\n* ``refused`` \u2014 the runner declined to execute (unsafe safety_level,\n  or a handler_ref outside the connector tree).\n* ``error`` \u2014 the handler raised; the exception is summarised in\n  ``error`` and never re-raised into the tick loop."
+      },
+      "RunnerResultBatch": {
+        "properties": {
+          "runner_id": {
+            "type": "string",
+            "title": "Runner Id"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/RunnerResult"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "runner_id"
+        ],
+        "title": "RunnerResultBatch",
+        "description": "A batch of results the runner reports (or spools) in one POST."
+      },
+      "RunnerWorkItem": {
+        "properties": {
+          "check_ref": {
+            "type": "string",
+            "title": "Check Ref"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "product": {
+            "type": "string",
+            "title": "Product"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version",
+            "default": ""
+          },
+          "impl_id": {
+            "type": "string",
+            "title": "Impl Id",
+            "default": ""
+          },
+          "handler_ref": {
+            "type": "string",
+            "title": "Handler Ref"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "safety_level": {
+            "type": "string",
+            "title": "Safety Level"
+          },
+          "principal": {
+            "$ref": "#/components/schemas/RunnerPrincipal"
+          },
+          "target_descriptor": {
+            "$ref": "#/components/schemas/ResolvedTargetDescriptor",
+            "nullable": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "check_ref",
+          "op_id",
+          "product",
+          "handler_ref",
+          "safety_level",
+          "principal"
+        ],
+        "title": "RunnerWorkItem",
+        "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``)."
       },
       "ScheduledTriggerCreate": {
         "properties": {
@@ -24531,7 +25913,8 @@
             "type": "string",
             "format": "date-time",
             "nullable": true,
-            "title": "Fire At"
+            "title": "Fire At",
+            "description": "One-off fire time (UTC); required for kind=one_off and must be null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment."
           },
           "event_filter": {
             "additionalProperties": true,
@@ -24581,7 +25964,7 @@
           "agent_definition_id"
         ],
         "title": "ScheduledTriggerCreate",
-        "description": "Request body for ``POST /api/v1/scheduler/triggers``.\n\nDiscriminated by *kind*: exactly one of ``cron_expr`` / ``fire_at``\n/ ``event_filter`` must be set, matching the DB-side\n``ck_scheduled_trigger_kind_fields`` invariant. The\n:meth:`_validate_discriminated_union` validator enforces this at\nthe wire so a malformed body surfaces as 422 rather than as a\nflush-time :class:`IntegrityError`.\n\n*agent_definition_id* is the existing-definition reference -- the\nrepository's FK check rejects an orphan id with 422 at insert; no\nvalidation is duplicated here.\n\n*identity_sub* is the OIDC ``sub`` the scheduler impersonates when\nfiring the trigger (distinct from *created_by_sub* which the\nboundary derives from the operator). Defaulted to\n``\"__scheduler__\"`` to match the migration-time backstop the\nORM-level default sets, so a minimal create body still validates.\n\n*inputs* is optional and unvalidated here **by design**. Whether a\ntrigger needs a user prompt depends on the referenced agent\ndefinition, which this pure wire-shape validator does not (and must\nnot) load -- the definition FK is checked one layer down in the\nservice. A no-inputs trigger is therefore *accepted* at create and the\nno-usable-prompt case is handled at fire time: the scheduled-run seam\nfinalises the run ``failed`` with a typed\n:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` error\nrather than letting it reach the provider as an empty-``messages`` 400\n(#1505). This keeps a definition that legitimately needs no user turn\nfrom being over-rejected at create while still surfacing the doomed\nno-prompt fire as a typed, greppable failure.\n\n*in_flight_policy* defaults to ``fail_into_audit`` per the consumer\ndoc; operators wanting at-least-once semantics opt into ``resume``.\n\n*tenant_id* (optional) lets a tenant-admin caller create triggers in\nanother tenant for cross-tenant admin operations; ``operator`` role\ncallers leave it ``None`` and the boundary pins it to the JWT's\ntenant id. The boundary enforces the RBAC -- this schema only\ncarries the field.\n\n*work_ref* (optional, work_ref I3-T3 #1663) is the opaque external\nchange-ticket reference the trigger -- and every run it dispatches --\nworks under. Pinned on the trigger row at create time and inherited\nby each dispatched run's ``agent_run.work_ref`` and audit rows via\nthe shared ``work_ref_var`` ContextVar. Set-at-create-only: triggers\nhave no UPDATE path. Omit when the trigger carries no change ticket."
+        "description": "Request body for ``POST /api/v1/scheduler/triggers``.\n\nDiscriminated by *kind*: exactly one of ``cron_expr`` / ``fire_at``\n/ ``event_filter`` must be set, matching the DB-side\n``ck_scheduled_trigger_kind_fields`` invariant. The\n:meth:`_validate_discriminated_union` validator enforces this at\nthe wire so a malformed body surfaces as 422 rather than as a\nflush-time :class:`IntegrityError`.\n\n*agent_definition_id* is the existing-definition reference -- the\nrepository's FK check rejects an orphan id with 422 at insert; no\nvalidation is duplicated here.\n\n*identity_sub* is the OIDC ``sub`` the scheduler impersonates when\nfiring the trigger (distinct from *created_by_sub* which the\nboundary derives from the operator). Defaulted to\n``\"__scheduler__\"`` to match the migration-time backstop the\nORM-level default sets, so a minimal create body still validates.\n\n*inputs* is the JSON payload rendered into the run's user-prompt string\nat fire time (:func:`~meho_backplane.scheduler.loop._coerce_inputs`).\nFor ``kind=cron`` and ``kind=one_off`` it **must** render a non-empty\nuser turn: :meth:`_validate_discriminated_union` rejects an input-less\ntrigger -- and the ``inputs: {}`` case, which would otherwise render the\nliteral ``\"{}\"`` -- with a 422 at create. The check is payload-only\n(:func:`_payload_yields_prompt`); it loads no agent definition, so it\ndoes not resurrect the layering objection that kept #1505 fire-time-only\n-- a cron that fires every tick and a one_off that burns its single fire\nwith no user turn are deterministic failures the wire shape can see\nwithout extra I/O. ``kind=event`` is **exempt**: its future\npayload-dispatch junction may derive the prompt from the matched event,\nso an input-less event trigger stays creatable.\n\nThe fire-time typed guard remains as defense-in-depth\n(:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`, #1505):\nit still finalises a no-prompt fire ``failed`` before the model call for\n``event`` triggers and for any row inserted directly around this wire\nschema. See ``docs/codebase/scheduler.md``.\n\n*in_flight_policy* defaults to ``fail_into_audit`` per the consumer\ndoc; operators wanting at-least-once semantics opt into ``resume``.\n\n*tenant_id* (optional) lets a tenant-admin caller create triggers in\nanother tenant for cross-tenant admin operations; ``operator`` role\ncallers leave it ``None`` and the boundary pins it to the JWT's\ntenant id. The boundary enforces the RBAC -- this schema only\ncarries the field.\n\n*work_ref* (optional, work_ref I3-T3 #1663) is the opaque external\nchange-ticket reference the trigger -- and every run it dispatches --\nworks under. Pinned on the trigger row at create time and inherited\nby each dispatched run's ``agent_run.work_ref`` and audit rows via\nthe shared ``work_ref_var`` ContextVar. Set-at-create-only: triggers\nhave no UPDATE path. Omit when the trigger carries no change ticket."
       },
       "ScheduledTriggerInFlightPolicy": {
         "type": "string",
@@ -24652,7 +26035,8 @@
             "type": "string",
             "format": "date-time",
             "nullable": true,
-            "title": "Fire At"
+            "title": "Fire At",
+            "description": "Stored one-off fire time (UTC), echoed from create; null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment."
           },
           "event_filter": {
             "additionalProperties": true,
@@ -24670,13 +26054,33 @@
             "type": "string",
             "format": "date-time",
             "nullable": true,
-            "title": "Next Fire At"
+            "title": "Next Fire At",
+            "description": "Next instant the trigger is eligible to fire (UTC) -- the column the tick loop scans; null for event triggers (dispatched on event arrival, not the clock). The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment."
           },
           "last_fired_at": {
             "type": "string",
             "format": "date-time",
             "nullable": true,
-            "title": "Last Fired At"
+            "title": "Last Fired At",
+            "description": "Timestamp of the most recent fire (UTC), stamped with the scheduler tick that claimed the row -- not the trigger's fire_at / next_fire_at. Because fires are tick-aligned, successive last_fired_at values sit on the tick grid and can trail the requested time by up to one tick interval (SCHEDULER_TICK_INTERVAL_SECONDS, default 30 s); null until the first fire."
+          },
+          "last_skip_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Last Skip Reason",
+            "description": "Machine tag of the most recent tick the scheduler skipped this trigger without firing -- one of 'definition_missing', 'definition_disabled', 'credentials_unresolved' (a park also stamps 'invalid_cron_expr' / 'unknown_kind'). null when the trigger has never skipped since its last successful fire (cleared to null on the next fire). A non-null value on an 'active' trigger means it looks healthy but is silently not firing -- fix the named cause. (#2327)"
+          },
+          "last_skipped_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Skipped At",
+            "description": "UTC timestamp of the most recent skipped tick; null until the first skip and cleared on the next successful fire. (#2327)"
+          },
+          "skip_count": {
+            "type": "integer",
+            "title": "Skip Count",
+            "description": "Consecutive ticks skipped since the last successful fire (0 when healthy; reset to 0 on the next fire). The scheduler parks the trigger ('status'='paused') once this reaches its internal consecutive-skip cap, so a permanently-unresolvable trigger stops silently re-tripping every tick. (#2327)"
           },
           "inputs": {
             "additionalProperties": true,
@@ -24722,6 +26126,9 @@
           "in_flight_policy",
           "next_fire_at",
           "last_fired_at",
+          "last_skip_reason",
+          "last_skipped_at",
+          "skip_count",
           "inputs",
           "identity_sub",
           "created_by_sub",
@@ -25386,8 +26793,15 @@
               "holodeck",
               "k8s",
               "keycloak",
+              "loki",
+              "mongodb",
               "nsx",
               "pfsense",
+              "postgres",
+              "prometheus",
+              "proxmox",
+              "rabbitmq",
+              "rke2",
               "sddc",
               "vault",
               "vcfa",
@@ -25477,6 +26891,28 @@
         ],
         "title": "TargetCreate",
         "description": "POST /api/v1/targets body.\n\n``name`` and ``product`` are immutable after creation; to rename a\ntarget, delete + re-create. ``auth_model`` defaults to\n``shared_service_account`` matching the DB column default.\n\n``fingerprint`` is **not** accepted \u2014 it is server-managed and only\nwritten by the probe handler from the connector's response. Sending\n``fingerprint`` in the create body raises 422 via ``extra='forbid'``\nso clients cannot seed the G0.6 resolver's tie-break input with\nfabricated values. ``preferred_impl_id`` is accepted as an optional\noperator override.\n\n``version`` is accepted as an optional operator-asserted product\nversion (G0.15-T6 #1215). Operators who know the version up-front\n(e.g. ``\"9.0\"`` for a vCenter Hetzner-DC target the consumer just\ndeployed) can pass it at create time so the very first probe\ndispatches against the versioned connector without round-tripping\nthrough PATCH. Fresh targets still default to ``None`` and resolve\nvia the sibling wildcard registration applied to every typed\nconnector in the same PR (K8s pattern fanned out)."
+      },
+      "TargetListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/TargetSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "TargetListResponse",
+        "description": "Unified list envelope for ``GET /api/v1/targets``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. ``items`` carries the\nkeyset-paginated page of :class:`TargetSummary` rows; ``next_cursor``\nis the last-row ``name`` of the page when a further page exists and\n``None`` when this page exhausted the matching set (so callers see\n\"no more pages\" without inspecting list length). The field is always\npresent so a client reads ``response[\"next_cursor\"]`` without a\n``KeyError`` guard."
       },
       "TargetSummary": {
         "properties": {
@@ -25764,6 +27200,16 @@
         ],
         "title": "TemplateSummary",
         "description": "Operator-readable summary row surfaced by ``meho.runbook.list_templates``.\n\nThe list-view projection -- enough to identify a template and its\nlifecycle state without loading the full step list (which\n:class:`ShowTemplateResponse` carries)."
+      },
+      "TenantRole": {
+        "type": "string",
+        "enum": [
+          "tenant_admin",
+          "operator",
+          "read_only"
+        ],
+        "title": "TenantRole",
+        "description": "Per-tenant role granted to the operator by the JWT issuer.\n\nThe set is intentionally small in v0.2: a closed three-value enum\nlets the RBAC primitive (Task #234, ``require_role``) make\nexhaustive comparisons without leaking arbitrary string handling\ninto route code. A richer policy engine \u2014 topology-aware\npermissions, ABAC, approval workflows \u2014 is a separate v0.2.next\nGoal; widening this enum is the only ratcheting mechanism in the\ninterim.\n\nValues are the literal strings the Keycloak protocol-mapper recipe\n(Task #235) emits, so a JWT carrying ``\"tenant_admin\"`` materialises\ncleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in\n3.11+) gives the members ``str`` semantics for free, so\n``f\"role={role}\"`` renders as ``\"role=tenant_admin\"`` rather than\n``\"role=TenantRole.TENANT_ADMIN\"``."
       },
       "Thresholds": {
         "properties": {
@@ -26317,7 +27763,7 @@
           "read_ok"
         ],
         "title": "VaultStatus",
-        "description": "Vault federation-chain status.\n\n``reachable`` is true when the OIDC login succeeded (TCP + TLS +\nJWT forward all worked). ``read_ok`` is true when the test secret\nread succeeded against the resulting Vault token. ``detail`` carries\na short structured string for the CLI to render on failure paths \u2014\nnever an unbounded exception message."
+        "description": "Federation-chain status for the deployment's credential backend.\n\nThe field is named ``vault`` on :class:`HealthResponse` for wire\ncompatibility (it predates the credential-backend seam), but the value\nreflects whichever backend ``config.credentialBackend`` selects: the\nVault OIDC-login + KV read on a Vault install, or the configured\nbackend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM\ninstall) through the credential-backend seam.\n\n``reachable`` is true when the backend was reached \u2014 on Vault, the OIDC\nlogin succeeded (TCP + TLS + JWT forward); on a seam backend, the store\nwas addressable (config resolved, backend registered). ``read_ok`` is\ntrue when the probe secret read succeeded. ``detail`` carries a short\nstructured string for the CLI to render on failure paths \u2014 a class name\nor error code, never an unbounded exception message or a secret value."
       },
       "_AnnotateEdgeRequest": {
         "properties": {
@@ -26325,7 +27771,11 @@
             "$ref": "#/components/schemas/_EdgeEndpoint"
           },
           "kind": {
-            "$ref": "#/components/schemas/GraphEdgeKind"
+            "type": "string",
+            "maxLength": 63,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "title": "Kind"
           },
           "to": {
             "$ref": "#/components/schemas/_EdgeEndpoint"
@@ -26351,7 +27801,7 @@
           "to"
         ],
         "title": "_AnnotateEdgeRequest",
-        "description": "Inbound body for ``POST /api/v1/topology/edges``.\n\n``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind\nfails Pydantic validation (HTTP 422) **before** the service runs \u2014\nthe service still raises :class:`InvalidEdgeKindError` for\nnon-route callers, but at the HTTP boundary the operator gets the\nstandard FastAPI validation error shape (with the candidate list in\nthe error context) rather than a 500-shaped diagnostic.\n\nThe keyword ``from`` is reserved in Python so the attribute name is\n``from_endpoint``; ``alias=\"from\"`` keeps the wire shape the issue\nbody specifies (``{from, kind, to, note?, evidence_url?}``).\n``populate_by_name`` lets the alias **and** the attribute name both\nwork \u2014 handy for hand-written test fixtures that use the Python\nattribute names."
+        "description": "Inbound body for ``POST /api/v1/topology/edges``.\n\n``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind\nfails Pydantic validation (HTTP 422) **before** the service runs \u2014\nthe service still raises :class:`InvalidEdgeKindError` for\nnon-route callers, but at the HTTP boundary the operator gets the\nstandard FastAPI validation error shape (with the pattern in the\nerror context) rather than a 500-shaped diagnostic.\n\nThe keyword ``from`` is reserved in Python so the attribute name is\n``from_endpoint``; ``alias=\"from\"`` keeps the wire shape the issue\nbody specifies (``{from, kind, to, note?, evidence_url?}``).\n``populate_by_name`` lets the alias **and** the attribute name both\nwork \u2014 handy for hand-written test fixtures that use the Python\nattribute names."
       },
       "_BulkImportEdge": {
         "properties": {
@@ -26359,7 +27809,11 @@
             "$ref": "#/components/schemas/_EdgeEndpoint"
           },
           "kind": {
-            "$ref": "#/components/schemas/GraphEdgeKind"
+            "type": "string",
+            "maxLength": 63,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "title": "Kind"
           },
           "to": {
             "$ref": "#/components/schemas/_EdgeEndpoint"
@@ -26385,7 +27839,7 @@
           "to"
         ],
         "title": "_BulkImportEdge",
-        "description": "One edge in the ``POST /api/v1/topology/edges/bulk`` body.\n\nSame wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,\nnote?, evidence_url?}``) \u2014 ``from`` is bound via ``alias`` because\nit is a Python keyword. ``kind`` is typed against\n:class:`GraphEdgeKind` so an unknown kind fails at the boundary\n(HTTP 422) before any service call runs, and the per-row error\nsurfaces inside the standard FastAPI validation envelope with the\nrow index in ``loc``. ``extra=\"forbid\"`` rejects typo'd keys so a\nmisspelled ``evidnce_url`` is caught at the boundary rather than\nsilently dropped."
+        "description": "One edge in the ``POST /api/v1/topology/edges/bulk`` body.\n\nSame wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,\nnote?, evidence_url?}``) \u2014 ``from`` is bound via ``alias`` because\nit is a Python keyword. ``kind`` is typed against\n:data:`_EdgeKindSlug` so a malformed kind fails at the boundary\n(HTTP 422) before any service call runs, and the per-row error\nsurfaces inside the standard FastAPI validation envelope with the\nrow index in ``loc``. ``extra=\"forbid\"`` rejects typo'd keys so a\nmisspelled ``evidnce_url`` is caught at the boundary rather than\nsilently dropped."
       },
       "_BulkImportRequest": {
         "properties": {

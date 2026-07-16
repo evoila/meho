@@ -115,6 +115,23 @@ Design choices:
   connector, GitHub App session client) are separate sinks outside this
   guard.
 
+## Deployment surface
+
+The allowlist env var is a first-class Helm chart value:
+`config.targetSsrfAllowlist` in `deploy/charts/meho/values.yaml` renders
+into `MEHO_TARGET_SSRF_ALLOWLIST` on the backplane ConfigMap
+(`templates/configmap.yaml`), which the Deployment injects into the
+container via `envFrom.configMapRef` — so a populated value reaches the
+guard with no `extraEnv` escape hatch. It is schema-typed in
+`values.schema.json` as a plain optional string: deliberately absent
+from `config.required` and carrying no `minLength`, so the safe default
+`""` validates on every install (and surfaces under `helm show values`).
+That default renders `MEHO_TARGET_SSRF_ALLOWLIST: ""`, a genuine no-op
+that keeps the guard fully on. See CHANGELOG v0.20.0 ("Deployment
+impact — action likely required") and
+`deploy/values-examples/values-rdc-example.yaml` for a populated
+private-range example.
+
 ## References
 
 - Task: evoila-bosnia/meho-internal#153 (parent backlog #101, goal #87)

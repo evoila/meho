@@ -135,9 +135,9 @@ func TestRunListHappyPath(t *testing.T) {
 			t.Errorf("missing Authorization header")
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]api.TargetSummary{
+		_ = json.NewEncoder(w).Encode(api.TargetListResponse{Items: []api.TargetSummary{
 			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
-		})
+		}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -162,9 +162,9 @@ func TestRunListJSONHappyPath(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode([]api.TargetSummary{
+		_ = json.NewEncoder(w).Encode(api.TargetListResponse{Items: []api.TargetSummary{
 			{Id: mustUUID(t, "11111111-1111-1111-1111-111111111111"), Name: "rdc-vcenter", Aliases: []string{"vc-prod"}, Product: "vcenter", Host: "vc.example"},
-		})
+		}})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

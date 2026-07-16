@@ -8,13 +8,14 @@
 # "Clean as You Code" model is meant to gate new code only — existing
 # issues don't block PRs.
 #
-# NEW-CODE BASELINE: the orphan-commit reset left SonarCloud with a
-# baseline that predates *all* commits, so the entire repo is scored as
-# "new code" (every new_* metric equals its all-time twin and the gate
-# fails on the whole codebase, not the diff). It does NOT reset itself.
-# Fix is a one-time project setting — New Code = "Reference branch: main"
-# — documented in docs/codebase/sonarcloud.md. continue-on-error below
-# keeps the (currently meaningless) gate advisory until that lands.
+# NEW-CODE BASELINE: this workflow analyzes main pushes only (see the
+# `if:` on the job — the event filter stops PR completions from
+# overwriting the main-branch analysis). The new-code period is left at
+# SonarCloud's default `previous_version`, NOT a reference branch: pinning
+# New Code = "Reference branch: main" would make main's own new-code
+# window permanently ~empty (main is diffed against itself). Rationale +
+# how to read the dashboard live in docs/codebase/sonarcloud.md.
+# continue-on-error below keeps the gate advisory.
 #
 # Prerequisite: SONAR_TOKEN repo secret. Verified present pre-merge.
 #
@@ -33,18 +34,57 @@ concurrency:
   group: quality-gate-${{ github.event.workflow_run.head_branch }}
   cancel-in-progress: true
 
+# Workflow-level floor: read-only. The sonarcloud job below declares its
+# own explicit token scope (job-level `permissions:`), so this floor caps
+# any future job that forgets to.
 permissions:
   contents: read
-  pull-requests: write  # required for PR decoration (Sonar comment with the gate result)
 
 jobs:
   sonarcloud:
     name: SonarCloud Analysis
-    runs-on: meho-runners-ci
+    # GitHub-hosted, ephemeral runner — deliberately NOT the self-hosted
+    # meho-runners-ci pool. This job checks out an untrusted
+    # workflow_run head_sha (see the checkout invariant below), so it must
+    # never land on persistent internal infrastructure (CodeQL
+    # actions/untrusted-checkout, alert #109). SonarCloud + apt mirrors are
+    # reachable from GitHub-hosted runners (the vendor-default topology);
+    # Harbor / internal network are not needed here.
+    runs-on: ubuntu-latest
+    # Job-scoped least-privilege token. contents:read = checkout the
+    # analyzed commit; actions:read = cross-run actions/download-artifact
+    # pulling coverage from the triggering CI run (per download-artifact
+    # docs). pull-requests:write is retained CONSERVATIVELY: SonarCloud
+    # decorates PRs via its GitHub App + SONAR_TOKEN, not the workflow
+    # GITHUB_TOKEN, and this job is push-only (see `if:` below) so no
+    # GITHUB_TOKEN PR-decoration path actually runs here — but the drop is
+    # UNVERIFIED (no live PR-decoration test is possible pre-merge). Kept
+    # until decoration is empirically confirmed unaffected, then dropped as
+    # a follow-up (#2492).
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
     timeout-minutes: 20
     continue-on-error: true
-    if: github.event.workflow_run.conclusion == 'success'
+    # Only analyze main pushes. CI runs on both `push` and `pull_request`,
+    # so without the event filter every PR-branch CI completion triggered a
+    # scan that overwrote the main-branch analysis (SonarCloud stores one
+    # analysis per project, keyed by branch — PR scans churned the activity
+    # history and the "new code" window never lined up with a real merge).
+    # See docs/codebase/sonarcloud.md.
+    if: >-
+      github.event.workflow_run.conclusion == 'success'
+      && github.event.workflow_run.event == 'push'
     steps:
+      # SECURITY INVARIANT — load-bearing: no step in this workflow may
+      # execute code from the checkout (no make/pytest/npm/scripts/
+      # build-wrapper); artifacts downloaded from the triggering run are
+      # untrusted input. This checkout is a workflow_run head_sha, which on
+      # a fork PR is attacker-controlled source. The Sonar scanner only
+      # reads source; every `run:` step invokes fixed sed/grep/apt-get/
+      # command -v. Adding any step that runs a file from the checkout turns
+      # this into arbitrary code execution with SONAR_TOKEN in scope.
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
         with:
           fetch-depth: 0  # full history for accurate blame + new-code detection
@@ -62,6 +102,25 @@ jobs:
           run-id: ${{ github.event.workflow_run.id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true  # missing artifact degrades to "no coverage", never blocks
+
+      - name: Assert python-coverage artifact present (fail-visible)
+        # Fail-visible contract (#2513). The job-level `if:` above already scopes
+        # this workflow to main-push analyses, so a missing backend/coverage.xml
+        # here means the push-only python-coverage job (ci.yml) did not upload
+        # coverage — historically an invisible OOM / runner-loss on
+        # meho-runners-ci-heavy that collapsed SonarCloud coverage from 65.8% to
+        # ~24% on 2026-06-20 and stayed hidden for 3+ weeks (the download above is
+        # continue-on-error, so the scan silently ran without coverage). This step
+        # makes that degradation LOUD: an error-level workflow annotation naming
+        # the missing artifact plus a clearly-named failed step. Its own
+        # continue-on-error keeps it non-blocking, so the SonarCloud scan below
+        # still runs (resilience preserved) — only the invisibility is removed.
+        # See docs/codebase/sonarcloud.md (coverage-collapse runbook).
+        if: hashFiles('backend/coverage.xml') == ''
+        continue-on-error: true
+        run: |
+          echo "::error title=python-coverage artifact missing::No backend/coverage.xml on this main-push analysis — the push-only python-coverage job (ci.yml) did not upload coverage (likely an OOM / runner-loss on meho-runners-ci-heavy). SonarCloud will import 0% backend coverage for commit ${{ github.event.workflow_run.head_sha }}. See docs/codebase/sonarcloud.md (coverage-collapse runbook)."
+          exit 1
 
       - name: Point coverage report at the backend/ source root
         # coverage.py (relative_files=true) writes an empty <source></source>
@@ -103,7 +162,7 @@ jobs:
           fi
 
       - name: SonarCloud Scan
-        uses: SonarSource/sonarqube-scan-action@713881670b6b3676cda39549040e2d88c70d582e  # v8.2.0
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f  # v8.2.1
         with:
           # Stamp each analysis with the analysed commit so SonarCloud's
           # history is navigable (the project version was "not provided").

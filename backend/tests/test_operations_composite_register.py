@@ -80,6 +80,7 @@ from meho_backplane.operations import (
 from meho_backplane.settings import get_settings
 from tests.fixtures.composites.handlers import (
     CompositeHandlerHost,
+    composite_connector_only_handler,
     composite_dispatch_child_handler,
     composite_module_level_handler,
     composite_typed_shaped_handler,
@@ -420,6 +421,41 @@ async def test_register_composite_rejects_typed_shaped_handler(
         )
     # Message names the handler's dotted path so the operator can find it.
     assert "composite_typed_shaped_handler" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_register_composite_accepts_connector_only_handler(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A direct-session composite (``connector``, no ``dispatch_child``) registers (#2251)."""
+    await register_composite_operation(
+        product="vmware",
+        version="9.0",
+        impl_id="vmware-rest",
+        op_id="vmware.composite.direct",
+        handler=composite_connector_only_handler,
+        summary="Direct-session composite.",
+        description="Reaches its sub-op through the connector session.",
+        parameter_schema={"type": "object"},
+        safety_level="safe",
+        requires_approval=False,
+        when_to_use=None,
+        embedding_service=stub_embedding_service,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        row = (
+            await fresh.execute(
+                select(EndpointDescriptor).where(
+                    EndpointDescriptor.op_id == "vmware.composite.direct"
+                )
+            )
+        ).scalar_one()
+    assert row.source_kind == "composite"
+    assert row.handler_ref == (
+        "tests.fixtures.composites.handlers.composite_connector_only_handler"
+    )
 
 
 @pytest.mark.asyncio

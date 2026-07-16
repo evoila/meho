@@ -561,13 +561,15 @@ class DecideRequestBody(BaseModel):
 class DecideResponseBody(BaseModel):
     """Response for a successful operator decision.
 
-    The ``dispatch_*`` fields are populated only when ``/decide``
-    re-dispatched the approved op — i.e. an approved **direct** operator
-    op (no ``run_id``) whose stored params drove a fresh execution
-    (#1503). They stay ``None`` on a rejection and on an approved
-    **agent-run** request (``run_id`` set), where the in-process agent
-    runtime owns the re-dispatch and ``/decide`` only records the
-    decision (avoiding a double execution).
+    The ``dispatch_*`` fields are populated whenever ``/decide`` attempted
+    the approved op's re-dispatch — for **every** approved request now, not
+    only direct operator ops (#2293). ``dispatch_status`` is ``"ok"`` when
+    ``/decide`` won the exactly-one-resumer claim and executed (the direct
+    op, or the run-bound fallback when the in-process waiter was gone), or
+    ``"already_resumed"`` when the in-process agent waiter won the claim
+    first (the run-bound waiter-alive case) — a benign "executed elsewhere"
+    that keeps the approver from double-dispatching. They stay ``None``
+    only on a rejection.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -597,19 +599,20 @@ async def decide_approval_request(
     broadcast event. Backs the CLI/MCP operator-decision flow where the
     operator approves by id alone.
 
-    On **approval of a direct operator op** (``run_id IS NULL``), the
-    decision then drives a re-dispatch using the params stored on the row
-    at park time (#1503) — so a parked direct write approved here lands
-    its effect exactly once, rather than being silently re-parked on the
-    next call. The request is already in a terminal ``approved`` state
-    before the re-dispatch, so a concurrent second decide hits the
-    already-decided guard (409) and cannot double-execute.
-
-    On approval of an **agent-run** request (``run_id`` set), ``/decide``
-    records the decision only and does **not** re-dispatch: the
-    in-process agent runtime awaits the ``approval.approved`` broadcast
-    and re-dispatches from its own in-memory params (the must-not-regress
-    path). Re-dispatching here too would execute the op twice.
+    On **every approval** the decision then drives a re-dispatch using the
+    params stored on the row at park time (#1503) — the direct operator op
+    (``run_id IS NULL``) and, since #2293, the **agent-run** request
+    (``run_id`` set) alike. The exactly-one-resumer claim
+    (:func:`~meho_backplane.operations.approval_queue.claim_resume`, won
+    inside ``resume_dispatch_after_approval``) makes this safe for
+    run-bound requests: when the in-process agent waiter is alive it wins
+    the claim and ``/decide``'s re-dispatch no-ops with
+    ``dispatch_status="already_resumed"``; when the waiter is gone
+    (wait-timeout, pod restart, run cancelled) ``/decide`` wins the claim
+    and executes the approved op, closing the silent-non-execution seam
+    where the approval committed but nothing ran. Two independent guards
+    coexist: the already-decided 409 prevents a second *decision*, and the
+    claim prevents a second *dispatch* of one decision.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="approval.decide",
@@ -630,12 +633,15 @@ async def decide_approval_request(
         operator=operator,
     )
 
-    # Direct operator op (no agent run): the decision drives the execute
-    # (#1503). Stored params re-hydrate the dispatch; the committed
-    # approval is the authorization (``_approved=True``). Agent-run
-    # requests (run_id set) are resumed by the in-process agent runtime
-    # off the broadcast — re-dispatching here would double-execute.
-    if decision == "approved" and request.run_id is None:
+    # Every approval drives the execute (#1503, #2293): stored params
+    # re-hydrate the dispatch; the committed approval is the authorization
+    # (``_approved=True``). The exactly-one-resumer claim inside
+    # resume_dispatch_after_approval arbitrates against the in-process
+    # agent waiter for a run-bound request — this path executes only when
+    # the claim is free (waiter gone), else it no-ops already_resumed —
+    # so the run_id-is-not-None skip guard is gone: it was the source of
+    # the silent-non-execution seam when the waiter had died.
+    if decision == "approved":
         dispatch_result = await _resume_dispatch_after_approval(
             operator=operator, request=request, params=None
         )

@@ -39,6 +39,7 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -165,9 +166,23 @@ def _reset_ingest_job_registry() -> Iterator[None]:
 # per the ipaddress module so the SSRF destination guard passes.
 _INGEST_TEST_PUBLIC_IP = "93.184.216.34"
 
+# The genuine ``socket.getaddrinfo``, captured at import time before any
+# fixture patches the global attribute. The stand-ins below delegate to it
+# for non-test hosts. They must NOT re-reference ``socket.getaddrinfo`` for
+# that delegation: the autouse fixture patches the *global* module attribute
+# (``openapi.socket`` is the shared ``socket`` module), so ``socket.getaddrinfo``
+# is the mock itself while a patch is active — delegating through it recurses
+# infinitely. A leaked/active patch reaching an unrelated caller (e.g. the
+# embedding-model load resolving a HuggingFace CDN host) must resolve through
+# the real function to stay a transparent no-op (evoila/meho#574, #2385).
+_REAL_GETADDRINFO = socket.getaddrinfo
+
 # Hostname for all spec mock endpoints in this module.
 _SPEC_HOST = "specs.example.test"
 _SPEC_BASE = f"https://{_SPEC_HOST}"
+
+# On-disk OpenAPI fixtures served through the respx HTTPS mock.
+_OPENAPI_FIXTURES = Path(__file__).parent / "fixtures" / "openapi"
 
 # All test hostnames that must resolve to a public IP via the mock.
 _INGEST_TEST_HOSTS = frozenset(
@@ -182,17 +197,29 @@ _INGEST_TEST_HOSTS = frozenset(
 
 
 def _ingest_getaddrinfo(
-    host: str, port: object, **kwargs: object
+    host: str, port: object, *args: object, **kwargs: object
 ) -> list[tuple[int, int, int, str, tuple[str, int]]]:
     """Mock for ``socket.getaddrinfo`` in the SSRF guard.
 
     Returns a public IP for test hostnames so the destination guard
     accepts them; delegates to the real function for everything else so
     that the discovery/JWKS mock routes wired by respx still resolve.
+
+    The trailing ``*args``/``**kwargs`` mirror the full ``getaddrinfo``
+    arity (``family``, ``type``, ``proto``, ``flags``). ``mock.patch`` here
+    rebinds the *global* ``socket.getaddrinfo`` attribute, so a resolution
+    that runs outside this module -- e.g. the embedding-model load, which
+    calls ``getaddrinfo`` positionally as
+    ``getaddrinfo(host, port, family, type, proto, flags)`` -- can hit the
+    patch if it is still active on the worker. Accepting all positional args
+    and delegating to the captured real function (never the re-looked-up,
+    still-patched ``socket.getaddrinfo``, which would recurse) makes such a
+    leaked call a transparent no-op rather than a ``TypeError`` or a
+    ``RecursionError`` (evoila/meho#574, #2385).
     """
     if host in _INGEST_TEST_HOSTS:
         return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_INGEST_TEST_PUBLIC_IP, 443))]
-    return socket.getaddrinfo(host, port, **kwargs)  # type: ignore[arg-type]
+    return _REAL_GETADDRINFO(host, port, *args, **kwargs)  # type: ignore[arg-type]
 
 
 @pytest.fixture(autouse=True)
@@ -575,8 +602,8 @@ def test_list_operator_role_returns_200(client: TestClient) -> None:
     Asserts the RBAC contract only: response payload shape varies
     with whatever v2-registered connectors are present at test time
     (T5 #733 unions the class-side registry into the response), so
-    the test pins the wire shape (``{"connectors": [...]}``) and the
-    200 status code rather than the exact row set.
+    the test pins the §2 wire shape (``{"items": [...], "next_cursor":
+    null}``) and the 200 status code rather than the exact row set.
     """
     key, token = _operator_token()
     with respx.mock as mock_router:
@@ -584,8 +611,8 @@ def test_list_operator_role_returns_200(client: TestClient) -> None:
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
     body = response.json()
-    assert "connectors" in body
-    assert isinstance(body["connectors"], list)
+    assert isinstance(body["items"], list)
+    assert "next_cursor" in body
 
 
 # ---------------------------------------------------------------------------
@@ -609,7 +636,7 @@ async def test_list_returns_operator_tenant_and_builtins(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     # T5 #733: filter to DB-backed rows; class-only v2 registrations
     # (``group_count == 0``) leak into the response from other tests'
     # lifespan boots and aren't the subject of this assertion.
@@ -648,7 +675,7 @@ async def test_list_status_staged_filters_by_aggregate_state(
             headers=_authed(token),
         )
     assert response.status_code == 200
-    seen_ids = {c["connector_id"] for c in response.json()["connectors"]}
+    seen_ids = {c["connector_id"] for c in response.json()["items"]}
     assert seen_ids == {"vmware-rest-9.0"}
 
 
@@ -672,7 +699,7 @@ async def test_list_status_enabled_requires_uniform_state(
             headers=_authed(token),
         )
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     assert len(connectors) == 1
     item = connectors[0]
     assert item["connector_id"] == "vmware-rest-9.0"
@@ -733,7 +760,7 @@ async def test_list_operation_count_includes_typed_and_composite(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
     assert by_id["vmware-rest-9.0"]["operation_count"] == 3
     assert by_id["bind9-ssh-9.0"]["operation_count"] == 4
     assert by_id["vmware-composite-9.0"]["operation_count"] == 2
@@ -784,7 +811,7 @@ async def test_list_splits_enabled_vs_total_operation_count(
     # The unfiltered listing unions class-side "registered" rows for
     # every v2-registered connector; key on connector_id like the
     # sibling rollup tests instead of expecting a single row.
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
     item = by_id["vmware-rest-9.0"]
     assert item["state"] == "ingested"
     assert item["operation_count"] == 6
@@ -894,7 +921,7 @@ async def test_list_surfaces_register_connector_v2_only_entries(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     by_id = {c["connector_id"]: c for c in connectors}
 
     assert "harbor-rest-2.x" in by_id
@@ -987,7 +1014,7 @@ async def test_list_surfaces_profiled_kind_gated_then_dispatchable(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    item = {c["connector_id"]: c for c in response.json()["items"]}["acme-rest-1.0"]
     assert item["state"] == "ingested"
     assert item["kind"] == "profiled-but-unreviewed"
     assert item["dispatchable"] is False
@@ -1013,7 +1040,7 @@ async def test_list_surfaces_profiled_kind_dispatchable_when_enabled(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    item = {c["connector_id"]: c for c in response.json()["connectors"]}["acme-rest-1.0"]
+    item = {c["connector_id"]: c for c in response.json()["items"]}["acme-rest-1.0"]
     assert item["kind"] == "profiled"
     assert item["dispatchable"] is True
 
@@ -1070,7 +1097,7 @@ async def test_list_class_only_entries_excluded_under_status_narrowing(
             headers=_authed(token),
         )
     assert response.status_code == 200
-    seen_ids = {c["connector_id"] for c in response.json()["connectors"]}
+    seen_ids = {c["connector_id"] for c in response.json()["items"]}
     assert "vmware-rest-9.0" in seen_ids
     assert "harbor-rest-2.x" not in seen_ids
 
@@ -1142,7 +1169,7 @@ async def test_list_registered_row_carries_catalog_next_step_hint(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     harbor = by_id["harbor-rest-2.x"]
     assert harbor["state"] == "registered"
@@ -1180,7 +1207,7 @@ async def test_list_registered_row_spec_only_catalog_entry_points_at_spec(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     nsx = by_id["nsx-rest-9.0"]
     assert nsx["state"] == "registered"
@@ -1238,7 +1265,7 @@ async def test_list_registered_row_without_catalog_entry_points_at_manual_mode(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     custom = by_id["customvendor-rest-1.0"]
     assert custom["state"] == "registered"
@@ -1290,7 +1317,7 @@ async def test_list_ingested_row_omits_next_step_hint(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    by_id = {c["connector_id"]: c for c in response.json()["connectors"]}
+    by_id = {c["connector_id"]: c for c in response.json()["items"]}
 
     vmware = by_id["vmware-rest-9.0"]
     assert vmware["state"] == "ingested"
@@ -1357,7 +1384,7 @@ async def test_list_drops_stale_impl_id_rows_whose_connector_id_will_not_resolve
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     seen_ids = {c["connector_id"] for c in connectors}
 
     assert "vmware-rest-9.0" in seen_ids
@@ -1423,7 +1450,7 @@ async def test_list_every_connector_id_round_trips_through_dispatcher(
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         response = client.get("/api/v1/connectors", headers=_authed(token))
     assert response.status_code == 200
-    connectors = response.json()["connectors"]
+    connectors = response.json()["items"]
     operator = Operator(
         sub="op-roundtrip",
         name="Round-Trip Probe",
@@ -2192,6 +2219,47 @@ paths:
     assert body["grouping"] is None
 
 
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_ingest_non_serializable_example_fails_identically_on_both_legs(
+    client: TestClient, dry_run: bool
+) -> None:
+    """A spec whose proto isn't JSON-serializable fails the same on both legs (#2272).
+
+    Before the proto-build serializability guard, the effectful ingest
+    leg crashed at ``session.flush()`` with an opaque ``StatementError``
+    while the parse-only ``dry_run`` leg green-lit the identical spec —
+    a false green. Both legs now surface the same structured
+    ``invalid_schema`` 400 at parse time. The fixture carries a
+    ``!!binary`` example (``bytes``) so it stays non-serializable
+    independently of the timestamp loader fix.
+    """
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(
+            mock_router,
+            _OPENAPI_FIXTURES / "nonserializable_example_30.yaml",
+            path="nonserializable-example.yaml",
+        )
+        request_body: dict[str, Any] = {
+            "product": "blobsvc",
+            "version": "1.0",
+            "impl_id": "blobsvc-rest",
+            "specs": [{"uri": spec_url}],
+        }
+        if dry_run:
+            request_body["dry_run"] = True
+        else:
+            request_body["async"] = False
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json=request_body,
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    assert response.json()["detail"]["detail"] == "invalid_schema"
+
+
 def test_ingest_happy_path_runs_full_pipeline(
     client: TestClient,
     tmp_path: Any,
@@ -2483,6 +2551,79 @@ paths:
         )
         rows = result.scalars().all()
     assert {row.tenant_id for row in rows} == {tenant_a}
+
+
+@pytest.mark.asyncio
+async def test_ingest_yaml_timestamp_examples_persist_as_strings(
+    client: TestClient,
+) -> None:
+    """A YAML spec with unquoted date/timestamp examples ingests + persists verbatim (#2272).
+
+    The descriptor INSERT used to crash with ``StatementError: Object of
+    type datetime is not JSON serializable`` because YAML 1.1 typed the
+    unquoted ``example:`` scalars as ``datetime`` / ``date``. The ingest
+    loader now keeps them as the author's raw strings, so the row lands
+    and the persisted ``parameter_schema`` / ``response_schema`` carry the
+    exact strings the spec author wrote.
+    """
+    propose_json = (
+        '[{"group_key": "events", "name": "Events", '
+        '"when_to_use": "Use these operations to inspect events."}]'
+    )
+    assign_json = '{"GET:/events": "events"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(
+            mock_router,
+            _OPENAPI_FIXTURES / "timestamp_examples_30.yaml",
+            path="timestamp-examples.yaml",
+        )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "tsexample",
+                "version": "1.0",
+                "impl_id": "tsexample-rest",
+                "specs": [{"uri": spec_url}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["ingestion"]["inserted_count"] == 1
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(
+            select(EndpointDescriptor).where(EndpointDescriptor.product == "tsexample"),
+        )
+        rows = result.scalars().all()
+    assert len(rows) == 1
+    row = rows[0]
+
+    since = row.parameter_schema["properties"]["since"]
+    assert since["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert isinstance(since["example"], str)
+    assert row.parameter_schema["properties"]["on_date"]["example"] == "2024-01-15"
+
+    assert row.response_schema is not None
+    resp_props = row.response_schema["properties"]
+    assert resp_props["observed_on"]["example"] == "2024-01-15"
+    assert resp_props["observed_at"]["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert resp_props["quoted_at"]["example"] == "2019-07-21T17:32:28Z"
 
 
 def test_ingest_cross_tenant_tenant_id_rejected_403(client: TestClient) -> None:
@@ -2782,6 +2923,46 @@ def test_ingest_spec_error_family_returns_structured_400(
         )
     assert response.status_code == 400, response.text
     assert response.json()["detail"] == builder(exc)
+
+
+def test_ingest_op_id_collision_400_detail_names_remediation(client: TestClient) -> None:
+    """#2273 — the REST 400 ``detail`` names the collision's remediation.
+
+    A cross-call ``OpIdCollision`` (the shape a crashed ingest's stranded
+    debris leaves) surfaces on the wire with a structured ``remediation``
+    field and a ``message`` that names both remedies: re-ingest under the
+    original spec URI, or ``meho.connector.delete`` to clear the debris.
+    """
+    exc = OpIdCollision(
+        op_ids=["GET:/api/items"],
+        product="test",
+        version="1.0",
+        impl_id="test-impl",
+        existing_spec_source="https://specs.example.test/a.yaml",
+        incoming_spec_source="file:///tmp/a.yaml",
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch.object(IngestionPipelineService, "ingest", AsyncMock(side_effect=exc)),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={
+                "product": "test",
+                "version": "1.0",
+                "impl_id": "test-impl",
+                "specs": [{"uri": "https://specs.example.test/never-fetched.yaml"}],
+                "async": False,
+            },
+            headers=_authed(token),
+        )
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "original spec URI" in detail["remediation"]
+    assert "meho.connector.delete" in detail["remediation"]
+    assert "meho.connector.delete" in detail["message"]
 
 
 def test_ingest_vcenter_9_under_label_8_returns_422(client: TestClient, tmp_path: Any) -> None:
@@ -3522,6 +3703,78 @@ def test_ingest_catalog_entry_shipped_spec_loads_content_and_ingests(
     assert body["ingestion"]["connector_id"] == "shippedt1-rest-1.0"
 
 
+def test_ingest_catalog_entry_shipped_spec_reingest_is_idempotent(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2274: a second non-dry-run catalog ingest skips its own rows, not 400.
+
+    The catalog shipped-spec route labels its source ``spec:<resource>``;
+    the parser persists that verbatim as a tag and the upsert appends its
+    own ``spec:<spec_source>`` marker, so the row carries two ``spec:``
+    tags. A first-match extractor recovered the shadowing verbatim tag
+    (one ``spec:`` layer short of the real source) and the second ingest
+    of the same catalog entry collided with its own rows -- a 400
+    ``op_id_collision`` that made the unbacked-composite remediation loop
+    (which prints exactly this command) circular. The persisted-then-
+    re-ingested, non-dry-run catalog leg is the path CI never covered.
+    """
+    _patch_catalog(
+        monkeypatch,
+        entries=[
+            {
+                "product": "shippedt1",
+                "version": "1.0",
+                "impl_id": "shippedt1-rest",
+                "requires_connector_class": "ProfiledRestConnector_shippedt1",
+                "upstream": None,
+                "spec_resource": "_fixture_minimal.yaml",
+                "profile_resource": "_fixture_minimal.yaml",
+            },
+        ],
+    )
+    # _fixture_minimal.yaml carries exactly one op (``GET /things``); the
+    # deterministic grouping stub only needs to place that one op.
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=(
+                '[{"group_key": "things", "name": "Things", '
+                '"when_to_use": "Use these operations to work with things."}]'
+            ),
+            assign_response='{"GET:/things": "things"}',
+        ),
+    )
+    key, token = _admin_token()
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        # No upstream mock — the shipped spec is served inline from
+        # package data; any fetch attempt would raise an unmocked request.
+        first = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "async": False},
+            headers=_authed(token),
+        )
+        second = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": "shippedt1/1.0", "async": False},
+            headers=_authed(token),
+        )
+    assert first.status_code == 200, first.text
+    assert first.json()["ingestion"]["inserted_count"] == 1
+    # The re-ingest is idempotent: success with nothing inserted, not a
+    # 400 op_id_collision against the rows the first call just wrote.
+    assert second.status_code == 200, second.text
+    second_ingestion = second.json()["ingestion"]
+    assert second_ingestion["inserted_count"] == 0
+    assert second_ingestion["skipped_count"] == 1
+
+
 def test_ingest_catalog_entry_unknown_returns_structured_422(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -3951,6 +4204,169 @@ def test_ingest_packaged_catalog_no_broadcom_portal_fetch_entries_remain() -> No
         assert entry.upstream is None
         assert entry.spec_resource is not None
         assert "#1976" in entry.notes
+
+
+# ---------------------------------------------------------------------------
+# CI dry-run fixture over EVERY packaged catalog entry (G0.31-T #2334)
+#
+# The signal (#2334) was a packaged catalog row whose ``upstream`` pointed
+# at an HTML developer-portal page: the resolver fetched it, YAML-decoded the
+# HTML, and surfaced an opaque bare-400 ("could not decode spec ... line 33")
+# that told the operator nothing actionable. The structured
+# ``catalog_entry_upstream_not_spec`` guard (G0.15-T2 #1211) closes that for a
+# text/html upstream; this fixture is the CI trip-wire that keeps EVERY
+# packaged entry -- present and future -- inside the success-or-structured
+# contract so a new row (or a URL edit) can never regress into a bare-400.
+#
+# Determinism: every fetchable ``upstream`` is mocked (respx) to serve the
+# worst case -- an HTML portal page with a 200 -- so no live network is
+# touched and the outcome is fixed by the catalog + guard alone. An entry
+# that never reaches the fetch path (typed connector -> null upstream;
+# fqdn-templated upstream; shipped ``spec_resource``) resolves on its own
+# deterministic branch. Whatever the branch, the assertion is uniform:
+# the route answers 200 (dry-run parsed a real spec) or a STRUCTURED error
+# envelope -- never the opaque YAML/JSON decode 400.
+# ---------------------------------------------------------------------------
+
+# Markers of the bare, unstructured decode-error 400 the fixture forbids.
+_BARE_DECODE_MARKERS = ("could not decode spec", "invalid yaml", "invalid json")
+
+# A worst-case HTML developer-portal body. The doctype sits on line 1 and
+# markup runs well past line 33 -- the exact "line 33, column 1" coordinate
+# the original bare-400 reported when the HTML fell through the YAML decoder.
+_HTML_PORTAL_BODY = (
+    b"<!doctype html>\n<html>\n<head><title>Developer Portal</title></head>\n<body>\n"
+    + b"<p>API reference landing page (not a machine-readable spec).</p>\n" * 40
+    + b"</body>\n</html>\n"
+)
+
+
+_AddrInfo = list[tuple[int, int, int, str, tuple[str, int]]]
+
+
+def _resolver_allowing(hosts: set[str]) -> Callable[..., _AddrInfo]:
+    """Return a ``getaddrinfo`` stand-in that maps *hosts* to a public IP.
+
+    The SSRF destination guard (#95) resolves the upstream host before it
+    opens a socket. respx intercepts the HTTP itself, so the resolver only
+    has to hand back a public, non-special address for the catalog entry's
+    upstream host(s) (plus the module's fixed test hosts) so the guard lets
+    the (already-mocked) fetch proceed -- no live DNS, no live network.
+    """
+
+    allowed = set(hosts) | _INGEST_TEST_HOSTS
+
+    # ``*args``/``**kwargs`` mirror the full ``getaddrinfo`` positional arity,
+    # and the delegation targets the captured real function (not the still-
+    # patched ``socket.getaddrinfo``), so a leaked/active patch on an unrelated
+    # caller is a transparent no-op, never a ``TypeError`` or ``RecursionError``
+    # (evoila/meho#574, #2385).
+    def _resolver(host: str, port: object, *args: object, **kwargs: object) -> _AddrInfo:
+        if host in allowed:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (_INGEST_TEST_PUBLIC_IP, 443))]
+        return _REAL_GETADDRINFO(host, port, *args, **kwargs)  # type: ignore[arg-type]
+
+    return _resolver
+
+
+def _packaged_catalog_entries() -> list[tuple[str, str]]:
+    """``(product, version)`` for every entry in the real packaged catalog."""
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    return [(entry.product, entry.version) for entry in load_catalog().entries]
+
+
+@pytest.mark.parametrize(
+    ("product", "version"),
+    _packaged_catalog_entries(),
+    ids=[f"{p}/{v}" for p, v in _packaged_catalog_entries()],
+)
+def test_dry_run_every_packaged_catalog_entry_is_success_or_structured_never_bare_400(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    product: str,
+    version: str,
+) -> None:
+    """Every packaged catalog entry dry-run-resolves without a bare-400 (#2334).
+
+    Drives ``POST /connectors/ingest {catalog_entry, dry_run: true}`` against
+    each shipped ``(product, version)`` with every fetchable ``upstream``
+    mocked to serve an HTML developer-portal page (the worst case). The
+    contract, asserted uniformly, is: the route returns 200 (a real spec
+    dry-run-parsed) or a STRUCTURED error body (``detail`` is an envelope
+    dict carrying a snake_case classifier -- ``catalog_entry_typed_connector``,
+    ``catalog_entry_templated_upstream``, ``catalog_entry_upstream_not_spec``,
+    ``product_impl_id_mismatch``, ``version_mismatch``, ...), NEVER the opaque
+    ``could not decode spec ... line 33`` YAML/JSON decode 400 that the signal
+    filed and never an unhandled 500. A future row whose ``upstream`` drifts
+    to an HTML portal (or any non-spec content-type) trips here at CI time
+    instead of on an operator's first POST.
+    """
+    from meho_backplane.operations.ingest.catalog import load_catalog
+
+    entry = load_catalog().get(product, version)
+    assert entry is not None, f"{product}/{version} vanished from the packaged catalog"
+
+    # Only non-templated upstreams reach the HTTP fetch path; an
+    # fqdn-templated URL (``<nsx-mgr-fqdn>``) is refused earlier by
+    # ``catalog_entry_templated_upstream`` before any fetch.
+    fetch_urls = [u for u in (entry.upstream or ()) if "<" not in u and ">" not in u]
+    hosts = {host for u in fetch_urls if (host := urlparse(u).hostname)}
+    monkeypatch.setattr(
+        "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",
+        _resolver_allowing(hosts),
+    )
+
+    key, token = _admin_token()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        for url in fetch_urls:
+            mock_router.get(url).mock(
+                return_value=httpx.Response(
+                    200,
+                    headers={"content-type": "text/html; charset=utf-8"},
+                    content=_HTML_PORTAL_BODY,
+                ),
+            )
+        response = client.post(
+            "/api/v1/connectors/ingest",
+            json={"catalog_entry": f"{product}/{version}", "dry_run": True, "async": False},
+            headers=_authed(token),
+        )
+
+    ref = f"{product}/{version}"
+    assert response.status_code != 500, f"{ref} raised an unhandled 500: {response.text}"
+    body = response.json()
+    detail = body.get("detail") if isinstance(body, dict) else None
+
+    # A bare, unstructured string ``detail`` is exactly the failure mode
+    # #2334 targets -- forbid it regardless of the status code.
+    if isinstance(detail, str):
+        low = detail.lower()
+        assert not any(marker in low for marker in _BARE_DECODE_MARKERS), (
+            f"{ref} dry-run returned a BARE decode error: {detail!r}. A packaged "
+            "catalog entry must resolve to a dry-run success or a structured "
+            "error envelope, never the opaque 'could not decode spec' 400 (#2334)."
+        )
+
+    if response.status_code == 200:
+        return
+    # Any non-2xx must be a structured envelope with a snake_case classifier.
+    assert response.status_code in (400, 422), f"{ref} unexpected status: {response.text}"
+    assert isinstance(detail, dict), (
+        f"{ref} dry-run returned a bare-{response.status_code} (unstructured "
+        f"detail): {detail!r}. Expected a structured error envelope (#2334)."
+    )
+    # The envelope must carry a machine-branchable snake_case classifier. The
+    # catalog-side 422s key it under ``detail`` (``catalog_entry_*``); the
+    # pipeline round-trip / version 422s key it under ``kind``
+    # (``product_impl_id_mismatch``, ``version_mismatch``). Accept either so
+    # the fixture pins "structured + branchable" without coupling to one shape.
+    classifier = detail.get("detail") or detail.get("kind")
+    assert isinstance(classifier, str) and classifier, (
+        f"{ref} structured error is missing its snake_case classifier "
+        f"(no ``detail``/``kind`` key): {detail!r}"
+    )
 
 
 def test_ingest_explicit_quadruple_still_works_regression(
@@ -4533,7 +4949,7 @@ async def test_review_total_reconciles_with_ungrouped_ops(client: TestClient) ->
     assert r["total_op_count"] == 6
     assert r["ungrouped_op_count"] == 1
 
-    listed = {c["connector_id"]: c for c in listing.json()["connectors"]}
+    listed = {c["connector_id"]: c for c in listing.json()["items"]}
     op_count = listed["vmware-rest-9.0"]["operation_count"]
     assert op_count == 7
     # The reconciliation contract: review total + ungrouped == listing total.
@@ -4556,5 +4972,5 @@ async def test_review_all_grouped_counts_match_listing(client: TestClient) -> No
         listing = client.get("/api/v1/connectors", headers=_authed(token))
     r = review.json()
     assert r["ungrouped_op_count"] == 0
-    listed = {c["connector_id"]: c for c in listing.json()["connectors"]}
+    listed = {c["connector_id"]: c for c in listing.json()["items"]}
     assert r["total_op_count"] == listed["vmware-rest-9.0"]["operation_count"] == 6

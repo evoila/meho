@@ -388,6 +388,17 @@ func TestValidateIngestModeTable(t *testing.T) {
 		{"no-wait alone is fine", ingestOptions{
 			Catalog: "vmware/9.0", NoWait: true,
 		}, ""},
+		{"auth-scheme in manual mode is fine", ingestOptions{
+			Product: "acme", Version: "1.2", ImplID: "acme-rest",
+			Specs: []string{"file:///x.yaml"}, AuthScheme: "session_login_token",
+		}, ""},
+		{"auth-scheme + catalog", ingestOptions{
+			Catalog: "vmware/9.0", AuthScheme: "basic",
+		}, "--auth-scheme cannot be combined with --catalog"},
+		{"auth-secret-field without scheme", ingestOptions{
+			Product: "acme", Version: "1.2", ImplID: "acme-rest",
+			Specs: []string{"file:///x.yaml"}, AuthSecretFields: []string{"username"},
+		}, "--auth-secret-field requires --auth-scheme"},
 	}
 	for _, c := range cases {
 		err := validateIngestMode(c.opts)
@@ -458,6 +469,68 @@ func TestBuildIngestRequestSpecInfoVersionsCompatible(t *testing.T) {
 		}
 		if body.SpecInfoVersionsCompatible != nil {
 			t.Errorf("SpecInfoVersionsCompatible = %v, want nil", *body.SpecInfoVersionsCompatible)
+		}
+	})
+}
+
+// TestBuildIngestRequestAuthScheme — the manual-mode --auth-scheme /
+// --auth-secret-field flags (#2289) thread onto the request body so the
+// backend stamps a dispatchable profiled connector instead of a bare
+// shim; catalog mode and an unset flag both leave the fields nil, and
+// the secret fields carry NAMES only.
+func TestBuildIngestRequestAuthScheme(t *testing.T) {
+	t.Run("manual sets scheme + secret-field names", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Product:          "acme",
+			Version:          "1.2",
+			ImplID:           "acme-rest",
+			Specs:            []string{"https://specs.example.test/acme.yaml"},
+			AuthScheme:       "session_login_token",
+			AuthSecretFields: []string{"username", "password"},
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.AuthScheme == nil || *body.AuthScheme != api.SessionLoginToken {
+			t.Fatalf("AuthScheme = %v, want session_login_token", body.AuthScheme)
+		}
+		if body.AuthSecretFields == nil {
+			t.Fatal("AuthSecretFields: want populated, got nil")
+		}
+		got := *body.AuthSecretFields
+		if len(got) != 2 || got[0] != "username" || got[1] != "password" {
+			t.Errorf("AuthSecretFields = %v, want [username password]", got)
+		}
+	})
+
+	t.Run("unset leaves both fields nil", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Product: "acme",
+			Version: "1.2",
+			ImplID:  "acme-rest",
+			Specs:   []string{"https://specs.example.test/acme.yaml"},
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.AuthScheme != nil {
+			t.Errorf("AuthScheme = %v, want nil", *body.AuthScheme)
+		}
+		if body.AuthSecretFields != nil {
+			t.Errorf("AuthSecretFields = %v, want nil", *body.AuthSecretFields)
+		}
+	})
+
+	t.Run("catalog mode never carries the scheme", func(t *testing.T) {
+		body, err := buildIngestRequest(ingestOptions{
+			Catalog:    "vmware/9.0",
+			AuthScheme: "basic",
+		})
+		if err != nil {
+			t.Fatalf("buildIngestRequest: %v", err)
+		}
+		if body.AuthScheme != nil {
+			t.Errorf("AuthScheme = %v, want nil", *body.AuthScheme)
 		}
 	})
 }
@@ -799,7 +872,7 @@ func TestPrintListTableEmpty(t *testing.T) {
 func TestPrintListTableHappyPath(t *testing.T) {
 	tenantA := "tenant-a"
 	r := &connectorListEnvelope{
-		Connectors: []listEntry{
+		Items: []listEntry{
 			{
 				ConnectorID:       "vault-1.x",
 				GroupCount:        2,
@@ -969,7 +1042,7 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			t.Error("next_step.rationale must survive decode")
 		}
 		var buf bytes.Buffer
-		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Items: []listEntry{got}}); err != nil {
 			t.Fatalf("PrintJSON: %v", err)
 		}
 		out := buf.String()
@@ -1012,7 +1085,7 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			t.Fatalf("next_step must be nil on an ingested row; got %+v", got.NextStep)
 		}
 		var buf bytes.Buffer
-		if err := output.PrintJSON(&buf, &connectorListEnvelope{Connectors: []listEntry{got}}); err != nil {
+		if err := output.PrintJSON(&buf, &connectorListEnvelope{Items: []listEntry{got}}); err != nil {
 			t.Fatalf("PrintJSON: %v", err)
 		}
 		out := buf.String()
@@ -1062,6 +1135,48 @@ func TestPrintReviewTableHappyPath(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("review render missing %q in:\n%s", want, out)
 		}
+	}
+}
+
+// TestPrintReviewTableRendersProvenance — the review render surfaces
+// per-spec provenance (#2291): the fetched/inline/shipped origin, the
+// audit uri, a sha256 prefix, and the operator, so an operator can tell
+// a vendor artifact from a hand-mutated one before enabling reads.
+func TestPrintReviewTableRendersProvenance(t *testing.T) {
+	operator := "user:alice"
+	r := &api.ConnectorReviewPayload{
+		ConnectorId: "vmware-rest-9.0",
+		Product:     "vmware",
+		Version:     "9.0",
+		ImplId:      "vmware-rest",
+		Provenance: &[]api.ConnectorReviewProvenance{
+			{
+				Uri:         "https://developer.broadcom.com/vcenter.yaml",
+				Sha256:      "deadbeefdeadbeefdeadbeefdeadbeef",
+				Origin:      "fetched",
+				OperatorSub: &operator,
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	out := buf.String()
+	for _, want := range []string{"provenance", "fetched", "deadbeef", "user:alice", "vcenter.yaml"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("review render missing provenance token %q in:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintReviewTableProvenanceUnknown — a connector ingested before
+// the provenance table landed (nil/empty Provenance) says so explicitly
+// rather than rendering a blank section.
+func TestPrintReviewTableProvenanceUnknown(t *testing.T) {
+	r := &api.ConnectorReviewPayload{ConnectorId: "k8s-1.x", Provenance: nil}
+	var buf bytes.Buffer
+	printReviewTable(&buf, r)
+	if !strings.Contains(buf.String(), "pre-provenance") {
+		t.Errorf("expected pre-provenance note; got:\n%s", buf.String())
 	}
 }
 
@@ -2357,7 +2472,7 @@ func TestGetListWithMockServer(t *testing.T) {
 				t.Errorf("expected status=staged; got %q", r.URL.Query().Get("status"))
 			}
 			writeJSON(t, w, 200, connectorListEnvelope{
-				Connectors: []listEntry{
+				Items: []listEntry{
 					{
 						ConnectorID:      "vmware-rest-9.0",
 						GroupCount:       9,
@@ -2375,7 +2490,7 @@ func TestGetListWithMockServer(t *testing.T) {
 	if err != nil {
 		t.Fatalf("getList: %v", err)
 	}
-	if len(got.Connectors) != 1 || got.Connectors[0].ConnectorID != "vmware-rest-9.0" {
+	if len(got.Items) != 1 || got.Items[0].ConnectorID != "vmware-rest-9.0" {
 		t.Fatalf("unexpected list: %+v", got)
 	}
 }
@@ -2538,7 +2653,7 @@ func TestShippedResourceLabel(t *testing.T) {
 func TestRegisteredTriplesFromMockServer(t *testing.T) {
 	srv := mockBackplane(t, map[string]mockHandler{
 		"GET /api/v1/connectors": func(w http.ResponseWriter, _ *http.Request) {
-			writeJSON(t, w, 200, connectorListEnvelope{Connectors: []listEntry{
+			writeJSON(t, w, 200, connectorListEnvelope{Items: []listEntry{
 				{ConnectorID: "vmware-rest-9.0", Product: "vmware", Version: "9.0", ImplID: "vmware-rest"},
 			}})
 		},
@@ -2775,7 +2890,7 @@ func TestDecodeErrorClassifiedAsUnexpected(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(200)
 			// Malformed JSON — triggers json.SyntaxError on decode.
-			_, _ = w.Write([]byte(`{"connectors": [{"connector_id": "x"`))
+			_, _ = w.Write([]byte(`{"items": [{"connector_id": "x"`))
 		},
 	})
 	defer srv.Close()

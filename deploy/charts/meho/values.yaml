@@ -80,6 +80,37 @@ securityContext:
     drop:
       - ALL
 
+# -- Network-diagnostics (`net.*`) connector posture (Initiative #2405).
+#
+# The `net.*` diagnostic ops need NO added pod capability by default:
+# `net.trace` and `net.path_mtu` read ICMP errors off the unprivileged
+# Linux `IP_RECVERR` socket error queue, and `net.ping` uses an
+# unprivileged `IPPROTO_ICMP` datagram socket. `CAP_NET_RAW` is
+# deliberately NOT granted to this credential-holding pod (a privileged
+# sidecar is the documented escalation path, not a default).
+netdiag:
+  # -- `net.ipv4.ping_group_range` pod sysctl for unprivileged ICMP-echo
+  # ping (`net.ping`). **Default-off (empty) ships no sysctl and no
+  # pod-security change** — `net.trace` / `net.path_mtu` work
+  # unprivileged everywhere, and `net.ping` degrades gracefully to
+  # `{available: false, reason: icmp_echo_unprivileged_unavailable}`
+  # (pointing callers at `net.tcp_check`) where the range excludes the
+  # pod's GID. Set it ONLY after a security review.
+  #
+  # SECURITY NOTE — read before enabling:
+  #   * Value is a `"<low> <high>"` GID range that must include the GID
+  #     the container runs as (`podSecurityContext.runAsGroup`, or 0 when
+  #     unset). Example matching `runAsGroup: 1001`: `"1001 1001"`.
+  #   * `net.ipv4.ping_group_range` is a *safe* sysctl on Kubernetes 1.29+
+  #     (no kubelet allowlist needed); on older clusters it is *unsafe*
+  #     and pods setting it are rejected at admission unless the kubelet
+  #     runs with `--allowed-unsafe-sysctls=net.ipv4.ping_group_range`.
+  #   * Enabling it only widens who may open unprivileged ICMP *datagram*
+  #     sockets in this pod; it does NOT grant `CAP_NET_RAW` or
+  #     packet-crafting. `net.ping` remains allowlist-gated
+  #     (`MEHO_NETDIAG_PROBE_ALLOWLIST`) regardless.
+  pingGroupRange: ""
+
 service:
   type: ClusterIP
   port: 8000
@@ -129,6 +160,16 @@ ingress:
 # period, 2s timeout × 3 failures = 15s detection window) so a flaky
 # dependency removes the pod from rotation promptly without triggering a
 # restart. Every field is operator-tunable.
+#
+# `startup` (Issue #2393) gates liveness/readiness until first boot
+# succeeds. First boot registers the full typed-op catalog and preloads the
+# fastembed embedding model before the app binds :8000 (~2-3 min, longer on
+# a cold install that downloads model weights into an empty cache PVC), so
+# the short-delay liveness probe would otherwise CrashLoopBackOff a
+# slow-but-healthy pod. The default budget is `failureThreshold` ×
+# `periodSeconds` = 30 × 10s = 300s (5 min); once it passes the kubelet
+# hands off to the liveness probe for fast hang detection. Clear
+# `probes.startup` to opt out on a fast cluster.
 probes:
   liveness:
     httpGet:
@@ -146,6 +187,15 @@ probes:
     periodSeconds: 5
     timeoutSeconds: 2
     failureThreshold: 3
+  startup:
+    httpGet:
+      path: /healthz
+      port: http
+    # 30 × 10s = 300s (5 min) first-boot budget; covers op-catalog
+    # registration + fastembed model preload/download on a cold install.
+    periodSeconds: 10
+    timeoutSeconds: 1
+    failureThreshold: 30
 
 # -- Container resources. Conservative production baselines for the v0.1
 # chassis backplane — sized for steady-state authn/authz traffic plus the
@@ -195,6 +245,30 @@ config:
   vaultOidcRole: "meho-mcp"
   vaultOidcMountPath: "jwt"
   vaultTimeoutSeconds: "10.0"
+  # Credential backend a schemeless target `secret_ref` (and the
+  # `/api/v1/health` federation proof) resolves through (#2227). `vault`
+  # (the default) keeps every existing install on today's Vault KV-v2 read
+  # with no change — a schemeless `targets/<id>` ref and an explicit
+  # `vault:targets/<id>` ref both dispatch to the Vault backend, and the
+  # health proof reads `secret/meho/test/federation` unchanged. Set to
+  # `gsm` for a GCP-native, Vault-free install: schemeless refs then
+  # resolve through GCP Secret Manager and the health proof reads
+  # `gsm:<gsmProject>/meho-test-federation`. Rendered as `CREDENTIAL_BACKEND`.
+  # The schema requires `vault.address` only when this is `vault`, and
+  # requires `gsm.enabled: true` + `gsm.project` when this is `gsm`.
+  credentialBackend: "vault"
+  # GCP project the GSM credential backend + health federation proof read
+  # secrets under (#2227). Empty is correct for every Vault install; a
+  # `gsm`-backend install sets it to the project hosting the MEHO target
+  # credentials + the `meho-test-federation` probe secret. Rendered as
+  # `GSM_PROJECT`. Typically mirrors the top-level `gsm.project`.
+  gsmProject: ""
+  # Optional service account the GSM backend impersonates when reading
+  # Secret Manager (#2227). Empty (the default) reads directly under the
+  # pod's own GKE Workload Identity ADC; a non-empty SA email wraps that
+  # ADC source in impersonated credentials (the GcloudConnector chain). No
+  # service-account JSON key is ever used. Rendered as `GSM_IMPERSONATE_SA`.
+  gsmImpersonateSa: ""
   databasePoolSize: "10"
   databasePoolTimeout: "30.0"
   # MCP audience binding (G0.8-T4 #633). The `/mcp` router is mounted
@@ -258,6 +332,43 @@ config:
   # `docs/cross-repo/reverse-proxy-contract.md` for the operator-
   # side trust contract.
   forwardedAllowIps: "127.0.0.1"
+  # -- Target-destination SSRF allowlist (v0.20.0, PR #2191). The
+  # backplane refuses to register or dial a target whose host is (or
+  # resolves to) a non-public address — loopback, RFC 1918, link-local,
+  # `169.254.169.254` (cloud metadata), CGNAT, the IPv6 analogues —
+  # classic server-side request forgery protection. This value is the
+  # operator's scoped opt-out: it renders into the
+  # `MEHO_TARGET_SSRF_ALLOWLIST` env var the guard reads per request
+  # (`backend/src/meho_backplane/targets/ssrf_guard.py`), NOT via
+  # settings.py. Comma-separated exemptions: CIDR ranges (`10.0.0.0/8`),
+  # bare IPs (`192.168.7.10`), and/or hostname literals
+  # (`vcenter.lab.internal`); whitespace around commas is ignored.
+  #
+  # Default `""` keeps the guard fully on (default-deny) — a genuine
+  # no-op render. MEHO is on-prem: registering appliances on private
+  # space is the normal case, so a deploy that manages LAN targets MUST
+  # allowlist the ranges those appliances live on, e.g.
+  # `"10.0.0.0/8,192.168.0.0/16"`. A scoped opt-in is the intended
+  # posture, never a global off-switch; a malformed CIDR fails loudly at
+  # runtime naming the offending token. See CHANGELOG v0.20.0
+  # ("Deployment impact — action likely required") and
+  # `docs/codebase/target-ssrf-guard.md`.
+  targetSsrfAllowlist: ""
+  # -- Async ingest-job watchdog budget override, in seconds (#2318,
+  # hardens #2275). The backplane time-boxes each background OpenAPI-ingest
+  # job in `asyncio.timeout(...)` so a wedged pipeline (a starved
+  # `to_thread` executor, a hung grouping LLM call) can't sit at
+  # `status=running` until a pod restart. The 30-min default is owned by the
+  # backend (`_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS`); this knob only overrides
+  # it — raise it for a slow shared executor or a very large fleet of specs.
+  # Rendered into `INGEST_JOB_TIMEOUT_SECONDS` ONLY when non-empty: the
+  # default `""` omits the env so the backend's built-in 30-min default
+  # applies silently (an always-rendered empty string would hit `float("")`
+  # and log a spurious warning every boot). A non-finite (`inf`/`nan`),
+  # non-positive, or malformed value is rejected at the backend, which logs
+  # a warning and falls back to 30 min — a misconfigured budget can never
+  # disable the watchdog. See `docs/codebase/spec-ingestion.md`.
+  ingestJobTimeoutSeconds: ""
 
 # Memory layer (G5.2 #374). The backplane ships an in-process
 # memory-expiry sweeper that runs in the FastAPI lifespan and removes
@@ -343,6 +454,24 @@ postgres:
   # -- Name of the Kubernetes Secret holding the DATABASE_URL value at key
   # `url` — MUST be set. Synced from Vault by External Secrets Operator (ESO)
   # in production; the consumer pre-provisions it before `helm install`.
+  #
+  # HARD PREREQUISITE (pgvector): the pre-install migration Job runs Alembic
+  # revision 0003, which executes `CREATE EXTENSION IF NOT EXISTS vector`.
+  # PostgreSQL requires **superuser** to create an extension, so a cold
+  # install against a least-privilege app role fails at that step with
+  # `permission denied to create extension "vector"`
+  # (`HINT: Must be superuser to create this extension.`). Satisfy ONE of:
+  #   (a) pre-create the extension once, as a superuser, before installing:
+  #         psql -d meho -c "CREATE EXTENSION IF NOT EXISTS vector;"
+  #       (CNPG: `kubectl exec <cluster>-1 -n <ns> -c postgres -- \
+  #                 psql -d meho -c "CREATE EXTENSION IF NOT EXISTS vector;"`),
+  #       OR at cluster bootstrap via CNPG `postInitSQL`:
+  #         spec.bootstrap.initdb.postInitSQL:
+  #           - "CREATE EXTENSION IF NOT EXISTS vector;"
+  #   (b) point this DSN at a superuser-capable role for the first migration.
+  # Option (a) with a least-privilege app role is the recommended, minimal
+  # posture. See `deploy/values-examples/README.md` (§ pgvector extension
+  # prerequisite) and `docs/decisions/pgvector-superuser-prerequisite.md`.
   credentialsSecret: ""
 
 vault:
@@ -359,6 +488,36 @@ vault:
     # -- KV v2 mount + base path for operator secrets. Federation-proof reads
     # happen under `<paths.kv>/test/federation` (see backend health.py).
     kv: secret/meho
+
+# GCP Secret Manager credential backend (Initiative #2227). Mirrors the
+# `vault.*` block: a top-level operator-facing declaration that the schema
+# validates (required when `config.credentialBackend: gsm`), paired with
+# the runtime `config.gsmProject` / `config.gsmImpersonateSa` env values the
+# backplane reads. A Vault install leaves this at `enabled: false` and the
+# block is inert.
+gsm:
+  # -- Whether the deployment uses the GSM credential backend. Set true
+  # together with `config.credentialBackend: gsm` for a Vault-free,
+  # GCP-native install. When false (the default) the block is inert and the
+  # schema does not require `project`.
+  enabled: false
+  # -- GCP project id hosting the MEHO target credentials and the
+  # `meho-test-federation` health-probe secret. Required (non-empty) when
+  # `gsm.enabled: true`. Typically the same value as `config.gsmProject`
+  # (which is the value the backplane actually reads at runtime).
+  project: ""
+  # -- Workload Identity Federation parameters for per-operator GCP token
+  # exchange. STUB for Phase 2 (#2232) — declared so a GSM adopter can pin
+  # the shape now, but NO template consumes these yet and the SA-direct
+  # Phase 1 backend ignores them. Leave empty until #2232 wires the STS
+  # token-exchange path.
+  workloadIdentityFederation:
+    # -- Workload Identity **pool** id (Phase 2 stub, #2232).
+    poolId: ""
+    # -- Workload Identity **provider** id within the pool (Phase 2 stub).
+    providerId: ""
+    # -- Service account the federated identity impersonates (Phase 2 stub).
+    serviceAccount: ""
 
 keycloak:
   # -- Keycloak issuer URL — MUST be set; empty fails the schema. The JWT

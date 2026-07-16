@@ -44,7 +44,13 @@ from .duration import DurationParseError, parse_duration
 from .policy_replay import PolicyReplayResult, PolicyReplayStatus, replay_policy
 from .query import UnsupportedFilterError, query_audit
 from .replay import replay_session
-from .schemas import AuditEntry, AuditQueryFilters, AuditQueryResult, ReplayNode
+from .schemas import (
+    AuditEntry,
+    AuditQueryFilters,
+    AuditQueryResult,
+    MyRecentPage,
+    ReplayNode,
+)
 
 __all__ = [
     "AuditEntry",
@@ -53,6 +59,7 @@ __all__ = [
     "CursorPosition",
     "DurationParseError",
     "InvalidCursorError",
+    "MyRecentPage",
     "PolicyReplayResult",
     "PolicyReplayStatus",
     "ReplayNode",

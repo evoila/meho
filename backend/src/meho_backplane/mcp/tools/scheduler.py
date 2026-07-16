@@ -71,6 +71,7 @@ from meho_backplane.scheduler.schemas import (
 )
 from meho_backplane.scheduler.service import (
     AgentDefinitionMissingError,
+    EventTriggersNotImplementedError,
     SchedulerAdminService,
 )
 
@@ -236,6 +237,10 @@ async def _create_handler(
             created_by_sub=operator.sub,
             payload=payload,
         )
+    except EventTriggersNotImplementedError as exc:
+        # kind=event is refused at create until #826 wires the event-
+        # subscription matcher; same error code the REST route surfaces.
+        raise McpInvalidParamsError(exc.error_code) from exc
     except AgentDefinitionMissingError as exc:
         raise McpInvalidParamsError("agent_definition_not_found") from exc
     structlog.contextvars.bind_contextvars(audit_trigger_id=str(entry.id))
@@ -251,16 +256,23 @@ register_mcp_tool(
             "('cron'|'one_off'|'event'), agent_definition_id (UUID of an "
             "agent definition in the operator's tenant), and exactly one "
             "of cron_expr (for kind=cron), fire_at (ISO 8601 string for "
-            "kind=one_off), or event_filter (object for kind=event). "
-            "Optional: timezone (IANA name, default 'UTC'), inputs (JSON "
-            "object), identity_sub (default '__scheduler__'), "
+            "kind=one_off), or event_filter (object for kind=event). NOTE: "
+            "kind=event is refused at create with 'event_triggers_not_"
+            "implemented' until #826 wires the event-subscription matcher "
+            "(an accepted event trigger cannot fire today). For "
+            "kind=cron/one_off, inputs (JSON object) is REQUIRED and must "
+            "render a non-empty prompt (a 'prompt' string, or any non-empty "
+            "object; inputs: {} is rejected); it is optional for kind=event. "
+            "Optional: timezone (IANA name, default 'UTC'), "
+            "identity_sub (default '__scheduler__'), "
             "in_flight_policy ('fail_into_audit'|'resume', default "
             "'fail_into_audit'), tenant_id (UUID; tenant_admin-only "
             "cross-tenant target), work_ref (change-ticket reference "
             "inherited by every dispatched run's audit rows). Invalid "
             "cron expression -> error with "
             "detail 'invalid_arguments'; unknown agent_definition_id -> "
-            "'agent_definition_not_found'; non-admin passing tenant_id -> "
+            "'agent_definition_not_found'; a cron/one_off with no usable "
+            "inputs -> invalid arguments (422); non-admin passing tenant_id -> "
             "'tenant_id_requires_tenant_admin'. Response: {trigger_id, "
             "trigger: {...}}."
         ),
@@ -296,7 +308,13 @@ register_mcp_tool(
                 },
                 "inputs": {
                     "type": ["object", "null"],
-                    "description": "JSON payload forwarded as the agent run's input.",
+                    "description": (
+                        "JSON payload rendered into the agent run's user "
+                        "prompt. Required for kind=cron/one_off and must "
+                        "render a non-empty prompt (a 'prompt' string, or "
+                        "any non-empty object; an empty {} is rejected). "
+                        "Optional for kind=event."
+                    ),
                 },
                 "identity_sub": {
                     "type": "string",

@@ -85,6 +85,12 @@ _CREDENTIAL_READ_OPS: Final[frozenset[str]] = frozenset(
     {
         "vault.kv.read",
         "vault.kv.list",
+        # SDDC Manager is the system of record for nested-infra credentials;
+        # its typed ``GET /v1/credentials`` read returns live account secrets
+        # (#2306). Classified credential_read so audit + broadcast payloads
+        # collapse to aggregate-only, on top of the op's requires_approval
+        # gate and the connector-boundary secret scrub.
+        "sddc.credential.list",
     }
 )
 
@@ -106,6 +112,13 @@ _CREDENTIAL_MINT_OPS: Final[frozenset[str]] = frozenset(
         # ``OperationResult`` returned to the caller still carries it.
         "vault.token.create",
         "vault.auth.approle.generate_secret_id",
+        # G-Node/RKE2-T2 #2429 — the RKE2 server-token rotate mints a new
+        # join token server-side. The handler never returns the token value
+        # (only a Vault pointer), so nothing sensitive is in the response —
+        # but ``.rotate`` would otherwise classify ``other`` and broadcast
+        # full params/detail. Pinning to ``credential_mint`` collapses the
+        # broadcast to aggregate-only as defence-in-depth for the op class.
+        "rke2.token.rotate",
     }
 )
 
@@ -150,6 +163,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # aggregate-only rather than shipping it on the feed.
         "keycloak.user.create",
         "keycloak.user.reset_password",
+        # G-Node/RKE2-T3 #2430 — the RKE2 node-config write op. Its ``patch``
+        # param carries key -> value edits, and an RKE2 ``config.yaml`` body
+        # holds ``token:`` / ``agent-token:`` join credentials, so a plain
+        # ``write`` classification (the ``.update`` suffix) would broadcast a
+        # written token in full. Pinning it collapses the broadcast to
+        # aggregate-only. (The op result itself returns key NAMES only.)
+        "rke2.node.config.update",
     }
 )
 
@@ -194,6 +214,14 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     # falls through to ``other``. Classifying it ``write`` keeps the feed's
     # mutation signal accurate.
     ".assign",
+    # RKE2 node service-restart verb (G-Node/RKE2-T3 #2430).
+    # ``rke2.node.service.restart`` is a disruptive mutation; its params
+    # (a single allow-listed unit name) carry no secret, so the plain
+    # ``write`` class (full detail) is correct — but without this suffix it
+    # falls through to ``other`` and broadcasts the full param dict as an
+    # unclassified event. Classifying it ``write`` keeps the mutation signal
+    # accurate on the feed.
+    ".restart",
 )
 
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
@@ -329,6 +357,9 @@ class BroadcastEvent(BaseModel):
     work_ref: str | None = None
 
 
+# code-quality-allow: flat order-significant op-id classifier; length is the
+# explanatory match-order docstring, not branching. Pre-existing >100 (126 on
+# main); #2406 only adds the `net.` prefix to an existing read tuple.
 def classify_op(op_id: str) -> str:
     """Map an op-id to one of the sensitivity classes.
 
@@ -378,13 +409,19 @@ def classify_op(op_id: str) -> str:
        (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
        map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
        map to ``write``. Checked before the dot-suffix branches since
-       ingested ops carry no meho verb suffix.
+       ingested ops carry no meho verb suffix. The ``net.`` product
+       prefix (the synthetic network-diagnostics connector, #2406)
+       rides the ``read`` arm here: every ``net.*`` op is a
+       non-mutating probe, matched by prefix because its verbs are
+       underscore-joined (``net.tcp_check``), so a dotted read suffix
+       never matches.
     6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
        ``.delete`` / ``.patch`` / ``.put`` / ``.write`` / ``.add`` /
-       ``.remove``). The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3)
-       runs first, so a ``.write``-shaped secret-bearing op like
-       ``vault.auth.userpass.write`` keeps its ``credential_write``
-       class.
+       ``.remove`` / ``.assign`` / ``.restart``). The
+       ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3) runs first, so a
+       secret-bearing op like ``vault.auth.userpass.write`` or
+       ``rke2.node.config.update`` (``.update``-shaped, token-bearing
+       patch) keeps its ``credential_write`` class.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
        / ``.versions``). ``.read`` is deliberately **not** a read
@@ -420,6 +457,8 @@ def classify_op(op_id: str) -> str:
     'read'
     >>> classify_op("DELETE:/api/v2.0/projects/myproj/repositories/myrepo")
     'write'
+    >>> classify_op("net.tcp_check")
+    'read'
     >>> classify_op("vsphere.vm.list")
     'read'
     >>> classify_op("vsphere.vm.create")
@@ -441,10 +480,15 @@ def classify_op(op_id: str) -> str:
     # not sensitive, so it stays full-detail like the `other` fall-through.
     if op_id.startswith("approval."):
         return "approval"
-    # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo").
-    # GET/HEAD are safe reads by HTTP semantics; all mutation methods are writes.
-    # Checked after the explicit allowlists so credential_mint pins still win.
-    if op_id.startswith(("GET:", "HEAD:")):
+    # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo");
+    # GET/HEAD are safe reads by HTTP semantics. The synthetic net.* probes
+    # (#2406) ride the same arm: every net.* op is a non-mutating
+    # reachability probe, and it's matched by product prefix (not verb
+    # suffix) because the verbs are underscore-joined (`net.tcp_check`), so
+    # a dotted read suffix like `.check` never matches the `tcp_check`
+    # segment. Checked after the explicit allowlists so credential_mint pins
+    # still win.
+    if op_id.startswith(("GET:", "HEAD:", "net.")):
         return "read"
     if op_id.startswith(("POST:", "PUT:", "PATCH:", "DELETE:")):
         return "write"

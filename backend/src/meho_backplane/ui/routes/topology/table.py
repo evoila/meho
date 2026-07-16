@@ -88,7 +88,7 @@ from pydantic import StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_raw_session
-from meho_backplane.db.models import _GRAPH_NODE_KINDS
+from meho_backplane.db.models import WELL_KNOWN_NODE_KINDS
 from meho_backplane.topology.query import list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -310,10 +310,11 @@ def _next_direction_factory(
 
 
 def _node_kind_options() -> list[str]:
-    """Return the closed-enum list of kinds for the filter dropdown.
+    """Return the well-known list of kinds for the filter dropdown.
 
-    Sourced from :data:`meho_backplane.db.models._GRAPH_NODE_KINDS`,
-    the same closed vocabulary the DB-layer CHECK constraint pins.
+    Sourced from :data:`meho_backplane.db.models.WELL_KNOWN_NODE_KINDS`,
+    the documented core set (the vocabulary itself is open per T1
+    #2534; surfacing novel kinds in the filter is future console work).
     Deriving the dropdown from the *current page's* rows was wrong
     for two reasons:
 
@@ -323,12 +324,12 @@ def _node_kind_options() -> list[str]:
       kind, blocking the operator from clearing back to a different
       kind without manually editing the URL.
 
-    Using the closed enum gives the operator the full kind vocabulary
-    regardless of paging or active filter, at zero substrate cost
+    Using the well-known set gives the operator the documented core
+    vocabulary regardless of paging or active filter, at zero substrate cost
     (no extra ``SELECT DISTINCT`` round trip). Sorted alphabetically
     for stable rendering across page loads.
     """
-    return sorted(_GRAPH_NODE_KINDS)
+    return sorted(WELL_KNOWN_NODE_KINDS)
 
 
 #: Module-level :class:`fastapi.Depends` closures -- required to satisfy

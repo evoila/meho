@@ -27,6 +27,17 @@
 
 {% block content %}
 <section class="space-y-4">
+  {# ---------- Back-to-agents breadcrumb ----------
+     The runs list is a sub-surface of the agents console; a breadcrumb
+     back to ``/ui/agents`` matches the grants / principals sub-views and
+     gives a one-click return without relying on the browser back button
+     (which an HTMX filter swap does not populate) (#2347). #}
+  <nav class="text-sm" aria-label="Breadcrumb">
+    <a href="/ui/agents" class="link link-hover">Agents</a>
+    <span aria-hidden="true">/</span>
+    <span>Runs</span>
+  </nav>
+
   {# ---------- Definitions / Runs tab strip ---------- #}
   <div role="tablist" class="tabs tabs-bordered">
     <a role="tab" class="tab" href="/ui/agents">Definitions</a>

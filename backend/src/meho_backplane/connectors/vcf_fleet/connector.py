@@ -162,6 +162,14 @@ _FLEET_PROBE_METHOD = (
 )
 _FLEET_LCM_API_VERSION_HEADER = "Lcm-API-Version"
 
+# Typed read-op endpoint paths (T4 · #2304). The audited read set — the
+# about/health probe + the component-inventory ("what's deployed") list —
+# dispatches off these paths as ``source_kind="typed"`` on the connector's
+# existing HTTP Basic session, with no dependence on ingesting the
+# crash-prone Fleet LCM spec.
+_FLEET_ABOUT_PATH = "/lcm/lcops/api/v2/about"
+_FLEET_ENVIRONMENTS_PATH = "/lcm/lcops/api/v2/environments"
+
 
 class VcfFleetConnector(HttpConnector):
     """VCF Fleet 9.0 REST connector with HTTP Basic auth.
@@ -374,6 +382,141 @@ class VcfFleetConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    # ------------------------------------------------------------------
+    # Typed read ops (T4 · #2304, Initiative #2266)
+    #
+    # The audited Fleet read set — about/health probe + component
+    # inventory — dispatched off the connector's existing HTTP Basic
+    # session as ``source_kind="typed"`` (no ingested endpoint_descriptor
+    # rows, no Fleet-LCM spec dependency). The dispatcher rebinds these
+    # bound methods to the per-process connector instance and threads
+    # ``operator`` by name (see ``dispatch_typed``); ``operator`` is
+    # forwarded to ``_get_json`` so the credential loader reads the
+    # per-target Basic credentials under the operator's identity. Both are
+    # read-only — no write op ships here (writes are out of #2266 scope).
+    # ------------------------------------------------------------------
+
+    async def about(
+        self,
+        operator: Operator,
+        target: VcfFleetTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``fleet.about`` — ``GET /lcm/lcops/api/v2/about``.
+
+        Returns the appliance identity payload (``apiVersion`` /
+        ``productVersion`` / ``buildNumber`` / ``releaseDate``). KNOWN
+        REGRESSION: in VCF 9.0 builds this endpoint returns HTTP 500 — the
+        dispatcher records that as a ``connector_error`` result; the
+        curated ``llm_instructions`` tell the agent the appliance is still
+        reachable (the connector probe confirms it off the datacenters
+        surface) and to cross-source the product version from SDDC Manager.
+        """
+        del params  # schema declares the param object empty
+        return await self._get_json(target, _FLEET_ABOUT_PATH, operator=operator)
+
+    async def environment_list(
+        self,
+        operator: Operator,
+        target: VcfFleetTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``fleet.environment.list`` — ``GET /lcm/lcops/api/v2/environments``.
+
+        The component inventory ("what's deployed"). Fleet returns a bare
+        JSON array of Environment objects; the handler wraps it under an
+        ``environments`` key so the typed result is a stable object
+        envelope (mirrors the vSphere typed reads' ``{"hosts": [...]}``
+        shape). Each environment carries its status and an inline
+        ``products[]`` summary.
+        """
+        del params  # schema declares the param object empty
+        environments: Any = await self._get_json(
+            target, _FLEET_ENVIRONMENTS_PATH, operator=operator
+        )
+        return {"environments": environments}
+
+    @classmethod
+    async def register_operations(cls) -> None:
+        """Upsert every op in :data:`FLEET_TYPED_OPS` into ``endpoint_descriptor``.
+
+        Called from the application lifespan (via the registrar queued in
+        :mod:`meho_backplane.connectors.vcf_fleet.__init__`) after the
+        registry has eager-imported every connector module. Walks
+        :data:`~meho_backplane.connectors.vcf_fleet.typed_ops.FLEET_TYPED_OPS`,
+        resolves each op's ``handler_attr`` to the class-visible handler,
+        looks the group's curated ``when_to_use`` up in
+        :data:`~meho_backplane.connectors.vcf_fleet.typed_ops.FLEET_TYPED_WHEN_TO_USE_BY_GROUP`,
+        and routes each row through
+        :func:`~meho_backplane.operations.typed_register.register_typed_operation`
+        (``source_kind="typed"``). Idempotent across restarts (the helper
+        skips the embedding recompute on unchanged text). Mirrors the
+        argocd / bind9 / vmware_rest ``register_operations`` shape.
+        """
+        # Lazy import: the operations package pulls in the embedding
+        # pipeline (ONNX runtime + model), which pure fingerprint/probe
+        # unit tests should not pay. Lifespan callers have it warmed by the
+        # time this runs.
+        from meho_backplane.connectors.vcf_fleet.typed_ops import (
+            FLEET_TYPED_OPS,
+            FLEET_TYPED_WHEN_TO_USE_BY_GROUP,
+        )
+        from meho_backplane.operations.typed_register import register_typed_operation
+
+        for op in FLEET_TYPED_OPS:
+            handler = getattr(cls, op.handler_attr, None)
+            if handler is None:
+                raise AttributeError(
+                    f"VcfFleetConnector op {op.op_id!r} declares "
+                    f"handler_attr={op.handler_attr!r} but the class has no such attribute"
+                )
+            when_to_use: str | None
+            if op.group_key is None:
+                when_to_use = None
+            else:
+                when_to_use = FLEET_TYPED_WHEN_TO_USE_BY_GROUP.get(op.group_key)
+                if when_to_use is None:
+                    raise ValueError(
+                        f"VcfFleetConnector op {op.op_id!r} declares "
+                        f"group_key={op.group_key!r} but no curated when_to_use exists "
+                        f"for that key. Add an entry to "
+                        f"FLEET_TYPED_WHEN_TO_USE_BY_GROUP (typed_ops.py)."
+                    )
+            await register_typed_operation(
+                product=cls.product,
+                version=cls.version,
+                impl_id=cls.impl_id,
+                op_id=op.op_id,
+                handler=handler,
+                summary=op.summary,
+                description=op.description,
+                parameter_schema=op.parameter_schema,
+                response_schema=op.response_schema,
+                group_key=op.group_key,
+                when_to_use=when_to_use,
+                tags=list(op.tags),
+                safety_level=op.safety_level,
+                requires_approval=op.requires_approval,
+                llm_instructions=op.llm_instructions,
+            )
+        _log.info(
+            "fleet_typed_operations_registered",
+            count=len(FLEET_TYPED_OPS),
+            product=cls.product,
+            version=cls.version,
+            impl_id=cls.impl_id,
+        )
+
+    async def invalidate_credentials(self, target: VcfFleetTargetLike) -> None:
+        """Public duck-typed credential-eviction hook for the dispatch path (#2396).
+
+        Delegates to the shared :class:`CredentialsCache.invalidate` so the
+        next credential read re-reads Vault. The dispatcher calls this hook on
+        an establish-auth failure so an operator's out-of-band restage
+        converges on the next dispatch without a backplane restart.
+        """
+        await self._creds.invalidate(target)
 
     async def aclose(self) -> None:
         """Clear cached credentials, then tear down the httpx pool.

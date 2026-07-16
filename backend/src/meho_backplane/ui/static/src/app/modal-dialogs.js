@@ -79,7 +79,24 @@
   // descendant of a container target and we must not double-drive it.
   document.body.addEventListener("htmx:afterSwap", function (event) {
     var root = (event.detail && event.detail.target) || event.target;
-    if (!root || typeof root.querySelectorAll !== "function") {
+    // htmx 2.0.9 dispatches ``htmx:afterSwap`` with ``detail.target`` still
+    // referencing the PRE-swap element. An ``outerHTML`` swap (e.g. the
+    // runbook run driver's abort / reassign / advance forms, which target
+    // ``#runbook-run-step`` with ``hx-swap="outerHTML"``) has already replaced
+    // and DETACHED that element, so ``detail.target`` is now disconnected from
+    // the document. Scanning its stale subtree would find the old, closed
+    // descendant dialogs and call ``showModal()`` on a dialog that is no longer
+    // connected -- which throws ``InvalidStateError``. Bail on a detached root:
+    // the freshly swapped-in replacement ships its own dialogs closed and
+    // button-driven, so there is nothing here to auto-open. This handler's
+    // auto-open pattern always swaps modal fragments via ``innerHTML`` into a
+    // STABLE container, whose ``detail.target`` stays connected, so the
+    // ``isConnected`` check is a no-op for it.
+    if (
+      !root ||
+      typeof root.querySelectorAll !== "function" ||
+      !root.isConnected
+    ) {
       return;
     }
     var dialogs = root.querySelectorAll("dialog.modal");
@@ -88,6 +105,16 @@
       // ``showModal()`` throws InvalidStateError on an already-open
       // dialog, so only open the ones a swap just inserted closed.
       if (dialog.open || typeof dialog.showModal !== "function") {
+        continue;
+      }
+      // Respect an explicit opt-out. A button-driven inline dialog (e.g.
+      // the agent run console's Stop-confirm) ships INSIDE a swapped-in
+      // fragment -- the run transcript, swapped over ``#agent-run-transcript``
+      // on Run submit -- but must open only on its own trigger, never on the
+      // swap. Without this guard the auto-open sweep pops the Stop dialog the
+      // instant a run starts, blocking the live transcript the operator
+      // wanted to watch (#2347). The dialog carries ``data-auto-open="false"``.
+      if (dialog.dataset.autoOpen === "false") {
         continue;
       }
       // Never open a dialog nested inside another already-open dialog --

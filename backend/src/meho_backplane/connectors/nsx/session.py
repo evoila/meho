@@ -38,17 +38,35 @@ structurally; no edits here.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
+from meho_backplane.connectors.schemas import AuthModel
 
 __all__ = [
     "NsxSessionLoader",
     "NsxTargetLike",
     "SessionCredentials",
+    "is_acceptable_auth_model",
     "load_session_credentials_from_vault",
 ]
+
+
+def is_acceptable_auth_model(value: Any) -> bool:
+    """Return ``True`` iff *value* is the SHARED_SERVICE_ACCOUNT mode or unset.
+
+    Accepts the enum member, the equivalent string, and ``None`` (the
+    "auth_model column not yet populated" sentinel for pre-G0.3 targets).
+    Any other value (``"per_user"``, ``"impersonation"``, a typo, an int) is
+    rejected by :meth:`NsxConnector.auth_headers`. Kept nsx-local rather than
+    imported from the shared VCF helper to keep the two connectors decoupled.
+    """
+    if value is None:
+        return True
+    if value is AuthModel.SHARED_SERVICE_ACCOUNT:
+        return True
+    return bool(value == AuthModel.SHARED_SERVICE_ACCOUNT.value)
 
 
 class SessionCredentials(Protocol):

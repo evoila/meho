@@ -182,11 +182,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as http_status
 from fastapi.responses import JSONResponse, Response
 
-from meho_backplane.api.v1._envelope import (
-    ENVELOPE_QUERY,
-    EnvelopeVersion,
-    wrap_v2_envelope,
-)
 from meho_backplane.api.v1.operations import connector_not_ingested_404
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
@@ -198,6 +193,7 @@ from meho_backplane.operations._lookup import (
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     CatalogListResponse,
+    ConnectorListResponse,
     ConnectorNotFoundError,
     ConnectorReviewPayload,
     ConnectorSpecEntry,
@@ -649,6 +645,12 @@ async def _spawn_async_ingest(
             tenant_id=resolved.tenant_id,
             dry_run=False,
             spec_info_versions_compatible=spec_info_versions_compatible,
+            auth_scheme=resolved.auth_scheme,
+            auth_secret_fields=(
+                tuple(resolved.auth_secret_fields)
+                if resolved.auth_secret_fields is not None
+                else None
+            ),
         )
 
     # ``asyncio.create_task`` (not ``BackgroundTasks``) so the work
@@ -1131,6 +1133,10 @@ async def _run_ingest_with_http_mapping(
             tenant_id=body.tenant_id,
             dry_run=body.dry_run,
             spec_info_versions_compatible=spec_info_versions_compatible,
+            auth_scheme=body.auth_scheme,
+            auth_secret_fields=(
+                tuple(body.auth_secret_fields) if body.auth_secret_fields is not None else None
+            ),
         )
     except Exception as exc:
         _raise_ingest_http_error(exc, catalog_entry=catalog_entry)
@@ -1229,12 +1235,11 @@ def _raise_ingest_http_error(
     raise exc
 
 
-@router.get("")
+@router.get("", response_model=ConnectorListResponse)
 async def list_endpoint(
     status: ConnectorStatusFilter | None = Query(default=None),
     operator: Operator = _require_operator,
-    envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
-) -> dict[str, list[dict[str, object]]] | dict[str, object]:
+) -> ConnectorListResponse:
     """List ingested connectors visible to the operator.
 
     Visibility scope (per
@@ -1242,31 +1247,20 @@ async def list_endpoint(
     built-ins. The optional ``status`` filter narrows by aggregated
     review status; ``all`` (or omission) returns everything.
 
-    The default response is wrapped in ``{"connectors": [...]}`` so
-    future paging / cursor fields can land non-breakingly. The route
-    builds the payload by calling :meth:`ConnectorListItem.model_dump`
-    (with ``mode="json"``) on each item returned by
-    :func:`list_ingested_connectors` rather than annotating
-    ``response_model=ConnectorListResponse`` — per-item ``tenant_id``
-    UUIDs need to render as strings in JSON, and the per-item
-    ``mode="json"`` dump is the simplest way to get that without
-    introducing a custom serializer.
-
-    Passing ``?envelope=v2`` returns the unified ``{"items": [...],
-    "next_cursor": ...}`` shape per
-    ``docs/codebase/api-shape-conventions.md`` §2. This listing is
-    not cursor-paginated, so ``next_cursor`` is always ``None`` under
-    the opt-in. Omitting the param keeps the v0.8.0 default shape so
-    no client breaks (G0.18-T3 #1356, completing #1312 acceptance A).
+    Returns the unified ``{"items": [...], "next_cursor": null}`` list
+    envelope per ``docs/codebase/api-shape-conventions.md`` §2 (#2338
+    breaking pass — the response shape converged from the v0.8.0
+    ``{"connectors": [...]}`` keyed shape onto the reference envelope;
+    the ``?envelope=v2`` opt-in that bridged the migration was retired).
+    Per-item ``tenant_id`` UUIDs render as JSON strings via FastAPI's
+    ``response_model`` serialization. This listing is not
+    cursor-paginated, so ``next_cursor`` is always ``null``.
     """
     items = await list_ingested_connectors(
         operator=operator,
         status=status,
     )
-    serialised = [item.model_dump(mode="json") for item in items]
-    if envelope == "v2":
-        return wrap_v2_envelope(serialised, next_cursor=None)
-    return {"connectors": serialised}
+    return ConnectorListResponse(items=items, next_cursor=None)
 
 
 @router.get("/catalog", response_model=CatalogListResponse)

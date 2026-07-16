@@ -10,9 +10,12 @@ SQLite-backed test module (no Docker dependency; runs in the
 
 Acceptance contract:
 
-(a) **Both planes dispatch** -- all 11 curated VCFA core ops
-    (6 provider + 5 tenant) dispatch through ``call_operation``
+(a) **Both planes dispatch** -- all 6 curated VCFA core ops
+    (3 provider + 3 tenant) dispatch through ``call_operation``
     against a respx-mocked VCFA appliance and return ``status='ok'``.
+    (The audited read set — org/region list, provider health, tenant
+    projects/about — moved to typed ops in T5 #2305; that surface is
+    covered by ``test_connectors_vcf_automation_typed_reads.py``.)
     Each plane carries its bespoke auth flow (provider Basic ->
     ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` JWT; tenant JSON body ->
     ``{"token": ...}``); the connector picks the right token by path
@@ -73,8 +76,6 @@ from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_automation import (
     VCFA_CONNECTOR_ID,
-    VCFA_CORE_GROUPS,
-    VCFA_CORE_OPS,
     VCFA_IMPL_ID,
     VCFA_PRODUCT,
     VCFA_VERSION,
@@ -121,6 +122,14 @@ _OPERATOR = Operator(
 # The op_id the JSONFlux force-handle test dispatches. ``deployments``
 # is the largest tenant payload by design (per #840 acceptance d).
 _FORCE_HANDLE_OP_ID = "GET:/iaas/api/deployments"
+
+# Per-plane representative ops for the auth-flow / audit / bearer tests.
+# The audited read set (site/about/orgs-list/regions-list/projects) moved
+# to typed ops (T5 #2305), so the ingested-curation E2E picks a remaining
+# curated op per plane: provider ``users`` and tenant ``blueprints`` (both
+# param-less list ops, one per auth plane).
+_PROVIDER_REPR_OP_ID = "GET:/cloudapi/1.0.0/users"
+_TENANT_REPR_OP_ID = "GET:/iaas/api/blueprints"
 
 # Path-template params for the two get-by-id ops (substitution at
 # dispatch time). Maps op_id -> the {id} value the route registers
@@ -375,8 +384,39 @@ async def _vcfa_credentials_loader(_target: object, _operator: Operator) -> dict
     return {"username": "svc-meho", "password": "vcfa-e2e-password"}
 
 
+#: Ingested browse-breadth seed data for the VCFA dispatch E2E — the six
+#: ``source_kind="ingested"`` read ops (and their five dual-plane groups)
+#: declined from typed conversion on #2305 but kept browsable. Relocated here
+#: from the retired ``vcf_automation._core_data`` / ``core_ops`` curation
+#: modules (#2358): this is test-only fixture material describing the
+#: ``EndpointDescriptor`` rows this E2E seeds and mocks. ``(group_key, name,
+#: when_to_use)``.
+_VCFA_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("provider-orgs", "VCFA Provider Organizations", "Provider-plane organization detail."),
+    ("provider-regions", "VCFA Provider Regions", "Provider-plane region detail."),
+    ("provider-users", "VCFA Provider Users", "Provider-plane user inventory."),
+    ("tenant-deployments", "VCFA Tenant Deployments", "Tenant-plane deployment list + detail."),
+    ("tenant-blueprints", "VCFA Tenant Blueprints", "Tenant-plane blueprint inventory."),
+)
+
+#: ``(op_id, group_key)`` for each ingested browse-breadth VCFA read op. The
+#: ``tenant-deployments`` group carries two ops (list + get by id).
+_VCFA_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/cloudapi/1.0.0/orgs/{id}", "provider-orgs"),
+    ("GET:/cloudapi/1.0.0/regions/{id}", "provider-regions"),
+    ("GET:/cloudapi/1.0.0/users", "provider-users"),
+    ("GET:/iaas/api/deployments", "tenant-deployments"),
+    ("GET:/iaas/api/deployments/{id}", "tenant-deployments"),
+    ("GET:/iaas/api/blueprints", "tenant-blueprints"),
+)
+
+#: Op ids this VCFA E2E parametrizes over (relocated from
+#: ``tuple(op.op_id for op in VCFA_CORE_OPS)``).
+VCFA_SEED_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _VCFA_SEED_OPS)
+
+
 async def _insert_vcfa_descriptors() -> None:
-    """Seed the 11 curated VCFA core ops + their 8 groups as enabled rows.
+    """Seed the 6 ingested VCFA browse-breadth ops + their 5 dual-plane groups.
 
     Every row carries ``product=VCFA_PRODUCT="vcfa"`` (what
     :func:`parse_connector_id("vcfa-rest-9.0")` derives) and the
@@ -389,40 +429,40 @@ async def _insert_vcfa_descriptors() -> None:
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
     async with sessionmaker() as session:
-        for group in VCFA_CORE_GROUPS:
+        for group_key, name, when_to_use in _VCFA_SEED_GROUPS:
             group_row = OperationGroup(
                 tenant_id=None,
                 product=VCFA_PRODUCT,
                 version=VCFA_VERSION,
                 impl_id=VCFA_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
+                group_key=group_key,
+                name=name,
+                when_to_use=when_to_use,
                 review_status="enabled",
             )
             session.add(group_row)
             await session.flush()
-            group_ids[group.group_key] = group_row.id
+            group_ids[group_key] = group_row.id
 
-        for op in VCFA_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _VCFA_SEED_OPS:
+            method, path = op_id.split(":", 1)
             spec_tag = "spec:iaas" if path.startswith("/iaas/api/") else "spec:cloudapi"
             descriptor = EndpointDescriptor(
                 tenant_id=None,
                 product=VCFA_PRODUCT,
                 version=VCFA_VERSION,
                 impl_id=VCFA_IMPL_ID,
-                op_id=op.op_id,
+                op_id=op_id,
                 source_kind="ingested",
                 method=method,
                 path=path,
                 handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"VCFA core op {op.op_id} (curated read).",
-                description=f"VCFA core op {op.op_id} (curated read).",
+                group_id=group_ids[group_key],
+                summary=f"VCFA ingested read op {op_id}.",
+                description=f"VCFA ingested read op {op_id}.",
                 parameter_schema=_param_schema_for(path),
                 response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
+                llm_instructions=None,
                 safety_level="safe",
                 requires_approval=False,
                 is_enabled=True,
@@ -558,7 +598,7 @@ async def vcfa_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VcfaE2EB
     """Dispatcher-ready VCFA setup over a respx-mocked dual-plane appliance.
 
     Lifecycle:
-    1. Insert :data:`VCFA_CORE_OPS` descriptors + groups into the
+    1. Insert :data:`_VCFA_SEED_OPS` descriptors + groups into the
        per-test SQLite DB.
     2. Seed a :class:`Target` row carrying :data:`_FINGERPRINT` so the
        resolver binds :class:`VcfAutomationConnector`. The target's
@@ -599,8 +639,8 @@ async def vcfa_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_VcfaE2EB
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VCFA_CORE_OPS)
-assert len(_OP_IDS) == 11, f"Expected 11 curated VCFA ops, got {len(_OP_IDS)}: {_OP_IDS}"
+_OP_IDS: tuple[str, ...] = VCFA_SEED_OP_IDS
+assert len(_OP_IDS) == 6, f"Expected 6 ingested VCFA browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -608,10 +648,10 @@ async def test_vcfa_e2e_all_ops_dispatch_ok(
     op_id: str,
     vcfa_e2e_canary: _VcfaE2EBundle,
 ) -> None:
-    """All 11 VCFA core ops dispatch and return ``status='ok'``.
+    """All 6 ingested VCFA browse ops dispatch and return ``status='ok'``.
 
     Exercises acceptance criterion (a) -- both planes are covered
-    because :data:`VCFA_CORE_OPS` spans 6 provider + 5 tenant ops.
+    because :data:`_VCFA_SEED_OPS` spans provider (cloudapi) + tenant (iaas) ops.
     Each plane establishes its own bespoke session on first dispatch;
     subsequent dispatches re-use the cached per-plane token.
     """
@@ -655,7 +695,7 @@ async def test_vcfa_e2e_provider_login_fires_once_per_target(
         _OPERATOR,
         {
             "connector_id": VCFA_CONNECTOR_ID,
-            "op_id": "GET:/cloudapi/1.0.0/site",
+            "op_id": _PROVIDER_REPR_OP_ID,
             "target": {"name": target_name},
             "params": {},
         },
@@ -685,7 +725,7 @@ async def test_vcfa_e2e_tenant_login_fires_once_per_target(
         _OPERATOR,
         {
             "connector_id": VCFA_CONNECTOR_ID,
-            "op_id": "GET:/iaas/api/about",
+            "op_id": _TENANT_REPR_OP_ID,
             "target": {"name": target_name},
             "params": {},
         },
@@ -704,7 +744,7 @@ async def test_vcfa_e2e_dispatch_writes_audit_row(
 
     Exercises acceptance criterion (c).
     """
-    op_id = "GET:/cloudapi/1.0.0/site"
+    op_id = _PROVIDER_REPR_OP_ID
     sessionmaker = get_sessionmaker()
 
     async def _count_dispatch_rows() -> int:
@@ -835,7 +875,7 @@ async def test_vcfa_e2e_per_call_fqdn_override_threads_to_connector(
                 _OPERATOR,
                 {
                     "connector_id": VCFA_CONNECTOR_ID,
-                    "op_id": "GET:/cloudapi/1.0.0/site",
+                    "op_id": _PROVIDER_REPR_OP_ID,
                     "target": {"name": VCFA_E2E_TARGET_NAME, "fqdn": VCFA_E2E_FQDN},
                     "params": {},
                 },
@@ -881,7 +921,7 @@ async def test_vcfa_e2e_ip_host_without_fqdn_surfaces_descriptive_error(
             _OPERATOR,
             {
                 "connector_id": VCFA_CONNECTOR_ID,
-                "op_id": "GET:/cloudapi/1.0.0/site",
+                "op_id": _PROVIDER_REPR_OP_ID,
                 "target": {"name": VCFA_E2E_TARGET_NAME},
                 "params": {},
             },
@@ -926,10 +966,11 @@ async def test_vcfa_e2e_provider_request_carries_bearer_jwt(
     instance = _resolve_connector()
 
     captured: dict[str, str] = {}
+    repr_path = "/cloudapi/1.0.0/users"
 
-    def _site_responder(request: httpx.Request) -> httpx.Response:
+    def _users_responder(request: httpx.Request) -> httpx.Response:
         captured[request.url.path] = request.headers.get("Authorization", "")
-        return httpx.Response(200, json=_PROVIDER_SITE)
+        return httpx.Response(200, json=_PROVIDER_USERS)
 
     try:
         async with respx.mock(
@@ -941,21 +982,21 @@ async def test_vcfa_e2e_provider_request_carries_bearer_jwt(
                 200,
                 headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": _PROVIDER_JWT},
             )
-            mock.get("/cloudapi/1.0.0/site").mock(side_effect=_site_responder)
+            mock.get(repr_path).mock(side_effect=_users_responder)
 
             result = await call_operation(
                 _OPERATOR,
                 {
                     "connector_id": VCFA_CONNECTOR_ID,
-                    "op_id": "GET:/cloudapi/1.0.0/site",
+                    "op_id": _PROVIDER_REPR_OP_ID,
                     "target": {"name": VCFA_E2E_TARGET_NAME},
                     "params": {},
                 },
             )
             assert result["status"] == "ok"
-            assert captured.get("/cloudapi/1.0.0/site") == f"Bearer {_PROVIDER_JWT}", (
+            assert captured.get(repr_path) == f"Bearer {_PROVIDER_JWT}", (
                 "Provider-plane GET must carry the provider JWT as Bearer; "
-                f"got Authorization={captured.get('/cloudapi/1.0.0/site')!r}"
+                f"got Authorization={captured.get(repr_path)!r}"
             )
     finally:
         await instance.aclose()

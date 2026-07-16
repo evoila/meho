@@ -141,8 +141,8 @@ func registeredTriples(ctx context.Context, backplaneURL string) map[string]bool
 	if err != nil {
 		return nil
 	}
-	set := make(map[string]bool, len(list.Connectors))
-	for _, c := range list.Connectors {
+	set := make(map[string]bool, len(list.Items))
+	for _, c := range list.Items {
 		set[tripleKey(c.Product, c.Version, c.ImplID)] = true
 	}
 	return set

@@ -109,11 +109,11 @@ func listOverrides(
 	}
 	if resp.JSON200 == nil {
 		// 2xx without a JSON200 means the response body didn't
-		// decode against BroadcastOverrideRead -- treat as the empty
+		// decode against the list envelope -- treat as the empty
 		// list rather than NPE'ing.
 		return nil, nil
 	}
-	return *resp.JSON200, nil
+	return resp.JSON200.Items, nil
 }
 
 func printOverridesTable(w io.Writer, entries []api.BroadcastOverrideRead) {

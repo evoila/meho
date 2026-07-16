@@ -15,6 +15,7 @@ HTTPS endpoints so the same parsing assertions remain valid.
 
 from __future__ import annotations
 
+import datetime
 import json
 import socket
 from collections.abc import Generator
@@ -52,6 +53,9 @@ PARAMETER_REFS_30 = FIXTURES / "parameter_refs_30.yaml"
 RESPONSE_REFS_30 = FIXTURES / "response_refs_30.yaml"
 REQUEST_BODY_REFS_30 = FIXTURES / "request_body_refs_30.yaml"
 HANDAUTHORED_MINIMAL_30 = FIXTURES / "handauthored_minimal_30.yaml"
+TIMESTAMP_EXAMPLES_30 = FIXTURES / "timestamp_examples_30.yaml"
+NONSERIALIZABLE_EXAMPLE_30 = FIXTURES / "nonserializable_example_30.yaml"
+METASCHEMA_INVALID_RESPONSES_30 = FIXTURES / "metaschema_invalid_responses_30.yaml"
 
 # Stable HTTPS URL prefix used by tests that serve fixture content through
 # respx. Using a dedicated subdomain makes it easy to route all fixture
@@ -194,6 +198,70 @@ def test_parse_petstore_30_safety_heuristic() -> None:
     assert ops["DELETE:/pets/{petId}"].safety_level == "dangerous"
     assert ops["PUT:/pets/{petId}/photos"].safety_level == "caution"
     assert ops["HEAD:/pets/{petId}/photos"].safety_level == "safe"
+
+
+# -- parse_openapi: YAML 1.1 timestamp typing (#2272) ----------------------
+
+
+def test_parse_unquoted_yaml_timestamps_stay_strings() -> None:
+    """Unquoted date / date-time ``example:`` scalars persist as raw text.
+
+    Stock PyYAML 1.1 implicit resolvers would construct ``datetime`` /
+    ``date`` objects the descriptor INSERT cannot JSON-encode (#2272). The
+    ingest loader overrides the timestamp constructor so the author's
+    exact spelling survives into ``parameter_schema`` / ``response_schema``.
+    """
+    rows = parse_openapi(
+        "file:///timestamp_examples_30.yaml",
+        content=TIMESTAMP_EXAMPLES_30.read_text(),
+    )
+    op = _by_op_id(rows)["GET:/events"]
+
+    params = op.parameter_schema["properties"]
+    assert params["since"]["example"] == "2000-01-23T04:56:07.000+00:00"
+    assert isinstance(params["since"]["example"], str)
+    assert params["on_date"]["example"] == "2024-01-15"
+    assert isinstance(params["on_date"]["example"], str)
+
+    assert op.response_schema is not None
+    resp = op.response_schema["properties"]
+    assert resp["observed_on"]["example"] == "2024-01-15"
+    assert resp["observed_at"]["example"] == "2000-01-23T04:56:07.000+00:00"
+    # A quoted timestamp keeps round-tripping as a string (no regression).
+    assert resp["quoted_at"]["example"] == "2019-07-21T17:32:28Z"
+
+    # The whole proto is now JSON-serializable — the exact property the
+    # descriptor INSERT relies on and the bug violated.
+    json.dumps(op.parameter_schema)
+    json.dumps(op.response_schema)
+
+
+def test_ingest_timestamp_override_leaves_shared_safe_loader_unmutated() -> None:
+    """The ingest loader override must not leak to other ``yaml.safe_load`` sites.
+
+    ``add_constructor`` copies the constructor table onto the ingest
+    subclass (PyYAML copy-on-write), so ``yaml.safe_load`` — used by the
+    catalog / kubeconfig / topology-import parsers that are out of scope
+    for #2272 — must still apply the stock YAML 1.1 timestamp resolver.
+    """
+    assert isinstance(yaml.safe_load("d: 2024-01-15\n")["d"], datetime.date)
+
+
+def test_parse_non_serializable_example_raises_invalid_schema() -> None:
+    """A proto value stdlib json cannot encode fails at parse time (#2272).
+
+    The proto-build boundary asserts serializability so the effectful
+    ingest leg and the parse-only ``dry_run`` leg fail identically,
+    instead of the real run crashing at ``session.flush()`` while dry-run
+    green-lights the spec.
+    """
+    with pytest.raises(InvalidSchemaError) as excinfo:
+        parse_openapi(
+            "file:///nonserializable_example_30.yaml",
+            content=NONSERIALIZABLE_EXAMPLE_30.read_text(),
+        )
+    assert "GET:/blobs" in str(excinfo.value)
+    assert "not JSON-serializable" in str(excinfo.value)
 
 
 def test_parse_petstore_30_path_and_query_param_locations() -> None:
@@ -747,7 +815,20 @@ def test_unsupported_openapi_4_raises() -> None:
 
 
 def test_invalid_spec_missing_paths_raises() -> None:
-    content = b"openapi: '3.1.0'\ninfo: {title: x, version: '1'}\n"
+    """A 3.1 doc that is metaschema-valid but path-less is still refused.
+
+    OpenAPI 3.1 permits a document that declares ``webhooks`` (or
+    ``components``) with no ``paths`` — such a doc passes the structural
+    metaschema gate (#2292) — but meho only ingests path operations, so
+    the bespoke ``no 'paths' key`` check behind the gate still rejects it.
+    This pins the layering: the metaschema gate does not shadow meho's
+    narrower path-required contract for the specs the metaschema allows.
+    """
+    content = (
+        b"openapi: '3.1.0'\ninfo: {title: x, version: '1'}\n"
+        b"webhooks:\n  newPet:\n    post:\n      responses:\n"
+        b"        '200':\n          description: ok\n"
+    )
     with respx.mock(assert_all_called=False) as router:
         url = _mock_yaml_spec(router, "broken.yaml", content)
         with pytest.raises(InvalidSpecError, match="no 'paths' key"):
@@ -760,6 +841,73 @@ def test_invalid_spec_non_mapping_root_raises() -> None:
         url = _mock_yaml_spec(router, "list.yaml", content)
         with pytest.raises(InvalidSpecError, match="must parse to a mapping"):
             parse_openapi(url)
+
+
+def test_metaschema_invalid_spec_refused_naming_pointer() -> None:
+    """A 3.x doc that violates the OpenAPI metaschema is refused (#2292).
+
+    The fixture is well-formed everywhere except its operation's
+    ``responses``, which is a list where the metaschema requires a
+    Responses Object. The version gate and the ``paths``-is-a-mapping
+    check both pass, so the *only* reason to refuse it is the structural
+    metaschema gate. The rejection is actionable: it names the failing
+    JSON path and points at the error-shape convention doc.
+    """
+    content = METASCHEMA_INVALID_RESPONSES_30.read_text()
+    with pytest.raises(InvalidSpecError, match="metaschema") as excinfo:
+        parse_openapi("docs:widgets/spec.yaml", content=content)
+    message = str(excinfo.value)
+    # Names the failing pointer (the operation's responses slot) ...
+    assert "$.paths['/widgets'].get.responses" in message
+    # ... and carries the house remediation anchor.
+    assert "docs/codebase/error-message-shape.md" in message
+
+
+def test_metaschema_invalid_spec_dry_run_and_effectful_refuse_identically() -> None:
+    """The gate lives at parse, so ``dry_run`` and the real run refuse alike.
+
+    ``dry_run`` differs from the effectful ingest only in whether the
+    parsed rows are persisted; both legs call :func:`parse_openapi`. A
+    spec_source tag is threaded on the effectful leg and absent on a bare
+    probe, so exercise both call shapes and assert the same structured
+    refusal — there is no leg on which a metaschema-invalid spec slips
+    through to a partial catalog write.
+    """
+    content = METASCHEMA_INVALID_RESPONSES_30.read_text()
+    with pytest.raises(InvalidSpecError, match="metaschema") as effectful:
+        parse_openapi("docs:widgets/spec.yaml", spec_source="spec:widgets.yaml", content=content)
+    with pytest.raises(InvalidSpecError, match="metaschema") as dry_run:
+        parse_openapi("docs:widgets/spec.yaml", content=content)
+    assert str(effectful.value) == str(dry_run.value)
+
+
+def test_metaschema_valid_path_without_operations_still_tolerated() -> None:
+    """The gate does not disturb the parser's tolerant-skip of empty paths.
+
+    A path item carrying only a ``description`` (no verbs) is legal per
+    the metaschema, so the gate lets it through; the parser then yields no
+    operation for it (existing skip behavior). Guards the boundary that
+    the structural gate refuses *metaschema* violations only, not
+    otherwise-valid specs whose sub-documents the parser deliberately
+    skips.
+    """
+    content = yaml.safe_dump(
+        {
+            "openapi": "3.0.3",
+            "info": {"title": "sparse", "version": "1.0.0"},
+            "paths": {
+                "/described-but-empty": {"description": "no operations here"},
+                "/real": {
+                    "get": {
+                        "operationId": "getReal",
+                        "responses": {"200": {"description": "ok"}},
+                    }
+                },
+            },
+        }
+    )
+    rows = parse_openapi("docs:sparse/spec.yaml", content=content)
+    assert [r.op_id for r in rows] == ["GET:/real"]
 
 
 def test_non_https_scheme_raises_invalid_spec() -> None:
@@ -1322,7 +1470,14 @@ paths:
 
 
 def test_non_list_tags_raises() -> None:
-    """A spec with ``tags: "admin"`` would otherwise iterate as characters."""
+    """A spec with ``tags: "admin"`` is refused by the structural gate.
+
+    ``tags`` must be an array per the OpenAPI metaschema, so the #2292
+    structural gate now catches this scalar-tags mistake at parse with a
+    pointer to ``$.paths['/x'].get.tags`` — earlier than, and superseding,
+    the parser's own defensive ``tags must be a list`` check (which stays
+    as belt-and-suspenders for any input that reaches ``_build_proto``).
+    """
     content = b"""openapi: '3.0.3'
 info: {title: x, version: '1'}
 paths:
@@ -1335,8 +1490,9 @@ paths:
 """
     with respx.mock(assert_all_called=False) as router:
         url = _mock_yaml_spec(router, "bad_tags.yaml", content)
-        with pytest.raises(InvalidSchemaError, match=r"tags must be a list"):
+        with pytest.raises(InvalidSpecError, match="metaschema") as excinfo:
             parse_openapi(url)
+        assert "$.paths['/x'].get.tags" in str(excinfo.value)
 
 
 def test_openapi_31_boolean_parameter_schema() -> None:

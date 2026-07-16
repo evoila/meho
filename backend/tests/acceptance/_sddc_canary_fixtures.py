@@ -7,15 +7,16 @@ Two SDDC Manager acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.sddc_manager.SddcManagerConnector` instance
 with a stub credentials loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 9 curated
+:class:`~meho_backplane.db.models.Target` row, the 4 ingested browse-breadth
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.sddc_manager.core_ops.SDDC_CORE_OPS`, and a
-:mod:`respx`-mocked SDDC Manager REST surface answering each of the 9 curated
-read ops.
+:data:`_SDDC_SEED_OPS`, and a :mod:`respx`-mocked SDDC Manager REST surface
+answering each of the 4 read ops.
 
-SDDC Manager uses HTTP Basic auth on every request — no session establish
-or XSRF-token dance is needed. The stub credentials loader bypasses the
-Vault-backed loader; the respx router matches requests by path (Basic auth
+SDDC Manager is token-only: the connector establishes a session at
+``POST /v1/tokens`` (the ``session_login_token`` scheme, #2290) and sends the
+minted ``accessToken`` as ``Authorization: Bearer`` on every subsequent
+request. The stub credentials loader bypasses the Vault-backed loader; the
+respx router registers the token-mint route plus each op path (the Bearer
 header is not asserted by default).
 
 Why a minimal direct-insert path (not full G0.7 canary ingest)
@@ -24,7 +25,8 @@ Why a minimal direct-insert path (not full G0.7 canary ingest)
 The full VCF API spec ingest needs the SDDC Manager 9.0 OpenAPI spec file
 reachable on the CI runner. Until the spec-shelf is wired to the
 meho-runners pool, the dispatch leg is exercised against a minimal
-direct-insert path that seeds the 9 curated endpoint_descriptor rows by
+direct-insert path that seeds the 4 curated endpoint_descriptor rows (plus
+the hosts breadth row the JSONFlux test dispatches) by
 hand. Same pattern :mod:`tests.acceptance._nsx_canary_fixtures` established
 for NSX (which also has no public CI simulator).
 
@@ -56,8 +58,6 @@ from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.sddc_manager import (
     SDDC_CONNECTOR_ID,
-    SDDC_CORE_GROUPS,
-    SDDC_CORE_OPS,
     SDDC_IMPL_ID,
     SDDC_PRODUCT,
     SDDC_VERSION,
@@ -73,6 +73,7 @@ _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 __all__ = [
     "SDDC_CANARY_BASE_URL",
     "SDDC_CANARY_BUNDLES",
+    "SDDC_CANARY_CORE_OP_IDS",
     "SDDC_CANARY_DOMAINS",
     "SDDC_CANARY_FINGERPRINT",
     "SDDC_CANARY_HOSTS",
@@ -286,61 +287,128 @@ class IngestedSddcCanary:
     base_url: str
 
 
-async def _insert_sddc_descriptors() -> None:
-    """Seed the 9 curated SDDC Manager core ops + their groups as enabled rows.
+#: Ingested browse-breadth seed data for the SDDC Manager dispatch canary —
+#: the four ``source_kind="ingested"`` read ops (and their four groups)
+#: declined from typed conversion on #2306 but kept browsable. Relocated here
+#: from the retired ``sddc_manager.core_ops`` curation apparatus (#2358): this
+#: is test-only fixture material describing the ``EndpointDescriptor`` rows the
+#: dispatch tests seed and mock. ``(group_key, name, when_to_use)``.
+_SDDC_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("sddc-releases", "SDDC Manager (release)", "Appliance release / BOM version info."),
+    ("sddc-domains", "VCF Domains", "Management + workload domain inventory."),
+    ("sddc-network-pools", "VCF Network Pools", "Network pool inventory."),
+    ("sddc-bundles", "VCF LCM Bundles", "Lifecycle-manager upgrade bundles."),
+)
 
-    One :class:`OperationGroup` per entry in :data:`SDDC_CORE_GROUPS`
-    (``review_status='enabled'``), one :class:`EndpointDescriptor` per entry
-    in :data:`SDDC_CORE_OPS` (``is_enabled=True``, ``source_kind='ingested'``,
-    ``handler_ref=None``).
+#: ``(op_id, group_key)`` for each ingested browse-breadth SDDC Manager read op.
+_SDDC_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/v1/releases/system", "sddc-releases"),
+    ("GET:/v1/domains/{id}", "sddc-domains"),
+    ("GET:/v1/network-pools", "sddc-network-pools"),
+    ("GET:/v1/bundles", "sddc-bundles"),
+)
+
+#: Op ids the SDDC Manager dispatch/e2e tests parametrize over (relocated from
+#: ``tuple(op.op_id for op in SDDC_CORE_OPS)``).
+SDDC_CANARY_CORE_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _SDDC_SEED_OPS)
+
+
+async def _insert_sddc_descriptors(*, enabled: bool = True) -> None:
+    """Seed the 4 ingested SDDC Manager browse-breadth ops + their groups.
+
+    One :class:`OperationGroup` per entry in :data:`_SDDC_SEED_GROUPS`,
+    one :class:`EndpointDescriptor` per entry in :data:`_SDDC_SEED_OPS`
+    (``source_kind='ingested'``, ``handler_ref=None``).
+
+    *enabled* controls the rows' initial dispatchability. The default
+    (``True``, ``review_status='enabled'``) is the ready-to-dispatch
+    posture the e2e / smoke fixtures need. Pass ``enabled=False``
+    (``review_status='staged'``, ``is_enabled=False``) to model a fresh
+    post-ingest catalog whose reads have not been enabled yet — the input
+    state for the ``enable_reads`` round-trip that replaced the retired
+    curation applier (#2358).
 
     Rows use ``product=SDDC_PRODUCT="sddc"`` (from
     :func:`parse_connector_id("sddc-rest-9.0")`), not the connector class's
     ``product="sddc"``. The target row uses ``product="sddc"``
     so the resolver finds :class:`SddcManagerConnector`.
     """
+    review_status = "enabled" if enabled else "staged"
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
     async with sessionmaker() as session:
-        for group in SDDC_CORE_GROUPS:
+        for group_key, name, when_to_use in _SDDC_SEED_GROUPS:
             group_row = OperationGroup(
                 tenant_id=None,
                 product=SDDC_PRODUCT,
                 version=SDDC_VERSION,
                 impl_id=SDDC_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
-                review_status="enabled",
+                group_key=group_key,
+                name=name,
+                when_to_use=when_to_use,
+                review_status=review_status,
             )
             session.add(group_row)
             await session.flush()
-            group_ids[group.group_key] = group_row.id
+            group_ids[group_key] = group_row.id
 
-        for op in SDDC_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _SDDC_SEED_OPS:
+            method, path = op_id.split(":", 1)
             descriptor = EndpointDescriptor(
                 tenant_id=None,
                 product=SDDC_PRODUCT,
                 version=SDDC_VERSION,
                 impl_id=SDDC_IMPL_ID,
-                op_id=op.op_id,
+                op_id=op_id,
                 source_kind="ingested",
                 method=method,
                 path=path,
                 handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"SDDC Manager core op {op.op_id} (curated read).",
-                description=f"SDDC Manager core op {op.op_id} (curated read).",
+                group_id=group_ids[group_key],
+                summary=f"SDDC Manager ingested read op {op_id}.",
+                description=f"SDDC Manager ingested read op {op_id}.",
                 parameter_schema=_param_schema_for(path),
                 response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
+                llm_instructions=None,
                 safety_level="safe",
                 requires_approval=False,
-                is_enabled=True,
+                is_enabled=enabled,
                 tags=["spec:sddc-manager-9.0/api.yaml"],
             )
             session.add(descriptor)
+
+        # The JSONFlux force-handle test dispatches the ingested
+        # ``GET:/v1/hosts`` breadth op. Since #2306 promoted hosts to a
+        # first-class typed op (``sddc.host.list``), the ingested row is no
+        # longer part of the browse-breadth _SDDC_SEED_OPS set -- but it still
+        # exists as browse breadth. Seed it explicitly (ungrouped) so the
+        # JSONFlux test exercises the ingested-breadth surface, proving the two
+        # surfaces coexist without shadowing.
+        if SDDC_FORCE_HANDLE_LIST_OP_ID not in {op_id for op_id, _ in _SDDC_SEED_OPS}:
+            force_method, force_path = SDDC_FORCE_HANDLE_LIST_OP_ID.split(":", 1)
+            session.add(
+                EndpointDescriptor(
+                    tenant_id=None,
+                    product=SDDC_PRODUCT,
+                    version=SDDC_VERSION,
+                    impl_id=SDDC_IMPL_ID,
+                    op_id=SDDC_FORCE_HANDLE_LIST_OP_ID,
+                    source_kind="ingested",
+                    method=force_method,
+                    path=force_path,
+                    handler_ref=None,
+                    group_id=None,
+                    summary=f"SDDC Manager ingested breadth op {SDDC_FORCE_HANDLE_LIST_OP_ID}.",
+                    description=f"SDDC Manager ingested breadth op {SDDC_FORCE_HANDLE_LIST_OP_ID}.",
+                    parameter_schema=_param_schema_for(force_path),
+                    response_schema={"type": "object"},
+                    llm_instructions=None,
+                    safety_level="safe",
+                    requires_approval=False,
+                    is_enabled=True,
+                    tags=["spec:sddc-manager-9.0/api.yaml"],
+                )
+            )
         await session.commit()
 
 
@@ -373,16 +441,25 @@ async def _sddc_credentials_loader(_target: object, _operator: Operator) -> dict
     return {"username": "sddc-canary-svc", "password": "sddc-canary-pw"}
 
 
-def _register_sddc_routes(mock: respx.MockRouter) -> None:
-    """Register the 9 SDDC Manager read-op routes on *mock*.
+#: The synthetic ``accessToken`` the mocked ``POST /v1/tokens`` mints. Opaque
+#: to the dispatch leg — the tests assert only that requests carry a Bearer
+#: header, not the token value.
+SDDC_CANARY_ACCESS_TOKEN: str = "sddc-canary-access-token"
 
-    SDDC Manager uses HTTP Basic on every request — no session establish
-    call is needed. Each route returns a pre-seeded JSON body matching
-    the rough shape SDDC Manager returns for that path family.
+
+def _register_sddc_routes(mock: respx.MockRouter) -> None:
+    """Register the session-mint route + the SDDC Manager read-op routes on *mock*.
+
+    SDDC Manager is token-only: the connector first POSTs ``/v1/tokens`` to
+    mint an ``accessToken`` (the ``session_login_token`` scheme, #2290), then
+    sends it as ``Authorization: Bearer`` on each op request. Each route returns
+    a pre-seeded JSON body matching the rough shape SDDC Manager returns for
+    that path family.
 
     The ``GET:/v1/domains/{id}`` route is registered for the specific
     ``domain-mgmt`` id the dispatch smoke test uses as its path parameter.
     """
+    mock.post("/v1/tokens").respond(200, json={"accessToken": SDDC_CANARY_ACCESS_TOKEN})
     mock.get("/v1/releases/system").respond(200, json=SDDC_CANARY_RELEASE)
     mock.get("/v1/sddc-managers").respond(200, json=SDDC_CANARY_MANAGERS)
     mock.get("/v1/domains").respond(200, json=SDDC_CANARY_DOMAINS)
@@ -419,7 +496,7 @@ async def ingested_sddc_canary(
     Setup mirrors :func:`tests.acceptance._nsx_canary_fixtures.ingested_nsx_canary`:
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
-       rows for the 9 curated SDDC Manager core ops.
+       rows for the 4 curated SDDC Manager core ops (plus the hosts breadth row).
     2. Seed a :class:`Target` with ``product="sddc"`` and the
        :data:`SDDC_CANARY_FINGERPRINT` so the resolver binds
        :class:`SddcManagerConnector`.

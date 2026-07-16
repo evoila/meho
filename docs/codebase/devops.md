@@ -20,7 +20,14 @@ resources that make up a running backplane:
 - Service — ClusterIP front-door for the Deployment, target port `http`.
 - Ingress — TLS-enabled external entry with cert-manager annotations.
 - ConfigMap — non-secret env (Keycloak URLs, Vault address, pool sizes,
-  `FORWARDED_ALLOW_IPS` for the uvicorn proxy-header trust list).
+  `FORWARDED_ALLOW_IPS` for the uvicorn proxy-header trust list, and
+  `MEHO_TARGET_SSRF_ALLOWLIST` — the operator-scoped opt-out for the
+  target-destination SSRF guard, set via `config.targetSsrfAllowlist`
+  (v0.20.0; see `docs/codebase/target-ssrf-guard.md`), and
+  `INGEST_JOB_TIMEOUT_SECONDS` — the async ingest-job watchdog budget
+  override, set via `config.ingestJobTimeoutSeconds` (rendered only when
+  non-empty so the default deploy inherits the backend's 30-min ceiling;
+  #2318, see `docs/codebase/spec-ingestion.md`)).
 - ServiceAccount — Pod identity, `automountServiceAccountToken: false`.
 - NetworkPolicy — default-deny ingress + explicit egress allow-list to
   Postgres, Vault, Keycloak, the broadcast subchart, and CoreDNS only.
@@ -109,14 +116,29 @@ deployment path. Consumers mirroring through a private registry override
 
 ### Probes
 
-The Deployment always renders `livenessProbe` and `readinessProbe` against
-the backplane chassis endpoints from G2.1-T2
+The Deployment renders `startupProbe`, `livenessProbe`, and
+`readinessProbe` against the backplane chassis endpoints from G2.1-T2
 (`backend/src/meho_backplane/health.py`):
 
 | Probe | Endpoint | Failure semantics | Default timings (operator-tunable) |
 | --- | --- | --- | --- |
+| `startupProbe` | `/healthz` | Pod **restarts** once the budget is exhausted; disables liveness/readiness until it first passes | `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 30` (30 × 10s = 300s / 5-min first-boot budget) |
 | `livenessProbe` | `/healthz` (always 200 if the process is up) | Pod **restarts** on failure | `initialDelaySeconds: 30`, `periodSeconds: 10`, `timeoutSeconds: 1`, `failureThreshold: 3` |
 | `readinessProbe` | `/ready` (200 only when every registered probe in the readiness registry passes; 503 with an empty registry at the chassis stage) | Pod **removed from Service endpoints**, no restart | `initialDelaySeconds: 5`, `periodSeconds: 5`, `timeoutSeconds: 2`, `failureThreshold: 3` |
+
+The `startupProbe` (Issue #2393) exists because first boot registers the
+full typed-op catalog and preloads the fastembed embedding model inside the
+FastAPI lifespan **before** the app binds `:8000` — ~2-3 minutes, and longer
+on a cold install where the fastembed cache PVC is empty and the model
+weights are downloaded. The kubelet disables the liveness and readiness
+probes until the startup probe first succeeds, so a slow-but-healthy first
+boot no longer trips the short-delay liveness probe into a
+CrashLoopBackOff. The budget is `failureThreshold × periodSeconds` (300s by
+default); once it passes, the liveness probe's fast 30s detection window
+takes over for genuine hang detection. Inflating
+`probes.liveness.initialDelaySeconds` (the old-only lever) is strictly
+worse — it also blinds liveness to a real hang for the whole life of the
+Pod.
 
 The 30-second liveness `initialDelaySeconds` gives the FastAPI app time to
 import, build the JWKS cache, and bind structlog context before the first
@@ -126,12 +148,16 @@ total detection) makes the Pod fall out of rotation promptly when a
 downstream dependency goes flaky, without triggering an unnecessary
 restart of the backplane process itself.
 
-Probes are **always on** — there is no `enabled: false` escape valve.
-Disabling probes would mask startup deadlocks and let an unready Pod
-accept traffic; that tradeoff is never the right call for a governance
-backplane. Every field under `probes.liveness.*` and `probes.readiness.*`
-in `values.yaml` is operator-tunable for environments that need different
-timings.
+Liveness and readiness are **always on** — there is no `enabled: false`
+escape valve. Disabling them would mask startup deadlocks and let an
+unready Pod accept traffic; that tradeoff is never the right call for a
+governance backplane. Every field under `probes.liveness.*`,
+`probes.readiness.*`, and `probes.startup.*` in `values.yaml` is
+operator-tunable for environments that need different timings. The
+`startupProbe` alone is rendered under a `{{- with .Values.probes.startup }}`
+guard so an operator on a fast cluster can opt out by clearing
+`probes.startup` (e.g. `--set probes.startup=null`); it ships defaulted-on
+because slow first boots are the common case.
 
 The `/ready` endpoint **returns 503 by design** until G2.2 (Vault /
 Keycloak probes) and G2.3 (Alembic migration probe) register concrete
@@ -217,10 +243,21 @@ Pod spec:
   garbage-collection backstop: even if `helm uninstall` is delayed, the
   Job + Pod logs are reaped after the configured window (10 minutes by
   default).
-- Same `serviceAccountName`, `imagePullSecrets`, and pod/container
-  `securityContext` as the backplane Deployment (`runAsNonRoot`,
-  `readOnlyRootFilesystem`, `drop: [ALL]`), with `/tmp` mounted as an
-  `emptyDir` to keep the read-only root invariant.
+- **No `serviceAccountName`** — unlike the backplane Deployment, the Job
+  deliberately omits it (#2391). As a `pre-install,pre-upgrade` hook the
+  Job is scheduled *before* Helm creates the chart's normal (non-hook)
+  resources, so referencing the chart-managed `meho` ServiceAccount here
+  deadlocks a fresh `helm install` (`serviceaccount "meho" not found` on
+  every admission attempt until the release times out). The runner needs
+  no Kubernetes API access, so the pod falls back to the namespace
+  `default` SA and — with `automountServiceAccountToken: false` — mounts
+  no token. Annotating the shared `meho` SA as a hook is *not* the fix:
+  it backs the running Deployment and a hook-delete-policy would delete
+  it out from under that Deployment.
+- Same `imagePullSecrets` and pod/container `securityContext` as the
+  backplane Deployment (`runAsNonRoot`, `readOnlyRootFilesystem`,
+  `drop: [ALL]`), with `/tmp` mounted as an `emptyDir` to keep the
+  read-only root invariant.
 - `envFrom` reuses the backplane's ConfigMap so any Alembic-relevant env
   vars (pool sizes, timeouts) stay in lock-step; `DATABASE_URL` is
   pulled from `Values.postgres.credentialsSecret` at the `url` key
@@ -232,6 +269,20 @@ never created against an unmigrated schema. The failed Job is left in
 the namespace; `kubectl logs -n <ns> job/<release>-meho-migrate` shows
 the Alembic error (rendered to stderr by the runner as
 `migration_failed: <ExcClass>: <msg>`).
+
+**pgvector superuser prerequisite (cold install).** Revision `0003`
+(`backend/alembic/versions/0003_create_documents_with_pgvector.py`) runs
+`CREATE EXTENSION IF NOT EXISTS vector`, which PostgreSQL only allows a
+**superuser** to execute (the `vector` extension is not marked trusted).
+The migration Job runs under the app-role `DATABASE_URL`, so a **cold**
+install against a least-privilege role fails at this step with
+`permission denied to create extension "vector"`. The extension must be
+pre-created once by a superuser (or bootstrapped via CNPG
+`postInitSQL`) — see the `deploy/values-examples/README.md` § *pgvector
+extension prerequisite* and the recorded decision at
+`docs/decisions/pgvector-superuser-prerequisite.md` (which rejects a
+dedicated `migrationSuperuserDsn` chart value in favour of the documented
+prerequisite). The chart does **not** ship a superuser migration DSN.
 
 ### Broadcast subchart (`charts/broadcast/`)
 
@@ -312,10 +363,10 @@ values overlay:
 | `ingress.host` | Per-environment; no generic placeholder is correct. Required only when `ingress.enabled: true` (the default) — relaxed when ingress is disabled |
 | `ingress.tls.secretName` | Per-environment Secret name (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true |
 | `postgres.credentialsSecret` | Per-environment Secret holding `DATABASE_URL` (ESO-synced from Vault in production) |
-| `vault.address` | Per-environment Vault endpoint |
+| `vault.address` | Per-environment Vault endpoint. Required only when `config.credentialBackend: vault` (the default) — a `gsm` install leaves it blank (#2231) |
 | `keycloak.issuer` | Per-environment Keycloak issuer URL |
-| `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract) |
-| `config.backplaneUrl` / `config.mcpResourceUri` | G0.8-T4 (#633). Blank by design: for the common ingress-fronted deploy the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` via the `meho.backplaneUrl` / `meho.mcpResourceUri` helpers, so the `/mcp` audience resolves without operator action. Set explicitly only when the public URL differs from the Ingress host, or for a non-default MCP mount. When neither resolves (no ingress, nothing set) the backend fails loudly at startup with the remediation rather than serving a dark `/mcp` (`_assert_mcp_resource_uri_configured` in `main.py`). The operator must still add a matching Keycloak `oidc-audience-mapper` — see `docs/cross-repo/mcp-client-setup.md` Step 1 |
+| `config.keycloakIssuerUrl` / `config.keycloakAudience` / `config.vaultAddr` | ConfigMap env-var mirrors of the above (`backend/src/meho_backplane/settings.py` contract). `config.vaultAddr` is required-when-`credentialBackend: vault`, like `vault.address` |
+| `config.backplaneUrl` / `config.mcpResourceUri` | G0.8-T4 (#633). Blank by design: for the common ingress-fronted deploy the chart derives `BACKPLANE_URL=https://<ingress.host>` (scheme follows `ingress.tls.enabled`) and `MCP_RESOURCE_URI=${BACKPLANE_URL}/mcp` via the `meho.backplaneUrl` / `meho.mcpResourceUri` helpers, so the `/mcp` audience resolves without operator action. Set explicitly only when the public URL differs from the Ingress host, or for a non-default MCP mount. When neither resolves (no ingress / empty host, nothing set) the chart `fail`s at `helm template` / `helm install` time with an actionable message naming `config.backplaneUrl` / `config.mcpResourceUri` / `ingress.host` (#2394, in `templates/configmap.yaml`) instead of rendering an empty audience and letting the pod crash-loop at startup on `audience_not_configured` (`_assert_mcp_resource_uri_configured` in `main.py`, still the runtime backstop). There is no `allowNoMcpResourceUri` escape hatch — for a deliberate MCP-less bring-up before ingress/DNS exists, set a placeholder `config.backplaneUrl`; `/mcp` stays per-request fail-closed regardless. The operator must still add a matching Keycloak `oidc-audience-mapper` — see `docs/cross-repo/mcp-client-setup.md` Step 1 |
 | `networkPolicy.{postgres,vault,keycloak}CIDR` | Per-environment subnet for each upstream. Required only when `networkPolicy.enabled: true` (the default) — relaxed when networkPolicy is disabled |
 
 A blank field falls into the typed-schema contract immediately — `helm
@@ -342,11 +393,13 @@ them).
 | `ingress.host` | string (`hostname`) | External hostname the chart publishes. Required only when `ingress.enabled: true` (default); skipped when ingress is disabled. |
 | `ingress.tls.secretName` | string | TLS Secret (cert-manager-managed or pre-provisioned). Required only when both `ingress.enabled` and `ingress.tls.enabled` are true. |
 | `postgres.credentialsSecret` | string | Kubernetes Secret holding `DATABASE_URL` at key `url`. |
-| `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. |
+| `vault.address` | string (`uri`) | Vault endpoint, e.g. `https://vault.example.org`. Required only when `config.credentialBackend: vault` (the default); a `gsm` install leaves it blank (#2231). |
 | `keycloak.issuer` | string (`uri`) | Keycloak issuer URL (used for `iss` validation + JWKS discovery). |
 | `config.keycloakIssuerUrl` | string | ConfigMap mirror of the above; consumed by the backplane env. |
 | `config.keycloakAudience` | string | Keycloak client ID fronting the backplane. |
-| `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. |
+| `config.vaultAddr` | string (`uri`) | ConfigMap mirror of `vault.address`. Required-when-`credentialBackend: vault`, like `vault.address`. |
+| `config.credentialBackend` | enum `vault` \| `gsm` | Credential backend a schemeless target `secret_ref` and the `/api/v1/health` federation proof resolve through (#2227). Default `vault` (rendered `CREDENTIAL_BACKEND`). `vault` requires `vault.address` + `config.vaultAddr`; `gsm` requires `gsm.enabled: true` + `gsm.project` (root-level `allOf` conditional). |
+| `gsm.enabled` / `gsm.project` | boolean / string | GSM credential backend (#2227). Required (`enabled: true` + non-empty `project`) only when `config.credentialBackend: gsm`; inert on a Vault install. Runtime values the backplane reads are `config.gsmProject` (`GSM_PROJECT`) + optional `config.gsmImpersonateSa` (`GSM_IMPERSONATE_SA`). The `gsm.workloadIdentityFederation.*` keys are inert Phase-2 (#2232) stubs. See `deploy/values-examples/values-gsm-example.yaml`. |
 | `networkPolicy.postgresCIDR` | CIDR (IPv4) | Egress CIDR; pattern-validated. Required only when `networkPolicy.enabled: true` (default). |
 | `networkPolicy.vaultCIDR` | CIDR (IPv4) | Same. |
 | `networkPolicy.keycloakCIDR` | CIDR (IPv4) | Same. |
@@ -361,11 +414,13 @@ them).
 | `service.type` / `service.port` | `ClusterIP` / `8000` | Service shape. |
 | `ingress.className` | `""` | Cluster default IngressClass when empty. |
 | `probes.liveness.*` / `probes.readiness.*` | `/healthz` / `/ready` httpGet + tuned timings | Operator-tunable; never disabled. |
+| `probes.startup.*` | `/healthz` httpGet + 5-min first-boot budget (#2393) | Operator-tunable; defaulted-on, opt-out by clearing `probes.startup`. Gates liveness/readiness through catalog registration + fastembed preload. |
 | `resources.requests` / `resources.limits` | `100m`/`256Mi` / `1000m`/`1Gi` | Conservative chassis baselines. |
 | `networkPolicy.ingressControllerNamespace` | `ingress-nginx` | RKE2 default; override per cluster. |
 | `audit.postgresOnly` | `true` | Postgres-only audit sink baseline. |
 | `broadcast.enabled` | `true` | Deploys the bundled Valkey broadcast subchart. |
 | `connectors.enabled` | `[]` | Opt-in list; pick from the shipped connector catalog (see [`docs/architecture/connectors.md`](../architecture/connectors.md) — VMware/VCF, NSX, Kubernetes, Vault, Harbor, Keycloak, ArgoCD, GCloud, BIND9, pfSense, and more). |
+| `config.ingestJobTimeoutSeconds` | `""` | Async ingest-job watchdog budget override, in seconds (#2318, hardens #2275). Empty (default) omits `INGEST_JOB_TIMEOUT_SECONDS` so the backend's built-in 30-min ceiling applies; set a positive number to raise it for a slow shared executor / large spec fleet. Set via a values file or `--set-string` (bare `--set` coerces to a number and fails the `type: string` schema — as with every `*Seconds` knob here). Non-finite (`inf`/`nan`), non-positive, or malformed values are rejected at the backend (warn + fall back to 30 min), so the watchdog can never be disabled. |
 
 ### `values.schema.json` typed contract
 

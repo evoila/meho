@@ -7,11 +7,11 @@ Two NSX acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.nsx.NsxConnector` instance with a
 stub session loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 9 curated
+:class:`~meho_backplane.db.models.Target` row, the ingested browse-breadth
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.nsx.core_ops.NSX_CORE_OPS`, and a
-:mod:`respx`-mocked NSX REST surface answering both the session-
-establish call and every read op the connector dispatches against.
+:data:`_NSX_SEED_OPS`, and a :mod:`respx`-mocked NSX REST surface answering
+both the session-establish call and every read op the connector dispatches
+against.
 
 Why a minimal direct-insert path (not the full G0.7 canary ingest)
 ==================================================================
@@ -25,10 +25,10 @@ PR body for #614); until the NSX specs are wired to the meho-runners
 pool, the dispatch leg can still be exercised against a minimal
 direct-insert path.
 
-This module inserts the 9 curated NSX-core
+This module inserts the ingested NSX browse-breadth
 :class:`EndpointDescriptor` rows with hand-authored ``method`` /
-``path`` triples (sourced from :mod:`meho_backplane.connectors.nsx.core_ops`),
-seeds one enabled :class:`OperationGroup` per curated group_key,
+``path`` triples (from :data:`_NSX_SEED_OPS`),
+seeds one enabled :class:`OperationGroup` per group_key,
 opens a respx router for the canary's NSX manager URL, and yields a
 small :class:`IngestedNsxCanary` bundle the dispatch tests consume.
 
@@ -61,8 +61,6 @@ import respx
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.nsx import (
     NSX_CONNECTOR_ID,
-    NSX_CORE_GROUPS,
-    NSX_CORE_OPS,
     NSX_IMPL_ID,
     NSX_PRODUCT,
     NSX_VERSION,
@@ -83,6 +81,7 @@ _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 
 __all__ = [
     "NSX_CANARY_BASE_URL",
+    "NSX_CANARY_CORE_OP_IDS",
     "NSX_CANARY_FINGERPRINT",
     "NSX_CANARY_OPERATOR_TENANT",
     "NSX_CANARY_SEGMENTS",
@@ -216,52 +215,86 @@ class IngestedNsxCanary:
     base_url: str
 
 
-async def _insert_nsx_descriptors() -> None:
-    """Seed the 9 curated NSX core ops + their groups as enabled rows.
+#: Ingested browse-breadth seed data for the NSX dispatch canary — the five
+#: ``source_kind="ingested"`` read ops (and their four groups) declined from
+#: typed conversion on #2302 but kept browsable. Relocated here from the
+#: retired ``nsx.core_ops`` curation apparatus (#2358): this is test-only
+#: fixture material describing the ``EndpointDescriptor`` rows the dispatch
+#: tests seed and mock. ``(group_key, name, when_to_use)``.
+_NSX_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("manager-transport-nodes", "NSX Transport Nodes", "Transport-node fabric inventory."),
+    ("policy-segments", "NSX Segments", "Policy overlay/VLAN segments."),
+    ("policy-tier0", "NSX Tier-0 Gateways", "Tier-0 gateway inventory."),
+    (
+        "policy-firewall",
+        "NSX Distributed Firewall",
+        "Distributed-firewall security policies + rules.",
+    ),
+)
 
-    One :class:`OperationGroup` per entry in
-    :data:`~meho_backplane.connectors.nsx.core_ops.NSX_CORE_GROUPS`
+#: ``(op_id, group_key)`` for each ingested browse-breadth NSX read op. Two ops
+#: share the ``policy-firewall`` group (security-policies + their rules).
+_NSX_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/api/v1/transport-nodes", "manager-transport-nodes"),
+    ("GET:/policy/api/v1/infra/segments", "policy-segments"),
+    ("GET:/policy/api/v1/infra/tier-0s", "policy-tier0"),
+    ("GET:/policy/api/v1/infra/domains/{domain-id}/security-policies", "policy-firewall"),
+    (
+        "GET:/policy/api/v1/infra/domains/{domain-id}/security-policies/{security-policy-id}/rules",
+        "policy-firewall",
+    ),
+)
+
+#: Op ids the NSX dispatch/e2e/smoke tests parametrize over (relocated from
+#: ``tuple(op.op_id for op in NSX_CORE_OPS)``).
+NSX_CANARY_CORE_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _NSX_SEED_OPS)
+
+
+async def _insert_nsx_descriptors() -> None:
+    """Seed the ingested NSX browse-breadth ops + their groups as enabled rows.
+
+    One :class:`OperationGroup` per entry in :data:`_NSX_SEED_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor`
-    per entry in :data:`~meho_backplane.connectors.nsx.core_ops.NSX_CORE_OPS`
+    per entry in :data:`_NSX_SEED_OPS`
     (``is_enabled=True``, ``source_kind='ingested'``, ``handler_ref=None``).
 
-    Two ops in :data:`NSX_CORE_OPS` reference the same ``policy-firewall``
+    Two ops in :data:`_NSX_SEED_OPS` reference the same ``policy-firewall``
     group; the helper coalesces those into one inserted group row so
     the FK to ``operation_group.id`` resolves correctly on both ops.
     """
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
     async with sessionmaker() as session:
-        for group in NSX_CORE_GROUPS:
+        for group_key, name, when_to_use in _NSX_SEED_GROUPS:
             group_row = OperationGroup(
                 tenant_id=None,
                 product=NSX_PRODUCT,
                 version=NSX_VERSION,
                 impl_id=NSX_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
+                group_key=group_key,
+                name=name,
+                when_to_use=when_to_use,
                 review_status="enabled",
             )
             session.add(group_row)
             await session.flush()
-            group_ids[group.group_key] = group_row.id
+            group_ids[group_key] = group_row.id
 
-        for op in NSX_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _NSX_SEED_OPS:
+            method, path = op_id.split(":", 1)
             descriptor = EndpointDescriptor(
                 tenant_id=None,
                 product=NSX_PRODUCT,
                 version=NSX_VERSION,
                 impl_id=NSX_IMPL_ID,
-                op_id=op.op_id,
+                op_id=op_id,
                 source_kind="ingested",
                 method=method,
                 path=path,
                 handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"NSX core op {op.op_id} (curated read).",
-                description=f"NSX core op {op.op_id} (curated read).",
+                group_id=group_ids[group_key],
+                summary=f"NSX ingested read op {op_id}.",
+                description=f"NSX ingested read op {op_id}.",
                 # ``x-meho-param-loc='path'`` declares which params the
                 # dispatcher's ``_split_ingested_params`` routes to URL
                 # template substitution. The G0.7 ingestion pipeline
@@ -272,7 +305,7 @@ async def _insert_nsx_descriptors() -> None:
                 # ``{security-policy-id}`` placeholders correctly.
                 parameter_schema=_param_schema_for(path),
                 response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
+                llm_instructions=None,
                 safety_level="safe",
                 requires_approval=False,
                 is_enabled=True,
@@ -483,7 +516,7 @@ async def ingested_nsx_canary(
     Setup steps mirror :func:`tests.acceptance._canary_fixtures.ingested_canary_vcsim`:
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
-       rows for the 9 curated NSX core ops.
+       rows for the curated NSX core ops.
     2. Seed a :class:`Target` carrying the :data:`NSX_CANARY_FINGERPRINT`
        so the resolver binds :class:`NsxConnector` (version 9.0 fits
        its ``">=4.0,<10.0"`` advertisement).

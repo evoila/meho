@@ -27,6 +27,12 @@ The pipeline is broken into work items per Initiative #389:
   registry on first ingest of a `(product, version, impl_id)` triple;
   the shim raises `NotImplementedError` on `auth_headers` / `execute`
   until a per-G3.x Initiative replaces it with a hand-coded subclass.
+  Commits **once per register call** — the whole spec is one unit of
+  work, so a crash mid-batch rolls the helper-owned session back to
+  zero rows instead of stranding retry-blocking debris (#2273); the
+  embed pass runs inside that transaction, and the process-local
+  auto-shim (not part of the DB transaction) survives the rollback as
+  an idempotent zero-op stub.
 * **T3 — LLM-summarised grouping** (`ingest/llm_groups.py` +
   `ingest/_llm_grouping_internals.py` + `ingest/prompts/`). Two-pass
   LLM run: (1) propose 8–15 groups from the full op list, (2) assign
@@ -383,6 +389,27 @@ synchronously (no regression for small-spec / CI callers). This
 parallels the `meho.agents.run` + `meho.agents.run_status` async
 precedent (#811).
 
+**Inline spec content on the MCP tool (#2326).** Each `specs[*]` entry
+on `meho.connector.ingest` carries a required `uri` (the audit label)
+and an optional `content` string. When `content` is set the handler
+passes it straight to `SpecSource(uri=…, content=…)`, so the pipeline
+uses the inline bytes verbatim and skips the fetch — the same
+`SpecSource.content` on-ramp the CLI upload uses (`meho connector ingest
+--spec file://… / docs:…` reads the file client-side and posts the bytes
+here, #1535). Before this, the MCP tool schema required a `uri`-only
+entry and a `file://` / `docs:` scheme was rejected by the fetch-path
+https guard, forcing agent-driven flows to publish private lab specs to
+a public gist purely to satisfy the fetcher. Inline content bypasses the
+fetcher entirely, so it adds no SSRF surface (strictly safer than the
+gist workaround it retires) and lets an appliance-served or
+hand-authored spec with no public https URL (NSX, VCFA) be ingested over
+a fully MCP-drivable flow. The `uri` stays the audit label the origin
+classification reads (a non-`spec:` label with inline content →
+`inline`), so the resulting L1/L2 rows match what the CLI upload of the
+same file produces. A `file://` on a **content-less** `uri` is still
+rejected — inline content is the private-spec path, not a co-located
+filesystem fetch (a separate deployment-topology question).
+
 The `ingest` handler additionally maps **every typed `SpecError`
 sibling** to JSON-RPC `-32602 Invalid Params` with the structured
 detail on `error.data` **on the inline path**: `VersionMismatchError`
@@ -621,6 +648,83 @@ tri-state to match: a `"bare"` resolve still yields the
 enable — not the stamp — is what cleared the review gate and made the op
 callable. Both advisories decorate a write that already landed; neither
 blocks it.
+
+**Boot-time stamping (#2288).** `record_profile_stamp` had no production
+caller until #2288 — shipped profile-backed rows were boot-validated
+package data that never became connector classes.
+`stamp_catalog_profiled_connectors()` (`ingest/boot_stamp.py`) is the
+production wiring: the lifespan calls it once, immediately after
+`validate_shipped_artifacts()`, so every catalog row carrying a
+`profile_resource` registers a `ProfiledRestConnector` (synthesised from
+the already-validated profile by `synthesise_profiled_class`) under the
+built-in (`tenant_id=None`) scope. It runs as a synthetic
+`system:boot-profile-stamp` operator and does **no** network I/O (it only
+re-parses the package-data bytes the boot validator already read). The
+result: a fresh deploy has profiled connector classes registered and
+resolvable for every profile-backed row, with dispatch still behind the
+per-op review gate above (stamping never enables an op).
+
+The path is idempotent and gated by construction: a `(product, version,
+impl_id)` triple already served by a hand-coded class (vmware's
+`VmwareRestConnector`, sddc's `SddcManagerConnector`) — or an already-
+stamped profiled class — no-ops (logged at debug, not an error), because
+`record_profile_stamp` refuses to overwrite an occupied triple. The
+synthesised class's triple is derived from the connector_id
+(`parse_connector_id`), not the catalog's raw `product`, so it agrees with
+the registry key `record_profile_stamp` lands it under even when the raw
+product does not round-trip (the `_fixture` mechanism row parses to
+`fixture`). A malformed profile has already crashed the lifespan at
+`validate_shipped_artifacts()`; the stamp path re-parses with the same
+model, so it stays fail-closed as a second line of defence.
+
+### Operator-selectable auth scheme on a non-catalog ingest (#2289)
+
+Boot stamping (above) makes a *shipped* profile-backed catalog row
+dispatchable. `#2289` is the **non-catalog on-ramp**: an operator ingesting an
+arbitrary spec may *select* a named auth scheme at creation time, and the
+register phase synthesises a minimal `ExecutionProfile` and stamps the same
+`ProfiledRestConnector` under the triple — so a hand-authored spec becomes
+dispatchable without a hand-coded connector class.
+
+The selection is exposed on all three surfaces as two optional fields:
+
+* REST — `IngestRequest.auth_scheme` (+ `auth_secret_fields`) in
+  `ingest/api_schemas.py`.
+* MCP — the `auth_scheme` / `auth_secret_fields` properties on the
+  `meho.connector.ingest` tool schema (`mcp/tools/connector_ingest.py`).
+* CLI — `meho connector ingest --auth-scheme <name> [--auth-secret-field
+  <name> ...]` (`cli/internal/cmd/connector/ingest.go`).
+
+`auth_scheme` is a member of the **closed** `AuthSchemeName` catalog
+(`connectors/profile.py`): `basic`, `static_header`, `session_login`,
+`session_login_basic`, `session_login_token`, `oauth2_mint`. The Pydantic
+`Literal` rejects an unknown value **and every reserved typed-only shape**
+(`github_app_jwt`, `kubeconfig`, `cookie_jar_session`, …) with a 422 closed-set
+error naming the allowed members, at the API boundary.
+
+**The boundary (Initiative #2271, grounded in #1177 / Goal #1964 Non-goals) is
+selection only.** The operator picks *which* vetted scheme (and optionally the
+NAMES of the secret-bundle keys it reads); there is **no** free-form auth
+config — no login URL, body template, token JSONPath, or header name. The login
+path, request body shape, and token extractor for each scheme are vetted Python
+selected by the scheme name in `_shared/profile_auth.py::SESSION_SCHEME_SPECS`.
+Adding a new auth shape is a scheme PR (a new `Literal` member + a reviewed
+extractor + coverage-trace update), never a request knob. The secret *values*
+are never carried in the ingest request — `auth_secret_fields` is field NAMES
+only, resolved from the target's `secret_ref` by the broker at dispatch.
+
+Wiring: `IngestionPipelineService.ingest(auth_scheme=…, auth_secret_fields=…)`
+builds the profile via `ingest/ingest_profile.py::build_ingest_execution_profile`
+(per-scheme secret-field defaults in `DEFAULT_SECRET_FIELDS`; conservative
+fingerprint/`delegate`-probe/`none`-pagination defaults, since a non-catalog
+ingest names no version endpoint). The register phase then skips the bare shim
+(`register_ingested_operations(register_shim=False)`) so the triple is free, and
+`_stamp_profiled_connector` stamps the synthesised class through the same
+`record_profile_stamp` seam boot stamping uses. **Stamping never enables an
+op** — the `review_status='staged'` gate (#1971) stays the interlock, so the
+connector lands dispatchable-but-unreviewed (`kind="profiled-but-unreviewed"`)
+and the operator clears the gate per-op via the normal review/enable flow.
+Omitting `auth_scheme` keeps the historical bare-shim behaviour byte-identical.
 
 ### Authoring-mode `kind` on the list / review surfaces (G0.28-T6 #1979)
 
@@ -1103,6 +1207,66 @@ open to `succeeded` (a transient DB blip must not strand or degrade a
 completed pipeline). Regression coverage:
 `tests/test_operations_ingest_jobs.py`.
 
+#### Watchdog: a job always reaches a terminal state (#2275)
+
+The dispatchability postcondition and the `except BaseException`
+boundary only guarantee terminality for a pipeline that *returns or
+raises*. A pipeline that **never completes an await** — a starved
+`asyncio.to_thread` executor, a DB connection that never acquires, or a
+grouping LLM call pending on the Anthropic SDK's default 10-min-read ×
+2-retry ceiling (~30 min wall-clock) — left the job at `running` until a
+pod restart cleared the in-memory registry, while the identical *sync*
+request returned a clean 4xx. `run_ingest_job` now time-boxes the whole
+body — the pipeline call **and** the post-run dispatchability probe (a
+real `connector_exists` DB read whose own hang would strand the job if
+only the pipeline call were wrapped) — inside
+`async with asyncio.timeout(_INGEST_JOB_TIMEOUT_SECONDS)`. At the
+deadline the body is cancelled and `asyncio.timeout` re-raises
+`TimeoutError`, which the existing `except` routes to `failed`
+(`error_class="TimeoutError"`). The budget defaults to 30 min and is
+env-overridable via `INGEST_JOB_TIMEOUT_SECONDS` — surfaced as the typed
+Helm value `config.ingestJobTimeoutSeconds` (#2318), rendered onto the
+backplane ConfigMap only when set so the default deploy inherits the
+30-min default silently rather than an empty `float("")` that would warn
+every boot. The value is parsed defensively: a malformed, non-finite
+(`inf` / `nan`), or non-positive budget falls back to the default with a
+warning rather than crashing the package at import. The non-finite guard
+is load-bearing, not padding — `float("inf")` / `float("nan")` raise no
+`ValueError` and slip past a bare `value <= 0` check (`inf <= 0` is
+`False`; every `nan` comparison is `False`), and `asyncio.timeout(inf)`
+schedules no deadline, so without the `math.isfinite` guard a
+misconfigured budget would silently re-open this very wedge (#2318). The
+guarantee is scoped precisely to
+the *job leg*: cancellation cannot interrupt an already-running
+`to_thread` OS thread (Python exposes no thread cancellation), so the
+status flips but that thread may linger until it returns.
+
+Two supporting bounds close the same wedge:
+
+* **LLM client bounds.** `build_anthropic_ingest_llm_client`
+  (`ingest/anthropic_client.py`) constructs the grouping
+  `AsyncAnthropic` with an explicit `timeout` + `max_retries`
+  (`_INGEST_LLM_TIMEOUT_SECONDS` = 120 s, `_INGEST_LLM_MAX_RETRIES` = 1)
+  instead of the SDK defaults, so a hung grouping call fails the request
+  fast rather than silently consuming the watchdog budget. The
+  fail-closed 503 contract for a missing key (#1386) is unchanged.
+* **Job-id log correlation.** `run_ingest_job` binds `ingest_job_id`
+  into structlog *contextvars* (`bound_contextvars`), not just a local
+  `_log.bind`. The pipeline binds its own `connector_id` logger and never
+  sees the job id, so before this a job-id-filtered log grep was
+  structurally blind to every pipeline event; the configured
+  `merge_contextvars` processor (`logging.py`) now stamps `ingest_job_id`
+  onto `ingestion_pipeline_start` &c. A future wedge is diagnosable from
+  those events plus a `py-spy` dump against the named
+  `ingest-job-<uuid>` task.
+
+Regression coverage: `tests/test_operations_ingest_jobs.py`
+(`test_wedged_pipeline_times_out_to_failed`,
+`test_wedged_dispatchability_probe_times_out_to_failed`,
+`test_pipeline_log_event_carries_ingest_job_id`) and
+`tests/test_operations_ingest_anthropic_client.py`
+(`test_factory_constructs_client_with_explicit_timeout_and_retries`).
+
 If `load_catalog()` raises `CatalogError` at listing time (only
 possible mid-test-monkeypatch or mid-reload — startup parse failures
 crash the lifespan), the helper degrades to the manual-mode
@@ -1304,11 +1468,68 @@ for the operator-facing framing.
 The only public entry point for the full walk. Resolves the input
 (file path or `http(s)://` URL via `httpx`), sniffs YAML vs JSON via
 `detect_spec_format`, decodes, validates the OpenAPI version
-(3.0.x / 3.1.x), and walks `paths`. Returns a list.
+(3.0.x / 3.1.x), validates the document against the official OpenAPI
+metaschema (`_validate_openapi_structure`), and walks `paths`. Returns a
+list.
 
 The function is synchronous because callers are CLI / one-shot
 ingestion endpoints that have no in-flight event loop concern. It
 also keeps the surface trivially testable.
+
+**YAML scalar typing (#2272).** The YAML leg decodes with
+`_SpecYamlLoader`, a `CSafeLoader` / `SafeLoader` subclass that overrides
+the YAML 1.1 implicit `timestamp` resolver to hand back the scalar's raw
+text. Without it an unquoted `example: 2000-01-23T04:56:07.000+00:00`
+constructs a `datetime` (and a date-only `2024-01-15` a `date`) that
+rides verbatim into the `parameter_schema` / `response_schema` JSON(B)
+columns and crashes `session.flush()` with `Object of type datetime is
+not JSON serializable` (the engine sets no `json_serializer`, so stdlib
+`json.dumps` runs). OAS 3.1 limits YAML tags to the JSON Schema ruleset,
+which excludes the timestamp tag, so the resolver was over-typing a value
+the author meant as a string. `add_constructor` copies the constructor
+table onto the subclass (PyYAML copy-on-write), leaving the
+`yaml.safe_load` sites elsewhere (catalog / kubeconfig / topology import)
+on the stock resolver. As defence-in-depth, `_build_proto` asserts each
+schema is JSON-serializable at the proto-build boundary both the real and
+`dry_run` legs share, so any non-encodable value (a `!!binary` example,
+say) fails identically — a structured `invalid_schema` 400 at parse time
+— instead of crashing the real INSERT while `dry_run=true` green-lights
+the same spec.
+
+**Structural (metaschema) gate (#2292).** Immediately after the version
+gate, `_validate_openapi_structure` validates the decoded document
+against the official OpenAPI metaschema — the 2020-12-based schema for a
+`3.1.x` document, the draft-04-based schema for `3.0.x` — via
+`openapi-spec-validator`'s pre-built schema validators
+(`openapi_v30_schema_validator` / `openapi_v31_schema_validator`).
+Validation is **metaschema-only**: the library's optional semantic
+add-ons (duplicate-`operationId`, unresolvable-path-parameter,
+extra-parameter) are *not* run, because they routinely flag
+legal-but-untidy vendor specs and this gate judges structure, not style.
+The first (most-relevant) violation is selected with
+`jsonschema.exceptions.best_match` and surfaced as `InvalidSpecError`
+naming the failing JSON path (e.g. `$.paths['/pets'].get.responses`) plus
+the house remediation anchor, so it flows through the existing
+`invalid_spec` envelope on every transport (REST 400, MCP `-32602`,
+async-job `error`) with no new typed field. Because the gate lives at
+parse, a metaschema-invalid document is refused identically on the
+`dry_run` and effectful legs — it can never partially ingest into
+catalog rows of unknown quality. The gate is deliberately narrower than
+"validate everything": the metaschema does not resolve `$ref` targets
+(so cross-document `$ref` rejection stays with the ref resolver
+downstream) and it permits a `3.1` document with `webhooks`/`components`
+but no `paths`, which meho's own `no 'paths' key` check — sitting behind
+the gate — still rejects because meho ingests only path operations. The
+parser's tolerant-skip of sub-document junk (a path item with no verbs,
+a non-dict path item) is unaffected: those shapes are legal per the
+metaschema and are handled in `_iter_operations`.
+
+Boot-time impact: the same gated parser runs in
+`validate_shipped_artifacts` (`catalog.py`, called at `main.py`
+startup), so every shipped package-data spec and catalog `spec_resource`
+must be metaschema-valid or the backplane crashes on start — the guard
+that keeps a malformed shipped artifact from 500-ing the first ingest
+that touches it (Initiative #1966 boot-validation precedent).
 
 `read_spec_info_version(spec_path_or_uri)` is the companion helper
 the G0.9-T8 cross-check uses. It runs the same load / decode /
@@ -1316,6 +1537,47 @@ version-gate steps but returns the spec's `info.version` string
 (or `None` when absent) without walking `paths` — so the
 pipeline can fail the spec-vs-label check in milliseconds rather
 than after spending CPU on a 2,000-op spec walk.
+
+### Spec provenance persistence (#2291)
+
+`parse_openapi_with_provenance(spec_path_or_uri, *, spec_source=None,
+content=None)` is the register phase's variant of `parse_openapi`: it
+returns the same proto list **plus** a `ParsedSpecProvenance` (a frozen
+dataclass with `uri`, `sha256`, `origin`). The bytes are loaded exactly
+once — the `sha256` is taken over the **raw bytes** (fetched body or
+uploaded content) at the `_load_spec_bytes` trust boundary, before any
+YAML/JSON decode, so it reflects exactly what arrived rather than a
+re-serialised dict. `classify_spec_origin(uri, content)` derives the
+origin from what the ingest request already carries — no threading from
+the REST/MCP/CLI entry points:
+
+- `content is None` → `fetched` (the https GET path).
+- `content` set **and** `uri` starts with `spec:` → `shipped` (the
+  catalog on-ramp uploads MEHO-authored package data under
+  `uri="spec:<resource>"`, #1975).
+- `content` set under any other label → `inline` (an operator upload).
+
+The register phase (`IngestionPipeline._register_one_spec`) upserts one
+`spec_provenance` row per accepted spec after its descriptor rows land —
+in its **own** transaction, because provenance is record-and-surface
+metadata and must not roll back the operations it describes. The row is
+keyed on `(tenant_id, product, version, impl_id, uri)` (two partial
+unique indexes, `tenant_id IS NULL` = global, mirroring the descriptor
+scope split), so re-ingesting the same spec updates the row in place
+(new `sha256` + `ingested_at`, no duplicate) and different content under
+the same label changes the stored digest. `upsert_spec_provenance` /
+`load_spec_provenance` live in `ingest/spec_provenance.py`; the
+`SpecProvenance` model is in `db/models.py` (Alembic `0056`).
+
+The review service reads the rows back via `load_spec_provenance` and
+attaches them to `ConnectorReviewPayload.provenance` (a list of
+`ConnectorReviewProvenance`), which `GET
+/api/v1/connectors/{id}/review`, `meho connector review`, and the review
+drawer surface. A connector ingested before the table landed has no
+rows; the surfaces render that as "unknown (pre-provenance)" rather than
+fabricating a record. This is a spec-level table by design: a single
+spec fans out to hundreds of descriptor rows, so per-descriptor
+provenance columns would be the wrong shape.
 
 ## Security: SSRF and local-file guard (G0.16-T8, #95)
 
@@ -1374,15 +1636,17 @@ parse_openapi
 │  ├─ content present       # docs:/file:// bytes uploaded by CLI; no fetch, no guard (#102)
 │  ├─ docs:<...> + no content rejected with UnsupportedSpecError (#1535)
 │  └─ _assert_fetchable_remote_url  # https-only SSRF guard; DNS resolve, IP allowlist
-├─ _decode_spec            # CSafeLoader-preferred YAML, stdlib JSON
+├─ _decode_spec            # YAML via _SpecYamlLoader (timestamp→str, #2272), stdlib JSON
 ├─ _validate_openapi_version
+├─ _validate_openapi_structure  # metaschema gate: refuse invalid 3.x w/ JSON-pointer (#2292)
 └─ _iter_operations
    └─ _build_proto         # per (method, path) verb under paths
       ├─ _build_parameter_schema
       │  ├─ _resolve_shallow_ref      # $ref → #/components/schemas/X
       │  ├─ _build_param_property     # one property per path/query/header
       │  └─ _build_body_property      # requestBody under "body" key
-      └─ _extract_response_schema     # picks 200 > 201 > 202 > ... > 2XX
+      ├─ _extract_response_schema     # picks 200 > 201 > 202 > ... > 2XX
+      └─ _assert_json_serializable    # fail-closed: param/response schema must JSON-encode (#2272)
 ```
 
 `_resolve_shallow_ref` is the load-bearing helper. It inlines exactly
@@ -1676,13 +1940,6 @@ CI / unit tests inject a deterministic stub via
 `IngestionPipelineService(..., llm_client_factory=...)` (or
 `set_llm_client_factory(...)`) so the grouping pass stays hermetic.
 
-The `composite_l2_missing` error envelope
-(`operations/_errors.py:result_composite_l2_missing`) surfaces a
-catalog-ingest command as the escape hatch from a missing L2 sub-op;
-that escape hatch now completes the ingest when the key is set, and
-its envelope text names the `ANTHROPIC_API_KEY` requirement (and the
-503 a keyless deploy still gets) so operators know the prerequisite.
-
 **Out of scope (#1386).** The grouping pass talks to Anthropic
 directly rather than routing through the G11.5 per-tenant model
 resolver (Bedrock / vLLM / VCF PAIF, egress-aware). Ingest grouping is
@@ -1811,6 +2068,13 @@ Both delegate to `ReviewService.delete_connector`
 * **`$ref` drill-down rejected.** Refs that walk into a component's
   sub-tree (`#/components/schemas/X/properties/y`,
   `#/components/parameters/X/schema`) raise `InvalidSchemaError`.
+* **Non-crashing YAML 1.1 over-typings kept as-is.** The implicit
+  `timestamp` resolver is normalised to text (#2272), but other YAML 1.1
+  implicit resolutions in `example:` values — `on`/`off`/`yes`/`no` →
+  bool, sexagesimal `1:30` → `90` — still resolve per YAML 1.1 because
+  they stay JSON-serializable and so never break the descriptor INSERT.
+  A silent-fidelity nit only; file separately if a real spec surfaces a
+  wrong value.
 
 ## References
 

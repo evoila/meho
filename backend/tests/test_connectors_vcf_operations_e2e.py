@@ -8,11 +8,12 @@ Covers all four acceptance criteria from Issue #837:
 (a) All 8 curated vROps read ops dispatch through the full
     ``call_operation`` stack against a respx-mocked vROps appliance
     and return ``status='ok'``.
-(b) HTTP Basic auth path: vROps' ``/suite-api/api/*`` surface is
-    stateless — no session token, no 401-retry. The connector's stub
-    credentials loader is verified to be called (once, then cached)
-    on the first dispatch — mirrors the SDDC Manager Basic-auth
-    posture, not NSX's session-cookie-with-401-retry posture.
+(b) OpsToken session-auth path (#2395): vROps 9.0.2 authenticates on an
+    acquired-token session — the first dispatch POSTs to
+    ``/suite-api/api/auth/token/acquire`` and the connector then presents
+    ``Authorization: OpsToken <token>``. The connector's stub credentials
+    loader is verified to be called (once, then cached) on the first
+    dispatch.
 (c) Audit rows: each dispatch inserts an ``AuditLog`` row carrying
     ``method='DISPATCH'``, a non-null ``target_id``, and a
     ``payload["params_hash"]`` key.
@@ -61,7 +62,6 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_operations import (
     VROPS_CONNECTOR_ID,
-    VROPS_CORE_OPS,
     VROPS_IMPL_ID,
     VROPS_VERSION,
     VcfOperationsConnector,
@@ -76,6 +76,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vrops_canary_fixtures import (
     VROPS_CANARY_BASE_URL,
+    VROPS_CANARY_CORE_OP_IDS,
     VROPS_CANARY_FINGERPRINT,
     VROPS_CANARY_OPERATOR_TENANT,
     VROPS_CANARY_RESOURCES,
@@ -221,7 +222,7 @@ async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator
 
     Lifecycle:
     1. Insert the 8 curated
-       :data:`~meho_backplane.connectors.vcf_operations.VROPS_CORE_OPS`
+       :data:`~tests.acceptance._vrops_canary_fixtures._VROPS_SEED_OPS`
        descriptors + their 7 groups into the per-test SQLite DB.
     2. Seed a :class:`Target` row carrying
        :data:`VROPS_CANARY_FINGERPRINT` so the resolver binds
@@ -257,8 +258,10 @@ async def vcf_operations_e2e_canary(captured_events: list[Any]) -> AsyncIterator
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VROPS_CORE_OPS)
-assert len(_OP_IDS) == 8, f"Expected 8 curated vROps ops, got {len(_OP_IDS)}: {_OP_IDS}"
+_OP_IDS: tuple[str, ...] = VROPS_CANARY_CORE_OP_IDS
+# 6 ingested-browse ops after #2303 moved liveness/alerts/resources-query to
+# the typed surface (tests/test_connectors_vcf_operations_typed_reads.py).
+assert len(_OP_IDS) == 6, f"Expected 6 ingested vROps browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -266,13 +269,12 @@ async def test_vcf_operations_e2e_all_ops_dispatch_ok(
     op_id: str,
     vcf_operations_e2e_canary: _VropsE2EBundle,
 ) -> None:
-    """All 8 vROps core ops dispatch through the full dispatcher and return status='ok'.
+    """All 6 vROps ingested browse ops dispatch through the full dispatcher and return status='ok'.
 
-    Acceptance criterion (a). HTTP Basic auth is computed by the
-    connector's stub credentials loader on first dispatch (then
-    cached); no session-establish step is needed because Basic auth
-    is stateless on the vROps side. The parametrise reports one CI
-    case per op_id for granular failure attribution.
+    Acceptance criterion (a). The connector acquires an OpsToken on the
+    first dispatch (stub credentials loader → ``token/acquire``) and
+    presents it on each read. The parametrise reports one CI case per
+    op_id for granular failure attribution.
     """
     params = _RESOURCE_GET_OP_PARAMS.get(op_id, {})
     result = await call_operation(
@@ -295,17 +297,12 @@ async def test_vcf_operations_e2e_credentials_cached_after_first_dispatch(
 ) -> None:
     """First dispatch loads credentials; subsequent dispatches reuse the cache.
 
-    Acceptance criterion (b). vROps' Basic auth is stateless server-
-    side — there's no session token to refresh and no 401-retry. The
-    only thing the connector caches is the Vault-sourced
+    Acceptance criterion (b). The connector caches the Vault-sourced
     ``{"username": ..., "password": ...}`` mapping behind
-    :class:`CredentialsCache`. Pin the contract: cache empty on
-    first reach, populated after one dispatch, and not re-filled on
-    the second dispatch to the same target.
-
-    Mirrors :func:`test_sddc_e2e_credentials_cached_after_first_dispatch`
-    in the SDDC Manager E2E. NSX's analogue tests a 401-retry loop
-    that doesn't apply to vROps.
+    :class:`CredentialsCache` (and, separately, the acquired OpsToken).
+    Pin the credential-cache contract: cache empty on first reach,
+    populated after one dispatch, and not re-filled on the second
+    dispatch to the same target (the acquired token is likewise reused).
     """
     instance = vcf_operations_e2e_canary.connector_instance
     target_name = vcf_operations_e2e_canary.target_name
@@ -322,7 +319,10 @@ async def test_vcf_operations_e2e_credentials_cached_after_first_dispatch(
         _OPERATOR,
         {
             "connector_id": VROPS_CONNECTOR_ID,
-            "op_id": "GET:/suite-api/api/versions/current",
+            # versions/current + alerts moved to the typed surface (#2303),
+            # so they are no longer seeded as ingested rows here; use another
+            # curated ingested op to exercise the cold credential load.
+            "op_id": "GET:/suite-api/api/alertdefinitions",
             "target": {"name": target_name},
             "params": {},
         },

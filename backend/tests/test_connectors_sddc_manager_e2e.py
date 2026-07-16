@@ -5,12 +5,13 @@
 
 Covers all four acceptance criteria from Issue #618:
 
-(a) All 9 curated SDDC Manager read ops dispatch through the full
+(a) All 4 curated SDDC Manager ingested read ops dispatch through the full
     ``call_operation`` stack against a respx-mocked SDDC Manager
     appliance and return ``status='ok'``.
-(b) HTTP Basic auth path: no 401-retry for SDDC Manager — Basic
-    credentials are stateless. The connector's stub credentials loader
-    is verified to be called (once, then cached) on the first dispatch.
+(b) Token-session auth path: the connector mints a session token at
+    ``POST /v1/tokens`` and reuses it. The connector's stub credentials
+    loader is verified to be called (once, then cached) on the first
+    dispatch.
 (c) Audit rows: each dispatch inserts an ``AuditLog`` row carrying
     ``method='DISPATCH'``, a non-null ``target_id``, and a
     ``payload["params_hash"]`` key.
@@ -42,7 +43,6 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.sddc_manager import (
     SDDC_CONNECTOR_ID,
-    SDDC_CORE_OPS,
     SDDC_IMPL_ID,
     SDDC_VERSION,
     SddcManagerConnector,
@@ -57,6 +57,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._sddc_canary_fixtures import (
     SDDC_CANARY_BASE_URL,
+    SDDC_CANARY_CORE_OP_IDS,
     SDDC_CANARY_FINGERPRINT,
     SDDC_CANARY_HOSTS,
     SDDC_CANARY_OPERATOR_TENANT,
@@ -185,14 +186,15 @@ async def sddc_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_SddcE2EB
     """Dispatcher-ready SDDC Manager setup over a respx-mocked appliance (happy-path).
 
     Lifecycle:
-    1. Insert :data:`~meho_backplane.connectors.sddc_manager.SDDC_CORE_OPS`
-       descriptors + groups into the per-test SQLite DB.
+    1. Insert the ingested browse-breadth SDDC descriptors + groups (from
+       :data:`~tests.acceptance._sddc_canary_fixtures._SDDC_SEED_OPS`)
+       into the per-test SQLite DB.
     2. Seed a :class:`Target` row carrying :data:`SDDC_CANARY_FINGERPRINT`
        so the resolver binds :class:`SddcManagerConnector`.
     3. Resolve + cache the connector instance; patch its
        ``_credentials_loader`` to bypass Vault.
     4. Activate a respx router for :data:`SDDC_CANARY_BASE_URL` and
-       register the 9 read-op routes.
+       register the SDDC Manager read-op routes.
     """
     await _insert_sddc_descriptors()
     seeded_target = await _seed_target()
@@ -219,8 +221,10 @@ async def sddc_e2e_canary(captured_events: list[Any]) -> AsyncIterator[_SddcE2EB
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in SDDC_CORE_OPS)
-assert len(_OP_IDS) == 9, f"Expected 9 curated SDDC Manager ops, got {len(_OP_IDS)}: {_OP_IDS}"
+_OP_IDS: tuple[str, ...] = SDDC_CANARY_CORE_OP_IDS
+assert len(_OP_IDS) == 4, (
+    f"Expected 4 ingested SDDC Manager browse ops, got {len(_OP_IDS)}: {_OP_IDS}"
+)
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -228,11 +232,14 @@ async def test_sddc_e2e_all_ops_dispatch_ok(
     op_id: str,
     sddc_e2e_canary: _SddcE2EBundle,
 ) -> None:
-    """All 9 SDDC Manager core ops dispatch through the full dispatcher and return status='ok'.
+    """All 4 curated SDDC Manager ingested ops dispatch through the full dispatcher (status='ok').
 
-    HTTP Basic auth is computed by the connector's stub credentials loader on
-    first dispatch (then cached); no session-establish step is needed because
-    Basic auth is stateless on the SDDC Manager side.
+    The audited 12-read operational set is now typed ops (#2306); these 4
+    are the browse-breadth curation left in ``core_ops.py``.
+
+    The connector mints a session token at ``POST /v1/tokens`` from the stub
+    credentials loader on first dispatch (then caches both the credentials and
+    the token), and sends it as ``Authorization: Bearer`` on each op request.
     """
     params = _DOMAIN_INFO_OP_PARAMS.get(op_id, {})
     result = await call_operation(
@@ -257,8 +264,9 @@ async def test_sddc_e2e_credentials_cached_after_first_dispatch(
 
     Verifies acceptance criterion (b): the SDDC Manager connector's per-target
     credential cache starts empty, gets populated on the first dispatch, and is
-    not re-filled on the second dispatch to the same target. HTTP Basic is
-    stateless server-side — no session revoke or re-login needed.
+    not re-filled on the second dispatch to the same target (the minted session
+    token is likewise cached, so the second dispatch neither re-loads
+    credentials nor re-mints the token).
     """
     instance = sddc_e2e_canary.connector_instance
     target_name = sddc_e2e_canary.target_name
@@ -292,7 +300,7 @@ async def test_sddc_e2e_credentials_cached_after_first_dispatch(
         _OPERATOR,
         {
             "connector_id": SDDC_CONNECTOR_ID,
-            "op_id": "GET:/v1/sddc-managers",
+            "op_id": "GET:/v1/network-pools",
             "target": {"name": target_name},
             "params": {},
         },
@@ -318,7 +326,7 @@ async def test_sddc_e2e_dispatch_writes_audit_row(
     * ``row.payload["op_id"]`` equals the dispatched ``op_id``.
     * ``row.payload["params_hash"]`` is present (non-None string).
     """
-    op_id = "GET:/v1/domains"
+    op_id = "GET:/v1/network-pools"
     sessionmaker = get_sessionmaker()
 
     async def _count_dispatch_rows() -> int:
@@ -434,4 +442,62 @@ async def test_sddc_e2e_jsonflux_handle_populated_for_host_list(
     payload = result_envelope.get("result")
     assert payload is not None and payload.get("row_count") == expected_rows, (
         f"Expected reducer summary on result.row_count={expected_rows}; got result={payload!r}"
+    )
+
+
+async def test_sddc_ingest_enable_reads_dispatch_round_trip(
+    captured_events: list[Any],
+) -> None:
+    """Ingested-breadth round-trip: seed staged reads → enable_reads → dispatch.
+
+    Proves the generic ingested-breadth path is unaffected by retiring the
+    hand-curated enable apparatus (#2358, T7 of #2266). A fresh post-ingest
+    catalog lands ``is_enabled=False`` / ``review_status='staged'``; the
+    generic :meth:`ReviewService.enable_reads` verb flips every GET/HEAD read
+    to dispatchable in one pass; the op then dispatches through the full
+    ``call_operation`` stack against the respx-mocked appliance. This is the
+    replacement for the deleted ``apply_sddc_core_curation`` applier and the
+    single-product ``ingest → enable_reads → dispatch`` acceptance criterion.
+    """
+    from meho_backplane.operations.ingest import ReviewService
+
+    await _insert_sddc_descriptors(enabled=False)
+    await _seed_target()
+    instance = _resolve_connector()
+
+    op_id = "GET:/v1/network-pools"
+    async with respx.mock(
+        base_url=SDDC_CANARY_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        _register_sddc_routes(mock)
+        try:
+            # The seeded browse reads start disabled — a dispatch would be
+            # rejected as not-enabled. The generic enable-reads verb (the
+            # path that replaced curation) flips every GET read in one pass.
+            enabled = await ReviewService(_OPERATOR).enable_reads(
+                SDDC_CONNECTOR_ID,
+                tenant_id=None,
+            )
+            assert enabled >= len(SDDC_CANARY_CORE_OP_IDS), (
+                f"enable_reads should flip at least the {len(SDDC_CANARY_CORE_OP_IDS)} "
+                f"seeded browse GET reads; got {enabled}"
+            )
+
+            result = await call_operation(
+                _OPERATOR,
+                {
+                    "connector_id": SDDC_CONNECTOR_ID,
+                    "op_id": op_id,
+                    "target": {"name": _E2E_TARGET_NAME},
+                    "params": {},
+                },
+            )
+        finally:
+            await instance.aclose()
+            reset_dispatcher_caches()
+
+    assert result["status"] == "ok", (
+        f"dispatch of {op_id!r} after enable_reads did not return ok: {result!r}"
     )

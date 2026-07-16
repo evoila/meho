@@ -87,10 +87,27 @@ Behavioural contract
   unchanged rows skip-re-embed.
 
 The helper opens its own transaction (or uses a caller-supplied
-:class:`AsyncSession`) and commits row-by-row; an exception
-mid-batch leaves the previous rows committed. This matches the
-typed-register precedent and the v0.2 "ingest is operator-driven
-and idempotent on retry" discipline.
+:class:`AsyncSession`) and commits **once per register call** -- the
+whole spec is a single unit of work. An exception mid-batch rolls the
+helper-owned session back on context exit, so a crashed ingest leaves
+**zero** descriptor rows for the crashing spec rather than stranding
+the already-upserted ops as retry-blocking debris (#2273). The
+per-op branches only ``flush()``; the sole ``commit()`` runs after
+the loop.
+
+Two consequences of the single-commit boundary, both deliberate:
+
+* The embedding (ONNX) inference runs **inside** the loop, so one
+  write transaction stays open across the whole batch's embed pass --
+  tens of seconds for a large spec such as vSphere. Correctness (an
+  all-or-nothing spec, no retry-blocking debris) is worth the
+  longer-held transaction; ingest is an operator-driven, low-
+  concurrency path, not a hot request.
+* The process-local :class:`GenericRestConnector` auto-shim is
+  registered **before** the loop and is not part of the DB
+  transaction, so it survives a rollback. It is a zero-op stub and
+  idempotent on re-register, so a retried ingest simply re-registers
+  it harmlessly.
 """
 
 from __future__ import annotations
@@ -219,8 +236,9 @@ async def _run_upsert_loop(
 
     When *session* is provided, run the loop against it and defer
     commit decisions to the caller. When *session* is ``None``, open
-    a helper-owned session via :func:`get_sessionmaker`, run the
-    loop with per-op commits, and close on context exit.
+    a helper-owned session via :func:`get_sessionmaker`, run the loop,
+    commit **once** after the whole batch, and close on context exit
+    (an exception mid-batch rolls back, leaving zero rows).
     """
     if session is not None:
         return await _register_in_session(
@@ -253,6 +271,7 @@ async def register_ingested_operations(
     tenant_id: UUID | None = None,
     session: AsyncSession | None = None,
     embedding_service: EmbeddingService | None = None,
+    register_shim: bool = True,
 ) -> IngestionResult:
     """Bulk-upsert parsed operations into ``endpoint_descriptor``.
 
@@ -281,9 +300,16 @@ async def register_ingested_operations(
         tenant_id: ``None`` (default) → built-in / global rows.
         session: Optional caller-owned :class:`AsyncSession` (defers
             commit to the caller). ``None`` opens a helper-owned
-            session that commits row-by-row.
+            session that commits once after the whole batch (a crash
+            mid-batch rolls back to zero rows).
         embedding_service: Test seam; production callers leave
             ``None`` to resolve the process-wide singleton.
+        register_shim: ``True`` (default) auto-registers a bare
+            :class:`GenericRestConnector` shim for the triple on first
+            ingest. ``False`` (#2289) skips it because the caller will
+            stamp a dispatchable ``ProfiledRestConnector`` under the same
+            triple from an operator-selected ``auth_scheme``; a bare shim
+            would occupy the triple and make that stamp a no-op.
 
     Returns:
         :class:`IngestionResult` with per-action counts +
@@ -310,6 +336,7 @@ async def register_ingested_operations(
         version=version,
         impl_id=impl_id,
         base_url=base_url,
+        register_shim=register_shim,
     )
     coords = _BatchCoordinates(
         tenant_id=tenant_id,
@@ -339,6 +366,7 @@ def _preflight_and_register_class(
     version: str,
     impl_id: str,
     base_url: str | None,
+    register_shim: bool = True,
 ) -> bool:
     """Run the version-coverage pre-flight, then ensure the v2 class exists.
 
@@ -359,6 +387,16 @@ def _preflight_and_register_class(
     under. So the coverage check finds the real registered class and the
     auto-shim, when synthesised, lands in the dispatchable namespace.
 
+    ``register_shim`` is ``False`` for a profiled ingest (#2289): the
+    operator selected a named ``auth_scheme``, so the pipeline stamps a
+    dispatchable
+    :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+    under the triple *after* this register phase. Synthesising a bare shim
+    here would occupy the triple and make that stamp a no-op, leaving the
+    connector non-dispatchable — so the shim is skipped and this returns
+    ``False`` (the profiled stamp is the registration). The version-coverage
+    pre-flight still runs (a divergent label is caught regardless of tier).
+
     Returns the ``connector_registered`` flag (``True`` when a fresh
     auto-shim was registered).
     """
@@ -367,6 +405,8 @@ def _preflight_and_register_class(
         version=version,
         impl_id=impl_id,
     )
+    if not register_shim:
+        return False
     return ensure_connector_class_registered(
         product=product,
         version=version,
@@ -387,9 +427,9 @@ async def _register_in_session(
 
     Split out from :func:`register_ingested_operations` so the public
     function can branch on caller-owned-vs-helper-owned session
-    without duplicating the loop body. ``commit=True`` commits after
-    every op so a mid-batch crash leaves the already-processed rows
-    persisted (the same shape T4's review-queue service uses);
+    without duplicating the loop body. ``commit=True`` commits **once
+    after the whole batch**, so a mid-batch crash rolls the session
+    back and leaves zero descriptor rows for the spec (#2273);
     ``commit=False`` defers transaction boundaries to the caller.
     """
     log = structlog.get_logger(__name__)
@@ -412,8 +452,6 @@ async def _register_in_session(
             embedding_service=embedding_service,
         )
         counts[action] += 1
-        if commit:
-            await session.commit()
         log.debug(
             "ingested_operation_upserted",
             action=action,
@@ -423,6 +461,14 @@ async def _register_in_session(
             op_id=proto.op_id,
             spec_source=coords.spec_source,
         )
+
+    if commit:
+        # One commit per register call (= per spec): the batch is a single
+        # unit of work. A crash mid-loop rolls the helper-owned session back
+        # on context exit, so a failed ingest leaves zero descriptor rows for
+        # the spec instead of stranding the already-upserted ops as
+        # retry-blocking debris (#2273). The per-op upserts above only flush.
+        await session.commit()
 
     log.info(
         "ingested_operations_registered",

@@ -28,6 +28,9 @@ generic dispatcher stays vendor-neutral (CLAUDE.md postulate 5).
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 SESSION_PATH_MODERN = "/api/session"
 SESSION_PATH_LEGACY = "/rest/com/vmware/cis/session"
 
@@ -35,11 +38,18 @@ API_MOUNT_MODERN = "/api"
 API_MOUNT_LEGACY = "/rest"
 _KNOWN_API_MOUNT_PREFIXES = (f"{API_MOUNT_MODERN}/", f"{API_MOUNT_LEGACY}/")
 
+# vSphere's list FilterSpec query params carry a ``filter.`` prefix on the
+# legacy ``/rest`` mount (``filter.datastores``, ``filter.hosts``, ...) but
+# are addressed by their bare name on the modern ``/api`` mount
+# (``datastores``, ``hosts``, ...). See :func:`adapt_filter_params`.
+_FILTER_PREFIX = "filter."
+
 __all__ = [
     "API_MOUNT_LEGACY",
     "API_MOUNT_MODERN",
     "SESSION_PATH_LEGACY",
     "SESSION_PATH_MODERN",
+    "adapt_filter_params",
     "api_mount_for_session_path",
     "mounted_path",
 ]
@@ -57,6 +67,38 @@ def api_mount_for_session_path(session_path: str) -> str:
     if session_path == SESSION_PATH_LEGACY:
         return API_MOUNT_LEGACY
     return API_MOUNT_MODERN
+
+
+def adapt_filter_params(api_mount: str, query: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Key vSphere ``filter.*`` query params off the target's API mount.
+
+    Composite sub-calls and typed-op listing legs author their query
+    buckets in the legacy ``/rest`` style — ``filter.datastores``,
+    ``filter.hosts``, ``filter.names``, ``filter.types`` and friends.
+    The modern ``/api`` mount (real vCenter 8.x) addresses the same
+    FilterSpec fields by their *bare* name (``datastores``, ``hosts``,
+    ...) and returns HTTP 400 for the ``filter.``-prefixed form; the
+    legacy ``/rest`` mount — and the ``vmware/vcsim`` simulator CI runs
+    against — requires the prefix. Encode that protocol-flavor split
+    once, here at the transport seam, rather than per call site.
+
+    On any mount that is not the explicit legacy ``/rest`` mount (i.e.
+    the modern mount, or an unknown one that
+    :func:`api_mount_for_session_path` already resolves toward modern),
+    strip the ``filter.`` prefix from every key; on the legacy mount
+    return the params unchanged. Keys without the prefix pass through
+    untouched on both mounts. Empty / ``None`` in → ``None`` out, so the
+    result drops straight into ``params=`` at a seam that previously used
+    the ``params=... or None`` idiom.
+    """
+    if not query:
+        return None
+    if api_mount == API_MOUNT_LEGACY:
+        return dict(query)
+    return {
+        (key[len(_FILTER_PREFIX) :] if key.startswith(_FILTER_PREFIX) else key): value
+        for key, value in query.items()
+    }
 
 
 def mounted_path(session_path: str, descriptor_path: str) -> str:

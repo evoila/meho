@@ -78,17 +78,17 @@ func TestPlaneConstantsAreFrozen(t *testing.T) {
 }
 
 func TestAboutOpForPlane(t *testing.T) {
-	if got := aboutOpForPlane(PlaneProvider); got != "GET:/cloudapi/1.0.0/site" {
+	if got := aboutOpForPlane(PlaneProvider); got != "vcfa.provider.health" {
 		t.Errorf("provider about op_id: got %q", got)
 	}
-	if got := aboutOpForPlane(PlaneTenant); got != "GET:/iaas/api/about" {
+	if got := aboutOpForPlane(PlaneTenant); got != "vcfa.tenant.about" {
 		t.Errorf("tenant about op_id: got %q", got)
 	}
 	// Defensive: empty / unknown plane → provider (the default
 	// fallback at the dispatcher layer). The CLI never reaches this
 	// branch because requirePlane(...) rejects empty / unknown values
 	// upstream, but covering the fallback keeps the contract honest.
-	if got := aboutOpForPlane(""); got != "GET:/cloudapi/1.0.0/site" {
+	if got := aboutOpForPlane(""); got != "vcfa.provider.health" {
 		t.Errorf("empty plane should fall back to provider; got %q", got)
 	}
 }
@@ -510,12 +510,12 @@ func TestAboutVerbDispatchesPerPlane(t *testing.T) {
 	cases := []wireCheck{
 		{
 			plane:       PlaneProvider,
-			expectedOp:  "GET:/cloudapi/1.0.0/site",
+			expectedOp:  "vcfa.provider.health",
 			responseRes: `{"id":"site-1","name":"VCFA"}`,
 		},
 		{
 			plane:       PlaneTenant,
-			expectedOp:  "GET:/iaas/api/about",
+			expectedOp:  "vcfa.tenant.about",
 			responseRes: `{"latestApiVersion":"2024-01-01"}`,
 		},
 	}

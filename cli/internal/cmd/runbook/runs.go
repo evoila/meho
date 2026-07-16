@@ -230,13 +230,13 @@ func getRunsList(
 // correlation across audit log rows) but trimmed of the nanosecond
 // tail (which the operator-facing surface doesn't need).
 func printRunsTable(w io.Writer, r *api.RunbookListRunsResponse) {
-	if r == nil || len(r.Runs) == 0 {
+	if r == nil || len(r.Items) == 0 {
 		fmt.Fprintln(w, "no runbook runs in this tenant (matching the filter)")
 		return
 	}
 	fmt.Fprintf(w, "%-9s %-30s %-7s %-20s %-12s %-8s %s\n",
 		"RUN_ID", "TEMPLATE_SLUG", "VERSION", "ASSIGNED_TO", "STATE", "STEP", "STARTED_AT")
-	for _, run := range r.Runs {
+	for _, run := range r.Items {
 		step := "-"
 		if run.Position != nil {
 			step = fmt.Sprintf("%d/%d", run.Position.N, run.Position.Total)

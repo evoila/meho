@@ -55,6 +55,25 @@ is the only error class operators routinely chase against this endpoint.
 Detail strings deliberately surface only exception class names, never
 their messages, so a misconfigured Vault role can't leak operator-
 controllable URL substrings into a successful 200 response.
+
+Backend-agnostic federation proof (#2231)
+=========================================
+
+The four-step chain above describes the Vault deployment — the default
+and, until #2230, the only credential backend. The proof is now
+dispatched on ``config.credentialBackend`` / ``CREDENTIAL_BACKEND``: a
+Vault install takes the unchanged ``vault.kv.read`` path
+(:func:`_probe_vault_federation`, zero migration); any other backend
+(``gsm`` on a GCP-native install) reads its designated probe secret
+through the credential-backend seam (:func:`_probe_backend_federation`).
+Either way the response shape is identical — the ``vault`` field carries
+whichever backend's federation status — so the CLI ``meho status`` and
+the ``meho.status`` MCP tool render a GSM install exactly as they render
+a Vault one. The ``gsm`` probe reads under MEHO's own deployment identity
+(SA-direct, #2230), so its probe secret is reachable without the
+per-operator Vault tenant-scope exemption in
+:data:`~meho_backplane.connectors.vault.tenant_scope.PLATFORM_EXEMPT_PATHS`
+(that guard is on the Vault op path only).
 """
 
 from __future__ import annotations
@@ -67,13 +86,26 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.connectors._shared.credential_backend import (
+    UnknownCredentialBackendError,
+    resolve_credential_backend,
+    split_credential_ref,
+)
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 from meho_backplane.mcp.server import mcp_session_id_capture_mode
 from meho_backplane.middleware import verify_jwt_and_bind
 from meho_backplane.operations import dispatch
+from meho_backplane.settings import get_settings
 
 __all__ = ["build_health_response", "router"]
+
+#: Vault backend kind — the schemeless default (``config.credentialBackend`` /
+#: ``CREDENTIAL_BACKEND`` default). When the deployment runs on Vault the
+#: federation proof takes the unchanged :func:`_probe_vault_federation`
+#: dispatch path; any other backend routes through the credential-backend
+#: seam (:func:`_probe_backend_federation`).
+_VAULT_BACKEND_KIND: str = "vault"
 
 #: Hardcoded path inside the Vault KV v2 mount used to prove the
 #: federation chain. The path is provisioned by the consumer (see
@@ -82,6 +114,20 @@ __all__ = ["build_health_response", "router"]
 #: which secret to read is explicitly out of scope for v0.1; product
 #: routes added post-Goal-2 will read different paths.
 _FEDERATION_PROOF_PATH: str = "meho/test/federation"
+
+#: GCP Secret Manager secret name the GSM-backend federation proof reads
+#: under ``Settings.gsm_project`` (``config.gsmProject`` / ``GSM_PROJECT``).
+#: The GSM analogue of :data:`_FEDERATION_PROOF_PATH` — hyphenated because
+#: Secret Manager secret ids are ``[A-Za-z0-9_-]`` (no ``/``). A GSM-only
+#: install provisions ``projects/<gsm_project>/secrets/meho-test-federation``
+#: with a JSON-object value (e.g. ``{"ok": "true"}``) so the seam read
+#: returns a field dict, exactly as the Vault probe reads a KV-v2 secret.
+_FEDERATION_PROOF_GSM_SECRET: str = "meho-test-federation"
+
+#: Target name threaded into the credential-backend seam for the probe read;
+#: it never names a credential value, only labels the read in error/log
+#: strings (the backend contract's ``target_name``).
+_FEDERATION_PROOF_TARGET_NAME: str = "health-federation-proof"
 
 
 class OperatorIdentity(BaseModel):
@@ -100,13 +146,21 @@ class OperatorIdentity(BaseModel):
 
 
 class VaultStatus(BaseModel):
-    """Vault federation-chain status.
+    """Federation-chain status for the deployment's credential backend.
 
-    ``reachable`` is true when the OIDC login succeeded (TCP + TLS +
-    JWT forward all worked). ``read_ok`` is true when the test secret
-    read succeeded against the resulting Vault token. ``detail`` carries
-    a short structured string for the CLI to render on failure paths —
-    never an unbounded exception message.
+    The field is named ``vault`` on :class:`HealthResponse` for wire
+    compatibility (it predates the credential-backend seam), but the value
+    reflects whichever backend ``config.credentialBackend`` selects: the
+    Vault OIDC-login + KV read on a Vault install, or the configured
+    backend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM
+    install) through the credential-backend seam.
+
+    ``reachable`` is true when the backend was reached — on Vault, the OIDC
+    login succeeded (TCP + TLS + JWT forward); on a seam backend, the store
+    was addressable (config resolved, backend registered). ``read_ok`` is
+    true when the probe secret read succeeded. ``detail`` carries a short
+    structured string for the CLI to render on failure paths — a class name
+    or error code, never an unbounded exception message or a secret value.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -313,6 +367,107 @@ async def _probe_vault_federation(
     return VaultStatus(reachable=True, read_ok=False, detail=f"read_failed: {exc_type}")
 
 
+def _federation_probe_ref(backend_kind: str) -> str | None:
+    """Build the scheme-prefixed probe ref for a non-Vault *backend_kind*.
+
+    Returns a ``<kind>:<store-ref>`` value the credential-backend seam
+    resolves, or ``None`` when the backend has no probe convention or is
+    not configured enough to address one (e.g. ``gsm`` without
+    ``GSM_PROJECT`` set). ``None`` maps to a ``config_error`` status rather
+    than a spurious store read against an empty project.
+
+    * ``gsm`` → ``gsm:<gsm_project>/meho-test-federation`` (latest version),
+      or ``None`` when ``Settings.gsm_project`` is unset.
+    """
+    if backend_kind == "gsm":
+        project = get_settings().gsm_project.strip()
+        if not project:
+            return None
+        return f"gsm:{project}/{_FEDERATION_PROOF_GSM_SECRET}"
+    return None
+
+
+async def _probe_backend_federation(
+    operator: Operator,
+    log: Any,
+    backend_kind: str,
+) -> VaultStatus:
+    """Run the federation proof through the credential-backend seam.
+
+    The non-Vault path (``config.credentialBackend != "vault"``): resolve
+    the backend registered for *backend_kind* on the #2229 seam and read
+    its designated probe secret. Success / failure map onto the same
+    :class:`VaultStatus` axes the Vault dispatch path uses, so the
+    ``/api/v1/health`` response shape is identical regardless of backend.
+
+    The read forwards *operator* to satisfy the seam contract; a
+    deployment-identity backend (GSM SA-direct, #2230) reads under MEHO's
+    own identity and ignores it, so the GSM probe secret is reachable
+    without a per-operator tenant-scope exemption (the Vault tenant-scope
+    guard is not on this path — see
+    :data:`~meho_backplane.connectors.vault.tenant_scope.PLATFORM_EXEMPT_PATHS`).
+
+    Never raises: the module's never-a-5xx contract holds by mapping every
+    failure axis (unconfigured probe, unknown backend kind, store read
+    error) to a :class:`VaultStatus` with ``read_ok=False`` and a class-
+    name / error-code ``detail`` that never echoes a secret value.
+    """
+    ref = _federation_probe_ref(backend_kind)
+    if ref is None:
+        log.warning("federation_health_probe_unconfigured", backend=backend_kind)
+        return VaultStatus(
+            reachable=False,
+            read_ok=False,
+            detail=f"config_error: {backend_kind}",
+        )
+
+    kind, store_ref = split_credential_ref(ref, default_backend=backend_kind)
+    try:
+        backend = resolve_credential_backend(kind)
+    except UnknownCredentialBackendError:
+        log.warning("federation_health_unknown_backend", backend=kind)
+        return VaultStatus(reachable=False, read_ok=False, detail=f"unknown_backend: {kind}")
+
+    try:
+        await backend.load_secret_data(
+            store_ref,
+            operator,
+            target_name=_FEDERATION_PROOF_TARGET_NAME,
+            mount="",
+        )
+    except Exception as exc:
+        # Never-a-5xx contract: any backend read failure (missing secret,
+        # denied access, ADC error, malformed payload) surfaces as
+        # read_ok=False with the exception class name, exactly as the Vault
+        # dispatch path renders its read-phase failures. Only the class name
+        # is surfaced — never the message, so operator-controllable
+        # substrings can't leak into a 200 response body.
+        exc_type = type(exc).__name__
+        log.warning("federation_health_backend_read_failed", backend=kind, exc_type=exc_type)
+        return VaultStatus(reachable=True, read_ok=False, detail=f"read_failed: {exc_type}")
+
+    log.info("federation_health_ok", backend=kind)
+    return VaultStatus(reachable=True, read_ok=True, detail="ok")
+
+
+async def _probe_federation(operator: Operator, log: Any) -> VaultStatus:
+    """Dispatch the federation proof to the deployment's credential backend.
+
+    On Vault (the default, ``config.credentialBackend == "vault"``) this is
+    the unchanged :func:`_probe_vault_federation` dispatch path — same
+    ``vault.kv.read`` op, same audit / policy-gate / broadcast, zero
+    migration. Any other backend routes through
+    :func:`_probe_backend_federation` over the credential-backend seam.
+
+    ``_probe_vault_federation`` is resolved as a module global so existing
+    tests that monkeypatch it keep working through this dispatcher.
+    """
+    backend_kind = get_settings().credential_backend
+    if backend_kind == _VAULT_BACKEND_KIND:
+        return await _probe_vault_federation(operator, log)
+    return await _probe_backend_federation(operator, log, backend_kind)
+
+
 async def build_health_response(operator: Operator) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
@@ -326,7 +481,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     resolved.
     """
     log = structlog.get_logger()
-    vault_status = await _probe_vault_federation(operator, log)
+    vault_status = await _probe_federation(operator, log)
     db_probe_result = await db_migration_probe()
     return HealthResponse(
         operator=OperatorIdentity(

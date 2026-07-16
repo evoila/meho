@@ -8,11 +8,12 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 15 hand-authored composites
-that orchestrate cross-spec workflows: 7 read composites
-(G3.1-T5 / `#508` shipped 5; `#2080` added `host.network_uplinks`;
-`#2135` added `host.vsan_health`) and 8 write composites
-(G3.1-T6 / `#509`). The
+vSphere 8.5+ / ESXi 8.5+ targets, plus 14 hand-authored composites
+that orchestrate cross-spec workflows: 5 read composites
+(G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
+`host.vsan_health` / `#2135` reads were later re-shipped as typed ops
+in `#2258`) and 9 write composites (G3.1-T6 / `#509`, plus the
+single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -30,12 +31,29 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `event_tail_composite`, `performance_summary_composite`,
   `datastore_usage_composite`, `network_portgroup_audit_composite`,
   `host_network_uplinks_composite`, `host_vsan_health_composite`).
-  Each accepts `(operator, target, params, dispatch_child)` per the
-  `DispatchChild` Protocol and orchestrates 1-3 sub-op dispatches
-  back into the same `vmware-rest-9.0` connector. Registered with
-  `safety_level="safe"` + `requires_approval=False` — read-only
-  overrides of `register_composite_operation()`'s `dangerous` / `True`
-  defaults. `host_network_uplinks_composite` (`#2080`) lists hosts via
+  Since `#2253` each accepts `(operator, target, params, connector)`
+  and issues its 1-3 sub-ops **directly on the resolved connector
+  session** — `connector._get_json` / `connector._post_json` mounted
+  through `connector.mount_op_path` (`_read_sub_op`) — with **no**
+  `dispatch_child`, **no** ingested `endpoint_descriptor` lookup, and
+  **no** L2 pre-flight, so the read composites work on a fresh boot
+  with zero vCenter-catalog ingest (the missing-L2 dead-end defect
+  class, consumer signal 20, is gone for reads). The `connector` kwarg
+  is the substrate `#2251` added to the composite handler contract; the
+  dispatcher forwards the instance it already resolved for the
+  composite's target. The direct path drops two of `dispatch_child`'s
+  four `#508` guarantees (bounded recursion, per-sub-op param
+  validation) and relocates the other two (audit-tree linkage collapses
+  to the top-level composite audit row; per-sub-op policy/broadcast is
+  the top-level op's). The two dropped guarantees are acceptable for
+  **reads**; the relocated per-sub-op policy gate is load-bearing for
+  **writes**, so the write composites (`#2256`) re-apply it per governed
+  write sub-call through the reusable
+  `operations.composite.enforce_subop_policy` seam (`#2254`) — see the
+  write-composites bullet. Registered with `safety_level="safe"` +
+  `requires_approval=False` — read-only overrides of
+  `register_composite_operation()`'s `dangerous` / `True` defaults.
+  `host_network_uplinks_composite` (`#2080`) lists hosts via
   `GET:/vcenter/host`, then per host reads `config.network.pnic` +
   `config.network.proxySwitch` through the vi-json PropertyCollector
   `RetrievePropertiesEx` method — the pnic link-state / uplink mapping
@@ -50,27 +68,135 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — eight module-level
+- **Write composites** (`composites/_write.py`) — nine module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
-  `vm_power_bulk_composite`, `host_evacuate_composite`,
-  `host_detach_from_vds_composite`, `cluster_patch_composite`). Same
-  `DispatchChild`-Protocol contract; each orchestrates 2-N sub-ops
-  with documented status enums on the response envelope
-  (`{"status": "created" | "rolled_back" | …}`). Registered with
-  T4's defaults `safety_level="dangerous"` + `requires_approval=True`
-  so the policy gate pops the approval queue on every dispatch.
+  `vm_power_composite`, `vm_power_bulk_composite`,
+  `host_evacuate_composite`, `host_detach_from_vds_composite`,
+  `cluster_patch_composite`). Since
+  `#2256` each accepts `(operator, target, params, connector)` and
+  issues its raw-REST sub-ops **directly on the resolved connector
+  session** — `connector._get_json` (`_read_sub_op`) for the resolution
+  reads, `connector._post_json` (`_write_sub_op`) for the mutating
+  writes, both mounted through `connector.mount_op_path` — with **no**
+  ingested `endpoint_descriptor` lookup and **no** L2 pre-flight, so the
+  write composites also work on a fresh boot with zero catalog ingest.
+  Each orchestrates 2-N sub-ops with documented status enums on the
+  response envelope (`{"status": "created" | "rolled_back" | …}`).
+  Registered with T4's defaults `safety_level="dangerous"` +
+  `requires_approval=True` so the **top-level** composite pops the
+  approval queue on every dispatch — that top-level gate stays the single
+  primary approval decision.
+
+  **Preserving write governance on the direct path.** Because a direct
+  session call bypasses the dispatcher, each mutating sub-call first
+  routes through `operations.composite.enforce_subop_policy` (`#2254`)
+  before `_post_json` fires: the seam re-runs the same `policy_gate`
+  against an in-memory descriptor carrying the sub-op's declared
+  governance (`safety_level="dangerous"`, `requires_approval=False`) and
+  returns an `awaiting_approval` / `denied` `OperationResult` when the
+  gate does not clear. The handler returns that verbatim (the dispatcher
+  passes a handler-returned `OperationResult` straight through), so an
+  internal write **queues** or is **denied** instead of executing
+  un-gated — property 3 of `#508`'s four guarantees preserved. The
+  sub-op posture is `requires_approval=False` on purpose: flooring it to
+  `True` would double-gate the approval-resume path (the resume re-runs
+  the handler with the top-level gate satisfied, but the seam is not
+  resume-aware). A human/service operator whose composite was already
+  approved therefore auto-executes each write; an agent without a grant
+  is denied a `dangerous` sub-op (governance not lowered); an agent with
+  a per-`(principal, op, target)` `needs_approval` grant queues it.
   `host_evacuate_composite` is the first production composite that
   dispatches another composite (`vmware.composite.vm.migrate`) via
-  `dispatch_child` — the recursion-depth contextvar (default cap 8)
-  handles the depth-2 nesting cleanly.
+  `dispatch_child` — that composite→composite recursion is a
+  registrar-guaranteed `source_kind="composite"` row (never an ingested
+  primitive), so it stays on the `dispatch_child` path per `#2248`; the
+  recursion-depth contextvar (default cap 8) handles the depth-1 nesting
+  cleanly, and the resolved `vm.migrate` runs its own relocate write on
+  the direct session under the same governance seam.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 15
-  `_CompositeSpec` rows (7 read + 8 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 14
+  `_CompositeSpec` rows (5 read + 9 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
+- **Typed ops** (`typed_ops.py`, `#2257`) — the first vmware
+  `source_kind="typed"` op, `vmware.host.usage`. Unlike a composite, a
+  typed op is a **bound method** on `VmwareRestConnector`
+  (`host_usage(self, operator, target, params)`) that the dispatcher
+  binds to the resolved connector instance and calls directly — no
+  `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
+  therefore works on a **fresh boot with zero catalog ingest** — the same
+  direct-session property the 5 read composites (`#2253`) and, since
+  `#2256`, the 9 write composites now share. The only `dispatch_child`
+  leg left on the whole vmware surface is the `host.evacuate` →
+  `vm.migrate` composite→composite recursion (a registrar-guaranteed
+  `source_kind="composite"` row, not an ingested primitive, `#2248`). The metadata
+  lives in a frozen `VmwareTypedOp` dataclass (mirroring
+  `argocd/ops.py::ArgoCdOp`); the implementation
+  (`host_usage_impl(connector, operator, target, params)`) lists hosts
+  via `GET /vcenter/host` then, per host, reads `summary.quickStats`
+  (CPU/memory load, MHz/MB), `summary.hardware` (capacity totals:
+  `cpu_mhz` per core, core/package/thread counts, `memory_size_bytes`),
+  and `runtime.inMaintenanceMode` through a direct PropertyCollector
+  `RetrievePropertiesEx` on the connector session. Both calls are routed
+  through `mount_op_path` so they land on `/api` (modern) or `/rest`
+  (legacy/vcsim). The per-host property read is best-effort (a failed
+  read nulls the detail with a `read_note`, mirroring
+  `host_network_uplinks_composite`); the host listing is load-bearing.
+  This op is why the plain REST host summary (liveness only) is not
+  enough — `overallCpuUsage` / `overallMemoryUsage` live on the WS-API
+  `HostSystem`, not the REST resource. It establishes the vmware typed-op
+  pattern future per-host/per-VM typed reads reuse.
+- **Incident-survival typed reads** (`#2300`) — three more
+  `source_kind="typed"` bound-method reads in sibling modules, each
+  registered through `VMWARE_TYPED_OPS` (so no registrar change) and
+  working on a fresh boot with zero catalog ingest:
+  - **`vmware.vm.info`** (`typed_ops_vm_info.py`, handler `vm_info`) —
+    single-VM incident triage. Addressed by `vm` moid or `name`
+    (`oneOf` in the schema; a `name` is resolved via
+    `GET /vcenter/vm?filter.names=`, and an unknown / ambiguous name
+    raises). One PropertyCollector read of the `VirtualMachine`'s
+    `runtime.powerState`, `guest.ipAddress` / `guest.hostName` /
+    `guest.toolsStatus` / `guest.toolsRunningStatus`,
+    `guestHeartbeatStatus`, and `storage.perDatastoreUsage`. Unlike
+    `host.usage`'s per-host best-effort leg, this single-object read is
+    **load-bearing** (a failure propagates). The "poweredOn but no
+    guest IP" hung-appliance shape is representable in one call — the
+    plain REST VM detail reports configuration, not these live guest
+    signals.
+  - **`vmware.object.collect`** (`typed_ops_object_collect.py`, handler
+    `object_collect`) — the **bounded generic** escape hatch: read a
+    caller-specified property-path list off one `(type, moid)` object.
+    Bounded by construction (keeping the `#1177` dumb-substrate line):
+    a single `objectSet` entry with **no `TraversalSpec`** (cannot walk
+    the inventory), and the size / shape cap lives entirely in
+    `parameter_schema` — at most 64 paths, each a dotted vim identifier
+    ≤16 segments deep, wildcards / array-indices rejected by pattern.
+    An oversized / malformed request fails `validate_params` in the
+    dispatcher and returns a structured `invalid_params` result before
+    any read is issued. Returns `{properties: {path: val}, missing:
+    [path]}`, surfacing the `ObjectContent.missingSet`.
+  - **`vmware.tasks.recent`** (`typed_ops_tasks_recent.py`, handler
+    `tasks_recent`) — recent vCenter Task objects for change-window
+    monitoring (distinct from `event.tail`, which reads the *event*
+    log). Two PropertyCollector reads: `TaskManager.recentTask` for the
+    Task MoRefs, then `Task.info` on those MoRefs (capped by the
+    optional `max_tasks`, default 50, in a single round trip). Each row
+    carries operation (`descriptionId`), target entity + type + name,
+    state (`queued`/`running`/`success`/`error`), progress, cancelled
+    flag, the queue/start/complete timestamps, and the localized error
+    message when a task faulted.
+- **`register_vmware_typed_operations`** (`typed_ops.py`) — async
+  registrar wrapper queued onto `run_typed_op_registrars` (via
+  `register_typed_op_registrar` in the package `__init__`, alongside the
+  composite registrar). Walks `VMWARE_TYPED_OPS`, resolves each op's
+  `handler_attr` to the connector bound method, looks the group's
+  curated `when_to_use` blurb up in `VMWARE_TYPED_WHEN_TO_USE_BY_GROUP`
+  (required for a grouped typed op), and upserts each row into
+  `endpoint_descriptor` with `source_kind="typed"` via
+  `register_typed_operation`.
 - **`VsphereTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
   `host`, `port`, `secret_ref`, `auth_model`. Replaced by the concrete
@@ -107,17 +233,21 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    `__init__` calls
    `register_typed_op_registrar(register_vmware_composite_operations)`
    to queue the composite-row upsert onto the lifespan's registrar
-   list.
+   list. The package `__init__` then queues
+   `register_typed_op_registrar(register_vmware_typed_operations)`
+   (`#2257`) for the typed-op rows.
 4. The registry's v2 table now resolves `(vmware, 9.0, vmware-rest)`
    to `VmwareRestConnector`. The G0.7 auto-shim's idempotency check
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar -- including the composite one -- and upserts the
-   15 `vmware.composite.*` rows into `endpoint_descriptor` with
-   `source_kind="composite"` (7 reads with `safety_level="safe"` +
-   `requires_approval=False`; 8 writes with `safety_level="dangerous"`
-   + `requires_approval=True`).
+   queued registrar and upserts: the 14 `vmware.composite.*` rows with
+   `source_kind="composite"` (5 reads with `safety_level="safe"` +
+   `requires_approval=False`; 9 writes with `safety_level="dangerous"`
+   + `requires_approval=True`), plus the `vmware.host.usage` row with
+   `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
+   The typed row resolves and dispatches with **zero catalog ingest** —
+   it depends on no ingested descriptor.
 
 ### Per-target session
 
@@ -184,7 +314,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 15 composites (7 reads + 8 writes) land as `source_kind="composite"`
+The 14 composites (5 reads + 9 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -194,27 +324,34 @@ rows in `endpoint_descriptor`. At dispatch time:
    parent_target=..., parent_audit_id=..., parent_op_id=...)`.
 2. Handler is resolved via `import_handler(descriptor.handler_ref)`
    to one of the module-level functions in `composites/_read.py` or
-   `composites/_write.py`.
-3. Dispatcher invokes
-   `handler(operator=..., target=..., params=..., dispatch_child=...)`.
-4. Handler issues N `await dispatch_child(connector_id="vmware-rest-9.0",
-   op_id=..., params=...)` calls. Each child dispatch:
-   - Inherits `parent_audit_id` via the contextvar so the child's
-     audit row's `parent_audit_id` column is set automatically.
-   - Increments `composite_depth_var` (bounded at
-     `Settings.composite_max_depth=8`; over-depth raises
-     `CompositeRecursionLimitExceeded` pre-recursion).
-   - Re-enters the dispatcher's same code path -- the child sub-op
-     hits the `source_kind="ingested"` branch which routes through
-     `VmwareRestConnector.execute()` for the actual HTTP call.
+   `composites/_write.py`. The dispatcher also resolves the connector
+   instance for the composite's target (`#2251`).
+3. Dispatcher invokes the handler with the keyword args it declares:
+   `connector` (the resolved instance — every read and write handler)
+   and/or `dispatch_child` (only `host_evacuate_composite`, for its
+   composite→composite recursion).
+4. Handler issues its sub-ops **directly on the connector session**
+   (`connector._get_json` / `connector._post_json` mounted via
+   `connector.mount_op_path`), no `endpoint_descriptor` lookup. Write
+   sub-calls pass through `enforce_subop_policy` first (see the
+   write-composites bullet above). The lone exception is
+   `host.evacuate`'s `await dispatch_child(op_id="vmware.composite.vm.migrate", …)`
+   recursion, which re-enters the dispatcher's `source_kind="composite"`
+   branch, inherits `parent_audit_id` via the contextvar, and increments
+   `composite_depth_var` (bounded at `Settings.composite_max_depth=8`).
 5. Handler aggregates the sub-op responses into a single dict and
    returns; the dispatcher wraps it as an `OperationResult` with
-   `status="ok"` and `result=<aggregated dict>`.
+   `status="ok"` and `result=<aggregated dict>`. A write handler may
+   instead return an `awaiting_approval` / `denied` `OperationResult`
+   (from `enforce_subop_policy`); the dispatcher passes that through
+   verbatim.
 
-The composite handlers go through `dispatch_child` rather than
-calling `_request_json` directly so the audit-tree linkage,
-bounded-recursion guard, policy gate, broadcast publish, and
-parameter-schema validation all run on every sub-call.
+Direct-session sub-calls drop the per-sub-op audit rows (the top-level
+composite row is the audit anchor) and the per-sub-op parameter-schema
+validation; the per-sub-op policy gate is relocated onto
+`enforce_subop_policy` for writes. Only the `host.evacuate` →
+`vm.migrate` recursion still rides `dispatch_child` and keeps its
+audit-tree linkage + bounded-recursion guard.
 
 ### Recursive composite dispatch (`host.evacuate` → `vm.migrate`)
 
@@ -223,130 +360,58 @@ calls another composite via `dispatch_child`. Two-level nesting:
 
 ```text
 host.evacuate                                            # depth 0 (top-level dispatch)
+  ├─ GET:/vcenter/vm                                     # depth 0 (direct session read)
   └─ vmware.composite.vm.migrate (× N)                  # depth 1 (dispatch_child of a composite)
-       ├─ GET:/vcenter/cluster/{c}/drs/recommendations  # depth 2 (typed sub-op)
-       └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 2 (typed sub-op)
-  └─ PATCH:/vcenter/host/{host}/maintenance?action=enter # depth 1 (typed sub-op)
+       ├─ GET:/vcenter/cluster/{c}/drs/recommendations  # depth 1 (direct session read)
+       └─ POST:/vcenter/vm/{vm}?action=relocate         # depth 1 (direct session write, gated)
+  └─ PATCH:/vcenter/host/{host}/maintenance?action=enter # depth 0 (direct session write, gated)
 ```
 
-`composite_depth_var` (default cap 8) handles this naturally. The
-audit log shows a 3-level tree per `host.evacuate` dispatch: one
-parent row, N `vm.migrate` child rows, each with two grandchild rows
-(DRS lookup + relocate). The substrate guard's coverage in
+`composite_depth_var` (default cap 8) handles the one nesting level
+naturally. Post-`#2256` the **audit** tree is two-level, not three:
+one `host.evacuate` parent row and N `vm.migrate` child rows (the
+`dispatch_child` recursion). The raw-REST leaves run directly on the
+session and write **no** audit row of their own — the top-level
+composite's row is the audit anchor. `composite_depth_var` reads inside
+those direct sub-calls ramp 0 (host.evacuate's own reads/writes) → 1
+(the vm.migrate frame's reads/writes). The substrate guard's coverage in
 `tests/test_operations_composite.py` proves the depth-cap behaviour
 holds; this connector's recursive composite is the first production
 caller.
 
-### L1/L2 dispatch contract + pre-flight (G0.14-T10 / #1151)
+### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 15 composites are the **L1** surface: hand-authored aggregators
-each connector ships as `source_kind='composite'` descriptors. Every
-composite's body fans out to **L2** raw-REST primitives
-(`GET:/vcenter/datastore`, `POST:/vcenter/vm/{vm}/power?action=start`,
-etc.) via `dispatch_child(...)`. The L2 layer is the ~3,470 ingested
-descriptor rows derived from `vcenter.yaml` + `vi-json.yaml`.
+The 15 composites are hand-authored aggregators the connector ships as
+`source_kind='composite'` descriptors. Each composite's body issues its
+raw-REST sub-ops (`GET:/vcenter/datastore`,
+`POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
+connector's own authenticated session** — the connector instance is
+injected into the handler (Task #2251), so the sub-calls never resolve an
+`endpoint_descriptor` row and work on a fresh boot with zero catalog
+ingest (reads migrated in `#2253`, writes in `#2256`).
 
-The L2 surface is **not** registered by default. Operators bring it in
-by running `meho connector ingest --catalog vmware/9.0`, which posts
-the spec sources from
-`backend/src/meho_backplane/operations/ingest/catalog.yaml` through
-the ingest pipeline. Until that ingest runs, the L2 descriptor rows do
-not exist and any composite that tries to dispatch into them would
-crash mid-call with the dispatcher's generic `unknown_op` error.
+Because no composite dispatches through an ingested row, the entire old
+failure-coping apparatus is gone (Task #2259): the dispatch-time
+`preflight_l2_dependencies` pre-flight, the `CompositeL2Dependency*`
+exceptions, and the `composite_l2_missing` / `composite_l2_disabled`
+structured errors are deleted, not guarded. The `_SUB_OPS_*` tuples in
+`_read.py` / `_write.py` are retained purely as the canonical
+sub-op-path manifest the ingest-reconcile acceptance guard
+(`tests/acceptance/test_portgroup_audit_op_id_reconcile.py` and
+`tests/test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`)
+checks against the vCenter spec.
 
-Each composite handler runs an explicit pre-flight check
-(`preflight_l2_dependencies` in `composites/_preflight.py`) before any
-`dispatch_child(...)` call. The pre-flight walks the composite's
-declared sub-op-ids against `endpoint_descriptor`; if any are missing,
-it raises `CompositeL2DependencyMissing`. The dispatcher catches that
-exception specifically (ahead of the generic exception branch) and
-surfaces it as a structured `composite_l2_missing` error per the
-`docs/codebase/error-message-shape.md` convention (G0.14-T11 #1141).
-The response shape is:
+The sole remaining safety net is the platform-wide registration-time
+invariant (`operations.composite_invariant`, `#2252`): if any future
+code-shipped op declared a `dispatch_child` sub-op that resolved to an
+`ingested` row, the boot would fail closed. See
+`docs/codebase/composite-ingested-dispatch-invariant.md`.
 
-```json
-{
-  "status": "error",
-  "op_id": "vmware.composite.datastore.usage",
-  "error": "composite_l2_missing: composite '...' depends on L2 sub-ops not registered ...",
-  "extras": {
-    "error_code": "composite_l2_missing",
-    "missing_op_ids": ["GET:/vcenter/datastore", ...],
-    "catalog_command": "meho connector ingest --catalog vmware/9.0"
-  }
-}
-```
-
-The first call against a stale catalog pays the DB walk; subsequent
-calls hit a per-process cache and short-circuit. A negative result
-(missing or disabled L2) is **not** cached -- the operator's expected
-next action is to remediate and retry, and we want the retry to see
-fresh state from the database.
-
-### Disabled vs absent L2 (`composite_l2_disabled`, #1601)
-
-`lookup_descriptor` hard-filters `is_enabled = TRUE`, so a sub-op whose
-descriptor row **exists but is disabled** (`is_enabled = false`)
-resolves to `None` exactly like one that was never ingested. On a
-default `vmware-rest-9.0` deploy the ~3,470 L2 ops land
-ingested-but-disabled, so collapsing both into `composite_l2_missing`
-would tell the operator to re-run `meho connector ingest` -- which has
-already happened. The pre-flight therefore classifies each
-non-dispatchable sub-op with the `is_enabled`-agnostic
-`descriptor_exists_any_state` probe (used **only** to classify -- a
-disabled op stays non-dispatchable, it is never transient-enabled at
-dispatch):
-
-- **present but disabled** -> `CompositeL2DependencyDisabled` ->
-  structured `composite_l2_disabled`:
-
-  ```json
-  {
-    "status": "error",
-    "op_id": "vmware.composite.datastore.usage",
-    "error": "composite_l2_disabled: ... present in this connector's catalog but disabled ... 'meho connector edit-op vmware-rest-9.0 <op_id> --enable' ...",
-    "extras": {
-      "error_code": "composite_l2_disabled",
-      "disabled_op_ids": ["GET:/vcenter/datastore", ...],
-      "connector_id": "vmware-rest-9.0"
-    }
-  }
-  ```
-
-  The remediation names a **real** verb: per-op
-  `meho connector edit-op <connector_id> <op_id> --enable`. Connector-level
-  `meho connector enable <connector_id>` is named only as the caveated
-  alternative -- it does **not** re-enable spec-ingested ops, which land
-  `group_id = NULL` and the enable cascade filters on `group_id` (see
-  `ingest/_internals.py` / `ingest/_upsert.py`), so per-op `edit-op
-  --enable` is the deterministic path. The original report proposed a
-  group-level enable verb; no such verb exists, so the remediation never
-  references one.
-
-- **truly absent** (no row in any state) -> unchanged
-  `composite_l2_missing` + the catalog-ingest remediation above.
-
-When a single walk turns up both states, **disabled takes precedence**
--- only one exception can surface, and the re-enable remediation is the
-one a default ingested-but-disabled deploy needs.
-
-Composite-to-composite sub-ops (`vmware.composite.*`, today only
-`host.evacuate` -> `vm.migrate`) are deliberately skipped by the
-pre-flight: their registration is guaranteed by the same lifespan
-registrar that brings their parent composite in, so validating them
-would create a startup-order false positive without catching any real
-gap.
-
-Three options were considered for the L2-dependency strategy
-(per #1151's *Desired state*); Option B (lazy pre-resolve on first
-call) was chosen as it (a) closes signal 20's actual gap (a
-remediation-bearing error message) without (b) blocking on
-T9 (#1150)'s server-side catalog-driven ingest landing first, (c)
-disrupting the boot order, or (d) inverting the catalog ingest
-posture (an explicit operator action by design since v0.5.1).
-See `composites/_preflight.py`'s module docstring for the full
-trade-off matrix vs. Options A (eager-at-registration) and C
-(ship-L1+L2-as-unit).
+Composite-to-composite recursion (`vmware.composite.*`, today only
+`host.evacuate` -> `vm.migrate`) keeps its `dispatch_child` path: those
+sub-ops resolve to registrar-guaranteed `source_kind='composite'` rows,
+not ingested primitives, and the invariant skips `*.composite.*` sub-ops
+for that reason.
 
 ### Write-composite partial-failure conventions
 
@@ -361,6 +426,7 @@ enum) are:
 | `vm.clone` | `completed`, `pending`, `timeout` |
 | `vm.snapshot.revert` | `reverted`, `ambiguous`, `not_found` |
 | `vm.migrate` | `migrated`, `no_recommendation` |
+| `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted` |
 | `host.detach_from_vds` | `detached`, `incomplete` |
@@ -424,7 +490,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 8 write composites ship `requires_approval=True`, so a human/agent
+All 9 write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -447,6 +513,7 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
+| `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
 
 The live-read previews resolve the same entity set the approved
 dispatch would act on, through the **same shared helpers** the handlers
@@ -455,31 +522,35 @@ use at dispatch time (`_write._resolve_vm_list` /
 sites. The `resolved` list is capped at 20 entries
 (`_PREVIEW_RESOLVED_CAP`), identity-only per row (`vm`/`host`, `name`,
 `power_state`); `total_resolved` always carries the uncapped count. The
-four param-echo composites name their full blast radius in params, so
+five param-echo composites name their full blast radius in params, so
 no read can change what the preview says; `vm.migrate` deliberately
 does **not** pre-resolve a DRS recommendation (point-in-time output
 would mislead the reviewer — the preview says
 `target_host_source="drs_at_execution"` instead).
 
-At park time the composite handler never runs, so the builders cannot
-receive the dispatcher's `dispatch_child`. They construct a **read-only
-adapter** (`_read_only_dispatch_child`) that satisfies the same
-`DispatchChild` protocol but executes the sub-op directly against the
-resolved connector (descriptor lookup → `dispatch_ingested` /
-`dispatch_typed`), never through `dispatch()`: no policy-gate re-entry
-(a read-gating policy could otherwise park the preview's own sub-op
-from inside the parent's park), no unparented audit rows (the
-`approval.request` row — the audit anchor — is written *after* the
-preview), and a fail-closed `GET:`-prefix guard so the park path can
-never mutate vSphere state. This mirrors how the k8s.apply dry-run
-(#1437), the argocd snapshot reads (#1452), and the vault capability
-probe (#1504) run their preview I/O — connector-level, un-dispatched.
+At park time the composite handler never runs, but the shared
+`_write._resolve_vm_list` / `_write._resolve_cluster_hosts` helpers are
+now direct-session (`#2256`): the live-read builders call them with the
+connector instance the dispatcher resolved into the `PreviewContext`
+(`ctx.connector_instance`), so the one listing `GET` runs straight on the
+session. Because it is a direct read, the three properties the old
+park-time `dispatch_child` adapter enforced hold intrinsically — no
+policy-gate re-entry (a direct call cannot re-enter the dispatcher), no
+unparented audit rows (a direct read writes none), reads-only (the
+helpers only ever issue the listing `GET`). This also fixes the
+fresh-boot gap the pre-`#2256` preview had: the retired adapter resolved
+the sub-op against an **ingested** descriptor row, so on a
+zero-catalog-ingest deploy the live-read preview always degraded to
+`preview_unavailable`; the direct-session read now resolves the entity
+set on a fresh boot. This mirrors how the k8s.apply dry-run (#1437), the
+argocd snapshot reads (#1452), and the vault capability probe (#1504) run
+their preview I/O — connector-level, un-dispatched.
 
 Everything is fail-soft — the park always proceeds — but a decline and
 a failure degrade differently (#1628): a builder that *declines*
-(malformed params) parks with the identifier-only default, while a
-builder that *raises* (vCenter unreachable, listing op not ingested
-yet, the L2 read can't execute on this deploy) parks with the
+(malformed params, or no resolved connector instance) parks with the
+identifier-only default, while a builder that *raises* (vCenter
+unreachable, the listing read errors on this deploy) parks with the
 identifier fields **plus** `preview_unavailable: true` and a
 `preview_error` reason naming the failed read. The marker rides through
 every reviewer surface that renders `proposed_effect` verbatim (REST
@@ -534,9 +605,12 @@ they never park.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
-- **All 15 composites shipped** — T5 (#508) ships 5 read, #2080 adds a 6th read,
-  #2135 adds a 7th read (`host.vsan_health`); T6 (#509) ships the 8 write
-  composites. The "All hand-authored composites land as endpoint_descriptor rows with
+- **All hand-authored composites shipped** — T5 (#508) ships 5 read;
+  #2080 + #2135 add two more reads (`host.network_uplinks` /
+  `host.vsan_health`, later re-shipped as typed ops in #2258); T6
+  (#509) ships 8 write composites, and #2301 adds a 9th (single-VM
+  `vm.power`, incl. Tools soft shutdown) — 14 composites today. The
+  "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.
 - **`vm.clone` task polling is wall-clock bounded** — the composite
@@ -578,7 +652,7 @@ they never park.
   "GET:/vcenter/network/distributed-portgroup"` has the identical
   unresolvable spelling. #1602 is scoped to the read
   `network.portgroup.audit` composite only; the write-side fix plus a
-  reconcile guard over the 8 write composites' `_SUB_OPS_*` against the
+  reconcile guard over the 9 write composites' `_SUB_OPS_*` against the
   real pinned spec (the existing
   `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
   synthesises its fixture *from* the constants, so it cannot catch a

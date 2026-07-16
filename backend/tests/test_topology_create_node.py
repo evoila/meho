@@ -254,8 +254,14 @@ async def test_create_node_over_auto_promotes_discovered_by() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_node_rejects_unknown_kind_before_db_write() -> None:
-    """A non-vocabulary kind raises ``InvalidNodeKindError`` pre-DB."""
+@pytest.mark.parametrize("bad_kind", ["DNS Record!", "a" * 64])
+async def test_create_node_rejects_malformed_kind_before_db_write(bad_kind: str) -> None:
+    """A malformed kind slug raises ``InvalidNodeKindError`` pre-DB.
+
+    T1 #2534: the vocabulary is open, so rejection is by slug shape
+    (pattern + length), not membership. The error message names the
+    pattern and echoes the well-known kinds as suggestions.
+    """
     tenant_id = await _seed_tenant()
     sessionmaker = get_sessionmaker()
 
@@ -265,13 +271,16 @@ async def test_create_node_rejects_unknown_kind_before_db_write() -> None:
                 await create_or_get_node(
                     session,
                     _operator(tenant_id),
-                    kind="quantum-blob",
+                    kind=bad_kind,
                     name="entangled",
                 )
 
-    assert "quantum-blob" in str(excinfo.value)
-    # Vocabulary list is echoed for the operator to recover from.
-    assert "vault-role" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert bad_kind in message
+    # The slug pattern is named for the operator to recover from...
+    assert "[a-z0-9]" in message
+    # ...and the well-known kinds are echoed as suggestions.
+    assert "vault-role" in message
 
     # No row landed, no broadcast emitted.
     async with sessionmaker() as session:
@@ -282,6 +291,37 @@ async def test_create_node_rejects_unknown_kind_before_db_write() -> None:
         )
     assert rows == []
     publish_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_node_accepts_novel_kind() -> None:
+    """A well-formed novel kind (``dns-record``) creates a node end-to-end.
+
+    The T1 #2534 acceptance case: a kind that was outside the old
+    closed 14-member vocabulary flows through validation, insert, and
+    round-trip without a migration.
+    """
+    tenant_id = await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            result = await create_or_get_node(
+                session,
+                _operator(tenant_id),
+                kind="dns-record",
+                name="www.example.com",
+            )
+
+    assert result.was_created is True
+    assert result.node.kind == "dns-record"
+
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(GraphNode).where(GraphNode.id == result.node.id))
+        ).scalar_one()
+    assert row.kind == "dns-record"
+    assert row.name == "www.example.com"
 
 
 # ---------------------------------------------------------------------------

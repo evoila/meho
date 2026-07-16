@@ -135,6 +135,7 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 		rollup, kindCell(kind, dispatchable),
 		len(r.Groups), r.TotalOpCount,
 	)
+	printProvenance(w, r.Provenance)
 	if len(r.Groups) == 0 {
 		fmt.Fprintln(w, "(no groups; the connector has no operations or the grouping pass produced no buckets)")
 		return
@@ -165,6 +166,33 @@ func printReviewTable(w io.Writer, r *api.ConnectorReviewPayload) {
 				truncate(strDeref(op.Summary), 70),
 			)
 		}
+	}
+}
+
+// printProvenance renders the per-spec ingest provenance (#2291) so an
+// operator can tell a vendor artifact from a hand-mutated one before
+// enabling reads: the fetched/inline/shipped origin, the audit uri, a
+// short sha256 prefix over the raw bytes, who ingested it, and when. A
+// connector ingested before the provenance table landed carries no
+// rows; we say so explicitly rather than render a blank section.
+func printProvenance(w io.Writer, provenance *[]api.ConnectorReviewProvenance) {
+	if provenance == nil || len(*provenance) == 0 {
+		fmt.Fprintln(w, "  provenance: unknown (pre-provenance) — ingested before provenance was recorded")
+		return
+	}
+	fmt.Fprintf(w, "\nprovenance — %d spec(s):\n", len(*provenance))
+	fmt.Fprintf(w, "  %-8s %-19s %-14s %s\n", "origin", "sha256", "operator", "uri")
+	for _, p := range *provenance {
+		operator := "—"
+		if p.OperatorSub != nil && *p.OperatorSub != "" {
+			operator = *p.OperatorSub
+		}
+		fmt.Fprintf(w, "  %-8s %-19s %-14s %s\n",
+			p.Origin,
+			truncate(p.Sha256, 19),
+			truncate(operator, 14),
+			p.Uri,
+		)
 	}
 }
 

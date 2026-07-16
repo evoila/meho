@@ -29,16 +29,49 @@ side of the same task).
 
 from __future__ import annotations
 
+import asyncio
+import math
+import time
+
 import pytest
+import structlog
+from structlog.testing import capture_logs
 
 from meho_backplane.operations.ingest import (
     IngestionPipelineResult,
     IngestJob,
     IngestJobRegistry,
+    OpIdCollision,
+    jobs,
     run_ingest_job,
 )
 from meho_backplane.operations.ingest.jobs import INGESTED_NOT_DISPATCHABLE
 from meho_backplane.operations.ingest.register_ingested import IngestionResult
+
+
+@pytest.fixture(autouse=True)
+def _rebind_jobs_logger(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give each test a fresh, unrealized ``jobs._log`` structlog proxy.
+
+    Guards against an xdist ``--dist loadscope`` ordering hazard. A sibling
+    module that calls ``meho_backplane.logging.configure_logging()`` sets
+    ``cache_logger_on_first_use=True`` and installs a **fresh** processors
+    list; a later sibling call swaps in yet another fresh list. Once the
+    module-level ``jobs._log`` proxy is realized (e.g. by an earlier
+    ``run_ingest_job`` test that emits a log line) it caches a bound logger
+    holding a reference to whichever list was live *then*.
+    ``structlog.testing.capture_logs`` mutates the *current* config list in
+    place (by design, to reach live bound loggers), so it can no longer
+    intercept the orphaned cached logger — the capture comes back empty and
+    ``test_load_timeout_env_rejected_values_fall_back`` (and the other
+    capture-based tests here) fail deterministically depending on worker
+    layout. Rebinding a fresh proxy per test forces re-realization against
+    the live config list inside the test — the same list ``capture_logs``
+    mutates — so the capture is robust regardless of prior realization.
+    ``monkeypatch`` restores the original module logger after each test;
+    product ``jobs.py`` behaviour is unchanged.
+    """
+    monkeypatch.setattr(jobs, "_log", structlog.get_logger(jobs.__name__))
 
 
 def _pipeline_result(
@@ -244,6 +277,274 @@ async def test_raising_pipeline_still_fails() -> None:
     assert stored.error is not None and "spec parse blew up" in stored.error
     assert stored.result is None
     assert probe_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_wedged_pipeline_times_out_to_failed() -> None:
+    """A never-returning ``pipeline_call`` is watchdog-failed, not left ``running``.
+
+    The terminal-state guarantee (#2275): an await that never resolves
+    (a starved ``to_thread`` executor, a hung DB acquire, a grouping LLM
+    call pending on the SDK's ~30-min ceiling) must not strand the job at
+    ``running`` until a pod restart clears the in-memory registry. With a
+    test-shrunk budget the job flips to ``failed`` carrying
+    ``error_class="TimeoutError"`` well within the budget.
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    async def _never_returns() -> IngestionPipelineResult:
+        await asyncio.Event().wait()  # blocks forever until cancelled
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    started = time.monotonic()
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=_never_returns,
+        registry=registry,
+        timeout_s=0.05,
+    )
+    elapsed = time.monotonic() - started
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "TimeoutError"
+    assert stored.ended_at is not None
+    assert stored.result is None
+    # Terminated promptly on the shrunk budget -- nowhere near the 30-min default.
+    assert elapsed < 5.0
+
+
+@pytest.mark.asyncio
+async def test_wedged_dispatchability_probe_times_out_to_failed() -> None:
+    """A hang in the *post-run* dispatchability probe also terminates the job.
+
+    The watchdog wraps the whole body, not just ``pipeline_call``: the
+    dispatchability probe is a real DB read (``connector_exists``) whose
+    own hang would strand the job if only the pipeline call were guarded.
+    A probe that never returns flips the job to ``failed`` /
+    ``TimeoutError``. Note the probe *hangs* rather than raises, so
+    ``_dispatchability_failure_reason``'s fail-open ``except Exception``
+    does not swallow the cancellation (``CancelledError`` is a
+    ``BaseException``, outside ``Exception``).
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+    result = _pipeline_result(inserted_count=5)
+
+    async def _hanging_probe(_result: IngestionPipelineResult) -> bool:
+        await asyncio.Event().wait()  # blocks forever until cancelled
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    started = time.monotonic()
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=lambda: _async_return(result),
+        registry=registry,
+        dispatchability_check=_hanging_probe,
+        timeout_s=0.05,
+    )
+    elapsed = time.monotonic() - started
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "TimeoutError"
+    # The pipeline returned, but the job is failed (not succeeded/degraded)
+    # because the probe never produced a dispatchability verdict.
+    assert stored.result is None
+    assert elapsed < 5.0
+
+
+# --- Watchdog budget env loader (#2318) -----------------------------------
+#
+# ``_load_ingest_job_timeout_seconds`` parses ``INGEST_JOB_TIMEOUT_SECONDS``
+# into the finite, positive budget ``asyncio.timeout`` receives. A
+# non-finite (``inf`` / ``nan``), non-positive, or malformed value must fall
+# back to the 1800 s default with a warning — a misconfigured budget can
+# never disable the #2275 watchdog by handing ``asyncio.timeout`` a deadline
+# it never schedules.
+
+
+def test_load_timeout_env_unset_returns_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unset env var yields the 1800 s default with no warning."""
+    monkeypatch.delenv("INGEST_JOB_TIMEOUT_SECONDS", raising=False)
+    with capture_logs() as logs:
+        budget = jobs._load_ingest_job_timeout_seconds()
+    assert budget == jobs._DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
+    assert not [e for e in logs if e.get("log_level") == "warning"]
+
+
+def test_load_timeout_env_finite_positive_honored(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finite positive override is honored verbatim, with no warning."""
+    monkeypatch.setenv("INGEST_JOB_TIMEOUT_SECONDS", "3600")
+    with capture_logs() as logs:
+        budget = jobs._load_ingest_job_timeout_seconds()
+    assert budget == 3600.0
+    assert not [e for e in logs if e.get("log_level") == "warning"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "event"),
+    [
+        ("inf", "ingest_job_timeout_env_out_of_range"),
+        ("Infinity", "ingest_job_timeout_env_out_of_range"),
+        ("-inf", "ingest_job_timeout_env_out_of_range"),
+        ("nan", "ingest_job_timeout_env_out_of_range"),
+        ("0", "ingest_job_timeout_env_out_of_range"),
+        ("0.0", "ingest_job_timeout_env_out_of_range"),
+        ("-30", "ingest_job_timeout_env_out_of_range"),
+        ("abc", "ingest_job_timeout_env_invalid"),
+        ("", "ingest_job_timeout_env_invalid"),
+    ],
+)
+def test_load_timeout_env_rejected_values_fall_back(
+    raw: str,
+    event: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-finite, non-positive, and malformed values fall back with a warning.
+
+    ``inf`` / ``-inf`` / ``nan`` parse as floats (no ``ValueError``) but are
+    rejected by the ``math.isfinite`` guard; ``0`` / ``0.0`` / negatives by
+    the ``<= 0`` guard — both route to ``ingest_job_timeout_env_out_of_range``.
+    Empty and non-numeric strings raise ``ValueError`` →
+    ``ingest_job_timeout_env_invalid``. Every case returns the finite 1800 s
+    default so the watchdog stays armed.
+    """
+    monkeypatch.setenv("INGEST_JOB_TIMEOUT_SECONDS", raw)
+    with capture_logs() as logs:
+        budget = jobs._load_ingest_job_timeout_seconds()
+    assert budget == jobs._DEFAULT_INGEST_JOB_TIMEOUT_SECONDS
+    assert math.isfinite(budget)
+    warnings = [e for e in logs if e.get("log_level") == "warning"]
+    assert [w["event"] for w in warnings] == [event]
+
+
+@pytest.mark.asyncio
+async def test_inf_env_sanitized_so_watchdog_still_fires(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``INGEST_JOB_TIMEOUT_SECONDS=inf`` sanitizes to a finite budget, so a wedged job still fails.
+
+    The correctness bug #2318 closes: ``inf`` slips past a bare ``value <= 0``
+    guard, and ``asyncio.timeout(inf)`` schedules no deadline — a wedged job
+    would sit at ``running`` forever, re-opening the exact hole the #2275
+    watchdog closed. With the ``math.isfinite`` guard ``inf`` falls back to
+    the finite default, which is what ``asyncio.timeout`` receives, so the job
+    flips to ``failed`` / ``TimeoutError``. The default is shrunk here so the
+    finite fallback is observable in-test rather than 30 min later.
+    """
+    monkeypatch.setenv("INGEST_JOB_TIMEOUT_SECONDS", "inf")
+    monkeypatch.setattr(jobs, "_DEFAULT_INGEST_JOB_TIMEOUT_SECONDS", 0.05)
+    # Re-resolve the module budget from the (inf) env through the guard,
+    # exactly as import time does — the sanitized value is finite, not inf.
+    budget = jobs._load_ingest_job_timeout_seconds()
+    assert math.isfinite(budget)
+    monkeypatch.setattr(jobs, "_INGEST_JOB_TIMEOUT_SECONDS", budget)
+
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    async def _never_returns() -> IngestionPipelineResult:
+        await asyncio.Event().wait()  # blocks forever until cancelled
+        raise AssertionError("unreachable")  # pragma: no cover
+
+    started = time.monotonic()
+    await run_ingest_job(
+        job.job_id,
+        pipeline_call=_never_returns,
+        registry=registry,
+        # timeout_s=None → run_ingest_job reads the sanitized module budget,
+        # the production path (not the per-call test override).
+    )
+    elapsed = time.monotonic() - started
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "TimeoutError"
+    assert stored.ended_at is not None
+    # Fired on the finite fallback, nowhere near `inf`.
+    assert elapsed < 5.0
+
+
+@pytest.mark.asyncio
+async def test_pipeline_log_event_carries_ingest_job_id() -> None:
+    """A pipeline log event carries ``ingest_job_id`` via the contextvar binding.
+
+    ``run_ingest_job`` binds the job id into structlog contextvars, so the
+    configured ``merge_contextvars`` processor stamps it onto events
+    emitted by *other* loggers under the pipeline call -- not just
+    jobs.py's own lines. This is what lets a job-id-filtered log grep see
+    ``ingestion_pipeline_start`` &c. ``capture_logs`` clears the configured
+    processor chain, so ``merge_contextvars`` is re-supplied to mirror the
+    production chain (``logging.py``).
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+    result = _pipeline_result(inserted_count=5)
+
+    async def _pipeline_that_logs() -> IngestionPipelineResult:
+        # Mirror the real pipeline: emit from a freshly-bound logger that
+        # carries ``connector_id`` but has never seen the job id.
+        structlog.get_logger("test.pipeline").bind(connector_id="vrli-rest-9.0").info(
+            "ingestion_pipeline_start",
+        )
+        return result
+
+    async def _check(_result: IngestionPipelineResult) -> bool:
+        return True
+
+    with capture_logs(processors=[structlog.contextvars.merge_contextvars]) as logs:
+        await run_ingest_job(
+            job.job_id,
+            pipeline_call=_pipeline_that_logs,
+            registry=registry,
+            dispatchability_check=_check,
+        )
+
+    starts = [entry for entry in logs if entry.get("event") == "ingestion_pipeline_start"]
+    assert starts, "pipeline start event was not captured"
+    assert starts[0]["ingest_job_id"] == str(job.job_id)
+    # The binding must not leak past the run: the contextvar is unbound.
+    assert "ingest_job_id" not in structlog.contextvars.get_contextvars()
+
+
+@pytest.mark.asyncio
+async def test_op_id_collision_job_error_names_remediation() -> None:
+    """#2273 — the async-job ``error`` field carries the collision remediation.
+
+    The background path loses the structured HTTP ``detail`` shape (no route
+    context to raise into) and records only ``str(exc)``. Folding the
+    remediation into the exception message is therefore what makes the
+    async job's polling response name the fix -- re-ingest under the
+    original spec URI, or ``meho.connector.delete`` to clear crashed-job
+    debris -- not just the fault.
+    """
+    registry = IngestJobRegistry()
+    job = await _create_running_job(registry)
+
+    async def _raise() -> IngestionPipelineResult:
+        raise OpIdCollision(
+            op_ids=["GET:/api/items"],
+            product="test",
+            version="1.0",
+            impl_id="test-impl",
+            existing_spec_source="https://specs.example.test/a.yaml",
+            incoming_spec_source="file:///tmp/a.yaml",
+        )
+
+    await run_ingest_job(job.job_id, pipeline_call=_raise, registry=registry)
+
+    stored = await registry.get(job.job_id, tenant_id=None, is_tenant_admin=True)
+    assert stored.status == "failed"
+    assert stored.error_class == "OpIdCollision"
+    assert stored.error is not None
+    assert "original spec URI" in stored.error
+    assert "meho.connector.delete" in stored.error
 
 
 @pytest.mark.asyncio

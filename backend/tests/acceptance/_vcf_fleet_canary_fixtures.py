@@ -6,11 +6,11 @@
 The E2E module (:mod:`tests.test_connectors_vcf_fleet_e2e`) needs a
 registered :class:`~meho_backplane.connectors.vcf_fleet.VcfFleetConnector`
 instance with a stub credentials loader (so no Vault read fires), a
-probed :class:`~meho_backplane.db.models.Target`, the 8 curated
-:class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.vcf_fleet.core_ops.FLEET_CORE_OPS`,
-and a :mod:`respx`-mocked Fleet REST surface answering each of the 8
-curated read ops.
+probed :class:`~meho_backplane.db.models.Target`, the ingested
+browse-breadth :class:`~meho_backplane.db.models.EndpointDescriptor` rows
+from :data:`_FLEET_SEED_OPS` (the declined ingested set — the audited
+about/inventory ops are typed now, T4 · #2304), and a :mod:`respx`-mocked
+Fleet REST surface answering each read op.
 
 Fleet uses HTTP Basic auth against the local LCM user store on every
 request — no session-establish call, no XSRF-token dance, no 401-retry
@@ -24,7 +24,7 @@ Why a minimal direct-insert path (not full G0.7 canary ingest)
 VCF Fleet has no public CI simulator (Initiative #369 DoD), and the
 full vRSLCM OpenAPI ingest needs the spec file reachable on the runner.
 Until the spec-shelf is wired to the meho-runners pool, the dispatch
-leg is exercised against a direct-insert path that seeds the 8 curated
+leg is exercised against a direct-insert path that seeds the curated
 endpoint_descriptor rows by hand. Same pattern :mod:`tests.acceptance._nsx_canary_fixtures`
 and :mod:`tests.acceptance._sddc_canary_fixtures` established for the
 other no-public-simulator connectors.
@@ -64,8 +64,6 @@ import respx
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.connectors.vcf_fleet import (
-    FLEET_CORE_GROUPS,
-    FLEET_CORE_OPS,
     FLEET_IMPL_ID,
     FLEET_PRODUCT,
     FLEET_VERSION,
@@ -77,6 +75,7 @@ _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 
 __all__ = [
     "FLEET_CANARY_BASE_URL",
+    "FLEET_CANARY_CORE_OP_IDS",
     "FLEET_CANARY_DATACENTERS",
     "FLEET_CANARY_ENVIRONMENTS",
     "FLEET_CANARY_FINGERPRINT",
@@ -105,12 +104,14 @@ FLEET_TARGET_NAME: str = "fleet-acceptance"
 #: client URL exactly.
 FLEET_CANARY_BASE_URL: str = "https://fleet-canary.test.invalid"
 
-#: The list op the JSONFlux force-handle test dispatches. Environment
-#: listing is the largest curated Fleet read surface in real
-#: deployments — every vRA / vROps / vRLI / vIDM deploy on the appliance
-#: lives under an environment, and busy Fleets manage dozens. Mirrors
-#: the NSX (segment list) and SDDC Manager (host list) choices.
-FLEET_FORCE_HANDLE_LIST_OP_ID: str = "GET:/lcm/lcops/api/v2/environments"
+#: The ingested list op the JSONFlux force-handle test dispatches.
+#: Lifecycle-request listing is the largest *ingested-curated* Fleet read
+#: surface in real deployments — busy appliances accumulate thousands of
+#: historical requests. (Environment listing, formerly used here, is now a
+#: typed op — T4 · #2304 — so it no longer dispatches via the ingested
+#: path this fixture exercises.) Mirrors the NSX (segment list) and SDDC
+#: Manager (host list) choices.
+FLEET_FORCE_HANDLE_LIST_OP_ID: str = "GET:/lcm/request/api/v2/requests"
 
 #: Persisted as ``Target.fingerprint`` so the resolver binds
 #: :class:`VcfFleetConnector` (``supported_version_range=">=9.0,<10.0"``).
@@ -329,15 +330,45 @@ def _param_schema_for(path: str) -> dict[str, object]:
     }
 
 
-async def _insert_fleet_descriptors() -> None:
-    """Seed the 8 curated Fleet core ops + their groups as enabled rows.
+#: Ingested browse-breadth seed data for the Fleet dispatch canary — the six
+#: ``source_kind="ingested"`` read ops (and their five groups) declined from
+#: typed conversion on #2304 but kept browsable. Relocated here from the
+#: retired ``vcf_fleet.core_ops`` curation apparatus (#2358): this is test-only
+#: fixture material describing the ``EndpointDescriptor`` rows the dispatch
+#: tests seed and mock. ``(group_key, name, when_to_use)``.
+_FLEET_SEED_GROUPS: tuple[tuple[str, str, str], ...] = (
+    ("fleet-datacenter", "VCF Fleet Datacenters", "Datacenter inventory."),
+    ("fleet-vcenter", "VCF Fleet vCenters", "vCenter inventory per datacenter."),
+    ("fleet-environment", "VCF Fleet Environments", "LCM environment detail."),
+    ("fleet-product", "VCF Fleet Products", "Deployed products per environment."),
+    ("fleet-request", "VCF Fleet Lifecycle Requests", "LCM request list + detail."),
+)
 
-    One :class:`OperationGroup` per entry in
-    :data:`~meho_backplane.connectors.vcf_fleet.FLEET_CORE_GROUPS`
+#: ``(op_id, group_key)`` for each ingested browse-breadth Fleet read op. The
+#: ``fleet-request`` group carries two ops (list + info).
+_FLEET_SEED_OPS: tuple[tuple[str, str], ...] = (
+    ("GET:/lcm/lcops/api/v2/datacenters", "fleet-datacenter"),
+    ("GET:/lcm/lcops/api/v2/datacenters/{dataCenterVmid}/vcenters", "fleet-vcenter"),
+    ("GET:/lcm/lcops/api/v2/environments/{environmentId}", "fleet-environment"),
+    ("GET:/lcm/lcops/api/v2/environments/{environmentId}/products", "fleet-product"),
+    ("GET:/lcm/request/api/v2/requests", "fleet-request"),
+    ("GET:/lcm/request/api/v2/requests/{requestId}", "fleet-request"),
+)
+
+#: Op ids the Fleet dispatch/e2e tests parametrize over (relocated from
+#: ``tuple(op.op_id for op in FLEET_CORE_OPS)``).
+FLEET_CANARY_CORE_OP_IDS: tuple[str, ...] = tuple(op_id for op_id, _ in _FLEET_SEED_OPS)
+
+
+async def _insert_fleet_descriptors() -> None:
+    """Seed the ingested Fleet browse-breadth ops + their groups as enabled rows.
+
+    One :class:`OperationGroup` per entry in :data:`_FLEET_SEED_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor` per
-    entry in :data:`~meho_backplane.connectors.vcf_fleet.FLEET_CORE_OPS`
+    entry in :data:`_FLEET_SEED_OPS`
     (``is_enabled=True``, ``source_kind='ingested'``,
-    ``handler_ref=None``).
+    ``handler_ref=None``). This is the *declined* ingested set — the
+    audited about/inventory ops dispatch typed (T4 · #2304).
 
     Rows use ``product=FLEET_PRODUCT="fleet"`` (from
     :func:`parse_connector_id("fleet-rest-9.0")`), not the connector
@@ -345,47 +376,46 @@ async def _insert_fleet_descriptors() -> None:
     ``product="fleet"`` so the resolver finds
     :class:`VcfFleetConnector`.
 
-    Multiple ops can reference the same ``group_key`` — environments
-    has two ops (list + info), requests has two ops (list + info) — so
-    the helper coalesces group inserts via the ``group_ids`` dict and
-    skips re-inserting on the second op encounter.
+    Multiple ops can reference the same ``group_key`` — requests has two
+    ops (list + info) — so the helper coalesces group inserts via the
+    ``group_ids`` dict and skips re-inserting on the second op encounter.
     """
     sessionmaker = get_sessionmaker()
     group_ids: dict[str, UUID] = {}
     async with sessionmaker() as session:
-        for group in FLEET_CORE_GROUPS:
+        for group_key, name, when_to_use in _FLEET_SEED_GROUPS:
             group_row = OperationGroup(
                 tenant_id=None,
                 product=FLEET_PRODUCT,
                 version=FLEET_VERSION,
                 impl_id=FLEET_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
+                group_key=group_key,
+                name=name,
+                when_to_use=when_to_use,
                 review_status="enabled",
             )
             session.add(group_row)
             await session.flush()
-            group_ids[group.group_key] = group_row.id
+            group_ids[group_key] = group_row.id
 
-        for op in FLEET_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
+        for op_id, group_key in _FLEET_SEED_OPS:
+            method, path = op_id.split(":", 1)
             descriptor = EndpointDescriptor(
                 tenant_id=None,
                 product=FLEET_PRODUCT,
                 version=FLEET_VERSION,
                 impl_id=FLEET_IMPL_ID,
-                op_id=op.op_id,
+                op_id=op_id,
                 source_kind="ingested",
                 method=method,
                 path=path,
                 handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"VCF Fleet core op {op.op_id} (curated read).",
-                description=f"VCF Fleet core op {op.op_id} (curated read).",
+                group_id=group_ids[group_key],
+                summary=f"VCF Fleet ingested read op {op_id}.",
+                description=f"VCF Fleet ingested read op {op_id}.",
                 parameter_schema=_param_schema_for(path),
                 response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
+                llm_instructions=None,
                 safety_level="safe",
                 requires_approval=False,
                 is_enabled=True,
@@ -406,7 +436,12 @@ async def _fleet_credentials_loader(_target: object, _operator: Operator) -> dic
 
 
 def _register_fleet_routes(mock: respx.MockRouter) -> None:
-    """Register the 8 Fleet read-op routes on *mock*.
+    """Register the Fleet read-op routes on *mock*.
+
+    Covers the full read surface (including the now-typed /about and
+    /environments paths, kept here so a typed-op smoke can reuse this
+    router); the ingested E2E only dispatches the ``_FLEET_SEED_OPS``
+    browse-breadth subset. ``assert_all_called=False`` tolerates the unhit routes.
 
     Fleet uses HTTP Basic on every request — no session-establish call.
     Each route returns a pre-seeded JSON body matching the rough shape

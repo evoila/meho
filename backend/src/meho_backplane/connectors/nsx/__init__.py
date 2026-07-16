@@ -40,27 +40,35 @@ of the NSX ``policy.yaml`` + ``manager.yaml`` corpus against the
 ``endpoint_descriptor`` table. This Task ships only the skeleton.
 """
 
+from typing import Final
+
 from meho_backplane.connectors.nsx.connector import NsxConnector
-from meho_backplane.connectors.nsx.core_ops import (
-    NSX_CONNECTOR_ID,
-    NSX_CORE_GROUPS,
-    NSX_CORE_OPS,
-    NSX_IMPL_ID,
-    NSX_PATH_RULES,
-    NSX_PRODUCT,
-    NSX_VERSION,
-    NsxCoreGroup,
-    NsxCoreOp,
-    apply_nsx_core_curation,
-    classify_nsx_op,
-)
 from meho_backplane.connectors.nsx.session import (
     NsxSessionLoader,
     NsxTargetLike,
     SessionCredentials,
     load_session_credentials_from_vault,
 )
+from meho_backplane.connectors.nsx.typed_ops import (
+    NSX_TYPED_OPS,
+    NsxTypedOp,
+    register_nsx_typed_operations,
+)
 from meho_backplane.connectors.registry import register_connector_v2
+from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+#: Endpoint-descriptor identity for the NSX connector — the dispatch-canonical
+#: ``(product, version, impl_id)`` triple :func:`parse_connector_id` derives
+#: from ``"nsx-rest-9.0"``, plus the derived ``connector_id`` slug (the class
+#: pin; finer VCF-9 9.x labels ingest under their own ``nsx-rest-<label>``
+#: slug). :class:`NsxConnector` pins the same triple as class attributes.
+#: Relocated from the retired ``core_ops`` curation module (#2358) so
+#: acceptance / typed-read / VCF-9-ingest tests that seed ``EndpointDescriptor``
+#: rows import one source of truth.
+NSX_PRODUCT: Final[str] = "nsx"
+NSX_VERSION: Final[str] = "9.0"
+NSX_IMPL_ID: Final[str] = "nsx-rest"
+NSX_CONNECTOR_ID: Final[str] = f"{NSX_IMPL_ID}-{NSX_VERSION}"
 
 register_connector_v2(
     product="nsx",
@@ -82,21 +90,23 @@ register_connector_v2(
     cls=NsxConnector,
 )
 
+# Queue the audited-read typed-op upsert (#2302) onto the lifespan-driven
+# registrar list. The runner (``run_typed_op_registrars``) iterates after
+# ``_eager_import_connectors`` so the ``source_kind='typed'`` descriptor
+# rows land before the first dispatch -- no catalog ingest required.
+register_typed_op_registrar(register_nsx_typed_operations)
+
 __all__ = [
     "NSX_CONNECTOR_ID",
-    "NSX_CORE_GROUPS",
-    "NSX_CORE_OPS",
     "NSX_IMPL_ID",
-    "NSX_PATH_RULES",
     "NSX_PRODUCT",
+    "NSX_TYPED_OPS",
     "NSX_VERSION",
     "NsxConnector",
-    "NsxCoreGroup",
-    "NsxCoreOp",
     "NsxSessionLoader",
     "NsxTargetLike",
+    "NsxTypedOp",
     "SessionCredentials",
-    "apply_nsx_core_curation",
-    "classify_nsx_op",
     "load_session_credentials_from_vault",
+    "register_nsx_typed_operations",
 ]

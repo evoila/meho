@@ -16,6 +16,11 @@ Coverage matrix:
   - ``tenant_admin`` sees both.
 * Both tools' ``inputSchema`` is strict JSON-Schema 2020-12 with
   ``additionalProperties: false``; descriptions name when (not) to use.
+* **Inline spec content** (#2326): each ``specs[*]`` entry exposes an
+  optional ``content`` field that threads through to
+  :attr:`SpecSource.content` verbatim (the CLI-upload on-ramp for a
+  private / appliance-served spec with no public https URL); an omitted
+  ``content`` leaves the historical fetch shape unchanged.
 * **Inline path** (``dry_run=true`` / ``async`` unset) returns the
   canonical ``IngestResponse`` synchronously — the pre-#1531 behaviour
   (no regression). Specs + flags + tenant_id thread through to the
@@ -305,6 +310,82 @@ def test_ingest_tool_schemas_are_strict_and_describe_async(
 
 @pytest.mark.parametrize(
     "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_ingest_schema_exposes_closed_auth_scheme_selector(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """The ingest tool schema advertises auth_scheme as a closed enum + names only (#2289)."""
+    from meho_backplane.connectors.profile import NAMED_AUTH_SCHEMES
+
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools = {t["name"]: t for t in response.json()["result"]["tools"]}
+    props = tools[_INGEST_TOOL]["inputSchema"]["properties"]
+
+    # auth_scheme is a closed enum covering exactly the named catalog (+ null).
+    scheme_enum = set(props["auth_scheme"]["enum"]) - {None}
+    assert scheme_enum == NAMED_AUTH_SCHEMES
+    # auth_secret_fields carries NAMES only — an array of strings, no value field.
+    assert props["auth_secret_fields"]["items"]["type"] == "string"
+    assert "auth_secret" not in {k for k in props if "value" in k}
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_ingest_schema_exposes_inline_spec_content(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """Each specs entry advertises an optional inline ``content`` field (#2326)."""
+    client, _op = client_with_operator
+    response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    tools = {t["name"]: t for t in response.json()["result"]["tools"]}
+    spec_item = tools[_INGEST_TOOL]["inputSchema"]["properties"]["specs"]["items"]
+
+    # uri stays the required audit label; content is optional (string | null).
+    assert spec_item["required"] == ["uri"]
+    content = spec_item["properties"]["content"]
+    assert content["type"] == ["string", "null"]
+    # Size cap mirrors the REST SpecSource.content bound (~20 MiB chars).
+    assert content["maxLength"] == 20 * 1024 * 1024
+    # No stray field crept into the strict item schema.
+    assert spec_item["additionalProperties"] is False
+    assert set(spec_item["properties"]) == {"uri", "content"}
+
+
+async def test_inline_ingest_threads_auth_scheme_to_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A selected auth_scheme + secret-field names reach the pipeline (#2289)."""
+    fake = _FakeIngestionPipelineService()
+    monkeypatch.setattr(ci_mod, "IngestionPipelineService", fake)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    await ci_mod._ingest_handler(
+        op,
+        {
+            "product": "acme",
+            "version": "1.2",
+            "impl_id": "acme-rest",
+            "specs": [{"uri": "docs:acme-1.2/acme.yaml"}],
+            "auth_scheme": "session_login_token",
+            "auth_secret_fields": ["username", "password"],
+            "async": False,
+            "tenant_id": str(OPERATOR_TENANT_ID),
+        },
+    )
+
+    [call] = fake.ingest_calls
+    assert call["auth_scheme"] == "session_login_token"
+    assert call["auth_secret_fields"] == ("username", "password")
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
     [TenantRole.OPERATOR],
     indirect=True,
 )
@@ -410,6 +491,73 @@ async def test_inline_default_returns_grouping(
     assert "job_id" not in payload
     [call] = fake.ingest_calls
     assert call["dry_run"] is False
+
+
+async def test_inline_content_threads_to_service_verbatim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Inline ``content`` reaches the pipeline as ``SpecSource.content`` (#2326).
+
+    A private spec with no public https URL (an appliance-served /
+    hand-authored spec) is uploaded inline: the ``file://`` ``uri`` is
+    the audit label, ``content`` carries the bytes, and the pipeline
+    uses them verbatim — the fetch (and its https scheme guard) is
+    bypassed, so no gist workaround is needed. Mirrors what the CLI
+    upload path sends the backplane.
+    """
+    fake = _FakeIngestionPipelineService()
+    monkeypatch.setattr(ci_mod, "IngestionPipelineService", fake)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    spec_text = "openapi: 3.1.0\ninfo:\n  title: probe\n  version: '0.0'\npaths: {}\n"
+    payload = await ci_mod._ingest_handler(
+        op,
+        {
+            "product": "probe",
+            "version": "0.0",
+            "impl_id": "probe-rest",
+            "specs": [{"uri": "file:///tmp/probe-spec.yaml", "content": spec_text}],
+            "dry_run": True,
+            "tenant_id": str(OPERATOR_TENANT_ID),
+        },
+    )
+
+    assert "job_id" not in payload  # inline (dry-run) shape, not a handle
+    [call] = fake.ingest_calls
+    [source] = call["specs"]
+    # uri preserved as the audit label; content threaded through verbatim.
+    assert source.uri == "file:///tmp/probe-spec.yaml"
+    assert source.content == spec_text
+
+
+async def test_inline_omitted_content_stays_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A specs entry without ``content`` yields ``SpecSource.content is None`` (#2326).
+
+    The historical fetch shape is unchanged: an entry that carries only
+    a ``uri`` still leaves ``content`` unset, so the pipeline fetches the
+    URL under the https guard exactly as before.
+    """
+    fake = _FakeIngestionPipelineService()
+    monkeypatch.setattr(ci_mod, "IngestionPipelineService", fake)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    await ci_mod._ingest_handler(
+        op,
+        {
+            "product": "vmware",
+            "version": "9.0",
+            "impl_id": "vmware-rest",
+            "specs": [{"uri": "https://example.test/vcenter.yaml"}],
+            "dry_run": True,
+        },
+    )
+
+    [call] = fake.ingest_calls
+    [source] = call["specs"]
+    assert source.uri == "https://example.test/vcenter.yaml"
+    assert source.content is None
 
 
 async def test_inline_version_mismatch_maps_to_invalid_params(
@@ -625,6 +773,12 @@ async def test_inline_op_id_collision_maps_to_invalid_params(
     assert err.data["product"] == "vmware"
     assert err.data["existing_spec_source"] == "spec:vcenter.yaml"
     assert err.data["incoming_spec_source"] == "spec:vi-json.yaml"
+    # #2273 — the MCP -32602 data + message both name the remediation:
+    # re-ingest under the original URI, or meho.connector.delete to clear
+    # crashed-job debris.
+    assert "original spec URI" in err.data["remediation"]
+    assert "meho.connector.delete" in err.data["remediation"]
+    assert "meho.connector.delete" in str(err)
 
 
 async def test_inline_upstream_not_spec_maps_to_invalid_params(

@@ -54,10 +54,11 @@
 #     attestation is content-addressed (bound to the digest, not a tag) so
 #     verification works for every tag alias.
 #   - aquasecurity/trivy-action scans the same digest for CVEs and emits SARIF.
-#     v0.1 is report-only (`exit-code: 0`) — the workflow never fails on
-#     findings. SARIF results land both on the GitHub Security tab (Code
-#     scanning alerts) and as a 30-day workflow artefact. v0.2 will flip on a
-#     severity-based gate once the baseline noise level is known.
+#     It runs post-push on main/tags with `exit-code: '1'`, so a CRITICAL/HIGH
+#     fixed CVE fails the run as a red-main alarm against silent CVE
+#     accumulation on a stale base image (it is not a PR merge gate — the step
+#     is skipped on pull_request). SARIF results land both on the GitHub
+#     Security tab (Code scanning alerts) and as a 30-day workflow artefact.
 #
 # Cross-repo deploy trigger (Task #51):
 #   - After image push on main, the workflow POSTs a `repository_dispatch`
@@ -128,16 +129,16 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Set up QEMU (arm64 emulation for cross-build)
-        uses: docker/setup-qemu-action@06116385d9baf250c9f4dcb4858b16962ea869c3  # v4.1.0
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8  # v4.2.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c  # v4.2.0
 
       - name: Log in to GHCR
         # PRs build only; no login needed and no GHCR credential available
         # to the workflow on PRs from forks anyway.
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee  # v4.2.0
+        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -145,7 +146,7 @@ jobs:
 
       - name: Compute image tags + labels
         id: meta
-        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9  # v6.1.0
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302  # v6.2.0
         with:
           images: ghcr.io/evoila/meho
           # Tag matrix:
@@ -165,7 +166,7 @@ jobs:
 
       - name: Build (and conditionally push) image
         id: build
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf  # v7.2.0
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a  # v7.3.0
         with:
           context: backend
           # Multi-arch invariant (Initiative #31 DoD): publish manifest list
@@ -301,12 +302,19 @@ jobs:
         # including the uv-installed Python wheels in /app/.venv). Emits
         # SARIF for upload to the GitHub Security tab.
         #
-        # v0.1 is *report-only*:
-        #   - `severity: CRITICAL,HIGH` filters the SARIF to the levels that
-        #     actually matter (LOW/MEDIUM are noise at this stage).
-        #   - `exit-code: '0'` keeps the workflow green regardless of
-        #     findings. v0.2 will flip this to fail on a defined policy once
-        #     the baseline noise is known (deliberate split per Goal #11).
+        #   - `severity: CRITICAL,HIGH` restricts the scan to the levels that
+        #     actually matter. `limit-severities-for-sarif: true` makes the
+        #     SARIF honour that filter — without it the trivy-action emits
+        #     ALL severities into SARIF regardless of `severity` (its
+        #     documented default), which is why the Security tab previously
+        #     showed LOW/MEDIUM alerts the `severity` input was meant to drop.
+        #   - `exit-code: '1'` makes the step FAIL when a CRITICAL/HIGH fixed
+        #     CVE is present. This scan runs POST-PUSH on main/tags against the
+        #     already-pushed digest — it is a red-main alarm against silent
+        #     CVE accumulation on a stale base image, NOT a PR merge gate (the
+        #     `if:` below skips it on pull_request). A red run means "the base
+        #     image drifted; bump the digest (Dependabot docker PR) and
+        #     re-push", not "this merge is blocked".
         #   - `ignore-unfixed: true` drops CVEs with no upstream fix
         #     available, which would otherwise dominate the SARIF without
         #     any operator action to take.
@@ -317,15 +325,16 @@ jobs:
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          limit-severities-for-sarif: true
           ignore-unfixed: true
-          exit-code: '0'
+          exit-code: '1'
 
       - name: Upload trivy SARIF to GitHub Security tab
         # SARIF upload surfaces findings under repo -> Security -> Code
         # scanning alerts. Requires `security-events: write` at the job or
         # workflow level — granted in the top-level permissions block.
         if: github.event_name != 'pull_request'
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e  # v4.36.2
+        uses: github/codeql-action/upload-sarif@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4.37.0
         with:
           sarif_file: trivy-results.sarif
           # Category disambiguates this run when other SARIF sources (e.g.

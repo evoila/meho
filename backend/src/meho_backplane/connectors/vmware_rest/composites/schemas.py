@@ -23,11 +23,12 @@ Conventions
   documentation lives on the schema's ``description`` keys; the meta-
   tools (:mod:`meho_backplane.operations.meta_tools`) surface the
   schema verbatim on ``describe_operation`` calls.
-* The 7 read composites are read-only -- the registration call site
+* The 5 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 8 write composites inherit T4's
+  each. The 9 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
-  (G3.1-T6 / #509). The schema text reflects which side of that line
+  (G3.1-T6 / #509, plus single-VM ``vm.power`` / #2301). The schema
+  text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
 """
@@ -49,10 +50,6 @@ __all__ = [
     "HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
     "HOST_EVACUATE_RESPONSE_SCHEMA",
-    "HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA",
-    "HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA",
-    "HOST_VSAN_HEALTH_PARAMETER_SCHEMA",
-    "HOST_VSAN_HEALTH_RESPONSE_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA",
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
@@ -65,6 +62,8 @@ __all__ = [
     "VM_MIGRATE_RESPONSE_SCHEMA",
     "VM_POWER_BULK_PARAMETER_SCHEMA",
     "VM_POWER_BULK_RESPONSE_SCHEMA",
+    "VM_POWER_PARAMETER_SCHEMA",
+    "VM_POWER_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
@@ -251,61 +250,6 @@ NETWORK_PORTGROUP_AUDIT_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": [],
-    "additionalProperties": False,
-}
-
-
-#: ``vmware.composite.host.network_uplinks`` parameter schema.
-#:
-#: Reads, per host, the physical NICs (link state + speed) and the
-#: proxy-switch / uplink association from ``config.network.pnic`` +
-#: ``config.network.proxySwitch``. Lists hosts via
-#: ``GET:/vcenter/host`` (optionally narrowed by ``filter_hosts``),
-#: then reads the two network config properties per host through the
-#: vi-json ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx``
-#: sub-op. The one read the plain REST surface cannot reproduce --
-#: pnic link-state / uplink mapping is a Web-Services-API property.
-HOST_NETWORK_UPLINKS_PARAMETER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "filter_hosts": {
-            "type": "array",
-            "items": {"type": "string", "minLength": 1},
-            "description": (
-                "Optional list of host managed-object IDs (e.g. "
-                "'host-42'). When supplied, only these hosts are "
-                "surfaced; the listing sub-op forwards them as "
-                "'filter.hosts'. Empty / absent returns every host the "
-                "operator can see."
-            ),
-        },
-    },
-    "required": [],
-    "additionalProperties": False,
-}
-
-
-#: ``vmware.composite.host.vsan_health`` parameter schema.
-#:
-#: Surfaces per-cluster vSAN health via the health-service vmomi method
-#: ``VsanQueryVcClusterHealthSummary`` on the
-#: ``vsan-cluster-health-system`` singleton. vSAN health is a
-#: cluster-scoped read (the ``govc vsan.health.*`` equivalent), so the
-#: composite requires the target cluster's managed-object ID.
-HOST_VSAN_HEALTH_PARAMETER_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "cluster": {
-            "type": "string",
-            "minLength": 1,
-            "description": (
-                "Managed-object ID of the vSAN cluster to check (e.g. "
-                "'domain-c123'). The composite scopes the health-service "
-                "query to this ClusterComputeResource MoRef."
-            ),
-        },
-    },
-    "required": ["cluster"],
     "additionalProperties": False,
 }
 
@@ -577,236 +521,11 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 }
 
 
-#: ``vmware.composite.host.network_uplinks`` response schema.
-#:
-#: One row per host. ``pnics`` carries each physical NIC's device /
-#: MAC / driver plus its link state (``link_up`` -- derived from the
-#: presence of ``linkSpeed`` on the WS-API ``PhysicalNic``) and speed.
-#: ``proxy_switches`` carries each proxy switch (the host-side backing
-#: of a DVS) with its uplink pnic device names, so the operator can
-#: read physical switch-port occupancy per uplink.
-HOST_NETWORK_UPLINKS_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "hosts": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Host managed-object ID.",
-                    },
-                    "name": {
-                        "type": ["string", "null"],
-                        "description": "Host name from the listing row.",
-                    },
-                    "pnics": {
-                        "type": ["array", "null"],
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "device": {
-                                    "type": ["string", "null"],
-                                    "description": "Physical NIC device name (e.g. 'vmnic0').",
-                                },
-                                "mac": {
-                                    "type": ["string", "null"],
-                                    "description": "MAC address of the physical NIC.",
-                                },
-                                "driver": {
-                                    "type": ["string", "null"],
-                                    "description": "Driver name backing the physical NIC.",
-                                },
-                                "link_up": {
-                                    "type": "boolean",
-                                    "description": (
-                                        "True when the WS-API ``linkSpeed`` object is "
-                                        "present (the API omits it when the link is "
-                                        "down)."
-                                    ),
-                                },
-                                "speed_mb": {
-                                    "type": ["integer", "null"],
-                                    "description": (
-                                        "Current link speed in Mb/s from "
-                                        "``linkSpeed.speedMb``; ``null`` when the link "
-                                        "is down."
-                                    ),
-                                },
-                                "duplex": {
-                                    "type": ["boolean", "null"],
-                                    "description": (
-                                        "Full-duplex flag from ``linkSpeed.duplex``; "
-                                        "``null`` when the link is down."
-                                    ),
-                                },
-                            },
-                            "required": ["device", "link_up"],
-                        },
-                        "description": (
-                            "Physical NICs on the host from "
-                            "``config.network.pnic``; ``null`` when the best-effort "
-                            "per-host property read was skipped (see ``read_note``)."
-                        ),
-                    },
-                    "proxy_switches": {
-                        "type": ["array", "null"],
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "key": {
-                                    "type": ["string", "null"],
-                                    "description": "Proxy-switch key on the host.",
-                                },
-                                "dvs_name": {
-                                    "type": ["string", "null"],
-                                    "description": (
-                                        "Name of the DVS this proxy switch backs (``dvsName``)."
-                                    ),
-                                },
-                                "dvs_uuid": {
-                                    "type": ["string", "null"],
-                                    "description": "UUID of the backing DVS (``dvsUuid``).",
-                                },
-                                "uplink_pnics": {
-                                    "type": "array",
-                                    "items": {"type": "string"},
-                                    "description": (
-                                        "Physical-NIC device names bound to this proxy "
-                                        "switch as uplinks (from the proxy switch's "
-                                        "``pnic`` backing)."
-                                    ),
-                                },
-                            },
-                            "required": ["uplink_pnics"],
-                        },
-                        "description": (
-                            "Proxy switches on the host from "
-                            "``config.network.proxySwitch``; ``null`` when the "
-                            "best-effort per-host property read was skipped (see "
-                            "``read_note``)."
-                        ),
-                    },
-                    "read_note": {
-                        "type": "string",
-                        "description": (
-                            "Present only when the per-host property read was "
-                            "skipped; records the failing sub-op, its status, and "
-                            "the underlying error."
-                        ),
-                    },
-                },
-                "required": ["id"],
-            },
-            "description": "One row per host in scope.",
-        },
-    },
-    "required": ["hosts"],
-}
-
-
-#: ``vmware.composite.host.vsan_health`` response schema.
-#:
-#: Captures the ``VsanClusterHealthSummary`` aggregation: the
-#: cluster-level ``overall_health`` colour plus the health-test
-#: ``groups`` list (each group with its own roll-up colour + per-check
-#: ``tests``). When the best-effort health-service read is skipped,
-#: ``overall_health`` and ``groups`` are ``null`` and a ``read_note``
-#: records why. The vSAN health-service owns the colour vocabulary
-#: (``green`` / ``yellow`` / ``red`` / ``unknown`` / ``info``); it is
-#: passed through verbatim.
-HOST_VSAN_HEALTH_RESPONSE_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "cluster": {
-            "type": "string",
-            "description": "Managed-object ID of the cluster the summary was read for.",
-        },
-        "overall_health": {
-            "type": ["string", "null"],
-            "description": (
-                "Cluster-wide vSAN health roll-up colour from "
-                "``VsanClusterHealthSummary.overallHealth``; ``null`` when "
-                "the best-effort health-service read was skipped (see "
-                "``read_note``)."
-            ),
-        },
-        "groups": {
-            "type": ["array", "null"],
-            "items": {
-                "type": "object",
-                "properties": {
-                    "group_id": {
-                        "type": ["string", "null"],
-                        "description": "Health-group identifier (``groupId``).",
-                    },
-                    "group_name": {
-                        "type": ["string", "null"],
-                        "description": "Human-readable group name (``groupName``).",
-                    },
-                    "group_health": {
-                        "type": ["string", "null"],
-                        "description": "Group-level roll-up colour (``groupHealth``).",
-                    },
-                    "tests": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "test_id": {
-                                    "type": ["string", "null"],
-                                    "description": "Health-test identifier (``testId``).",
-                                },
-                                "test_name": {
-                                    "type": ["string", "null"],
-                                    "description": "Human-readable test name (``testName``).",
-                                },
-                                "test_health": {
-                                    "type": ["string", "null"],
-                                    "description": "Per-test colour (``testHealth``).",
-                                },
-                                "test_short_description": {
-                                    "type": ["string", "null"],
-                                    "description": (
-                                        "Short human-readable description "
-                                        "(``testShortDescription``)."
-                                    ),
-                                },
-                            },
-                            "required": [],
-                        },
-                        "description": (
-                            "Individual health checks in this group from ``groupTests``."
-                        ),
-                    },
-                },
-                "required": ["tests"],
-            },
-            "description": (
-                "Health-test groups from ``VsanClusterHealthSummary.groups``; "
-                "``null`` when the best-effort health-service read was skipped "
-                "(see ``read_note``)."
-            ),
-        },
-        "read_note": {
-            "type": "string",
-            "description": (
-                "Present only when the health-service read was skipped; "
-                "records the failing sub-op, its status, and the underlying "
-                "error."
-            ),
-        },
-    },
-    "required": ["cluster"],
-}
-
-
 # ===========================================================================
 # Write composites (G3.1-T6 / #509)
 # ===========================================================================
 #
-# The 8 write composites inherit T4's ``safety_level="dangerous"`` +
+# The 9 write composites inherit T4's ``safety_level="dangerous"`` +
 # ``requires_approval=True`` defaults. The registrar passes those
 # explicitly anyway to keep the policy posture obvious at the call site
 # alongside the read overrides.
@@ -1039,6 +758,40 @@ VM_POWER_BULK_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["action"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.power`` parameter schema.
+#:
+#: Single-VM power verb. Hard verbs (``on`` / ``off`` / ``reset``) hit
+#: ``POST:/vcenter/vm/{vm}/power``; soft verbs (``guest_shutdown`` /
+#: ``guest_reboot``) hit ``POST:/vcenter/vm/{vm}/guest/power`` and require
+#: running VMware Tools.
+VM_POWER_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid to act on.",
+        },
+        "verb": {
+            "type": "string",
+            "enum": ["on", "off", "reset", "guest_shutdown", "guest_reboot"],
+            "description": (
+                "Power verb. ``on`` / ``off`` / ``reset`` are hard "
+                "transitions via ``POST:/vcenter/vm/{vm}/power`` "
+                "(immediate; ``off`` / ``reset`` may lose in-guest state). "
+                "``guest_shutdown`` / ``guest_reboot`` are clean "
+                "Tools-mediated transitions via "
+                "``POST:/vcenter/vm/{vm}/guest/power`` and fail with "
+                "``status='tools_unavailable'`` when VMware Tools is not "
+                "running."
+            ),
+        },
+    },
+    "required": ["vm", "verb"],
     "additionalProperties": False,
 }
 
@@ -1332,6 +1085,52 @@ VM_POWER_BULK_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["results", "summary", "aborted_on_failure"],
+}
+
+
+#: ``vmware.composite.vm.power`` response schema.
+VM_POWER_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {"type": "string", "description": "VM moid the verb targeted."},
+        "verb": {
+            "type": "string",
+            "enum": ["on", "off", "reset", "guest_shutdown", "guest_reboot"],
+            "description": "Verb applied.",
+        },
+        "status": {
+            "type": "string",
+            "enum": ["ok", "error", "tools_unavailable"],
+            "description": (
+                "``'ok'`` -- the power verb issued; ``'tools_unavailable'`` "
+                "-- a soft verb could not run because VMware Tools is not "
+                "running (typed failure, not a hang); ``'error'`` -- any "
+                "other transport / vCenter fault."
+            ),
+        },
+        "error": {
+            "type": ["string", "null"],
+            "description": "Fault text when ``status != 'ok'``; ``null`` on success.",
+        },
+        "error_type": {
+            "type": ["string", "null"],
+            "description": (
+                "vCenter machine ``error_type`` parsed from the fault body "
+                "when present (e.g. ``SERVICE_UNAVAILABLE``); ``null`` when "
+                "unparseable or on success."
+            ),
+        },
+        "guest_tools": {
+            "type": ["string", "null"],
+            "enum": ["ok", "unavailable", None],
+            "description": (
+                "Tools state for a soft verb: ``'ok'`` when the guest "
+                "request issued, ``'unavailable'`` when Tools is down. "
+                "``null`` for the hard verbs, which do not consult Tools."
+            ),
+        },
+    },
+    "required": ["vm", "verb", "status"],
 }
 
 

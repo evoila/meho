@@ -83,6 +83,7 @@ from packaging.version import InvalidVersion, Version
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors.profile import AuthSchemeName, ExecutionProfile
 from meho_backplane.connectors.registry import product_impl_id_round_trips
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest._llm_grouping_internals import (
@@ -102,23 +103,28 @@ from meho_backplane.operations.ingest.catalog import (
 )
 from meho_backplane.operations.ingest.connector_registration import (
     check_version_covered_by_registered_class,
+    synthesise_profiled_class,
 )
 from meho_backplane.operations.ingest.exceptions import (
     ProductImplIdMismatch,
     VersionMismatchError,
 )
+from meho_backplane.operations.ingest.ingest_profile import build_ingest_execution_profile
 from meho_backplane.operations.ingest.llm_groups import (
     GroupingResult,
     run_llm_grouping,
 )
 from meho_backplane.operations.ingest.openapi import (
     parse_openapi,
+    parse_openapi_with_provenance,
     read_spec_info_version,
 )
 from meho_backplane.operations.ingest.register_ingested import (
     IngestionResult,
     register_ingested_operations,
 )
+from meho_backplane.operations.ingest.service import ReviewService
+from meho_backplane.operations.ingest.spec_provenance import upsert_spec_provenance
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
@@ -589,6 +595,8 @@ class IngestionPipelineService:
         tenant_id: UUID | None = None,
         dry_run: bool = False,
         spec_info_versions_compatible: tuple[str, ...] | None = None,
+        auth_scheme: AuthSchemeName | None = None,
+        auth_secret_fields: tuple[str, ...] | None = None,
     ) -> IngestionPipelineResult:
         """Run the full pipeline (parse → register → group) for one connector.
 
@@ -615,6 +623,17 @@ class IngestionPipelineService:
         the spec-vs-label cross-check accepts ``info.version`` values
         inside the declared band even if they differ from the
         operator's ``version`` label.
+
+        ``auth_scheme`` (#2289) is the operator-selected named auth scheme
+        for a non-catalog ingest. When set, the register phase synthesises a
+        minimal :class:`~meho_backplane.connectors.profile.ExecutionProfile`
+        (scheme + ``auth_secret_fields`` names, or the per-scheme defaults)
+        and stamps a dispatchable
+        :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+        under the triple instead of the bare non-dispatchable shim — staged
+        behind the #1971 review gate, never auto-enabled. ``None`` keeps the
+        historical bare-shim behaviour. Ignored on the ``dry_run`` path (which
+        registers nothing).
         """
         self.authorize_scope(tenant_id)
         # Round-trip guard runs first — before the spec-vs-label
@@ -654,6 +673,17 @@ class IngestionPipelineService:
                 log=log,
             )
 
+        execution_profile = (
+            build_ingest_execution_profile(
+                product=product,
+                version=version,
+                auth_scheme=auth_scheme,
+                secret_fields=auth_secret_fields,
+            )
+            if auth_scheme is not None
+            else None
+        )
+
         return await self._dispatch_real_run(
             product=product,
             version=version,
@@ -663,6 +693,7 @@ class IngestionPipelineService:
             tenant_id=tenant_id,
             connector_id=connector_id,
             log=log,
+            execution_profile=execution_profile,
         )
 
     # ----- private helpers ------------------------------------------------
@@ -762,12 +793,17 @@ class IngestionPipelineService:
         tenant_id: UUID | None,
         connector_id: str,
         log: structlog.stdlib.BoundLogger,
+        execution_profile: ExecutionProfile | None = None,
     ) -> IngestionPipelineResult:
         """Drive the register → group phases for a non-dry-run ingest.
 
         Extracted from :meth:`ingest` so the public method stays at
         the "validate, dispatch" abstraction level; the per-phase
         log binding + result aggregation lives here.
+
+        ``execution_profile`` (#2289), when set, makes the register phase
+        stamp a dispatchable profiled connector under the triple instead of
+        the bare shim (see :meth:`_run_register_phase`).
         """
         log.info("ingestion_pipeline_start")
         sessionmaker = self._sessionmaker()
@@ -778,7 +814,9 @@ class IngestionPipelineService:
             specs=specs,
             base_url=base_url,
             tenant_id=tenant_id,
+            connector_id=connector_id,
             sessionmaker=sessionmaker,
+            execution_profile=execution_profile,
         )
         log.info(
             "ingestion_pipeline_register_complete",
@@ -871,48 +909,70 @@ class IngestionPipelineService:
         specs: Sequence[SpecSource],
         base_url: str | None,
         tenant_id: UUID | None,
+        connector_id: str,
         sessionmaker: async_sessionmaker[AsyncSession],
+        execution_profile: ExecutionProfile | None = None,
     ) -> IngestionResult:
         """Parse + register every spec under the same connector triple.
 
         Each spec is parsed and registered separately so the per-spec
         :func:`register_ingested_operations` call attaches its own
-        ``spec:<uri>`` tag to the row. The aggregated counts roll up
+        ``spec:<uri>`` tag to the row. After a spec's descriptor rows
+        land, its durable provenance (#2291) — sha256 over the raw
+        bytes, ``fetched`` / ``inline`` / ``shipped`` origin, operator,
+        timestamp — is upserted via :func:`upsert_spec_provenance`,
+        keyed on ``(triple, uri, scope)`` so a re-ingest updates the row
+        rather than duplicating it. The aggregated counts roll up
         every spec's individual result. ``connector_registered`` is
         ``True`` when ANY spec triggered the auto-shim registration —
         on a fresh connector the first spec flips it, subsequent
         specs see it already there.
+
+        When ``execution_profile`` is set (#2289 — the operator selected a
+        named ``auth_scheme``), the per-spec calls skip the bare-shim
+        registration (``register_shim=False``) and, after every spec's rows
+        land, a dispatchable
+        :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+        synthesised from the profile is stamped under the triple via
+        :meth:`ReviewService.record_profile_stamp`. Stamping registers the
+        class but never enables an op — the ``review_status='staged'`` gate
+        (#1971) stays the interlock. ``connector_registered`` then reflects
+        the stamp (``True`` on the first stamp of a fresh triple).
         """
+        register_shim = execution_profile is None
         aggregated_inserted = 0
         aggregated_updated = 0
         aggregated_skipped = 0
         connector_registered = False
 
         for spec in specs:
-            # G0.16-T1 (#1303): same thread-pool offload as the
-            # dry-run path -- the synchronous parser is the worst
-            # event-loop-blocking offender on real vendor specs
-            # (vmware/9.0 ingest blocked the loop for ~30 s before
-            # this hop). ``register_ingested_operations`` is already
-            # an async coroutine that yields on every DB write so
-            # it doesn't need the same treatment.
-            protos = await asyncio.to_thread(
-                parse_openapi, spec.uri, spec_source=spec.uri, content=spec.content
-            )
-            partial = await register_ingested_operations(
+            partial = await self._register_one_spec(
+                spec,
                 product=product,
                 version=version,
                 impl_id=impl_id,
-                spec_source=spec.uri,
-                operations=protos,
                 base_url=base_url,
                 tenant_id=tenant_id,
-                embedding_service=self._embedding_service,
+                sessionmaker=sessionmaker,
+                register_shim=register_shim,
             )
             aggregated_inserted += partial.inserted_count
             aggregated_updated += partial.updated_count
             aggregated_skipped += partial.skipped_count
             connector_registered = connector_registered or partial.connector_registered
+
+        if execution_profile is not None:
+            connector_registered = (
+                await self._stamp_profiled_connector(
+                    product=product,
+                    version=version,
+                    impl_id=impl_id,
+                    connector_id=connector_id,
+                    tenant_id=tenant_id,
+                    execution_profile=execution_profile,
+                )
+                or connector_registered
+            )
 
         return IngestionResult(
             inserted_count=aggregated_inserted,
@@ -920,6 +980,96 @@ class IngestionPipelineService:
             skipped_count=aggregated_skipped,
             connector_registered=connector_registered,
             operations_grouped=False,
+        )
+
+    async def _register_one_spec(
+        self,
+        spec: SpecSource,
+        *,
+        product: str,
+        version: str,
+        impl_id: str,
+        base_url: str | None,
+        tenant_id: UUID | None,
+        sessionmaker: async_sessionmaker[AsyncSession],
+        register_shim: bool,
+    ) -> IngestionResult:
+        """Parse one spec, upsert its descriptor rows, persist its provenance.
+
+        G0.16-T1 (#1303): the synchronous parser is offloaded to a
+        thread pool -- it is the worst event-loop-blocking offender on
+        real vendor specs (vmware/9.0 ingest blocked the loop for ~30 s
+        before this hop). ``register_ingested_operations`` is already an
+        async coroutine that yields on every DB write, so it needs no
+        such treatment.
+
+        After the descriptor rows land, the spec's durable provenance
+        (#2291) — sha256 over the raw bytes + ``fetched`` / ``inline`` /
+        ``shipped`` origin + operator + timestamp — is upserted in its
+        own transaction (keyed on ``(triple, uri, scope)``). Provenance
+        is record-and-surface metadata and must not roll back the
+        operations it describes, hence the separate write.
+        """
+        protos, provenance = await asyncio.to_thread(
+            parse_openapi_with_provenance,
+            spec.uri,
+            spec_source=spec.uri,
+            content=spec.content,
+        )
+        partial = await register_ingested_operations(
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            spec_source=spec.uri,
+            operations=protos,
+            base_url=base_url,
+            tenant_id=tenant_id,
+            embedding_service=self._embedding_service,
+            register_shim=register_shim,
+        )
+        await upsert_spec_provenance(
+            sessionmaker,
+            tenant_id=tenant_id,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            uri=provenance.uri,
+            sha256=provenance.sha256,
+            origin=provenance.origin,
+            operator_sub=self._operator.sub,
+        )
+        return partial
+
+    async def _stamp_profiled_connector(
+        self,
+        *,
+        product: str,
+        version: str,
+        impl_id: str,
+        connector_id: str,
+        tenant_id: UUID | None,
+        execution_profile: ExecutionProfile,
+    ) -> bool:
+        """Stamp a profiled connector synthesised from *execution_profile*.
+
+        The non-catalog on-ramp (#2289) sibling of
+        :func:`~meho_backplane.operations.ingest.boot_stamp.stamp_catalog_profiled_connectors`:
+        synthesises a
+        :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+        subclass carrying the profile and registers it under the triple via
+        the review-gate-preserving
+        :meth:`ReviewService.record_profile_stamp` seam. Returns ``True`` when
+        a new profiled class was registered, ``False`` on the idempotent
+        no-op (the triple is already served by a stamped / hand-coded class).
+        The stamp writes a ``meho.connector.profile_stamp`` audit row under
+        the ingesting operator and never enables an op (#1971).
+        """
+        connector_class = synthesise_profiled_class(
+            product=product, version=version, impl_id=impl_id, profile=execution_profile
+        )
+        review_service = ReviewService(self._operator)
+        return await review_service.record_profile_stamp(
+            connector_id, tenant_id=tenant_id, connector_class=connector_class
         )
 
     async def _run_grouping_phase(

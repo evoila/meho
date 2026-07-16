@@ -382,6 +382,31 @@ def test_modal_controller_script_opens_injected_dialog_on_swap() -> None:
     )
 
 
+def test_modal_controller_script_guards_detached_swap_target() -> None:
+    """The controller skips a detached scan root (htmx 2.0.9 pre-swap target).
+
+    ``htmx:afterSwap`` fires with ``detail.target`` still pointing at the
+    PRE-swap element. An ``outerHTML`` swap (the runbook run driver's
+    abort / reassign / advance forms target ``#runbook-run-step`` with
+    ``hx-swap="outerHTML"``) has already detached that element, so scanning its
+    stale subtree and calling ``showModal()`` on a now-disconnected dialog
+    throws ``InvalidStateError``. An ``isConnected`` guard on the scan root
+    suppresses that while leaving the connected-container auto-open path
+    untouched (#2242).
+    """
+    script = (static_src_dir() / "app" / "modal-dialogs.js").read_text(encoding="utf-8")
+    assert "isConnected" in script, (
+        "the controller must skip a detached scan root so an outerHTML swap "
+        "cannot showModal() a disconnected dialog (InvalidStateError)"
+    )
+    # The guard belongs on the afterSwap scan-root early return, in the same
+    # condition as the existing querySelectorAll capability check.
+    assert re.search(r"querySelectorAll[^)]*isConnected", script), (
+        "isConnected must gate the htmx:afterSwap scan-root early return, "
+        "alongside the querySelectorAll check"
+    )
+
+
 def test_base_template_loads_modal_controller_outside_component_scripts() -> None:
     """``base.html`` ships the modal controller on every page (#1803).
 
@@ -531,3 +556,119 @@ def test_session_expiry_handler_served_as_static_asset() -> None:
     # SPDX header posture matches the sibling app-shell scripts.
     source = handler.read_text(encoding="utf-8")
     assert "SPDX-License-Identifier: Apache-2.0" in source
+
+
+def test_csrf_token_hook_overrides_header_from_live_cookie() -> None:
+    """The CSRF hook re-reads the live cookie and sets ``X-CSRF-Token`` (#2345).
+
+    A single global ``htmx:configRequest`` listener reads the ``meho_csrf``
+    cookie at request time and overrides the outgoing header echo, so a
+    modal's baked-in token can never drift out of sync with the cookie.
+    """
+    script = (static_src_dir() / "app" / "csrf-token.js").read_text(encoding="utf-8")
+    assert "SPDX-License-Identifier: Apache-2.0" in script
+    assert re.search(r'addEventListener\(\s*"htmx:configRequest"', script), (
+        "the hook must attach on the htmx:configRequest event so it runs "
+        "before every htmx request is sent"
+    )
+    assert "document.cookie" in script, (
+        "the hook must read the LIVE cookie at request time (not a baked-in render-time snapshot)"
+    )
+    assert '"meho_csrf"' in script, "the hook must read the meho_csrf double-submit cookie"
+    assert re.search(r'headers\[\s*CSRF_HEADER_NAME\s*\]|headers\["X-CSRF-Token"\]', script), (
+        "the hook must set the X-CSRF-Token header on the outgoing request"
+    )
+
+
+def test_head_assets_loads_csrf_token_hook_after_htmx() -> None:
+    """``_head_assets.html`` ships the CSRF hook, deferred, after htmx (#2345).
+
+    The listener must be registered before the first htmx request can
+    resolve, so the script loads after ``htmx.min.js`` -- both ``defer``red,
+    which preserves document order.
+    """
+    source = (templates_dir() / "_head_assets.html").read_text(encoding="utf-8")
+    assert '<script src="/ui/static/src/app/csrf-token.js" defer></script>' in source, (
+        "_head_assets.html must load the CSRF double-submit header hook"
+    )
+    htmx_pos = source.index("/ui/static/src/vendor/htmx.min.js")
+    hook_pos = source.index("/ui/static/src/app/csrf-token.js")
+    assert htmx_pos < hook_pos, "the CSRF hook must load after htmx.min.js"
+
+
+# ---------------------------------------------------------------------------
+# hx-disabled-elt find-selector inheritance discipline (#2340)
+#
+# ``hx-disabled-elt`` is an *inherited* htmx attribute. A form that binds
+# ``hx-disabled-elt="find button[type=submit]"`` (to disable its own submit
+# while a request is in flight) works for the form's own submit -- ``find``
+# resolves against the form's descendants and matches the submit button. But
+# every descendant that issues its OWN htmx request (a debounced preview POST,
+# a live cron-validate POST, an in-form Cancel ``hx-get``, ...) inherits that
+# value and resolves ``find button[type=submit]`` against ITS subtree -- which
+# has no submit button -- logging
+# ``The selector "find button[type=submit]" on hx-disabled-elt returned no
+# matches!`` once per descendant request, and the intended disable-submit
+# affordance never fires for those triggers.
+#
+# The fix (established by #2117-D1 / #2174 on ``runbooks/editor.html``) is to
+# add ``hx-disinherit="hx-disabled-elt"`` to the form: the value stays on the
+# form's own submit and stops leaking into the descendant triggers. This guard
+# enforces the discipline generically so a new modal cannot reintroduce the
+# leak -- the console-warning class the console has no browser harness to catch.
+# ---------------------------------------------------------------------------
+
+#: Re-find every opening ``<form ...>`` tag plus its body up to the first
+#: closing tag. Forms cannot nest in valid HTML, so a non-greedy ``</form>``
+#: correctly bounds each form (the DaisyUI ``form[method="dialog"]`` backdrop
+#: is a separate, attribute-free match that carries no ``hx-disabled-elt``).
+_FORM_BLOCK_RE = re.compile(r"<form\b([^>]*)>(.*?)</form>", re.IGNORECASE | re.DOTALL)
+
+#: A descendant htmx request trigger (any verb) inside a form body -- the
+#: element that would inherit the form's ``hx-disabled-elt`` and mis-resolve a
+#: ``find`` selector against its own (submit-button-less) subtree.
+_HX_REQUEST_ATTR_RE = re.compile(r"\bhx-(get|post|put|patch|delete)\s*=", re.IGNORECASE)
+
+#: An inheritance-sensitive ``find`` selector on ``hx-disabled-elt``. ``find``
+#: resolves relative to the issuing element, so it breaks under inheritance;
+#: ``this`` / document-wide id selectors do not, and are intentionally ignored.
+_DISABLED_ELT_FIND_RE = re.compile(r'hx-disabled-elt\s*=\s*"find\b', re.IGNORECASE)
+
+
+def _ui_template_sources() -> Iterator[tuple[str, str]]:
+    """Yield ``(relative_name, jinja-comment-stripped source)`` for every UI template."""
+    root = templates_dir()
+    for path in sorted(root.rglob("*.html")):
+        source = _JINJA_COMMENT_RE.sub("", path.read_text(encoding="utf-8"))
+        yield str(path.relative_to(root)), source
+
+
+def test_forms_with_find_disabled_elt_disinherit_it() -> None:
+    """Every form leaking a ``find`` ``hx-disabled-elt`` into a descendant disinherits it (#2340).
+
+    A form that carries ``hx-disabled-elt="find ..."`` AND contains a
+    descendant htmx request trigger must also carry
+    ``hx-disinherit="hx-disabled-elt"`` (or ``hx-disinherit="*"``); otherwise
+    the descendant inherits the ``find`` selector, resolves it against its own
+    subtree, and htmx logs ``... returned no matches!`` on every such request.
+    Scans the raw template sources so the guard is render-context independent
+    and catches the whole class, not just the modals fixed in #2340.
+    """
+    offenders: list[str] = []
+    for name, source in _ui_template_sources():
+        for open_tag, body in _FORM_BLOCK_RE.findall(source):
+            if not _DISABLED_ELT_FIND_RE.search(open_tag):
+                continue
+            if not _HX_REQUEST_ATTR_RE.search(body):
+                # No descendant request trigger -> the form's own submit is the
+                # only consumer of hx-disabled-elt; nothing to leak into.
+                continue
+            if "hx-disinherit" not in open_tag:
+                offenders.append(name)
+
+    assert not offenders, (
+        'these templates have a form with hx-disabled-elt="find ..." plus a '
+        'descendant htmx request, but no hx-disinherit="hx-disabled-elt" -- '
+        "the find selector leaks into the descendant request and htmx logs "
+        f"'... returned no matches!': {sorted(set(offenders))}"
+    )

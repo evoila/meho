@@ -60,6 +60,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from meho_backplane.connectors.profile import AuthSchemeName
 from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_specifier
 
 __all__ = [
@@ -242,6 +243,54 @@ class IngestRequest(BaseModel):
         default=None,
         max_length=16,
     )
+    #: Operator-selected named auth scheme for a **non-catalog** ingest
+    #: (#2289). When set, the register phase synthesises a minimal
+    #: :class:`~meho_backplane.connectors.profile.ExecutionProfile` (this
+    #: scheme + secret-field names + scheme defaults) and stamps a
+    #: dispatchable
+    #: :class:`~meho_backplane.connectors.profiled.ProfiledRestConnector`
+    #: instead of the non-dispatchable bare
+    #: :class:`~meho_backplane.operations.ingest.connector_registration.GenericRestConnector`
+    #: shim — staged behind the normal review/enable gate (#1971), never
+    #: auto-enabled. Left ``None`` (the default) keeps the historical bare-shim
+    #: behaviour byte-identical.
+    #:
+    #: A member of the closed
+    #: :data:`~meho_backplane.connectors.profile.AuthSchemeName` catalog; the
+    #: ``Literal`` rejects an unknown value **and every reserved typed-only
+    #: shape** with a 422 closed-set error naming the allowed members. There is
+    #: no free-form auth config (login URL / body template / token path) — that
+    #: is the rejected-DSL door (#1177 / Goal #1964 Non-goals). Mutually
+    #: exclusive with ``catalog_entry`` (catalog rows bind their profile via
+    #: ``profile_resource`` + boot stamping, #2288).
+    auth_scheme: AuthSchemeName | None = Field(
+        default=None,
+        description=(
+            "Named auth scheme (closed catalog) for a non-catalog ingest. When "
+            "set, the connector is stamped as a dispatchable profiled connector "
+            "(staged behind review, never auto-enabled) instead of a "
+            "non-dispatchable bare shim. Unknown / reserved schemes are rejected "
+            "(422). No free-form auth config — selection only. Mutually exclusive "
+            "with catalog_entry."
+        ),
+    )
+    #: Optional override of the secret-bundle key **names** the selected
+    #: ``auth_scheme``'s extractor reads at dispatch (e.g. ``["username",
+    #: "password"]``). NAMES only — credential *values* are never carried in
+    #: the request; they are resolved from the target's ``secret_ref`` at
+    #: dispatch. Omitted → the per-scheme defaults
+    #: (:data:`~meho_backplane.operations.ingest.ingest_profile.DEFAULT_SECRET_FIELDS`).
+    #: Requires ``auth_scheme`` to be set (naming fields without selecting a
+    #: scheme is a caller-side bug worth a 422).
+    auth_secret_fields: list[str] | None = Field(
+        default=None,
+        max_length=8,
+        description=(
+            "Optional override of the secret-field NAMES the auth_scheme reads "
+            "at dispatch (never the values — those stay in the target's "
+            "secret_ref). Omit for the per-scheme defaults. Requires auth_scheme."
+        ),
+    )
     dry_run: bool = False
     #: Background-mode opt-out. ``True`` (default) fires the
     #: pipeline off the request thread and returns
@@ -319,6 +368,25 @@ class IngestRequest(BaseModel):
                 "(explicit-quadruple shape). "
                 "See docs/codebase/error-message-shape.md.",
             )
+        if catalog_set and self.auth_scheme is not None:
+            # A catalog row binds its profile via ``profile_resource`` + boot
+            # stamping (#2288); an operator-selected ``auth_scheme`` is the
+            # non-catalog on-ramp (#2289). Mixing them would silently discard
+            # the selection during catalog resolution, so reject it loudly.
+            raise ValueError(
+                "catalog_entry_conflict: 'auth_scheme' is the non-catalog "
+                "ingest on-ramp; a catalog row binds its own profile via "
+                "profile_resource. Drop 'auth_scheme' when using "
+                "'catalog_entry'. See docs/codebase/error-message-shape.md.",
+            )
+        if self.auth_secret_fields is not None and self.auth_scheme is None:
+            # Naming the secret fields without selecting a scheme is a
+            # caller-side bug: there is no extractor to read them.
+            raise ValueError(
+                "ingest_request_underspecified: 'auth_secret_fields' names the "
+                "secret keys the selected auth scheme reads, so it requires "
+                "'auth_scheme' to be set. See docs/codebase/error-message-shape.md.",
+            )
         if not catalog_set:
             # Explicit-quadruple shape — every quadruple field must
             # be set. Partial-quadruple bodies (e.g. impl_id missing)
@@ -343,6 +411,28 @@ class IngestRequest(BaseModel):
                     "See docs/codebase/error-message-shape.md.",
                 )
         return self
+
+    @field_validator("auth_secret_fields")
+    @classmethod
+    def _auth_secret_fields_nonblank(cls, value: list[str] | None) -> list[str] | None:
+        """Reject an empty list or a blank secret-field name.
+
+        Mirrors :meth:`AuthSpec._secret_fields_nonempty`: naming zero fields
+        (or a blank one) is a malformed selection, not a credential-less auth
+        shape. ``None`` (use the per-scheme defaults) is the common path and
+        passes untouched. The values are field *names* only — the credential
+        values are resolved from the target's ``secret_ref`` at dispatch and
+        never ride this request.
+        """
+        if value is None:
+            return value
+        if not value:
+            raise ValueError(
+                "auth_secret_fields must be null (scheme defaults) or a non-empty list"
+            )
+        if any(not field.strip() for field in value):
+            raise ValueError("auth_secret_fields entries must be non-blank")
+        return value
 
     @field_validator("spec_info_versions_compatible")
     @classmethod
@@ -636,16 +726,20 @@ class ConnectorListItem(BaseModel):
 
 
 class ConnectorListResponse(BaseModel):
-    """Response shape for ``GET /api/v1/connectors``.
+    """Unified list envelope for ``GET /api/v1/connectors``.
 
-    Wrapped in an object (rather than a bare ``list[...]``) so
-    future paging / total / cursor metadata can land without a
-    breaking change to the JSON shape.
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. This listing is not
+    cursor-paginated, so ``next_cursor`` is always ``None``; the field
+    is present so a client reads it without a ``KeyError`` guard and so
+    the endpoint can grow keyset pagination later without a further
+    breaking change.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    connectors: list[ConnectorListItem]
+    items: list[ConnectorListItem]
+    next_cursor: str | None = None
 
 
 class EditGroupBody(BaseModel):

@@ -58,6 +58,7 @@
       hx-target="#scheduler-modal-container"
       hx-swap="innerHTML"
       hx-disabled-elt="find button[type=submit]"
+      hx-disinherit="hx-disabled-elt"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
       class="space-y-3 py-2"
       aria-labelledby="scheduler-create-modal-title"
@@ -132,16 +133,30 @@
       </div>
 
       {# ---------- one_off fields ---------- #}
+      {# The datetime-local picker shows the operator their own wall-clock
+         time but posts a naive ``YYYY-MM-DDTHH:MM`` string the engine stored
+         verbatim as UTC -- a CEST operator's "11:00" landed as 11:00Z (2h
+         late). The inline script below converts the picked local value to a
+         UTC ISO-8601 instant on submit (``htmx:configRequest``) using the
+         browser's own DST-aware ``Date``; the live hint shows the resolved
+         UTC so the conversion is visible, not silent (#2339). #}
       <div x-show="kind === 'one_off'" x-cloak class="space-y-2 rounded-box border border-base-300 p-3">
         <label class="form-control">
-          <span class="label-text">Fire at</span>
+          <span class="label-text">Fire at (your local time)</span>
           <input
             type="datetime-local"
             name="fire_at"
             class="input input-bordered input-sm"
+            data-fire-at
             aria-label="Fire at"
+            aria-describedby="scheduler-fire-at-hint"
           />
-          <span class="label-text-alt opacity-60">Interpreted as UTC if no offset.</span>
+          <span
+            id="scheduler-fire-at-hint"
+            class="label-text-alt opacity-60"
+            data-fire-at-hint
+            aria-live="polite"
+          >Enter your local wall-clock time — it is converted to UTC on submit.</span>
         </label>
       </div>
 
@@ -160,8 +175,21 @@
       </div>
 
       {# ---------- shared fields ---------- #}
+      {# Inputs is required for cron/one_off (they fire with no other prompt
+         source, so an input-less trigger fails every fire) and optional for
+         event (its future dispatch junction may derive the prompt from the
+         matched event). The label tracks the Alpine kind-switch. #}
       <label class="form-control">
-        <span class="label-text">Run inputs (JSON object, optional)</span>
+        <span class="label-text">
+          Run inputs (JSON object)<span
+            class="opacity-60"
+            x-show="kind !== 'event'"
+          > — required, must render a prompt</span><span
+            class="opacity-60"
+            x-cloak
+            x-show="kind === 'event'"
+          > — optional</span>
+        </span>
         <textarea
           name="inputs"
           class="textarea textarea-bordered textarea-sm font-mono"
@@ -225,3 +253,67 @@
     <button>close</button>
   </form>
 </dialog>
+
+{# Inline script: convert the one_off ``fire_at`` datetime-local value from
+   the operator's local zone to a UTC ISO-8601 instant on submit, and mirror
+   the resolved UTC into the field hint so the conversion is visible (#2339).
+   Pulled inline (not a <script src>) because the modal is HTMX-injected and a
+   separate JS fetch would race showModal() -- the memory-create modal follows
+   the same pattern. The browser's own ``Date`` is DST-aware, so CEST (UTC+2)
+   and CET (UTC+1) resolve correctly without a hardcoded offset. #}
+<script>
+  (function () {
+    var modal = document.getElementById('scheduler-create-modal');
+    if (!modal) return;
+    var form = modal.querySelector('#scheduler-create-form');
+    if (!form) return;
+    var input = form.querySelector('[data-fire-at]');
+    var hint = form.querySelector('[data-fire-at-hint]');
+    // A naive datetime-local value carries no zone: YYYY-MM-DDTHH:MM[:SS].
+    // An already-offset value (Z or +hh:mm) is left untouched.
+    var NAIVE_LOCAL = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/;
+    var zone = '';
+    try {
+      zone = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    } catch (e) {
+      zone = '';
+    }
+
+    function localToUtcIso(value) {
+      if (!value || !NAIVE_LOCAL.test(value)) return null;
+      var d = new Date(value);
+      if (isNaN(d.getTime())) return null;
+      return d.toISOString();
+    }
+
+    function renderHint() {
+      if (!hint) return;
+      var value = input ? input.value : '';
+      var utc = localToUtcIso(value);
+      if (!utc) {
+        hint.textContent =
+          'Enter your local wall-clock time — it is converted to UTC on submit.';
+        return;
+      }
+      var utcMinute = utc.slice(0, 16) + 'Z';
+      hint.textContent =
+        'Fires at ' + utcMinute + ' (UTC)' +
+        (zone ? ' — your local zone: ' + zone : '') + '.';
+    }
+
+    if (input) {
+      input.addEventListener('input', renderHint);
+      input.addEventListener('change', renderHint);
+      renderHint();
+    }
+
+    // htmx serialises the form before this fires; rewriting parameters here
+    // changes the request body without mutating the picker the operator sees.
+    form.addEventListener('htmx:configRequest', function (evt) {
+      var params = evt && evt.detail ? evt.detail.parameters : null;
+      if (!params) return;
+      var utc = localToUtcIso(params.fire_at);
+      if (utc) params.fire_at = utc;
+    });
+  }());
+</script>

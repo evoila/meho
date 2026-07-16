@@ -11,7 +11,8 @@ non-injected) credential loader:
       -> dispatch_ingested -> auth_headers
       -> load_credentials_from_vault                # the live shared loader
       -> load_basic_credentials (G3.9-T2)           # operator-context Vault read
-      -> GET /suite-api/api/versions/current        # the actual read op (Basic auth)
+      -> POST /suite-api/api/auth/token/acquire     # OpsToken session establish
+      -> GET /suite-api/api/versions/current        # the read op (OpsToken auth)
       -> OperationResult(status="ok")
 
 The two "real" leaves are stubbed at their boundaries so the gate runs
@@ -28,14 +29,14 @@ in the **secret-free unit lane** (``pytest -n auto`` /
   ``credentials_loader``, so the default
   :func:`~meho_backplane.connectors._shared.vcf_auth.load_credentials_from_vault`
   runs.
-* **vROps** — respx replays ``GET /suite-api/api/versions/current``
+* **vROps** — respx replays ``POST /suite-api/api/auth/token/acquire``
+  (returns a canned OpsToken) and ``GET /suite-api/api/versions/current``
   (returns a canned version payload). No network.
 
-The vROps appliance uses HTTP Basic on every request (stateless — no
-session token; vROps has no ``/api/session`` analogue). So unlike the
-vmware-rest precedent there is no session establish call to mock; the
-single read op carries the Vault-read credentials in
-``Authorization: Basic <b64>``.
+vROps 9.0.2 authenticates on an acquired-token session (#2395): the first
+request per target POSTs the Vault-read credentials to
+``/suite-api/api/auth/token/acquire`` and the connector then presents the
+returned token as ``Authorization: OpsToken <token>`` on the read op.
 
 Why this lives in the unit lane (not ``tests/integration``)
 ===========================================================
@@ -51,6 +52,7 @@ already migrates per worker. Mirrors
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime
@@ -58,6 +60,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 import respx
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,6 +111,16 @@ _VROPS_BASE_URL = f"https://{_VROPS_HOST}"
 _OP_RESPONSE: dict[str, Any] = {
     "releaseName": "9.0.0",
     "buildNumber": 23456789,
+}
+
+#: OpsToken session-establish path + canned acquire response (#2395).
+_ACQUIRE_PATH = "/suite-api/api/auth/token/acquire"
+_OPS_TOKEN = "vrops-credread-ops-token"
+_ACQUIRE_RESPONSE: dict[str, Any] = {
+    "token": _OPS_TOKEN,
+    "validity": 1470421325035,
+    "expiresAt": "Friday, August 5, 2016 6:22:05 PM UTC",
+    "roles": [],
 }
 
 
@@ -254,7 +267,7 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     captured_events: list[BroadcastEvent],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The full dispatch->loader->vROps chain returns status="ok" with no injected loader."""
+    """The full dispatch->loader->acquire->vROps chain returns ok with no injected loader."""
     await _seed_descriptor(session, stub_embedding_service.encode_one.return_value)
 
     # Vault leaf: the in-process fake returns the canary creds via the
@@ -270,6 +283,7 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     operator = _make_operator()
 
     async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
         op_route = mock.get(_OP_PATH).respond(200, json=_OP_RESPONSE)
 
         result = await dispatch(
@@ -288,10 +302,14 @@ async def test_dispatch_executes_full_credread_chain_returns_ok(
     # The default loader actually read Vault under the operator's identity.
     assert fake.auth.jwt.login_calls[-1]["jwt"] == "op.credread.vrops.jwt"
     assert fake.secrets.kv.v2.read_calls[-1]["path"] == target.secret_ref
-    # The op route was hit, and the Basic-auth header carried the read creds.
+    # The session was acquired with the Vault-read credentials.
+    assert acquire_route.called and acquire_route.call_count == 1
+    acquire_body = json.loads(acquire_route.calls[0].request.content)
+    assert acquire_body == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
+    # The op route was hit, and the OpsToken header carried the acquired token.
     assert op_route.called and op_route.call_count == 1
     sent_auth = op_route.calls[0].request.headers.get("authorization")
-    assert sent_auth is not None and sent_auth.startswith("Basic ")
+    assert sent_auth == f"OpsToken {_OPS_TOKEN}"
     # One audit + one broadcast for the dispatched op.
     assert len(captured_events) == 1
 
@@ -316,6 +334,7 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
 
     with capture_logs() as captured:
         async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+            mock.post(_ACQUIRE_PATH).respond(200, json=_ACQUIRE_RESPONSE)
             mock.get(_OP_PATH).respond(200, json=_OP_RESPONSE)
 
             result = await dispatch(
@@ -343,6 +362,95 @@ async def test_credread_chain_never_leaks_credential_in_result_or_logs(
     events_blob = repr(captured_events)
     assert _CANARY_PASSWORD not in events_blob
     assert _CANARY_USERNAME not in events_blob
+
+
+@pytest.mark.asyncio
+async def test_dispatch_recovers_from_session_expiry_401_via_invalidate_and_retry(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 on a dispatched op re-acquires the token and retries once (the #2067 seam).
+
+    Mirrors the vRLI dispatch-path recovery: the connector advertises
+    ``invalidate_session`` so the generic-ingested dispatch path evicts the
+    stale token and re-dispatches the op exactly once. The acquire route
+    fires twice (initial + post-401 re-acquire); the read route fires twice
+    (401 then 200) and the second read carries the refreshed OpsToken.
+    """
+    await _seed_descriptor(session, stub_embedding_service.encode_one.return_value)
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+
+    target = _CredReadTarget()
+    operator = _make_operator()
+
+    async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        acquire_route = mock.post(_ACQUIRE_PATH)
+        acquire_route.side_effect = [
+            httpx.Response(200, json={"token": "token-first", "validity": 1, "roles": []}),
+            httpx.Response(200, json={"token": "token-second", "validity": 1, "roles": []}),
+        ]
+        op_route = mock.get(_OP_PATH)
+        op_route.side_effect = [
+            httpx.Response(401),
+            httpx.Response(200, json=_OP_RESPONSE),
+        ]
+
+        result = await dispatch(
+            operator=operator,
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=target,
+            params={},
+        )
+
+    assert result.status == "ok", result.error
+    assert result.result == _OP_RESPONSE
+    # Re-acquire fired exactly once — two acquire POSTs, two reads.
+    assert acquire_route.call_count == 2
+    assert op_route.call_count == 2
+    assert op_route.calls[0].request.headers.get("authorization") == "OpsToken token-first"
+    assert op_route.calls[1].request.headers.get("authorization") == "OpsToken token-second"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_acquire_401_maps_to_connector_auth_failed(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 401 at token/acquire surfaces as connector_auth_failed (cause session_establish_401).
+
+    The session-establish auth-class failure is wrapped by the shared
+    ``vcf_session_login`` helper into a ``ConnectorAuthError`` the dispatcher
+    routes to the structured ``connector_auth_failed`` code — not the opaque
+    ``connector_error`` the pre-#2329 shape flattened it to.
+    """
+    await _seed_descriptor(session, stub_embedding_service.encode_one.return_value)
+    install_fake_client(
+        monkeypatch,
+        secret={"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD},
+    )
+
+    async with respx.mock(base_url=_VROPS_BASE_URL, assert_all_called=False) as mock:
+        mock.post(_ACQUIRE_PATH).respond(401, json={"message": "invalid_credentials"})
+
+        result = await dispatch(
+            operator=_make_operator(),
+            connector_id=_CONNECTOR_ID,
+            op_id=_OP_ID,
+            target=_CredReadTarget(),
+            params={},
+        )
+
+    assert result.status == "error"
+    assert result.extras.get("error_code") == "connector_auth_failed"
+    assert result.extras.get("cause") == "session_establish_401"
 
 
 @pytest.mark.asyncio

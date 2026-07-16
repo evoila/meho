@@ -420,6 +420,37 @@ def test_run_post_returns_transcript_with_stream_token() -> None:
     assert "summarise the topology" not in body  # prompt rides in the token, not the URL.
 
 
+def test_run_transcript_stop_dialog_opts_out_of_autopen() -> None:
+    """The Stop-confirm dialog must not auto-open when the transcript swaps in.
+
+    The run transcript is swapped over ``#agent-run-transcript`` on Run submit;
+    the app-shell modal controller auto-opens freshly swapped-in
+    ``dialog.modal`` fragments on ``htmx:afterSwap``. The Stop dialog is
+    button-driven, so it carries ``data-auto-open="false"`` to opt out of that
+    sweep -- otherwise the confirm pops the instant a run starts and hides the
+    live transcript (#2347).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="a1")
+    reset_agent_invoker_for_testing(_FakeInvoker())
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_token(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/a1/run",
+            data={"input": "go"},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'data-role="stop-confirm"' in body
+    assert 'data-auto-open="false"' in body
+
+
 def test_run_post_disabled_agent_renders_409_inline() -> None:
     """A disabled agent renders an inline 409 alert, not a torn stream."""
     _seed_tenant(_TENANT_A, "tenant-a")

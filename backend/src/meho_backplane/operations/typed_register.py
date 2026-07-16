@@ -130,7 +130,7 @@ import inspect
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from sqlalchemy import insert, select
@@ -139,6 +139,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations._handler_resolve import import_handler
+from meho_backplane.operations.composite_invariant import (
+    assert_registered_composites_have_no_ingested_dispatch,
+)
 from meho_backplane.operations.embed import (
     build_embedding_text,
     compute_embedding_text_hash,
@@ -146,6 +149,9 @@ from meho_backplane.operations.embed import (
 )
 from meho_backplane.retrieval.embedding import EmbeddingService
 from meho_backplane.settings import get_settings
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors import OperationResult
 
 __all__ = [
     "CompositeOpHandler",
@@ -406,6 +412,31 @@ async def run_typed_op_registrars(
     mirrors the schema-template amortization in ``tests/conftest.py``
     (#793/#898) — replay a once-computed artifact instead of recomputing
     it per test.
+
+    Two-world invariant (#2252)
+    ---------------------------
+
+    After the descriptor rows are in place — via a real registrar pass or
+    the amortized snapshot replay — every registered composite is swept for
+    a two-world violation
+    (:func:`~meho_backplane.operations.composite_invariant.assert_registered_composites_have_no_ingested_dispatch`):
+    a code-shipped op whose declared sub-op resolves to an ``ingested`` row
+    fails the boot closed. The sweep runs on **every** path (fresh pass and
+    replay) because the violation is a function of live descriptor state,
+    not of which registration path produced the rows.
+    """
+    await _run_typed_op_registrars(embedding_service=embedding_service)
+    await assert_registered_composites_have_no_ingested_dispatch()
+
+
+async def _run_typed_op_registrars(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Populate descriptor rows via a real registrar pass or the amortized replay.
+
+    Split from :func:`run_typed_op_registrars` so the two-world invariant
+    sweep runs on every path regardless of which branch produced the rows.
     """
     if get_settings().test_amortize_typed_op_registrars:
         fingerprint = _registrar_fingerprint()
@@ -446,9 +477,15 @@ type TypedOpHandler = Callable[..., Awaitable[dict[str, Any]]]
 #: ``self`` that disappears at bind time. The shape contract is
 #: enforced at registration time by
 #: :func:`validate_composite_handler_signature`, which asserts the
-#: handler exposes a ``dispatch_child`` parameter -- the only positional
-#: distinction from typed handlers.
-type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any]]]
+#: handler exposes a ``dispatch_child`` and/or a ``connector`` parameter
+#: -- the sub-call-capability distinction from typed handlers (#2251
+#: added the direct-session ``connector`` seam alongside
+#: ``dispatch_child``). The result type widens to ``dict | OperationResult``
+#: (#2256): a migrated write composite may return an ``OperationResult``
+#: verbatim when its direct-session governance seam parks/denies an internal
+#: write, and the dispatcher passes a handler-returned ``OperationResult``
+#: straight through.
+type CompositeOpHandler = Callable[..., Awaitable[dict[str, Any] | OperationResult]]
 
 
 # Bounded enum for ``safety_level`` -- mirrors the DB CHECK constraint
@@ -495,7 +532,7 @@ class HandlerSignatureError(ValueError):
     """
 
 
-def derive_handler_ref(handler: TypedOpHandler) -> str:
+def derive_handler_ref(handler: TypedOpHandler | CompositeOpHandler) -> str:
     """Derive the dotted Python path the dispatcher will import at dispatch time.
 
     Module-level functions resolve to ``f"{module}.{qualname}"`` --
@@ -576,30 +613,45 @@ def _handler_parameter_names(handler: Any) -> list[str]:
 
 
 def validate_composite_handler_signature(handler: Any) -> None:
-    """Assert *handler* accepts a ``dispatch_child`` parameter.
+    """Assert *handler* declares at least one sub-call capability.
 
-    Composite handlers receive
-    ``dispatch_child: DispatchChild`` from the dispatcher at invocation
-    time
-    (:func:`~meho_backplane.operations._branches.dispatch_composite`).
-    Registering a handler without it would surface the failure as a
-    :exc:`TypeError` at first dispatch -- late, with poor signal.
-    Checking the signature at registration time fails fast with an
-    operator-readable message and the handler's dotted path.
+    A composite is defined by *how it reaches its sub-ops*. The
+    dispatcher offers two seams
+    (:func:`~meho_backplane.operations._branches.dispatch_composite`),
+    and a composite handler opts into either or both by declaring the
+    matching parameter:
+
+    * ``dispatch_child`` -- the catalog-routed
+      :class:`~meho_backplane.operations.composite.DispatchChild`
+      callable (audit-tree linkage, bounded recursion, per-sub-op
+      policy/broadcast + param validation).
+    * ``connector`` -- the direct-session substrate (#2251): the
+      resolved connector instance, so the handler issues sub-calls
+      through the connector's own session with no ``endpoint_descriptor``
+      lookup.
+
+    A handler declaring **neither** is not a composite -- it has no way
+    to reach a sub-op -- and would surface the failure as a
+    :exc:`TypeError` at first dispatch (missing keyword), late and with
+    poor signal. Checking the signature at registration time fails fast
+    with an operator-readable message and the handler's dotted path.
 
     Raises
     ------
     HandlerSignatureError
-        Handler's parameters do not include ``dispatch_child``.
+        Handler's parameters include neither ``dispatch_child`` nor
+        ``connector``.
     """
     param_names = _handler_parameter_names(handler)
-    if "dispatch_child" not in param_names:
+    if "dispatch_child" not in param_names and "connector" not in param_names:
         module = getattr(handler, "__module__", "<unknown>")
         qualname = getattr(handler, "__qualname__", repr(handler))
         raise HandlerSignatureError(
             f"composite handler {module}.{qualname} "
             f"must accept a 'dispatch_child' parameter "
-            f"(per meho_backplane.operations.composite.DispatchChild); "
+            f"(per meho_backplane.operations.composite.DispatchChild) "
+            f"and/or a 'connector' parameter (the resolved connector "
+            f"instance, for direct-session sub-calls); "
             f"signature is ({', '.join(param_names)})"
         )
 
@@ -1140,8 +1192,9 @@ async def register_composite_operation(
     one private upsert path (:func:`_register_in_session`) -- they
     differ in (a) the column they write to ``source_kind`` (this one
     writes ``"composite"``), (b) the handler-signature contract they
-    enforce (this one rejects handlers without ``dispatch_child``),
-    and (c) the policy defaults (this one defaults
+    enforce (this one rejects handlers that declare neither
+    ``dispatch_child`` nor ``connector``), and (c) the policy defaults
+    (this one defaults
     ``safety_level="dangerous"`` and ``requires_approval=True``).
 
     Parameters
@@ -1158,11 +1211,14 @@ async def register_composite_operation(
         Must be a module-level function or bound method (closure /
         lambda / :class:`functools.partial` rejected via
         :func:`derive_handler_ref`'s contract -- shared with the typed
-        helper). The handler MUST accept a ``dispatch_child``
-        parameter; the dispatcher's composite branch
+        helper). The handler MUST accept a ``dispatch_child`` and/or a
+        ``connector`` parameter; the dispatcher's composite branch
         (:func:`~meho_backplane.operations._branches.dispatch_composite`)
-        passes a :class:`~meho_backplane.operations.composite.DispatchChild`
-        callable in by keyword. Handlers missing the parameter raise
+        passes the
+        :class:`~meho_backplane.operations.composite.DispatchChild`
+        callable and/or the resolved connector instance in by keyword,
+        matching whichever the handler declares (#2251). A handler
+        declaring neither has no way to reach a sub-op and raises
         :class:`HandlerSignatureError` at registration time -- not
         first dispatch -- so the failure surfaces in lifespan.
     summary, description, parameter_schema, response_schema, group_key, when_to_use, tags
@@ -1204,8 +1260,9 @@ async def register_composite_operation(
         bounded enum, or the ``group_key`` / ``when_to_use`` pairing
         contract is violated (see :func:`register_typed_operation`).
     HandlerSignatureError
-        Handler does not accept a ``dispatch_child`` parameter, **or**
-        the natural key is already registered with
+        Handler accepts neither a ``dispatch_child`` nor a
+        ``connector`` parameter, **or** the natural key is already
+        registered with
         ``source_kind="typed"`` -- cross-kind re-registration is
         rejected at lookup time so a dispatch-time :exc:`TypeError`
         cannot surface from an inconsistent persisted row. Subclass

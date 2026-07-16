@@ -37,6 +37,9 @@ from meho_backplane.operations.ingest.api_schemas import (
     IngestResponse,
     SpecSource,
 )
+from meho_backplane.operations.ingest.boot_stamp import (
+    stamp_catalog_profiled_connectors,
+)
 from meho_backplane.operations.ingest.catalog import (
     CatalogError,
     CatalogListResponse,
@@ -122,6 +125,7 @@ from meho_backplane.operations.ingest.payload import (
     ConnectorReviewGroup,
     ConnectorReviewOp,
     ConnectorReviewPayload,
+    ConnectorReviewProvenance,
 )
 from meho_backplane.operations.ingest.pipeline import (
     IngestionPipelineResult,
@@ -152,6 +156,7 @@ __all__ = [
     "ConnectorReviewGroup",
     "ConnectorReviewOp",
     "ConnectorReviewPayload",
+    "ConnectorReviewProvenance",
     "ConnectorScopeCandidate",
     "ConnectorSpecCatalog",
     "ConnectorSpecEntry",
@@ -231,6 +236,7 @@ __all__ = [
     "reset_job_registry_for_tests",
     "run_ingest_job",
     "run_llm_grouping",
+    "stamp_catalog_profiled_connectors",
     "strip_code_fences",
     "validate_catalog_registry_coverage",
     "validate_shipped_artifacts",

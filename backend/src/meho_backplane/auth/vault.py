@@ -69,6 +69,7 @@ from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "VaultClientError",
+    "VaultNotConfiguredError",
     "VaultRoleDeniedError",
     "VaultUnreachableError",
     "vault_client_for_operator",
@@ -107,6 +108,21 @@ class VaultRoleDeniedError(VaultClientError):
     """
 
 
+class VaultNotConfiguredError(VaultClientError):
+    """``VAULT_ADDR`` is unset but a Vault operation was attempted.
+
+    Since Initiative #2227 a GCP-native install boots Vault-free
+    (``CREDENTIAL_BACKEND=gsm``, no ``VAULT_ADDR``). If such an install
+    is *mis*configured — ``CREDENTIAL_BACKEND=vault`` but no
+    ``VAULT_ADDR`` — the backplane still boots, and the failure lands
+    here at the **first** Vault use with an operator-actionable message
+    naming both env vars, instead of a bare ``KeyError`` at startup or a
+    bogus ``str(None)`` URL. As a :class:`VaultClientError` subclass it
+    flows through the dispatcher's ``connector_error`` arm — a handled
+    4xx-class result to the caller, never a 5xx.
+    """
+
+
 def _build_client(settings: Settings, *, token: str | None = None) -> hvac.Client:
     """Construct an unauthenticated :class:`hvac.Client` from settings.
 
@@ -115,7 +131,18 @@ def _build_client(settings: Settings, *, token: str | None = None) -> hvac.Clien
     per-operator login share one construction path. ``token`` is
     threaded through so tests can build a client bound to a fixture
     token without round-tripping through ``jwt_login``.
+
+    Raises :class:`VaultNotConfiguredError` when ``vault_addr`` is
+    ``None`` (a Vault-free ``gsm`` install with ``CREDENTIAL_BACKEND``
+    still pointed at ``vault``), rather than constructing a client
+    against the string ``"None"``.
     """
+    if settings.vault_addr is None:
+        raise VaultNotConfiguredError(
+            "VAULT_ADDR is not set but a Vault operation was attempted; "
+            "set VAULT_ADDR, or use CREDENTIAL_BACKEND=gsm for a "
+            "Vault-free install."
+        )
     return hvac.Client(
         url=str(settings.vault_addr).rstrip("/"),
         namespace=settings.vault_namespace,
@@ -305,7 +332,12 @@ async def vault_readiness_probe() -> ProbeResult:
     ``connectors.vault.connector`` importing from ``auth.vault`` at module
     load time.
 
-    The probe distinguishes three failure shapes in ``detail``:
+    An unconfigured Vault (``vault_addr is None`` — the Vault-free
+    ``gsm`` install) is **skipped**, not failed: the probe returns
+    ``ok=True`` with ``detail="not_configured"`` so a GSM-only deploy's
+    ``/api/v1/health`` readiness stays green.
+
+    Otherwise the probe distinguishes three failure shapes in ``detail``:
 
     * ``unreachable: <ExceptionClassName>`` — TCP/TLS/DNS/timeout.
     * ``sealed`` / ``uninitialized`` — Vault answered, but is not serving.
@@ -314,13 +346,21 @@ async def vault_readiness_probe() -> ProbeResult:
     Detail strings never echo Vault's URL or the operator's namespace.
     """
     try:
-        get_settings()  # fail-fast before importing the connector
+        settings = get_settings()  # fail-fast before importing the connector
     except Exception as exc:
         return ProbeResult(
             name="vault",
             ok=False,
             detail=f"settings_unavailable: {type(exc).__name__}",
         )
+
+    # Vault-free (`gsm`) install: no VAULT_ADDR configured. Vault is an
+    # optional credential backend here, so an unconfigured Vault is
+    # skipped — never failed — keeping /api/v1/health readiness green
+    # for a GSM-only deploy. Mirrors the docs-backends probe's
+    # "unconfigured optional backend is skipped" contract (#1606).
+    if settings.vault_addr is None:
+        return ProbeResult(name="vault", ok=True, detail="not_configured")
 
     # Lazy import: connectors.vault.connector imports auth.vault at module
     # level, so a top-level import here would create a cycle.

@@ -368,6 +368,56 @@ async def test_invalidate_session_evicts_only_the_targets_slot() -> None:
     assert connector._session_tokens == {key_b: "token-for-b"}
 
 
+# ---------------------------------------------------------------------------
+# adapt_op_query — mount-flavor filter-param keying (#2298)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_adapt_op_query_strips_filter_prefix_on_modern_mount() -> None:
+    """On a modern ``/api`` session the ``filter.`` prefix is stripped (#2298).
+
+    Real vCenter 8.x 400s ``filter.datastores`` and wants the bare
+    ``datastores``; the seam keys the param style off the established mount.
+    """
+    connector = _make_connector()
+    key = target_cache_key(_TARGET_A)
+    connector._session_tokens[key] = "tok"
+    connector._session_paths[key] = "/api/session"
+
+    adapted = await connector.adapt_op_query(
+        _TARGET_A, {"filter.datastores": ["ds-1"], "filter.names": ["n"]}, _make_operator()
+    )
+
+    assert adapted == {"datastores": ["ds-1"], "names": ["n"]}
+
+
+@pytest.mark.asyncio
+async def test_adapt_op_query_keeps_filter_prefix_on_legacy_mount() -> None:
+    """On a legacy ``/rest`` session (vcsim) the ``filter.`` prefix is kept (#2298)."""
+    connector = _make_connector()
+    key = target_cache_key(_TARGET_A)
+    connector._session_tokens[key] = "tok"
+    connector._session_paths[key] = "/rest/com/vmware/cis/session"
+
+    adapted = await connector.adapt_op_query(
+        _TARGET_A, {"filter.hosts": ["host-1"]}, _make_operator()
+    )
+
+    assert adapted == {"filter.hosts": ["host-1"]}
+
+
+@pytest.mark.asyncio
+async def test_adapt_op_query_empty_short_circuits_to_none() -> None:
+    """An empty / ``None`` query returns ``None`` without a session establish (#2298)."""
+    connector = _make_connector()
+
+    assert await connector.adapt_op_query(_TARGET_A, {}, _make_operator()) is None
+    assert await connector.adapt_op_query(_TARGET_A, None, _make_operator()) is None
+    # No session was established for the short-circuit path.
+    assert connector._session_tokens == {}
+
+
 @pytest.mark.asyncio
 async def test_invalidate_then_auth_headers_re_establishes_session() -> None:
     """After ``invalidate_session``, the next ``auth_headers`` re-logs-in.
@@ -457,8 +507,15 @@ async def test_same_name_targets_in_different_tenants_get_distinct_sessions() ->
 
 
 @pytest.mark.asyncio
-async def test_session_create_401_surfaces_runtime_error_with_target_name() -> None:
-    """401 from POST /api/session raises RuntimeError naming the target."""
+async def test_session_create_401_surfaces_connector_auth_error_with_target_name() -> None:
+    """401 from POST /api/session raises the structured ConnectorAuthError (#2329).
+
+    Still a ``RuntimeError`` subclass (via ``SessionLoginError``) so pre-#2329
+    callers are unaffected, but now carries the establish cause sub-code the
+    dispatcher maps to ``connector_auth_failed``.
+    """
+    from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
+
     connector = _make_connector()
     _patch_no_revoke_aclose(connector)
 
@@ -467,8 +524,12 @@ async def test_session_create_401_surfaces_runtime_error_with_target_name() -> N
         with pytest.raises(RuntimeError, match=r"vcenter-a") as exc_info:
             await connector.auth_headers(_TARGET_A, _make_operator())
 
+    err = exc_info.value
+    assert isinstance(err, ConnectorAuthError)
+    assert err.cause == "session_establish_401"
+    assert err.status_code == 401
     # The wrapped HTTPStatusError carries the 401 details.
-    assert "401" in str(exc_info.value)
+    assert "401" in str(err)
     await connector.aclose()
 
 

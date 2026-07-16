@@ -72,7 +72,6 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.vcf_logs import (
     VRLI_CONNECTOR_ID,
-    VRLI_CORE_OPS,
     VRLI_IMPL_ID,
     VRLI_VERSION,
     VcfLogsConnector,
@@ -87,6 +86,7 @@ from meho_backplane.operations.meta_tools import call_operation
 from meho_backplane.operations.reducer import PassThroughReducer
 from tests.acceptance._vrli_canary_fixtures import (
     VRLI_CANARY_BASE_URL,
+    VRLI_CANARY_CORE_OP_IDS,
     VRLI_CANARY_EVENTS,
     VRLI_CANARY_FINGERPRINT,
     VRLI_CANARY_OPERATOR_TENANT,
@@ -506,8 +506,11 @@ async def vrli_e2e_440_persists(
 # Tests
 # ---------------------------------------------------------------------------
 
-_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in VRLI_CORE_OPS)
-assert len(_OP_IDS) == 7, f"Expected 7 curated vRLI ops, got {len(_OP_IDS)}: {_OP_IDS}"
+_OP_IDS: tuple[str, ...] = VRLI_CANARY_CORE_OP_IDS
+assert len(_OP_IDS) == 6, (
+    f"Expected 6 ingested vRLI browse-breadth ops after #2295 (events query is now the "
+    f"vrli.event.query typed op), got {len(_OP_IDS)}: {_OP_IDS}"
+)
 
 
 @pytest.mark.parametrize("op_id", _OP_IDS, ids=lambda op: op)
@@ -515,13 +518,15 @@ async def test_vrli_e2e_all_ops_dispatch_ok(
     op_id: str,
     vrli_e2e_canary: _VrliE2EBundle,
 ) -> None:
-    """All 7 vRLI core ops dispatch through the full dispatcher and return status='ok'.
+    """All 6 curated ingested vRLI ops dispatch through the full dispatcher OK.
 
     The first call in the series fires the session-establish POST; subsequent
     calls reuse the cached token. The parametrise reports one CI case per
-    op_id for granular failure attribution. The two ``{constraints}`` ops
-    pass an empty-string constraints value to exercise the path-template
-    substitution + empty-trailing-segment behaviour.
+    op_id for granular failure attribution. The ingested ``aggregated-events``
+    ``{constraints}`` op passes an empty-string constraints value to exercise
+    the path-template substitution + empty-trailing-segment behaviour. The
+    typed ``vrli.event.query`` op is covered separately (its own dispatch-level
+    test module + the JSONFlux handle test below).
     """
     params = VRLI_CONSTRAINT_OP_PARAMS.get(op_id, {})
     result = await call_operation(
@@ -885,13 +890,15 @@ async def test_vrli_e2e_dispatch_writes_audit_row(
 async def test_vrli_e2e_jsonflux_handle_populated_for_event_query(
     vrli_e2e_canary: _VrliE2EBundle,
 ) -> None:
-    """Event query dispatched with the real JsonFluxReducer returns a populated handle.
+    """Typed event query dispatched with the real JsonFluxReducer returns a populated handle.
 
     Exercises acceptance criterion (d) — the issue body's "vcf-logs
     query E2E asserts the JSONFlux handle path (handle →
-    ``result_query`` drills in)". Picks events.query as the canonical
-    list op because the headline read surface of vRLI is event search
-    and large result sets are precisely where the handle path matters.
+    ``result_query`` drills in)". Since #2295 ``vrli.event.query`` is a
+    ``source_kind="typed"`` op, so this also pins that the dispatcher's
+    connector-agnostic reducer wraps a typed handler's ``{events: [...]}``
+    envelope into a handle exactly as it did the ingested row's response —
+    large result sets are precisely where the handle path matters.
     """
     events_payload = VRLI_CANARY_EVENTS["events"]
     assert isinstance(events_payload, list)

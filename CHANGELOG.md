@@ -90,6 +90,1743 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Performance — `find_path` per-branch target pruning + dense-mesh envelope + topology concurrency coverage (#2535)
+
+- Bound `find_path`'s recursive walk per branch: `_PATH_SQL` gains a
+  non-recursive `target` CTE and the recursive term now refuses to extend a
+  branch whose frontier row already is the destination (`NOT EXISTS` against
+  `target`). Results are byte-identical (same shortest hop count, same `None`
+  on unreachable — existing suite green unmodified); on a dense mesh the walk
+  no longer enumerates simple paths *through* the target (measured 1 544 →
+  795 materialised rows on the 20-node pruning fixture; regression-pinned).
+  Global cross-branch early termination is not expressible (PostgreSQL allows
+  exactly one recursive self-reference, outside subqueries; `ORDER BY hops
+  LIMIT 1` must consume the full walk) — the unreachable-target worst case
+  (dense cyclic mesh, `max_hops=32` API ceiling) is instead CI-pinned by a
+  new benchmark: exact walk-row-count pin (~31k rows, load-invariant),
+  hops-32/hops-8 timing ratio gate, generous absolute backstop; envelope
+  documented in `docs/architecture/topology.md` §Performance expectations.
+  The new `MeshSpec` / `seed_mesh_graph` generator (converging paths, cycles,
+  mixed edge kinds, optional soft-deleted rows) closes the fixture gap — the
+  prior 10k fixture was out-degree-1 hub-and-chains only. Also adds the
+  topology suite's first real-concurrency tests: `asyncio.gather`
+  refresh-vs-annotate race (no lost update, no dangling §6 markers, both
+  synchronous audit rows present) and the scheduler's per-target advisory
+  lock exercised against real PostgreSQL (skip while held, proceed after
+  release) instead of a mocked pre-held lock —
+  `backend/src/meho_backplane/topology/query.py`,
+  `backend/tests/fixtures/topology_10k_nodes.py`,
+  `backend/tests/integration/test_topology_path_pruning.py`,
+  `backend/tests/integration/test_topology_concurrency.py` (#2535).
+
+### Security — agent-principal Keycloak-orphan rollback + bounded name (#2523)
+
+- Close the two credential-lifecycle gaps in the agent-principal register
+  path, mirroring the runner-principal fix (#2502 / PR #2508). **(1) Orphan
+  rollback:** previously, if `create_client` succeeded but the following
+  `get_client_secret` failed, the just-created, enabled Keycloak client was
+  left orphaned — a live, token-issuing identity un-listable and un-revocable
+  through MEHO — because the `except` only handled the 409-conflict path. The
+  Phase-1 create+secret-capture is now extracted into a
+  `_provision_keycloak_client` helper whose `except BaseException` arm deletes
+  the just-created client on **any** post-create failure before re-raising
+  (its own cleanup errors are caught + logged so they never mask the original
+  cause), honouring the module's "Keycloak failure → no DB row" contract.
+  **(2) Bounded name:** `AgentPrincipalCreate.name` gains a `max_length`
+  bound sourced from the shared `NAME_MAX_LENGTH = 128` constant reused from
+  the runner path (not a second literal), applied to the intake `Field` **and**
+  the show/revoke `Path` params so intake and by-name lookup cannot drift — a
+  name past 128 chars is now rejected 422 at the schema boundary instead of
+  registering into an unreachable kill switch —
+  `backend/src/meho_backplane/auth/agent_principals.py`,
+  `backend/src/meho_backplane/api/v1/agent_principals.py` (#2523).
+
+### Security — gcloud docstring reword to clear FP secret alert (#2493)
+
+- Reword the SA-JSON-key-refusal docstring in
+  `backend/src/meho_backplane/connectors/gcloud/session.py` so it no longer
+  embeds the literal JSON-shaped `"type": "service_account"` marker that made
+  Trivy's builtin `gcp-service-account` secret rule raise a permanently-open
+  CRITICAL false positive (code-scanning alert #39, open since 2026-05-23) on
+  the in-image copy of the file. The prose now describes *a `type` field of
+  `service_account`* and names the `_SA_KEY_FIELDS` / `_contains_sa_key_fields`
+  refusal gate — meaning unchanged, no key material ever present. The
+  `gcp-service-account` rule is deliberately **not** suppressed via trivyignore
+  (that would blind the scan to a real future leak) — G0.34-T3 (#2493).
+### Security — workflow token hardening (#2492)
+
+- Least-privilege the two workflows CodeQL flagged as token/isolation gaps
+  (G0.34-T2). `runner-smoke.yml` gains a top-level `permissions: {}` — the
+  smoke job uses zero `GITHUB_TOKEN` capability (no checkout, no `gh`,
+  anonymous Harbor probe), so it no longer carries the repo-default write-all
+  token on the self-hosted `meho-runners-ci` pool (CodeQL alert #36). In
+  `quality-gate.yml` the `sonarcloud` job moves **off** the self-hosted pool
+  to the ephemeral GitHub-hosted `ubuntu-latest`, so the untrusted
+  `workflow_run` `head_sha` checkout never lands on persistent internal
+  infrastructure (CodeQL alert #109); its token is scoped at job level to
+  `contents: read` + `actions: read` (the latter required by the cross-run
+  `actions/download-artifact`), the workflow-level floor drops to
+  `contents: read`, and a load-bearing invariant comment above the checkout
+  documents that no step may execute code from the checkout. `pull-requests:
+  write` is retained conservatively pending empirical verification that
+  SonarCloud PR decoration (GitHub App + `SONAR_TOKEN`, not `GITHUB_TOKEN`) is
+  unaffected — `.github/workflows/runner-smoke.yml`,
+  `.github/workflows/quality-gate.yml` (#2492).
+### Security — base-image digest unfreeze + Trivy SARIF (#2491)
+
+- Unfreeze the backplane image's base pin and stop CVEs accruing on a stale
+  snapshot (G0.34-T1). `backend/Dockerfile` now pins `python:3.12-slim` by a
+  **literal, tag-qualified digest** (`FROM python:3.12-slim@sha256:c3d81d25…`)
+  inline on both the builder and runtime `FROM` lines instead of via an
+  `ARG PYTHON_BASE_DIGEST`, because Dependabot's docker ecosystem only bumps
+  literal `FROM` references (it does not resolve an ARG-held digest —
+  dependabot-core#2057 / #4597). `.github/dependabot.yml` gains an active
+  `docker` block for `/backend` (weekly, `chore(deps)` prefix), so upstream
+  base rebuilds now arrive as automatic PRs. The runtime stage also
+  `pip uninstall -y pip`s the base image's own unused pip (5 alerts incl.
+  CVE-2026-8643 — nothing runs it; deps live in the uv-built `/app/.venv`).
+  Finally, `.github/workflows/image.yml`'s Trivy step adds
+  `limit-severities-for-sarif: true` (so the `severity: CRITICAL,HIGH`
+  filter actually applies to SARIF, dropping the LOW/MEDIUM noise the input
+  never suppressed) and flips `exit-code: '0' → '1'` to make a post-push
+  main/tag scan a **red-main alarm** against silent CVE accumulation (not a
+  PR merge gate). Stale "bookworm"/"v0.2 will flip this" comments corrected —
+  `backend/Dockerfile`, `.github/workflows/image.yml`, `.github/dependabot.yml`
+  (#2491).
+
+### CI — coverage fail-visible contract (#2513)
+
+- Make a missing backend coverage import **loud instead of silent** (G0.35-T3).
+  When the push-only `python-coverage` job fails to upload `backend/coverage.xml`
+  — historically an invisible OOM / runner-loss on `meho-runners-ci-heavy` that
+  collapsed SonarCloud coverage from 65.8% to ~24% on 2026-06-20 and stayed
+  hidden for 3+ weeks — `quality-gate.yml` now emits an **error-level workflow
+  annotation** plus a clearly-named non-required failing step naming the missing
+  artifact. Resilience is preserved (the SonarCloud scan still runs advisory);
+  only the invisibility is removed. `ci.yml` gains a greppable `# TODO(ops)` at
+  the coverage job's `runs-on:` naming the durable fix (a larger-memory
+  gha-runner-scale-set pool on the rke2-ci cluster, ops-owned / out of band), and
+  `docs/codebase/sonarcloud.md` gains a coverage-collapse runbook (the ~24% chip
+  failure mode, the 2026-06-20 worked example, where to look, and the runner-pool
+  dependency) — `.github/workflows/quality-gate.yml`, `.github/workflows/ci.yml`,
+  `docs/codebase/sonarcloud.md` (#2513).
+
+### Gateway — runner dead-man switch + mandatory heartbeat
+
+- Add the runner dead-man switch + mandatory heartbeat for the push-only
+  satellite runner (Initiative #2415, #2501). Every authenticated
+  runner-plane request now stamps `runner_principal.last_seen_at` on the
+  central clock through the single shared choke-point (`assert_runner_scope`)
+  — keyed by the token's `runner_id` claim, never a client value, and with
+  no dedicated heartbeat endpoint (a healthy idle runner already fetches its
+  assignment once per ~60 s tick — `tick_interval_seconds`, #2499 — so the
+  idle work cycle *is* the heartbeat; the #1501 lesson).
+  A central interval-tick sweeper (`gateway/deadman.py`, gated on
+  `GATEWAY_DEADMAN_ENABLED`, default on) flips a lapsed runner's
+  `runner_assignments.stale_at` once its `last_seen_at` falls behind
+  `GATEWAY_RUNNER_STALE_AFTER_MULTIPLIER × GATEWAY_LONGPOLL_MAX_WAIT_SECONDS`
+  (default 3 × 30 s = 90 s, deliberately above the runner's ~60 s poll
+  cadence so a healthy idle runner never false-trips) judged on the central
+  clock, writing one
+  `gateway.runner.stale` audit row per flip; a fixed advisory lock plus a
+  conditional `WHERE stale_at IS NULL` flip keep it exactly-once under
+  concurrent replicas. Recovery is data-driven — an accepted result
+  ingestion clears the marker; the sweeper only ever flips. `stale_at IS NOT
+  NULL` maps to the `UNKNOWN` rollup state (#2416 / #2506). Migration `0061`
+  adds `runner_principal.last_seen_at` (+ index) and
+  `runner_assignments.stale_at` (#2501).
+
+### Added — single-use gateway capability commands (#2500)
+
+- Add the authorization keystone of the remote-execution gateway (Initiative
+  #2415, T4): single-use **capability commands** bound to `(runner, op,
+  target, args-hash, expiry)`, minted centrally **after** the policy gate and
+  executed at most once. `mint_gateway_command` re-runs the dispatcher's
+  pre-execution ladder (`lookup_descriptor` → `validate_params` → **safe-only
+  wall** → `policy_gate`) and mints a `gateway_command` row **only** on an
+  explicit `AUTO_EXECUTE` for a `safety_level=='safe'` op — a non-`safe` op,
+  or a `DENY` / `NEEDS_APPROVAL` verdict, is a structured refusal that writes
+  no command row and never parks into the approval queue (change-ops over the
+  gateway are v2). The capability *is* the command row's opaque UUID (not a
+  JWT). Delivery re-hashes the stored params against `params_hash` and refuses
+  on mismatch (post-mint substitution defence); the claim predicate skips
+  expired (`expires_at > now`, bounded at mint against a module-constant
+  default TTL) and consumed rows. A one-way `consumed_at` latch
+  (`consume_command`) makes result acceptance at-most-once with central replay
+  refusal (`gateway_command_already_consumed` + a `gateway_command_replay_refused`
+  log), and the accepted result's audit row links back to the mint audit row
+  (`parent_audit_id = mint_audit_id`) so a remote execution forms one audit
+  subtree. Runner-side, `ExecutedCommandStore` + `execute_command_once` record
+  the command id before dispatch so a redelivery re-submits the spooled result
+  instead of re-executing. Migration `0061` adds the four binding columns to
+  `gateway_command` —
+  `backend/src/meho_backplane/operations/gateway_commands.py` (#2500).
+
+### Accessibility — operator-console a11y + soak/keycloak hardening (#2512)
+
+- Fix ~10 real static-analysis findings triaged out of the SonarCloud noise
+  (G0.35-T2): every `<th>` in the topology table head now carries
+  `scope="col"` and the empty action column gets a visually-hidden
+  `<span class="sr-only">Actions</span>`; the connectors review-row
+  custom-description input and the ingest-modal spec-URL repeater input gain
+  accessible names via `aria-label`; the keycloak token parser drops a
+  provably-dead `isinstance` re-check; and `scripts/soak/soak-harness.sh`
+  pins its embedded `uv run` to `--locked` so a stale lockfile fails closed,
+  matching the repo-wide CI posture — `backend/src/meho_backplane/ui/
+  templates/topology/_table_head.html`, `.../connectors/_review_op_row.html`,
+  `.../connectors/_ingest_modal.html`,
+  `backend/src/meho_backplane/connectors/keycloak/connector.py`,
+  `scripts/soak/soak-harness.sh` (#2512).
+### Gateway — versioned assignment + results ingest API
+
+- Add the central-side ingest + versioned assignment API for the push-only
+  satellite runner (Initiative #2415, #2499), mounted under `/api/v1/checks/`
+  (inside the runner route cage). `PUT /api/v1/checks/assignment/{runner}`
+  (operator) authors a runner's checks with create-time validation — each
+  item's target must resolve and its op must resolve to an enabled
+  `safety_level=='safe'` descriptor, else a structured 422
+  (`assignment_op_not_safe` / `assignment_op_unknown` /
+  `assignment_target_unknown`) and nothing is stored. `GET
+  /api/v1/checks/assignment?runner=…[&known_version=…]` (runner, own-only)
+  returns a digest-versioned `RunnerAssignment` whose items carry resolved
+  target descriptors (host/port/TLS + the `secret_ref` **reference**, never a
+  credential value), `handler_ref` + `safety_level`, and the runner principal
+  context — all materialised from live rows, so target-row drift (e.g. a
+  rotated `tls_ca_pin`) shifts the sha256 content digest and the runner
+  self-heals; a matching `known_version` yields `304 Not Modified`. `POST
+  /api/v1/checks/results` (runner, own-only) ingests a result batch
+  idempotently — `(tenant, runner, result_uid)` dedups on-disk-spool re-posts
+  and `received_at` is stamped by the central clock. The `runner/wire.py`
+  models are widened in place, not forked (one schema on both ends). Migration
+  `0059` creates `runner_assignments` + `runner_check_results` (#2499).
+### Added — outbound long-poll gateway command plane (#2498)
+
+- Add the central command plane of the remote-execution gateway
+  (Initiative #2415, T2): a durable `gateway_command` queue (migration
+  `0059`) plus two runner-facing routes. `GET /api/v1/gateway/{runner}/next`
+  is a blocking long-poll — it holds up to `wait` seconds (default 25,
+  clamped to a 30 s ceiling; `wait=0` = one immediate claim attempt) and
+  returns `200` with the claimed command envelope (`id`, `op_id`, `params`,
+  resolved `target_descriptor`) or `204` on timeout.
+  `POST /api/v1/gateway/{runner}/result` records the outcome (`200`, or
+  `404` for an unknown/foreign command, `409` for a non-`delivered` row).
+  Both gate on the scoped runner principal (#2502) — a runner may only poll
+  and report its **own** queue — and every query filters `tenant_id`. The
+  claim is exactly-once under concurrent pollers (`SELECT … FOR UPDATE SKIP
+  LOCKED` on PostgreSQL, a conditional `UPDATE` on the SQLite test path),
+  and the hold is a bounded DB claim-poll loop that never holds a
+  transaction across its sleep (multi-replica-safe, no in-process
+  `asyncio.Event`). There is deliberately **no** HTTP enqueue endpoint —
+  central code enqueues via `gateway.queue.enqueue_command` so all
+  authorization stays central — `backend/src/meho_backplane/gateway/queue.py`,
+  `backend/src/meho_backplane/api/v1/gateway.py` (#2498).
+
+### Added — scoped runner principal (gateway v1)
+
+- Add the identity substrate of the remote-execution gateway (Initiative
+  #2415): a scoped, **read-only** service principal per satellite runner.
+  New `PrincipalKind.RUNNER` discriminator + a `runner_id` JWT claim on the
+  `Operator` chain (fail-closed pairing — a `principal_kind=runner` token
+  without `runner_id` is 401 `missing_runner_id_claim`; a non-UUID value is
+  401 `malformed_runner_id_claim`). A negative **route cage** in
+  `verify_jwt_and_bind` fail-closed 403s a runner token on every
+  authenticated REST route outside `RUNNER_ALLOWED_PATH_PREFIXES`
+  (`/api/v1/gateway/`, `/api/v1/checks/`), and the MCP surface rejects
+  runner tokens outright — both with the `runner_scope_violation` code. The
+  cage keys on the unforgeable `principal_kind` mapper, not on claim
+  presence, so a mis-provisioned runner client cannot fail open (the #2489
+  lesson). A `require_runner()` dependency + `assert_runner_scope()` helper
+  give the not-yet-built gateway routes (#2498/#2499) a name→`runner_id`
+  binding with no existence oracle. Register/list/show/revoke lifecycle
+  (REST `/api/v1/runner-principals` + `meho runner-principal` Go verbs)
+  moulded on the agent-principal lifecycle (#815): Keycloak-first two-phase
+  with orphan rollback, Keycloak `enabled=false` before the row flips
+  revoked, `runner:<name>` client-id convention, hardcoded
+  `tenant_role=read_only` + `runner_id`=row-id mappers. Migration `0058`
+  creates `runner_principal` (#2502).
+### Gateway — satellite runner mode (#2415)
+
+- Add a headless, push-only **satellite runner** deploy mode of the
+  backplane image, started as `python -m meho_backplane.runner`. It runs
+  an in-process interval-tick loop (no local Postgres, Valkey, UI, MCP,
+  or inbound listener), polls the central instance over client-initiated
+  HTTP for its assignment, executes read-only (`safety_level == "safe"`)
+  operations locally against the same connector surface, and reports
+  results back — with an on-disk retry spool covering uplink outages and
+  a fail-closed executor that refuses non-`safe` ops and any handler
+  outside `meho_backplane.connectors.*`. Runner chassis only; the central
+  assignment/ingest API (#2499) and long-poll command plane (#2498) land
+  separately. (#2497)
+### Tooling — SonarCloud scanner-scope hygiene (#2511)
+
+- Stop SonarCloud from misrepresenting the codebase, without hiding real risk
+  (G0.35-T1). Rule-scoped `# NOSONAR(Sxxxx)` comments now mark the 5 by-design
+  CRITICAL TLS lines (`net/tls.py` inspection-only handshake S4423/S4830/S5527;
+  `adapters/http.py` per-target `verify_tls=false` opt-out S5527/S4830), each
+  pointing at the module docstring that justifies it — scoped so only the named
+  rule is muted and future insecure-TLS code still gets flagged.
+  `sonar-project.properties` gains `sonar.coverage.exclusions=**/*_test.go,
+  scripts/**` (coverage denominator only — issues still analyzed), descopes the
+  generated `cli/api/openapi.json` (~27k ncloc) via `sonar.exclusions`, and adds
+  a `go:S1313` test-IP suppression (`t_ip`) that drops the MQR security-impact
+  count from 43 to 12. `quality-gate.yml` now analyzes **main pushes only**
+  (`workflow_run.event == 'push'`), so PR-branch scans no longer overwrite the
+  main analysis; `docs/codebase/sonarcloud.md` is reconciled to the shipped
+  `previous_version` new-code period + push-only trigger — `sonar-project.
+  properties`, `.github/workflows/quality-gate.yml`,
+  `backend/src/meho_backplane/connectors/net/tls.py`,
+  `backend/src/meho_backplane/connectors/adapters/http.py`,
+  `docs/codebase/sonarcloud.md` (#2511).
+
+### Fixed — broadcast rows self-label their stream cursor (#2479)
+
+- `meho.broadcast.recent` / `meho.broadcast.watch` event rows and the
+  `meho.broadcast.announce` return now carry a self-labelled `cursor` field —
+  the Valkey stream entry id that round-trips as the tools' `cursor` input
+  arg. Previously the cursor was only exposed under misleading names: `id` on
+  rows (where every other MCP surface uses `id` for the row's domain UUID)
+  and `event_id` on the announce return (which is NOT a durable event UUID —
+  announcements carry none). Additive and backward-compatible: `id` and the
+  announce `event_id` remain as legacy aliases of the same value, now
+  documented as such in the tool descriptions —
+  `backend/src/meho_backplane/broadcast/history.py`,
+  `backend/src/meho_backplane/mcp/tools/broadcast.py` (#2479).
+
+## [0.22.0] - 2026-07-13
+
+### Added — rke2.etcd-snapshot.save safe managed-etcd snapshot op (#2431)
+
+- Add `rke2.etcd-snapshot.save` on the `rke2-ssh` connector — an on-demand
+  managed-etcd snapshot over SSH (`rke2 etcd-snapshot save`, embedded-etcd
+  only). It is the lone **safe / non-gated** op in Initiative #2172:
+  `safety_level="safe"`, `requires_approval=false`, because it is read-only
+  with respect to running cluster state (copies etcd to disk) and returns
+  only a snapshot name + path — never etcd contents (so the audit
+  `raw_payload` carries no secret). An optional `name` is charset-bounded to
+  `^[A-Za-z0-9._-]+$` at the schema boundary **and** re-checked in the
+  handler (fail-closed), then `shlex.quote`'d into an absolute-path argv; a
+  fail-closed precondition guard refuses a non-server or
+  external-`datastore-endpoint` node, and the guard's own exit status is
+  checked before its verdict is read (a transport failure surfaces distinctly
+  rather than mislabeling the node role). Runs **as root over plain SSH** via
+  `_run_command` — no `sudo` argv, matching the sibling T3 node-write ops and
+  staying clear of the repo-wide sudo-guard invariant — `backend/src/
+  meho_backplane/connectors/rke2/ops_snapshot.py`,
+  `docs/codebase/connectors-rke2.md` (#2431).
+### Added — rke2 node service.restart + config.update write ops (#2430)
+
+- Add the first two approval-gated node-write ops on the `rke2-ssh`
+  connector (Initiative #2172, T3), both `dangerous` / `requires_approval`
+  and parked for human approval before anything changes.
+  `rke2.node.service.restart` restarts EXACTLY one allow-listed unit
+  (`rke2-server` / `rke2-agent`) — a schema `enum` re-checked against a
+  module-level frozenset in the handler (fail-closed; no arbitrary unit or
+  `systemctl` action) — and health-gates on `systemctl is-active`.
+  `rke2.node.config.update` applies a **backplane-owned key merge** to a
+  bounded `/etc/rancher/rke2/*.yaml` file: the connector reads + parses the
+  current YAML in-process, applies the operator's key-level `patch`
+  (`merge`/`replace`), validates it re-parses, and writes it back atomically
+  (`0600 root:root`) — no host-side `sed`/`yq`. It does **not** restart
+  (config is inert until one), returning `restart_required: true` and changed
+  key **names** only. The op is pinned `credential_write` (its `patch` may
+  carry a `token:` value) and `.restart` joins the broadcast write-suffix set,
+  so both broadcast correctly. Approval-park previews render the systemd-unit
+  and config-file blast-radius shapes without the file body or values —
+  `backend/src/meho_backplane/connectors/rke2/ops_write.py`,
+  `docs/codebase/connectors-rke2.md` (#2430).
+### Added — rke2.token.rotate approval-gated server-token rotation (#2429)
+
+- Add `rke2.token.rotate`, the first approval-gated write op on the
+  `rke2-ssh` connector (`safety_level=dangerous`, `requires_approval=True`).
+  It rotates the RKE2 server join token cluster-wide via `rke2 token rotate`
+  over sudo-SSH. It takes **no parameters and no token value**: the new token
+  is minted server-side, the old token is read on-disk as root inside the
+  rotate script, and the new token is written to Vault — only a pointer plus
+  non-secret metadata (`rotated` / `node` / `exit_status`) is returned, so no
+  token value ever reaches the result, the audit `raw_payload`, or the
+  broadcast feed (the op is pinned to `credential_mint` and carries a
+  no-secret park-time preview). A read-only fingerprint gate refuses a
+  non-server node, an inactive `rke2-server`, or a below-floor / known-bad
+  (`v1.27.10+rke2r1`) RKE2 version before any mutation, because a botched
+  rotate wedges future node joins (rancher/rke2#5785, #6250). Multi-node
+  restart choreography stays an operator runbook — `backend/src/meho_backplane/
+  connectors/rke2/ops_write.py`, `docs/codebase/connectors-rke2.md` (#2429).
+
+### Added — node/rke2-ssh connector scaffold + read-only posture tier (#2221)
+
+- Add the `rke2` node-OS connector (`rke2-ssh-1.x`), the read-only entry in
+  the governed SSH cluster-node OS-lifecycle family (Initiative #2172, the
+  holodeck-ssh mold). Ships two safe/no-approval ops over the shared SSH
+  adapter: `rke2.about` (identity — `rke2 --version` + `/etc/os-release`) and
+  `rke2.posture.show`, which `stat`s the RKE2 config-file modes under
+  `/etc/rancher/rke2/` plus the on-disk server join-token presence **with the
+  token value never read** (redacted by construction — no secret can reach
+  the result envelope, the audit `raw_payload`, or the logs). Auth resolves
+  via the fixed SSH adapter (`load_vault_secret_data`, the #2155 either/or
+  key-or-password shape), not the bind9 anti-shape. The approval-gated write
+  ops land in sibling Tasks #2429/#2430/#2431 — `backend/src/meho_backplane/
+  connectors/rke2/`, `docs/codebase/connectors-rke2.md` (#2221).
+
+### Added — net.ping/trace/path_mtu ICMP cohort (unprivileged, degrade-not-crash) (#2411)
+
+- Add the `net.*` ICMP cohort completing local-tool parity: `net.ping`
+  (reachability + RTT), `net.trace` (hop path), and `net.path_mtu`
+  (largest unfragmented packet) — `connectors/net/icmp.py`, one registrar,
+  the shared `net-probe-1.x` synthetic identity, reusing the keystone
+  probe allowlist / audit-visible host / return-failures contract. The
+  cohort uses only **unprivileged** Linux mechanisms and adds **no**
+  `CAP_NET_RAW` to the backplane pod: `net.trace` / `net.path_mtu` read
+  ICMP errors off the `IP_RECVERR` socket error queue (works on any
+  cluster), and `net.ping` uses an unprivileged `IPPROTO_ICMP` datagram
+  socket that **degrades** to `{available: false, reason:
+  icmp_echo_unprivileged_unavailable}` (pointing at `net.tcp_check`) where
+  the pod's GID is outside `net.ipv4.ping_group_range` — never a crash.
+  The Helm chart gains an **optional, default-off** `netdiag.pingGroupRange`
+  value that renders a `net.ipv4.ping_group_range` pod sysctl for
+  operators who want unprivileged ping (documented with a security note;
+  no pod-security change ships by default) (#2411 / #2405).
+### Added — net.ntp_check clock offset/skew + stratum diagnostics op (#2410)
+
+- Add `net.ntp_check` on the T1 `net.*` mold — a targetless NTP
+  diagnostic (`ntpdate -q` / `sntp` parity) that sends one mode-3 (client)
+  NTPv4 packet over an **unprivileged** UDP socket and reports the queried
+  server's clock offset and skew **against the backplane's own clock** per
+  RFC 5905, plus `stratum`, `ref_id`, `root_delay_ms` /
+  `root_dispersion_ms`, and the `leap` indicator — clock skew is a common
+  root cause of TLS-cert-validity and Kerberos/auth failures. Read-only
+  (never sets a clock) and **no new dependency**: the 48-byte SNTP
+  request/reply is built and parsed with the stdlib `struct`, sent off the
+  event loop via `asyncio` datagram endpoints. The `host` is gated through
+  the same `MEHO_NETDIAG_PROBE_ALLOWLIST` guard; a timeout, a refused /
+  unreachable peer, a malformed or off-path (origin-mismatch) reply, or a
+  kiss-o'-death (stratum-0, with the `kiss_code`) packet return
+  `{reachable: false, reason}` with `status="ok"` (never a `connector_*`
+  error). Parent Initiative #2405.
+
+### Added — net.dns_lookup full dig-parity DNS diagnostics op (#2409)
+
+- Add `net.dns_lookup` on the T1 `net.*` mold — a targetless DNS
+  diagnostic via **dnspython** (`dns.asyncresolver`, off the event loop):
+  forward typed records (A/AAAA/CNAME/MX/TXT/SRV/NS/SOA), reverse PTR when
+  the name is an IP literal (`dig -x`), and an optional `resolver` IP to
+  query a chosen nameserver instead of the system resolver (the
+  split-horizon case). Reports `{resolved, name, type, resolver,
+  records:[{type,value,ttl}], authoritative, authenticated_data}` — the
+  DNSSEC AD flag is reported, not validated. The queried `name` and any
+  custom `resolver` IP are gated through the same
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` guard; NXDOMAIN / no-answer / SERVFAIL /
+  timeout / a non-IP resolver / a refused lookup return `{resolved:
+  false, reason}` with `status="ok"` (never a `connector_*` error).
+  `dnspython` (ISC-licensed) is pinned as a direct dependency. Parent
+  Initiative #2405.
+### Added — net.http_probe HTTP reachability probe (no body, per-hop redirect re-gating)
+
+- Add `net.http_probe` to the synthetic `net.*` connector — a targetless
+  HTTP(S) reachability/identity probe that issues a single `HEAD`/`GET`
+  from the backplane and reports `status`, response `headers`, the
+  `redirect_chain`, a `tls` summary (version/cipher/ALPN/cert
+  identity), `timing_ms`, `final_url`, and the body's `body_size` /
+  `body_sha256` — but **never the response body** (the anti-exfil
+  floor). It uses a fresh `httpx.AsyncClient(follow_redirects=False)`
+  and walks redirects manually so **every redirect hop's host is
+  re-checked against `MEHO_NETDIAG_PROBE_ALLOWLIST` before it is
+  followed**: a redirect to a non-allowlisted host halts with
+  `reason="blocked_redirect"` and is never dialed (open-redirect SSRF
+  floor). `method` is restricted to `HEAD`/`GET` at the schema boundary;
+  a refused / timed-out / DNS-failed / TLS-failed / redirect-blocked
+  probe returns `{reachable, reason}` with `status="ok"`, never a
+  `connector_*` error. No new dependency (reuses the existing `httpx`
+  stack) (#2408 / #2405).
+### Fixed — profiled-connector login-POST 401 stamped establish-stage, not after_relogin (#2414)
+
+- A profiled session-scheme connector whose login POST is rejected
+  (`ProfiledRestConnector._post_login`, HTTP `401`/`403`) is now stamped
+  `connector_auth_failed` with the **establish-stage** cause
+  `session_establish_<status>` and the restage remediation (`meho vault kv
+  put …`), matching the typed connectors. Previously it raised a raw
+  `httpx.HTTPStatusError`; because a profiled connector advertises
+  `invalidate_session`, the dispatcher re-dispatched the failing login once
+  and mislabelled it `session_dispatch_<status>_after_relogin` (do-NOT-restage)
+  — telling the operator the session was re-established and retried (false)
+  and not to restage the credential (wrong). The `reestablished` /
+  `after_relogin` label is now reserved for a genuine post-re-login *dispatch*
+  failure (the re-login POST succeeded and the fresh session was still
+  rejected). The fix routes the login-POST auth-class rejection through the
+  same `session_establish_auth_error` classifier the typed family uses; a
+  non-auth login-POST status (404, 5xx) re-raises unchanged. Typed-connector
+  stamping and the #2262/#1798 registration/shadowing invariants are
+  untouched (#2414).
+### Fixed — keycloak user write-op password read routed through the credential-backend seam (#2401)
+
+- `keycloak.user.create` / `keycloak.user.reset_password` sourced the
+  operator-supplied `password_secret_ref` by opening an hvac Vault client
+  directly, bypassing the #2229 credential-backend seam. On a
+  `CREDENTIAL_BACKEND=gsm` (no-Vault) deploy this left both write ops with
+  no working credential path — a `gsm:` ref was treated as a literal Vault
+  path. The reader now resolves the ref through `load_vault_secret_data`
+  (the same seam the connector's admin-credential loader and kubeconfig
+  loader ride), so a `gsm:<project>/<secret>#password` ref reaches GCP
+  Secret Manager while schemeless Vault refs resolve byte-for-byte as
+  before (`password_secret_mount` / `password_secret_key` unchanged; the
+  `#field` fragment subsumes `password_secret_key` for schemed refs).
+  Approval-gating of both write ops is untouched.
+
+### Added — net.tcp_check network-diagnostics probe (net.* keystone)
+
+- Add the synthetic `net.*` connector (`connectors/net/`, no
+  `Connector` class, `secret.move` mold) and its first op
+  `net.tcp_check` — a targetless TCP reachability probe that opens a
+  connection to `host:port` under a bounded timeout, measures latency,
+  and closes immediately. Introduces the dedicated probe allowlist
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` with **inverted, fail-closed**
+  semantics (the parsed set is the whole permitted probe space; **empty
+  ⇒ the connector is inert**), the audit-visible `host:port` (recorded
+  in the durable audit row's `raw_payload`), and the return-failures
+  contract (a refused / timed-out / DNS-failed probe returns
+  `{connected: false, reason}` with `status="ok"`, never a `connector_*`
+  error). `net.*` ops classify as reads in the broadcast feed
+  (#2406 / #2405).
+
+### Added — net.tls_inspect full presented certificate chain (openssl s_client parity)
+
+- Add `net.tls_inspect` on the `net.*` keystone — a targetless probe
+  that opens a TLS handshake with certificate verification **off** and
+  reports the **full chain the server presents** (leaf → intermediates →
+  root-if-sent, leaf-first): per-cert subject / SAN / issuer / validity
+  window / serial / self-signed flag, plus `chain_complete` (did the
+  server send a self-signed root), a leaf `hostname_match` computed
+  independently of the disabled verification, and the negotiated protocol
+  and cipher — `openssl s_client -showcerts` parity. A self-signed /
+  expired / hostname-mismatched cert is **inspected and reported**
+  (`handshake=true`, `status="ok"`), never rejected; a refused /
+  timed-out / DNS-failed / non-TLS endpoint returns `{handshake: false,
+  reason}` with `status="ok"`. Reuses the T1 probe allowlist, audit-
+  visible `host:port`, and return-failures contract. Adds `pyOpenSSL`
+  (full-chain read; stdlib `ssl` on the 3.12 floor exposes only the leaf)
+  and promotes `cryptography` to a declared runtime dependency — both
+  Apache-2.0 (#2407 / #2405).
+
+### Fixed — harden ingest-job timeout warning tests against xdist logger-cache ordering (#2397)
+
+- `test_operations_ingest_jobs.py` rebinds `jobs._log` to a fresh structlog
+  proxy per test. Under `pytest -n --dist loadscope`, a sibling module that
+  calls `configure_logging()` (`cache_logger_on_first_use=True`) then later
+  reconfigures structlog with a fresh processors list could orphan the
+  module-level `_log` proxy's cached bound logger; `capture_logs()` mutates
+  the *current* config list in place, so it could no longer reach the cached
+  logger and the capture came back empty — deterministically failing the
+  timeout-fallback warning assertions depending on worker layout. The
+  per-test rebind forces re-realization against the live config list.
+  Test-only; product `jobs.py` behaviour is unchanged.
+
+### Fixed — kubeconfig loader routed through the credential-backend seam (#2397)
+
+- The Kubernetes connector's default kubeconfig loader
+  (`load_kubeconfig_from_vault`) no longer reads Vault directly — it now
+  resolves `target.secret_ref` through the shared credential-backend seam
+  (`load_vault_secret_data` → `split_credential_ref` → the backend registry).
+  A `product: kubernetes` target with a `gsm:<project>/<secret>#kubeconfig`
+  ref now authenticates on a `CREDENTIAL_BACKEND=gsm` / no-Vault deployment,
+  closing the last-mile gap #2227 left for the k8s connector (every other
+  connector already got `gsm:` for free via the seam).
+- The loader inherits the seam's Vault-kind KV-v2 API-path-shape guard: a
+  `secret/data/…`-shaped `secret_ref` now fails with an actionable error
+  instead of silently 404ing (a latent defect the old direct-read bypass
+  carried). Behaviour is otherwise unchanged for schemeless / `vault:` refs
+  on Vault deployments.
+
+### Fixed — Helm chart fails at render time on an unresolvable MCP resource URI (#2394)
+
+- The chart now `fail`s at `helm template` / `helm install` time — with an
+  actionable message naming `config.backplaneUrl`, `config.mcpResourceUri`,
+  and `ingress.host` — when the `/mcp` audience is unresolvable (ingress
+  disabled / empty host **and** both config values blank). Previously such an
+  ingress-less bring-up rendered an empty audience and the pod crash-looped at
+  startup with a runtime `audience_not_configured` stack trace instead of
+  failing before anything was applied. The guard mirrors the existing eso/agent
+  render-time guards and fires only on the nothing-resolves path: the
+  ingress-derived default and explicit-value installs render unchanged. No
+  `allowNoMcpResourceUri` escape hatch is added (kept minimal) — a deliberate
+  MCP-less bring-up sets a placeholder `config.backplaneUrl`, and `/mcp` stays
+  per-request fail-closed regardless.
+- The chart's own `helm install + helm test (pgvector preflight)` CI lane —
+  an ingress-less install that set neither config value — now pins a
+  placeholder `config.backplaneUrl=https://meho-test.test` (matching the
+  surrounding `.test` fakes) so it satisfies the new render-time guard instead
+  of tripping it.
+### Fixed — Helm chart `startupProbe` stops liveness crash-looping slow first boots (#2393)
+
+- The backplane Deployment now renders a `startupProbe` on `/healthz` from a
+  new `probes.startup.*` values subtree. The kubelet disables the liveness and
+  readiness probes until the startup probe first passes, so a slow-but-healthy
+  first boot — full typed-op catalog registration plus the fastembed
+  embedding-model preload before the app binds `:8000`, ~2-3 min and longer on
+  a cold install that downloads model weights into an empty cache PVC — no
+  longer trips the short-delay liveness probe into a CrashLoopBackOff.
+- The default budget is `failureThreshold: 30` × `periodSeconds: 10` = 300s
+  (5 min), operator-tunable. `values.schema.json` accepts the new
+  `probes.startup` subtree; liveness/readiness defaults are unchanged. Opt out
+  on a fast cluster by clearing `probes.startup` (e.g. `--set probes.startup=null`).
+### Documentation — pgvector superuser prerequisite for cold migration 0003 (#2392)
+
+- Document the hard prerequisite that a **cold** install must satisfy before
+  the pre-install migration Job runs: Alembic revision `0003` executes
+  `CREATE EXTENSION IF NOT EXISTS vector`, which PostgreSQL only lets a
+  **superuser** run, so a first-time install against a least-privilege app role
+  fails with `permission denied to create extension "vector"`. The chart
+  `values.yaml` `postgres.credentialsSecret` comment and
+  `deploy/values-examples/README.md` now state the prerequisite with the exact
+  superuser `psql` one-liner and the CNPG `postInitSQL` bootstrap path.
+- Record the decision (`docs/decisions/pgvector-superuser-prerequisite.md`) to
+  **reject** a dedicated `migrationSuperuserDsn` chart value as out of scope —
+  it adds a permanent second-DSN/second-Secret surface and a standing superuser
+  credential for a one-time bootstrap step that a documented `psql` line (or
+  CNPG `postInitSQL`) covers. Migration `0003` SQL is unchanged.
+### Fixed — migrate hook ServiceAccount fresh-install ordering deadlock (#2391)
+
+- The `meho-migrate` `pre-install,pre-upgrade` hook Job no longer sets
+  `serviceAccountName`. Helm schedules hooks before it creates the chart's
+  normal (non-hook) resources, so the Job referenced the `meho`
+  ServiceAccount that did not exist yet — a fresh `helm install` deadlocked
+  with `serviceaccount "meho" not found` on every admission attempt until
+  the release timed out. The migration runner needs no Kubernetes API
+  access, so the pod now falls back to the namespace `default` SA and
+  (with `automountServiceAccountToken: false` unchanged) carries no token.
+  A `helm template` unit assertion pins that the hook Job renders without
+  `serviceAccountName` while the backplane Deployment keeps its own (#2391).
+
+### Changed — stage-aware `connector_auth_failed` causes + truthful remediation (#2400)
+
+- The `connector_auth_failed` envelope's `extras.cause` is now **stage-aware**
+  and describes what the dispatcher actually did: `session_establish_<status>`
+  (the login POST itself was rejected), `dispatch_<status>` (an auth-class
+  status on a connector with **no** `invalidate_session` hook — no session
+  stage happened, so no re-login was attempted), and
+  `session_dispatch_<status>_after_relogin` (the dispatcher force-re-logged-in,
+  the re-login SUCCEEDED, and the fresh session was **still** rejected). The
+  false "the session was already re-logged-in and retried once" sentence now
+  appears **only** on the `after_relogin` envelope.
+- **Cause-string rename for consumers.** The old ambiguous unqualified
+  `session_dispatch_<status>` is no longer emitted on any path. A consumer that
+  matched on `session_dispatch_` now matches only the genuinely-had-a-session
+  `session_dispatch_<status>_after_relogin` case; a no-session dispatch failure
+  is `dispatch_<status>`.
+- **Truthful remediation.** The restage hint named a phantom
+  `meho target credential set <name>` command that does not exist in the CLI —
+  it sent both MFC 401 reporters (#2395, #2396) down a credential rabbit hole.
+  The establish / `dispatch` stages now name the real staging surface
+  `meho vault kv put <mount> <path> --data <field>=<value>`; the `after_relogin`
+  stage says do **NOT** restage (the credential logs in fine — verify the
+  target's `auth_model` / auth scheme) and names no command. The phantom
+  command is also removed from `docs/codebase/error-message-shape.md`.
+
+### Fixed — connector credential cache evicted on establish-auth failure (#2396)
+
+- Establish-time auth failures (a login POST rejected with 401/403) now evict
+  the connector's cached credentials so an operator's out-of-band restage
+  converges on the next dispatch **without a backplane restart**. Previously a
+  connector cached the credential bytes it read from Vault *before* attempting
+  the login (e.g. `SddcManagerConnector` writes `_creds_cache` ahead of
+  `POST /v1/tokens`), and `invalidate_session` deliberately left them intact —
+  so a rejected credential replayed forever until a process restart.
+- The dispatcher calls a duck-typed `invalidate_credentials(target)` hook from
+  both `ConnectorAuthError` arms (first-establish and post-`invalidate_session`
+  recovery). The hook is wired family-wide across the caching connectors
+  (`sddc_manager`, `harbor`, `argocd`, `proxmox`, `gcloud`, `hetzner_robot`,
+  `rabbitmq`) and delegates to the shared `CredentialsCache.invalidate` on the
+  `vcf_logs` / `vcf_fleet` / `vcf_operations` consumers. `nsx` and `vmware_rest`
+  are intentionally excluded — they re-read credentials on every establish and
+  cache no raw credential.
+
+### Fixed — vROps OpsToken session auth
+
+- Rebuild the `vcf-operations` (vROps) connector auth on an acquired-token
+  session: acquire via `POST /suite-api/api/auth/token/acquire` and present
+  `Authorization: OpsToken <token>` on both the typed and generic-ingested
+  dispatch paths, replacing the stateless HTTP Basic that live VCF
+  Operations 9.0.2 rejects. Adds an `invalidate_session` hook so the
+  dispatcher's session-expiry seam re-acquires on a mid-flight 401, moves
+  `authSource` federation into the acquire body, and deletes the
+  per-request `?auth-source=` query mechanism (#2395).
+
+## [0.21.0] - 2026-07-11
+
+### Breaking changes — GET-list endpoints converged on the `{items, next_cursor}` envelope (#2338)
+
+- **BREAKING.** The seven reference `GET`-list endpoints now return the
+  unified `{items, next_cursor?, ...sidecars}` list envelope
+  (`docs/codebase/api-shape-conventions.md` §2) as their default **and
+  only** shape. The `?envelope=v2` opt-in that bridged the migration
+  (G0.16-T6 #1312 / G0.18-T3 #1356 / G0.22-T6 #1611) was retired. A
+  platform-wide contract test now pins the convention so a new list
+  endpoint can't reintroduce a divergent shape. Affected endpoints and
+  the wire-shape change adopters must migrate:
+  - `GET /api/v1/targets` — was a bare `[TargetSummary, …]` array → now
+    `{"items": [...], "next_cursor": <name|null>}` (keyset-paginated).
+  - `GET /api/v1/connectors` — was `{"connectors": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/conventions` — was `{"entries": [...], "budget_status":
+    {...}}` → now `{"items": [...], "next_cursor": null, "budget_status":
+    {...}}` (sidecar unchanged).
+  - `GET /api/v1/audit/my-recent` — was `{"rows": [...], "next_cursor":
+    …}` → now `{"items": [...], "next_cursor": …}`.
+  - `GET /api/v1/broadcast/overrides` — was a bare
+    `[BroadcastOverrideRead, …]` array → now `{"items": [...],
+    "next_cursor": null}`.
+  - `GET /api/v1/runbooks/templates` — was `{"templates": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/runbooks/runs` — was `{"runs": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+
+  **Migration recipe.** Read the list from `response["items"]` instead
+  of the old key (`connectors` / `entries` / `rows` / `templates` /
+  `runs`) or the bare array; read `response["next_cursor"]` for
+  pagination (only `targets` populates it today). The bundled `meho`
+  CLI and the generated Go client already read the new envelope — this
+  change ships them together. Clients still sending `?envelope=v2` are
+  unaffected (the now-unknown param is ignored). The `audit` sibling
+  reads (`/query` / `/who-touched` / `/by-work-ref`) and the topology
+  closure reads keep their existing shapes.
+
+### Fixed — `/ui/kb` editor save renders backend errors visibly (200-on-recoverable-error mold, #2384)
+
+- The KB editor modal's save handler (`POST /ui/kb/new`) re-rendered
+  its inline error banner on a validation failure (invalid slug, empty
+  body) but returned **422**. The form swaps with `hx-swap="outerHTML"`,
+  and HTMX 2 does not swap a non-2xx response, so the error fragment was
+  computed server-side and silently dropped — the operator saw the Save
+  button appear to do nothing. The re-render now returns **200** (the
+  mold established for `/ui/agents/create` in #2346, and already shipped
+  on the runbooks start-run and conventions author modals), so the error
+  swaps back into the modal in place with the operator's input and the
+  CSRF-token refresh preserved. The OpenAPI snapshot was regenerated for the updated route docstring in a follow-up (PR #2389). The memory create form was assessed and
+  intentionally **not** changed: it already surfaces recoverable errors
+  via its client-side `hx-on::response-error` handler (#1754) over a
+  `hx-swap="none"` post, which — unlike a server re-render — is the only
+  path that can display the chassis CSRF-middleware 403; returning 200
+  there would suppress `htmx:responseError` and regress it (see #2384
+  discussion).
+### Fixed — leaky `_ingest_getaddrinfo` test shim now delegates to the real resolver, killing the xdist cross-test flake (#2385)
+
+- The ingest SSRF-guard mocks in `test_api_v1_connectors_ingest.py`
+  (`_ingest_getaddrinfo` and the `_resolver_allowing` twin) patched the
+  **global** `socket.getaddrinfo` attribute (`openapi.socket` is the
+  shared `socket` module), so the patch leaked process-wide onto any
+  worker also running the embedding/DNS path under `pytest-xdist`
+  (`test_real_descriptor_embedding_path`, `test_g51_memory_canary`).
+  The two-positional-arg signature crashed the leaked positional call
+  with `TypeError: takes 2 positional arguments but N were given`
+  (evoila/meho#574), and its early-stop masked a real failure at #2338's
+  merge (hotfix #2383).
+- Both stand-ins now accept the full `getaddrinfo` positional arity
+  (`*args`/`**kwargs`) and delegate non-test hosts to the **real**
+  resolver captured at import time (`_REAL_GETADDRINFO`) instead of the
+  re-looked-up, still-patched `socket.getaddrinfo` — which would recurse
+  infinitely. A leaked/active patch is now a transparent no-op, never a
+  `TypeError` or `RecursionError`. SSRF-guard behavior is unchanged: test
+  hostnames still resolve to the fixed public test IP and the destination
+  guard still fires.
+
+### Docs — curated-until-populator-covers policy for auto-only edge kinds + grandfather rule (#2336)
+
+- Documented that the four auto-discoverable topology edge kinds
+  (`runs-on`, `mounts`, `routes-through`, `belongs-to`) MAY be curated
+  on any pair no populator covers — v0.2 auto-discovery is
+  Kubernetes-only (base `discover_topology` is a no-op; only the k8s
+  connector overrides it), so on a non-k8s pair no probe emits the edge
+  and the curated write inserts clean (`source: curated, conflicts:
+  []`). §6 conflict detection stays dormant because it only keys off
+  `source='auto'` rows / existing different-kind edges.
+- Recorded the **grandfather commitment**: any populator that begins
+  covering a previously-uncovered kind ships with a one-shot
+  reconciliation that keeps pre-existing curated edges visible and
+  free of retroactive §6 conflicts — the same operator-owned-rows
+  principle `refresh._refresh_curated_edge` already applies for the
+  identical pair. Policy-only; the `curated_until_populator_covers`
+  bucket and the reconciliation job are deferred to the non-k8s
+  populator initiative. Updated `docs/architecture/topology.md` and
+  `docs/cross-repo/topology-annotation.md`.
+
+### Changed — `/ui/agents` polish: card toggle, no auto-open Stop dialog, sub-view back-nav (#2347)
+
+- The `/ui/agents` cards now carry a one-click enable/disable **Toggle**
+  (tenant_admin only), routed through the same `/ui/agents/{name}/toggle`
+  endpoint the detail view uses — an operator no longer has to open the
+  detail page and navigate back just to flip an agent's state.
+- Submitting **Run** on an agent no longer auto-opens the "Stop this run"
+  confirm dialog. The dialog ships inside the run-transcript fragment
+  swapped in on submit, and the app-shell modal controller's
+  `htmx:afterSwap` sweep was popping it the instant a run started, hiding
+  the live logs. Button-driven dialogs now opt out of the sweep via
+  `data-auto-open="false"`, so the Stop confirm opens only on the Stop
+  button.
+- The `/ui/agents/runs` list and per-run detail views gained a
+  breadcrumb back to `/ui/agents` (the run detail now links the agents
+  console directly, not only the runs list), matching the grants and
+  principals sub-views.
+### Fixed — disinherited leaking `hx-disabled-elt` find-selectors across `/ui` modals (#2340)
+
+- Five operator-console modals (`scheduler` create-trigger, `memory`
+  create + body-edit, `conventions` create + edit) bound
+  `hx-disabled-elt="find button[type=submit]"` on the `<form>` to disable
+  the submit button while a request is in flight. Because `hx-disabled-elt`
+  is an *inherited* htmx attribute, each form's descendant htmx requests —
+  the debounced cron-validate / token-preview `POST`s and the in-form
+  Cancel `hx-get` — inherited the value and resolved `find button[type=submit]`
+  against their own (submit-button-less) subtree, logging
+  `The selector "find button[type=submit]" on hx-disabled-elt returned no
+  matches!` on every such request while the intended disable-submit
+  affordance silently never fired. Each form now carries
+  `hx-disinherit="hx-disabled-elt"` (the pattern established for the runbook
+  editor in #2174), scoping the value to the form's own submit. A generic
+  `test_ui_templates.py` guard enforces the discipline across every `/ui`
+  template so a new modal cannot reintroduce the leak.
+
+### Fixed — unified the `/ui` CSRF double-submit token pattern (#2345)
+
+- The operator console's `/ui/*` write surfaces no longer `403
+  csrf_token_invalid` on the 3rd repeated write of a session. The
+  codebase mixed two CSRF patterns — some renders rotated the
+  `meho_csrf` cookie on every fragment render while others reused the
+  live cookie — so an open modal's echoed token could drift out of sync
+  with the cookie. The double-submit token is now **session-stable**:
+  `mint_csrf_token` derives it deterministically from the session, so
+  re-minting on any render returns the identical value and the token
+  only changes when the session rotates at an auth boundary. A global
+  `htmx:configRequest` hook (`static/src/app/csrf-token.js`)
+  additionally re-reads the live `meho_csrf` cookie at request time and
+  overrides the `X-CSRF-Token` header, so the double-submit pair can
+  never drift regardless of render order. Security is unchanged (the
+  HMAC binding to the session id still defeats cookie injection).
+### Fixed — `/ui/agents/create` now shows backend validation errors (#2346)
+
+- The Create-agent modal previously swallowed backend 4xx validation
+  responses: the handler re-rendered the modal with per-field errors but
+  returned it as `409` / `422`, and HTMX's default response handling
+  does not swap a non-2xx fragment — so a bad `identity_ref`, a
+  duplicate name, or an out-of-range `turn_budget` made the Create
+  button appear to "do nothing" while the failure was only visible in
+  DevTools. The recoverable-error re-render now returns `200` (the same
+  inline-error mold the runbooks start-run and conventions author modals
+  already ship) and carries a top-of-form error banner in addition to
+  the existing per-field messages, so the operator sees exactly which
+  field to fix and keeps their typed input. Sibling `/ui` create/edit
+  forms with the same missing handler (memory, kb) are tracked
+  separately for a follow-up sweep.
+### Fixed — scheduler one_off `fire_at` picker now converts local time to UTC on submit (#2339)
+
+- The `/ui/scheduler` Create-trigger modal's `fire_at` `datetime-local`
+  picker showed the operator their own wall-clock time but posted a
+  naive string the engine stored verbatim as UTC, so a CEST (UTC+2)
+  operator who picked "11:00" got a trigger that fired at 11:00Z — two
+  hours late. The modal now converts the picked local value to a
+  UTC ISO-8601 instant on submit (via the browser's DST-aware `Date`,
+  so CET/CEST both resolve correctly), and a live hint next to the
+  field shows the resolved UTC so the conversion is visible rather than
+  silent. Engine-side `fire_at` handling is unchanged.
+
+### Changed — structured `connector_auth_failed` at session establish across the VCF family (#2329)
+
+- A session-establish login rejected by a rotated/stale/locked-out
+  credential (a `401`/`403` on `POST /api/session`, `/api/session/create`,
+  the VCF Automation provider/tenant logins, SDDC Manager `/v1/tokens`, or
+  vRLI `/api/v2/sessions`) now returns the structured
+  `connector_auth_failed` result instead of a bare
+  `connector_error: RuntimeError` that buried the auth cause in an
+  interpolated exception string. The envelope carries a `cause` sub-code
+  (`session_establish_401` / `_403`), the `target`, its `secret_ref`, a
+  `remediation` naming the `meho target credential set <name>` restage
+  command, and the original message in `raw_message` — the #2091
+  `connector_vault_forbidden` mold. The family connectors now raise a
+  shared `ConnectorAuthError` (a `SessionLoginError`/`RuntimeError`
+  subclass, so existing callers are unaffected) that the dispatcher
+  recognises ahead of its generic error arm and maps to the **same**
+  builder the mid-session-401 recovery path (#2067) reaches — so the code
+  is emitted consistently regardless of *when* auth fails, including when
+  the one-shot mid-session re-establish is itself rejected. A consumer can
+  now switch on `error_code` to distinguish "restage the stale credential"
+  from a generic connector crash (#2329).
+
+### Added — CI trip-wire: every packaged catalog entry dry-run-resolves without a bare-400, plus a raw-spec-URL upstream audit (#2334)
+
+- A packaged connector-catalog entry whose `upstream` pointed at an HTML
+  developer-portal page used to fetch the HTML, YAML-decode it, and surface
+  an opaque bare-400 (`could not decode spec … line 33`) that told the
+  operator nothing actionable. The structured `catalog_entry_upstream_not_spec`
+  content-type guard (G0.15-T2 #1211) already closes that at request time;
+  #2334 adds the CI guardrails that keep the contract from regressing: a
+  parametrized fixture dry-run-ingests **every** shipped catalog entry (with
+  all fetchable upstreams mocked to serve worst-case HTML — deterministic, no
+  live network) and asserts each resolves to a dry-run success or a
+  **structured** error envelope, never the opaque decode-400 or an unhandled
+  500. A companion static audit asserts every fetch-path `upstream` is a raw
+  OpenAPI URL (`.yaml`/`.yml`/`.json`), not a documentation portal —
+  generalizing the prior Broadcom-only sweep. A future row (or URL edit) that
+  drifts into the portal/HTML pattern now trips at unit-test time instead of
+  on an operator's first POST. Audit finding: the shipped catalog is already
+  clean — only `harbor` and `gh` reach the fetch path and both point at
+  raw-content URLs (#2334).
+### Added — inline spec content on the MCP `connector.ingest` tool (#2326)
+
+- Each `specs[*]` entry on the `meho.connector.ingest` MCP tool now
+  accepts an optional `content` field carrying the spec text inline
+  (~20 MiB cap, the REST bound). When set, the backplane uses the bytes
+  verbatim and skips the fetch — the same `SpecSource.content` on-ramp
+  the CLI upload already uses. Previously the tool required a `uri`-only
+  entry and rejected `file://` / `docs:` schemes at the https fetch
+  guard, forcing agent-driven flows to publish private lab specs to a
+  public gist purely to satisfy the fetcher. Inline content bypasses the
+  fetcher entirely (no SSRF surface, strictly safer than the gist
+  workaround it retires), so an appliance-served or hand-authored spec
+  with no public https URL (NSX, VCFA) can be ingested over a fully
+  MCP-drivable flow; `uri` stays the audit label, so the resulting
+  L1/L2 rows match a CLI upload of the same file (#2326).
+### Tested — regression pin: a non-dry-run 1275-op-class spec ingest keeps the event loop responsive (#2333)
+
+- Pinned the v0.8.0 large-spec ingest crash fix end-to-end: a
+  **non-dry-run** ingest of the 1275-op class (the canonical 7.5 MB
+  vmware/9.0 signal) now has a regression test proving the event loop
+  stays responsive while every operation is committed. A heartbeat
+  coroutine measures loop lag concurrently with
+  `IngestionPipelineService.ingest(dry_run=False)`; the test asserts all
+  1275 ops persist and the loop keeps ticking with no starvation. A
+  deterministic companion injects a fixed blocking parse and proves the
+  `asyncio.to_thread` offload keeps it off the loop, and a third pins
+  that the `--catalog` (`catalog_entry`) shape resolves onto the same
+  `202` + job-handle async path rather than the synchronous pass that
+  crashed the pod. Test-only; no runtime change (the fix shipped in
+  #2275 / #2317).
+
+### Added — structured post-approval vault-write-forbidden error + write-capability warning on the approval envelope (#2331)
+
+- A typed `vault.kv.put` / `patch` / `delete` that Vault denies at
+  dispatch now surfaces a dedicated `connector_vault_write_forbidden`
+  result (the write-side sibling of the read-oriented
+  `connector_vault_forbidden`, #2091) naming the exact `<mount>/data/<path>`
+  Vault denied, the acting operator identity, and the write-policy stanza
+  to add — instead of a bare permission-denied or a misleading read-path
+  diagnosis. The park-time `sys/capabilities-self` write preflight already
+  shipped; #2331 promotes its `will_be_denied` signal to a top-level
+  `write_capability_warning` on the parked `proposed_effect` envelope so
+  the approval surface can render a "this write may not land" banner
+  (a warning, not a gate), and documents the per-operator templated
+  write-identity contract in `docs/cross-repo/connector-vault-policy.md`
+  (#2331).
+### Changed — reject `kind=event` scheduler triggers at create until #826 lands (#2325)
+
+- Creating a `kind=event` scheduled trigger now returns a structured 422
+  `event_triggers_not_implemented` (MCP invalid-params with the same
+  code; UI modal banner naming #826) on **every** transport — REST, MCP,
+  and the operator console. Previously the create succeeded and the
+  trigger reported `status=active`, but it could never fire: the
+  event-subscription matcher in `events/drain.py` is still the documented
+  T5 no-op, so events that real producers already emit onto the outbox
+  (e.g. `operations/agent_run.py` publishes agent-run terminal-transition
+  events) were silently swallowed. Accept-and-never-fire is dishonest;
+  the honest shape until #826 wires the matcher is a refusal at create.
+  The guard is a single check in `SchedulerAdminService.create` — removed
+  in the same change that lands #826.
+- Any pre-existing `active` event trigger is parked to `paused` by a
+  one-shot startup reconcile (`reconcile_active_event_triggers`, run once
+  before the first scheduler tick), with the reason logged under
+  `scheduler_event_triggers_parked` so an operator sees it parked (via
+  `?kind=event&status=paused` or the UI list) rather than misleadingly
+  active. No schema change, no migration; `cron` / `one_off` creation is
+  unchanged.
+### Fixed — scheduler Vault token renews on use + startup/periodic lookup-self (defuses the ~32-day periodic-token fuse) (#2328)
+
+- The scheduler now fires a best-effort `auth/token/renew-self` after
+  every successful Vault agent-secret read/write, so the documented
+  **periodic** service token (`-period=768h`) is renewed at scheduler-tick
+  frequency and never ages out while the process runs. Previously the
+  backplane never renewed it — a token minted per the onboarding guide
+  silently died ~32 days after standup and every Vault-first credential
+  read started returning 403. Renewal failures are logged and swallowed
+  (the read/write already succeeded), never a new failure mode.
+- The scheduler token is now self-looked-up (`auth/token/lookup-self`) at
+  startup and on a slow cadence (hourly), logging a dead or unreachable
+  token as a loud `scheduler_vault_token_dead` /
+  `scheduler_vault_token_unreachable` ERROR the moment it's observed —
+  cutting time-to-notice from weeks to minutes. The healthy path logs
+  `scheduler_vault_token_verified` with the token's `ttl`/`expire_time`
+  so operators can watch expiry advance across renewals.
+- The token is now resolved from its live source on every use. A new
+  optional `VAULT_SCHEDULER_TOKEN_FILE` names a file (a Vault-Agent
+  sidecar sink) the token is re-read from per read/write, so a re-mint is
+  picked up **without a pod restart** — removing the manual re-mint +
+  Secret-patch + pod-restart remediation the fuse otherwise forced. The
+  static `VAULT_SCHEDULER_TOKEN` remains the default; an unreadable/empty
+  file falls through to it.
+
+### Added — scheduler skip-state on the trigger row + park after N unresolvable skips (#2327)
+
+- The scheduler tick loop now projects its precondition **skips** onto the
+  `scheduled_trigger` row (migration `0057`, three columns): `skip_count`
+  (consecutive skips since the last successful fire), `last_skip_reason`
+  (machine tag — `definition_missing` / `definition_disabled` /
+  `credentials_unresolved`; the corrupt-cron / unknown-kind park paths also
+  stamp `invalid_cron_expr` / `unknown_kind`), and `last_skipped_at`.
+  Previously a permanent misconfiguration (revoked scheduler Vault token,
+  deleted-but-referenced definition, never-persisted agent secret) made the
+  loop skip every 30 s tick with the only trace a pod-log WARN, while
+  `meho scheduler list` showed a healthy-looking `active` trigger — a real
+  deploy lost ~360 hourly fires over 15 days before anyone noticed.
+- After a fixed number of **consecutive** unresolvable skips the loop parks
+  the trigger (`status='paused'`) so the state machine itself communicates
+  "broken, stopped trying" instead of re-tripping forever; a successful
+  fire resets the streak and clears the skip fields. The new state is
+  surfaced on `GET /api/v1/scheduler/triggers`, `meho.scheduler.list` /
+  `.show` (MCP), `meho scheduler list` (a `SKIPS` column), and the operator
+  console (a warning badge on the list row + a skip block on the detail
+  page). The at-most-once fire contract and transient-retry behaviour are
+  unchanged — the columns are additive visibility.
+
+### Added — redaction-safe `proposed_effect` preview for `vault.kv.*` credential writes (#2332)
+
+- A parked `vault.kv.put` / `patch` / `delete` approval request now
+  carries a bespoke, redaction-safe `proposed_effect` preview instead of
+  the op-identity-only default. The approver sees the KV **mount**,
+  **path**, KV **version**, the write **semantics** (`put` = wholesale
+  replace, `patch` = merge, `delete` = version soft-delete), and the set
+  of **key names** being written — never their **values**. This restores
+  the approver's ability to distinguish "rotate the throwaway probe key"
+  from "clobber the production database password" while keeping the
+  value-redaction promise the credential-class suppression established
+  (#1422 / #1856). Wired as a bespoke builder (`vault.kv.put` / `patch`
+  classify `credential_write`, so the generic params-echo default is
+  suppressed for them), mirroring the Keycloak user-create builder mold
+  (#1857).
+- Every parked-request envelope now carries two reviewer-facing
+  provenance fields: `preview_populated` (a `bool` a caller can read to
+  refuse to auto-approve a blind, op-identity-only request) and, when a
+  preview is intentionally sparse, `preview_reason` —
+  `credential_write_redacted` (a deliberately-redacted credential write
+  with no bespoke builder) vs `connector_did_not_populate` (a
+  non-credential op that simply never populated one) — so the approval
+  surface can style the blind case as elevated-risk. `proposed_effect`
+  is a free-form JSON field, so no API schema / OpenAPI change (#2332).
+### Added — approval-TTL lifecycle wired end-to-end (parked approvals now expire) (#2322)
+
+- Every parked approval is now stamped `expires_at = created_at +
+  APPROVAL_DEFAULT_TTL` (new `APPROVAL_DEFAULT_TTL_SECONDS`, default 14
+  days) at park time across **all** transports — REST, MCP, and run-bound
+  dispatches (they all park through the dispatcher's
+  `_handle_needs_approval`, plus the composite park path). An explicit
+  caller deadline is honoured but capped at that ceiling, so no surface
+  can park an unbounded-lived approval. Previously every parked row
+  carried `expires_at: null` and the `expired` status / column /
+  `expire_stale_requests` helper existed but had zero production callers —
+  the TTL lifecycle was shipped but inert.
+- A dedicated periodic sweeper (`operations.approval_expiry`, gated on
+  `APPROVAL_EXPIRY_ENABLED`, `APPROVAL_EXPIRY_TICK_INTERVAL_SECONDS`
+  default 300s) drives `expire_stale_requests` per tenant under a
+  `system:approval-expiry` operator, so past-deadline pending approvals
+  transition to `expired` within one tick, each with a decision audit row
+  and a fail-open `approval.expired` broadcast. Expired rows leave the
+  default `?status=pending` view and cannot be approved or resumed.
+- Legacy pre-#2322 rows with `expires_at IS NULL` age out too: the sweep
+  coalesces a null deadline against `created_at + APPROVAL_DEFAULT_TTL`
+  (no schema change, no migration) and backfills the deadline on expiry.
+
+### Fixed — agent-run resume stamps `parent_audit_id` so approved chains replay as one subtree (#2323)
+
+- Completing #2086: an approval chain resumed by the **in-process agent
+  runtime** (broadcast-driven `/decide` / MCP path) now emits its executed
+  DISPATCH row with `parent_audit_id` pointing at the `approval.request`
+  row, matching what the decision row already did. Previously the agent
+  waiter re-dispatched on the agent's own task, where `parent_audit_id_var`
+  still held the top-level value (`None`), so the executed row orphaned as a
+  **second root** in `meho.audit.query` / `meho.audit.replay` even though
+  `agent_session_id` anchored the chain.
+- Fix is scoped to `agent/approval_wait.py::_resume_approved_or_already_resumed`:
+  it loads the parked row's pre-generated `request_audit_id` (tenant-isolated
+  `get_request`) and binds `parent_audit_id_var` (token-scoped) around
+  `call_operation_with_approval`. The operator/REST resume path already bound
+  it via #2312's `_dispatch_resume_with_bound_context`; this closes the
+  remaining agent-run gap. No schema change (column shipped in migration
+  0053), no route/OpenAPI change.
+- Adds a regression test that drives the four-eyes agent decide-path resume
+  end to end and asserts the executed dispatch back-links to the request,
+  the chain has exactly one null-parent row, and `replay_session`
+  reconstructs one subtree (`approval.request` → {`approval.decision`,
+  `<op_id>`}).
+
+### Fixed — vCenter filtered listings key `filter.*` params off the mount flavor (modern `/api` no longer 400s) (#2298)
+
+- Filtered vCenter listings sent legacy `/rest`-style `filter.`-prefixed
+  query params (`filter.datastores`, `filter.hosts`, `filter.types`, …) on
+  **every** mount. Real vCenter 8.x serves the modern `/api` surface, which
+  addresses those FilterSpec fields by their bare name and returns HTTP 400
+  for the prefixed form — so `datastore.usage`'s VM-placement enrichment
+  400'd on every row, `network.portgroup.audit` was structurally broken, and
+  the typed `host.usage` / `host.network_uplinks` listings 400'd whenever a
+  host filter was supplied. Unfiltered listings were unaffected (which is why
+  the gap slipped past CI).
+- One shared adaptation helper (`VmwareRestConnector.adapt_op_query`,
+  delegating to `_mount.adapt_filter_params`) now keys the param style off
+  the target's established mount at the transport seam: bare names on modern
+  `/api`, `filter.`-prefixed on legacy `/rest` / vcsim. Applied once at the
+  composite read + write sub-call seams and the two typed-op listing legs —
+  not per call site. Adds a modern-mount mock that 400s the prefixed form so
+  the vcsim-only test gap is closed; no new op_ids, no OpenAPI change (#2298).
+- Also routes `vm.info`'s name→moid listing leg (which entered via the
+  `origin/main` merge of #2354, predating the seam) through `adapt_op_query`,
+  so its `filter.names` param is likewise keyed off the mount flavor instead
+  of 400'ing on a modern `/api` vCenter 8.x; pinned with modern/legacy mount
+  tests mirroring `host.usage` (#2298).
+### Fixed — VMware-family CLI verbs repointed to typed op_ids (#2355)
+
+- The 19 VMware-REST-family CLI verbs whose backend reads were converted to typed
+  ops in #2266 now dispatch the **dotted** typed op_ids (`vrops.liveness`,
+  `nsx.node.status`, `sddc.domain.list`, `fleet.about`, `vcfa.provider.org.list`,
+  `vrli.event.query`, …) instead of the legacy `METHOD:/path` op_ids. On a fresh
+  boot with zero catalog ingest — the state #2266 makes canonical — the legacy
+  op_ids no longer resolve, so `meho vcf-operations|vcf-fleet|vcf-automation|
+  sddc-manager|nsx|vcf-logs …` verbs were dead-ends; the repoint restores them.
+- `meho vcf-logs query` now aligns with `vrli.event.query`'s closed
+  `parameter_schema`: it sends `limit` as an integer (was a string) and no longer
+  sends `timestamp_window` (the schema accepts only `constraints` + `limit`, so
+  the retired param would trip `additionalProperties:false`). The `--time-range`
+  flag is removed — compose any time-range constraint into the `constraints`
+  expression, which the typed op renders into the request path.
+- Unconverted verbs and the flagged method/semantic-mismatch verbs
+  (`vcf-operations resource list/get`, `sddc-manager domain info`/`about`,
+  `nsx node list`) keep their legacy op_ids until their typed ops land.
+
+### Removed — retired the ingested-curation apparatus in the six VMware-family connectors (T7 · #2358)
+
+- Deleted the hand-curated ingested-enable apparatus (`core_ops.py` /
+  `vcf_automation/_core_data.py`) from all six VMware-family connectors —
+  `sddc_manager`, `vcf_fleet`, `vcf_operations`, `vcf_logs`, `nsx`,
+  `vcf_automation` — dropping ~6.5k lines of dead code with **zero production
+  callers**: the `*_CORE_OPS` flip-lists, `*_CORE_GROUPS`, path classifiers
+  (`classify_*_op`), and appliers (`apply_*_core_curation`) were only ever
+  invoked by tests. The audited operational reads are already typed ops
+  (T1–T6, #2295/#2302–#2306); the remaining 33 declined ops stay browsable as
+  `source_kind="ingested"` breadth and are enabled through the generic review
+  flow (`ReviewService.enable_reads` / MCP `meho.connector.enable_reads` / REST
+  `POST /api/v1/connectors/{id}/enable-reads`). No REST/schema change — no
+  OpenAPI snapshot delta. The `(product, version, impl_id, connector_id)`
+  identity constants each package re-exports are preserved (relocated into the
+  package `__init__.py`), so `from meho_backplane.connectors.<pkg> import
+  <PROD>_CONNECTOR_ID` still resolves.
+- **Operator action — vRLI canonical-spec swap on the consumer deploy.** If a
+  deploy still serves the hand-edited **gist overlay** of the `vcf-logs-9.0`
+  OpenAPI spec, retire it in this upgrade: the two blockers that forced the
+  overlay are fixed as of v0.20.0 (`#2066` `{+path}` reserved-expansion render,
+  `#1796` `servers[]` base path), so the **canonical** spec now ingests clean.
+  Re-ingest the canonical spec, confirm it does not trip the `#2272`
+  YAML-timestamp ingest class, spot-check a read (`GET:/api/v2/version` → ok;
+  the typed `vrli.event.query` op is unaffected — typed reads have no ingest
+  dependency), then delete the gist. No MEHO code change is required — it is an
+  operator action on the deploy. Tracked with a runbook on `#2358` and
+  coordinated on `evoila-bosnia/claude-rdc-hetzner-dc#1790`.
+
+### Changed — nsx/connector.py split under the file-size budget (#2356)
+
+- `nsx/connector.py` dropped from 600 to ~562 lines, back under the
+  `code-quality.py` file-size ceiling (block limit 600), with zero behaviour
+  change. The pure module-level `_is_acceptable_auth_model` predicate moved to
+  `nsx/session.py` as the public `is_acceptable_auth_model` (imported back at the
+  `auth_headers` boundary), and the module docstring was trimmed to the house
+  norm. The seven typed-read shims (`node_status`…`alarm_list`) stay bound
+  methods on `NsxConnector` with their exact names so the dispatcher's
+  `module.ClassName.method` handler resolution (`operations/_handler_resolve`)
+  is unchanged; typed reads still register and dispatch `source_kind="typed"`.
+
+### Added — vm.power single-VM gated write verbs (incl. guest-shutdown)
+
+- New `vmware.composite.vm.power` write composite acts on **one** VM for
+  one-off incident actions (a hung appliance) — the single-VM ergonomics the
+  fan-out `vm.power.bulk` is clumsy for. Five verbs: `on` / `off` / `reset`
+  hit the hard `POST:/vcenter/vm/{vm}/power` endpoint; `guest_shutdown` /
+  `guest_reboot` hit the Tools-mediated `POST:/vcenter/vm/{vm}/guest/power`
+  for a clean in-guest transition. A soft verb against a VM whose VMware
+  Tools are not running fails **typed** (`status="tools_unavailable"`,
+  echoing the Tools state) instead of hanging, so the operator can fall back
+  to a hard `off`. Approval-gated per row (`dangerous` +
+  `requires_approval=True`) on the shipped write mold (#2256/#2254); the
+  park-time preview echoes the VM, verb, and a `power_kind` (`hard` vs
+  Tools-soft `guest`) so the approver sees the soft-vs-hard blast radius.
+  `vm.power.bulk` is unchanged. (#2301)
+
+### Added — typed vSphere incident reads (vm.info/object.collect/tasks.recent)
+
+- **Three new `source_kind="typed"` vmware-rest reads for incident
+  survival** (#2300), each a bound method on `VmwareRestConnector` that
+  reads directly on the connector session via PropertyCollector — no
+  `dispatch_child`, no ingested descriptor, so they dispatch on a fresh
+  boot with zero catalog ingest:
+  - **`vmware.vm.info`** — one VM's live triage signals (power state,
+    guest IP, VMware Tools status/running, guest heartbeat, per-datastore
+    usage) addressed by moid or name. The "poweredOn but no guest IP"
+    hung-appliance shape is representable in one call — data the plain
+    vCenter REST VM detail (configuration only) cannot supply.
+  - **`vmware.object.collect`** — a bounded generic PropertyCollector
+    read of a caller-specified property set off one `(type, moid)`
+    object. Bounded by construction (one object, no traversal, ≤64 paths
+    each ≤16 segments deep); oversized/malformed requests return a
+    structured `invalid_params` error before any read is issued.
+  - **`vmware.tasks.recent`** — recent vCenter Task objects (operation,
+    entity, state, progress, queued/started/completed times) for
+    change-window monitoring, distinct from `event.tail`'s event-log read.
+
+### Connectors — SDDC typed reads (12-read lab-audit set incl. credential_read-gated /v1/credentials) (#2306)
+
+- The audited 12-read SDDC Manager lab-audit set — `domains`, `domains/{id}/status`,
+  `clusters`, `hosts`, `vcenters`, `nsxt-clusters`, `credentials`, `tasks`,
+  `system`, `vcf-services`, `sddc-managers`, `license-keys` — is now first-class
+  **typed** ops (`source_kind="typed"`, `sddc.*` op-ids) that dispatch on a fresh
+  boot with zero catalog ingest, on the post-#2290 `session_login_token` token
+  session, with one-shot 401 recovery via the #2067 `invalidate_session` seam.
+- `sddc.credential.list` (`GET /v1/credentials`) is gated as a credential-read:
+  `requires_approval=True` routes it through the policy-gate approval queue (not
+  dispatchable without operator approval), its op-id classifies as
+  `credential_read` so audit/broadcast rows collapse to aggregate-only, and the
+  handler scrubs every secret-keyed value at the connector boundary — no
+  credential material rides the result.
+- `core_ops.py` ingested-row curation is repointed for the converted ops: the 5
+  overlapping reads leave the curated set (now 4 non-audited browse-breadth reads:
+  release, domain detail, network-pools, bundles); the ingested VCF catalog stays
+  browsable as profiled-dispatch breadth under its own `METHOD:path` op_ids — two
+  surfaces, no resolver shadowing (#2262 invariant holds).
+
+### Connectors — vRLI events query converted to a typed op on the connector session (#2295)
+
+- The vRLI (VCF Operations for Logs) events query is now a
+  `source_kind="typed"` op — `vrli.event.query`, a bound method on
+  `VcfLogsConnector` that issues `GET /api/v2/events/<constraints>` (with an
+  optional `limit`) directly on the connector's authenticated session and
+  recovers a 440/401 session expiry with one re-login + retry (the #1909/#1135
+  soak scenario). It works on a fresh boot with **zero catalog ingest**, so
+  the op no longer depends on per-deploy `endpoint_descriptor` state (the
+  #2247 failure class Initiative #2266 retires for the VCF family). The
+  reserved-expansion constraint sub-path (`text/CONTAINS error/...`) is
+  rendered with literal slashes so it reaches the appliance intact
+  (#2003/#2066). `vcf_logs/core_ops.py` no longer flips an ingested row for
+  the events query; the other six curated ops stay ingested (declined from
+  typed conversion — unused in the adopter's real operations, and the
+  ingested canonical spec covers the browse case). First conversion in
+  Initiative #2266; the hand-edited production-overlay retirement is a
+  follow-up RDC-team coordination step. (#2295)
+
+### Added — vROps typed reads (liveness, alerts, resource query) (#2303)
+
+- The vROps (`vcf-operations`) connector's audited read set now dispatches
+  as **typed** ops (`source_kind="typed"`) directly on its hand-rolled HTTP
+  Basic (+ optional `auth-source`) session, so they work on a fresh boot
+  with **zero catalog ingest** (no per-deploy spec ingestion or operator
+  review): `vrops.liveness` (`GET /suite-api/api/versions/current` — the
+  documented reachability surface; the adopter's `casa/health` names a
+  private/undocumented CaSA API), `vrops.alert.list`
+  (`GET /suite-api/api/alerts` alert triage), and `vrops.resource.query`
+  (a body-shaped `POST /suite-api/api/resources/query` with a typed
+  `ResourceQuerySpec` request body). All three are read-only, `safe`, no
+  approval. The two converted GET reads are removed from the `core_ops.py`
+  ingested curation so the ingested twin is never flipped alongside the
+  typed op (the #2262 no-shadow invariant); the remaining 6 ingested-browse
+  ops stay curated as breadth until the Initiative #2266 T7 apparatus
+  retirement. Unconverted curated ops (resource list/get, alert
+  definitions, symptoms, recommendations, super metrics) are declined from
+  typed conversion — not in the adopter's audited operational set. (#2303)
+
+### Added — NSX typed reads on the cookie+XSRF session (audited set) (#2302)
+
+- The audited NSX operational read set is now first-class **typed** ops
+  (`source_kind="typed"`) that dispatch on a fresh boot with **zero
+  catalog ingest** (no per-deploy curation state, the #2247 failure
+  class): `nsx.node.status` + `nsx.cluster.status` (manager/cluster
+  status+version), `nsx.backup.config` + `nsx.backup.status`,
+  `nsx.transport_zone.list`, `nsx.tier1.list`, and `nsx.alarm.list`
+  (optional status/feature/severity filters). `nsx.backup.config` is
+  first-class for the backup disk-fill incident class (Broadcom KB 442696
+  shape): it surfaces `backup_enabled`, `passphrase_configured`, and the
+  retention-relevant `backup_schedule` / `remote_file_server` fields, and
+  scrubs the backup passphrase + any nested SFTP credential at the
+  connector boundary (the default redaction policy masks
+  `password`/`secret` but not `passphrase`). These reads recover from
+  session expiry through the #2067 dispatcher seam — `NsxConnector` now
+  exposes the public `invalidate_session` hook, so a 401 evicts the cached
+  cookie+XSRF session and re-dispatches once, no restart. The remaining
+  reads (transport-node listing, segments, tier-0 gateways,
+  distributed-firewall policies + rules) stay as ingested-row curation in
+  `core_ops.py` so the wider ingested breadth is still browsable; the
+  converted ops are no longer flipped by `apply_nsx_core_curation`. `tier-1
+  gateway create` (a write) is out of scope. (#2302)
+
+### Connectors — VCFA typed reads on the dual-plane session (#2305)
+
+- The audited VCF Automation read set — provider org list / region list /
+  health (`/cloudapi/1.0.0/site`) and tenant `/iaas/api/projects` + `about`
+  — is now served by first-class `source_kind="typed"` operations
+  (`vcfa.provider.org.list` / `region.list` / `health`,
+  `vcfa.tenant.project.list` / `about`) that dispatch through the
+  connector's own dual-plane session with **zero catalog state**. VCFA
+  ships no vendor OpenAPI spec, so the prior ingested-curation path was
+  dispatch-inert on a real deploy; typed conversion is the only working
+  read surface. Each op declares the auth plane it rides (provider vs
+  tenant), cross-checked against the request path at import time. The
+  remaining `core_ops` ingested-curation surface is trimmed to the 6-op
+  browse remainder; `org create` (a write) stays out of scope (#2305).
+
+### Changed — Fleet typed reads on the LCM-local Basic session (#2304)
+
+- VCF Fleet's audited read set — the **about/health probe** (`fleet.about`)
+  and the **component inventory** ("what's deployed", `fleet.environment.list`)
+  — now dispatches as `source_kind="typed"` off the connector's existing
+  HTTP Basic (LCM-local) session, registered in code at lifespan startup.
+  These ops work on a fresh boot with **zero catalog ingest**, removing the
+  Fleet operational surface's dependence on ingesting the crash-prone
+  vRSLCM-derived Fleet OpenAPI spec (the #2272 datetime-crash artifact). The
+  remaining six curated ops (datacenter/vcenter list, environment detail,
+  product list, request list/detail) are declined from typed conversion —
+  outside the adopter's audited set — and stay as browsable ingested breadth
+  until the curation apparatus is retired (T7); their ingested `/about` and
+  `/environments` duplicates no longer curate, so they cannot shadow the
+  typed ops. (#2304)
+
+### Added — structural OpenAPI 3.x metaschema gate on spec ingest (#2292)
+
+- Spec ingest now validates a decoded OpenAPI 3.0/3.1 document against the
+  official OpenAPI metaschema (via `openapi-spec-validator`), immediately
+  after the existing version check. A metaschema-invalid document — `paths`
+  as a list, an operation with a non-object `responses`, a missing required
+  field — is refused with a structured `invalid_spec` error naming the
+  failing JSON path (e.g. `$.paths['/pets'].get.responses`) and a
+  remediation line, on every transport (REST 400, MCP `-32602`, async-job
+  `error`). Because the gate lives at parse, `dry_run` and the real ingest
+  refuse an invalid spec identically, so a structurally broken document can
+  no longer partially ingest into catalog rows of unknown quality.
+  Validation is metaschema-only (no `operationId`/parameter semantic
+  add-ons) so legal vendor specs — and every shipped package-data spec, at
+  boot — keep ingesting; Swagger 2.0 still gets its dedicated conversion
+  remedy, and the parser's tolerant-skip of sub-document junk is unchanged.
+  (#2292)
+
+### Added — persisted spec provenance at ingest (sha256 + origin + operator/timestamp, surfaced in review) (#2291)
+
+- Every accepted spec ingest now writes a durable, non-spoofable
+  provenance row to a new `spec_provenance` table (Alembic `0056`): the
+  `sha256` over the **raw spec bytes** (hashed at the fetch/upload trust
+  boundary before any decode), the audit `uri` as presented, the
+  `origin` (`fetched` https GET · `inline` operator upload · `shipped`
+  MEHO-authored catalog data), the ingesting operator, and a timestamp,
+  scoped like the descriptor rows (`tenant_id IS NULL` = global). Before
+  this, the only provenance was a spoofable `spec:<uri>` tag — an
+  operator's hand-mutated inline upload labelled with a vendor's https
+  URL persisted identically to a genuine fetch of that URL, and the
+  fetched-vs-inline bit was never persisted. Re-ingesting the same spec
+  updates the row in place (new `sha256` + timestamp), so different
+  content under the same label is detectable. Provenance is surfaced on
+  the connector review REST payload (`ConnectorReviewPayload.provenance`)
+  and rendered by `meho connector review`; connectors ingested before
+  this landed read as "unknown (pre-provenance)". Record-and-surface
+  only — no refusal policy, and the `file:///` / `docs:` inline on-ramp
+  stays fully functional. (#2270 / #2291)
+
+### Changed — SDDC Manager auth rebuilt on the `session_login_token` profile scheme (#2290)
+
+- Flip the shipped `sddc_manager_minimal.yaml` profile from the false
+  `basic` scheme to `session_login_token`, and rebuild `SddcManagerConnector`
+  auth atop it: the connector now establishes a session at
+  `POST /v1/tokens` (JSON `{username, password}` → `accessToken`) and sends
+  `Authorization: Bearer <accessToken>` on every request — SDDC Manager
+  rejects HTTP Basic outright (live 401; Broadcom KBs 435716/387124/372387),
+  so the ingested sddc catalog was never dispatchable before. Session
+  mechanics are derived from the shared `session_login_token` scheme spec
+  (single source with a profile-stamped connector), with per-`(tenant_id,
+  target.id)` token isolation, single-flight establish, and one-shot 401
+  recovery through the #2067 dispatcher seam (`invalidate_session` hook) —
+  no restart. The hand-rolled class stays the resolution winner, preserving
+  the #1750/#1798 product-shadowing invariant. Removed the false
+  `username@sso_realm` Basic decoration. (#2271 / #2290)
+
+### Added — operator-selectable auth scheme on non-catalog ingest (#2289)
+
+- `meho connector ingest --auth-scheme <name>` (and the REST
+  `IngestRequest.auth_scheme` / MCP `meho.connector.ingest` fields) let an
+  operator select a named auth scheme from the **closed** catalog (`basic`,
+  `static_header`, `session_login`, `session_login_basic`,
+  `session_login_token`, `oauth2_mint`) when ingesting an arbitrary spec. The
+  register phase then synthesises a minimal `ExecutionProfile` and stamps a
+  **dispatchable** `ProfiledRestConnector` instead of the non-dispatchable
+  bare shim — staged behind the normal review/enable gate (#1971), never
+  auto-enabled. Optional `--auth-secret-field` overrides the secret-field
+  NAMES the scheme reads at dispatch; values stay in the target's
+  `secret_ref` and never ride the request. Selection only — no free-form auth
+  config (login URL / template / token path), and reserved typed-only schemes
+  are rejected at the API boundary with a closed-set 422. Omitting the flag
+  keeps today's bare-shim behaviour unchanged. (#2271 / #2289)
+
+### Added — profiled-connector boot registration (shipped ExecutionProfiles become dispatchable at boot) (#2288)
+
+- Wire `record_profile_stamp` into production: at boot, immediately after
+  the shipped-artifact validator, every catalog row carrying a
+  `profile_resource` registers a `ProfiledRestConnector` synthesised from
+  its reviewed `ExecutionProfile`, so a shipped profile is dispatchable
+  from a fresh deploy instead of inert package data. Idempotent and gated —
+  a triple already served by a hand-coded class (vmware/sddc) no-ops, and
+  stamping never enables an op (the #1971 review gate stays the interlock).
+  Runs as a system operator with no network I/O. (#2271 / #2288)
+
+### Added — `session_login_token` named auth scheme (#2287)
+
+- **A new vetted member of the closed auth-scheme catalog covers the
+  JSON-body-login → response-body-token → `Bearer` flow** (#2287). An
+  `ExecutionProfile` may now declare `auth.scheme: session_login_token`
+  (with `secret_fields: [username, password]`): the harness POSTs a JSON
+  `{username, password}` credential body to the login endpoint, reads the
+  token out of the response body's `accessToken` field, and sends it as
+  `Authorization: Bearer <token>` on subsequent requests. SDDC Manager's
+  `POST /v1/tokens` — whose HTTP Basic surface the appliance rejects — is
+  the first member of the shape. Like the other session schemes it caches
+  until a downstream expiry status (default `{401}`) triggers a full
+  re-login; there is no refresh-token leg. Every mechanic is a
+  code-reviewed per-scheme constant, not a profile knob — a future product
+  with a different login path or token field enters as its own catalog
+  member, preserving the no-DSL line (#1177). No shipped connector profile
+  selects it yet (`sddc_manager` still ships `basic`); flipping a profile
+  onto it is a separate task.
+
+### Fixed — non-finite `INGEST_JOB_TIMEOUT_SECONDS` can no longer defeat the ingest-job watchdog; the budget is now a chart value (#2318)
+
+- **`INGEST_JOB_TIMEOUT_SECONDS=inf` (or `nan`) no longer silently
+  disables the async ingest-job watchdog** (#2318, hardens #2275). The
+  env loader's only sanity check was `value <= 0`, which a non-finite
+  float slips past (`inf <= 0` is `False`; every `nan` comparison is
+  `False`), so the value flowed straight into `asyncio.timeout(...)` —
+  where `inf` schedules no deadline and `nan` is ill-defined —
+  re-opening the exact "job wedged at `status=running` forever" hole
+  #2275 was built to close. The loader now rejects non-finite values
+  with `math.isfinite`, logs a warning, and falls back to the 1800 s
+  default, so a misconfigured budget can never disable the watchdog.
+- **The ingest-job watchdog budget is now a first-class Helm chart
+  value** (#2318). `config.ingestJobTimeoutSeconds` (schema-typed
+  optional string) renders `INGEST_JOB_TIMEOUT_SECONDS` on the backplane
+  ConfigMap — injected via the existing `envFrom.configMapRef` — so an
+  operator who needs a longer ceiling for a slow shared executor or a
+  large spec fleet no longer has to reach for the untyped `extraEnv`
+  escape hatch. Rendered only when set: the default `""` omits the env
+  so the backend's own 30-min default applies silently (unlike the
+  always-render-`""` SSRF-allowlist pattern, an empty numeric env would
+  hit `float("")` and warn on every boot). Existing installs are
+  unchanged. (#2318)
+
+### Fixed — async ingest jobs always reach a terminal state (watchdog + bounded LLM client + job-id log binding) (#2275)
+
+- **A wedged async connector ingest can no longer sit at `status=running`
+  forever** (#2275). An ingest job whose pipeline hit a *never-completing
+  await* — a starved `to_thread` executor, a DB connection that never
+  acquires, or a grouping LLM call pending on the Anthropic SDK's default
+  10-min-read × 2-retry ceiling (~30 min wall-clock) — was stranded at
+  `running` until a pod restart cleared the in-memory registry, even
+  though the identical *sync* request returned a clean 400. (The
+  exception boundary was already maximal — an `OpIdCollision`-raising
+  pipeline does flip to `failed` — so the earlier "widen the try/except"
+  framing was a no-op; the real defect was the missing watchdog.)
+  `run_ingest_job` now time-boxes the whole job body — the pipeline call
+  **and** the post-run dispatchability probe — inside
+  `asyncio.timeout`; at the deadline the job flips to `failed` with
+  `error_class="TimeoutError"`. The budget defaults to 30 min and is
+  env-overridable via `INGEST_JOB_TIMEOUT_SECONDS`. Cancellation cannot
+  interrupt an already-running `to_thread` OS thread, so the guarantee is
+  job-state terminality, not thread reclamation.
+- **The grouping LLM client is now constructed with an explicit request
+  timeout + retry ceiling** (120 s × 1 retry) instead of the SDK
+  defaults, so a hung grouping call fails fast rather than consuming the
+  watchdog budget; the fail-closed 503 contract for a missing
+  `ANTHROPIC_API_KEY` (#1386) is unchanged.
+- **Pipeline log events now carry `ingest_job_id`.** The job id is bound
+  via structlog `contextvars` (not just the job coroutine's own logger),
+  so the configured `merge_contextvars` processor stamps it onto pipeline
+  events (`ingestion_pipeline_start` &c.) — a job-id-filtered log grep is
+  no longer blind to the pipeline. No schema or route change. (#2275)
+
+### Added — first-class Helm chart value for the target-SSRF allowlist (#2240)
+
+- **The target-destination SSRF allowlist is now a typed Helm chart
+  value** (#2240). v0.20.0 shipped the default-deny target-destination
+  SSRF guard whose only opt-out is the `MEHO_TARGET_SSRF_ALLOWLIST` env
+  var ("Deployment impact — action likely required"), but the chart had
+  no surface for it: operators had to reach for the untyped `extraEnv`
+  escape hatch, which `values.schema.json` does not validate and
+  `helm show values` does not surface. A new `config.targetSsrfAllowlist`
+  value (schema-typed optional string, default `""`) now renders into
+  `MEHO_TARGET_SSRF_ALLOWLIST` on the backplane ConfigMap — injected
+  into the container via the existing `envFrom.configMapRef` — so a
+  scoped allowlist (e.g. `"10.0.0.0/8,192.168.0.0/16"` for a deploy that
+  registers on-prem appliances on RFC 1918 space) is a first-class,
+  `helm show values`-discoverable setting. The default `""` is a genuine
+  no-op that keeps the guard fully on (default-deny), so existing
+  installs are unchanged. Chart-only — the guard itself is untouched.
+  (#2240)
+
+### Changed — scheduler `fire_at` tick-quantization latency documented on the API schema (#2245)
+
+- **The scheduler's fire-time latency window is now part of the API contract,
+  not just an internal doc** (#2245). `ScheduledTriggerCreate.fire_at` and
+  `ScheduledTriggerRead.{fire_at,next_fire_at,last_fired_at}` gained OpenAPI
+  field descriptions stating that a requested fire time is a **floor, not an
+  exact dispatch instant**: the loop scans on a fixed grid every
+  `SCHEDULER_TICK_INTERVAL_SECONDS` (default 30 s, env-tunable 1–3600 s) and
+  fires on the first tick at or after the requested time, so dispatch can trail
+  it by up to one whole tick interval — and `last_fired_at` reads back
+  tick-aligned because it is stamped with the claiming tick, not the requested
+  time. This is the contract behind an operator-reported "~28 s delay" that was
+  pure grid quantization, not failure fallout (no backoff constant exists;
+  per-fire failure isolation already shipped in PR #1509 / v0.11.0). SLA-
+  sensitive deployments can lower the tick interval (floor 1 s) per deployment.
+  Consumer doc (`docs/codebase/scheduler.md`) and the generated CLI client
+  regenerated from the new descriptions; **no behavioral change**. (#2245)
+
+### Fixed — crashed ingest no longer strands retry-blocking descriptor debris; `op_id_collision` names its remedy
+
+- **A crashed connector ingest now leaves zero persisted operations for the
+  failed spec, and the `op_id_collision` error names how to recover** (#2273).
+  Registration committed the `endpoint_descriptor` rows one-per-operation, so
+  an ingest that failed partway (e.g. the #2272 YAML crash) left the
+  already-processed ops committed as debris; a retry that presented the same
+  spec under a *different* URI then aborted with a 400 `op_id_collision`
+  against that debris — with no hint of the way out. Registration now commits
+  **once per spec** (a single unit of work), so a mid-batch failure rolls back
+  to zero rows and the retry inserts cleanly. When a genuine cross-call
+  collision does fire, the error — on all three transports (REST 400 `detail`,
+  MCP `-32602` `data`, async-job `error`) — now names both remedies: re-ingest
+  under the **original** spec URI (a same-URI re-ingest updates in place), or
+  clear stranded debris with the `meho.connector.delete` MCP tool (`tenant_id`
+  omitted for the global scope). The embedding pass now runs inside one
+  transaction per spec (a large spec holds it open for tens of seconds — an
+  accepted correctness-first trade-off). No schema or route change. (#2273)
+
+### Fixed — shared modal controller ignores htmx's detached pre-swap target
+
+- **The app-shell modal controller no longer calls ``showModal()`` on a
+  disconnected dialog after an ``outerHTML`` swap** (#2242). htmx 2.0.9
+  dispatches ``htmx:afterSwap`` with ``detail.target`` still pointing at the
+  PRE-swap element, which an ``outerHTML`` swap already detached — the runbook
+  run driver's abort / reassign / advance forms target ``#runbook-run-step``
+  with ``hx-swap="outerHTML"``. The shared controller scanned that stale
+  subtree and reopened the old, closed descendant dialog (the admin-only
+  reassign dialog on the abort repro; the assignee's advance dialog on every
+  Advance click), throwing an uncaught ``InvalidStateError`` into the console.
+  A one-line ``isConnected`` guard on the scan root skips a detached root and
+  is behaviour-preserving for the console's ``innerHTML``-into-a-stable-
+  container auto-open pattern, which always delivers a connected root. Console
+  noise only; the abort / advance actions were always functional.
+
+### Fixed — exactly-one-resumer claim for run-bound approvals (#2293)
+
+- **A run-bound approval now executes its gated op exactly once — no silent
+  non-execution, no double dispatch** (#2293). Two opposite seams are closed
+  by one `approval_request.resumed_at` claim column (migration `0055`): a
+  single conditional `UPDATE ... WHERE resumed_at IS NULL` that every
+  resumer of an approved op must win before it re-dispatches `_approved=True`
+  (the in-process agent waiter, the shared `resume_dispatch_after_approval`
+  operator path, any future resumer). Before this, REST `/decide` and the
+  MCP by-id approve *skipped* re-dispatch whenever `run_id` was set, assuming
+  the in-process broadcast waiter (#1117) would resume — so when the waiter
+  was gone (wait-timeout, pod restart, run cancelled) the approval committed,
+  the audit said "approved", and **nothing ran**; meanwhile REST `/approve`
+  and the UI approve re-dispatched unconditionally, so with the waiter alive
+  one approval could dispatch an approval-gated **write twice**. `/decide`
+  and MCP now fall back to a server-side re-dispatch when the claim is free
+  (covering waiter-gone), while the same claim blocks the `/approve` / UI
+  double-dispatch when the waiter is alive; a resumer that loses the claim
+  no-ops cleanly (`dispatch_status="already_resumed"`, HTTP 200). Exactly one
+  execution audit row per approval, still stamped with the requester sub. No
+  route/schema change beyond the migration. (#2293)
+
+### Added — Discard verb on draft runbooks in the operator console
+
+- **A `tenant_admin` can now discard an unwanted draft runbook template from
+  the operator console** (`/ui/runbooks/<slug>`) — the draft close-out leg the
+  engine's Discard verb (#2127) already exposed on REST/MCP but the UI had no
+  affordance for. A draft's action row gains a **Discard** button behind the
+  standard confirm dialog; confirming deletes the draft and `HX-Redirect`s back
+  to the catalog. Discard is draft-only: a published / deprecated version is
+  retired via **Deprecate** (preserving lifecycle history), and Deprecate stays
+  hidden on drafts — deprecate-on-draft is engine-illegal (`draft → published →
+  deprecated` is one-directional). (#2241)
+
+### Fixed — catalog re-ingest is idempotent instead of colliding with its own rows
+
+- **A second `meho connector ingest --catalog <product>/<version>` on the
+  same deploy now returns an idempotent skip instead of a 400
+  `op_id_collision` against the rows the first ingest just wrote** (#2274).
+  The catalog shipped-spec on-ramp labels its source `spec:<resource>`;
+  the parser then persists that label verbatim as a row tag while the
+  upsert appends its own `spec:<spec_source>` marker, so a catalog row
+  carries two `spec:` tags. The cross-source collision guard recovered the
+  persisted source from the *first* matching tag — the verbatim one, one
+  `spec:` layer short of the real source — so every re-ingest mismatched
+  its own rows and aborted the batch, making the unbacked-composite
+  remediation loop (which prints exactly that command) circular. The guard
+  now reads the authoritative *last* (marker) tag and compares on the
+  prefix-normalized logical spec identity; genuine cross-source `op_id`
+  clashes (`file:///a.yaml` vs `spec:b.yaml`) still fire, and the
+  structured exception still carries the raw persisted/incoming labels for
+  diagnostics. Compare-time fix only — no data migration, no schema
+  change. (#2274)
+
+### Fixed — vendor YAML date/timestamp `example:` values no longer crash spec ingest
+
+- **Ingesting a YAML OpenAPI spec whose schema `example:` fields carry
+  unquoted ISO dates or timestamps no longer crashes the descriptor
+  INSERT** with `StatementError: Object of type datetime is not JSON
+  serializable` (#2272). Stock PyYAML applied the YAML 1.1 implicit
+  `timestamp` resolver, turning an unquoted `2000-01-23T04:56:07.000+00:00`
+  into a `datetime` (and `2024-01-15` into a `date`) that the JSON(B)
+  descriptor columns cannot encode; the spec-ingest loader now keeps such
+  scalars as the verbatim string the author wrote (OAS 3.1 limits YAML
+  tags to the JSON Schema ruleset, which excludes the timestamp tag).
+  Ingest also gained a fail-closed serializability check at the shared
+  proto-build boundary, so `dry_run=true` now rejects a non-encodable
+  spec with the same structured `invalid_schema` 400 the real run raises
+  instead of green-lighting it. Scoped to spec ingest — no engine-wide
+  serializer change. (#2272)
+
+### Removed — the L2 composite failure-coping apparatus (two-world op model)
+
+- **The dispatch-time L2 pre-flight and its structured errors are deleted, not
+  guarded** (#2259). Now that every code-shipped composite dispatches its
+  sub-ops directly on the connector session (#2253/#2255/#2256), nothing
+  depends on ingested catalog rows, so the whole coping apparatus is retired:
+  vmware's `preflight_l2_dependencies` + the `composite_l2_missing` /
+  `composite_l2_disabled` error codes (and their `CompositeL2Dependency*`
+  exceptions), github's import-time `UnbackedEnabledCompositeError` load guard
+  and its `composite_backing` registry, and the `unbacked` / `next_step`
+  markers `search_operations` attached to composite hits. The platform-wide
+  registration-time invariant (#2252) is the sole remaining check: a
+  code-shipped op whose declared `dispatch_child` sub-op resolves to an
+  ingested row still fails the boot closed. Part of the two-world op model
+  (Goal #2247, Initiative #2248). Operator-visible change: the
+  `composite_l2_missing` / `composite_l2_disabled` error envelopes and the
+  `unbacked=true` search-hit flag no longer appear — composites simply work on
+  a fresh boot with zero catalog ingest.
+
+### Changed — vmware `host.vsan_health` + `host.network_uplinks` re-shipped as typed ops
+
+- **`vmware.host.vsan_health` and `vmware.host.network_uplinks` are now
+  `source_kind="typed"` bound-method ops, and the two composites
+  (`vmware.composite.host.vsan_health` / `vmware.composite.host.network_uplinks`)
+  are removed** (#2258): both now read directly on the connector session via
+  `RetrievePropertiesEx` / `VsanQueryVcClusterHealthSummary`, mounted through
+  `mount_op_path`, in the `vmware.host.usage` (#2257) mould — one row per
+  host/cluster, working on a fresh boot with **zero catalog ingest**. Output
+  is byte-for-byte compatible with the composite versions, including the
+  per-host / per-cluster best-effort `read_note` on a partial failure. The
+  registered vmware composite total drops 15→13 (7→5 read); the two reads
+  keep `safety_level="safe"` / `requires_approval=False`. Part of the
+  two-world op model (Goal #2247, Initiative #2250). No new auth model —
+  `vmware-rest-9.0` stays State 2.
+
+### Added — GCP Secret Manager backend Phase 2 (per-operator Workload Identity Federation)
+
+- The `gsm` credential backend now supports a **per-operator** read path via
+  Keycloak→GCP-STS Workload Identity Federation. When `GSM_WIF_AUDIENCE` is
+  set, a `gsm:` read exchanges the operator's Keycloak JWT
+  (`operator.raw_jwt`) at `sts.googleapis.com` for a short-lived federated
+  token (google-auth `identity_pool.Credentials`), optionally impersonates
+  `GSM_WIF_SERVICE_ACCOUNT`, does the one `secretmanager.versions.access`,
+  and discards the token — so GCP's own audit log attributes the read to the
+  operator, mirroring Vault's per-operator JIT contract. A fresh credential
+  is minted per read (never cached). Installs that leave `GSM_WIF_AUDIENCE`
+  unset keep the Phase-1 SA-direct path unchanged. The GCP-side Workload
+  Identity Pool + OIDC provider must trust the MEHO Keycloak issuer; no
+  service-account key material is ever used. New `GSM_WIF_AUDIENCE` /
+  `GSM_WIF_POOL_ID` / `GSM_WIF_PROVIDER_ID` / `GSM_WIF_SERVICE_ACCOUNT` /
+  `GSM_WIF_SUBJECT_TOKEN_TYPE` settings; the Helm surface lands in #2231.
+  (#2232)
+
+### Added — GCP Secret Manager credential backend (Phase 1, SA-direct)
+
+- Resolve a target's `gsm:<project>/<secret>[#field]` `secret_ref` through
+  a new `gsm` credential backend on the #2229 resolver seam, reading GCP
+  Secret Manager under MEHO's own GKE Workload Identity ADC (optionally
+  impersonating a configured SA via `GSM_IMPERSONATE_SA`) — a Vault-free
+  install path for GCP-native adopters. A bare ref returns the whole JSON
+  payload; a `#field` fragment selects one key. No service-account JSON
+  key is ever used (honours `constraints/iam.disableServiceAccountKeyCreation`).
+  Per-operator GCP federation and the Helm surface are deferred to #2232 /
+  #2231. (#2230)
+
+### Added — Helm `gsm.*` surface + backend-agnostic `/api/v1/health` federation proof
+
+- Deploy a **Vault-free, GCP-native** install: the chart gains a top-level
+  `gsm.*` block (`enabled`, `project`, and inert Phase-2 (#2232)
+  `workloadIdentityFederation.{poolId,providerId,serviceAccount}` stubs)
+  plus `config.credentialBackend` / `config.gsmProject` /
+  `config.gsmImpersonateSa`, rendered into the backplane env as
+  `CREDENTIAL_BACKEND` / `GSM_PROJECT` / `GSM_IMPERSONATE_SA`.
+  `values.schema.json` now requires `vault.address` **only when**
+  `config.credentialBackend: vault` and requires `gsm.enabled: true` +
+  `gsm.project` when it is `gsm`, so a GSM-only overlay passes schema
+  validation with a blank Vault address (see
+  `deploy/values-examples/values-gsm-example.yaml`). (#2231)
+- The `GET /api/v1/health` federation proof is now **backend-agnostic**:
+  it dispatches on `config.credentialBackend` — a Vault install keeps the
+  unchanged `vault.kv.read` path (zero migration), while a GSM install
+  reads its probe secret (`gsm:<project>/meho-test-federation`) through the
+  credential-backend seam and reports the same `vault` status shape. (#2231)
+
+### Fixed — empty runbook step bodies backfilled (migration 0054) + structured template-hydration errors (#2239)
+
+- **Legacy runbook rows readable again via migration `0054`** (#2239 / PR #2309): the #2122 `min_length=1` step-body tightening shipped no data migration, and the read path re-validates stored `runbook_templates.steps` JSONB on every read (`_steps_from_storage`), so any pre-v0.20.0 template with an empty or whitespace-only step body 500'd `GET /api/v1/runbooks/templates/{slug}`, broke MCP `meho.runbook.show_template` with an opaque `-32603`, and — via pinned-template hydration — broke `list_runs` tenant-wide. Alembic migration `0054_backfill_empty_runbook_step_bodies` rewrites every such body to a non-empty placeholder: pure-data, idempotent, tenant-agnostic, documented no-op `downgrade()`. One rewrite repairs all read sinks at once, since runs re-read the same row; the deliberate fail-closed read-side validation is kept, not relaxed.
+- **Structured `template_body_validation_failed` envelope on both template-show transports** (#2239 / PR #2309): a hydration `ValidationError` no longer leaks as a bare `text/plain` 500 or a data-less `-32603`. A single shared builder (`runbooks/hydration_errors.py`, per the `error-message-shape.md` convention) emits the stable code, the `slug`/`version` coordinates, a compact pydantic `errors` list, and a remediation message pointing at migration 0054 or a re-save via `PATCH /api/v1/runbooks/templates/{slug}`; REST carries it in `HTTPException.detail` (declared in the OpenAPI snapshot and regenerated Go client), MCP in the JSON-RPC `error.data`. Any future malformed row is diagnosable instead of opaque; `docs/codebase/runbook-template-hydration.md` documents the surface.
+
+### Fixed — input-less `one_off`/`cron` scheduler triggers now rejected at create time with 422 (#2244)
+
+- **Create-time 422 for prompt-less cron/one_off triggers** (#2244 / PR #2308): `ScheduledTriggerCreate`'s discriminated-union validator (`backend/src/meho_backplane/scheduler/schemas.py`) now rejects a `POST /api/v1/scheduler/triggers` body of kind `one_off` or `cron` whose payload renders no usable prompt — missing `inputs`, or the `inputs: {}` edge, which `_coerce_inputs` serialized to the literal string `"{}"` that slipped past the fire-time `scheduled_run_no_input` guard and reached the model as a meaningless user turn. Previously such a trigger created with 201 and deterministically failed at fire (a cron burning a run every tick, a one_off burning its single at-most-once fire). The check is payload-only (`_payload_yields_prompt`, no agent-definition load), so the #1505 layering objection does not apply; the fire-time guard is retained as defense-in-depth for rows inserted around the wire schema.
+- **Contract mirrored across MCP, console, and clients** (#2244 / PR #2308): the MCP scheduler create tool (`mcp/tools/scheduler.py`) documents the requirement in its `inputs` schema ("an empty {} is rejected"), the `/ui` scheduler create modal (`_create_modal.html`) labels the inputs field kind-aware — "required, must render a prompt" for `cron`/`one_off`, "optional" for `event` — and surfaces the 422 as a form error, and `docs/codebase/scheduler.md` plus the regenerated OpenAPI snapshot and typed Go CLI client (`cli/api/openapi.json`, `cli/internal/api/client.gen.go`) record the new contract. `kind=event` stays exempt: its future event-dispatch junction may derive the prompt from the matched event.
+
+### Added — typed `vmware.host.usage` op: per-host utilisation with zero catalog ingest (#2257)
+
+- **New typed op `vmware.host.usage`** (#2257 / PR #2263): the first vmware op with `source_kind="typed"` — a bound method on `VmwareRestConnector` (new `connectors/vmware_rest/typed_ops.py`) that returns one row per ESXi host with CPU/memory load from `summary.quickStats` (`overallCpuUsage` MHz, `overallMemoryUsage` MB, uptime), hardware capacity totals from `summary.hardware` (sockets/cores/threads, per-core MHz, `memorySize` bytes), and `runtime.inMaintenanceMode`. It lists hosts via `GET /vcenter/host`, then reads those properties per host through a direct PropertyCollector `RetrievePropertiesEx` call on the connector session — no `dispatch_child`, no ingested `endpoint_descriptor` rows — so it works on a fresh boot before any catalog ingest, which no composite can. Both legs route through `mount_op_path` (modern `/api` and legacy `/rest`/vcsim), and per-host reads are best-effort with a `read_note`.
+- **Vmware typed-op registration mold** (#2257 / PR #2263): a `VmwareTypedOp` metadata dataclass plus a `register_vmware_typed_operations` registrar, queued at import time via `register_typed_op_registrar` in `connectors/vmware_rest/__init__.py` and executed by `run_typed_op_registrars` at startup, with a curated `when_to_use` blurb for the grouped op — the mold the later typed vmware ops (`host.vsan_health`, `host.network_uplinks`, #2279) reuse. Shipped with 15 unit tests (`tests/test_connectors_vmware_rest_typed_host_usage.py`) plus respx end-to-end integration over both mounts, and updated `docs/codebase/connectors-vmware-rest.md`. No migrations; OpenAPI snapshot unchanged.
+
+### Changed — code-shipped composites dispatch sub-ops on the connector's own session (two-world op model, #2251, #2253–#2256)
+
+- **Direct-session substrate + write-governance seam** (#2251 / PR #2261, #2254 / PR #2265): `dispatch_composite` now inspects the handler signature and injects the resolved connector instance and/or the catalog-routed `dispatch_child` only when the handler declares it, so a composite can issue sub-calls via `connector._get_json` / `connector._post_json` + `connector.mount_op_path` with no `endpoint_descriptor` lookup — every existing `dispatch_child`-only handler keeps its exact signature and behaviour. The new `enforce_subop_policy` helper in `operations/composite.py` keeps direct **write** sub-ops governed: it re-runs the dispatcher's `policy_gate` against an in-memory, never-persisted `EndpointDescriptor` built from the sub-op's declared `op_id`/`safety_level`/`requires_approval` — auto-execute proceeds, needs-approval writes a durable `ApprovalRequest` and returns `awaiting_approval` so the write queues, deny blocks it (#508 property 3). Trade-offs documented in `docs/architecture/operations-substrate.md`.
+- **vmware's 7 read + 8 write composites migrated** (#2253 / PR #2276, #2256 / PR #2284): `composites/_read.py` (via the `_read_sub_op` helper) and `composites/_write.py` drop `dispatch_child`-through-ingested-rows for direct session calls, so all vmware composites now work on a fresh boot with **zero vCenter catalog ingest** (the `composite_l2_missing` defect class) with identical response schemas and aggregation. Each mutating sub-call passes `enforce_subop_policy` before its `_post_json`; sub-ops declare `dangerous`/`requires_approval=False` so the top-level composite stays the single primary approval gate (no resume-path double-gate). `_write_preview` live reads also resolve on the session, fixing their fresh-boot `preview_unavailable` degradation. Only the `host.evacuate` → `vmware.composite.vm.migrate` recursion keeps `dispatch_child`, and the dispatcher's `_handler_requires_target` now fails a `connector`-declaring composite dispatched with `target=None` cleanly as `target_required`.
+- **`gh.composite.pr_status_summary` migrated; gh `composite_backing` registration dropped** (#2255 / PR #2268): the composite's three reads (PR, check-runs, reviews) now go through the resolved `GitHubRestConnector`'s own session with a byte-identical seven-key response envelope — fixing #2050 by construction, since a fresh deploy with no gh catalog ingest can no longer dead-end at `composite_l2_missing`; secondary reads keep their graceful degradation (`null` + `*_status="unknown"`). gh's `composite_backing` registration and the `_register_and_assert_composite_backings` load assertion are removed — the platform-wide registration-time invariant (#2252) supersedes the gh-only guard, and the dormant L2 coping apparatus was deleted wholesale under #2259 (see "Removed — the L2 composite failure-coping apparatus", PR #2297).
+
+### Changed — `VAULT_ADDR` now optional: a gsm-backend install boots Vault-free (#2277)
+
+- **`Settings.vault_addr` is now optional** (#2277 / PR #2278): the field is `HttpUrl | None` defaulting to `None` in `backend/src/meho_backplane/settings.py`, and the env loader coerces a missing or blank `VAULT_ADDR` to `None`, so a `CREDENTIAL_BACKEND=gsm` backplane boots with no Vault anywhere — the last mile of Initiative #2227's zero-new-secret-infrastructure promise for GCP-native adopters. Fail-closed moves from import time to first use: `auth/vault.py:_build_client` raises the new `VaultNotConfiguredError` (a `VaultClientError` subclass the dispatcher surfaces as a handled `connector_error`, never a 5xx) naming both `VAULT_ADDR` and `CREDENTIAL_BACKEND`, so a Vault-backend install missing its address fails loudly and actionably at the first Vault operation instead of crashing the lifespan with a bare `KeyError`.
+- **Readiness probe and Helm chart follow suit** (#2277 / PR #2278): `vault_readiness_probe` now returns `ok=True` with `detail="not_configured"` when `vault_addr` is unset — the skip-unconfigured contract established for the docs backends in #1606 — so a GSM-only deploy's `/api/v1/health` readiness stays green instead of perma-failing against a Vault it does not run. `deploy/charts/meho/templates/configmap.yaml` renders `VAULT_ADDR` only when `config.vaultAddr` is non-empty, so a `gsm` install injects no empty env var into the pod; `backend/tests/test_chart_vault_addr_optional.py` proves both `helm template` shapes. Installs with `VAULT_ADDR` set are behaviourally unchanged; no DB migration and no OpenAPI change ship with this.
+
+### Connectors — read-only RabbitMQ Management HTTP API connector (#2233)
+- **RabbitMQ Management connector — 16 typed read ops, `shared_service_account` auth model live** (#2233 / PR #2280): new `RabbitMqConnector` (`backend/src/meho_backplane/connectors/rabbitmq/`) over the Management HTTP API (`/api`, ports 15672/15671) registers the versioned triple `(rabbitmq, 3.x, rabbitmq-management)` plus the wildcard fallback at import and upserts its 16 read ops at lifespan startup, so a fresh boot dispatches immediately: `rabbitmq.overview`, `.nodes`, `.exchanges`, `.queues`, `.bindings`, `.vhosts`, `.connections`, `.channels`, `.consumers`, `.shovels`, `.shovel_status`, `.federation_links`, `.parameters`, `.policies`, `.definitions`, and the `.request` GET/HEAD passthrough. HTTP Basic auth reads live operator-context Vault KV-v2 credentials via `load_credentials_from_vault` (`session.py`), a thin wrapper over the shared `load_basic_credentials` helper (`_shared/vault_creds.py`); other auth models are refused with a clear boundary error. Each op names the RabbitMQ user tag (`monitoring`/`policymaker`/`administrator`) its surface requires.
+- **Read-only by construction, broker credentials redacted by default** (#2233 / PR #2280): a code-level method gate (`RabbitMqMethodNotAllowedError`) refuses any verb other than GET/HEAD before the request leaves the process, so even `rabbitmq.request` cannot mutate the broker; every op ships `safety_level=safe`, `requires_approval=False` — write/admin ops (create shovel, set policy) are deliberately out of scope for a future approval-gated write surface. `redact.py` blanks `amqp://user:pass@` URI userinfo and `password`/`secret`/`password_hash` keys in shovel, federation, parameter, and definitions payloads before they reach the agent. The regenerated CLI OpenAPI snapshot adds `rabbitmq` to the `TargetCreate.product` enum; `probe()` fails closed without operator context (the Management API has no unauthenticated endpoint). Docs: `docs/codebase/connectors-rabbitmq.md`.
+
+### Connectors — read-only Prometheus connector also serving Thanos Query and Mimir/Cortex (#2234)
+
+- **Prometheus/Thanos/Mimir read surface, typed and boot-dispatchable** (#2234 / PR #2281): new `PrometheusConnector` (`backend/src/meho_backplane/connectors/prometheus/`) covers the three PromQL-HTTP-compatible metrics backends — Prometheus, Thanos Query, Grafana Mimir/Cortex — over their shared `/api/v1` API. Eight typed read ops (`prometheus.query`, `query_range`, `series`, `labels`, `targets`, `rules`, `alerts`, plus the gate-constrained `prometheus.get` GET passthrough), all `safety_level="safe"` with no approval gate; no write ops ship (a future G3.x write-surface initiative would add any). Dual-registered via `register_connector_v2` as `("prometheus", "2.x", "prometheus-api")` plus the wildcard fallback, with `endpoint_descriptor` rows upserted at lifespan startup — a fresh boot dispatches all eight ops with no ingest step. Prometheus is now a selectable target type in the API and CLI (regenerated `cli/api/openapi.json` + `client.gen.go`).
+- **Read-only by construction; optional auth with a live credential path** (#2234 / PR #2281): every dispatched request passes a GET-only + `/api/v1/` path-allowlist gate with an `/api/v1/admin/` blocklist and `..` traversal guard, so TSDB-delete and `/-/reload` are unreachable through dispatch. `secret_ref=None` is a first-class state — `auth_headers` returns `{}` with no credential load (the unauthenticated in-cluster port-forward case, net-new platform-wide). When `secret_ref` is set, the default loader performs a live operator-context KV-v2 read via `_shared/vault_creds.load_vault_secret_data` (no stubbed loader), selecting Bearer (`token` field) or Basic (`username`+`password`) from the stored secret's shape. Scheme (`http`/`https`) and the Mimir `/prometheus` mount prefix come from per-target `extras`; in-cluster hosts still require `MEHO_TARGET_SSRF_ALLOWLIST`.
+- **Fingerprint with operator-asserted flavour** (#2234 / PR #2281): `fingerprint()` reads `GET /api/v1/status/buildinfo` and best-effort augments it with `/-/ready`, scrape-target, firing-alert, and rule-group counts, surfacing a `flavour` hint (`prometheus`/`thanos`/`mimir`). The flavour comes from `target.extras["flavour"]`, not response sniffing — Thanos and Mimir vendor Prometheus's buildinfo struct byte-identically, so targets are not self-identifying. Developer doc at `docs/codebase/connectors-prometheus.md`; no operator onboarding recipe yet and no DB migration ships with this change.
+
+### Connectors — Grafana Loki read-only multi-tenant connector (#2235)
+
+- **Grafana Loki typed connector — 6 read-only ops, dispatches on a fresh boot** (#2235 / PR #2282): `LokiConnector` (`backend/src/meho_backplane/connectors/loki/`), a hand-rolled `HttpConnector` subclass registered via `register_connector_v2` under `(product="loki", version="3.x", impl_id="loki-api")` plus the `("loki", "", "")` wildcard fallback. Six typed operations upsert into `endpoint_descriptor` at lifespan via `register_typed_operation`: `loki.query`, `loki.query_range`, `loki.labels`, `loki.label_values`, `loki.series`, and the gated `loki.get` passthrough — all `safety_level="safe"`, `requires_approval=False`. Read-only by construction: every op issues a GET, and the passthrough runs through `assert_loki_read_only` (`read_only.py`), a `/loki/api/v1`-scoped gate with an explicit `/push` + `/delete*` segment blocklist, so a write never reaches the wire. No write/admin ops and no DB migration ship.
+- **Optional auth live, per-call multi-tenancy** (#2235 / PR #2282): the credential path is wired, not stubbed — `auth_headers` performs the live operator-context Vault KV-v2 read via `load_vault_secret_data`, so `operations/call` executes end-to-end on a freshly booted backplane. `secret_ref=None` sends no `Authorization` header (the port-forward case); a `token` field yields Bearer, `username`+`password` yields Basic, and any other secret shape fails closed with `VaultCredentialsReadError`. Every op accepts an optional `tenant` selector rendered into Loki's `X-Scope-OrgID` header; a tenant-less `401` against an `auth_enabled` Loki surfaces `LokiTenantRequiredError` instead of a bare 401. `fingerprint()`/`probe()` stay unauthenticated and tenant-free (`status/buildinfo`, `/ready`). The new `loki` product token enters the `TargetCreate.product` enum; CLI OpenAPI snapshot (`cli/api/openapi.json`) and generated Go client regenerated. Doc: `docs/codebase/connectors-loki.md`.
+
+### Connectors — Proxmox VE read/write connector, PVEAPIToken auth, approval-gated writes (#2238)
+- **Proxmox VE 8.x typed connector — `shared_service_account` auth model live** (#2238 / PR #2283): `ProxmoxConnector` (`backend/src/meho_backplane/connectors/proxmox/`), an `HttpConnector` over the PVE REST API (`/api2/json` on :8006), registers 4 typed ops on a fresh boot — 3 read (`proxmox.about`, `proxmox.api.get`, `proxmox.task.status`) and 1 write (`proxmox.api.write`). The default loader `load_credentials_from_vault` (`session.py`) performs the live operator-context Vault KV-v2 read, so dispatch executes end-to-end for `shared_service_account` targets; any other `auth_model` raises a clear boundary error. Dual v2 registration (`("proxmox", "8.x", "proxmox-api")` + wildcard) adds `proxmox` to the `TargetCreate.product` enum; OpenAPI snapshot and Go client regenerated.
+- **API token preferred, ticket/cookie fallback** (#2238 / PR #2283): credentials resolve from the target's `secret_ref`, discriminated by stored fields — `token_id` + `token_secret` send `Authorization: PVEAPIToken=<id>=<secret>` on every request (CSRF-exempt, no expiry; preferred), else `username` + `password` (default realm `pam`) mint a ~2h ticket via `POST /api2/json/access/ticket`, ride as the `PVEAuthCookie` cookie, and attach `CSRFPreventionToken` on every write. The minted ticket is not auto-re-minted on expiry — a documented limit token auth avoids. Self-signed TLS is handled per-target through the inherited `tls_ca_pin` / `verify_tls` policy.
+- **Approval-gated generic write passthrough** (#2238 / PR #2283): the sole write op `proxmox.api.write` (POST/PUT/DELETE) registers `safety_level="dangerous"` + `requires_approval=True`, so every dispatch parks in the human approval queue (`awaiting_approval`) and the handler runs only on the `_approved=True` resume path — there is no code-level GET gate. Both passthroughs validate paths through a two-layer allowlist (anchored schema `pattern` plus fail-closed `validate_api_path`/`validate_method` in `ops.py`) beneath the constant, never-parameterised `/api2/json` base. UPID-returning writes hand back a parsed `{upid, node}` so the caller can follow up with `proxmox.task.status` (`wait=true` polls to terminal `stopped`). Docs: `docs/codebase/connectors-proxmox.md`.
+
+### Connectors — read-only PostgreSQL wire-protocol connector (#2236)
+- **PostgreSQL wire connector, 7 read-only typed ops** (#2236 / PR #2285): MEHO's first database wire-protocol connector — `PostgresConnector` subclasses the generic `Connector` ABC (not `HttpConnector`) and drives `asyncpg` over PostgreSQL protocol v3, registered as `("postgres", "16", "postgres-wire")` plus a `("postgres", "", "")` wildcard fallback in `backend/src/meho_backplane/connectors/postgres/`. Seven typed ops (`postgres.databases`, `schemas`, `tables`, `indexes`, `activity`, `settings`, `query`) register into `endpoint_descriptor` at lifespan; every op is `safety_level=safe` with `requires_approval=False` and no write op exists. Read-only is doubly enforced: sessions open with `default_transaction_read_only=on` (server-side, SQLSTATE 25006 backstop), and free-form `postgres.query` passes a first-keyword allowlist (`SELECT`/`SHOW`/`EXPLAIN`/`WITH`/`TABLE`/`VALUES`) before the wire. `postgres` joins the `TargetCreate.product` enum (CLI OpenAPI snapshot + Go client regenerated).
+- **Loader-wired, dispatches on a fresh boot; optional auth, no TLS yet** (#2236 / PR #2285): credentialled targets resolve `{username, password}` via the live operator-context Vault read (the shared `_shared/vault_creds.load_basic_credentials` helper, called from `connect_read_only` in `session.py` — no stub), and a `secret_ref=None` target takes the net-new trust-auth branch, connecting as role `postgres` with no password; secrets never enter logs or `OperationResult`s. The testcontainers lane `tests/integration/test_connectors_postgres_container.py` proves `fingerprint`, vacuum stats, and the server-side read-only backstop against a real `postgres:16-alpine`. TLS is not wired yet (unencrypted; fine for trust-auth port-forward/in-cluster), and `postgres.activity` omits in-flight query text. No DB migration ships. Establishes the DB-connector shape the mongodb sibling (#2237) reuses; docs at `docs/codebase/connectors-postgres.md`.
+
+### Connectors — read-only MongoDB wire-protocol connector via pymongo async (#2237)
+- **MongoDB read-only wire-protocol connector** (#2237 / PR #2296): `MongoDbConnector` (`backend/src/meho_backplane/connectors/mongodb/`) is MEHO's second wire-protocol (non-HTTP) connector, following the DB-connector shape postgres (#2236) established, driving `pymongo.AsyncMongoClient` (PyMongo's native async API; Motor is deprecated, EOL 2026-05-14) over the Mongo wire protocol on :27017. It registers at import time under the v2 triple `("mongodb", "7", "mongodb-wire")` plus the `("mongodb", "", "")` wildcard, and its lifespan registrar upserts eight typed read ops — `mongodb.databases`, `mongodb.collections`, `mongodb.db_stats`, `mongodb.collection_stats`, `mongodb.indexes`, `mongodb.count`, `mongodb.server_status`, `mongodb.replica_status` — all `safety_level=safe` / `requires_approval=False`, so nothing is approval-gated; as typed ops they catalog and dispatch on a fresh boot with no ingest step. `mongodb` joins the `TargetCreate.product` OpenAPI enum; `cli/api/openapi.json` and the Go client were regenerated.
+- **Read-only by construction; optional auth with the single basic-credentials model live** (#2237 / PR #2296): every op issues only fixed read commands from the closed `MONGO_READ_COMMANDS` allowlist in `session.py` — never a caller-supplied one; no free-form command, `eval`, `$where`, or aggregation-with-`$out` surface exists, and `assert_read_command` fails closed on anything off-list — so there are no write or approval-gated ops at all. A target without a `secret_ref` connects credential-less (`directConnection=True`, bounded 5 s server-selection timeout); a credentialled target resolves `{username, password}` through the live operator-context Vault read (`load_basic_credentials`) and authenticates against the `admin` database, failing closed on an operator-less dispatch path. TLS to the Mongo target is not yet wired. `fingerprint()` reads `buildInfo`/`hello`/slim `serverStatus`; `probe()` returns typed `auth_failed`/`tcp_unreachable`/`connect_failed` reasons. Ships no DB migration; see `docs/codebase/connectors-mongodb.md`.
+
+### Changed — dependency bumps
+
+- Bumped: `fastapi` 0.137.2→0.139.0 (#2167), `uvicorn[standard]` floor →0.50.1 (#2166), `croniter` 6.2.2→6.2.3 (#2164), `pydantic-ai-slim` →2.7.0 with the profile tests migrated to `TypedDict` shapes (#2243); CI/tooling — `actions/cache` (+`/restore`) 5.0.5→6.1.0 (#2096, #2094), `trufflesecurity/trufflehog` 3.95.6→3.95.8 (#2156), `golangci/golangci-lint-action` 9.2.1→9.3.0 (#2157), `docker/setup-buildx-action` 4.1.0→4.2.0 (#2158), `docker/build-push-action` 7.2.0→7.3.0 (#2159), `docker/login-action` 4.2.0→4.4.0 (#2160), `docker/metadata-action` 6.1.0→6.2.0 (#2161), `docker/setup-qemu-action` 4.1.0→4.2.0 (#2162), `astral-sh/setup-uv` 8.2.0→8.3.1 (#2163).
+
 ## [0.20.0] - 2026-07-08
 
 ### Fixed — ssh-family connectors resolve `secret_ref` from Vault

@@ -18,6 +18,17 @@ issue #1384:
 * The published-template "Edit (forks draft)" affordance surfaces the
   in-flight run count pinned to the version.
 
+Task #2241 adds the draft **discard** close-out leg:
+
+* A ``tenant_admin`` can discard a ``draft`` from the UI (the row is deleted)
+  -> empty ``204`` + ``HX-Redirect: /ui/runbooks`` back to the catalog; an
+  ``operator``'s forged POST is 403 and a missing CSRF token is blocked.
+* Discarding a non-draft (400 ``TemplateNotDraftError``) renders the inline
+  alert without deleting; a missing version is 404.
+* The Discard affordance renders only on a ``draft`` detail (never on a
+  ``published`` / ``deprecated`` one), and Deprecate stays hidden on drafts
+  (deprecate-on-draft is engine-illegal).
+
 Suite shape mirrors :mod:`backend.tests.test_ui_runbooks_editor` (the T2
 authoring surface, #1383): a minimal FastAPI app wired with the BFF
 middlewares + the UI surface router, SQLite-backed seeding via the real
@@ -66,7 +77,10 @@ from meho_backplane.runbooks.schemas import (
     PublishTemplateRequest,
     RunbookTemplateBody,
 )
-from meho_backplane.runbooks.service import RunbookTemplateService
+from meho_backplane.runbooks.service import (
+    RunbookTemplateService,
+    TemplateNotFoundError,
+)
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -339,6 +353,25 @@ def _status(tenant_id: uuid.UUID, slug: str, version: int) -> str:
     async def _do() -> str:
         tpl = await RunbookTemplateService().show_template(tenant_id, slug, version=version)
         return tpl.status
+
+    return asyncio.run(_do())
+
+
+def _template_exists(tenant_id: uuid.UUID, slug: str, version: int) -> bool:
+    """Return whether ``(slug, version)`` still resolves for *tenant_id*.
+
+    Discard deletes the row outright, so the post-discard assertion is
+    "the version no longer resolves" -- a subsequent
+    :meth:`RunbookTemplateService.show_template` raises
+    :class:`TemplateNotFoundError` (the same 404 posture a re-discard hits).
+    """
+
+    async def _do() -> bool:
+        try:
+            await RunbookTemplateService().show_template(tenant_id, slug, version=version)
+        except TemplateNotFoundError:
+            return False
+        return True
 
     return asyncio.run(_do())
 
@@ -1220,3 +1253,215 @@ def test_detail_genuine_operator_no_soft_fail_diagnostic() -> None:
     # No soft-fail diagnostic for a cleanly-resolved operator.
     assert 'data-testid="admin-lift-degraded"' not in body
     assert "Admin view could not be resolved" not in body
+
+
+# ---------------------------------------------------------------------------
+# Discard — draft close-out (#2241): admin 204+redirect, operator 403, CSRF,
+# non-draft inline alert, 404, and the draft-only affordance visibility
+# ---------------------------------------------------------------------------
+
+
+def test_discard_draft_admin_deletes_and_redirects() -> None:
+    """A tenant_admin discards a draft -> 204 + HX-Redirect; the row is deleted."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    version = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/rotate-cert/discard",
+            data={"version": str(version)},
+            **_csrf_kwargs(csrf),
+        )
+    finally:
+        mock.stop()
+
+    # The draft is deleted, so there is no fragment to swap -- HTMX is sent back
+    # to the catalog via HX-Redirect on an empty 204 (honoured before the
+    # 204-no-swap rule).
+    assert response.status_code == 204, response.text
+    assert response.headers["HX-Redirect"] == "/ui/runbooks"
+    assert response.text == ""
+    # The row is gone -- a re-discard / detail load would 404.
+    assert not _template_exists(_TENANT_A, "rotate-cert", version)
+
+
+def test_discard_operator_forged_post_forbidden_403() -> None:
+    """An operator's forged discard POST (valid CSRF) is 403 at require_ui_admin."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    version = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _role_session(TenantRole.OPERATOR)
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/rotate-cert/discard",
+            data={"version": str(version)},
+            **_csrf_kwargs(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 403, response.text
+    # The action did not fire -- the draft still exists.
+    assert _template_exists(_TENANT_A, "rotate-cert", version)
+
+
+def test_discard_missing_csrf_blocked() -> None:
+    """A discard POST with no CSRF token is blocked by CSRFMiddleware (not 204)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    version = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        # No CSRF header / cookie supplied.
+        response = client.post(
+            "/ui/runbooks/rotate-cert/discard",
+            data={"version": str(version)},
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 403, response.text
+    # The action did not fire -- the draft still exists.
+    assert _template_exists(_TENANT_A, "rotate-cert", version)
+
+
+def test_discard_non_draft_renders_inline_alert() -> None:
+    """Discarding a published version (400 not-draft) renders an inline alert, no delete."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    version = _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", publish=True)
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/rotate-cert/discard",
+            data={"version": str(version)},
+            **_csrf_kwargs(csrf),
+        )
+    finally:
+        mock.stop()
+
+    # The handler maps the typed 400 to an inline DaisyUI alert (HTTP 200 carries
+    # the re-rendered fragment so HTMX swaps the alert in) rather than deleting.
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "alert-error" in body
+    assert "not draft" in body
+    # The version is untouched -- published versions are retired, never discarded.
+    assert _status(_TENANT_A, "rotate-cert", version) == "published"
+    assert _template_exists(_TENANT_A, "rotate-cert", version)
+
+
+def test_discard_missing_version_404() -> None:
+    """Discarding a (slug, version) that doesn't exist is 404 (stale detail)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        csrf = _csrf_token(session_id)
+        response = client.post(
+            "/ui/runbooks/rotate-cert/discard",
+            data={"version": "99"},
+            **_csrf_kwargs(csrf),
+        )
+    finally:
+        mock.stop()
+
+    assert response.status_code == 404, response.text
+
+
+def test_detail_discard_control_visible_for_admin_draft() -> None:
+    """A draft detail shows the Discard control + confirm dialog; Deprecate stays hidden."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert")
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/rotate-cert")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The Discard affordance + its confirm dialog wired to the discard route.
+    assert "Discard" in body
+    assert 'hx-post="/ui/runbooks/rotate-cert/discard"' in body
+    assert "confirm === 'discard'" in body
+    # AC (#2241): Deprecate stays hidden on a draft -- deprecate-on-draft is
+    # engine-illegal (draft can only be published or discarded), so the
+    # actionable deprecate control must not render.
+    assert 'hx-post="/ui/runbooks/rotate-cert/deprecate"' not in body
+    assert "confirm === 'deprecate'" not in body
+
+
+def test_detail_discard_control_hidden_for_published() -> None:
+    """A published detail does NOT offer Discard (only drafts are discardable)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", publish=True)
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/rotate-cert")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Discard is draft-only; a published version is retired via Deprecate.
+    assert 'hx-post="/ui/runbooks/rotate-cert/discard"' not in body
+    assert "confirm === 'discard'" not in body
+    # Deprecate IS the published-state action (the discriminator holds).
+    assert 'hx-post="/ui/runbooks/rotate-cert/deprecate"' in body
+
+
+def test_detail_discard_control_hidden_for_deprecated() -> None:
+    """A deprecated detail offers no Discard (terminal; nothing to close out)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_template(tenant_id=_TENANT_A, slug="rotate-cert", deprecate=True)
+    session_id, jwks = _admin_session()
+
+    mock = respx.mock(assert_all_called=False)
+    mock.start()
+    try:
+        _mock_discovery_and_jwks(mock, jwks)
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/runbooks/rotate-cert")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert 'hx-post="/ui/runbooks/rotate-cert/discard"' not in body
+    assert "confirm === 'discard'" not in body

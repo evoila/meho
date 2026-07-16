@@ -17,13 +17,15 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// edgeKindVocabulary mirrors the closed 10-kind GraphEdgeKind enum
+// edgeKindVocabulary mirrors the well-known GraphEdgeKind set
 // (backend/src/meho_backplane/db/models.py). The order matches the
 // enum declaration order so the in-help table is stable across
 // releases — the four auto-discoverable kinds first, then the six
-// curated-only kinds. The vocabulary is closed; widening it is a
-// coordinated DB migration + enum + decision-row change per §12 of
-// Initiative #364. Keep this list in lock-step with the enum.
+// curated-only kinds. The vocabulary itself is OPEN (T1 #2534): any
+// lowercase slug (2-63 chars; letters/digits joined by `.`, `_` or
+// `-`) is a valid kind, and this table documents the well-known core
+// the operator should prefer when one fits. Keep this list in
+// lock-step with the backend enum.
 var edgeKindVocabulary = []edgeKindEntry{
 	// Four auto-discoverable kinds — refresh writes these on every probe.
 	{"runs-on", "vm runs-on host, pod runs-on node (physical/scheduling host)"},
@@ -44,13 +46,13 @@ type edgeKindEntry struct {
 	Desc string
 }
 
-// formatEdgeKindTable renders the 10-kind vocabulary as an aligned
+// formatEdgeKindTable renders the well-known kinds as an aligned
 // table block. Used both for the cobra `Long` help (§12 of Initiative
 // #364 requires the table to be discoverable from `--help`) and for
 // the unit tests that assert every name + description is present.
 func formatEdgeKindTable() string {
 	var b strings.Builder
-	b.WriteString("Edge kind vocabulary (closed 10-kind enum, §12 of Initiative #364):\n\n")
+	b.WriteString("Well-known edge kinds (the vocabulary is open — any lowercase slug is valid; prefer these when one fits):\n\n")
 	for _, e := range edgeKindVocabulary {
 		fmt.Fprintf(&b, "  %-18s %s\n", e.Name, e.Desc)
 	}
@@ -90,8 +92,10 @@ func newAnnotateCmd() *cobra.Command {
 			"and the recoverability lever for an incorrectly auto-" +
 			"discovered edge (the §6 supersede flow). Idempotent — a " +
 			"repeat call upserts the same row. Requires tenant_admin.\n\n" +
-			"<kind> must be one of the closed 10-kind vocabulary " +
-			"below. <from> and <to> are node names; pass --from-kind " +
+			"<kind> is any lowercase kind slug (2-63 chars; letters/" +
+			"digits joined by `.`, `_` or `-`) — prefer a well-known " +
+			"kind from the table below when one fits. <from> and <to> " +
+			"are node names; pass --from-kind " +
 			"/ --to-kind when a bare name is ambiguous across node " +
 			"kinds (the backend 409s otherwise).\n\n" +
 			formatEdgeKindTable(),
@@ -141,10 +145,10 @@ type annotateOptions struct {
 
 // buildAnnotateBody wraps the operator-typed annotate inputs into the
 // generated `UnderscoreAnnotateEdgeRequest` body. `Kind` is forwarded
-// as a plain string and validated server-side against the closed
-// 10-kind GraphEdgeKind vocabulary (a 422 with the per-row message is
-// the failure surface the operator sees if they typo the kind, same
-// shape as the pre-migration contract). Endpoint kinds are passed as
+// as a plain string and validated server-side against the open kind
+// slug grammar (a 422 with the pattern + well-known suggestions is
+// the failure surface the operator sees on a malformed kind; a novel
+// well-formed slug passes — T1 #2534). Endpoint kinds are passed as
 // nil pointers when the operator didn't supply --from-kind / --to-kind
 // so the wire shape sees an absent field rather than an empty string
 // (the backend's _EdgeEndpoint model treats absent and empty kind
@@ -152,7 +156,7 @@ type annotateOptions struct {
 func buildAnnotateBody(opts annotateOptions) api.UnderscoreAnnotateEdgeRequest {
 	body := api.UnderscoreAnnotateEdgeRequest{
 		From: api.UnderscoreEdgeEndpoint{Name: opts.From},
-		Kind: api.GraphEdgeKind(opts.Kind),
+		Kind: opts.Kind,
 		To:   api.UnderscoreEdgeEndpoint{Name: opts.To},
 	}
 	if opts.FromKind != "" {

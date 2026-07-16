@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: file-size — pre-existing dispatcher debt (>1200 lines on
-# main before #1601, which adds only an import + a structured-exception catch
-# branch); a split into per-phase modules is its own refactor task, out of
-# scope for the composite_l2_disabled classification fix.
+# code-quality-allow: file-size — pre-existing dispatcher debt (>1200 lines);
+# a split into per-phase modules is its own refactor task, out of scope here.
 
 """``dispatch()`` -- the single entry point every operation flows through.
 
@@ -232,6 +230,7 @@ from meho_backplane.connectors import (
     ResultHandle,
     resolve_connector_or_label,
 )
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, shim_kind
 from meho_backplane.db.models import EndpointDescriptor, PermissionVerdict
 from meho_backplane.operations._audit import (
@@ -248,8 +247,6 @@ from meho_backplane.operations._errors import (
     is_auth_failed_status,
     result_ambiguous_connector,
     result_awaiting_approval,
-    result_composite_l2_disabled,
-    result_composite_l2_missing,
     result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
@@ -257,6 +254,7 @@ from meho_backplane.operations._errors import (
     result_connector_tls_verify_failed,
     result_connector_unsupported,
     result_connector_vault_forbidden,
+    result_connector_vault_write_forbidden,
     result_denied,
     result_handler_unreachable,
     result_invalid_params,
@@ -281,6 +279,7 @@ from meho_backplane.operations._preview import (
     PreviewContext,
     build_permission_preflight,
     build_proposed_effect,
+    describe_preview_provenance,
 )
 from meho_backplane.operations._validate import (
     compute_params_hash,
@@ -288,8 +287,6 @@ from meho_backplane.operations._validate import (
     validate_params,
 )
 from meho_backplane.operations.composite import (
-    CompositeL2DependencyDisabled,
-    CompositeL2DependencyMissing,
     CompositeRecursionLimitExceeded,
     DispatchChild,
     get_dispatch_child,
@@ -356,14 +353,30 @@ type Dispatcher = Callable[..., Awaitable[OperationResult]]
 
 
 def _handler_requires_target(handler_ref: str) -> bool:
-    """True when *handler_ref* names a connector-bound (self-first) handler.
+    """True when *handler_ref* names a handler that reaches its connector via the target.
 
     Keys the no-target guard on **handler shape**, not just
-    ``source_kind`` — a typed/composite handler whose first parameter is
-    ``self`` is a connector method that only binds to its instance
-    *through* a resolved target, so dispatching it with ``target=None``
-    is a usage error (G0.20-T6 #1506). A module-level handler (no
-    ``self``) genuinely needs no target and must keep dispatching with
+    ``source_kind``. Two shapes reach their connector instance *through*
+    the resolved target, so dispatching them with ``target=None`` is a
+    usage error rather than a legitimate module-level no-target call:
+
+    * **Self-first (bound method)** -- a typed/composite handler whose
+      first parameter is ``self`` is a connector method that only binds
+      to its instance through a resolved target (G0.20-T6 #1506).
+    * **``connector``-declaring composite (direct-session, #2251)** -- a
+      composite handler that declares a ``connector`` parameter receives
+      the resolved connector instance the dispatcher built from the
+      target (see
+      :func:`~meho_backplane.operations._branches.dispatch_composite`).
+      With ``target=None`` the resolver produces ``connector_instance=None``,
+      which the handler would then dereference on its first
+      ``connector._get_json`` call and raise an
+      :exc:`AttributeError` deep in the handler body. Catching it here as
+      ``target_required`` gives the operator the same clear
+      omitted-argument diagnosis the self-first shape gets.
+
+    A module-level handler that declares neither (no ``self``, no
+    ``connector``) genuinely needs no target and keeps dispatching with
     ``connector_instance=None``.
 
     Mirrors the first-parameter check :func:`dispatch_typed` uses for its
@@ -379,7 +392,9 @@ def _handler_requires_target(handler_ref: str) -> bool:
     except (ImportError, TypeError):
         return False
     param_names = list(inspect.signature(handler).parameters.keys())
-    return bool(param_names) and param_names[0] == "self"
+    if param_names and param_names[0] == "self":
+        return True
+    return "connector" in param_names
 
 
 async def _resolve_connector_instance(
@@ -555,6 +570,11 @@ async def _run_source_kind_branch(
             target=target,
             params=params,
             dispatch_child=dispatch_child,
+            # Forward the instance the resolver already built for this
+            # composite's target (#2251). ``dispatch_composite`` hands it
+            # to the handler only when the handler declares a ``connector``
+            # parameter, so ``dispatch_child``-only handlers are untouched.
+            connector_instance=connector_instance,
         )
     # The DB CHECK constraint on source_kind prevents this in practice;
     # the explicit raise keeps the dispatcher's error contract honest
@@ -613,9 +633,9 @@ async def _execute_and_audit(
     Wraps the dispatch's success path (steps 6-9) so the main
     :func:`dispatch` body stays a flat sequence of phase calls.
     Failures inside the branch land as ``handler_unreachable`` /
-    ``composite_l2_missing`` / ``connector_error`` :class:`OperationResult`
-    shapes; the audit row still gets written before the return so the
-    operator-visible record is consistent with the dispatcher's reply.
+    ``connector_error`` :class:`OperationResult` shapes; the audit row
+    still gets written before the return so the operator-visible record
+    is consistent with the dispatcher's reply.
 
     G11.4-T2 (#1071) inserts the connector-boundary redaction
     middleware between the handler's raw return and the JSONFlux
@@ -758,12 +778,6 @@ async def _run_branch_with_error_handling(
     Both paths write the audit row before returning so the operator-
     visible record is consistent with the structured failure.
 
-    G0.14-T10 (#1151) adds a structured ``composite_l2_missing`` catch
-    ahead of the generic ``except Exception`` so the vmware composite
-    pre-flight signal (the catalog-command remediation step) survives
-    the audit + reduce pipeline rather than collapsing into the
-    opaque ``connector_error`` envelope.
-
     G0.23-T1 (#1627) adds the symmetric ``connector_unsupported``
     catch for :exc:`NotImplementedError` -- the deliberate "this
     connector doesn't do that" signal (unsupported
@@ -837,53 +851,6 @@ async def _run_branch_with_error_handling(
             duration_ms=duration_ms,
         )
         return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
-    except CompositeL2DependencyDisabled as l2_disabled_exc:
-        # #1601: pre-flight found L2 sub-ops present in the catalog but
-        # disabled. Distinct from ``composite_l2_missing`` below -- the
-        # catalog is already ingested, so the remediation is to re-enable
-        # the op (``edit-op --enable``), not to re-ingest. Structured
-        # ``composite_l2_disabled`` per
-        # ``docs/codebase/error-message-shape.md``; sits ahead of the
-        # generic ``except Exception`` so the structured shape wins. The
-        # disabled / missing catches are disjoint (the pre-flight raises
-        # at most one), so their order relative to each other is moot.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
-        return result_composite_l2_disabled(
-            op_id,
-            l2_disabled_exc.disabled_op_ids,
-            l2_disabled_exc.connector_id,
-            duration_ms,
-        )
-    except CompositeL2DependencyMissing as l2_exc:
-        # G0.14-T10 (#1151): pre-flight detected missing L2 sub-ops.
-        # Structured ``composite_l2_missing`` per
-        # ``docs/codebase/error-message-shape.md`` rather than the
-        # generic ``connector_error`` below. The catch sits ahead of
-        # the generic ``except Exception`` so the structured shape wins.
-        duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
-        return result_composite_l2_missing(
-            op_id, l2_exc.missing_op_ids, l2_exc.catalog_command, duration_ms
-        )
     except NotImplementedError as nie_exc:
         # G0.23-T1 (#1627): a connector raising NotImplementedError is a
         # deliberate "I don't do this" -- VmwareRestConnector.auth_headers
@@ -1042,6 +1009,38 @@ async def _run_branch_with_error_handling(
             result_status="error",
             duration_ms=duration_ms,
         )
+        # #2331: a typed KV-v2 *write* (``vault.kv.put`` / ``patch`` /
+        # ``delete``) that Vault denies is the post-approval write-identity
+        # gap, not a credential-resolution read. The read-oriented
+        # ``connector_vault_forbidden`` below would mis-describe it (it talks
+        # about a target's ``secret_ref`` outside the readable subtree, which
+        # does not apply to a write against the operator's own templated
+        # write path). Emit the write-specific structured cause naming the
+        # data path + acting identity + the §6.1 write stanza instead. The
+        # park-time preflight (#1514) already warns on this at approval time;
+        # this is the post-approval terminal error when the warning went
+        # unheeded (or the reviewer's token lacked the grant the dispatcher's
+        # did).
+        from meho_backplane.connectors.vault.ops import (
+            VAULT_KV_WRITE_CAPABILITIES,
+            vault_kv_write_target_path,
+        )
+
+        if op_id in VAULT_KV_WRITE_CAPABILITIES:
+            try:
+                write_path = vault_kv_write_target_path(params)
+            except (KeyError, ValueError):
+                # ``path`` normalises to nothing (validate_params guarantees
+                # presence, but stay defensive inside the never-raises arm) —
+                # omit the path rather than fault.
+                write_path = None
+            return result_connector_vault_write_forbidden(
+                op_id,
+                vault_exc,
+                duration_ms,
+                write_path=write_path,
+                identity_hint=operator.sub,
+            )
         expected_secret_ref: str | None = None
         target_name = getattr(target, "name", None)
         if target_name:
@@ -1063,6 +1062,35 @@ async def _run_branch_with_error_handling(
             duration_ms,
             expected_secret_ref=expected_secret_ref,
         )
+    except ConnectorAuthError as auth_exc:
+        # #2329: a session *establish* rejected the credential (401/403 at the
+        # login POST, family-wide across the VCF connectors). Before #2329
+        # every establish site wrapped this into a bare ``RuntimeError`` that
+        # fell through to the generic ``connector_error`` arm below, burying
+        # the auth cause in ``extras.exception_message`` -- exactly the opaque
+        # shape #2091 established the structured convention to prevent. Route
+        # it to the same ``connector_auth_failed`` builder the mid-session
+        # recovery path (#2067) reaches from the ``HTTPStatusError`` arm, so
+        # the code is emitted consistently regardless of *when* auth died.
+        # ``ConnectorAuthError`` subclasses ``SessionLoginError`` (a
+        # ``RuntimeError``), so this arm MUST sit ahead of the generic
+        # ``except Exception`` to win.
+        #
+        # #2396: evict any credentials the connector cached before the rejected
+        # login so the operator's restage takes effect on the next dispatch
+        # without a backplane restart (duck-typed; no-op for connectors with no
+        # credential cache).
+        await _evict_connector_credentials(connector_instance, target)
+        duration_ms = await _audit_error(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+        return result_connector_auth_failed(op_id, auth_exc, target, duration_ms)
     except Exception as exc:
         duration_ms = _elapsed_ms(started)
         await audit_and_broadcast_safe(
@@ -1108,6 +1136,37 @@ async def _audit_error(
     return duration_ms
 
 
+async def _evict_connector_credentials(connector_instance: Connector | None, target: Any) -> None:
+    """Evict *connector_instance*'s cached credentials for *target*, if it advertises the hook.
+
+    #2396: the establish-time companion to the #2067 ``invalidate_session``
+    seam. A family of connectors caches the credential bytes it reads from
+    Vault *before* attempting the login (e.g. ``SddcManagerConnector`` writes
+    ``_creds_cache`` ahead of ``POST /v1/tokens``); when that login is rejected
+    the cached bytes are the rejected ones, and ``invalidate_session`` leaves
+    them intact by design (a mid-session 401 means the *token* expired, not the
+    credential). A plain restage into Vault never reaches that in-process
+    cache, so every re-dispatch replayed the rejected bytes until a backplane
+    restart. Popping the cache on the establish-auth failure means the next
+    dispatch re-reads the store and the restage converges with no restart.
+
+    Duck-typed (``getattr``) like ``invalidate_session`` so connectors that
+    re-read credentials on each establish and cache no raw credential (nsx,
+    vmware_rest) or hold no credential cache at all (ProfiledRestConnector)
+    expose no hook and are simply skipped -- absence is harmless.
+
+    Eviction is deliberately *not* followed by a one-shot re-dispatch here (as
+    ``invalidate_session`` is in :func:`_retry_after_session_invalidation`): at
+    establish-auth-failure time the restage has not happened yet, so an
+    immediate retry would only replay the same rejected bytes. Convergence
+    needs the operator's out-of-band restage between dispatches; a single
+    failed attempt to prime the eviction is sufficient and loop-free.
+    """
+    evict = getattr(connector_instance, "invalidate_credentials", None)
+    if callable(evict):
+        await evict(target)
+
+
 def _classify_http_status_error(
     *,
     http_exc: httpx.HTTPStatusError,
@@ -1115,6 +1174,7 @@ def _classify_http_status_error(
     connector_instance: Connector | None,
     target: Any,
     duration_ms: float,
+    relogin: Literal["not_available", "reestablished"] = "not_available",
 ) -> OperationResult:
     """Map an upstream ``HTTPStatusError`` to its structured ``OperationResult``.
 
@@ -1131,6 +1191,13 @@ def _classify_http_status_error(
       :func:`result_connector_auth_failed` (#1804).
     * every other status (404, 429, 5xx) -> the generic
       :func:`result_connector_error`.
+
+    *relogin* (#2400) tells the auth-failed builder which stage produced the
+    status so the cause + summary are truthful. The first-failure caller
+    reaches this arm only when the connector has **no** ``invalidate_session``
+    hook (``not_available`` -- no session stage happened); the retry caller
+    reaches it after a re-login SUCCEEDED and the fresh session was still
+    rejected (``reestablished``). Only the auth-class branch consumes it.
     """
     status_code = http_exc.response.status_code
     if status_code == 403:
@@ -1138,7 +1205,7 @@ def _classify_http_status_error(
     if status_code == 422:
         return result_connector_http_422(op_id, http_exc, duration_ms)
     if is_auth_failed_status(status_code, _profile_expiry_statuses(connector_instance)):
-        return result_connector_auth_failed(op_id, http_exc, target, duration_ms)
+        return result_connector_auth_failed(op_id, http_exc, target, duration_ms, relogin=relogin)
     return result_connector_error(op_id, http_exc, duration_ms)
 
 
@@ -1292,12 +1359,45 @@ async def _retry_after_session_invalidation(
             params_hash=params_hash,
             started=started,
         )
+        # #2400: the re-login SUCCEEDED (invalidate_session ran, the re-dispatch
+        # re-established a fresh session) yet the fresh session was still
+        # rejected -- ``reestablished`` stamps ``session_dispatch_<s>_after_relogin``.
         return _classify_http_status_error(
             http_exc=retry_exc,
             op_id=op_id,
             connector_instance=connector_instance,
             target=target,
             duration_ms=duration_ms,
+            relogin="reestablished",
+        )
+    except ConnectorAuthError as retry_exc:
+        # #2329 convergence with #2067: the one-shot re-dispatch forces a
+        # cold-cache re-establish; if that re-login is itself rejected with a
+        # 401/403, the establish site raises ``ConnectorAuthError``. Classify
+        # it to the same ``connector_auth_failed`` code the first-failure path
+        # uses rather than flattening to ``connector_error`` in the generic
+        # arm below -- so a stale credential surfaced via mid-session recovery
+        # reads identically to one surfaced at first establish.
+        #
+        # #2396: the cold-cache re-establish re-read Vault yet was still
+        # rejected -- the cached credential is stale. Evict it (in addition to
+        # the session token ``invalidate_session`` already dropped) so the next
+        # dispatch after a restage re-reads the store without a restart.
+        await _evict_connector_credentials(connector_instance, target)
+        duration_ms = await _audit_error(
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            started=started,
+        )
+        # #2400: the forced re-login POST was itself rejected -- an establish
+        # failure (``session_establish_<s>``), narrowed by ``attempted_failed``
+        # to the "re-login after a mid-session expiry" sub-case in the summary.
+        return result_connector_auth_failed(
+            op_id, retry_exc, target, duration_ms, relogin="attempted_failed"
         )
     except Exception as retry_exc:
         duration_ms = await _audit_error(
@@ -1636,6 +1736,29 @@ async def _build_proposed_effect(
             base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
         if preflight is not None:
             base["permission_preflight"] = preflight
+            # #2331: promote a will-be-denied preflight to a named,
+            # top-level warning on the envelope so the approval surface can
+            # render a "this write may not land" banner without reaching
+            # into the ``permission_preflight`` sub-dict. Rides #2332's
+            # preview provenance surface (its natural carrier per the task):
+            # a warning, not a gate — refuse-to-park stays off by default,
+            # the approver may know the write policy is landing alongside.
+            if preflight.get("will_be_denied") is True:
+                base["write_capability_warning"] = "connector_identity_may_lack_write"
+        # Stamp the reviewer-facing preview provenance onto every parked
+        # op's envelope (#2332). ``preview_populated`` lets a caller
+        # programmatically refuse to auto-approve an op-identity-only
+        # (blind) request; ``preview_reason`` names WHY a sparse preview is
+        # sparse — a deliberately-redacted credential write vs a connector
+        # that never populated one — so the approval surface can style the
+        # blind case as elevated-risk. Read from the value
+        # :func:`build_proposed_effect` produced (``preview``), so the
+        # identifier-only default that ``base`` may hold is classified
+        # correctly rather than mislabelled populated.
+        preview_populated, preview_reason = describe_preview_provenance(preview, op_id=op_id)
+        base["preview_populated"] = preview_populated
+        if preview_reason is not None:
+            base["preview_reason"] = preview_reason
         # Promote the catalog severity onto every parked op's envelope
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``

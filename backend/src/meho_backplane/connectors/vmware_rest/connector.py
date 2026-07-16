@@ -82,6 +82,7 @@ fall back to v0.2 default" sentinel.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -93,6 +94,7 @@ from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.profile_auth import SESSION_TOKEN_OBJECT_KEY
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vcf_auth import session_establish_auth_error
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -103,6 +105,8 @@ from meho_backplane.connectors.schemas import (
 from meho_backplane.connectors.vmware_rest._mount import (
     SESSION_PATH_LEGACY,
     SESSION_PATH_MODERN,
+    adapt_filter_params,
+    api_mount_for_session_path,
     mounted_path,
 )
 from meho_backplane.connectors.vmware_rest.session import (
@@ -327,6 +331,39 @@ class VmwareRestConnector(HttpConnector):
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         return mounted_path(session_path, path)
 
+    async def adapt_op_query(
+        self,
+        target: VsphereTargetLike,
+        query: Mapping[str, Any] | None,
+        operator: Operator,
+    ) -> dict[str, Any] | None:
+        """Key a ``filter.*`` query bucket off *target*'s live mount flavor.
+
+        The composite sub-call seam (:func:`._read._read_sub_op`) and the
+        typed-op listing legs (:func:`.typed_ops.host_usage_impl`,
+        :func:`.typed_ops_host_network_uplinks.host_network_uplinks_impl`)
+        author their query params in the legacy ``/rest`` style
+        (``filter.datastores``, ``filter.hosts``, ...). Modern ``/api``
+        vCenter 8.x returns HTTP 400 for that prefixed form and expects the
+        bare parameter name; the legacy ``/rest`` mount (and ``vmware/vcsim``)
+        requires the prefix. Resolve the live mount the same way
+        :meth:`mount_op_path` does — off the established session — and
+        delegate the pure key rewrite to :func:`._mount.adapt_filter_params`.
+
+        The session establish is idempotent + cached (mirrors
+        :meth:`mount_op_path`), so calling this right after a
+        ``mount_op_path`` at the same call site costs nothing on the warm
+        path; ``operator`` is forwarded so a cold-cache establish
+        authenticates under the dispatch op's identity. Empty / ``None``
+        query short-circuits to ``None`` (no session establish needed) so
+        an unfiltered listing stays a bare, param-less GET.
+        """
+        if not query:
+            return None
+        await self._session_token(target, operator)
+        session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
+        return adapt_filter_params(api_mount_for_session_path(session_path), query)
+
     async def _session_token(self, target: VsphereTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, establishing one on first use.
 
@@ -435,9 +472,19 @@ class VmwareRestConnector(HttpConnector):
             # one attempted, which distinguishes a real 404 (legacy
             # also missing) from auth/server failure on the modern
             # path.
-            raise RuntimeError(
+            message = (
                 f"vsphere session establish failed for target {target.name!r}: "
                 f"POST {established_path} returned HTTP {exc.response.status_code}"
+            )
+            # #2329: a 401 (rotated/stale password) / 403 (locked-out account)
+            # at establish is an auth-class failure -- raise the structured
+            # ``ConnectorAuthError`` the dispatcher maps to
+            # ``connector_auth_failed`` (restage-the-credential remediation)
+            # instead of the opaque ``connector_error: RuntimeError``. A real
+            # 404 / 5xx keeps the bare RuntimeError shape.
+            raise (
+                session_establish_auth_error(exc, message=message, target=target)
+                or RuntimeError(message)
             ) from exc
         token = _extract_session_token(resp.json(), target.name)
         self._session_tokens[cache_key] = token
@@ -450,6 +497,11 @@ class VmwareRestConnector(HttpConnector):
         )
         return token
 
+    # #2396: vmware_rest deliberately exposes NO ``invalidate_credentials``
+    # hook. It caches only the session token (evicted below); the
+    # service-account credentials are re-read from Vault via ``_session_loader``
+    # on every ``_establish_and_cache_session``, so a restage already converges
+    # on the next cold-session dispatch with no credential cache to evict.
     async def invalidate_session(self, target: VsphereTargetLike) -> None:
         """Evict the cached session token + login path for *target*.
 
@@ -624,6 +676,179 @@ class VmwareRestConnector(HttpConnector):
             target=target,
             params=params,
         )
+
+    async def host_usage(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.usage`` -- per-host CPU/memory load + hardware + maintenance.
+
+        The first vmware **typed** op (``source_kind="typed"``): a bound
+        method the dispatcher binds to this connector instance and invokes
+        with ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        per-host ``summary.quickStats`` / ``summary.hardware`` /
+        ``runtime.inMaintenanceMode`` directly on the connector session via
+        PropertyCollector -- no ``dispatch_child``, no ingested descriptor
+        -- so it works on a fresh boot with zero catalog ingest. The plain
+        REST host summary reports only liveness, not load.
+
+        Delegates to :func:`~meho_backplane.connectors.vmware_rest.typed_ops.host_usage_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{"hosts": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops import host_usage_impl
+
+        return await host_usage_impl(self, operator, target, params)
+
+    async def host_network_uplinks(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.network_uplinks`` -- per-host pnic link state + uplinks.
+
+        A ``source_kind="typed"`` op (#2258, re-shipped from the former
+        ``vmware.composite.host.network_uplinks``): the dispatcher binds
+        this method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Lists
+        hosts then reads ``config.network.pnic`` +
+        ``config.network.proxySwitch`` per host via PropertyCollector
+        directly on the connector session -- no ``dispatch_child``, no
+        ingested descriptor -- so it works on a fresh boot with zero
+        catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks.host_network_uplinks_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{"hosts": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_network_uplinks import (
+            host_network_uplinks_impl,
+        )
+
+        return await host_network_uplinks_impl(self, operator, target, params)
+
+    async def host_vsan_health(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.host.vsan_health`` -- per-cluster vSAN health roll-up.
+
+        A ``source_kind="typed"`` op (#2258, re-shipped from the former
+        ``vmware.composite.host.vsan_health``): the dispatcher binds this
+        method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`).
+        Queries ``VsanQueryVcClusterHealthSummary`` on the
+        ``vsan-cluster-health-system`` singleton scoped to the target
+        cluster's MoRef, directly on the connector session -- no
+        ``dispatch_child``, no ingested descriptor -- so it works on a
+        fresh boot with zero catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health.host_vsan_health_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns
+        ``{"cluster": ..., "overall_health": ..., "groups": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (
+            host_vsan_health_impl,
+        )
+
+        return await host_vsan_health_impl(self, operator, target, params)
+
+    async def vm_info(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.vm.info`` -- single-VM power / guest IP / Tools / heartbeat / usage.
+
+        A ``source_kind="typed"`` incident-triage read (#2300): the
+        dispatcher binds this method to the connector instance and invokes
+        it with ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`).
+        Reads the VirtualMachine managed object's ``runtime.powerState``,
+        ``guest.*``, ``guestHeartbeatStatus``, and
+        ``storage.perDatastoreUsage`` via PropertyCollector directly on the
+        connector session -- no ``dispatch_child``, no ingested descriptor
+        -- so it works on a fresh boot with zero catalog ingest. Addresses
+        the VM by ``vm`` moid or ``name``.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_vm_info.vm_info_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns a single flat row.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_vm_info import vm_info_impl
+
+        return await vm_info_impl(self, operator, target, params)
+
+    async def object_collect(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.object.collect`` -- bounded generic PropertyCollector read.
+
+        A ``source_kind="typed"`` op (#2300): the dispatcher binds this
+        method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        the caller-specified property paths off a single ``(type, moid)``
+        object via PropertyCollector directly on the connector session --
+        no ``dispatch_child``, no ingested descriptor -- so it works on a
+        fresh boot with zero catalog ingest. Bounded by ``parameter_schema``
+        (one object, no traversal, <=64 paths); an oversized request is a
+        structured ``invalid_params`` error before the read is issued.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_object_collect.object_collect_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{type, moid, properties, missing}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_object_collect import (
+            object_collect_impl,
+        )
+
+        return await object_collect_impl(self, operator, target, params)
+
+    async def tasks_recent(
+        self,
+        operator: Operator,
+        target: VsphereTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vmware.tasks.recent`` -- recent vCenter Task objects.
+
+        A ``source_kind="typed"`` op (#2300): the dispatcher binds this
+        method to the connector instance and invokes it with
+        ``(operator, target, params)`` (see
+        :func:`~meho_backplane.operations._branches.dispatch_typed`). Reads
+        ``TaskManager.recentTask`` then ``Task.info`` via PropertyCollector
+        directly on the connector session -- no ``dispatch_child``, no
+        ingested descriptor -- so it works on a fresh boot with zero
+        catalog ingest.
+
+        Delegates to
+        :func:`~meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent.tasks_recent_impl`
+        (imported lazily to keep this module off the typed-ops import at
+        class-load time). Returns ``{"tasks": [...]}``.
+        """
+        from meho_backplane.connectors.vmware_rest.typed_ops_tasks_recent import (
+            tasks_recent_impl,
+        )
+
+        return await tasks_recent_impl(self, operator, target, params)
 
     async def aclose(self) -> None:
         """Revoke every cached session before closing the httpx pool.

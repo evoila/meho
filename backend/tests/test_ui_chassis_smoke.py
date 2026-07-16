@@ -65,6 +65,7 @@ from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.middleware import _redirect_to_login
 from meho_backplane.ui.auth.session_store import (
     EncryptionKeyMissingError,
     create_session,
@@ -76,6 +77,7 @@ from meho_backplane.ui.csrf import (
     CSRFMiddleware,
     _csrf_secret,
     mint_csrf_token,
+    verify_csrf_token,
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
@@ -306,6 +308,81 @@ def test_dashboard_unauthenticated_redirects_to_login() -> None:
 
 
 # ---------------------------------------------------------------------------
+# #161: htmx session-miss returns a client-actionable HX-Redirect, not a
+# bare 302 the XHR follows transparently (silent no-op)
+# ---------------------------------------------------------------------------
+
+
+def test_htmx_unauthenticated_returns_hx_redirect_not_silent_302() -> None:
+    """#161 AC1: an htmx request with no session yields a 204 + ``HX-Redirect``
+    to login (client-actionable), never a bare 302 an XHR silently follows."""
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        response = client.get(
+            "/ui/topology?view=graph",
+            headers={"HX-Request": "true"},
+        )
+    # htmx branch: 204, no Location (so the XHR does not transparently
+    # follow a redirect and swap login HTML into the target slot).
+    assert response.status_code == 204
+    assert "location" not in {k.lower() for k in response.headers}
+    hx_redirect = response.headers["HX-Redirect"]
+    assert hx_redirect.startswith("/ui/auth/login?return_to=")
+    return_to = parse_qs(urlparse(hx_redirect).query)["return_to"][0]
+    assert return_to == "/ui/topology?view=graph"
+
+
+def test_htmx_and_non_htmx_login_return_to_are_byte_identical() -> None:
+    """#161 AC3: for the same original URL, the login target (and its
+    ``return_to``) is byte-identical whether the expired request was htmx
+    (204 + ``HX-Redirect``) or a full-document nav (302 + ``Location``)."""
+    path = "/ui/topology?view=graph&selected=abc"
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        plain = client.get(path)
+        htmx = client.get(path, headers={"HX-Request": "true"})
+    assert plain.status_code == 302
+    assert htmx.status_code == 204
+    # Same login URL string -> same encoded return_to by construction.
+    assert plain.headers["location"] == htmx.headers["HX-Redirect"]
+
+
+def test_htmx_with_valid_session_is_not_hijacked_by_login_redirect() -> None:
+    """#161 invariant (guards the #122 422/2xx contract): the HX-Request
+    branch fires ONLY on a session miss. An authenticated htmx request flows
+    through untouched -- the middleware never converts a live response
+    (a 2xx swap, a 422 form re-render) into a login bounce."""
+    session_id = _seed_session_sync()
+    with respx.mock(assert_all_called=False):
+        client = TestClient(_build_app(), follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        response = client.get("/ui/", headers={"HX-Request": "true"})
+    assert response.status_code == 200
+    assert "HX-Redirect" not in response.headers
+
+
+def test_redirect_to_login_204_omits_content_length_but_302_keeps_it() -> None:
+    """RFC 9110 §8.6: the htmx ``204`` must NOT carry a ``Content-Length``.
+
+    The middleware writes the raw ASGI response (no framework header
+    sanitisation), so a ``Content-Length`` on a ``204`` would reach h11 /
+    a strict proxy and can raise ``LocalProtocolError``. The non-htmx
+    ``302`` (which permits the header) keeps its ``content-length: 0``.
+    """
+    htmx_status, htmx_headers = _redirect_to_login("/ui/topology", is_htmx=True)
+    htmx_names = {name.lower() for name, _ in htmx_headers}
+    assert htmx_status == 204
+    assert b"content-length" not in htmx_names
+    assert b"hx-redirect" in htmx_names
+
+    plain_status, plain_headers = _redirect_to_login("/ui/topology", is_htmx=False)
+    plain_names = {name.lower() for name, _ in plain_headers}
+    assert plain_status == 302
+    assert b"location" in plain_names
+    assert b"content-length" in plain_names
+
+
+# ---------------------------------------------------------------------------
 # AC 2: GET /ui/auth/login -> 302 to Keycloak
 # ---------------------------------------------------------------------------
 
@@ -513,6 +590,61 @@ def test_csrf_accepts_matching_token() -> None:
             headers={CSRF_HEADER_NAME: valid_token},
         )
     assert response.status_code == 200
+
+
+def test_csrf_token_is_session_stable() -> None:
+    """Minting twice for one session returns the identical token (#2345).
+
+    The unified ``/ui`` CSRF pattern derives the token deterministically
+    from the session, so a render that re-mints never rotates the value
+    out from under an already-open modal. Different sessions still get
+    different tokens, and every minted token validates.
+    """
+    session_a = str(_seed_session_sync())
+    session_b = str(uuid.uuid4())
+
+    first = mint_csrf_token(session_a)
+    second = mint_csrf_token(session_a)
+
+    assert first == second, "a re-mint for the same session must be byte-identical"
+    assert mint_csrf_token(session_b) != first, "distinct sessions must not share a token"
+    assert verify_csrf_token(session_a, first)
+    assert verify_csrf_token(session_a, second)
+
+
+def test_csrf_repeated_writes_survive_token_rerender() -> None:
+    """Re-minting the cookie mid-session no longer 403s a modal's echo (#2345).
+
+    Reproduces the "works twice, 403s the 3rd write" drift: a modal was
+    rendered with a token snapshot, then a sibling render re-mints and
+    re-sets the ``meho_csrf`` cookie. With rotate-on-render minting the
+    cookie value would diverge from the modal's echoed header and the
+    write would fail the double-submit match; with the session-stable
+    token the re-mint is identical, so every repeated write still passes.
+    """
+    session_id = _seed_session_sync()
+
+    app = _build_app()
+
+    @app.post("/ui/sentinel-write")
+    async def _sentinel_write() -> dict[str, str]:
+        return {"ok": "true"}
+
+    # The token a modal baked into its ``hx-headers`` echo at open time.
+    modal_echo = mint_csrf_token(str(session_id))
+
+    with respx.mock(assert_all_called=False):
+        client = TestClient(app, follow_redirects=False)
+        client.cookies.set(SESSION_COOKIE_NAME, str(session_id))
+        for _ in range(4):
+            # Each surrounding render re-mints + re-sets the cookie; with a
+            # session-stable token the value never drifts from ``modal_echo``.
+            client.cookies.set(CSRF_COOKIE_NAME, mint_csrf_token(str(session_id)))
+            response = client.post(
+                "/ui/sentinel-write",
+                headers={CSRF_HEADER_NAME: modal_echo},
+            )
+            assert response.status_code == 200
 
 
 def test_csrf_rejects_forged_signature() -> None:

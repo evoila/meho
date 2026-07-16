@@ -8,9 +8,7 @@ T4 (#1224) ships the first L1 composite for the gh-rest connector:
 composites at
 :mod:`meho_backplane.connectors.vmware_rest.composites._read` -- module-
 level async functions that take the dispatcher's composite-branch
-keyword args and route every sub-call through the injected
-``dispatch_child`` (the
-:class:`~meho_backplane.operations.composite.DispatchChild` callable).
+keyword args.
 
 Why module-level functions
 --------------------------
@@ -21,105 +19,106 @@ time. Module-level ``async def`` is the only shape the dispatcher can
 resolve via ``importlib.import_module`` + chained ``getattr`` at first-
 dispatch time.
 
-Why ``dispatch_child`` not direct httpx
----------------------------------------
+Direct-session dispatch (#2255)
+-------------------------------
 
-The four invariants documented on the vmware-rest precedent apply
-verbatim:
+The handler declares a ``connector`` parameter and issues its three
+reads through the resolved :class:`GitHubRestConnector`'s own session
+(``connector._get_json`` against ``connector.mount_op_path``), bypassing
+``endpoint_descriptor`` entirely. This is the #2251 direct-session
+substrate: it makes the composite work on a **fresh deploy with no gh
+catalog ingest** (the #2050 unbacked-composite dead-end is gone), so no
+gh-only backing machinery is needed here.
 
-1. **Audit-tree linkage** -- ``dispatch_child`` binds
-   ``parent_audit_id_var`` so every sub-op's audit row carries the
-   composite parent's id.
-2. **Bounded recursion** -- ``composite_depth_var`` enforces
-   ``Settings.composite_max_depth``.
-3. **Policy + broadcast** -- the dispatcher's policy gate and broadcast
-   publish run on every dispatched sub-op.
-4. **Param validation** -- each sub-op's ``parameter_schema`` validates
-   inbound params at dispatch time.
+Taking the direct path deliberately drops two of the four guarantees the
+old ``dispatch_child`` seam carried (documented on the vmware-rest
+precedent's "four reasons" note) and relocates the other two:
+
+* **Bounded recursion is moot** -- a direct session call cannot re-enter
+  the dispatcher, so there is no recursion to bound.
+* **Per-sub-op param validation goes away** -- the handler builds each
+  request in code from the already-schema-validated top-level params, so
+  re-validating against a persisted ingested schema is redundant.
+* **Audit-tree linkage** collapses to the top-level op's own audit row.
+* **Per-sub-op policy-gate + broadcast is evaded** -- acceptable for a
+  **read** composite (the top-level op is already gated); write
+  composites keep this question open (Initiative #2249).
 
 Partial-failure tolerance
 -------------------------
 
 The composite degrades gracefully on the two *secondary* sub-calls:
 
-* If ``GET:/repos/{owner}/{repo}/commits/{ref}/check-runs`` fails (e.g.
-  the repo has no checks configured -> 404), the composite returns
+* If ``/repos/{owner}/{repo}/commits/{ref}/check-runs`` fails (e.g. the
+  repo has no checks configured -> 404), the composite returns
   ``checks=None`` + ``checks_status="unknown"`` and continues.
-* If ``GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews`` fails,
-  the composite returns ``reviews=None`` + ``review_status="unknown"``
-  and continues.
+* If ``/repos/{owner}/{repo}/pulls/{pull_number}/reviews`` fails, the
+  composite returns ``reviews=None`` + ``review_status="unknown"`` and
+  continues.
 
-The *primary* sub-call (``GET:/repos/{owner}/{repo}/pulls/
-{pull_number}``) is non-optional -- the composite cannot extract the
-head SHA without it, so a failure there raises ``RuntimeError`` and the
-dispatcher's outer exception branch wraps it as ``connector_error``.
+The *primary* sub-call (``/repos/{owner}/{repo}/pulls/{pull_number}``)
+is non-optional -- the composite cannot extract the head SHA without it,
+so a failure there propagates (an ``httpx.HTTPStatusError`` or a
+``RuntimeError`` on a malformed payload) and the dispatcher's outer
+exception branch wraps it as ``connector_error``.
 
 The graceful-degradation design matches the issue body's acceptance
-criterion: "if ``gh.pr.get_checks`` 404s (no checks configured for the
-repo), the composite still returns the PR + reviews + ``checks: null``
-cleanly -- does NOT bail mid-flight."
+criterion: "if the checks call 404s (no checks configured for the repo),
+the composite still returns the PR + reviews + ``checks: null`` cleanly
+-- does NOT bail mid-flight."
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import httpx
+import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors import OperationResult
-from meho_backplane.connectors.github.composites._preflight import (
-    preflight_l2_dependencies,
-)
-from meho_backplane.operations.composite import DispatchChild
+
+if TYPE_CHECKING:
+    from meho_backplane.connectors.github.connector import GitHubRestConnector
 
 __all__ = ["pr_status_summary_composite"]
 
+_log = structlog.get_logger(__name__)
 
-# Connector-id constant: matches what the connector registers via
-# ``register_connector_v2(product="gh", version="3", impl_id="gh-rest")``
-# in the package ``__init__``. The version slot is the digit-prefix
-# ``"3"`` (the parse_connector_id regex's constraint), and the
-# operator-visible "v3" label lives in the catalog YAML and in docs.
-_CONNECTOR_ID = "gh-rest-3"
-
-# L2 sub-op-ids. The ingest pipeline emits op_ids as ``METHOD:/path``
-# strings (see :func:`~meho_backplane.operations.ingest.openapi.parse_openapi`).
-_OP_GET_PULL = "GET:/repos/{owner}/{repo}/pulls/{pull_number}"
-_OP_GET_CHECK_RUNS = "GET:/repos/{owner}/{repo}/commits/{ref}/check-runs"
-_OP_LIST_REVIEWS = "GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
-
-# Composite op_id constants -- used by the preflight cache key. Mirrors
-# the vmware-rest module's pattern so the test-side coverage assertion
-# (every registered composite has both a sub-op_id tuple and a cache-key
-# constant) can read them by name.
-_COMPOSITE_OP_ID_PR_STATUS_SUMMARY = "gh.composite.pr_status_summary"
-
-# Per-composite sub-op-id tuple consumed by the L2 pre-flight check.
-# Ordered to match the dispatch sequence (PR first, then the parallel
-# pair) for readability when the exception payload surfaces the missing
-# ops in declaration order.
-_SUB_OPS_PR_STATUS_SUMMARY: tuple[str, ...] = (
-    _OP_GET_PULL,
-    _OP_GET_CHECK_RUNS,
-    _OP_LIST_REVIEWS,
-)
+# GitHub REST wire paths, keyed with ``str.format`` placeholders. The
+# connector's ``_base_url`` mounts them under ``https://api.github.com``;
+# ``mount_op_path`` is identity for github today (a future GHES override
+# would remap here, matching the vmware-rest ``/api`` vs ``/rest`` mount).
+_PR_PATH = "/repos/{owner}/{repo}/pulls/{pull_number}"
+_CHECK_RUNS_PATH = "/repos/{owner}/{repo}/commits/{ref}/check-runs"
+_REVIEWS_PATH = "/repos/{owner}/{repo}/pulls/{pull_number}/reviews"
 
 
-def _require_ok(result: OperationResult) -> Any:
-    """Return :attr:`OperationResult.result` or raise on a non-OK status.
+async def _optional_get(
+    connector: GitHubRestConnector,
+    target: Any,
+    path: str,
+    operator: Operator,
+) -> Any:
+    """Return the GET payload for *path*, or ``None`` when the call fails.
 
-    Used for the *primary* sub-call only. The composite cannot proceed
-    without the PR payload (the head SHA drives the checks call), so
-    the all-or-nothing semantics are appropriate here -- the dispatcher
-    wraps the raised ``RuntimeError`` into a ``connector_error`` for
-    the composite parent.
+    Wraps a *secondary* sub-call (checks / reviews) so a 404 (the repo
+    has no checks configured), a rate-limit, or a transport error
+    degrades to ``None`` -- the composite then surfaces
+    ``checks_status`` / ``review_status`` of ``"unknown"`` rather than
+    aborting the whole envelope. The primary PR sub-call does NOT go
+    through this helper: its failure propagates to the dispatcher's
+    ``connector_error`` branch (the head SHA is load-bearing).
     """
-    if result.status != "ok":
-        raise RuntimeError(
-            f"composite sub-op {result.op_id!r} returned status="
-            f"{result.status!r}: {result.error or '<no error message>'}"
+    try:
+        return await connector._get_json(target, path, operator=operator)
+    except (httpx.HTTPError, OSError) as exc:
+        _log.info(
+            "pr_status_summary_secondary_subcall_failed",
+            path=path,
+            error=f"{type(exc).__name__}: {exc}",
         )
-    return result.result
+        return None
 
 
 def _summarize_checks(checks_payload: Any) -> str:
@@ -276,104 +275,18 @@ def _extract_head_sha(pr_payload: Any) -> str | None:
     return sha if isinstance(sha, str) and sha else None
 
 
-async def pr_status_summary_composite(
-    *,
-    operator: Operator,
-    target: Any,
-    params: dict[str, Any],
-    dispatch_child: DispatchChild,
+def _assemble_envelope(
+    pr_payload: Any,
+    checks_payload: Any,
+    reviews_payload: Any,
 ) -> dict[str, Any]:
-    """Aggregate PR metadata + checks + reviews + mergeable in one envelope.
+    """Build the seven-key PR-status envelope from the three sub-call payloads.
 
-    Op-id: ``gh.composite.pr_status_summary``.
-
-    Sub-ops dispatched:
-
-    1. ``GET:/repos/{owner}/{repo}/pulls/{pull_number}`` -- the PR
-       payload. Required; failure raises ``RuntimeError``.
-    2. ``GET:/repos/{owner}/{repo}/commits/{ref}/check-runs`` against
-       the head SHA from step 1. Optional; failure surfaces as
-       ``checks=None`` + ``checks_status="unknown"``.
-    3. ``GET:/repos/{owner}/{repo}/pulls/{pull_number}/reviews`` --
-       reviews list. Optional; failure surfaces as ``reviews=None`` +
-       ``review_status="unknown"``.
-
-    Steps 2 and 3 fire in parallel via :func:`asyncio.gather` -- they
-    are independent (neither depends on the other's output) and run
-    over the same authenticated session, so a parallel fanout halves
-    the operator-perceived latency vs. sequential dispatch.
-
-    Returns
-    -------
-    dict[str, Any]
-        ``{"pr": <PR payload>, "checks": <check-runs payload | None>,
-        "reviews": <reviews list | None>, "mergeable": <bool | None>,
-        "mergeable_state": <str | None>, "checks_status": <enum>,
-        "review_status": <enum>}``. See
-        :data:`schemas.PR_STATUS_SUMMARY_RESPONSE_SCHEMA` for the
-        per-key contract.
-
-    Raises
-    ------
-    CompositeL2DependencyMissing
-        Pre-flight detected that at least one of the three L2 sub-ops
-        is not registered in ``endpoint_descriptor``. The exception
-        carries the missing op-ids + the catalog command to run.
-        Surfaced to the operator as a structured
-        ``composite_l2_missing`` :class:`OperationResult` by the
-        dispatcher's exception branch.
-    RuntimeError
-        The primary PR sub-call failed, or the PR payload was malformed
-        (no head SHA extractable). Wrapped into a ``connector_error``
-        :class:`OperationResult` by the dispatcher's outer exception
-        branch.
+    ``mergeable`` / ``mergeable_state`` pass through from the PR payload
+    verbatim (GitHub's tri-state); the two ``*_status`` summaries collapse
+    the checks / reviews arrays into agent-actionable enums, degrading to
+    ``"unknown"`` when the corresponding secondary read failed (``None``).
     """
-    await preflight_l2_dependencies(
-        composite_op_id=_COMPOSITE_OP_ID_PR_STATUS_SUMMARY,
-        sub_op_ids=_SUB_OPS_PR_STATUS_SUMMARY,
-        connector_id=_CONNECTOR_ID,
-        tenant_id=operator.tenant_id,
-    )
-    owner = params["owner"]
-    repo = params["repo"]
-    pull_number = params["pull_number"]
-    pr_params = {"owner": owner, "repo": repo, "pull_number": pull_number}
-
-    pr_payload = _require_ok(
-        await dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_GET_PULL,
-            params=pr_params,
-        )
-    )
-    head_sha = _extract_head_sha(pr_payload)
-    if head_sha is None:
-        # The PR call succeeded but the response shape is unexpected.
-        # Surface as RuntimeError rather than silently using a stale /
-        # empty SHA; the dispatcher's outer branch wraps it cleanly.
-        raise RuntimeError(
-            f"pr_status_summary: PR payload from {_OP_GET_PULL!r} did not carry a head.sha "
-            f"string for {owner}/{repo}#{pull_number}; got payload type "
-            f"{type(pr_payload).__name__}"
-        )
-
-    checks_result, reviews_result = await asyncio.gather(
-        dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_GET_CHECK_RUNS,
-            params={"owner": owner, "repo": repo, "ref": head_sha},
-        ),
-        dispatch_child(
-            connector_id=_CONNECTOR_ID,
-            op_id=_OP_LIST_REVIEWS,
-            params=pr_params,
-        ),
-        return_exceptions=False,
-    )
-
-    checks_payload: Any = checks_result.result if checks_result.status == "ok" else None
-    reviews_payload: Any = reviews_result.result if reviews_result.status == "ok" else None
-
     pr_dict = pr_payload if isinstance(pr_payload, dict) else {}
     return {
         "pr": pr_payload,
@@ -388,3 +301,96 @@ async def pr_status_summary_composite(
             _summarize_reviews(reviews_payload) if reviews_payload is not None else "unknown"
         ),
     }
+
+
+async def pr_status_summary_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: GitHubRestConnector,
+) -> dict[str, Any]:
+    """Aggregate PR metadata + checks + reviews + mergeable in one envelope.
+
+    Op-id: ``gh.composite.pr_status_summary``.
+
+    Reads (all through the injected ``connector``'s own session, #2255):
+
+    1. ``GET /repos/{owner}/{repo}/pulls/{pull_number}`` -- the PR
+       payload. Required; failure propagates as ``connector_error``.
+    2. ``GET /repos/{owner}/{repo}/commits/{ref}/check-runs`` against
+       the head SHA from step 1. Optional; failure surfaces as
+       ``checks=None`` + ``checks_status="unknown"``.
+    3. ``GET /repos/{owner}/{repo}/pulls/{pull_number}/reviews`` --
+       reviews list. Optional; failure surfaces as ``reviews=None`` +
+       ``review_status="unknown"``.
+
+    Steps 2 and 3 fire in parallel via :func:`asyncio.gather` -- they
+    are independent (neither depends on the other's output) and run
+    over the same authenticated session, so a parallel fanout halves
+    the operator-perceived latency vs. sequential dispatch.
+
+    Each path is routed through :meth:`connector.mount_op_path` before
+    the wire call. That override is identity for github.com today; a
+    future GHES connector remaps the mount there, matching the
+    vmware-rest ``/api`` vs ``/rest`` precedent.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"pr": <PR payload>, "checks": <check-runs payload | None>,
+        "reviews": <reviews list | None>, "mergeable": <bool | None>,
+        "mergeable_state": <str | None>, "checks_status": <enum>,
+        "review_status": <enum>}``. See
+        :data:`schemas.PR_STATUS_SUMMARY_RESPONSE_SCHEMA` for the
+        per-key contract.
+
+    Raises
+    ------
+    httpx.HTTPStatusError
+        The primary PR sub-call returned a non-2xx status (e.g. 404 /
+        401). Mapped by the dispatcher's outer exception branch to the
+        matching structured :class:`OperationResult` (auth-class
+        statuses to their specific shapes, everything else to
+        ``connector_error``).
+    RuntimeError
+        The PR payload was malformed (no head SHA extractable). Wrapped
+        into a ``connector_error`` :class:`OperationResult` by the
+        dispatcher's outer exception branch.
+    """
+    owner = params["owner"]
+    repo = params["repo"]
+    pull_number = params["pull_number"]
+
+    pr_path = await connector.mount_op_path(
+        target,
+        _PR_PATH.format(owner=owner, repo=repo, pull_number=pull_number),
+        operator,
+    )
+    pr_payload = await connector._get_json(target, pr_path, operator=operator)
+    head_sha = _extract_head_sha(pr_payload)
+    if head_sha is None:
+        # The PR call succeeded but the response shape is unexpected.
+        # Surface as RuntimeError rather than silently using a stale /
+        # empty SHA; the dispatcher's outer branch wraps it cleanly.
+        raise RuntimeError(
+            f"pr_status_summary: PR payload from {pr_path!r} did not carry a head.sha "
+            f"string for {owner}/{repo}#{pull_number}; got payload type "
+            f"{type(pr_payload).__name__}"
+        )
+
+    checks_path = await connector.mount_op_path(
+        target,
+        _CHECK_RUNS_PATH.format(owner=owner, repo=repo, ref=head_sha),
+        operator,
+    )
+    reviews_path = await connector.mount_op_path(
+        target,
+        _REVIEWS_PATH.format(owner=owner, repo=repo, pull_number=pull_number),
+        operator,
+    )
+    checks_payload, reviews_payload = await asyncio.gather(
+        _optional_get(connector, target, checks_path, operator),
+        _optional_get(connector, target, reviews_path, operator),
+    )
+    return _assemble_envelope(pr_payload, checks_payload, reviews_payload)

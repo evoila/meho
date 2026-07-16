@@ -77,6 +77,20 @@ const (
 	Yes      ConfirmVerifyResponseAnswer = "yes"
 )
 
+// Defines values for ConnectorListItemKind.
+const (
+	ConnectorListItemKindIngestedShim          ConnectorListItemKind = "ingested-shim"
+	ConnectorListItemKindProfiled              ConnectorListItemKind = "profiled"
+	ConnectorListItemKindProfiledButUnreviewed ConnectorListItemKind = "profiled-but-unreviewed"
+	ConnectorListItemKindTyped                 ConnectorListItemKind = "typed"
+)
+
+// Defines values for ConnectorListItemState.
+const (
+	Ingested   ConnectorListItemState = "ingested"
+	Registered ConnectorListItemState = "registered"
+)
+
 // Defines values for ConnectorReviewPayloadKind.
 const (
 	ConnectorReviewPayloadKindIngestedShim          ConnectorReviewPayloadKind = "ingested-shim"
@@ -156,18 +170,10 @@ const (
 	EvalResultOverallVerdictYellow EvalResultOverallVerdict = "yellow"
 )
 
-// Defines values for GraphEdgeKind.
+// Defines values for GatewayResultBodyOutcome.
 const (
-	AuthenticatesVia GraphEdgeKind = "authenticates-via"
-	BackedUpBy       GraphEdgeKind = "backed-up-by"
-	BelongsTo        GraphEdgeKind = "belongs-to"
-	DependsOn        GraphEdgeKind = "depends-on"
-	Mounts           GraphEdgeKind = "mounts"
-	PolicyBinds      GraphEdgeKind = "policy-binds"
-	ReplicatesTo     GraphEdgeKind = "replicates-to"
-	RoutesThrough    GraphEdgeKind = "routes-through"
-	RoutesVia        GraphEdgeKind = "routes-via"
-	RunsOn           GraphEdgeKind = "runs-on"
+	GatewayResultBodyOutcomeFailed    GatewayResultBodyOutcome = "failed"
+	GatewayResultBodyOutcomeSucceeded GatewayResultBodyOutcome = "succeeded"
 )
 
 // Defines values for IngestJobHandleStatus.
@@ -184,6 +190,16 @@ const (
 	IngestJobStatusResponseStatusFailed    IngestJobStatusResponseStatus = "failed"
 	IngestJobStatusResponseStatusRunning   IngestJobStatusResponseStatus = "running"
 	IngestJobStatusResponseStatusSucceeded IngestJobStatusResponseStatus = "succeeded"
+)
+
+// Defines values for IngestRequestAuthScheme.
+const (
+	Basic             IngestRequestAuthScheme = "basic"
+	Oauth2Mint        IngestRequestAuthScheme = "oauth2_mint"
+	SessionLogin      IngestRequestAuthScheme = "session_login"
+	SessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
+	SessionLoginToken IngestRequestAuthScheme = "session_login_token"
+	StaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
 // Defines values for KindFilterValue.
@@ -207,6 +223,14 @@ const (
 	AutoExecute   PermissionVerdict = "auto-execute"
 	Deny          PermissionVerdict = "deny"
 	NeedsApproval PermissionVerdict = "needs-approval"
+)
+
+// Defines values for PrincipalKind.
+const (
+	PrincipalKindAgent   PrincipalKind = "agent"
+	PrincipalKindRunner  PrincipalKind = "runner"
+	PrincipalKindService PrincipalKind = "service"
+	PrincipalKindUser    PrincipalKind = "user"
 )
 
 // Defines values for RetireChecklistReportOverallVerdict.
@@ -322,24 +346,31 @@ const (
 
 // Defines values for TargetCreateProduct.
 const (
-	Argocd   TargetCreateProduct = "argocd"
-	Bind9    TargetCreateProduct = "bind9"
-	Fleet    TargetCreateProduct = "fleet"
-	Gcloud   TargetCreateProduct = "gcloud"
-	Gh       TargetCreateProduct = "gh"
-	Harbor   TargetCreateProduct = "harbor"
-	Hetzner  TargetCreateProduct = "hetzner"
-	Holodeck TargetCreateProduct = "holodeck"
-	K8s      TargetCreateProduct = "k8s"
-	Keycloak TargetCreateProduct = "keycloak"
-	Nsx      TargetCreateProduct = "nsx"
-	Pfsense  TargetCreateProduct = "pfsense"
-	Sddc     TargetCreateProduct = "sddc"
-	Vault    TargetCreateProduct = "vault"
-	Vcfa     TargetCreateProduct = "vcfa"
-	Vmware   TargetCreateProduct = "vmware"
-	Vrli     TargetCreateProduct = "vrli"
-	Vrops    TargetCreateProduct = "vrops"
+	Argocd     TargetCreateProduct = "argocd"
+	Bind9      TargetCreateProduct = "bind9"
+	Fleet      TargetCreateProduct = "fleet"
+	Gcloud     TargetCreateProduct = "gcloud"
+	Gh         TargetCreateProduct = "gh"
+	Harbor     TargetCreateProduct = "harbor"
+	Hetzner    TargetCreateProduct = "hetzner"
+	Holodeck   TargetCreateProduct = "holodeck"
+	K8s        TargetCreateProduct = "k8s"
+	Keycloak   TargetCreateProduct = "keycloak"
+	Loki       TargetCreateProduct = "loki"
+	Mongodb    TargetCreateProduct = "mongodb"
+	Nsx        TargetCreateProduct = "nsx"
+	Pfsense    TargetCreateProduct = "pfsense"
+	Postgres   TargetCreateProduct = "postgres"
+	Prometheus TargetCreateProduct = "prometheus"
+	Proxmox    TargetCreateProduct = "proxmox"
+	Rabbitmq   TargetCreateProduct = "rabbitmq"
+	Rke2       TargetCreateProduct = "rke2"
+	Sddc       TargetCreateProduct = "sddc"
+	Vault      TargetCreateProduct = "vault"
+	Vcfa       TargetCreateProduct = "vcfa"
+	Vmware     TargetCreateProduct = "vmware"
+	Vrli       TargetCreateProduct = "vrli"
+	Vrops      TargetCreateProduct = "vrops"
 )
 
 // Defines values for TemplateSummaryStatus.
@@ -347,6 +378,13 @@ const (
 	TemplateSummaryStatusDeprecated TemplateSummaryStatus = "deprecated"
 	TemplateSummaryStatusDraft      TemplateSummaryStatus = "draft"
 	TemplateSummaryStatusPublished  TemplateSummaryStatus = "published"
+)
+
+// Defines values for TenantRole.
+const (
+	Operator    TenantRole = "operator"
+	ReadOnly    TenantRole = "read_only"
+	TenantAdmin TenantRole = "tenant_admin"
 )
 
 // Defines values for TopologyDiffEntryChangeKind.
@@ -410,10 +448,10 @@ const (
 
 // Defines values for ListEndpointApiV1ConnectorsGetParamsStatus.
 const (
-	All      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
-	Disabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
-	Enabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
-	Staged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
+	ListEndpointApiV1ConnectorsGetParamsStatusAll      ListEndpointApiV1ConnectorsGetParamsStatus = "all"
+	ListEndpointApiV1ConnectorsGetParamsStatusDisabled ListEndpointApiV1ConnectorsGetParamsStatus = "disabled"
+	ListEndpointApiV1ConnectorsGetParamsStatusEnabled  ListEndpointApiV1ConnectorsGetParamsStatus = "enabled"
+	ListEndpointApiV1ConnectorsGetParamsStatusStaged   ListEndpointApiV1ConnectorsGetParamsStatus = "staged"
 )
 
 // Defines values for EnableReadsEndpointApiV1ConnectorsConnectorIdEnableReadsPostParamsPrefer.
@@ -424,8 +462,8 @@ const (
 
 // Defines values for GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer.
 const (
-	Builtin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
-	Tenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferBuiltin GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "builtin"
+	GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPreferTenant  GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer = "tenant"
 )
 
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
@@ -481,9 +519,9 @@ const (
 
 // Defines values for RunbooksRunsUiRunbooksRunsGetParamsStatus.
 const (
-	RunbooksRunsUiRunbooksRunsGetParamsStatusAbandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
-	RunbooksRunsUiRunbooksRunsGetParamsStatusCompleted  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
-	RunbooksRunsUiRunbooksRunsGetParamsStatusInProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
+	Abandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
+	Completed  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
+	InProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
 )
 
 // AbortRunRequest Request body for “meho.runbook.abort“ -- terminate the run mid-flight.
@@ -1047,6 +1085,17 @@ type AskDocsResponse struct {
 	Citations []map[string]interface{} `json:"citations"`
 }
 
+// AssignmentDocument Full-document “PUT“ body: replaces a runner's assignment wholesale.
+type AssignmentDocument struct {
+	Items *[]AuthoredCheckItem `json:"items,omitempty"`
+}
+
+// AssignmentDocumentResponse Echo returned by “PUT“: the stored authored document + runner name.
+type AssignmentDocumentResponse struct {
+	Items  []AuthoredCheckItem `json:"items"`
+	Runner string              `json:"runner"`
+}
+
 // AuditEntry One row of the audit query result.
 //
 // Field-to-column mapping (see module docstring for the substrate
@@ -1188,6 +1237,23 @@ type AuthConfigResponse struct {
 
 // AuthModel Per-target identity model per v0.1-spec L447-454.
 type AuthModel string
+
+// AuthoredCheckItem One operator-authored check in a runner's assignment document.
+//
+// The runner-facing “GET“ materialises each of these into a wire
+// :class:`~meho_backplane.runner.wire.RunnerWorkItem` at request time:
+// “target_name“ is resolved to a live target descriptor, “op“ to the
+// resolved connector's enabled descriptor (yielding “handler_ref“ +
+// “safety_level“ + the “(product, version, impl_id)“ key). “op“ is
+// the connector-side op id (e.g. “"vsphere.host.list"“); the connector
+// triple is derived from the resolved target, not authored here.
+type AuthoredCheckItem struct {
+	CadenceSeconds int                     `json:"cadence_seconds"`
+	CheckRef       string                  `json:"check_ref"`
+	Op             string                  `json:"op"`
+	Params         *map[string]interface{} `json:"params,omitempty"`
+	TargetName     string                  `json:"target_name"`
+}
 
 // BackendReadiness Typed result of a :meth:`SearchBackend.probe` call (T6 #1555).
 //
@@ -1426,6 +1492,11 @@ type BodyRetrievalUsageUiRetrievalUsagePost struct {
 
 // BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost defines model for Body_runbooks_deprecate_ui_runbooks__slug__deprecate_post.
 type BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost struct {
+	Version *string `json:"version,omitempty"`
+}
+
+// BodyRunbooksDiscardUiRunbooksSlugDiscardPost defines model for Body_runbooks_discard_ui_runbooks__slug__discard_post.
+type BodyRunbooksDiscardUiRunbooksSlugDiscardPost struct {
 	Version *string `json:"version,omitempty"`
 }
 
@@ -2289,6 +2360,18 @@ type BroadcastOverrideRead struct {
 	UpdatedAt    time.Time          `json:"updated_at"`
 }
 
+// BroadcastOverridesListResponse Unified list envelope for “GET /api/v1/broadcast/overrides“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. This listing is not
+// cursor-paginated, so “next_cursor“ is always “None“ but present
+// so the endpoint can grow keyset pagination later without a further
+// breaking change.
+type BroadcastOverridesListResponse struct {
+	Items      []BroadcastOverrideRead `json:"items"`
+	NextCursor *string                 `json:"next_cursor"`
+}
+
 // BudgetStatus Preamble budget status for the operator's tenant.
 //
 // Surfaced as a sub-document on every “GET /api/v1/conventions“
@@ -2480,6 +2563,143 @@ type ConfirmVerifyResponse struct {
 // ConfirmVerifyResponseAnswer defines model for ConfirmVerifyResponse.Answer.
 type ConfirmVerifyResponseAnswer string
 
+// ConnectorListItem One row in the “GET /api/v1/connectors“ response.
+//
+// Projects :class:`OperationGroup` aggregation. “connector_id“ is
+// the operator-facing identifier (“"<impl_id>-<version>"“);
+// “product“ / “version“ / “impl_id“ are the parsed triple.
+//
+// “tenant_id“ is “None“ for built-in / global connectors and a
+// UUID for tenant-curated ones. “group_count“ totals the rows
+// visible to the caller; the three “*_group_count“ fields split
+// that total by “review_status“ so operators can spot
+// review-queue backlog at a glance.
+//
+// “operation_count“ is the sum of operations across all groups
+// in scope; “enabled_operation_count“ (G0.23-T5 / #1636) is the
+// subset of those rows whose per-op “is_enabled“ flag is set --
+// the operations the dispatcher will actually resolve
+// (dispatchable), vs ingested-but-disabled rows that only surface
+// in review. The naming mirrors the “*_group_count“ family above:
+// the unprefixed field is the total, the “enabled_“-prefixed
+// field is the subset. Kept additive (rather than renaming the
+// total to “total_operation_count“) so existing consumers of
+// “operation_count“ -- the CLI's “listEntry“ decode shape and
+// every “meho.connector.list“ client -- keep working unchanged.
+// Mind the axis difference between the two “enabled_*“ fields:
+// “enabled_group_count“ buckets groups by *review_status*, while
+// “enabled_operation_count“ counts the per-op “is_enabled“ bit
+// (the dispatchability flag that survives connector-level
+// enable/disable cycles via operator overrides). Useful for the
+// CLI's “meho connector list --status staged“ summary view and
+// for an LLM browsing the catalog: “vmware-rest-9.0“ ingests
+// ~2,211 ops of which only a fraction are enabled, and before the
+// split nothing on the row said which of the two numbers
+// “operation_count“ was.
+//
+// “state“ (G0.9.1-T1 / #773) distinguishes *dispatchable* rows
+// (“"ingested"“ — DB-backed, resolves through the dispatcher) from
+// *registered-but-empty* rows (“"registered"“ — v2-registry entries
+// without descriptor rows yet). Rows that wouldn't round-trip
+// through the resolver at all (stale-impl_id DB rows, v2 entries
+// whose registry product disagrees with the parser's derived
+// product) are filtered out before the response is built;
+// “connector_id“s the listing emits are guaranteed to resolve
+// through :func:`~meho_backplane.operations._lookup.connector_exists`
+// when “state == "ingested"“, and explicitly labelled
+// not-yet-dispatchable when “state == "registered"“. Defaults to
+// “"ingested"“ so existing call sites (tests, MCP fakes)
+// construct rows without breakage.
+//
+// “next_step“ (G0.13-T3 / #1133) is the self-describing hint that
+// closes the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:
+// half-registered connectors fail lookup with no in-product hint
+// about what verb closes the workflow). It is a :class:`NextStep`
+// object on “state="registered"“ rows and “None“ on
+// “state="ingested"“ rows (no operator action remains for an
+// ingested connector). The hint is computed against the curated
+// connector-spec catalog (#743): when the catalog carries an entry
+// for the registry's “(product, version)“ the verb points at
+// “meho connector ingest --catalog ...“; otherwise it points at
+// the manual-mode flags. Defaults to “None“ so existing
+// construction call sites (tests, MCP fakes) continue to compile
+// without explicit assignment.
+//
+// “kind“ (G0.28-T6 / #1979) is the authoring-mode discriminator —
+// typed / ingested-shim / profiled / profiled-but-unreviewed — an
+// **additive** sibling to “state“ (which is deliberately left
+// unchanged: it is the documented dispatch-resolution state machine
+// with its own consumers). “dispatchable“ is the boolean roll-up of
+// the same projection: “True“ for “typed“ and “profiled“,
+// “False“ for “ingested-shim“ and “profiled-but-unreviewed“.
+// Together they let the operator console / CLI distinguish a working
+// profiled connector from a dead bare shim, which neither “state“
+// nor the count fields could express. Both default to the bare-shim
+// reading (“kind="ingested-shim"“, “dispatchable=False“) so
+// existing construction call sites (tests, MCP fakes) keep working;
+// the listing always sets them explicitly. See
+// :data:`ConnectorAuthoringKind`.
+type ConnectorListItem struct {
+	ConnectorId           string                 `json:"connector_id"`
+	DisabledGroupCount    int                    `json:"disabled_group_count"`
+	Dispatchable          *bool                  `json:"dispatchable,omitempty"`
+	EnabledGroupCount     int                    `json:"enabled_group_count"`
+	EnabledOperationCount int                    `json:"enabled_operation_count"`
+	GroupCount            int                    `json:"group_count"`
+	ImplId                string                 `json:"impl_id"`
+	Kind                  *ConnectorListItemKind `json:"kind,omitempty"`
+
+	// NextStep Self-describing in-product hint pointing at the verb that closes the workflow.
+	//
+	// Surfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`
+	// is ``"registered"`` (G0.13-T3 / #1133). An ``"ingested"`` row sets
+	// :attr:`ConnectorListItem.next_step` to ``None`` because the dispatcher
+	// already resolves operations against it -- there is nothing left for the
+	// operator to do.
+	//
+	// Two ``verb`` shapes ship:
+	//
+	// * ``meho connector ingest --catalog <product>/<version>`` -- when the
+	//   connector-spec catalog (G0.7-T8 / #743) carries an entry for the
+	//   registry's ``(product, version)``. The operator copies the verb,
+	//   ``meho connector ingest`` looks up the upstream spec URL, and
+	//   dispatchability follows after operator review.
+	// * ``meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>``
+	//   -- when the catalog has no entry. The ``rationale`` makes the
+	//   missing-catalog branch explicit so the operator knows they need
+	//   to source the OpenAPI spec themselves.
+	//
+	// Frozen for the same reason every wire shape in this module is frozen:
+	// responses are read-only and any in-place mutation should surface as a
+	// Pydantic error rather than a silently-modified payload.
+	NextStep         *NextStep               `json:"next_step,omitempty"`
+	OperationCount   int                     `json:"operation_count"`
+	Product          string                  `json:"product"`
+	StagedGroupCount int                     `json:"staged_group_count"`
+	State            *ConnectorListItemState `json:"state,omitempty"`
+	TenantId         *openapi_types.UUID     `json:"tenant_id"`
+	Version          string                  `json:"version"`
+}
+
+// ConnectorListItemKind defines model for ConnectorListItem.Kind.
+type ConnectorListItemKind string
+
+// ConnectorListItemState defines model for ConnectorListItem.State.
+type ConnectorListItemState string
+
+// ConnectorListResponse Unified list envelope for “GET /api/v1/connectors“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. This listing is not
+// cursor-paginated, so “next_cursor“ is always “None“; the field
+// is present so a client reads it without a “KeyError“ guard and so
+// the endpoint can grow keyset pagination later without a further
+// breaking change.
+type ConnectorListResponse struct {
+	Items      []ConnectorListItem `json:"items"`
+	NextCursor *string             `json:"next_cursor"`
+}
+
 // ConnectorReviewGroup One group within the review payload.
 //
 // Carries the LLM-generated group metadata
@@ -2550,20 +2770,51 @@ type ConnectorReviewOp struct {
 // (the Goal flags secret-handling sensitivity). See
 // :data:`~meho_backplane.operations.ingest.api_schemas.ConnectorAuthoringKind`.
 type ConnectorReviewPayload struct {
-	ConnectorId      string                      `json:"connector_id"`
-	Dispatchable     *bool                       `json:"dispatchable,omitempty"`
-	Groups           []ConnectorReviewGroup      `json:"groups"`
-	ImplId           string                      `json:"impl_id"`
-	Kind             *ConnectorReviewPayloadKind `json:"kind,omitempty"`
-	Product          string                      `json:"product"`
-	TenantId         *openapi_types.UUID         `json:"tenant_id"`
-	TotalOpCount     int                         `json:"total_op_count"`
-	UngroupedOpCount *int                        `json:"ungrouped_op_count,omitempty"`
-	Version          string                      `json:"version"`
+	ConnectorId      string                       `json:"connector_id"`
+	Dispatchable     *bool                        `json:"dispatchable,omitempty"`
+	Groups           []ConnectorReviewGroup       `json:"groups"`
+	ImplId           string                       `json:"impl_id"`
+	Kind             *ConnectorReviewPayloadKind  `json:"kind,omitempty"`
+	Product          string                       `json:"product"`
+	Provenance       *[]ConnectorReviewProvenance `json:"provenance,omitempty"`
+	TenantId         *openapi_types.UUID          `json:"tenant_id"`
+	TotalOpCount     int                          `json:"total_op_count"`
+	UngroupedOpCount *int                         `json:"ungrouped_op_count,omitempty"`
+	Version          string                       `json:"version"`
 }
 
 // ConnectorReviewPayloadKind defines model for ConnectorReviewPayload.Kind.
 type ConnectorReviewPayloadKind string
+
+// ConnectorReviewProvenance Provenance for one spec ingested under this connector (#2291).
+//
+// Surfaces the durable
+// :class:`~meho_backplane.db.models.SpecProvenance` record so an
+// operator reviewing a connector can tell a vendor artifact from a
+// hand-mutated one before enabling reads:
+//
+//   - “uri“ — the audit label as presented at ingest
+//     (“spec:“ / “https://“ / “file:///“ / “docs:“ form).
+//   - “sha256“ — hex digest over the raw spec bytes. Two ingests of
+//     the *same* label with different digests mean the content changed.
+//   - “origin“ — “fetched“ (https GET) vs “inline“ (operator
+//     upload) vs “shipped“ (MEHO-authored catalog data). An inline
+//     upload labelled with a vendor URL is thus distinguishable from a
+//     genuine fetch of that URL.
+//   - “operator_sub“ — who ingested it (“None“ for boot-time
+//     shipped ingests with no operator).
+//   - “ingested_at“ — when the provenance row was last written.
+//
+// Connectors ingested before this table landed have no provenance
+// rows; the surfaces render that as "unknown (pre-provenance)" rather
+// than a fabricated record.
+type ConnectorReviewProvenance struct {
+	IngestedAt  time.Time `json:"ingested_at"`
+	OperatorSub *string   `json:"operator_sub"`
+	Origin      string    `json:"origin"`
+	Sha256      string    `json:"sha256"`
+	Uri         string    `json:"uri"`
+}
 
 // ConnectorSpecEntry One curated “(product, version)“ -> spec-source mapping.
 //
@@ -2743,22 +2994,23 @@ type ConventionHistoryEntry struct {
 // demand and are exempt from the over-budget 422 rejection.
 type ConventionKind string
 
-// ConventionListResponse Response envelope for “GET /api/v1/conventions“.
+// ConventionListResponse Unified list envelope for “GET /api/v1/conventions“.
 //
-// Wrapped in “{"entries": [...]}“ so a future cursor / total
-// field can land non-breakingly. Same shape the kb + memory list
-// surfaces adopted; consistency across the v0.2 read APIs keeps
-// the CLI's list renderer one switch statement, not three.
+// The `{items, next_cursor, ...sidecars}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. “items“ carries the
+// :class:`ConventionSummary` rows; “next_cursor“ is always “None“
+// (the listing is not cursor-paginated) but present so the endpoint
+// can grow pagination later without a further breaking change.
 //
-// “budget_status“ (T7 #1094) carries the preamble budget
-// arithmetic for the operator's tenant. Always populated; the
-// underlying :func:`~meho_backplane.conventions.preamble.assemble_preamble`
-// call is one indexed SELECT + an in-memory pack -- cheap enough
-// to run on every list request. Exposing it on the list
-// response (rather than on a separate
-// “/api/v1/conventions/budget-status“ route the issue body
-// explicitly rejects) keeps the CLI / dashboard consumer paths
-// to one HTTP round-trip.
+// “budget_status“ (T7 #1094) is the §2 top-level *sidecar*: it
+// carries the preamble budget arithmetic for the operator's tenant.
+// Always populated; the underlying
+// :func:`~meho_backplane.conventions.preamble.assemble_preamble` call
+// is one indexed SELECT + an in-memory pack -- cheap enough to run on
+// every list request. Exposing it on the list response (rather than on
+// a separate “/api/v1/conventions/budget-status“ route the issue
+// body explicitly rejects) keeps the CLI / dashboard consumer paths to
+// one HTTP round-trip.
 type ConventionListResponse struct {
 	// BudgetStatus Preamble budget status for the operator's tenant.
 	//
@@ -2806,7 +3058,8 @@ type ConventionListResponse struct {
 	//   knows exactly which conventions never reach an agent
 	//   session.
 	BudgetStatus BudgetStatus        `json:"budget_status"`
-	Entries      []ConventionSummary `json:"entries"`
+	Items        []ConventionSummary `json:"items"`
+	NextCursor   *string             `json:"next_cursor"`
 }
 
 // ConventionSummary List-row representation returned by “GET /api/v1/conventions“.
@@ -2999,13 +3252,15 @@ type DecideRequestBody struct {
 
 // DecideResponseBody Response for a successful operator decision.
 //
-// The “dispatch_*“ fields are populated only when “/decide“
-// re-dispatched the approved op — i.e. an approved **direct** operator
-// op (no “run_id“) whose stored params drove a fresh execution
-// (#1503). They stay “None“ on a rejection and on an approved
-// **agent-run** request (“run_id“ set), where the in-process agent
-// runtime owns the re-dispatch and “/decide“ only records the
-// decision (avoiding a double execution).
+// The “dispatch_*“ fields are populated whenever “/decide“ attempted
+// the approved op's re-dispatch — for **every** approved request now, not
+// only direct operator ops (#2293). “dispatch_status“ is “"ok"“ when
+// “/decide“ won the exactly-one-resumer claim and executed (the direct
+// op, or the run-bound fallback when the in-process waiter was gone), or
+// “"already_resumed"“ when the in-process agent waiter won the claim
+// first (the run-bound waiter-alive case) — a benign "executed elsewhere"
+// that keeps the approver from double-dispatching. They stay “None“
+// only on a rejection.
 type DecideResponseBody struct {
 	ApprovalRequestId openapi_types.UUID                 `json:"approval_request_id"`
 	Decision          string                             `json:"decision"`
@@ -3469,53 +3724,38 @@ type ForkInfo struct {
 	Version          int    `json:"version"`
 }
 
-// GraphEdgeKind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
-//
-// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-// operator-curated cross-system kinds that auto-discovery cannot infer
-// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-// is closed -- widening it is a coordinated DB + model change (new
-// migration, new enum member, new decision row) so the v0.2.next
-// policy-engine grammar parsing “kind“ stays portable across tenants.
-//
-// The four auto-discoverable kinds (refresh service writes these on
-// every probe-derived edge):
-//
-//   - :attr:`RUNS_ON` -- “vm“ “runs-on“ “host“, “pod“ “runs-on“
-//     “node“: the physical / scheduling host of a workload.
-//   - :attr:`MOUNTS` -- “vm“ “mounts“ “datastore“, “pod“ “mounts“
-//     “volume“: storage attachment.
-//   - :attr:`ROUTES_THROUGH` -- “ingress“ “routes-through“ “service“,
-//     “service“ “routes-through“ “pod“: network routing path.
-//   - :attr:`BELONGS_TO` -- “pod“ “belongs-to“ “namespace“, “vm“
-//     “belongs-to“ “host“ (logical group membership).
-//
-// The six curated-only kinds (operator-asserted via
-// “meho topology annotate“; cannot be derived from probes):
-//
-//   - :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
-//     (e.g. “k8s-sa-foo“ -> “vault-role-bar“). The canonical
-//     cross-system example.
-//   - :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
-//     “service-X“ -> “database-Y“ where neither side knows about the
-//     other in its own probe output).
-//   - :attr:`REPLICATES_TO` -- operator-asserted replication relationship
-//     between two storage / database nodes.
-//   - :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
-//   - :attr:`ROUTES_VIA` -- operator-asserted network path through an
-//     intermediary (e.g., “vm-A“ -> “firewall-X“ -> “vm-B“ when the
-//     probes only see point-to-point reachability).
-//   - :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
-//     connector boundaries (e.g., “kubernetes-namespace-prod“ ->
-//     “vault-policy-prod-read“).
-//
-// Mirrors the closed-enum pattern :class:`AuthModel`
-// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-// :class:`enum.StrEnum` paired with a portable DB “CHECK“ constraint,
-// both moved in lock-step by one Alembic migration so the enum and the
-// constraint cannot drift.
-type GraphEdgeKind string
+// GatewayCommandEnvelope The claimed-command envelope returned by “GET .../next“ (200).
+type GatewayCommandEnvelope struct {
+	Id               openapi_types.UUID      `json:"id"`
+	OpId             string                  `json:"op_id"`
+	Params           map[string]interface{}  `json:"params"`
+	TargetDescriptor *map[string]interface{} `json:"target_descriptor"`
+}
+
+// GatewayResultAck Response for a successful “.../result“ report (200).
+type GatewayResultAck struct {
+	CommandId   openapi_types.UUID `json:"command_id"`
+	CompletedAt string             `json:"completed_at"`
+	Status      string             `json:"status"`
+}
+
+// GatewayResultBody POST body for “.../result“ — the runner's outcome report.
+type GatewayResultBody struct {
+	// CommandId The delivered command's id.
+	CommandId openapi_types.UUID `json:"command_id"`
+
+	// Error Failure summary (for a 'failed' outcome).
+	Error *string `json:"error"`
+
+	// Outcome Terminal outcome to record for the command.
+	Outcome GatewayResultBodyOutcome `json:"outcome"`
+
+	// Result Structured success payload (for a 'succeeded' outcome).
+	Result *map[string]interface{} `json:"result"`
+}
+
+// GatewayResultBodyOutcome Terminal outcome to record for the command.
+type GatewayResultBodyOutcome string
 
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
@@ -3591,13 +3831,21 @@ type HealthResponse struct {
 	// it for downstream Vault forward-auth only.
 	Operator OperatorIdentity `json:"operator"`
 
-	// Vault Vault federation-chain status.
+	// Vault Federation-chain status for the deployment's credential backend.
 	//
-	// ``reachable`` is true when the OIDC login succeeded (TCP + TLS +
-	// JWT forward all worked). ``read_ok`` is true when the test secret
-	// read succeeded against the resulting Vault token. ``detail`` carries
-	// a short structured string for the CLI to render on failure paths —
-	// never an unbounded exception message.
+	// The field is named ``vault`` on :class:`HealthResponse` for wire
+	// compatibility (it predates the credential-backend seam), but the value
+	// reflects whichever backend ``config.credentialBackend`` selects: the
+	// Vault OIDC-login + KV read on a Vault install, or the configured
+	// backend's probe-secret read (``gsm:<project>/<probe-secret>`` on a GSM
+	// install) through the credential-backend seam.
+	//
+	// ``reachable`` is true when the backend was reached — on Vault, the OIDC
+	// login succeeded (TCP + TLS + JWT forward); on a seam backend, the store
+	// was addressable (config resolved, backend registered). ``read_ok`` is
+	// true when the probe secret read succeeded. ``detail`` carries a short
+	// structured string for the CLI to render on failure paths — a class name
+	// or error code, never an unbounded exception message or a secret value.
 	Vault VaultStatus `json:"vault"`
 }
 
@@ -3774,7 +4022,13 @@ type IngestKbRequest struct {
 // and the operator only finds out at review-time.
 type IngestRequest struct {
 	// Async Run the pipeline off the request thread (202 + job handle); set to false for the legacy blocking response. Ignored when dry_run=true.
-	Async                      *bool         `json:"async,omitempty"`
+	Async *bool `json:"async,omitempty"`
+
+	// AuthScheme Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config — selection only. Mutually exclusive with catalog_entry.
+	AuthScheme *IngestRequestAuthScheme `json:"auth_scheme"`
+
+	// AuthSecretFields Optional override of the secret-field NAMES the auth_scheme reads at dispatch (never the values — those stay in the target's secret_ref). Omit for the per-scheme defaults. Requires auth_scheme.
+	AuthSecretFields           *[]string     `json:"auth_secret_fields"`
 	BaseUrl                    *string       `json:"base_url"`
 	CatalogEntry               *string       `json:"catalog_entry"`
 	DryRun                     *bool         `json:"dry_run,omitempty"`
@@ -3787,6 +4041,9 @@ type IngestRequest struct {
 	TenantId *openapi_types.UUID `json:"tenant_id"`
 	Version  *string             `json:"version"`
 }
+
+// IngestRequestAuthScheme Named auth scheme (closed catalog) for a non-catalog ingest. When set, the connector is stamped as a dispatchable profiled connector (staged behind review, never auto-enabled) instead of a non-dispatchable bare shim. Unknown / reserved schemes are rejected (422). No free-form auth config — selection only. Mutually exclusive with catalog_entry.
+type IngestRequestAuthScheme string
 
 // IngestResponse Response shape for “POST /api/v1/connectors/ingest“.
 //
@@ -4063,6 +4320,49 @@ type MemoryListResponse struct {
 // the :class:`~meho_backplane.auth.operator.TenantRole` convention.
 type MemoryScope string
 
+// MyRecentPage Unified list envelope for “GET /api/v1/audit/my-recent“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. It carries the same
+// audit rows and forward-only cursor as :class:`AuditQueryResult`, but
+// names the list field “items“ (not “rows“) so the reference list
+// endpoints agree on one envelope. The sibling audit-query endpoints
+// (“/query“ / “/who-touched“ / “/by-work-ref“) keep the
+// :class:`AuditQueryResult` “rows“ shape and are out of the §2
+// reference set.
+type MyRecentPage struct {
+	Items      []AuditEntry `json:"items"`
+	NextCursor *string      `json:"next_cursor"`
+}
+
+// NextStep Self-describing in-product hint pointing at the verb that closes the workflow.
+//
+// Surfaced on :class:`ConnectorListItem` rows whose :attr:`~ConnectorListItem.state`
+// is “"registered"“ (G0.13-T3 / #1133). An “"ingested"“ row sets
+// :attr:`ConnectorListItem.next_step` to “None“ because the dispatcher
+// already resolves operations against it -- there is nothing left for the
+// operator to do.
+//
+// Two “verb“ shapes ship:
+//
+//   - “meho connector ingest --catalog <product>/<version>“ -- when the
+//     connector-spec catalog (G0.7-T8 / #743) carries an entry for the
+//     registry's “(product, version)“. The operator copies the verb,
+//     “meho connector ingest“ looks up the upstream spec URL, and
+//     dispatchability follows after operator review.
+//   - “meho connector ingest --product <p> --version <v> --impl <i> --spec <uri>“
+//     -- when the catalog has no entry. The “rationale“ makes the
+//     missing-catalog branch explicit so the operator knows they need
+//     to source the OpenAPI spec themselves.
+//
+// Frozen for the same reason every wire shape in this module is frozen:
+// responses are read-only and any in-place mutation should surface as a
+// Pydantic error rather than a silently-modified payload.
+type NextStep struct {
+	Rationale string `json:"rationale"`
+	Verb      string `json:"verb"`
+}
+
 // NextStepRequest Request body for “meho.runbook.next“ -- advance the run.
 //
 // :attr:`last_verified` is the caller's *claim* that the previous
@@ -4283,6 +4583,42 @@ type PreviewOperationBody_Target struct {
 	union json.RawMessage
 }
 
+// PrincipalKind Discriminator that distinguishes what authenticated this request.
+//
+// G11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,
+// audit, and the approval gate can tell a human operator apart from
+// a service account or an agent without re-examining the JWT payload.
+//
+// Values are the literal strings the Keycloak “principal_kind“
+// protocol mapper emits on the agent client (or that the v0.3 token
+// exchange layer will emit). Existing tokens that carry no
+// “principal_kind“ claim default to :attr:`USER` — the graceful-
+// fallback contract means all pre-G11.2 human-operator flows are
+// unaffected.
+//
+// Members:
+//
+//   - :attr:`USER` — a human operator authenticated via the interactive
+//     device-code flow. Default when no claim is present.
+//   - :attr:`SERVICE` — a non-interactive service account client that
+//     uses client-credentials flow but is not a MEHO-managed agent.
+//   - :attr:`AGENT` — a Keycloak client registered by
+//     “meho agent-principal register“; the token carries
+//     “principal_kind=agent“. G11.2-T2 (RFC 8693 delegation) and
+//     G11.2-T3 (per-principal permission model) branch on this value
+//     to apply agent-specific authz.
+//   - :attr:`RUNNER` — a satellite runner's service principal registered
+//     by “meho runner-principal register“ (Initiative #2415, #2502);
+//     the token carries “principal_kind=runner“ plus a “runner_id“
+//     claim. A runner is a dumb, push-only executor with a **read-only**
+//     credential scope: its token is fail-closed 403'd on every
+//     authenticated route outside the gateway allowlist prefixes
+//     (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)
+//     and on the MCP surface. The unforgeable discriminator is what the
+//     negative cage keys on, so a runner client missing any other mapper
+//     still cannot roam the read API.
+type PrincipalKind string
+
 // PromoteBody POST body for “/api/v1/memory/{scope}/{slug}/promote“.
 //
 // G5.2-T4 (#626) of Initiative #374. Two required-ish fields plus a
@@ -4499,6 +4835,60 @@ type ReplayNode struct {
 	TenantId         *openapi_types.UUID    `json:"tenant_id"`
 	Ts               time.Time              `json:"ts"`
 	WorkRef          *string                `json:"work_ref"`
+}
+
+// ResolvedTargetDescriptor Centrally-resolved target attributes a connector handler reads.
+//
+// The runner has no local target table, so the central resolver
+// (:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises
+// the fields a handler duck-reads off a “Target“ row and ships them
+// on the assignment. It carries the resolver-read attributes
+// (“product“ / “fingerprint“ / “version“ / “preferred_impl_id“)
+// the tie-break ladder consumes **and** the connection-routing set
+// (“host“ / “port“ / “fqdn“ / “secret_ref“ / “auth_model“ /
+// TLS flags) the HTTP adapter reads, so on the runner the descriptor
+// feeds :func:`~meho_backplane.connectors.resolver.resolve_connector`
+// and the connector adapters directly — no DB session, no second
+// resolution mechanism.
+//
+// The full field set is moulded on the central
+// :class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the
+// same identification + connection-routing projection of the
+// “Target“ row, minus the server-managed timestamps and the
+// operator-authored “notes“ (neither drives connector routing).
+//
+// Credential discipline: “secret_ref“ is the **reference** the runner
+// resolves outbound under its own read-only scope; no credential value
+// is ever embedded (the runner spools assignments on disk, so a value
+// would durably persist — a locked no-durable-artifact violation).
+type ResolvedTargetDescriptor struct {
+	Aliases         *[]string               `json:"aliases,omitempty"`
+	AuthModel       *string                 `json:"auth_model,omitempty"`
+	Extras          *map[string]interface{} `json:"extras,omitempty"`
+	Fingerprint     *map[string]interface{} `json:"fingerprint"`
+	Fqdn            *string                 `json:"fqdn"`
+	Host            string                  `json:"host"`
+	Id              openapi_types.UUID      `json:"id"`
+	Name            string                  `json:"name"`
+	Port            *int                    `json:"port"`
+	PreferredImplId *string                 `json:"preferred_impl_id"`
+	Product         string                  `json:"product"`
+	SecretRef       *string                 `json:"secret_ref"`
+	TenantId        openapi_types.UUID      `json:"tenant_id"`
+	TlsCaPin        *string                 `json:"tls_ca_pin"`
+	TlsServerName   *string                 `json:"tls_server_name"`
+	VerifyTls       *bool                   `json:"verify_tls,omitempty"`
+	Version         *string                 `json:"version"`
+}
+
+// ResultIngestResponse “POST /checks/results“ response — idempotency accounting.
+//
+// “accepted“ counts rows newly persisted; “duplicates“ counts rows
+// whose “result_uid“ was already ingested for this runner (a re-posted
+// spool batch). “accepted + duplicates“ equals the batch length.
+type ResultIngestResponse struct {
+	Accepted   int `json:"accepted"`
+	Duplicates int `json:"duplicates"`
 }
 
 // RetireChecklistReport Top-level shape returned by :func:`compute_retire_checklist`.
@@ -4718,16 +5108,18 @@ type RunSummaryCurrentStepState string
 // RunSummaryState defines model for RunSummary.State.
 type RunSummaryState string
 
-// RunbookListRunsResponse Response envelope for “GET /api/v1/runbooks/runs“.
+// RunbookListRunsResponse Unified list envelope for “GET /api/v1/runbooks/runs“.
 //
-// Wrapped in “{"runs": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- same shape
-// :mod:`meho_backplane.api.v1.runbook_templates` adopted for its
-// list response. Per-entry shape is the substrate's
-// :class:`~meho_backplane.runbooks.runs_schemas.RunSummary` (no
-// step body content, only the run-level coordinates).
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. Per-entry shape is the
+// substrate's :class:`~meho_backplane.runbooks.runs_schemas.RunSummary`
+// (no step body content, only the run-level coordinates). The listing
+// is not cursor-paginated (“limit“ truncates), so “next_cursor“ is
+// always “None“ but present so the endpoint can grow pagination later
+// without a further breaking change.
 type RunbookListRunsResponse struct {
-	Runs []RunSummary `json:"runs"`
+	Items      []RunSummary `json:"items"`
+	NextCursor *string      `json:"next_cursor"`
 }
 
 // RunbookTemplateBody The author-facing template shape stored in “runbook_templates.steps“.
@@ -4755,14 +5147,202 @@ type RunbookTemplateBody_Steps_Item struct {
 	union json.RawMessage
 }
 
-// RunbookTemplateListResponse Response envelope for “GET /api/v1/runbooks/templates“.
+// RunbookTemplateListResponse Unified list envelope for “GET /api/v1/runbooks/templates“.
 //
-// Wrapped in “{"templates": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- same shape :mod:`meho_backplane.api.v1.kb`
-// adopted for its list response. Per-entry shape is the substrate's
-// :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. Per-entry shape is the
+// substrate's :class:`~meho_backplane.runbooks.schemas.TemplateSummary`.
+// The listing is not cursor-paginated (“limit“ truncates), so
+// “next_cursor“ is always “None“ but present so the endpoint can
+// grow pagination later without a further breaking change.
 type RunbookTemplateListResponse struct {
-	Templates []TemplateSummary `json:"templates"`
+	Items      []TemplateSummary `json:"items"`
+	NextCursor *string           `json:"next_cursor"`
+}
+
+// RunnerAssignment The runner's current work assignment, fetched each tick.
+//
+// “assignment_version“ is an opaque digest the runner echoes back as
+// “known_version“ so central can answer an unchanged assignment with a
+// “304“ (see :meth:`RunnerClient.fetch_assignment`).
+type RunnerAssignment struct {
+	AssignmentVersion string            `json:"assignment_version"`
+	Items             *[]RunnerWorkItem `json:"items,omitempty"`
+}
+
+// RunnerPrincipal Principal context an executed op runs under, carried on each item.
+//
+// Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
+// on the runner without a JWT: the runner never sees a bearer token for
+// the acting principal (the op was already authorized centrally), so the
+// reconstructed operator's “raw_jwt“ is empty.
+type RunnerPrincipal struct {
+	// PrincipalKind Discriminator that distinguishes what authenticated this request.
+	//
+	// G11.2-T1 (#815) adds this field to :class:`Operator` so dispatch,
+	// audit, and the approval gate can tell a human operator apart from
+	// a service account or an agent without re-examining the JWT payload.
+	//
+	// Values are the literal strings the Keycloak ``principal_kind``
+	// protocol mapper emits on the agent client (or that the v0.3 token
+	// exchange layer will emit). Existing tokens that carry no
+	// ``principal_kind`` claim default to :attr:`USER` — the graceful-
+	// fallback contract means all pre-G11.2 human-operator flows are
+	// unaffected.
+	//
+	// Members:
+	//
+	// * :attr:`USER` — a human operator authenticated via the interactive
+	//   device-code flow. Default when no claim is present.
+	// * :attr:`SERVICE` — a non-interactive service account client that
+	//   uses client-credentials flow but is not a MEHO-managed agent.
+	// * :attr:`AGENT` — a Keycloak client registered by
+	//   ``meho agent-principal register``; the token carries
+	//   ``principal_kind=agent``. G11.2-T2 (RFC 8693 delegation) and
+	//   G11.2-T3 (per-principal permission model) branch on this value
+	//   to apply agent-specific authz.
+	// * :attr:`RUNNER` — a satellite runner's service principal registered
+	//   by ``meho runner-principal register`` (Initiative #2415, #2502);
+	//   the token carries ``principal_kind=runner`` plus a ``runner_id``
+	//   claim. A runner is a dumb, push-only executor with a **read-only**
+	//   credential scope: its token is fail-closed 403'd on every
+	//   authenticated route outside the gateway allowlist prefixes
+	//   (:data:`~meho_backplane.middleware.RUNNER_ALLOWED_PATH_PREFIXES`)
+	//   and on the MCP surface. The unforgeable discriminator is what the
+	//   negative cage keys on, so a runner client missing any other mapper
+	//   still cannot roam the read API.
+	PrincipalKind *PrincipalKind     `json:"principal_kind,omitempty"`
+	Sub           string             `json:"sub"`
+	TenantId      openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
+}
+
+// RunnerPrincipalCreate Input shape for :meth:`RunnerPrincipalService.register`.
+type RunnerPrincipalCreate struct {
+	Name     string  `json:"name"`
+	OwnerSub *string `json:"owner_sub"`
+}
+
+// RunnerPrincipalListResponse Response envelope for “GET /api/v1/runner-principals“.
+type RunnerPrincipalListResponse struct {
+	Principals []RunnerPrincipalRead `json:"principals"`
+}
+
+// RunnerPrincipalRead Row representation returned by every accessor.
+type RunnerPrincipalRead struct {
+	CreatedAt          time.Time          `json:"created_at"`
+	CreatedBySub       string             `json:"created_by_sub"`
+	Id                 openapi_types.UUID `json:"id"`
+	KeycloakClientId   string             `json:"keycloak_client_id"`
+	KeycloakInternalId string             `json:"keycloak_internal_id"`
+	Name               string             `json:"name"`
+	OwnerSub           string             `json:"owner_sub"`
+	Revoked            bool               `json:"revoked"`
+	TenantId           openapi_types.UUID `json:"tenant_id"`
+	UpdatedAt          time.Time          `json:"updated_at"`
+}
+
+// RunnerResult The outcome of executing one :class:`RunnerWorkItem`.
+//
+// “result_uid“ is generated on the runner (a uuid4 hex) so central
+// ingest can deduplicate spool re-posts idempotently — a batch written
+// to the retry spool carries the same uids when it is re-posted.
+//
+// “status“ is a runner-level tri-state, distinct from any status
+// inside “result“:
+//
+//   - “ok“ — the handler ran and returned its structured payload
+//     (which may itself report a failed probe; a failed check is a
+//     result, not a runner error).
+//   - “refused“ — the runner declined to execute (unsafe safety_level,
+//     or a handler_ref outside the connector tree).
+//   - “error“ — the handler raised; the exception is summarised in
+//     “error“ and never re-raised into the tick loop.
+type RunnerResult struct {
+	CheckRef  string                  `json:"check_ref"`
+	Error     *string                 `json:"error"`
+	OpId      string                  `json:"op_id"`
+	Result    *map[string]interface{} `json:"result"`
+	ResultUid string                  `json:"result_uid"`
+	Status    string                  `json:"status"`
+}
+
+// RunnerResultBatch A batch of results the runner reports (or spools) in one POST.
+type RunnerResultBatch struct {
+	Results  *[]RunnerResult `json:"results,omitempty"`
+	RunnerId string          `json:"runner_id"`
+}
+
+// RunnerWorkItem One centrally-authorized operation for the runner to execute.
+//
+// Carries the fields the runner needs to resolve and invoke a handler
+// entirely locally: the dotted “handler_ref“ (resolved via
+// :func:`~meho_backplane.operations._handler_resolve.import_handler`),
+// the “(product, version, impl_id)“ registry key used to rebind a
+// bound-method handler against its connector instance, the validated
+// “params“, the “safety_level“ the runner re-checks (defence in
+// depth), the principal context, and the resolved target descriptor
+// (“None“ for targetless synthetic ops such as “net.*“).
+type RunnerWorkItem struct {
+	CheckRef   string                  `json:"check_ref"`
+	HandlerRef string                  `json:"handler_ref"`
+	ImplId     *string                 `json:"impl_id,omitempty"`
+	OpId       string                  `json:"op_id"`
+	Params     *map[string]interface{} `json:"params,omitempty"`
+
+	// Principal Principal context an executed op runs under, carried on each item.
+	//
+	// Enough to reconstruct an :class:`~meho_backplane.auth.operator.Operator`
+	// on the runner without a JWT: the runner never sees a bearer token for
+	// the acting principal (the op was already authorized centrally), so the
+	// reconstructed operator's ``raw_jwt`` is empty.
+	Principal   RunnerPrincipal `json:"principal"`
+	Product     string          `json:"product"`
+	SafetyLevel string          `json:"safety_level"`
+
+	// TargetDescriptor Centrally-resolved target attributes a connector handler reads.
+	//
+	// The runner has no local target table, so the central resolver
+	// (:mod:`meho_backplane.connectors.resolver`, DB-bound) materialises
+	// the fields a handler duck-reads off a ``Target`` row and ships them
+	// on the assignment. It carries the resolver-read attributes
+	// (``product`` / ``fingerprint`` / ``version`` / ``preferred_impl_id``)
+	// the tie-break ladder consumes **and** the connection-routing set
+	// (``host`` / ``port`` / ``fqdn`` / ``secret_ref`` / ``auth_model`` /
+	// TLS flags) the HTTP adapter reads, so on the runner the descriptor
+	// feeds :func:`~meho_backplane.connectors.resolver.resolve_connector`
+	// and the connector adapters directly — no DB session, no second
+	// resolution mechanism.
+	//
+	// The full field set is moulded on the central
+	// :class:`~meho_backplane.targets.schemas.TargetSummary` (#2499): the
+	// same identification + connection-routing projection of the
+	// ``Target`` row, minus the server-managed timestamps and the
+	// operator-authored ``notes`` (neither drives connector routing).
+	//
+	// Credential discipline: ``secret_ref`` is the **reference** the runner
+	// resolves outbound under its own read-only scope; no credential value
+	// is ever embedded (the runner spools assignments on disk, so a value
+	// would durably persist — a locked no-durable-artifact violation).
+	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
+	Version          *string                   `json:"version,omitempty"`
 }
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.
@@ -4784,18 +5364,25 @@ type RunbookTemplateListResponse struct {
 // “"__scheduler__"“ to match the migration-time backstop the
 // ORM-level default sets, so a minimal create body still validates.
 //
-// *inputs* is optional and unvalidated here **by design**. Whether a
-// trigger needs a user prompt depends on the referenced agent
-// definition, which this pure wire-shape validator does not (and must
-// not) load -- the definition FK is checked one layer down in the
-// service. A no-inputs trigger is therefore *accepted* at create and the
-// no-usable-prompt case is handled at fire time: the scheduled-run seam
-// finalises the run “failed“ with a typed
-// :data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS` error
-// rather than letting it reach the provider as an empty-“messages“ 400
-// (#1505). This keeps a definition that legitimately needs no user turn
-// from being over-rejected at create while still surfacing the doomed
-// no-prompt fire as a typed, greppable failure.
+// *inputs* is the JSON payload rendered into the run's user-prompt string
+// at fire time (:func:`~meho_backplane.scheduler.loop._coerce_inputs`).
+// For “kind=cron“ and “kind=one_off“ it **must** render a non-empty
+// user turn: :meth:`_validate_discriminated_union` rejects an input-less
+// trigger -- and the “inputs: {}“ case, which would otherwise render the
+// literal “"{}"“ -- with a 422 at create. The check is payload-only
+// (:func:`_payload_yields_prompt`); it loads no agent definition, so it
+// does not resurrect the layering objection that kept #1505 fire-time-only
+// -- a cron that fires every tick and a one_off that burns its single fire
+// with no user turn are deterministic failures the wire shape can see
+// without extra I/O. “kind=event“ is **exempt**: its future
+// payload-dispatch junction may derive the prompt from the matched event,
+// so an input-less event trigger stays creatable.
+//
+// The fire-time typed guard remains as defense-in-depth
+// (:data:`~meho_backplane.agent.run.SCHEDULED_RUN_NO_INPUT_CLASS`, #1505):
+// it still finalises a no-prompt fire “failed“ before the model call for
+// “event“ triggers and for any row inserted directly around this wire
+// schema. See “docs/codebase/scheduler.md“.
 //
 // *in_flight_policy* defaults to “fail_into_audit“ per the consumer
 // doc; operators wanting at-least-once semantics opt into “resume“.
@@ -4816,8 +5403,10 @@ type ScheduledTriggerCreate struct {
 	AgentDefinitionId openapi_types.UUID      `json:"agent_definition_id"`
 	CronExpr          *string                 `json:"cron_expr"`
 	EventFilter       *map[string]interface{} `json:"event_filter"`
-	FireAt            *time.Time              `json:"fire_at"`
-	IdentitySub       *string                 `json:"identity_sub,omitempty"`
+
+	// FireAt One-off fire time (UTC); required for kind=one_off and must be null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	FireAt      *time.Time `json:"fire_at"`
+	IdentitySub *string    `json:"identity_sub,omitempty"`
 
 	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
 	//
@@ -4957,9 +5546,11 @@ type ScheduledTriggerRead struct {
 	CreatedBySub      string                  `json:"created_by_sub"`
 	CronExpr          *string                 `json:"cron_expr"`
 	EventFilter       *map[string]interface{} `json:"event_filter"`
-	FireAt            *time.Time              `json:"fire_at"`
-	Id                openapi_types.UUID      `json:"id"`
-	IdentitySub       string                  `json:"identity_sub"`
+
+	// FireAt Stored one-off fire time (UTC), echoed from create; null for cron / event triggers. The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	FireAt      *time.Time         `json:"fire_at"`
+	Id          openapi_types.UUID `json:"id"`
+	IdentitySub string             `json:"identity_sub"`
 
 	// InFlightPolicy Closed policy of what happens to a fired run that gets killed mid-flight.
 	//
@@ -5015,9 +5606,22 @@ type ScheduledTriggerRead struct {
 	// :class:`AgentRunStatus` / :class:`AgentRunTrigger`; the drift guard
 	// in :mod:`tests.test_db_scheduled_trigger` enforces equality at
 	// unit-test time.
-	Kind        ScheduledTriggerKind `json:"kind"`
-	LastFiredAt *time.Time           `json:"last_fired_at"`
-	NextFireAt  *time.Time           `json:"next_fire_at"`
+	Kind ScheduledTriggerKind `json:"kind"`
+
+	// LastFiredAt Timestamp of the most recent fire (UTC), stamped with the scheduler tick that claimed the row -- not the trigger's fire_at / next_fire_at. Because fires are tick-aligned, successive last_fired_at values sit on the tick grid and can trail the requested time by up to one tick interval (SCHEDULER_TICK_INTERVAL_SECONDS, default 30 s); null until the first fire.
+	LastFiredAt *time.Time `json:"last_fired_at"`
+
+	// LastSkipReason Machine tag of the most recent tick the scheduler skipped this trigger without firing -- one of 'definition_missing', 'definition_disabled', 'credentials_unresolved' (a park also stamps 'invalid_cron_expr' / 'unknown_kind'). null when the trigger has never skipped since its last successful fire (cleared to null on the next fire). A non-null value on an 'active' trigger means it looks healthy but is silently not firing -- fix the named cause. (#2327)
+	LastSkipReason *string `json:"last_skip_reason"`
+
+	// LastSkippedAt UTC timestamp of the most recent skipped tick; null until the first skip and cleared on the next successful fire. (#2327)
+	LastSkippedAt *time.Time `json:"last_skipped_at"`
+
+	// NextFireAt Next instant the trigger is eligible to fire (UTC) -- the column the tick loop scans; null for event triggers (dispatched on event arrival, not the clock). The scheduler scans on a fixed grid every SCHEDULER_TICK_INTERVAL_SECONDS (default 30 s, env-tunable 1-3600 s) and fires on the first tick at or after this time -- so it is a floor, not an exact dispatch instant, and actual dispatch can trail it by up to one tick interval. SLA-sensitive deployments lower the tick interval (floor 1 s) per deployment.
+	NextFireAt *time.Time `json:"next_fire_at"`
+
+	// SkipCount Consecutive ticks skipped since the last successful fire (0 when healthy; reset to 0 on the next fire). The scheduler parks the trigger ('status'='paused') once this reaches its internal consecutive-skip cap, so a permanently-unresolvable trigger stops silently re-tripping every tick. (#2327)
+	SkipCount int `json:"skip_count"`
 
 	// Status Closed lifecycle status of a :class:`ScheduledTrigger`.
 	//
@@ -5496,6 +6100,21 @@ type TargetCreate struct {
 // TargetCreateProduct Connector product slug. Must match the “product“ field of a registered connector class; see “GET /api/v1/connectors“ for the live list and “docs/codebase/error-message-shape.md“ for the 422 shape returned on miss.
 type TargetCreateProduct string
 
+// TargetListResponse Unified list envelope for “GET /api/v1/targets“.
+//
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. “items“ carries the
+// keyset-paginated page of :class:`TargetSummary` rows; “next_cursor“
+// is the last-row “name“ of the page when a further page exists and
+// “None“ when this page exhausted the matching set (so callers see
+// "no more pages" without inspecting list length). The field is always
+// present so a client reads “response["next_cursor"]“ without a
+// “KeyError“ guard.
+type TargetListResponse struct {
+	Items      []TargetSummary `json:"items"`
+	NextCursor *string         `json:"next_cursor"`
+}
+
 // TargetSummary Short shape for list endpoints.
 //
 // G0.16-T6 Finding D (#1312) widened this from the previous narrow
@@ -5633,6 +6252,24 @@ type TemplateSummary struct {
 
 // TemplateSummaryStatus defines model for TemplateSummary.Status.
 type TemplateSummaryStatus string
+
+// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+//
+// The set is intentionally small in v0.2: a closed three-value enum
+// lets the RBAC primitive (Task #234, “require_role“) make
+// exhaustive comparisons without leaking arbitrary string handling
+// into route code. A richer policy engine — topology-aware
+// permissions, ABAC, approval workflows — is a separate v0.2.next
+// Goal; widening this enum is the only ratcheting mechanism in the
+// interim.
+//
+// Values are the literal strings the Keycloak protocol-mapper recipe
+// (Task #235) emits, so a JWT carrying “"tenant_admin"“ materialises
+// cleanly as :attr:`TENANT_ADMIN`. “StrEnum“ (PEP 663, stdlib in
+// 3.11+) gives the members “str“ semantics for free, so
+// “f"role={role}"“ renders as “"role=tenant_admin"“ rather than
+// “"role=TenantRole.TENANT_ADMIN"“.
+type TenantRole string
 
 // Thresholds Per-metric green-band thresholds for a verdict computation.
 //
@@ -6027,13 +6664,21 @@ type ValidationError_Loc_Item struct {
 	union json.RawMessage
 }
 
-// VaultStatus Vault federation-chain status.
+// VaultStatus Federation-chain status for the deployment's credential backend.
 //
-// “reachable“ is true when the OIDC login succeeded (TCP + TLS +
-// JWT forward all worked). “read_ok“ is true when the test secret
-// read succeeded against the resulting Vault token. “detail“ carries
-// a short structured string for the CLI to render on failure paths —
-// never an unbounded exception message.
+// The field is named “vault“ on :class:`HealthResponse` for wire
+// compatibility (it predates the credential-backend seam), but the value
+// reflects whichever backend “config.credentialBackend“ selects: the
+// Vault OIDC-login + KV read on a Vault install, or the configured
+// backend's probe-secret read (“gsm:<project>/<probe-secret>“ on a GSM
+// install) through the credential-backend seam.
+//
+// “reachable“ is true when the backend was reached — on Vault, the OIDC
+// login succeeded (TCP + TLS + JWT forward); on a seam backend, the store
+// was addressable (config resolved, backend registered). “read_ok“ is
+// true when the probe secret read succeeded. “detail“ carries a short
+// structured string for the CLI to render on failure paths — a class name
+// or error code, never an unbounded exception message or a secret value.
 type VaultStatus struct {
 	Detail    *string `json:"detail"`
 	Reachable bool    `json:"reachable"`
@@ -6042,12 +6687,12 @@ type VaultStatus struct {
 
 // UnderscoreAnnotateEdgeRequest Inbound body for “POST /api/v1/topology/edges“.
 //
-// “kind“ is typed against :class:`GraphEdgeKind` so an unknown kind
+// “kind“ is typed against :data:`_EdgeKindSlug` so a malformed kind
 // fails Pydantic validation (HTTP 422) **before** the service runs —
 // the service still raises :class:`InvalidEdgeKindError` for
 // non-route callers, but at the HTTP boundary the operator gets the
-// standard FastAPI validation error shape (with the candidate list in
-// the error context) rather than a 500-shaped diagnostic.
+// standard FastAPI validation error shape (with the pattern in the
+// error context) rather than a 500-shaped diagnostic.
 //
 // The keyword “from“ is reserved in Python so the attribute name is
 // “from_endpoint“; “alias="from"“ keeps the wire shape the issue
@@ -6067,55 +6712,8 @@ type UnderscoreAnnotateEdgeRequest struct {
 	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
 	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
 	From UnderscoreEdgeEndpoint `json:"from"`
-
-	// Kind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
-	//
-	// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-	// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-	// operator-curated cross-system kinds that auto-discovery cannot infer
-	// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-	// is closed -- widening it is a coordinated DB + model change (new
-	// migration, new enum member, new decision row) so the v0.2.next
-	// policy-engine grammar parsing ``kind`` stays portable across tenants.
-	//
-	// The four auto-discoverable kinds (refresh service writes these on
-	// every probe-derived edge):
-	//
-	// * :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``
-	//   ``node``: the physical / scheduling host of a workload.
-	// * :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``
-	//   ``volume``: storage attachment.
-	// * :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,
-	//   ``service`` ``routes-through`` ``pod``: network routing path.
-	// * :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``
-	//   ``belongs-to`` ``host`` (logical group membership).
-	//
-	// The six curated-only kinds (operator-asserted via
-	// ``meho topology annotate``; cannot be derived from probes):
-	//
-	// * :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
-	//   (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical
-	//   cross-system example.
-	// * :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
-	//   ``service-X`` -> ``database-Y`` where neither side knows about the
-	//   other in its own probe output).
-	// * :attr:`REPLICATES_TO` -- operator-asserted replication relationship
-	//   between two storage / database nodes.
-	// * :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
-	// * :attr:`ROUTES_VIA` -- operator-asserted network path through an
-	//   intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the
-	//   probes only see point-to-point reachability).
-	// * :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
-	//   connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
-	//   ``vault-policy-prod-read``).
-	//
-	// Mirrors the closed-enum pattern :class:`AuthModel`
-	// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-	// :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
-	// both moved in lock-step by one Alembic migration so the enum and the
-	// constraint cannot drift.
-	Kind GraphEdgeKind `json:"kind"`
-	Note *string       `json:"note"`
+	Kind string                 `json:"kind"`
+	Note *string                `json:"note"`
 
 	// To Inbound JSON shape for one annotation endpoint.
 	//
@@ -6133,7 +6731,7 @@ type UnderscoreAnnotateEdgeRequest struct {
 // Same wire shape as :class:`_AnnotateEdgeRequest` (“{from, kind, to,
 // note?, evidence_url?}“) — “from“ is bound via “alias“ because
 // it is a Python keyword. “kind“ is typed against
-// :class:`GraphEdgeKind` so an unknown kind fails at the boundary
+// :data:`_EdgeKindSlug` so a malformed kind fails at the boundary
 // (HTTP 422) before any service call runs, and the per-row error
 // surfaces inside the standard FastAPI validation envelope with the
 // row index in “loc“. “extra="forbid"“ rejects typo'd keys so a
@@ -6151,55 +6749,8 @@ type UnderscoreBulkImportEdge struct {
 	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
 	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
 	From UnderscoreEdgeEndpoint `json:"from"`
-
-	// Kind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
-	//
-	// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-	// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-	// operator-curated cross-system kinds that auto-discovery cannot infer
-	// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-	// is closed -- widening it is a coordinated DB + model change (new
-	// migration, new enum member, new decision row) so the v0.2.next
-	// policy-engine grammar parsing ``kind`` stays portable across tenants.
-	//
-	// The four auto-discoverable kinds (refresh service writes these on
-	// every probe-derived edge):
-	//
-	// * :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``
-	//   ``node``: the physical / scheduling host of a workload.
-	// * :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``
-	//   ``volume``: storage attachment.
-	// * :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,
-	//   ``service`` ``routes-through`` ``pod``: network routing path.
-	// * :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``
-	//   ``belongs-to`` ``host`` (logical group membership).
-	//
-	// The six curated-only kinds (operator-asserted via
-	// ``meho topology annotate``; cannot be derived from probes):
-	//
-	// * :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
-	//   (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical
-	//   cross-system example.
-	// * :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
-	//   ``service-X`` -> ``database-Y`` where neither side knows about the
-	//   other in its own probe output).
-	// * :attr:`REPLICATES_TO` -- operator-asserted replication relationship
-	//   between two storage / database nodes.
-	// * :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
-	// * :attr:`ROUTES_VIA` -- operator-asserted network path through an
-	//   intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the
-	//   probes only see point-to-point reachability).
-	// * :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
-	//   connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
-	//   ``vault-policy-prod-read``).
-	//
-	// Mirrors the closed-enum pattern :class:`AuthModel`
-	// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-	// :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
-	// both moved in lock-step by one Alembic migration so the enum and the
-	// constraint cannot drift.
-	Kind GraphEdgeKind `json:"kind"`
-	Note *string       `json:"note"`
+	Kind string                 `json:"kind"`
+	Note *string                `json:"note"`
 
 	// To Inbound JSON shape for one annotation endpoint.
 	//
@@ -6508,11 +7059,8 @@ type ByWorkRefApiV1AuditByWorkRefRefGetParams struct {
 
 // MyRecentApiV1AuditMyRecentGetParams defines parameters for MyRecentApiV1AuditMyRecentGet.
 type MyRecentApiV1AuditMyRecentGetParams struct {
-	Since *string `form:"since,omitempty" json:"since,omitempty"`
-	Limit *int    `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -6541,10 +7089,7 @@ type WhoTouchedApiV1AuditWhoTouchedTargetGetParams struct {
 // ListOverridesApiV1BroadcastOverridesGetParams defines parameters for ListOverridesApiV1BroadcastOverridesGet.
 type ListOverridesApiV1BroadcastOverridesGetParams struct {
 	// OpIdPattern Exact-match filter on op_id_pattern (not a glob match).
-	OpIdPattern *string `form:"op_id_pattern,omitempty" json:"op_id_pattern,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	OpIdPattern   *string `form:"op_id_pattern,omitempty" json:"op_id_pattern,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -6558,13 +7103,27 @@ type DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// GetAssignmentApiV1ChecksAssignmentGetParams defines parameters for GetAssignmentApiV1ChecksAssignmentGet.
+type GetAssignmentApiV1ChecksAssignmentGetParams struct {
+	Runner        string  `form:"runner" json:"runner"`
+	KnownVersion  *string `form:"known_version,omitempty" json:"known_version,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PutAssignmentApiV1ChecksAssignmentRunnerPutParams defines parameters for PutAssignmentApiV1ChecksAssignmentRunnerPut.
+type PutAssignmentApiV1ChecksAssignmentRunnerPutParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
+type PostResultsApiV1ChecksResultsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // ListEndpointApiV1ConnectorsGetParams defines parameters for ListEndpointApiV1ConnectorsGet.
 type ListEndpointApiV1ConnectorsGetParams struct {
-	Status *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Status        *ListEndpointApiV1ConnectorsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	Authorization *string                                     `json:"authorization,omitempty"`
 }
 
 // ListEndpointApiV1ConnectorsGetParamsStatus defines parameters for ListEndpointApiV1ConnectorsGet.
@@ -6633,11 +7192,8 @@ type GetReviewEndpointApiV1ConnectorsConnectorIdReviewGetParamsPrefer string
 // ListConventionsApiV1ConventionsGetParams defines parameters for ListConventionsApiV1ConventionsGet.
 type ListConventionsApiV1ConventionsGetParams struct {
 	// Kind Filter by kind (operational / workflow / reference).
-	Kind *ConventionKind `form:"kind,omitempty" json:"kind,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Kind          *ConventionKind `form:"kind,omitempty" json:"kind,omitempty"`
+	Authorization *string         `json:"authorization,omitempty"`
 }
 
 // CreateConventionApiV1ConventionsPostParams defines parameters for CreateConventionApiV1ConventionsPost.
@@ -6706,6 +7262,18 @@ type FeedEndpointApiV1FeedGetParams struct {
 
 	// Since Explicit replay cursor; superseded by Last-Event-Id when present.
 	Since         *string `form:"since,omitempty" json:"since,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// PollNextCommandApiV1GatewayRunnerNextGetParams defines parameters for PollNextCommandApiV1GatewayRunnerNextGet.
+type PollNextCommandApiV1GatewayRunnerNextGetParams struct {
+	// Wait Long-poll hold in seconds. 0 = a single immediate claim attempt (no hold). Values above the ceiling (30s) are clamped down, not rejected — the runner asking for a longer hold gets a bounded one.
+	Wait          *int    `form:"wait,omitempty" json:"wait,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ReportCommandResultApiV1GatewayRunnerResultPostParams defines parameters for ReportCommandResultApiV1GatewayRunnerResultPost.
+type ReportCommandResultApiV1GatewayRunnerResultPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -6860,15 +7428,12 @@ type UsageEndpointApiV1RetrieveUsageGetParamsSurface string
 
 // ListRunsApiV1RunbooksRunsGetParams defines parameters for ListRunsApiV1RunbooksRunsGet.
 type ListRunsApiV1RunbooksRunsGetParams struct {
-	Assignee     *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
-	Status       *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TemplateSlug *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
-	WorkRef      *string                                   `form:"work_ref,omitempty" json:"work_ref,omitempty"`
-	Limit        *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Assignee      *string                                   `form:"assignee,omitempty" json:"assignee,omitempty"`
+	Status        *ListRunsApiV1RunbooksRunsGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TemplateSlug  *string                                   `form:"template_slug,omitempty" json:"template_slug,omitempty"`
+	WorkRef       *string                                   `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+	Limit         *int                                      `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string                                   `json:"authorization,omitempty"`
 }
 
 // ListRunsApiV1RunbooksRunsGetParamsStatus defines parameters for ListRunsApiV1RunbooksRunsGet.
@@ -6896,13 +7461,10 @@ type ReassignRunApiV1RunbooksRunsRunIdReassignPostParams struct {
 
 // ListTemplatesApiV1RunbooksTemplatesGetParams defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
 type ListTemplatesApiV1RunbooksTemplatesGetParams struct {
-	Status     *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
-	TargetKind *string                                             `form:"target_kind,omitempty" json:"target_kind,omitempty"`
-	Limit      *int                                                `form:"limit,omitempty" json:"limit,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
-	Authorization *string `json:"authorization,omitempty"`
+	Status        *ListTemplatesApiV1RunbooksTemplatesGetParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+	TargetKind    *string                                             `form:"target_kind,omitempty" json:"target_kind,omitempty"`
+	Limit         *int                                                `form:"limit,omitempty" json:"limit,omitempty"`
+	Authorization *string                                             `json:"authorization,omitempty"`
 }
 
 // ListTemplatesApiV1RunbooksTemplatesGetParamsStatus defines parameters for ListTemplatesApiV1RunbooksTemplatesGet.
@@ -6936,6 +7498,29 @@ type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostParams struct {
 
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams defines parameters for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost.
 type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams defines parameters for ListRunnerPrincipalsApiV1RunnerPrincipalsGet.
+type ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams struct {
+	Limit          *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset         *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	IncludeRevoked *bool   `form:"include_revoked,omitempty" json:"include_revoked,omitempty"`
+	Authorization  *string `json:"authorization,omitempty"`
+}
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams defines parameters for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost.
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams defines parameters for ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet.
+type ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams defines parameters for RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete.
+type RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -6974,12 +7559,9 @@ type SearchDocsEndpointApiV1SearchDocsPostParams struct {
 
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
-	Product *string `form:"product,omitempty" json:"product,omitempty"`
-	Limit   *int    `form:"limit,omitempty" json:"limit,omitempty"`
-	Cursor  *string `form:"cursor,omitempty" json:"cursor,omitempty"`
-
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
-	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
+	Product       *string `form:"product,omitempty" json:"product,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -7022,7 +7604,7 @@ type DependenciesApiV1TopologyDependenciesNameGetParams struct {
 	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
 	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
 
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	// Envelope Opt into the unified REST↔MCP envelope shape per docs/codebase/api-shape-conventions.md §4. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).
 	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
@@ -7033,7 +7615,7 @@ type DependentsApiV1TopologyDependentsNameGetParams struct {
 	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
 	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
 
-	// Envelope Opt into the unified list-envelope shape per docs/codebase/api-shape-conventions.md §2. Pass `v2` to receive `{items, next_cursor?, ...sidecars}`; omit to keep the v0.8.0 bare/keyed default. The opt-in is non-breaking across release cycles — the default flips after two cycles and the legacy shape is removed three cycles after that (G0.16-T6 Finding A #1312).
+	// Envelope Opt into the unified REST↔MCP envelope shape per docs/codebase/api-shape-conventions.md §4. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).
 	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
@@ -7052,14 +7634,14 @@ type DiffRouteApiV1TopologyDiffGetParams struct {
 
 // ListEdgesRouteApiV1TopologyEdgesGetParams defines parameters for ListEdgesRouteApiV1TopologyEdgesGet.
 type ListEdgesRouteApiV1TopologyEdgesGetParams struct {
-	Kind          *GraphEdgeKind `form:"kind,omitempty" json:"kind,omitempty"`
-	Source        *string        `form:"source,omitempty" json:"source,omitempty"`
-	From          *string        `form:"from,omitempty" json:"from,omitempty"`
-	To            *string        `form:"to,omitempty" json:"to,omitempty"`
-	Conflicts     *bool          `form:"conflicts,omitempty" json:"conflicts,omitempty"`
-	Limit         *int           `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset        *int           `form:"offset,omitempty" json:"offset,omitempty"`
-	Authorization *string        `json:"authorization,omitempty"`
+	Kind          *string `form:"kind,omitempty" json:"kind,omitempty"`
+	Source        *string `form:"source,omitempty" json:"source,omitempty"`
+	From          *string `form:"from,omitempty" json:"from,omitempty"`
+	To            *string `form:"to,omitempty" json:"to,omitempty"`
+	Conflicts     *bool   `form:"conflicts,omitempty" json:"conflicts,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // AnnotateEdgeRouteApiV1TopologyEdgesPostParams defines parameters for AnnotateEdgeRouteApiV1TopologyEdgesPost.
@@ -7486,6 +8068,12 @@ type QueryApiV1AuditQueryPostJSONRequestBody = AuditQueryRequest
 // CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody defines body for CreateOverrideApiV1BroadcastOverridesPost for application/json ContentType.
 type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrideCreate
 
+// PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody defines body for PutAssignmentApiV1ChecksAssignmentRunnerPut for application/json ContentType.
+type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocument
+
+// PostResultsApiV1ChecksResultsPostJSONRequestBody defines body for PostResultsApiV1ChecksResultsPost for application/json ContentType.
+type PostResultsApiV1ChecksResultsPostJSONRequestBody = RunnerResultBatch
+
 // IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody defines body for IngestEndpointApiV1ConnectorsIngestPost for application/json ContentType.
 type IngestEndpointApiV1ConnectorsIngestPostJSONRequestBody = IngestRequest
 
@@ -7503,6 +8091,9 @@ type UpdateConventionApiV1ConventionsSlugPatchJSONRequestBody = ConventionUpdate
 
 // CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody defines body for CreateDocCollectionEndpointApiV1DocCollectionsPost for application/json ContentType.
 type CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody = DocCollectionCreate
+
+// ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody defines body for ReportCommandResultApiV1GatewayRunnerResultPost for application/json ContentType.
+type ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody = GatewayResultBody
 
 // CreateKbApiV1KbPostJSONRequestBody defines body for CreateKbApiV1KbPost for application/json ContentType.
 type CreateKbApiV1KbPostJSONRequestBody = KbEntryCreate
@@ -7557,6 +8148,9 @@ type DiscardTemplateApiV1RunbooksTemplatesSlugDiscardPostJSONRequestBody = Under
 
 // PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody defines body for PublishTemplateApiV1RunbooksTemplatesSlugPublishPost for application/json ContentType.
 type PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody = UnderscoreVersionBody
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody defines body for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost for application/json ContentType.
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody = RunnerPrincipalCreate
 
 // CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody defines body for CreateTriggerApiV1SchedulerTriggersPost for application/json ContentType.
 type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCreate
@@ -7911,6 +8505,9 @@ type RunbooksRunReassignUiRunbooksRunsRunIdReassignPostFormdataRequestBody = Bod
 
 // RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody defines body for RunbooksDeprecateUiRunbooksSlugDeprecatePost for application/x-www-form-urlencoded ContentType.
 type RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody = BodyRunbooksDeprecateUiRunbooksSlugDeprecatePost
+
+// RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody defines body for RunbooksDiscardUiRunbooksSlugDiscardPost for application/x-www-form-urlencoded ContentType.
+type RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody = BodyRunbooksDiscardUiRunbooksSlugDiscardPost
 
 // RunbooksEditorUpdateUiRunbooksSlugEditPostFormdataRequestBody defines body for RunbooksEditorUpdateUiRunbooksSlugEditPost for application/x-www-form-urlencoded ContentType.
 type RunbooksEditorUpdateUiRunbooksSlugEditPostFormdataRequestBody = BodyRunbooksEditorUpdateUiRunbooksSlugEditPost
@@ -8922,6 +9519,19 @@ type ClientInterface interface {
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetAssignmentApiV1ChecksAssignmentGet request
+	GetAssignmentApiV1ChecksAssignmentGet(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody request with any body
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PostResultsApiV1ChecksResultsPostWithBody request with any body
+	PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostResultsApiV1ChecksResultsPost(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// ListEndpointApiV1ConnectorsGet request
 	ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -9002,6 +9612,14 @@ type ClientInterface interface {
 
 	// FeedEndpointApiV1FeedGet request
 	FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// PollNextCommandApiV1GatewayRunnerNextGet request
+	PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ReportCommandResultApiV1GatewayRunnerResultPostWithBody request with any body
+	ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ReportCommandResultApiV1GatewayRunnerResultPost(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// AuthenticatedHealthApiV1HealthGet request
 	AuthenticatedHealthApiV1HealthGet(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -9137,6 +9755,20 @@ type ClientInterface interface {
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListRunnerPrincipalsApiV1RunnerPrincipalsGet request
+	ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody request with any body
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet request
+	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete request
+	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTriggersApiV1SchedulerTriggersGet request
 	ListTriggersApiV1SchedulerTriggersGet(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -9924,6 +10556,11 @@ type ClientInterface interface {
 
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBody(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// RunbooksDiscardUiRunbooksSlugDiscardPostWithBody request with any body
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// RunbooksEditorEditUiRunbooksSlugEditGet request
 	RunbooksEditorEditUiRunbooksSlugEditGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -10655,6 +11292,66 @@ func (c *Client) DeleteOverrideApiV1BroadcastOverridesOverrideIdDelete(ctx conte
 	return c.Client.Do(req)
 }
 
+func (c *Client) GetAssignmentApiV1ChecksAssignmentGet(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetAssignmentApiV1ChecksAssignmentGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(c.Server, runner, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(c.Server, runner, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultsApiV1ChecksResultsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostResultsApiV1ChecksResultsPost(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostResultsApiV1ChecksResultsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) ListEndpointApiV1ConnectorsGet(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewListEndpointApiV1ConnectorsGetRequest(c.Server, params)
 	if err != nil {
@@ -10993,6 +11690,42 @@ func (c *Client) ProbeCollectionEndpointApiV1DocCollectionsCollectionKeyProbePos
 
 func (c *Client) FeedEndpointApiV1FeedGet(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewFeedEndpointApiV1FeedGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PollNextCommandApiV1GatewayRunnerNextGet(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPollNextCommandApiV1GatewayRunnerNextGetRequest(c.Server, runner, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(c.Server, runner, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ReportCommandResultApiV1GatewayRunnerResultPost(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewReportCommandResultApiV1GatewayRunnerResultPostRequest(c.Server, runner, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -11605,6 +12338,66 @@ func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBody(ct
 
 func (c *Client) PublishTemplateApiV1RunbooksTemplatesSlugPublishPost(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequest(c.Server, slug, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(c.Server, name, params)
 	if err != nil {
 		return nil, err
 	}
@@ -15215,6 +16008,30 @@ func (c *Client) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBody(ct
 	return c.Client.Do(req)
 }
 
+func (c *Client) RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(c.Server, slug, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) RunbooksEditorEditUiRunbooksSlugEditGet(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunbooksEditorEditUiRunbooksSlugEditGetRequest(c.Server, slug)
 	if err != nil {
@@ -17576,22 +18393,6 @@ func NewMyRecentApiV1AuditMyRecentGetRequest(server string, params *MyRecentApiV
 
 		}
 
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -17923,22 +18724,6 @@ func NewListOverridesApiV1BroadcastOverridesGetRequest(server string, params *Li
 
 		}
 
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -18069,6 +18854,199 @@ func NewDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteRequest(server stri
 	return req, nil
 }
 
+// NewGetAssignmentApiV1ChecksAssignmentGetRequest generates requests for GetAssignmentApiV1ChecksAssignmentGet
+func NewGetAssignmentApiV1ChecksAssignmentGetRequest(server string, params *GetAssignmentApiV1ChecksAssignmentGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/assignment")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if queryFrag, err := runtime.StyleParamWithLocation("form", true, "runner", runtime.ParamLocationQuery, params.Runner); err != nil {
+			return nil, err
+		} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+			return nil, err
+		} else {
+			for k, v := range parsed {
+				for _, v2 := range v {
+					queryValues.Add(k, v2)
+				}
+			}
+		}
+
+		if params.KnownVersion != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "known_version", runtime.ParamLocationQuery, *params.KnownVersion); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest calls the generic PutAssignmentApiV1ChecksAssignmentRunnerPut builder with application/json body
+func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(server string, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server, runner, params, "application/json", bodyReader)
+}
+
+// NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody generates requests for PutAssignmentApiV1ChecksAssignmentRunnerPut with any type of body
+func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server string, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/assignment/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("PUT", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPostResultsApiV1ChecksResultsPostRequest calls the generic PostResultsApiV1ChecksResultsPost builder with application/json body
+func NewPostResultsApiV1ChecksResultsPostRequest(server string, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostResultsApiV1ChecksResultsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewPostResultsApiV1ChecksResultsPostRequestWithBody generates requests for PostResultsApiV1ChecksResultsPost with any type of body
+func NewPostResultsApiV1ChecksResultsPostRequestWithBody(server string, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/results")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListEndpointApiV1ConnectorsGetRequest generates requests for ListEndpointApiV1ConnectorsGet
 func NewListEndpointApiV1ConnectorsGetRequest(server string, params *ListEndpointApiV1ConnectorsGetParams) (*http.Request, error) {
 	var err error
@@ -18094,22 +19072,6 @@ func NewListEndpointApiV1ConnectorsGetRequest(server string, params *ListEndpoin
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -18747,22 +19709,6 @@ func NewListConventionsApiV1ConventionsGetRequest(server string, params *ListCon
 		if params.Kind != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -19457,6 +20403,139 @@ func NewFeedEndpointApiV1FeedGetRequest(server string, params *FeedEndpointApiV1
 	if err != nil {
 		return nil, err
 	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewPollNextCommandApiV1GatewayRunnerNextGetRequest generates requests for PollNextCommandApiV1GatewayRunnerNextGet
+func NewPollNextCommandApiV1GatewayRunnerNextGetRequest(server string, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/gateway/%s/next", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Wait != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "wait", runtime.ParamLocationQuery, *params.Wait); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewReportCommandResultApiV1GatewayRunnerResultPostRequest calls the generic ReportCommandResultApiV1GatewayRunnerResultPost builder with application/json body
+func NewReportCommandResultApiV1GatewayRunnerResultPostRequest(server string, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server, runner, params, "application/json", bodyReader)
+}
+
+// NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody generates requests for ReportCommandResultApiV1GatewayRunnerResultPost with any type of body
+func NewReportCommandResultApiV1GatewayRunnerResultPostRequestWithBody(server string, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "runner", runtime.ParamLocationPath, runner)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/gateway/%s/result", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -21064,22 +22143,6 @@ func NewListRunsApiV1RunbooksRunsGetRequest(server string, params *ListRunsApiV1
 
 		}
 
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
 		queryURL.RawQuery = queryValues.Encode()
 	}
 
@@ -21404,22 +22467,6 @@ func NewListTemplatesApiV1RunbooksTemplatesGetRequest(server string, params *Lis
 		if params.Limit != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -21833,6 +22880,255 @@ func NewPublishTemplateApiV1RunbooksTemplatesSlugPublishPostRequestWithBody(serv
 	return req, nil
 }
 
+// NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest generates requests for ListRunnerPrincipalsApiV1RunnerPrincipalsGet
+func NewListRunnerPrincipalsApiV1RunnerPrincipalsGetRequest(server string, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeRevoked != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_revoked", runtime.ParamLocationQuery, *params.IncludeRevoked); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest calls the generic RegisterRunnerPrincipalApiV1RunnerPrincipalsPost builder with application/json body
+func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequest(server string, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody generates requests for RegisterRunnerPrincipalApiV1RunnerPrincipalsPost with any type of body
+func NewRegisterRunnerPrincipalApiV1RunnerPrincipalsPostRequestWithBody(server string, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest generates requests for ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet
+func NewShowRunnerPrincipalApiV1RunnerPrincipalsNameGetRequest(server string, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest generates requests for RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete
+func NewRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteRequest(server string, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "name", runtime.ParamLocationPath, name)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/runner-principals/%s/revoke", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewListTriggersApiV1SchedulerTriggersGetRequest generates requests for ListTriggersApiV1SchedulerTriggersGet
 func NewListTriggersApiV1SchedulerTriggersGetRequest(server string, params *ListTriggersApiV1SchedulerTriggersGetParams) (*http.Request, error) {
 	var err error
@@ -22215,22 +23511,6 @@ func NewListTargetsApiV1TargetsGetRequest(server string, params *ListTargetsApiV
 		if params.Cursor != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
-				return nil, err
-			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
-				return nil, err
-			} else {
-				for k, v := range parsed {
-					for _, v2 := range v {
-						queryValues.Add(k, v2)
-					}
-				}
-			}
-
-		}
-
-		if params.Envelope != nil {
-
-			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -31799,6 +33079,53 @@ func NewRunbooksDeprecateUiRunbooksSlugDeprecatePostRequestWithBody(server strin
 	return req, nil
 }
 
+// NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody calls the generic RunbooksDiscardUiRunbooksSlugDiscardPost builder with application/x-www-form-urlencoded body
+func NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithFormdataBody(server string, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	bodyStr, err := runtime.MarshalForm(body, nil)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = strings.NewReader(bodyStr.Encode())
+	return NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(server, slug, "application/x-www-form-urlencoded", bodyReader)
+}
+
+// NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody generates requests for RunbooksDiscardUiRunbooksSlugDiscardPost with any type of body
+func NewRunbooksDiscardUiRunbooksSlugDiscardPostRequestWithBody(server string, slug string, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "slug", runtime.ParamLocationPath, slug)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runbooks/%s/discard", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
 // NewRunbooksEditorEditUiRunbooksSlugEditGetRequest generates requests for RunbooksEditorEditUiRunbooksSlugEditGet
 func NewRunbooksEditorEditUiRunbooksSlugEditGetRequest(server string, slug string) (*http.Request, error) {
 	var err error
@@ -33827,6 +35154,19 @@ type ClientWithResponsesInterface interface {
 	// DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse request
 	DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteWithResponse(ctx context.Context, overrideId openapi_types.UUID, params *DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse, error)
 
+	// GetAssignmentApiV1ChecksAssignmentGetWithResponse request
+	GetAssignmentApiV1ChecksAssignmentGetWithResponse(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error)
+
+	// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse request with any body
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
+
+	PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
+
+	// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with any body
+	PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
+
+	PostResultsApiV1ChecksResultsPostWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
+
 	// ListEndpointApiV1ConnectorsGetWithResponse request
 	ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error)
 
@@ -33907,6 +35247,14 @@ type ClientWithResponsesInterface interface {
 
 	// FeedEndpointApiV1FeedGetWithResponse request
 	FeedEndpointApiV1FeedGetWithResponse(ctx context.Context, params *FeedEndpointApiV1FeedGetParams, reqEditors ...RequestEditorFn) (*FeedEndpointApiV1FeedGetResponse, error)
+
+	// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request
+	PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error)
+
+	// ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse request with any body
+	ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error)
+
+	ReportCommandResultApiV1GatewayRunnerResultPostWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error)
 
 	// AuthenticatedHealthApiV1HealthGetWithResponse request
 	AuthenticatedHealthApiV1HealthGetWithResponse(ctx context.Context, params *AuthenticatedHealthApiV1HealthGetParams, reqEditors ...RequestEditorFn) (*AuthenticatedHealthApiV1HealthGetResponse, error)
@@ -34042,6 +35390,20 @@ type ClientWithResponsesInterface interface {
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
 
 	PublishTemplateApiV1RunbooksTemplatesSlugPublishPostWithResponse(ctx context.Context, slug string, params *PublishTemplateApiV1RunbooksTemplatesSlugPublishPostParams, body PublishTemplateApiV1RunbooksTemplatesSlugPublishPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse, error)
+
+	// ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse request
+	ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error)
+
+	// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse request with any body
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
+
+	RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error)
+
+	// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request
+	ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error)
+
+	// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse request
+	RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error)
 
 	// ListTriggersApiV1SchedulerTriggersGetWithResponse request
 	ListTriggersApiV1SchedulerTriggersGetWithResponse(ctx context.Context, params *ListTriggersApiV1SchedulerTriggersGetParams, reqEditors ...RequestEditorFn) (*ListTriggersApiV1SchedulerTriggersGetResponse, error)
@@ -34829,6 +36191,11 @@ type ClientWithResponsesInterface interface {
 
 	RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDeprecateUiRunbooksSlugDeprecatePostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse, error)
 
+	// RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse request with any body
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error)
+
+	RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error)
+
 	// RunbooksEditorEditUiRunbooksSlugEditGetWithResponse request
 	RunbooksEditorEditUiRunbooksSlugEditGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*RunbooksEditorEditUiRunbooksSlugEditGetResponse, error)
 
@@ -35602,7 +36969,7 @@ func (r ByWorkRefApiV1AuditByWorkRefRefGetResponse) StatusCode() int {
 type MyRecentApiV1AuditMyRecentGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *AuditQueryResult
+	JSON200      *MyRecentPage
 	JSON422      *HTTPValidationError
 }
 
@@ -35739,7 +37106,7 @@ func (r AuthConfigApiV1AuthConfigGetResponse) StatusCode() int {
 type ListOverridesApiV1BroadcastOverridesGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *[]BroadcastOverrideRead
+	JSON200      *BroadcastOverridesListResponse
 	JSON422      *HTTPValidationError
 }
 
@@ -35804,16 +37171,81 @@ func (r DeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse) StatusCod
 	return 0
 }
 
+type GetAssignmentApiV1ChecksAssignmentGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerAssignment
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetAssignmentApiV1ChecksAssignmentGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetAssignmentApiV1ChecksAssignmentGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PutAssignmentApiV1ChecksAssignmentRunnerPutResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *AssignmentDocumentResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PostResultsApiV1ChecksResultsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *ResultIngestResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PostResultsApiV1ChecksResultsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PostResultsApiV1ChecksResultsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListEndpointApiV1ConnectorsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *struct {
-		union json.RawMessage
-	}
-	JSON422 *HTTPValidationError
+	JSON200      *ConnectorListResponse
+	JSON422      *HTTPValidationError
 }
-type ListEndpointApiV1ConnectorsGet2000 map[string][]map[string]interface{}
-type ListEndpointApiV1ConnectorsGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r ListEndpointApiV1ConnectorsGetResponse) Status() string {
@@ -36327,6 +37759,52 @@ func (r FeedEndpointApiV1FeedGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r FeedEndpointApiV1FeedGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type PollNextCommandApiV1GatewayRunnerNextGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *GatewayCommandEnvelope
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r PollNextCommandApiV1GatewayRunnerNextGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r PollNextCommandApiV1GatewayRunnerNextGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ReportCommandResultApiV1GatewayRunnerResultPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *GatewayResultAck
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ReportCommandResultApiV1GatewayRunnerResultPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ReportCommandResultApiV1GatewayRunnerResultPostResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -36985,7 +38463,21 @@ type ShowTemplateApiV1RunbooksTemplatesSlugGetResponse struct {
 	HTTPResponse *http.Response
 	JSON200      *ShowTemplateResponse
 	JSON422      *HTTPValidationError
+	JSON500      *struct {
+		Detail struct {
+			Error  ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError `json:"error"`
+			Errors []struct {
+				Loc  []interface{} `json:"loc"`
+				Msg  string        `json:"msg"`
+				Type string        `json:"type"`
+			} `json:"errors"`
+			Message string `json:"message"`
+			Slug    string `json:"slug"`
+			Version *int   `json:"version"`
+		} `json:"detail"`
+	}
 }
+type ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError string
 
 // Status returns HTTPResponse.Status
 func (r ShowTemplateApiV1RunbooksTemplatesSlugGetResponse) Status() string {
@@ -37095,6 +38587,98 @@ func (r PublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse) StatusCode
 	return 0
 }
 
+type ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *RunnerPrincipalRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type ListTriggersApiV1SchedulerTriggersGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -37188,13 +38772,9 @@ func (r SearchDocsEndpointApiV1SearchDocsPostResponse) StatusCode() int {
 type ListTargetsApiV1TargetsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
-	JSON200      *struct {
-		union json.RawMessage
-	}
-	JSON422 *HTTPValidationError
+	JSON200      *TargetListResponse
+	JSON422      *HTTPValidationError
 }
-type ListTargetsApiV1TargetsGet2000 = []TargetSummary
-type ListTargetsApiV1TargetsGet2001 map[string]interface{}
 
 // Status returns HTTPResponse.Status
 func (r ListTargetsApiV1TargetsGetResponse) Status() string {
@@ -41287,6 +42867,28 @@ func (r RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse) StatusCode() int {
 	return 0
 }
 
+type RunbooksDiscardUiRunbooksSlugDiscardPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r RunbooksDiscardUiRunbooksSlugDiscardPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r RunbooksDiscardUiRunbooksSlugDiscardPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type RunbooksEditorEditUiRunbooksSlugEditGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -42466,6 +44068,49 @@ func (c *ClientWithResponses) DeleteOverrideApiV1BroadcastOverridesOverrideIdDel
 	return ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp)
 }
 
+// GetAssignmentApiV1ChecksAssignmentGetWithResponse request returning *GetAssignmentApiV1ChecksAssignmentGetResponse
+func (c *ClientWithResponses) GetAssignmentApiV1ChecksAssignmentGetWithResponse(ctx context.Context, params *GetAssignmentApiV1ChecksAssignmentGetParams, reqEditors ...RequestEditorFn) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error) {
+	rsp, err := c.GetAssignmentApiV1ChecksAssignmentGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetAssignmentApiV1ChecksAssignmentGetResponse(rsp)
+}
+
+// PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse request with arbitrary body returning *PutAssignmentApiV1ChecksAssignmentRunnerPutResponse
+func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBodyWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	rsp, err := c.PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx, runner, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
+}
+
+func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	rsp, err := c.PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx, runner, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
+}
+
+// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with arbitrary body returning *PostResultsApiV1ChecksResultsPostResponse
+func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	rsp, err := c.PostResultsApiV1ChecksResultsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultsApiV1ChecksResultsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	rsp, err := c.PostResultsApiV1ChecksResultsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostResultsApiV1ChecksResultsPostResponse(rsp)
+}
+
 // ListEndpointApiV1ConnectorsGetWithResponse request returning *ListEndpointApiV1ConnectorsGetResponse
 func (c *ClientWithResponses) ListEndpointApiV1ConnectorsGetWithResponse(ctx context.Context, params *ListEndpointApiV1ConnectorsGetParams, reqEditors ...RequestEditorFn) (*ListEndpointApiV1ConnectorsGetResponse, error) {
 	rsp, err := c.ListEndpointApiV1ConnectorsGet(ctx, params, reqEditors...)
@@ -42719,6 +44364,32 @@ func (c *ClientWithResponses) FeedEndpointApiV1FeedGetWithResponse(ctx context.C
 		return nil, err
 	}
 	return ParseFeedEndpointApiV1FeedGetResponse(rsp)
+}
+
+// PollNextCommandApiV1GatewayRunnerNextGetWithResponse request returning *PollNextCommandApiV1GatewayRunnerNextGetResponse
+func (c *ClientWithResponses) PollNextCommandApiV1GatewayRunnerNextGetWithResponse(ctx context.Context, runner string, params *PollNextCommandApiV1GatewayRunnerNextGetParams, reqEditors ...RequestEditorFn) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
+	rsp, err := c.PollNextCommandApiV1GatewayRunnerNextGet(ctx, runner, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePollNextCommandApiV1GatewayRunnerNextGetResponse(rsp)
+}
+
+// ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse request with arbitrary body returning *ReportCommandResultApiV1GatewayRunnerResultPostResponse
+func (c *ClientWithResponses) ReportCommandResultApiV1GatewayRunnerResultPostWithBodyWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	rsp, err := c.ReportCommandResultApiV1GatewayRunnerResultPostWithBody(ctx, runner, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) ReportCommandResultApiV1GatewayRunnerResultPostWithResponse(ctx context.Context, runner string, params *ReportCommandResultApiV1GatewayRunnerResultPostParams, body ReportCommandResultApiV1GatewayRunnerResultPostJSONRequestBody, reqEditors ...RequestEditorFn) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	rsp, err := c.ReportCommandResultApiV1GatewayRunnerResultPost(ctx, runner, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp)
 }
 
 // AuthenticatedHealthApiV1HealthGetWithResponse request returning *AuthenticatedHealthApiV1HealthGetResponse
@@ -43160,6 +44831,50 @@ func (c *ClientWithResponses) PublishTemplateApiV1RunbooksTemplatesSlugPublishPo
 		return nil, err
 	}
 	return ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp)
+}
+
+// ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse request returning *ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse
+func (c *ClientWithResponses) ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse(ctx context.Context, params *ListRunnerPrincipalsApiV1RunnerPrincipalsGetParams, reqEditors ...RequestEditorFn) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error) {
+	rsp, err := c.ListRunnerPrincipalsApiV1RunnerPrincipalsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse(rsp)
+}
+
+// RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse request with arbitrary body returning *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse
+func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBodyWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse(ctx context.Context, params *RegisterRunnerPrincipalApiV1RunnerPrincipalsPostParams, body RegisterRunnerPrincipalApiV1RunnerPrincipalsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	rsp, err := c.RegisterRunnerPrincipalApiV1RunnerPrincipalsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp)
+}
+
+// ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse request returning *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse
+func (c *ClientWithResponses) ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse(ctx context.Context, name string, params *ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetParams, reqEditors ...RequestEditorFn) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error) {
+	rsp, err := c.ShowRunnerPrincipalApiV1RunnerPrincipalsNameGet(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse(rsp)
+}
+
+// RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse request returning *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse
+func (c *ClientWithResponses) RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse(ctx context.Context, name string, params *RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteParams, reqEditors ...RequestEditorFn) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error) {
+	rsp, err := c.RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDelete(ctx, name, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp)
 }
 
 // ListTriggersApiV1SchedulerTriggersGetWithResponse request returning *ListTriggersApiV1SchedulerTriggersGetResponse
@@ -45748,6 +47463,23 @@ func (c *ClientWithResponses) RunbooksDeprecateUiRunbooksSlugDeprecatePostWithFo
 	return ParseRunbooksDeprecateUiRunbooksSlugDeprecatePostResponse(rsp)
 }
 
+// RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse request with arbitrary body returning *RunbooksDiscardUiRunbooksSlugDiscardPostResponse
+func (c *ClientWithResponses) RunbooksDiscardUiRunbooksSlugDiscardPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	rsp, err := c.RunbooksDiscardUiRunbooksSlugDiscardPostWithBody(ctx, slug, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksDiscardUiRunbooksSlugDiscardPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	rsp, err := c.RunbooksDiscardUiRunbooksSlugDiscardPostWithFormdataBody(ctx, slug, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp)
+}
+
 // RunbooksEditorEditUiRunbooksSlugEditGetWithResponse request returning *RunbooksEditorEditUiRunbooksSlugEditGetResponse
 func (c *ClientWithResponses) RunbooksEditorEditUiRunbooksSlugEditGetWithResponse(ctx context.Context, slug string, reqEditors ...RequestEditorFn) (*RunbooksEditorEditUiRunbooksSlugEditGetResponse, error) {
 	rsp, err := c.RunbooksEditorEditUiRunbooksSlugEditGet(ctx, slug, reqEditors...)
@@ -47070,7 +48802,7 @@ func ParseMyRecentApiV1AuditMyRecentGetResponse(rsp *http.Response) (*MyRecentAp
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest AuditQueryResult
+		var dest MyRecentPage
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -47261,7 +48993,7 @@ func ParseListOverridesApiV1BroadcastOverridesGetResponse(rsp *http.Response) (*
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest []BroadcastOverrideRead
+		var dest BroadcastOverridesListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -47338,6 +49070,105 @@ func ParseDeleteOverrideApiV1BroadcastOverridesOverrideIdDeleteResponse(rsp *htt
 	return response, nil
 }
 
+// ParseGetAssignmentApiV1ChecksAssignmentGetResponse parses an HTTP response from a GetAssignmentApiV1ChecksAssignmentGetWithResponse call
+func ParseGetAssignmentApiV1ChecksAssignmentGetResponse(rsp *http.Response) (*GetAssignmentApiV1ChecksAssignmentGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetAssignmentApiV1ChecksAssignmentGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerAssignment
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse parses an HTTP response from a PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse call
+func ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp *http.Response) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PutAssignmentApiV1ChecksAssignmentRunnerPutResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest AssignmentDocumentResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePostResultsApiV1ChecksResultsPostResponse parses an HTTP response from a PostResultsApiV1ChecksResultsPostWithResponse call
+func ParsePostResultsApiV1ChecksResultsPostResponse(rsp *http.Response) (*PostResultsApiV1ChecksResultsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PostResultsApiV1ChecksResultsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ResultIngestResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListEndpointApiV1ConnectorsGetResponse parses an HTTP response from a ListEndpointApiV1ConnectorsGetWithResponse call
 func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpointApiV1ConnectorsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -47353,9 +49184,7 @@ func ParseListEndpointApiV1ConnectorsGetResponse(rsp *http.Response) (*ListEndpo
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest struct {
-			union json.RawMessage
-		}
+		var dest ConnectorListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -48042,6 +49871,72 @@ func ParseFeedEndpointApiV1FeedGetResponse(rsp *http.Response) (*FeedEndpointApi
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest interface{}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParsePollNextCommandApiV1GatewayRunnerNextGetResponse parses an HTTP response from a PollNextCommandApiV1GatewayRunnerNextGetWithResponse call
+func ParsePollNextCommandApiV1GatewayRunnerNextGetResponse(rsp *http.Response) (*PollNextCommandApiV1GatewayRunnerNextGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &PollNextCommandApiV1GatewayRunnerNextGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GatewayCommandEnvelope
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseReportCommandResultApiV1GatewayRunnerResultPostResponse parses an HTTP response from a ReportCommandResultApiV1GatewayRunnerResultPostWithResponse call
+func ParseReportCommandResultApiV1GatewayRunnerResultPostResponse(rsp *http.Response) (*ReportCommandResultApiV1GatewayRunnerResultPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ReportCommandResultApiV1GatewayRunnerResultPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest GatewayResultAck
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -49008,6 +50903,25 @@ func ParseShowTemplateApiV1RunbooksTemplatesSlugGetResponse(rsp *http.Response) 
 		}
 		response.JSON422 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest struct {
+			Detail struct {
+				Error  ShowTemplateApiV1RunbooksTemplatesSlugGet500DetailError `json:"error"`
+				Errors []struct {
+					Loc  []interface{} `json:"loc"`
+					Msg  string        `json:"msg"`
+					Type string        `json:"type"`
+				} `json:"errors"`
+				Message string `json:"message"`
+				Slug    string `json:"slug"`
+				Version *int   `json:"version"`
+			} `json:"detail"`
+		}
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON500 = &dest
+
 	}
 
 	return response, nil
@@ -49128,6 +51042,138 @@ func ParsePublishTemplateApiV1RunbooksTemplatesSlugPublishPostResponse(rsp *http
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest PublishTemplateResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse parses an HTTP response from a ListRunnerPrincipalsApiV1RunnerPrincipalsGetWithResponse call
+func ParseListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse(rsp *http.Response) (*ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListRunnerPrincipalsApiV1RunnerPrincipalsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse parses an HTTP response from a RegisterRunnerPrincipalApiV1RunnerPrincipalsPostWithResponse call
+func ParseRegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse(rsp *http.Response) (*RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RegisterRunnerPrincipalApiV1RunnerPrincipalsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest RunnerPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse parses an HTTP response from a ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetWithResponse call
+func ParseShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse(rsp *http.Response) (*ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ShowRunnerPrincipalApiV1RunnerPrincipalsNameGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse parses an HTTP response from a RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteWithResponse call
+func ParseRevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse(rsp *http.Response) (*RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RevokeRunnerPrincipalApiV1RunnerPrincipalsNameRevokeDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RunnerPrincipalRead
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -49278,9 +51324,7 @@ func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsAp
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest struct {
-			union json.RawMessage
-		}
+		var dest TargetListResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -54096,6 +56140,32 @@ func ParseRunbooksDeprecateUiRunbooksSlugDeprecatePostResponse(rsp *http.Respons
 	}
 
 	response := &RunbooksDeprecateUiRunbooksSlugDeprecatePostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse parses an HTTP response from a RunbooksDiscardUiRunbooksSlugDiscardPostWithResponse call
+func ParseRunbooksDiscardUiRunbooksSlugDiscardPostResponse(rsp *http.Response) (*RunbooksDiscardUiRunbooksSlugDiscardPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &RunbooksDiscardUiRunbooksSlugDiscardPostResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

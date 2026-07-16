@@ -80,6 +80,17 @@
         >
           Edit
         </a>
+        {# Discard — deletes this draft outright. A draft can only be published
+           or discarded, never deprecated (the engine rejects deprecate-on-draft);
+           Discard is the draft close-out an operator otherwise had no UI path to. #}
+        <button
+          type="button"
+          class="btn btn-error btn-outline btn-sm"
+          x-on:click="confirm = 'discard'"
+          aria-label="Discard {{ template.slug }} v{{ template.version }}"
+        >
+          Discard
+        </button>
       {% elif template.status == "published" %}
         {# Deprecate — retires this published version. #}
         <button
@@ -160,6 +171,51 @@
               x-on:click="confirm = ''"
             >
               {{ "Publish" if action == "publish" else "Deprecate" }}
+            </button>
+          </div>
+        </div>
+        <div class="modal-backdrop" x-on:click="confirm = ''"></div>
+      </div>
+    {% endif %}
+
+    {# ---------- Discard confirmation dialog (draft only) ---------- #}
+    {# A separate modal from the publish/deprecate one above: a draft carries
+       BOTH a Publish and a Discard action, so its confirm dialog cannot be the
+       single per-status modal the other states use. Draft is the only
+       discardable state (the engine deletes drafts, retires published/
+       deprecated via deprecate), so this block never renders for a non-draft. #}
+    {% if template.status == "draft" %}
+      <div
+        x-show="confirm === 'discard'"
+        x-cloak
+        class="modal modal-open"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Confirm discard"
+      >
+        <div class="modal-box">
+          <h3 class="text-lg font-semibold">Discard this draft?</h3>
+          <p class="py-3 text-sm">
+            Permanently delete <code class="font-mono">{{ template.slug }}</code>
+            <span class="font-mono">v{{ template.version }}</span>. A draft is
+            removed outright — this cannot be undone. (A published version is
+            retired instead, never deleted.)
+          </p>
+          <div class="modal-action">
+            <button type="button" class="btn btn-ghost btn-sm" x-on:click="confirm = ''">
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="btn btn-sm btn-error"
+              hx-post="/ui/runbooks/{{ template.slug }}/discard"
+              hx-vals='{"version": "{{ template.version }}"}'
+              hx-target="#runbook-lifecycle"
+              hx-swap="outerHTML"
+              hx-headers='{"X-CSRF-Token": "{{ csrf_token | default('') }}"}'
+              x-on:click="confirm = ''"
+            >
+              Discard
             </button>
           </div>
         </div>

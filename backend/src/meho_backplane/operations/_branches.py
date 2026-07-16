@@ -506,28 +506,50 @@ async def dispatch_composite(
     target: Any,
     params: dict[str, Any],
     dispatch_child: Callable[..., Awaitable[Any]],
+    connector_instance: Connector | None = None,
 ) -> Any:
     """Invoke a ``source_kind='composite'`` handler with the dispatcher seam.
 
-    Composite handlers receive ``(operator, target, params,
-    dispatch_child)``; they call ``dispatch_child(...)`` recursively for
-    sub-ops. The ``dispatch_child`` callable is built by
-    :func:`~meho_backplane.operations.composite.get_dispatch_child` and
-    wraps :func:`~meho_backplane.operations.dispatcher.dispatch` so that
-    the audit-tree linkage (``parent_audit_id_var`` contextvar -> real
-    ``audit_log.parent_audit_id`` column) and bounded-recursion guard
-    (``composite_depth_var`` contextvar checked against
-    :attr:`~meho_backplane.settings.Settings.composite_max_depth`) are
-    applied automatically -- the handler reads as plain business logic.
+    Composite handlers receive ``(operator, target, params)`` plus at
+    least one sub-call capability, chosen by which parameters the
+    handler declares:
 
-    The keyword the handler sees is ``dispatch_child`` (not raw
-    ``dispatch``); composite handlers annotate the parameter against
-    the :class:`~meho_backplane.operations.composite.DispatchChild`
-    Protocol for static type checking.
+    * ``dispatch_child`` -- the catalog-routed seam. Built by
+      :func:`~meho_backplane.operations.composite.get_dispatch_child`,
+      it wraps :func:`~meho_backplane.operations.dispatcher.dispatch`
+      so audit-tree linkage (``parent_audit_id_var`` contextvar -> the
+      real ``audit_log.parent_audit_id`` column) and the
+      bounded-recursion guard (``composite_depth_var`` checked against
+      :attr:`~meho_backplane.settings.Settings.composite_max_depth`)
+      apply automatically. Handlers annotate it against the
+      :class:`~meho_backplane.operations.composite.DispatchChild`
+      Protocol for static type checking.
+    * ``connector`` -- the direct-session substrate (#2251). The
+      resolved connector instance the dispatcher already built for
+      this composite's ``target`` (via
+      :func:`~meho_backplane.operations.dispatcher._resolve_connector_instance`).
+      A handler that opts in issues sub-calls through the connector's
+      own session (``connector._get_json`` / ``connector._post_json`` /
+      ``connector.mount_op_path``) with no ``endpoint_descriptor``
+      lookup. See ``connectors/vmware_rest/composites/_read.py``'s
+      "Why ``dispatch_child`` not direct httpx" note for which of the
+      four ``dispatch_child`` guarantees the direct path drops and why.
+
+    Both capabilities are forwarded **only when the handler declares
+    the matching parameter**, so the existing ``dispatch_child``-only
+    handlers keep their exact signature and a direct-session handler
+    can omit ``dispatch_child`` entirely. A handler may declare both
+    (e.g. a composite that recurses into another composite via
+    ``dispatch_child`` yet reads its own connector via ``connector``).
     """
-    return await handler(
-        operator=operator,
-        target=target,
-        params=params,
-        dispatch_child=dispatch_child,
-    )
+    param_names = set(inspect.signature(handler).parameters)
+    call_kwargs: dict[str, Any] = {
+        "operator": operator,
+        "target": target,
+        "params": params,
+    }
+    if "dispatch_child" in param_names:
+        call_kwargs["dispatch_child"] = dispatch_child
+    if "connector" in param_names:
+        call_kwargs["connector"] = connector_instance
+    return await handler(**call_kwargs)

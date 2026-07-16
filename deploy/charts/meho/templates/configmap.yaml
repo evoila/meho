@@ -49,10 +49,27 @@ data:
   KEYCLOAK_CLI_CLIENT_ID: {{ .Values.config.keycloakCliClientId | quote }}
   KEYCLOAK_JWKS_CACHE_TTL_SECONDS: {{ .Values.config.keycloakJwksCacheTtlSeconds | quote }}
   KEYCLOAK_JWT_LEEWAY_SECONDS: {{ .Values.config.keycloakJwtLeewaySeconds | quote }}
+  # Emitted only for a Vault-backend install (Initiative #2227). A
+  # GCP-native (`config.credentialBackend: gsm`) deploy leaves
+  # `config.vaultAddr` empty and runs no Vault, so the key is omitted
+  # entirely — the backplane coerces a missing/blank VAULT_ADDR to None
+  # and boots Vault-free.
+  {{- if .Values.config.vaultAddr }}
   VAULT_ADDR: {{ .Values.config.vaultAddr | quote }}
+  {{- end }}
   VAULT_OIDC_ROLE: {{ .Values.config.vaultOidcRole | quote }}
   VAULT_OIDC_MOUNT_PATH: {{ .Values.config.vaultOidcMountPath | quote }}
   VAULT_TIMEOUT_SECONDS: {{ .Values.config.vaultTimeoutSeconds | quote }}
+  # Credential backend surface (Initiative #2227). `CREDENTIAL_BACKEND`
+  # names the store a schemeless target `secret_ref` and the
+  # `/api/v1/health` federation proof resolve through (`vault` default,
+  # `gsm` for a GCP-native install). `GSM_PROJECT` / `GSM_IMPERSONATE_SA`
+  # are read by the GSM backend (`connectors/_shared/gsm_creds.py`) and are
+  # harmless empty strings on a Vault install. The env-var names are the
+  # backplane's contract (`backend/src/meho_backplane/settings.py`).
+  CREDENTIAL_BACKEND: {{ .Values.config.credentialBackend | quote }}
+  GSM_PROJECT: {{ .Values.config.gsmProject | quote }}
+  GSM_IMPERSONATE_SA: {{ .Values.config.gsmImpersonateSa | quote }}
   DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | quote }}
   DATABASE_POOL_TIMEOUT: {{ .Values.config.databasePoolTimeout | quote }}
   # G0.4-T2 (#259) — retrieval substrate fastembed model + on-disk cache
@@ -88,6 +105,35 @@ data:
   # `docs/cross-repo/reverse-proxy-contract.md` for the trust
   # contract.
   FORWARDED_ALLOW_IPS: {{ .Values.config.forwardedAllowIps | quote }}
+  # v0.20.0 (PR #2191) target-destination SSRF guard. The backplane
+  # refuses to register or dial a target that resolves to a non-public
+  # address; this env var is the operator's scoped opt-out. Read per
+  # request from the environment by
+  # `backend/src/meho_backplane/targets/ssrf_guard.py`
+  # (`TARGET_SSRF_ALLOWLIST_ENV`) — NOT via settings.py. Rendered
+  # unconditionally: the default `""` is a genuine no-op (the guard
+  # stays default-deny). Comma-separated CIDRs / bare IPs / hostname
+  # literals. See `deploy/charts/meho/values.yaml`
+  # (`config.targetSsrfAllowlist`) and `docs/codebase/target-ssrf-guard.md`.
+  MEHO_TARGET_SSRF_ALLOWLIST: {{ .Values.config.targetSsrfAllowlist | quote }}
+  # Async ingest-job watchdog budget (#2318, hardens #2275). #2275
+  # time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)`
+  # so a wedged pipeline can't sit at `status=running` until a pod restart;
+  # this is the operator's override for that wall-clock ceiling (seconds),
+  # read once at import by `_load_ingest_job_timeout_seconds`
+  # (`backend/src/meho_backplane/operations/ingest/jobs.py`) — NOT via
+  # settings.py. Rendered ONLY when set: the empty default omits the key so
+  # the backend's unset→default (1800 s) path runs silently. An
+  # always-rendered `""` (the SSRF-allowlist pattern above) would instead
+  # hit `float("")` and log a spurious `ingest_job_timeout_env_invalid`
+  # warning on every boot, so the timeout knob is guarded. A non-finite
+  # (`inf`/`nan`), non-positive, or malformed value is rejected at the
+  # backend and falls back to 1800 s with a warning. See
+  # `deploy/charts/meho/values.yaml` (`config.ingestJobTimeoutSeconds`)
+  # and `docs/codebase/spec-ingestion.md`.
+  {{- if .Values.config.ingestJobTimeoutSeconds }}
+  INGEST_JOB_TIMEOUT_SECONDS: {{ .Values.config.ingestJobTimeoutSeconds | quote }}
+  {{- end }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that
@@ -96,13 +142,25 @@ data:
   # value resolves — explicit `config.backplaneUrl` / `config.mcpResourceUri`,
   # or derived from the Ingress host for the common ingress-fronted
   # deploy (see `meho.backplaneUrl` / `meho.mcpResourceUri` helpers).
-  # When nothing resolves the keys are omitted (env var stays unset) and
-  # the backend's startup guard fails loudly with the remediation.
+  # #2394 — when nothing resolves we `fail` at render time (mirroring the
+  # eso/agent guards in externalsecrets.yaml + _helpers.tpl) instead of
+  # emitting an empty audience and letting the pod crash-loop at startup on
+  # `audience_not_configured` (`_assert_mcp_resource_uri_configured` in
+  # main.py). The guard fires only on the ingress-less, nothing-set path —
+  # the ingress-derived default and explicit-value installs both resolve a
+  # non-empty URI and render unchanged. There is deliberately no
+  # `allowNoMcpResourceUri` escape hatch: an operator who wants a
+  # bring-up before ingress/DNS exists sets a placeholder
+  # `config.backplaneUrl` (the documented workaround), which keeps /mcp
+  # per-request fail-closed without a new chart tunable.
   {{- $backplaneUrl := include "meho.backplaneUrl" . }}
+  {{- $mcpResourceUri := include "meho.mcpResourceUri" . }}
+  {{- if not $mcpResourceUri }}
+  {{- fail "MCP resource URI is unresolvable: the /mcp audience is empty, so every /mcp request would fail closed and the backplane refuses to boot (audience_not_configured). Resolve it one of three ways: set config.backplaneUrl=<https://your-host> (audience derived as <url>/mcp), set config.mcpResourceUri=<https://your-host/mcp> explicitly, or enable ingress with ingress.host set (audience derived from the ingress host). For a deliberate MCP-less bring-up before ingress/DNS exists, set a placeholder config.backplaneUrl — /mcp stays per-request fail-closed regardless." }}
+  {{- end }}
   {{- if $backplaneUrl }}
   BACKPLANE_URL: {{ $backplaneUrl | quote }}
   {{- end }}
-  {{- $mcpResourceUri := include "meho.mcpResourceUri" . }}
   {{- if $mcpResourceUri }}
   MCP_RESOURCE_URI: {{ $mcpResourceUri | quote }}
   {{- end }}

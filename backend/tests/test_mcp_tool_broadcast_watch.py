@@ -522,6 +522,14 @@ def test_new_events_returned_with_advanced_cursor(
     op_ids = [e["op_id"] for e in result["events"]]
     assert op_ids == ["vsphere.vm.list", "vsphere.vm.create", "vsphere.vm.delete"]
     assert result["next_cursor"] == "1747800000300-0"
+    # Each row self-labels its stream entry id as ``cursor`` (#2479);
+    # ``id`` stays as the legacy alias of the same value.
+    assert [e["cursor"] for e in result["events"]] == [
+        "1747800000100-0",
+        "1747800000200-0",
+        "1747800000300-0",
+    ]
+    assert all(e["cursor"] == e["id"] for e in result["events"])
 
 
 @pytest.mark.parametrize(

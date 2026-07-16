@@ -38,19 +38,15 @@ import (
 // ignores unknown keys. TestListEntryDecodesCanonical pins the
 // fixture⇄struct direction with DisallowUnknownFields.
 //
-// Kept as a package-private decode shape (not surfaced through the
-// generated `api.*` types) because the FastAPI list endpoint
-// deliberately returns `dict[str, list[dict[str, object]]]` instead
-// of declaring a `response_model=ConnectorListResponse` — the route
-// dumps each item via `model_dump(mode="json")` so per-row
-// `tenant_id` UUIDs render as strings (see
-// `backend/src/meho_backplane/api/v1/connectors_ingest.py:list_endpoint`).
-// oapi-codegen reflects the lack of `response_model` as
-// `JSON200 *map[string][]map[string]interface{}`, which is harder to
-// drive than a hand-typed decode against the raw `Body` bytes. The
-// transport / auth / 401-refresh path still routes through the
-// generated `*WithResponse` method — this struct is just the JSON
-// schema for the body.
+// Kept as a package-private decode shape (rather than the generated
+// `api.ConnectorListItem`) so the human-table + `--json` renderers own
+// a stable field set independent of codegen churn; the raw `Body` bytes
+// are decoded against `connectorListEnvelope` below. The `GET
+// /api/v1/connectors` route declares `response_model=ConnectorListResponse`
+// (#2338), so `tenant_id` UUIDs serialise to JSON strings on the wire —
+// `TenantID *string` decodes them directly. The transport / auth /
+// 401-refresh path still routes through the generated `*WithResponse`
+// method — this struct is just the JSON schema for the body.
 //
 // Note: the canonical payload has no `review_status` field. The
 // review state is per-group (some groups can be staged while others
@@ -94,12 +90,15 @@ type nextStep struct {
 }
 
 // connectorListEnvelope is the package-private decode shape for the
-// `{"connectors": [...]}` envelope the list endpoint returns. The
-// envelope is wrapped (rather than a bare list) so future paging
-// fields can land non-breakingly, mirroring the GET /catalog list
-// shape; see the route's docstring for the reasoning.
+// §2 unified `{"items": [...], "next_cursor": <str|null>}` envelope the
+// list endpoint returns (#2338 breaking pass — converged from the
+// v0.8.0 `{"connectors": [...]}` shape). The hand-typed `listEntry`
+// carries the full 15-field row (see its doc); `next_cursor` is always
+// null today (the listing is unpaginated) but decoded so a future
+// keyset-paginated build lands without a CLI change.
 type connectorListEnvelope struct {
-	Connectors []listEntry `json:"connectors"`
+	Items      []listEntry `json:"items"`
+	NextCursor *string     `json:"next_cursor"`
 }
 
 // validStatuses pins the allowed --status values. `all` is the
@@ -241,15 +240,15 @@ func getList(ctx context.Context, backplaneURL, status string) (*connectorListEn
 }
 
 func printListTable(w io.Writer, status string, r *connectorListEnvelope) {
-	if len(r.Connectors) == 0 {
+	if len(r.Items) == 0 {
 		fmt.Fprintf(w, "0 connector(s) with status=%s\n", status)
 		return
 	}
-	fmt.Fprintf(w, "%d connector(s) with status=%s\n", len(r.Connectors), status)
+	fmt.Fprintf(w, "%d connector(s) with status=%s\n", len(r.Items), status)
 	fmt.Fprintf(w, "%-32s %-10s %-23s %-10s %5s %5s\n",
 		"connector_id", "status", "kind", "tenant", "grps", "ops",
 	)
-	for _, c := range r.Connectors {
+	for _, c := range r.Items {
 		tenant := "(built-in)"
 		if c.TenantID != nil && *c.TenantID != "" {
 			tenant = *c.TenantID

@@ -462,6 +462,113 @@ def _build_rejected_envelope(
     return annotated
 
 
+def _build_already_resumed_envelope(
+    *,
+    original_envelope: dict[str, Any],
+    approval_request_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Annotate the envelope when an operator surface already executed the op.
+
+    Exactly-one-resumer claim (#2293): the request was approved, but the
+    operator approval surface that granted it won the claim and
+    re-dispatched the op, so this in-process waiter lost the race and must
+    not dispatch again. Rewrites ``status`` to ``"already_resumed"`` (a
+    benign terminal, not an error), stamps
+    ``extras["error_code"] = "already_resumed"`` + ``extras["decision"] =
+    "approved"`` so the agent's model has a stable string to switch on, and
+    names the request in ``error``. The durable execution audit row written
+    by the winning resumer is the evidence the op ran; this envelope is the
+    model-side view telling the agent it need not (and must not) retry.
+    """
+    annotated = dict(original_envelope)
+    annotated["status"] = "already_resumed"
+    annotated["error"] = (
+        f"approval request {approval_request_id} was approved and executed by "
+        "an operator approval surface; not re-dispatched here."
+    )
+    extras = dict(original_envelope.get("extras") or {})
+    extras["error_code"] = "already_resumed"
+    extras["decision"] = "approved"
+    annotated["extras"] = extras
+    return annotated
+
+
+async def _resume_approved_or_already_resumed(
+    *,
+    operator: Operator,
+    call_arguments: dict[str, Any],
+    awaiting_envelope: dict[str, Any],
+    approval_request_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Re-dispatch the approved op, or no-op if an operator surface beat us.
+
+    Exactly-one-resumer claim (#2293): the operator surface that published
+    this ``approval.approved`` event *also* re-dispatches the approved op
+    via ``resume_dispatch_after_approval``. Both this in-process waiter and
+    that surface must win the same atomic :func:`claim_resume` before
+    dispatching, so the approved (possibly write) op executes exactly once.
+    Win it here before the in-memory re-dispatch; a lost claim means an
+    operator surface already executed it, so surface a clean
+    already-executed envelope to the agent rather than double-dispatching.
+
+    Audit lineage (#2323, completing #2086): the executed dispatch row must
+    parent-link to the ``approval.request`` row so an approved chain replays
+    as one subtree (request → decision + executed dispatch), not two roots.
+    The operator resume path binds ``parent_audit_id`` off the parked row in
+    :func:`~meho_backplane.operations.approval_queue._dispatch_resume_with_bound_context`;
+    this in-process waiter re-dispatches on the *agent's own task*, where
+    ``parent_audit_id_var`` still carries the original top-level value
+    (``None`` for a plain agent tool call) — so without the bind below the
+    resumed dispatch would emit ``parent_audit_id = NULL`` and orphan as a
+    second audit root. ``agent_session_id_var`` is already bound on the
+    agent task (the requester's run), so the session anchor needs no
+    re-bind; only the parent link does.
+
+    Local imports mirror each other (and the wider module convention):
+    ``meta_tools`` imports from ``operations.dispatcher`` which imports back
+    through ``meho_backplane.agent.invoke``, so a module-level import here
+    would set up an import-time cycle; keeping both inline resolves them
+    once at first-call time.
+    """
+    from meho_backplane.operations.approval_queue import claim_resume
+
+    if not await claim_resume(approval_request_id):
+        _log.info(
+            "approval_wait_resume_already_claimed",
+            approval_request_id=str(approval_request_id),
+            tenant_id=str(operator.tenant_id),
+            op_id=awaiting_envelope.get("op_id"),
+        )
+        return _build_already_resumed_envelope(
+            original_envelope=awaiting_envelope,
+            approval_request_id=approval_request_id,
+        )
+
+    # The re-dispatch threads ``_approved=True`` through the policy gate, so
+    # the durable approval-decision row is the authorization.
+    from meho_backplane.db.engine import get_sessionmaker
+    from meho_backplane.operations._audit import parent_audit_id_var
+    from meho_backplane.operations.approval_queue import get_request
+    from meho_backplane.operations.meta_tools import call_operation_with_approval
+
+    # Load the parked row's pre-generated ``approval.request`` audit id
+    # (tenant-isolated) so the resumed dispatch back-links to it. Pre-0053
+    # rows carry ``request_audit_id IS NULL`` → binds ``None`` (the var's
+    # default), which is the correct no-op for a chain that never had the
+    # anchor.
+    async with get_sessionmaker()() as session:
+        request = await get_request(
+            session,
+            tenant_id=operator.tenant_id,
+            request_id=approval_request_id,
+        )
+    parent_token = parent_audit_id_var.set(request.request_audit_id)
+    try:
+        return await call_operation_with_approval(operator, call_arguments)
+    finally:
+        parent_audit_id_var.reset(parent_token)
+
+
 async def resume_or_surface_awaiting_approval(
     *,
     operator: Operator,
@@ -526,18 +633,12 @@ async def resume_or_surface_awaiting_approval(
     )
 
     if decision == "approved":
-        # Local import — `meta_tools` imports from `operations.dispatcher`
-        # which imports back through ``meho_backplane.agent.invoke`` for
-        # the contextvar lookup. A module-level import here would set up
-        # a circular reference at import time; keeping it inline resolves
-        # it once at first-call time. The re-dispatch threads
-        # ``_approved=True`` through the policy gate, so the durable
-        # approval-decision row is the authorization.
-        from meho_backplane.operations.meta_tools import (
-            call_operation_with_approval,
+        return await _resume_approved_or_already_resumed(
+            operator=operator,
+            call_arguments=call_arguments,
+            awaiting_envelope=awaiting_envelope,
+            approval_request_id=approval_request_id,
         )
-
-        return await call_operation_with_approval(operator, call_arguments)
 
     if decision == "rejected":
         _log.info(

@@ -33,6 +33,7 @@ criteria from #1077 map onto the tests as:
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import cast
 from uuid import UUID
 
 import pytest
@@ -95,21 +96,23 @@ def _extract_profile(model: Model) -> OpenAIModelProfile:
 
     pydantic_ai exposes the profile through the ``Model.profile``
     property — the resolver wires it via the builder's ``profile=``
-    kwarg, so this reads back what was wired. ``isinstance`` rather
-    than equality so a future framework-side widening of the profile
-    return type (a subclass) still passes the test.
+    kwarg, so this reads back what was wired. As of pydantic-ai v2,
+    ``OpenAIModelProfile`` is a ``TypedDict`` (it was a dataclass in v1),
+    so it can no longer be ``isinstance``-checked; ``Model.profile`` hands
+    back a plain mapping, which we assert is a dict and read as the
+    OpenAI-specific TypedDict.
     """
     profile = model.profile
-    assert isinstance(profile, OpenAIModelProfile), profile
-    return profile
+    assert isinstance(profile, dict), profile
+    return cast(OpenAIModelProfile, profile)
 
 
 def test_openai_chat_profile_matches_openai_saas_quirks() -> None:
     """The OpenAI SaaS profile keeps strict tool defs + multi-system on."""
     profile = openai_chat_profile()
-    assert profile.openai_supports_strict_tool_definition is True
-    assert profile.openai_chat_supports_multiple_system_messages is True
-    assert profile.json_schema_transformer is None
+    assert profile["openai_supports_strict_tool_definition"] is True
+    assert profile["openai_chat_supports_multiple_system_messages"] is True
+    assert profile["json_schema_transformer"] is None
 
 
 def test_vllm_profile_disables_strict_tool_definition() -> None:
@@ -122,9 +125,9 @@ def test_vllm_profile_disables_strict_tool_definition() -> None:
     then rejects on a structural mismatch.
     """
     profile = vllm_chat_profile()
-    assert profile.openai_supports_strict_tool_definition is False
+    assert profile["openai_supports_strict_tool_definition"] is False
     # vLLM still honours multiple system messages.
-    assert profile.openai_chat_supports_multiple_system_messages is True
+    assert profile["openai_chat_supports_multiple_system_messages"] is True
 
 
 def test_ollama_profile_collapses_system_messages() -> None:
@@ -137,8 +140,8 @@ def test_ollama_profile_collapses_system_messages() -> None:
     message-assembly path does the right thing.
     """
     profile = ollama_chat_profile()
-    assert profile.openai_supports_strict_tool_definition is False
-    assert profile.openai_chat_supports_multiple_system_messages is False
+    assert profile["openai_supports_strict_tool_definition"] is False
+    assert profile["openai_chat_supports_multiple_system_messages"] is False
 
 
 def test_openai_compat_capabilities_declare_tools_streaming_no_cache() -> None:
@@ -178,7 +181,7 @@ def test_openai_compat_builder_constructs_openai_chat_model() -> None:
 
     assert isinstance(model, OpenAIChatModel)
     profile = _extract_profile(model)
-    assert profile.openai_supports_strict_tool_definition is True
+    assert profile["openai_supports_strict_tool_definition"] is True
 
 
 def test_openai_compat_builder_honours_vendor_profile_for_vllm() -> None:
@@ -202,8 +205,8 @@ def test_openai_compat_builder_honours_vendor_profile_for_vllm() -> None:
 
     assert isinstance(model, OpenAIChatModel)
     profile = _extract_profile(model)
-    assert profile.openai_supports_strict_tool_definition is False
-    assert profile.openai_chat_supports_multiple_system_messages is True
+    assert profile["openai_supports_strict_tool_definition"] is False
+    assert profile["openai_chat_supports_multiple_system_messages"] is True
 
 
 def test_openai_compat_builder_honours_vendor_profile_for_ollama() -> None:
@@ -219,8 +222,8 @@ def test_openai_compat_builder_honours_vendor_profile_for_ollama() -> None:
 
     assert isinstance(model, OpenAIChatModel)
     profile = _extract_profile(model)
-    assert profile.openai_supports_strict_tool_definition is False
-    assert profile.openai_chat_supports_multiple_system_messages is False
+    assert profile["openai_supports_strict_tool_definition"] is False
+    assert profile["openai_chat_supports_multiple_system_messages"] is False
 
 
 def test_resolver_routes_air_gapped_tenant_to_on_prem_openai_compat() -> None:
@@ -338,8 +341,8 @@ def test_default_openai_builder_picks_ollama_profile_from_base_url_hint(
 
     assert isinstance(model, OpenAIChatModel)
     profile = _extract_profile(model)
-    assert profile.openai_supports_strict_tool_definition is False
-    assert profile.openai_chat_supports_multiple_system_messages is False
+    assert profile["openai_supports_strict_tool_definition"] is False
+    assert profile["openai_chat_supports_multiple_system_messages"] is False
 
 
 def test_default_openai_builder_routes_to_openai_saas_when_no_base_url(
@@ -359,8 +362,8 @@ def test_default_openai_builder_routes_to_openai_saas_when_no_base_url(
 
     assert isinstance(model, OpenAIChatModel)
     profile = _extract_profile(model)
-    assert profile.openai_supports_strict_tool_definition is True
-    assert profile.openai_chat_supports_multiple_system_messages is True
+    assert profile["openai_supports_strict_tool_definition"] is True
+    assert profile["openai_chat_supports_multiple_system_messages"] is True
 
 
 def test_resolver_routes_default_tenant_to_openai_for_saas_only_deploy() -> None:

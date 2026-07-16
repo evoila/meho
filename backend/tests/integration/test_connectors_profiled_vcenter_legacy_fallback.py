@@ -43,6 +43,7 @@ import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.profile import (
     AuthSpec,
     ExecutionProfile,
@@ -191,15 +192,24 @@ async def test_profiled_vcenter_session_reused_across_calls(
 async def test_profiled_vcenter_401_on_modern_not_retried_on_legacy(
     vcsim_target: _VcsimTarget,
 ) -> None:
-    """A 401 on modern is an auth failure — the legacy path is NOT tried."""
+    """A 401 on modern is an auth failure — the legacy path is NOT tried.
+
+    #2414: a login-POST auth-class rejection surfaces as the structured
+    :class:`ConnectorAuthError` (establish stage) rather than the raw
+    ``httpx.HTTPStatusError``, so the dispatcher stamps ``session_establish_401``
+    (restage) instead of the retry arm's ``after_relogin``. The chained
+    ``__cause__`` preserves the underlying transport error.
+    """
     connector = _connector()
 
     async with respx.mock(base_url=VCSIM_BASE_URL, assert_all_called=False) as mock:
         modern = mock.post(MODERN_SESSION_PATH).respond(401)
         legacy = mock.post(LEGACY_SESSION_PATH).respond(200, json=SESSION_TOKEN)
 
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(ConnectorAuthError) as exc_info:
             await connector.auth_headers(vcsim_target, operator=_operator())
+        assert exc_info.value.cause == "session_establish_401"
+        assert isinstance(exc_info.value.__cause__, httpx.HTTPStatusError)
 
     assert modern.call_count == 1
     assert legacy.call_count == 0

@@ -73,6 +73,7 @@ from meho_backplane.api.v1.auth_config import router as api_v1_auth_config_route
 from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
+from meho_backplane.api.v1.checks import router as api_v1_checks_router
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -82,6 +83,7 @@ from meho_backplane.api.v1.connectors_ingest import (
 from meho_backplane.api.v1.conventions import router as api_v1_conventions_router
 from meho_backplane.api.v1.doc_collections import router as api_v1_doc_collections_router
 from meho_backplane.api.v1.feed import router as api_v1_feed_router
+from meho_backplane.api.v1.gateway import router as api_v1_gateway_router
 from meho_backplane.api.v1.health import router as api_v1_health_router
 from meho_backplane.api.v1.kb import router as api_v1_kb_router
 from meho_backplane.api.v1.memory import router as api_v1_memory_router
@@ -92,6 +94,9 @@ from meho_backplane.api.v1.retrieve_retire import router as api_v1_retrieve_reti
 from meho_backplane.api.v1.retrieve_usage import router as api_v1_retrieve_usage_router
 from meho_backplane.api.v1.runbook_runs import router as api_v1_runbook_runs_router
 from meho_backplane.api.v1.runbook_templates import router as api_v1_runbook_templates_router
+from meho_backplane.api.v1.runner_principals import (
+    router as api_v1_runner_principals_router,
+)
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
@@ -114,6 +119,10 @@ from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
 from meho_backplane.docs_search.readiness_probe import docs_backends_readiness_probe
 from meho_backplane.events import start_event_drain, stop_event_drain
+from meho_backplane.gateway.deadman import (
+    start_gateway_deadman_sweeper,
+    stop_gateway_deadman_sweeper,
+)
 from meho_backplane.health import register_probe
 from meho_backplane.health import router as health_router
 from meho_backplane.logging import configure_logging
@@ -127,9 +136,14 @@ from meho_backplane.memory import (
 from meho_backplane.metrics import render_metrics
 from meho_backplane.middleware import BroadcastDetailMiddleware, RequestContextMiddleware
 from meho_backplane.operations import run_typed_op_registrars, set_default_reducer
+from meho_backplane.operations.approval_expiry import (
+    start_approval_expiry_sweeper,
+    stop_approval_expiry_sweeper,
+)
 from meho_backplane.operations.ingest import (
     build_anthropic_ingest_llm_client,
     load_catalog,
+    stamp_catalog_profiled_connectors,
     validate_catalog_registry_coverage,
     validate_shipped_artifacts,
 )
@@ -361,6 +375,14 @@ async def _run_lifespan_startup() -> None:
     # Shipped spec/profile dry-run parse (#1964 T1 #1975): a malformed
     # packaged spec_resource / profile_resource crashes boot. See the fn.
     validate_shipped_artifacts()
+    # Boot-time ExecutionProfile stamping (#2288): register a
+    # ProfiledRestConnector for every catalog row carrying a profile_resource
+    # so a shipped, reviewed profile is dispatchable from boot instead of
+    # inert package data. Idempotent + gated — a triple already served by a
+    # hand-coded class (vmware/sddc) no-ops, and stamping never enables an op
+    # (the #1971 review gate stays the interlock). Runs after the dry-run
+    # validator above, so it only ever sees well-formed profiles.
+    await stamp_catalog_profiled_connectors()
     # Production spec-ingestion grouping LLM client (#1386). Installs the
     # Anthropic-backed factory so non-dry-run `--catalog` ingest grouping
     # works on deployed backplanes (reusing settings.anthropic_api_key)
@@ -417,9 +439,11 @@ class _BackgroundTasks:
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
+    approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
+    gateway_deadman: asyncio.Task[None] | None
 
 
 def _start_background_tasks() -> _BackgroundTasks:
@@ -453,6 +477,13 @@ def _start_background_tasks() -> _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None = None
     if settings.grant_expiry_enabled:
         grant_expiry = start_grant_expiry_sweeper()
+    # #2322 (G0.31 #2364) — approval-TTL sweeper. Gated on
+    # APPROVAL_EXPIRY_ENABLED so operators running an external sweep don't
+    # double-expire. Drives ``expire_stale_requests`` per tenant so parked
+    # approvals actually age out (the lifecycle was inert before #2322).
+    approval_expiry: asyncio.Task[None] | None = None
+    if settings.approval_expiry_enabled:
+        approval_expiry = start_approval_expiry_sweeper()
     # G11.3-T2 #823 — cron + one-off agent-trigger scheduler. Gated on
     # SCHEDULER_ENABLED so operators using an external orchestrator
     # (or running the test path without a scheduler) can opt out.
@@ -472,14 +503,24 @@ def _start_background_tasks() -> _BackgroundTasks:
     event_drain: asyncio.Task[None] | None = None
     if settings.event_drain_enabled:
         event_drain = start_event_drain()
+    # Initiative #2415 (#2501) — gateway runner dead-man switch. Gated on
+    # GATEWAY_DEADMAN_ENABLED; default-on is what "mandatory" means (a
+    # runner cannot opt out of heartbeating — the stamp is a request side
+    # effect — so central enforcement is on by default). Operators running
+    # an external liveness sweep can disable the in-tree one via the flag.
+    gateway_deadman: asyncio.Task[None] | None = None
+    if settings.gateway_deadman_enabled:
+        gateway_deadman = start_gateway_deadman_sweeper()
     return _BackgroundTasks(
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         grant_expiry=grant_expiry,
+        approval_expiry=approval_expiry,
         scheduler=scheduler,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
+        gateway_deadman=gateway_deadman,
     )
 
 
@@ -491,12 +532,16 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
     branches (``None`` task handles) are tolerated cleanly so a
     disable-and-shutdown sequence does not raise.
     """
+    if tasks.gateway_deadman is not None:
+        await stop_gateway_deadman_sweeper(tasks.gateway_deadman)
     if tasks.event_drain is not None:
         await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
+    if tasks.approval_expiry is not None:
+        await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
     if tasks.topology_history is not None:
@@ -855,6 +900,30 @@ app.include_router(api_v1_agents_router)
 # Reads gated to operator+; writes gated to tenant_admin.
 # Tenant-scoped via the JWT; cross-tenant probes return 404.
 app.include_router(api_v1_agent_principals_router)
+# Initiative #2415 (#2502) -- runner-principal lifecycle (register / list /
+# show / revoke). register creates a Keycloak client tagged kind=runner
+# (principal_kind=runner, tenant_role=read_only, hardcoded runner_id) + a DB
+# row; revoke disables the client (kill switch) + marks the row revoked.
+# Reads gated to operator+; writes gated to tenant_admin. Tenant-scoped via
+# the JWT; cross-tenant probes return 404. The minted runner token is caged
+# to the gateway path prefixes (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_runner_principals_router)
+# Initiative #2415 (#2498) -- outbound long-poll command plane (runner-facing).
+# GET /gateway/{runner}/next (blocking long-poll: 200 with a claimed command
+# envelope or 204 on timeout) + POST /gateway/{runner}/result (200 / 404 / 409).
+# Both gate on the runner principal (#2502's require_runner + assert_runner_scope),
+# NOT an operator JWT -- a runner may only poll/report its own queue; every query
+# filters tenant_id. No HTTP enqueue endpoint (central enqueues via
+# gateway.queue.enqueue_command so authorization stays central). Mounted under the
+# /api/v1/gateway/ cage prefix (see middleware.RUNNER_ALLOWED_PATH_PREFIXES).
+app.include_router(api_v1_gateway_router)
+# Initiative #2415 (#2499) -- gateway assignment + result-ingest API, mounted
+# under /api/v1/checks/ (inside the runner route cage). PUT /checks/assignment/
+# {runner} authors a runner's checks (operator); GET /checks/assignment (runner,
+# own-only) returns the digest-versioned assignment with resolved target
+# descriptors + handler_ref/safety_level; POST /checks/results (runner, own-only)
+# idempotently ingests results with a central-stamped received_at.
+app.include_router(api_v1_checks_router)
 # G11.3-T5 (#826) -- scheduler-admin surface. GET /scheduler/triggers
 # (list, paginated, operator-level), POST /scheduler/triggers (create,
 # tenant_admin), DELETE /scheduler/triggers/{id} (cancel, tenant_admin).

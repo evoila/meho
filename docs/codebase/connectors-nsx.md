@@ -3,15 +3,43 @@
 ## Overview
 
 The `nsx` connector is the hand-rolled `HttpConnector` subclass that
-dispatches ingested NSX REST operations under the
+dispatches NSX REST operations under the
 `(product="nsx", version="9.0", impl_id="nsx-rest")` registry triple.
 G3.5-T1 (#613) shipped the skeleton -- session-cookie / XSRF auth,
-fingerprint, probe, and the G0.6 dispatch shim. G3.5-T2 (#614) adds
-the **operator-review curation substrate**: the 9 read-only core
-ops + per-op `llm_instructions` blobs + group-level `when_to_use`
-hints + the `apply_nsx_core_curation` helper that the operator
-review step calls against the G0.7-ingested connector. CLI verbs +
-MCP review + recorded-fixture E2E arrive in G3.5-T3 (#615).
+fingerprint, probe, and the G0.6 dispatch shim. G3.5-T2 (#614) added an
+ingested read-enable surface for the NSX read core. T7 (#2358, Initiative
+#2266) retired that hand-curated apparatus, leaving the remaining reads as
+generic ingested breadth enabled through `ReviewService.enable_reads`. CLI
+verbs + MCP review + recorded-fixture E2E arrive in G3.5-T3 (#615).
+
+**Audited reads are typed ops (#2302).** The audited operational read
+set -- node/cluster status+version, backup config+status,
+transport-zones list, tier-1 list, and alarms -- is registered as
+**typed** ops (`source_kind="typed"`, `typed_ops.py` metadata +
+`typed_reads.py` bodies + bound-method shims on `NsxConnector`), so it
+dispatches on a fresh boot with **zero catalog ingest** (avoiding the
+#2247 per-deploy catalog-state failure class). The remaining reads
+(transport-node listing, segments, tier-0 gateways, distributed-firewall
+policies + rules) stay as ordinary `source_kind="ingested"` breadth, enabled
+generically via `ReviewService.enable_reads`, so the wider ingested breadth
+remains browsable. `nsx.backup.config` is
+first-class for the disk-fill incident class (Broadcom KB 442696 shape):
+it surfaces `backup_enabled` + `passphrase_configured` + the
+`backup_schedule` / `remote_file_server` retention-relevant fields, and
+scrubs the backup passphrase + any nested SFTP credential at the boundary
+(the default redaction policy masks `password`/`secret` but not
+`passphrase`). `tier-1 gateway create` (a write) is out of scope -- the
+first write on a read-only connector is its own approval-gated G3.x
+write-surface initiative.
+
+**Session recovery (#2067).** `NsxConnector.invalidate_session(target)`
+is the public duck-typed hook the generic dispatch path calls on an
+auth-class status (NSX's 401) before re-dispatching once. The typed reads
+issue `_get_json` directly, so a raw 401 propagates to the dispatcher's
+#2067 recovery arm, which evicts the cached session and re-dispatches --
+the same seam the vmware-rest / vcf-logs connectors expose. The internal
+`_get_json_with_session_retry` helper still serves the fingerprint /
+probe path (which the dispatcher does not drive).
 
 **VCF-9 version renumber (#1530).** NSX-T 4.x was renumbered onto the
 VCF train at VCF 9.0 -- a live VCF-9 appliance reports NSX 9.0.x and
@@ -52,26 +80,22 @@ Source: `backend/src/meho_backplane/connectors/nsx/`.
   operator-context Vault read path. Mirrors the
   `load_session_credentials_from_vault` shape in
   `connectors/vmware_rest/`.
-- **`NSX_CORE_OPS`** (`core_ops.py`) -- frozen tuple of the 9
-  curated read-only NSX core ops (`NsxCoreOp` dataclass:
-  `op_id` + `group_key` + `llm_instructions` blob). The
-  operator-review pass on a G0.7-ingested NSX connector flips
-  exactly these ops to `is_enabled=True`; every other op the
-  spec ingestion produced stays `is_enabled=False`.
-- **`NSX_CORE_GROUPS`** (`core_ops.py`) -- frozen tuple of the 8
-  `NsxCoreGroup` entries (`group_key` + `name` + `when_to_use`)
-  the read-only core spans. One entry per LLM-grouping-pass output
-  group; two ops share the `policy-firewall` group_key.
-- **`NSX_PATH_RULES`** (`core_ops.py`) -- path-prefix to group_key
-  classifier rules, same shape `_PathPrefixStubLlmClient._PATH_RULES`
-  in the G0.7 vSphere canary uses. First match wins; order is
-  most-specific-first so e.g. `/policy/api/v1/infra/tier-0s`
-  doesn't fall into a broader future catch-all.
-- **`apply_nsx_core_curation`** (`core_ops.py`) -- async helper that
-  drives `ReviewService.edit_group` + `enable_group` + `edit_op`
-  (the new `llm_instructions=` keyword from G3.5-T2) against the
-  ingested connector. Idempotent — re-runnable during a rollout
-  or test rerun without duplicate audit rows.
+- **`NSX_PRODUCT` / `NSX_VERSION` / `NSX_IMPL_ID` / `NSX_CONNECTOR_ID`**
+  (`__init__.py`) -- the `(product, version, impl_id)` identity constants
+  plus the derived `connector_id` slug (`"nsx-rest-9.0"`). `NsxConnector`
+  pins the same triple as class attributes; the constants give acceptance /
+  typed-read / VCF-9-ingest tests one importable source of truth. Relocated
+  here from the retired `core_ops` module in #2358.
+- **Ingested browse breadth** -- the reads outside the typed set
+  (transport-node listing, segments, tier-0 gateways, distributed-firewall
+  policies + rules, and the wider NSX catalog) land as ordinary
+  `source_kind="ingested"` `endpoint_descriptor` rows via G0.7 spec ingestion
+  and are enabled through the generic review flow
+  (`ReviewService.enable_reads`). The hand-curated ingested-enable apparatus
+  (`core_ops.py`, with its `NSX_CORE_OPS` / `NSX_CORE_GROUPS` /
+  `NSX_PATH_RULES` constants and the `classify_nsx_op` /
+  `apply_nsx_core_curation` helpers) was retired in #2358 (T7 of #2266);
+  read enablement is now generic, with no per-product curation code.
 
 ## Control flow
 
@@ -201,51 +225,28 @@ concern, same posture vSphere takes for proactive refresh.
 - **structlog** -- a single `nsx_session_established` info event per
   successful session create; no other emit points in this skeleton.
 
-## Operator-review curation flow (G3.5-T2)
+## Ingested breadth + read enablement
 
-The `core_ops.py` constants land the operator-review side of the
-G0.7 ingest. After a G0.7 ingest of the NSX `policy.yaml` +
-`manager.yaml` corpus lands the full NSX descriptor set in the
-`endpoint_descriptor` table (every row `is_enabled=False`,
-`source_kind='ingested'`), the operator runs:
+The audited operational reads are typed ops (see the Overview) and dispatch on
+a fresh boot with zero catalog state. The remaining reads (transport-node
+listing, segments, tier-0 gateways, distributed-firewall policies + rules) and
+the wider NSX catalog land as ordinary `source_kind="ingested"`
+`endpoint_descriptor` rows after a G0.7 ingest of the NSX `policy.yaml` +
+`manager.yaml` corpus (every row `is_enabled=False` until enabled).
 
-```python
-from meho_backplane.connectors.nsx import apply_nsx_core_curation
-from meho_backplane.operations.ingest import ReviewService
+Enablement is generic: the operator enables the reads through the review flow
+— `ReviewService.enable_reads(connector_id, tenant_id=...)` (REST
+`POST /api/v1/connectors/{connector_id}/enable-reads`, MCP
+`meho.connector.enable_reads`). Ingested ops land under the
+**operator-supplied** `version` label, so a VCF-9 spec ingested as
+`version="9.1.0.0"` produces `connector_id="nsx-rest-9.1.0.0"` rather than the
+class pin's `nsx-rest-9.0` (#1530); the operator passes the `connector_id` the
+ingest actually produced.
 
-review_service = ReviewService(operator)
-await apply_nsx_core_curation(review_service, tenant_id=None)
-```
-
-Ingested ops land under the **operator-supplied** `version` label,
-so a VCF-9 spec ingested as `version="9.1.0.0"` produces
-`connector_id="nsx-rest-9.1.0.0"` rather than the class pin's
-`nsx-rest-9.0` (#1530). `apply_nsx_core_curation` takes a
-`connector_id` keyword (default `NSX_CONNECTOR_ID = "nsx-rest-9.0"`)
-so the operator passes the id the ingest actually produced:
-
-```python
-await apply_nsx_core_curation(
-    review_service, tenant_id=None, connector_id="nsx-rest-9.1.0.0"
-)
-```
-
-The helper drives the substrate through three substrate calls per
-group (`edit_group` for the operator-reviewed `name` /
-`when_to_use`, `enable_group` to flip `review_status='enabled'` and
-cascade child ops to `is_enabled=True`) plus one `edit_op` per
-curated op carrying the `llm_instructions` blob. Every other op
-the spec ingestion produced stays `is_enabled=False`, matching the
-"~9-op read-only core enabled, everything else staged" acceptance
-criterion in #614.
-
-The `ReviewService.edit_op(..., llm_instructions=...)` keyword is
-the G3.5-T2 substrate extension to a method that previously only
-covered `custom_description` / `safety_level` / `requires_approval`
-/ `is_enabled`. The new field is persistent verbatim, audited as a
-`fields_updated` entry without echoing the blob into the payload
-(operator-authored prose belongs out of the audit table, same
-posture `edit_group` takes for `when_to_use`).
+The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
+`NSX_CORE_OPS` / `NSX_CORE_GROUPS` / `NSX_PATH_RULES` constants and the
+`classify_nsx_op` / `apply_nsx_core_curation` helpers) was retired in #2358
+(T7 of #2266); there is no longer any per-product curation code.
 
 ## Known issues
 
@@ -256,7 +257,7 @@ posture `edit_group` takes for `when_to_use`).
   follow-up — it requires the NSX spec-shelf wired to the
   meho-runners-ci pool (same env-gated pattern
   `tests/acceptance/_vcenter_spec.py` codifies for vSphere). Until
-  then, the dispatch leg is exercised against `NSX_CORE_OPS`-seeded
+  then, the dispatch leg is exercised against seeded ingested
   descriptors in `tests/acceptance/_nsx_canary_fixtures.py`.
 - Default session loader raises `NotImplementedError`. Production
   callers must inject `session_loader=...` on construction until
@@ -272,7 +273,7 @@ posture `edit_group` takes for `when_to_use`).
 
 - Issues: [G3.5-T1 #613](https://github.com/evoila/meho/issues/613)
   (skeleton); [G3.5-T2 #614](https://github.com/evoila/meho/issues/614)
-  (core-ops curation + `edit_op(llm_instructions=)` substrate);
+  (ingested read-enable surface, retired in #2358);
   [G3.5-T3 #615](https://github.com/evoila/meho/issues/615)
   (CLI verbs + E2E recorded-fixture tests + operator onboarding doc).
 - Parent Initiative: [G3.5 #368](https://github.com/evoila/meho/issues/368).

@@ -13,7 +13,7 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// newAboutCmd returns `meho nsx about` → GET:/api/v1/node.
+// newAboutCmd returns `meho nsx about` → nsx.node.status.
 //
 // Renders the NSX Manager's node_version / hostname / node_uuid /
 // kernel_version identity fields; --json emits the raw envelope.
@@ -26,7 +26,7 @@ func newAboutCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "about",
 		Short: "Show NSX Manager version, hostname, and node UUID",
-		Long: "about dispatches GET:/api/v1/node against connector_id=\"nsx-rest-4.2\"\n" +
+		Long: "about dispatches nsx.node.status against connector_id=\"nsx-rest-4.2\"\n" +
 			"and renders the manager's node_version / hostname / node_uuid fields.\n" +
 			"--json emits the full OperationResult envelope.\n\n" +
 			"Exit codes mirror meho operation call:\n" +
@@ -56,15 +56,15 @@ func runAbout(cmd *cobra.Command, targetName string, jsonOut bool, backplaneOver
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	r, err := conn.Call(cmd.Context(), backplaneURL, "GET:/api/v1/node", targetName, nil)
+	r, err := conn.Call(cmd.Context(), backplaneURL, "nsx.node.status", targetName, nil)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, jsonOut)
 	}
-	return conn.Render(cmd, "GET:/api/v1/node", r, jsonOut, printAbout)
+	return conn.Render(cmd, "nsx.node.status", r, jsonOut, printAbout)
 }
 
 func printAbout(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:/api/v1/node — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s nsx.node.status — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return

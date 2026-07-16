@@ -47,7 +47,8 @@ NULL``) as well as registered targets.
 
 **Annotate / unannotate — Task #595 (G9.2-T3):** the curated-edge
 write service. Resolves both endpoints, validates ``kind`` against
-:class:`~meho_backplane.db.models.GraphEdgeKind`, runs §6 conflict
+the open slug grammar
+(:data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`), runs §6 conflict
 detection (sticky ``superseded_by`` for same-kind/different-endpoint
 auto edges; bidirectional ``conflicts_with`` for incompatible kinds
 over the same endpoint pair), and writes one audit row + one

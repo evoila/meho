@@ -226,7 +226,8 @@ async def bulk_import_edges(
     The function performs two passes:
 
     1. **Validation pass.** Resolves both endpoints of every row,
-       canonicalises the ``kind`` against :class:`GraphEdgeKind`, and
+       validates the ``kind`` against the open slug grammar
+       (:data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`), and
        records what the apply pass would do (``create`` for a row that
        does not yet exist; ``update`` for a row that matches an
        existing ``(tenant, from, to, kind)``; ``conflict`` for a row
@@ -447,8 +448,9 @@ async def _classify_row(
         _RowValidationError: Any of the three validation surfaces
             failed for this row.
     """
-    # Validate kind first — fail-fast on a typo before doing any
-    # node-resolution IO.
+    # Validate kind first — fail-fast on a malformed slug before doing
+    # any node-resolution IO. `kinds` carries the well-known set as
+    # suggestions (the vocabulary is open; membership is not enforced).
     try:
         canonical_kind = _validate_kind(row.kind)
     except InvalidEdgeKindError as exc:

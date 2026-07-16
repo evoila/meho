@@ -62,10 +62,14 @@ from sqlalchemy import select
 
 from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
-    _GRAPH_NODE_KINDS,
+    KIND_SLUG_MAX_LENGTH,
+    KIND_SLUG_MIN_LENGTH,
+    KIND_SLUG_PATTERN,
+    WELL_KNOWN_NODE_KINDS,
     AuditLog,
     GraphHistoryChangeKind,
     GraphNode,
+    is_valid_kind_slug,
 )
 from meho_backplane.topology.history import node_snapshot, record_node_change
 
@@ -115,21 +119,24 @@ _CREATE_NODE_HEARTBEAT_PROPERTY_KEYS: tuple[str, ...] = ("seeded_at",)
 
 
 class InvalidNodeKindError(ValueError):
-    """The supplied ``kind`` is not in the v0.2 ``_GRAPH_NODE_KINDS`` vocabulary.
+    """The supplied ``kind`` is not a valid kind slug.
 
     Raised by :func:`create_or_get_node` before any DB write — the
-    closed enum is the policy-layer grammar's first guard rail and
-    failing here avoids a more obscure DB ``CHECK ck_graph_node_kind``
-    violation later. The MCP layer maps it to a JSON-RPC ``-32602``
-    with the candidate list echoed in the message; the REST layer (when
-    one lands) would map it to a 422.
+    slug grammar (T1 #2534's open vocabulary) is the first guard rail
+    and failing here avoids a more obscure DB ``CHECK
+    ck_graph_node_kind`` violation later. The MCP layer maps it to a
+    JSON-RPC ``-32602`` with the pattern and the well-known suggestions
+    echoed in the message; the REST layer (when one lands) would map it
+    to a 422.
     """
 
     def __init__(self, kind: str) -> None:
         self.kind = kind
         super().__init__(
-            f"node kind {kind!r} is not in the v0.2 vocabulary; "
-            f"valid kinds: {list(_GRAPH_NODE_KINDS)!r}"
+            f"node kind {kind!r} is not a valid kind slug (pattern "
+            f"{KIND_SLUG_PATTERN}, {KIND_SLUG_MIN_LENGTH}-"
+            f"{KIND_SLUG_MAX_LENGTH} chars); well-known kinds: "
+            f"{sorted(WELL_KNOWN_NODE_KINDS)!r}"
         )
 
 
@@ -151,15 +158,17 @@ class CreateNodeResult:
 
 
 def _validate_kind(kind: str) -> str:
-    """Validate ``kind`` against :data:`_GRAPH_NODE_KINDS`; return the value.
+    """Validate ``kind`` against the open slug grammar; return the value.
 
-    Mirrors :func:`annotate._validate_kind`'s shape — the closed enum
+    Mirrors :func:`annotate._validate_kind`'s shape — the slug check
     is the first guard rail, failing here avoids a more obscure DB
-    ``CHECK`` violation later. Returns the canonical string (the
-    constant itself, not the raw input) so subsequent code uses the
-    vocabulary value, not whatever the caller typed.
+    ``CHECK`` violation later. Any slug matching
+    :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN` (2-63 chars)
+    is accepted (T1 #2534's open vocabulary); membership in
+    :data:`~meho_backplane.db.models.WELL_KNOWN_NODE_KINDS` is a
+    documentation convention, not a gate.
     """
-    if kind not in _GRAPH_NODE_KINDS:
+    if not is_valid_kind_slug(kind):
         raise InvalidNodeKindError(kind)
     return kind
 
@@ -305,10 +314,10 @@ async def create_or_get_node(
     :func:`~meho_backplane.topology.annotate.annotate_edge` to assert
     the cross-system edge between them.
 
-    Validates ``kind`` against the closed
-    :data:`~meho_backplane.db.models._GRAPH_NODE_KINDS` vocabulary
-    *before* any DB write — raises :class:`InvalidNodeKindError` so a
-    typo never reaches the DB-layer CHECK.
+    Validates ``kind`` against the open slug grammar
+    (:data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`) *before* any
+    DB write — raises :class:`InvalidNodeKindError` so a malformed
+    kind never reaches the DB-layer CHECK.
 
     Idempotency keyed on the unique
     ``graph_node_tenant_kind_name_idx`` (``(tenant_id, kind, name)``):
@@ -358,9 +367,12 @@ async def create_or_get_node(
             audit attribution. Role gating (``tenant_admin``) is the
             front layer's job (MCP / REST); the service trusts its
             caller.
-        kind: One of the v0.2
-            :data:`~meho_backplane.db.models._GRAPH_NODE_KINDS` values.
-            Wrong value raises :class:`InvalidNodeKindError`.
+        kind: Any slug matching
+            :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`
+            (2-63 chars); prefer a
+            :data:`~meho_backplane.db.models.WELL_KNOWN_NODE_KINDS`
+            member when one fits. A malformed slug raises
+            :class:`InvalidNodeKindError`.
         name: ``graph_node.name``. Must be non-empty (the MCP
             inputSchema enforces ``minLength=1`` before the call).
         note: Optional free-text annotation. Stored on
@@ -374,8 +386,7 @@ async def create_or_get_node(
         row + ``was_created`` flag.
 
     Raises:
-        InvalidNodeKindError: ``kind`` not in
-            :data:`_GRAPH_NODE_KINDS`.
+        InvalidNodeKindError: ``kind`` is not a valid kind slug.
     """
     canonical_kind = _validate_kind(kind)
     # Pre-allocate ``audit_id`` so the history row's ``audit_id``

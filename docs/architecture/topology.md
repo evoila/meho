@@ -75,16 +75,84 @@ CLI, REST (`/api/v1/topology*`, `/api/v1/targets/discover`), and the
 MCP meta-tools are **sibling fronts on one backplane** — each calls the
 `topology/` substrate directly; none is a thin wrapper of another.
 
-## The v0.2 edge-kind vocabulary
+## The kind vocabularies — open, slug-validated, with a documented well-known core
 
-G9.2 ([#364](https://github.com/evoila/meho/issues/364)) locks the
-edge-kind vocabulary at **ten** members: the four auto-discoverable
-kinds G9.1 ships, plus six operator-curated cross-system kinds that
-no probe can derive. The vocabulary is closed; widening it is a
-coordinated DB + model + decision-row change (migration `0010`
-widens the `graph_edge.kind` CHECK from the G9.1 subset; the
+Both `graph_node.kind` and `graph_edge.kind` are **open
+vocabularies** ([Initiative #2533](https://github.com/evoila/meho/issues/2533)
+T1 [#2534](https://github.com/evoila/meho/issues/2534), reversing the
+[#364](https://github.com/evoila/meho/issues/364) v0.2 lock). Any kind
+matching the **slug grammar** is valid:
+
+```
+^[a-z0-9]+(?:[._-][a-z0-9]+)*$        (2–63 characters)
+```
+
+lowercase alphanumeric runs joined by single `.` / `_` / `-`
+separators. A novel kind (`dns-record`, `database`, `certificate`,
+`chassis`, `resolves-to`, `same-as`, …) enters the graph through a
+normal write — no migration, no registry, no per-tenant governance
+table ("dumb substrate, smart agent"). Human `tenant_admin` writes
+stay zero-friction on every front; for AGENT principals the write
+itself becomes approval-gated when T3
+[#2537](https://github.com/evoila/meho/issues/2537) lands (until
+then agent writes are immediate, like human writes), at which point
+a human sees a novel agent-invented kind at the moment it is
+proposed.
+
+Enforcement layers:
+
+- **Python (authoritative)** — the full slug pattern is validated at
+  every write boundary, single-sourced from
+  [`KIND_SLUG_PATTERN`](../../backend/src/meho_backplane/db/models.py)
+  (`is_valid_kind_slug`): the service primitives
+  (`topology/nodes.py`, `topology/annotate.py`), the REST body
+  models (Pydantic `StringConstraints`), and the MCP inputSchemas
+  (jsonschema `pattern`). Rejection cites the pattern and echoes the
+  well-known kinds as suggestions.
+- **DB (backstop)** — migration `0063` replaced the closed IN-list
+  CHECKs (`ck_graph_node_kind` 14 members, `ck_graph_edge_kind` 10
+  members) with a portable minimal shape CHECK
+  (`length(kind) BETWEEN 2 AND 63 AND kind = lower(kind)`); regex
+  CHECKs are not portable across PostgreSQL and the SQLite unit
+  suite, so the DB layer guards shape, not the full grammar.
+
+The old members survive as the **well-known set** — a documentation
+convention, not a gate.
+[`WELL_KNOWN_NODE_KINDS`](../../backend/src/meho_backplane/db/models.py)
+carries the 14 node kinds (`target`, `vm`, `host`, `network`,
+`datastore`, `namespace`, `pod`, `service`, `ingress`, `node`,
+`principal`, `vault-role`, `vault-mount`, `volume`);
 [`GraphEdgeKind`](../../backend/src/meho_backplane/db/models.py)
-`StrEnum` and the CHECK move in lock-step).
+carries the ten edge kinds tabulated below. **Prefer a well-known
+kind when one fits** — shared vocabulary keeps traversal answers and
+cross-operator conventions legible; reach for a novel slug when no
+well-known kind describes the resource class or relationship. The
+UI surfaces the well-known kinds as `datalist` suggestions with
+free-text input; MCP tool descriptions and error messages carry the
+same list.
+
+### The `same-as` convention — cross-system identity stitching
+
+When two connectors each discover *the same physical thing* under
+different names (the Kubernetes connector's `node` `worker-3` and a
+bare-metal inventory's `host` `hetzner-ax41-7`), assert a curated
+`same-as` edge between the two nodes:
+
+```
+meho topology annotate worker-3 same-as hetzner-ax41-7 \
+  --note "same machine; MAC 9c:6b:00:… verified 2026-07-10" \
+  --evidence-url https://…/INVENTORY.md#ax41-7
+```
+
+`same-as` is symmetric in meaning but stored as a directed edge like
+every other kind; pick a consistent direction per tenant (suggested:
+from the more specific / ephemeral representation to the more
+durable one) and record the evidence. Traversals then reach across
+the identity seam like any other edge. Machine-*suggested* matches
+(auto-matching by MAC/UUID) are a later initiative; T1 makes the
+assertion expressible and traversable today.
+
+### The well-known edge kinds
 
 **Four auto-discoverable kinds** — refresh writes these on every
 probe, **for the pair-types a populator covers** (see

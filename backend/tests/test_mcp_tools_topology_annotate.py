@@ -528,21 +528,55 @@ async def test_annotate_is_idempotent_on_repeat(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_annotate_rejects_unknown_kind_at_schema_layer(
+def test_annotate_rejects_malformed_kind_at_schema_layer(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A made-up `kind` value fails the inputSchema enum (-32602)."""
+    """A malformed `kind` slug fails the inputSchema pattern (-32602).
+
+    T1 #2534: the schema constrains by slug shape, not membership —
+    an uppercase / punctuated kind is rejected before the handler
+    runs, while a well-formed novel kind passes (covered by
+    ``test_annotate_accepts_novel_kind``).
+    """
     client, _op = client_with_operator
     response = _annotate_call(
         client,
         30,
         {
             "from_name": "a",
-            "kind": "made-up-kind",
+            "kind": "Made Up Kind!",
             "to_name": "b",
         },
     )
     assert response.json()["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+async def test_annotate_accepts_novel_kind(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _seeded_tenant: None,
+) -> None:
+    """A novel edge kind (`resolves-to`) annotates end-to-end (T1 #2534)."""
+    client, _op = client_with_operator
+    await _seed_node(kind="dns-record", name="www.example.com")
+    await _seed_node(kind="service", name="frontend")
+
+    with patch(_PUBLISH_PATCH, new=AsyncMock()):
+        response = _annotate_call(
+            client,
+            33,
+            {
+                "from_name": "www.example.com",
+                "kind": "resolves-to",
+                "to_name": "frontend",
+            },
+        )
+
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "resolves-to"
+    assert payload["source"] == "curated"
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)

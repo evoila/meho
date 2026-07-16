@@ -879,10 +879,10 @@ async def list_edges(
             commits, no flushes.
         tenant_id: The tenant scope. Mandatory and non-optional — there
             is no "list every edge across tenants" mode by construction.
-        kind: Optional :class:`~meho_backplane.db.models.GraphEdgeKind`
-            filter (one of the ten v0.2 vocabulary values). The CHECK
-            constraint already restricts the column; this filter
-            narrows the listing.
+        kind: Optional exact-match ``graph_edge.kind`` filter (any
+            kind slug; the vocabulary is open per T1 #2534, with
+            :class:`~meho_backplane.db.models.GraphEdgeKind` as the
+            well-known set). This filter narrows the listing.
         source: Optional ``graph_edge.source`` filter (``'auto'`` for
             probe-derived edges, ``'curated'`` for operator-asserted
             ones — see :class:`~meho_backplane.db.models.GraphEdge`).
@@ -1116,10 +1116,10 @@ async def list_nodes(
             across tenants" mode by construction. The first SQL WHERE
             clause is always ``graph_node.tenant_id = :tenant_id``;
             no filter combination overrides it.
-        kind: Optional exact-match ``graph_node.kind`` filter (one of
-            :data:`meho_backplane.db.models._GRAPH_NODE_KINDS`). The
-            CHECK constraint already restricts the column; this
-            narrows the listing.
+        kind: Optional exact-match ``graph_node.kind`` filter (any
+            kind slug; the vocabulary is open per T1 #2534, with
+            :data:`meho_backplane.db.models.WELL_KNOWN_NODE_KINDS` as
+            the well-known set). This narrows the listing.
         name_contains: Optional case-insensitive substring filter on
             ``graph_node.name``. Uses SQLAlchemy ``ilike`` with the
             user-controllable input wrapped in ``%`` on both sides;

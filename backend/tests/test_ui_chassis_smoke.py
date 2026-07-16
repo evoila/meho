@@ -65,6 +65,7 @@ from meho_backplane.ui.auth.flow import (
     clear_discovery_cache,
     reset_verifier_store_for_testing,
 )
+from meho_backplane.ui.auth.middleware import _redirect_to_login
 from meho_backplane.ui.auth.session_store import (
     EncryptionKeyMissingError,
     create_session,
@@ -358,6 +359,27 @@ def test_htmx_with_valid_session_is_not_hijacked_by_login_redirect() -> None:
         response = client.get("/ui/", headers={"HX-Request": "true"})
     assert response.status_code == 200
     assert "HX-Redirect" not in response.headers
+
+
+def test_redirect_to_login_204_omits_content_length_but_302_keeps_it() -> None:
+    """RFC 9110 §8.6: the htmx ``204`` must NOT carry a ``Content-Length``.
+
+    The middleware writes the raw ASGI response (no framework header
+    sanitisation), so a ``Content-Length`` on a ``204`` would reach h11 /
+    a strict proxy and can raise ``LocalProtocolError``. The non-htmx
+    ``302`` (which permits the header) keeps its ``content-length: 0``.
+    """
+    htmx_status, htmx_headers = _redirect_to_login("/ui/topology", is_htmx=True)
+    htmx_names = {name.lower() for name, _ in htmx_headers}
+    assert htmx_status == 204
+    assert b"content-length" not in htmx_names
+    assert b"hx-redirect" in htmx_names
+
+    plain_status, plain_headers = _redirect_to_login("/ui/topology", is_htmx=False)
+    plain_names = {name.lower() for name, _ in plain_headers}
+    assert plain_status == 302
+    assert b"location" in plain_names
+    assert b"content-length" in plain_names
 
 
 # ---------------------------------------------------------------------------

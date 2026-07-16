@@ -273,10 +273,14 @@ def _redirect_to_login(
     encoded = quote(original_path_with_query, safe="")
     location = f"{LOGIN_PATH}?return_to={encoded}"
     if is_htmx:
+        # No ``content-length`` here: RFC 9110 §8.6 forbids it on a 204,
+        # and this middleware writes the raw ASGI response (no framework
+        # header sanitisation), so an invalid header would reach h11 /
+        # strict proxies and can raise ``LocalProtocolError``. The 302
+        # branch below keeps ``content-length: 0`` -- that status permits it.
         return status.HTTP_204_NO_CONTENT, [
             (b"hx-redirect", location.encode("ascii")),
             (b"cache-control", b"no-store"),
-            (b"content-length", b"0"),
         ]
     return status.HTTP_302_FOUND, [
         (b"location", location.encode("ascii")),

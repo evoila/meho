@@ -333,6 +333,28 @@ class BroadcastEvent(BaseModel):
     #: ``audit_query`` classes — the redaction contract is upstream of
     #: this field.
     payload: dict[str, Any] = Field(default_factory=dict)
+    #: RFC 8693 actor (the acting agent) when the operation ran under a
+    #: user-initiated agent delegation, ``None`` for a direct human
+    #: request or an autonomous (self-authenticated) agent run. Projected
+    #: at publish time from the same
+    #: :func:`~meho_backplane.auth.delegation.resolve_actor_sub` the
+    #: sibling ``audit_log`` writer reads, so a feed reader can tell a
+    #: delegated agent's work (``actor_sub`` = agent, ``principal_sub`` =
+    #: human) from the human's own. Server-derived and trusted — no
+    #: untrusted-prose envelope applies.
+    actor_sub: str | None = None
+    #: Agent-run session id when the operation was dispatched from inside
+    #: an agent loop (the run id doubles as the session id), ``None``
+    #: otherwise. Groups every operation a single run produced —
+    #: projected from :data:`~meho_backplane.operations._audit.agent_session_id_var`,
+    #: the same contextvar the ``audit_log.agent_session_id`` column reads.
+    agent_session_id: UUID | None = None
+    #: External change-ticket reference (a GitHub issue, Jira key, CR id)
+    #: correlating the operation to the out-of-band record that authorised
+    #: it, ``None`` when unbound. Projected from
+    #: :data:`~meho_backplane.operations._audit.work_ref_var`, the same
+    #: contextvar the ``audit_log.work_ref`` column reads.
+    work_ref: str | None = None
 
 
 # code-quality-allow: flat order-significant op-id classifier; length is the

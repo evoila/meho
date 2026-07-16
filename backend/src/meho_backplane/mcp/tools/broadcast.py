@@ -127,6 +127,7 @@ class _BroadcastFilter(NamedTuple):
     op_class: str | None
     principal: str | None
     target: str | None
+    actor_sub: str | None
     work_ref: str | None
     active_only: bool
 
@@ -136,15 +137,18 @@ def _extract_filter(arguments: dict[str, Any]) -> _BroadcastFilter:
 
     The wire schema's ``filter`` object permits each sub-key to be
     omitted entirely OR set to its typed value (string for
-    ``op_class`` / ``principal`` / ``target`` / ``work_ref``, boolean
-    for ``active_only``). Anything else (a number, a list, an object)
-    surfaces as JSON-RPC ``-32602`` -- the JSON Schema validator at the
-    dispatcher layer catches structural violations; this helper picks
-    the typed view for the handler.
+    ``op_class`` / ``principal`` / ``target`` / ``actor_sub`` /
+    ``work_ref``, boolean for ``active_only``). Anything else (a number,
+    a list, an object) surfaces as JSON-RPC ``-32602`` -- the JSON
+    Schema validator at the dispatcher layer catches structural
+    violations; this helper picks the typed view for the handler.
 
-    ``work_ref`` narrows to announcement claims linked to that opaque
-    change-ticket reference; ``active_only`` (default ``False``) drops
-    TTL'd claims whose ``expires_at`` has already elapsed.
+    ``actor_sub`` narrows to a delegated agent's own operations -- the
+    RFC 8693 actor, distinct from ``principal`` which matches the human
+    subject (T3 #2545); ``work_ref`` narrows to any event linked to
+    that opaque change-ticket reference; ``active_only`` (default
+    ``False``) drops TTL'd claims whose ``expires_at`` has already
+    elapsed.
     """
     filter_obj = arguments.get("filter") or {}
     if not isinstance(filter_obj, dict):
@@ -152,11 +156,13 @@ def _extract_filter(arguments: dict[str, Any]) -> _BroadcastFilter:
     op_class = filter_obj.get("op_class")
     principal = filter_obj.get("principal")
     target = filter_obj.get("target")
+    actor_sub = filter_obj.get("actor_sub")
     work_ref = filter_obj.get("work_ref")
     for name, value in (
         ("op_class", op_class),
         ("principal", principal),
         ("target", target),
+        ("actor_sub", actor_sub),
         ("work_ref", work_ref),
     ):
         if value is not None and not isinstance(value, str):
@@ -164,7 +170,7 @@ def _extract_filter(arguments: dict[str, Any]) -> _BroadcastFilter:
     active_only = filter_obj.get("active_only", False)
     if not isinstance(active_only, bool):
         raise McpInvalidParamsError("filter.active_only: must be a boolean when provided")
-    return _BroadcastFilter(op_class, principal, target, work_ref, active_only)
+    return _BroadcastFilter(op_class, principal, target, actor_sub, work_ref, active_only)
 
 
 async def _handler_recent(
@@ -222,6 +228,7 @@ async def _handler_recent(
             op_class=flt.op_class,
             principal=flt.principal,
             target=flt.target,
+            actor_sub=flt.actor_sub,
             work_ref=flt.work_ref,
             active_only=flt.active_only,
             limit=raw_limit,
@@ -247,7 +254,8 @@ register_mcp_tool(
             "cursor ('1747800000000-0') to override. The 'filter' "
             "object narrows by exact-match op_class / principal "
             "(JWT 'sub') / target (target_name or any of an "
-            "announcement's 'targets') / work_ref, plus 'active_only' "
+            "announcement's 'targets') / actor_sub (the delegated agent) "
+            "/ work_ref (change ticket), plus 'active_only' "
             "(drop expired TTL claims). 'limit' caps the "
             "page at 1..1000 (default 100); the response's "
             "'next_cursor' round-trips as the next call's 'cursor' "
@@ -314,14 +322,29 @@ register_mcp_tool(
                                 "entry in its 'targets' list."
                             ),
                         },
+                        "actor_sub": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": (
+                                "Exact-match filter on the RFC 8693 actor "
+                                "(the delegated agent that acted). Answers "
+                                "'what has this agent been doing' -- distinct "
+                                "from 'principal', which matches the human "
+                                "subject the agent acted for."
+                            ),
+                        },
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": WORK_REF_MAX_CHARS,
                             "description": (
-                                "Exact-match filter on an announcement's "
-                                "'work_ref' (e.g. 'gh:evoila/meho#123'). "
-                                "Audit-driven events never match it."
+                                "Exact-match filter on an external "
+                                "change-ticket reference (e.g. "
+                                "'gh:evoila/meho#123'), grouping every event "
+                                "tied to one ticket -- an announcement's "
+                                "declared 'work_ref' OR an audit-driven "
+                                "operation's projected lineage 'work_ref'."
                             ),
                         },
                         "active_only": {
@@ -932,8 +955,9 @@ def _filter_xread_items(
     op_class: str | None,
     principal: str | None,
     target: str | None,
-    work_ref: str | None = None,
-    active_only: bool = False,
+    actor_sub: str | None,
+    work_ref: str | None,
+    active_only: bool,
 ) -> list[dict[str, Any]]:
     """Parse + filter the XREAD batch into the wire-shape events list.
 
@@ -967,6 +991,7 @@ def _filter_xread_items(
             op_class=op_class,
             principal=principal,
             target=target,
+            actor_sub=actor_sub,
             work_ref=work_ref,
             active_only=active_only,
             now=now,
@@ -983,6 +1008,7 @@ async def _watch_events_impl(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    actor_sub: str | None,
     work_ref: str | None,
     active_only: bool,
     timeout_ms: int,
@@ -1036,6 +1062,7 @@ async def _watch_events_impl(
         op_class=op_class,
         principal=principal,
         target=target,
+        actor_sub=actor_sub,
         work_ref=work_ref,
         active_only=active_only,
     )
@@ -1087,6 +1114,7 @@ async def _handler_watch(
         op_class=flt.op_class,
         principal=flt.principal,
         target=flt.target,
+        actor_sub=flt.actor_sub,
         work_ref=flt.work_ref,
         active_only=flt.active_only,
         timeout_ms=timeout_ms,
@@ -1121,7 +1149,8 @@ register_mcp_tool(
             "shape) and is mutually exclusive with it. The 'filter' "
             "object narrows by exact-match op_class / principal "
             "(JWT 'sub') / target (target_name or any of an "
-            "announcement's 'targets') / work_ref, plus 'active_only' "
+            "announcement's 'targets') / actor_sub (the delegated agent) "
+            "/ work_ref (change ticket), plus 'active_only' "
             "(drop expired TTL claims). Tenant scoping is "
             "structural -- every watch targets the operator's own tenant "
             "stream; there is no input that could request another "
@@ -1188,14 +1217,29 @@ register_mcp_tool(
                                 "entry in its 'targets' list."
                             ),
                         },
+                        "actor_sub": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": (
+                                "Exact-match filter on the RFC 8693 actor "
+                                "(the delegated agent that acted). Answers "
+                                "'what has this agent been doing' -- distinct "
+                                "from 'principal', which matches the human "
+                                "subject the agent acted for."
+                            ),
+                        },
                         "work_ref": {
                             "type": "string",
                             "minLength": 1,
                             "maxLength": WORK_REF_MAX_CHARS,
                             "description": (
-                                "Exact-match filter on an announcement's "
-                                "'work_ref' (e.g. 'gh:evoila/meho#123'). "
-                                "Audit-driven events never match it."
+                                "Exact-match filter on an external "
+                                "change-ticket reference (e.g. "
+                                "'gh:evoila/meho#123'), grouping every event "
+                                "tied to one ticket -- an announcement's "
+                                "declared 'work_ref' OR an audit-driven "
+                                "operation's projected lineage 'work_ref'."
                             ),
                         },
                         "active_only": {

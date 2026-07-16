@@ -71,6 +71,7 @@ from meho_backplane.db.models import (
     GraphNode,
     is_valid_kind_slug,
 )
+from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.topology.history import node_snapshot, record_node_change
 
 if TYPE_CHECKING:
@@ -275,6 +276,7 @@ async def _publish(
     a successful create_or_get.
     """
     try:
+        lineage = resolve_broadcast_lineage()
         event = BroadcastEvent(
             event_id=uuid.uuid4(),
             ts=datetime.now(UTC),
@@ -287,6 +289,9 @@ async def _publish(
             result_status="ok",
             audit_id=audit_id,
             payload=payload,
+            actor_sub=lineage.actor_sub,
+            agent_session_id=lineage.agent_session_id,
+            work_ref=lineage.work_ref,
         )
         await publish_event(event)
     except Exception:

@@ -70,8 +70,29 @@ Three layers, separated for traceability:
 - `BroadcastEvent` (`broadcast/events.py`) — every audited operation
   publishes one. Fields: `event_id` (UUID), `ts`, `tenant_id`,
   `principal_sub`, `principal_name`, `target_name`, `op_id`,
-  `op_class`, `result_status`, `audit_id`, `payload`.
-  `event_kind = "audit_derived"` discriminator.
+  `op_class`, `result_status`, `audit_id`, `payload`, plus the lineage
+  trio `actor_sub`, `agent_session_id` (UUID), `work_ref` (all
+  `| None`). `event_kind = "audit_derived"` discriminator.
+  - **Lineage projection (T3 #2545).** The three lineage fields mirror
+    the `audit_log` columns of the same name: `actor_sub` is the
+    RFC 8693 actor (the delegated agent that acted, distinct from
+    `principal_sub` = the human/subject it acted for);
+    `agent_session_id` groups every operation one agent run produced;
+    `work_ref` ties the operation to an external change ticket. Every
+    `BroadcastEvent` construction site reads them off the publish-site
+    contextvars via `resolve_broadcast_lineage()`
+    (`operations/_audit.py`) — the same `resolve_actor_sub()` /
+    `agent_session_id_var` / `work_ref_var` the sibling audit-row writer
+    reads — so a delegated agent's work is attributable to the agent on
+    the feed instead of broadcasting under the human's `principal_sub`.
+    Server-derived and trusted: no untrusted-prose envelope applies (the
+    envelope guards agent free text on `AgentAnnouncementEvent` only).
+    Optional with `None` defaults, so pre-T3 stream entries that predate
+    the fields still validate on read. `event_matches`
+    (`broadcast/history.py`) and the `meho.broadcast.recent` /
+    `meho.broadcast.watch` `filter` object gained matching `actor_sub`
+    and `work_ref` exact-match filters ("what has this agent been
+    doing"); an announcement never qualifies for a lineage filter.
 - `AgentAnnouncementEvent` (`broadcast/agent_events.py`) — agent-
   authored announcements published via `meho.broadcast.announce`.
   Fields: `tenant_id`, `principal_sub`, `activity`, `target`, `scope`,

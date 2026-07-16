@@ -138,6 +138,12 @@ HTTP request
 ```
 MCP tools/call meho.broadcast.announce
   → _handler_announce (mcp/tools/broadcast.py)
+    → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
+      → (skipped when broadcast_announce_rate_per_minute == 0)
+      → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}
+               EXPIRE …  60
+      → count > limit → AnnounceRateLimitExceeded
+           → McpRateLimitedError → JSON-RPC -32000 (retry-after in data)
     → publish_agent_announcement(AgentAnnouncementEvent)  ← fail-loud
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
       → returns Valkey entry id verbatim
@@ -146,6 +152,22 @@ MCP tools/call meho.broadcast.announce
        self-labelled name, #2479; `event_id` is the legacy alias
        and NOT a durable UUID: announcements carry no UUID)
 ```
+
+The rate limit (G6.5-T6 #2546) is a per-`(tenant, principal)`
+fixed-window counter (the canonical Redis `INCR` rate-limiter pattern)
+enforced **before** the publish. It protects the count-trimmed stream
+(`MAXLEN ~ 10000`): without it, one looping principal could evict the
+whole tenant's coordination window in a burst. Default 10 announces per
+60 s window (`broadcast_announce_rate_per_minute`, `0` disables). The
+counter lives on the same fast broadcast client as the publish and is
+fail-loud for the same reason — a Valkey wobble must not silently let a
+principal bypass the cap. See `broadcast/rate_limit.py`.
+
+The four-step broadcast discipline (check `meho.broadcast.recent` →
+announce `start` → `update` → `completion`) is seeded into every MCP
+session preamble as a static band (`BROADCAST_DISCIPLINE_BAND` in
+`conventions/preamble.py`, #2546) so agents receive it without relying
+on the optional consumer onboarding template.
 
 ### Read path (SSE)
 

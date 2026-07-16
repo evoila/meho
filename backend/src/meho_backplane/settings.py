@@ -395,6 +395,16 @@ class Settings(BaseModel):
         Default 24 matches the locked v0.2 decision-3 contract. T3
         (#309) will use this to set ``XADD MAXLEN`` / ``MINID`` trim
         on every publish; T1 only carries the knob.
+    broadcast_announce_rate_per_minute:
+        Per-``(tenant, principal)`` fixed-window cap on
+        ``meho.broadcast.announce`` writes, enforced before the publish
+        (G6.5-T6 #2546). Protects the count-trimmed tenant stream
+        (``BROADCAST_MAXLEN`` = 10000) from a single looping principal
+        evicting the whole tenant's coordination window. Default 10 per
+        60 s window; ``0`` disables the limit entirely (no Valkey
+        round-trip on the announce hot path). Over-limit announces are
+        rejected with a typed JSON-RPC error naming the window — the
+        fail-loud announce contract is preserved (no silent drop).
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1015,6 +1025,7 @@ class Settings(BaseModel):
         min_length=1,
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
+    broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
@@ -1622,6 +1633,9 @@ def get_settings() -> Settings:
         ),
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
+        ),
+        broadcast_announce_rate_per_minute=int(
+            os.environ.get("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "10"),
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),

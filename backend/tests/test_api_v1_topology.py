@@ -925,10 +925,43 @@ async def test_annotate_edge_admin_round_trip(client: TestClient) -> None:
     }
 
 
-def test_annotate_edge_unknown_kind_returns_422(client: TestClient) -> None:
-    """Pydantic enum field rejects an unknown ``kind`` before the service runs."""
+def test_annotate_edge_malformed_kind_returns_422(client: TestClient) -> None:
+    """The Pydantic slug pattern rejects a malformed ``kind`` before the service runs.
+
+    T1 #2534: the vocabulary is open — rejection is by slug shape
+    (pattern + length), not membership. Uppercase / punctuated and
+    over-long kinds both 422 at the boundary.
+    """
     key, token = _admin_token_value()
     fake = AsyncMock()
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.annotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        for bad_kind in ("Made Up Kind!", "a" * 64):
+            resp = client.post(
+                "/api/v1/topology/edges",
+                headers=_authed(token),
+                json={
+                    "from": {"name": "a"},
+                    "kind": bad_kind,
+                    "to": {"name": "b"},
+                },
+            )
+            assert resp.status_code == 422, bad_kind
+    fake.assert_not_awaited()
+
+
+def test_annotate_edge_novel_kind_passes_boundary(client: TestClient) -> None:
+    """A well-formed novel ``kind`` (`resolves-to`) reaches the service.
+
+    The open-vocabulary counterpart of the malformed-kind 422: the
+    boundary must not re-close the kind space, so a slug outside the
+    well-known set flows through to ``annotate_edge`` verbatim.
+    """
+    key, token = _admin_token_value()
+    fake = AsyncMock(side_effect=NodeNotFoundError("a", None))
     with (
         respx.mock as mock_router,
         patch("meho_backplane.api.v1.topology.annotate_edge", fake),
@@ -939,12 +972,14 @@ def test_annotate_edge_unknown_kind_returns_422(client: TestClient) -> None:
             headers=_authed(token),
             json={
                 "from": {"name": "a"},
-                "kind": "made-up-kind",
+                "kind": "resolves-to",
                 "to": {"name": "b"},
             },
         )
-    assert resp.status_code == 422
-    fake.assert_not_awaited()
+    # 404 proves the request cleared Pydantic validation and invoked
+    # the (mocked) service with the novel kind.
+    assert resp.status_code == 404
+    assert fake.call_args.args[3] == "resolves-to"
 
 
 def test_annotate_edge_unknown_field_returns_422(client: TestClient) -> None:
@@ -1144,12 +1179,16 @@ def test_list_edges_default_filters(client: TestClient) -> None:
 
 
 def test_list_edges_invalid_kind_returns_422(client: TestClient) -> None:
-    """Pydantic rejects an unknown ``kind`` query param."""
+    """Pydantic rejects a malformed ``kind`` query param (slug pattern).
+
+    T1 #2534: any well-formed slug is a legal filter (the vocabulary
+    is open), so only a shape-violating value 422s here.
+    """
     key, token = _token(TenantRole.OPERATOR)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         resp = client.get(
-            "/api/v1/topology/edges?kind=not-a-kind",
+            "/api/v1/topology/edges?kind=Not%20A%20Kind!",
             headers=_authed(token),
         )
     assert resp.status_code == 422

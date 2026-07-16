@@ -143,9 +143,11 @@ _EDGE_CHANGED_EVENT = "meho:topology-edge-changed"
 _MAX_NOTE_LENGTH = 2000
 _MAX_EVIDENCE_URL_LENGTH = 2000
 
-#: The closed v0.2 edge-kind vocabulary, surfaced to the modal's ``kind``
-#: dropdown. Sourced from the enum (single source of truth) so a future
-#: widening of :class:`GraphEdgeKind` lands in the modal for free.
+#: The well-known edge kinds, surfaced to the modal's ``kind`` field as
+#: ``datalist`` suggestions. The vocabulary is open (T1 #2534): the
+#: modal accepts any slug matching the kind grammar and the service
+#: validates it; this list is advisory. Sourced from the enum so a
+#: future widening of :class:`GraphEdgeKind` lands in the modal for free.
 _EDGE_KIND_OPTIONS = [k.value for k in GraphEdgeKind]
 
 

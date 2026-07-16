@@ -762,8 +762,45 @@ def test_topology_ui_annotate_modal_open_renders_for_admin_with_csrf() -> None:
     # The modal mints + sets a fresh meho_csrf cookie so the POST carries a
     # valid double-submit token.
     assert CSRF_COOKIE_NAME in response.cookies
-    # The closed edge-kind vocabulary is surfaced in the dropdown.
+    # The well-known edge kinds are surfaced as datalist suggestions.
     assert "authenticates-via" in body
+
+
+def test_topology_ui_annotate_modal_kind_is_free_text_with_datalist() -> None:
+    """The modal's kind field is a free-text input + datalist, not a closed select.
+
+    T1 #2534 acceptance criterion: the vocabulary is open, so the UI
+    must accept a novel kind (`resolves-to`, `same-as`, ...) while
+    offering the well-known kinds as ``datalist`` suggestions. A
+    ``<select name="kind">`` would silently re-close the vocabulary at
+    the console boundary.
+    """
+    _seed_tenant_row(_TENANT_A, "tenant-a")
+
+    client, mock, _csrf = _authenticated_client_with_role_jwks(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/topology/edges/annotate")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Free-text input bound to the suggestions datalist...
+    assert 'name="kind"' in body
+    assert 'list="edge-kind-suggestions"' in body
+    assert '<datalist id="edge-kind-suggestions">' in body
+    # ...and no closed <select> for the kind field.
+    assert '<select\n          name="kind"' not in body
+    assert '<select name="kind"' not in body
+    # Every well-known kind renders as a suggestion option.
+    from meho_backplane.db.models import GraphEdgeKind
+
+    for kind in GraphEdgeKind:
+        assert f'<option value="{kind.value}"' in body
 
 
 # ---------------------------------------------------------------------------

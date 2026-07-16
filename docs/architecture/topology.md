@@ -75,16 +75,84 @@ CLI, REST (`/api/v1/topology*`, `/api/v1/targets/discover`), and the
 MCP meta-tools are **sibling fronts on one backplane** — each calls the
 `topology/` substrate directly; none is a thin wrapper of another.
 
-## The v0.2 edge-kind vocabulary
+## The kind vocabularies — open, slug-validated, with a documented well-known core
 
-G9.2 ([#364](https://github.com/evoila/meho/issues/364)) locks the
-edge-kind vocabulary at **ten** members: the four auto-discoverable
-kinds G9.1 ships, plus six operator-curated cross-system kinds that
-no probe can derive. The vocabulary is closed; widening it is a
-coordinated DB + model + decision-row change (migration `0010`
-widens the `graph_edge.kind` CHECK from the G9.1 subset; the
+Both `graph_node.kind` and `graph_edge.kind` are **open
+vocabularies** ([Initiative #2533](https://github.com/evoila/meho/issues/2533)
+T1 [#2534](https://github.com/evoila/meho/issues/2534), reversing the
+[#364](https://github.com/evoila/meho/issues/364) v0.2 lock). Any kind
+matching the **slug grammar** is valid:
+
+```
+^[a-z0-9]+(?:[._-][a-z0-9]+)*$        (2–63 characters)
+```
+
+lowercase alphanumeric runs joined by single `.` / `_` / `-`
+separators. A novel kind (`dns-record`, `database`, `certificate`,
+`chassis`, `resolves-to`, `same-as`, …) enters the graph through a
+normal write — no migration, no registry, no per-tenant governance
+table ("dumb substrate, smart agent"). Human `tenant_admin` writes
+stay zero-friction on every front; for AGENT principals the write
+itself becomes approval-gated when T3
+[#2537](https://github.com/evoila/meho/issues/2537) lands (until
+then agent writes are immediate, like human writes), at which point
+a human sees a novel agent-invented kind at the moment it is
+proposed.
+
+Enforcement layers:
+
+- **Python (authoritative)** — the full slug pattern is validated at
+  every write boundary, single-sourced from
+  [`KIND_SLUG_PATTERN`](../../backend/src/meho_backplane/db/models.py)
+  (`is_valid_kind_slug`): the service primitives
+  (`topology/nodes.py`, `topology/annotate.py`), the REST body
+  models (Pydantic `StringConstraints`), and the MCP inputSchemas
+  (jsonschema `pattern`). Rejection cites the pattern and echoes the
+  well-known kinds as suggestions.
+- **DB (backstop)** — migration `0063` replaced the closed IN-list
+  CHECKs (`ck_graph_node_kind` 14 members, `ck_graph_edge_kind` 10
+  members) with a portable minimal shape CHECK
+  (`length(kind) BETWEEN 2 AND 63 AND kind = lower(kind)`); regex
+  CHECKs are not portable across PostgreSQL and the SQLite unit
+  suite, so the DB layer guards shape, not the full grammar.
+
+The old members survive as the **well-known set** — a documentation
+convention, not a gate.
+[`WELL_KNOWN_NODE_KINDS`](../../backend/src/meho_backplane/db/models.py)
+carries the 14 node kinds (`target`, `vm`, `host`, `network`,
+`datastore`, `namespace`, `pod`, `service`, `ingress`, `node`,
+`principal`, `vault-role`, `vault-mount`, `volume`);
 [`GraphEdgeKind`](../../backend/src/meho_backplane/db/models.py)
-`StrEnum` and the CHECK move in lock-step).
+carries the ten edge kinds tabulated below. **Prefer a well-known
+kind when one fits** — shared vocabulary keeps traversal answers and
+cross-operator conventions legible; reach for a novel slug when no
+well-known kind describes the resource class or relationship. The
+UI surfaces the well-known kinds as `datalist` suggestions with
+free-text input; MCP tool descriptions and error messages carry the
+same list.
+
+### The `same-as` convention — cross-system identity stitching
+
+When two connectors each discover *the same physical thing* under
+different names (the Kubernetes connector's `node` `worker-3` and a
+bare-metal inventory's `host` `hetzner-ax41-7`), assert a curated
+`same-as` edge between the two nodes:
+
+```
+meho topology annotate worker-3 same-as hetzner-ax41-7 \
+  --note "same machine; MAC 9c:6b:00:… verified 2026-07-10" \
+  --evidence-url https://…/INVENTORY.md#ax41-7
+```
+
+`same-as` is symmetric in meaning but stored as a directed edge like
+every other kind; pick a consistent direction per tenant (suggested:
+from the more specific / ephemeral representation to the more
+durable one) and record the evidence. Traversals then reach across
+the identity seam like any other edge. Machine-*suggested* matches
+(auto-matching by MAC/UUID) are a later initiative; T1 makes the
+assertion expressible and traversable today.
+
+### The well-known edge kinds
 
 **Four auto-discoverable kinds** — refresh writes these on every
 probe, **for the pair-types a populator covers** (see
@@ -311,6 +379,7 @@ Against a seeded ~10k-node / ~10k-edge tenant graph
 |---|---|
 | `find_dependents` depth 16 | < 100 ms |
 | `find_path` BFS | < 150 ms |
+| `find_path` worst case (dense mesh, unreachable target, `max_hops=32`) | < 500 ms (~31k walk rows on the 16-node `MeshSpec` benchmark mesh) |
 | `refresh_target_topology` (insert/update bottleneck) | < 500 ms |
 
 The `graph_edge_tenant_from_idx` / `graph_edge_tenant_to_idx` indexes
@@ -322,6 +391,39 @@ these against a real `pgvector/pgvector:pg16` container in the split-CI
 so ordinary runner variance doesn't flake the gate while an
 order-of-magnitude regression still fails it. The >10k-node case is a
 v0.3 concern, addressed only when a real tenant hits it.
+
+### `find_path` on dense meshes (#2535)
+
+The forest fixture's out-degree-1 shape hides `find_path`'s real cost
+profile: the bidirectional walk enumerates **simple paths**, which
+grow ~branch_factor^hops on a dense mesh (converging paths, cycles),
+not linearly with node count. Two mitigations bound it:
+
+- **Per-branch target pruning** in `_PATH_SQL` — the destination id
+  resolves in a non-recursive `target` CTE and the recursive term
+  refuses to extend a branch whose frontier row already is the target.
+  Behavior is identical (same shortest hop count, same `None`); on the
+  20-node pruning mesh the walk drops from 1 544 to 795 materialised
+  rows (regression-pinned in
+  `backend/tests/integration/test_topology_path_pruning.py`). Global
+  cross-branch early termination is **not** expressible — PostgreSQL
+  allows exactly one recursive self-reference, outside subqueries, and
+  `ORDER BY hops LIMIT 1` must consume the full walk before sorting.
+- **The `max_hops` bound** (route ceiling 32) — the only guard when
+  the target is unreachable, because pruning never fires. That worst
+  case (dense cyclic 16-node mesh, unreachable target, `max_hops=32`)
+  is CI-pinned: ~31k walk rows (exact row count asserted — it is a
+  deterministic function of the graph, immune to runner load), a
+  hops-32/hops-8 wall-clock ratio gate (~7.7 healthy, ceiling 20), and
+  a generous 5 s absolute backstop. Measured median on a dev laptop:
+  ~120 ms.
+
+The dense shapes come from the `MeshSpec` / `seed_mesh_graph`
+generator (same fixture module): layered meshes with configurable
+`branch_factor` (converging paths), `cycle_stride` (back-edges),
+mixed edge kinds, and optional soft-deleted rows — which the traversal
+verbs still walk (soft-delete is retention, not visibility; see
+§Soft-delete semantics).
 
 ## Tenant boundary
 

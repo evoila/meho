@@ -1005,7 +1005,7 @@ def test_kind_dropdown_lists_all_kinds_regardless_of_active_filter() -> None:
     ``?kind=vm`` left the dropdown with only ``vm`` as an option,
     blocking the operator from switching kinds without manually
     editing the URL. The dropdown is now sourced from
-    ``_GRAPH_NODE_KINDS`` so the full vocabulary stays available.
+    ``WELL_KNOWN_NODE_KINDS`` so the documented core set stays available.
 
     The acceptance shape also covers the "paged out" sibling failure:
     51 ``vm`` rows + 1 ``target`` row at the default limit=50 would
@@ -1030,7 +1030,7 @@ def test_kind_dropdown_lists_all_kinds_regardless_of_active_filter() -> None:
     # ``<option>`` rows.
     assert '<option value="vm"' in body
     assert '<option value="target"' in body
-    # Sanity: a few more enum members from db.models._GRAPH_NODE_KINDS.
+    # Sanity: a few more members from db.models.WELL_KNOWN_NODE_KINDS.
     assert '<option value="host"' in body
     assert '<option value="datastore"' in body
 

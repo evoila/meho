@@ -233,10 +233,12 @@ References
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Final
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
@@ -261,6 +263,11 @@ from sqlalchemy.types import TypeDecorator, TypeEngine
 
 __all__ = [
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
+    "KIND_SLUG_MAX_LENGTH",
+    "KIND_SLUG_MIN_LENGTH",
+    "KIND_SLUG_PATTERN",
+    "KIND_SLUG_RE",
+    "WELL_KNOWN_NODE_KINDS",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
@@ -288,6 +295,7 @@ __all__ = [
     "TenantConvention",
     "TenantConventionHistory",
     "WebSession",
+    "is_valid_kind_slug",
 ]
 
 
@@ -1665,12 +1673,56 @@ class SpecProvenance(Base):
     )
 
 
-#: Closed enum of :attr:`GraphNode.kind` values. Mirrored verbatim in
-#: migration ``0007``'s ``_NODE_KINDS`` constant; the two MUST stay in
-#: lock-step or the DB-layer CHECK constraint will reject ORM-shaped
-#: inserts. Widening the vocabulary (G9.2's curated extensions) is a
-#: migration that updates both sides at once.
-_GRAPH_NODE_KINDS: tuple[str, ...] = (
+#: Slug grammar for :attr:`GraphNode.kind` / :attr:`GraphEdge.kind` --
+#: the open-vocabulary contract Initiative #2533 (T1 #2534) replaces the
+#: closed IN-list CHECKs with. Lowercase alphanumeric runs joined by
+#: single ``.`` / ``_`` / ``-`` separators; no leading / trailing /
+#: doubled separators. Full validation (pattern + length) lives in
+#: Python at every write boundary (:mod:`meho_backplane.topology.nodes`,
+#: :mod:`meho_backplane.topology.annotate`, the REST body models, the
+#: MCP inputSchemas); the DB layer keeps only the portable minimal
+#: shape CHECK below (length bounds + lowercase) because regex CHECKs
+#: are not portable across PostgreSQL and the SQLite unit suite.
+KIND_SLUG_PATTERN: Final[str] = r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+
+#: Length bounds for a kind slug. Mirrored in migration ``0063``'s
+#: shape CHECK and in every boundary schema (Pydantic
+#: ``StringConstraints``, MCP ``minLength`` / ``maxLength``).
+KIND_SLUG_MIN_LENGTH: Final[int] = 2
+KIND_SLUG_MAX_LENGTH: Final[int] = 63
+
+#: Compiled form of :data:`KIND_SLUG_PATTERN` for the Python-side
+#: validators. Module-level so the write paths don't recompile per call.
+KIND_SLUG_RE: Final[re.Pattern[str]] = re.compile(KIND_SLUG_PATTERN)
+
+
+def is_valid_kind_slug(kind: str) -> bool:
+    """Return ``True`` when *kind* satisfies the open-vocabulary slug grammar.
+
+    The single Python-side source of truth for kind validation --
+    :func:`meho_backplane.topology.nodes._validate_kind` and
+    :func:`meho_backplane.topology.annotate._validate_kind` both call
+    this, so the node and edge paths cannot drift. Checks the length
+    bounds first (the regex has no length anchor) and then the slug
+    pattern.
+    """
+    return (
+        KIND_SLUG_MIN_LENGTH <= len(kind) <= KIND_SLUG_MAX_LENGTH
+        and KIND_SLUG_RE.fullmatch(kind) is not None
+    )
+
+
+#: Well-known :attr:`GraphNode.kind` values -- the documented core set,
+#: **not** an enforced vocabulary. Initiative #2533 (T1 #2534) opened
+#: the kind space: any slug matching :data:`KIND_SLUG_PATTERN` is a
+#: valid node kind, and this tuple survives as the convention layer --
+#: docs tables, UI filter dropdowns, and error-message suggestions all
+#: source from it. Prefer a well-known kind when one fits; a novel kind
+#: (``dns-record``, ``database``, ``certificate``, ...) enters the
+#: graph through a normal write. Same open-set-plus-documented-core
+#: pattern as Backstage's well-known relations and ServiceNow's
+#: extensible CI classes.
+WELL_KNOWN_NODE_KINDS: tuple[str, ...] = (
     "target",
     "vm",
     "host",
@@ -1689,15 +1741,20 @@ _GRAPH_NODE_KINDS: tuple[str, ...] = (
 
 
 class GraphEdgeKind(StrEnum):
-    """Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
+    """Well-known :attr:`GraphEdge.kind` values -- the documented core set.
 
-    Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-    the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-    operator-curated cross-system kinds that auto-discovery cannot infer
-    (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-    is closed -- widening it is a coordinated DB + model change (new
-    migration, new enum member, new decision row) so the v0.2.next
-    policy-engine grammar parsing ``kind`` stays portable across tenants.
+    Initiative #364 (G9.2) originally locked the edge-kind vocabulary at
+    these ten members so the (never-shipped) v0.2.next policy-engine
+    grammar would stay portable across tenants. Initiative #2533 (T1
+    #2534) reversed the lock: the kind space is **open** -- any slug
+    matching :data:`KIND_SLUG_PATTERN` is a valid edge kind -- and this
+    enum survives as the *well-known* set, the convention layer that
+    feeds docs tables, UI suggestion lists (``datalist``), and
+    error-message hints. Membership is no longer enforced anywhere;
+    prefer a well-known kind when one fits, and use a novel slug
+    (``resolves-to``, ``same-as``, ...) when none does. The ``same-as``
+    curated-edge convention for cross-system identity stitching is
+    documented in :file:`docs/architecture/topology.md`.
 
     The four auto-discoverable kinds (refresh service writes these on
     every probe-derived edge):
@@ -1730,11 +1787,11 @@ class GraphEdgeKind(StrEnum):
       connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
       ``vault-policy-prod-read``).
 
-    Mirrors the closed-enum pattern :class:`AuthModel`
-    (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-    :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
-    both moved in lock-step by one Alembic migration so the enum and the
-    constraint cannot drift.
+    Unlike the closed-enum pattern :class:`AuthModel` follows, this
+    enum is **not** paired with a membership CHECK constraint --
+    migration ``0063`` replaced ``ck_graph_edge_kind``'s IN-list with
+    the minimal slug-shape CHECK (length bounds + lowercase), and full
+    slug validation lives Python-side via :func:`is_valid_kind_slug`.
     """
 
     RUNS_ON = "runs-on"
@@ -1749,13 +1806,6 @@ class GraphEdgeKind(StrEnum):
     POLICY_BINDS = "policy-binds"
 
 
-#: Closed enum of :attr:`GraphEdge.kind` -- the v0.2 ten-kind vocabulary.
-#: Derived from :class:`GraphEdgeKind` so the enum and the CHECK constraint
-#: cannot drift; the drift guard
-#: :func:`tests.test_topology_schema.test_graph_edge_kinds_match_enum`
-#: enforces the equality at unit-test time.
-_GRAPH_EDGE_KINDS: tuple[str, ...] = tuple(k.value for k in GraphEdgeKind)
-
 #: Closed enum of :attr:`GraphEdge.source` -- ``auto`` for
 #: probe-derived edges (T3 refresh), ``curated`` reserved for the
 #: operator-asserted edges G9.2 lands. v0.2 writes ``auto`` exclusively.
@@ -1767,6 +1817,24 @@ def _ck_in(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
 
 
+def _ck_kind_shape(column: str) -> str:
+    """Render the portable minimal shape CHECK for an open kind column.
+
+    Length bounds plus a lowercase guard -- ``length()`` and ``lower()``
+    are portable across PostgreSQL 16 and SQLite, while regex CHECKs
+    are not (PG's ``~`` operator has no SQLite equivalent). The full
+    slug grammar (:data:`KIND_SLUG_PATTERN`) is enforced Python-side
+    at every write boundary; this CHECK is the DB-layer backstop that
+    keeps out-of-band inserts from landing obviously-malformed kinds.
+    Mirrored verbatim in migration ``0063``.
+    """
+    return (
+        f"length({column}) >= {KIND_SLUG_MIN_LENGTH} "
+        f"AND length({column}) <= {KIND_SLUG_MAX_LENGTH} "
+        f"AND {column} = lower({column})"
+    )
+
+
 class GraphNode(Base):
     """A node in the per-tenant topology graph.
 
@@ -1774,8 +1842,10 @@ class GraphNode(Base):
     one object an agent may need to reason about: a registered target,
     a VM, a host, a network, a datastore, a namespace, a pod, a
     service, an ingress, a node, a principal, a vault mount, a vault
-    role, a volume. The closed enum (``kind``) is documented on the
-    migration; widening it is a coordinated DB + model change.
+    role, a volume -- or any other resource class a connector or
+    operator needs to represent: ``kind`` is an open slug-validated
+    vocabulary (T1 #2534), with :data:`WELL_KNOWN_NODE_KINDS` as the
+    documented core set.
 
     Schema decisions for :class:`GraphNode`:
 
@@ -1795,9 +1865,11 @@ class GraphNode(Base):
       ``ondelete`` clause -- tenant deletion is a major operation
       that must clear the tenant's graph first; the default
       ``NO ACTION`` blocks the cascade.
-    * ``kind`` -- Text NOT NULL with a DB-layer
-      ``CHECK kind IN (...)`` constraint enforced by migration
-      ``0007`` (see :data:`_GRAPH_NODE_KINDS` for the v0.2 vocabulary).
+    * ``kind`` -- Text NOT NULL with a DB-layer minimal shape CHECK
+      (length 2--63, lowercase; migration ``0063``). The vocabulary is
+      open: full slug validation (:data:`KIND_SLUG_PATTERN`) runs
+      Python-side at every write boundary, and
+      :data:`WELL_KNOWN_NODE_KINDS` documents the core set.
     * ``name`` -- Text NOT NULL. Human-readable handle within the
       tenant + kind axis. Uniqueness is enforced by the named
       ``graph_node_tenant_kind_name_idx`` (unique b-tree on
@@ -1887,7 +1959,7 @@ class GraphNode(Base):
             postgresql_using="btree",
         ),
         sa.CheckConstraint(
-            _ck_in("kind", _GRAPH_NODE_KINDS),
+            _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
         ),
     )
@@ -1914,15 +1986,12 @@ class GraphEdge(Base):
       soft-deletes (``GraphNode.last_seen=NULL``) leave the edges
       alone, so the cascade is invisible during normal operation and
       exists only for tenant purges + test cleanup.
-    * ``kind`` -- Text NOT NULL with a DB-layer
-      ``CHECK kind IN (...)`` constraint. The closed v0.2 ten-kind
-      vocabulary is :class:`GraphEdgeKind` -- four auto-discoverable
-      kinds (refresh writes these) plus six curated-only kinds
-      (operator annotation only). :data:`_GRAPH_EDGE_KINDS` is derived
-      from the enum so the CHECK constraint and the Python type cannot
-      drift; widening requires a new Alembic migration that updates
-      both in lock-step (G9.2 #364 / migration ``0010`` was the first
-      widening, from G9.1's four to v0.2's ten).
+    * ``kind`` -- Text NOT NULL with a DB-layer minimal shape CHECK
+      (length 2--63, lowercase; migration ``0063``). The vocabulary is
+      open: full slug validation (:data:`KIND_SLUG_PATTERN`) runs
+      Python-side at every write boundary, and :class:`GraphEdgeKind`
+      documents the well-known core set (four auto-discoverable kinds
+      the refresh service writes plus six curated cross-system kinds).
     * ``source`` -- Text NOT NULL with a DB-layer
       ``CHECK source IN (...)`` constraint. ``auto`` for
       probe-derived (T3 refresh); ``curated`` for the
@@ -2022,7 +2091,7 @@ class GraphEdge(Base):
             postgresql_using="btree",
         ),
         sa.CheckConstraint(
-            _ck_in("kind", _GRAPH_EDGE_KINDS),
+            _ck_kind_shape("kind"),
             name="ck_graph_edge_kind",
         ),
         sa.CheckConstraint(
@@ -2240,8 +2309,9 @@ class GraphHistoryChangeKind(StrEnum):
 #: Derived from :class:`GraphHistoryChangeKind` so the enum and the
 #: DB-layer ``CHECK`` constraint cannot drift; the drift guard at
 #: :mod:`tests.test_topology_history_migration` enforces the equality
-#: at unit-test time. Mirrors the :data:`_GRAPH_EDGE_KINDS` pattern
-#: :class:`GraphEdge` uses.
+#: at unit-test time. (The graph ``kind`` columns dropped this
+#: derived-tuple pattern when T1 #2534 opened their vocabularies;
+#: ``change_kind`` remains a genuinely closed enum.)
 _GRAPH_HISTORY_CHANGE_KINDS: tuple[str, ...] = tuple(k.value for k in GraphHistoryChangeKind)
 
 

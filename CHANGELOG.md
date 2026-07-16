@@ -107,6 +107,34 @@ connector-related release-notes line.
   emits only the four observable states. The spec models reject unknown fields
   (`extra="forbid"`) and non-finite threshold bounds, so a typo'd assertion
   field is a 422 at create rather than a silently dropped key.
+### Performance — `find_path` per-branch target pruning + dense-mesh envelope + topology concurrency coverage (#2535)
+
+- Bound `find_path`'s recursive walk per branch: `_PATH_SQL` gains a
+  non-recursive `target` CTE and the recursive term now refuses to extend a
+  branch whose frontier row already is the destination (`NOT EXISTS` against
+  `target`). Results are byte-identical (same shortest hop count, same `None`
+  on unreachable — existing suite green unmodified); on a dense mesh the walk
+  no longer enumerates simple paths *through* the target (measured 1 544 →
+  795 materialised rows on the 20-node pruning fixture; regression-pinned).
+  Global cross-branch early termination is not expressible (PostgreSQL allows
+  exactly one recursive self-reference, outside subqueries; `ORDER BY hops
+  LIMIT 1` must consume the full walk) — the unreachable-target worst case
+  (dense cyclic mesh, `max_hops=32` API ceiling) is instead CI-pinned by a
+  new benchmark: exact walk-row-count pin (~31k rows, load-invariant),
+  hops-32/hops-8 timing ratio gate, generous absolute backstop; envelope
+  documented in `docs/architecture/topology.md` §Performance expectations.
+  The new `MeshSpec` / `seed_mesh_graph` generator (converging paths, cycles,
+  mixed edge kinds, optional soft-deleted rows) closes the fixture gap — the
+  prior 10k fixture was out-degree-1 hub-and-chains only. Also adds the
+  topology suite's first real-concurrency tests: `asyncio.gather`
+  refresh-vs-annotate race (no lost update, no dangling §6 markers, both
+  synchronous audit rows present) and the scheduler's per-target advisory
+  lock exercised against real PostgreSQL (skip while held, proceed after
+  release) instead of a mocked pre-held lock —
+  `backend/src/meho_backplane/topology/query.py`,
+  `backend/tests/fixtures/topology_10k_nodes.py`,
+  `backend/tests/integration/test_topology_path_pruning.py`,
+  `backend/tests/integration/test_topology_concurrency.py` (#2535).
 
 ### Security — agent-principal Keycloak-orphan rollback + bounded name (#2523)
 

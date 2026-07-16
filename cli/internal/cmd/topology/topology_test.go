@@ -327,7 +327,7 @@ func TestFormatAmbiguousNode(t *testing.T) {
 
 // TestAnnotateHelpEmitsTenKindVocabulary — §12 acceptance criterion
 // for #599: `meho topology annotate --help` must surface every one of
-// the closed 10 GraphEdgeKind values with a one-line description so
+// the 10 well-known GraphEdgeKind values with a one-line description so
 // operators discover the vocabulary without leaving the CLI.
 func TestAnnotateHelpEmitsTenKindVocabulary(t *testing.T) {
 	cmd := newAnnotateCmd()
@@ -344,20 +344,24 @@ func TestAnnotateHelpEmitsTenKindVocabulary(t *testing.T) {
 		}
 	}
 	// Sanity: the help block names the table explicitly so the table
-	// header is searchable in shell scrollback.
-	if !strings.Contains(long, "Edge kind vocabulary") {
+	// header is searchable in shell scrollback, and states that the
+	// vocabulary is open (T1 #2534).
+	if !strings.Contains(long, "Well-known edge kinds") {
 		t.Errorf("annotate --help should label the table; got %q", long)
+	}
+	if !strings.Contains(long, "vocabulary is open") {
+		t.Errorf("annotate --help should state the vocabulary is open; got %q", long)
 	}
 }
 
 // TestEdgeKindVocabularyMatchesEnum — the in-help table must stay in
-// lock-step with the closed enum on the backend side. Both lists are
+// lock-step with the well-known enum on the backend side. Both lists are
 // declared in source; this test fails noisily when the count drifts
 // (the actual enum lives in backend/src/meho_backplane/db/models.py
 // and is asserted from the Python side; here we lock the CLI mirror).
 func TestEdgeKindVocabularyMatchesEnum(t *testing.T) {
 	if got := len(edgeKindVocabulary); got != 10 {
-		t.Fatalf("edgeKindVocabulary count = %d; want 10 (closed v0.2 enum)", got)
+		t.Fatalf("edgeKindVocabulary count = %d; want 10 (well-known set)", got)
 	}
 	seen := make(map[string]bool, 10)
 	for _, e := range edgeKindVocabulary {

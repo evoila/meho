@@ -518,18 +518,19 @@ def test_graph_filter_by_name_substring_narrows_results() -> None:
     assert names == {"vm-prod-01"}
 
 
-def test_graph_kind_dropdown_matches_closed_enum() -> None:
-    """The graph view's kind dropdown sources its options from ``_GRAPH_NODE_KINDS``.
+def test_graph_kind_dropdown_matches_well_known_set() -> None:
+    """The graph view's kind dropdown sources its options from ``WELL_KNOWN_NODE_KINDS``.
 
     Regression for the previously hardcoded vocabulary in
     ``graph.html``. T1's tabular surface already routes through
-    ``node_kind_options`` (sourced from the closed enum); the graph
-    surface now mirrors that, so a widening of the closed enum (a new
-    connector contributing a new kind) reaches both filter dropdowns
-    without a template edit. The test asserts every ``_GRAPH_NODE_KINDS``
-    member renders as an ``<option>`` in the graph view.
+    ``node_kind_options`` (sourced from the well-known set); the graph
+    surface now mirrors that, so a widening of the well-known set (a new
+    connector contributing a new documented kind) reaches both filter
+    dropdowns without a template edit. The test asserts every
+    ``WELL_KNOWN_NODE_KINDS`` member renders as an ``<option>`` in the
+    graph view.
     """
-    from meho_backplane.db.models import _GRAPH_NODE_KINDS
+    from meho_backplane.db.models import WELL_KNOWN_NODE_KINDS
 
     _seed_tenant_row(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
@@ -538,9 +539,9 @@ def test_graph_kind_dropdown_matches_closed_enum() -> None:
         response = client.get("/ui/topology?view=graph")
     assert response.status_code == 200, response.text
     body = response.text
-    for kind in _GRAPH_NODE_KINDS:
+    for kind in WELL_KNOWN_NODE_KINDS:
         assert f'<option value="{kind}"' in body, (
-            f"closed-enum kind {kind!r} missing from graph view's filter dropdown"
+            f"well-known kind {kind!r} missing from graph view's filter dropdown"
         )
 
 

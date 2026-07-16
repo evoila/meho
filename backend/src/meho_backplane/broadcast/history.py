@@ -245,17 +245,66 @@ def _iso8601_to_min_cursor(raw: str) -> str:
     return str(int(parsed.timestamp() * 1000))
 
 
+def _target_matches(event: BroadcastEvent | AgentAnnouncementEvent, target: str) -> bool:
+    """Exact-match the ``target`` filter against an event's attribution.
+
+    :class:`BroadcastEvent` carries a single ``target_name``.
+    :class:`AgentAnnouncementEvent` carries a single ``target`` AND a
+    ``targets`` list (which supersedes-not-replaces the single field);
+    a query matches when it equals ``target`` OR appears in ``targets``.
+    Events with no target attribution never qualify.
+    """
+    if isinstance(event, BroadcastEvent):
+        return event.target_name == target
+    return event.target == target or target in event.targets
+
+
+def _work_ref_matches(event: BroadcastEvent | AgentAnnouncementEvent, work_ref: str) -> bool:
+    """Exact-match the ``work_ref`` filter; only announcements carry one.
+
+    A :class:`BroadcastEvent` has no ``work_ref`` field, so it can never
+    satisfy a ``work_ref`` filter -- the caller asked for an
+    announcement-linked claim. Mirrors the ``op_class``-vs-announcement
+    asymmetry (an announcement never satisfies an ``op_class`` filter).
+    """
+    if isinstance(event, AgentAnnouncementEvent):
+        return event.work_ref == work_ref
+    return False
+
+
+def _is_expired_claim(
+    event: BroadcastEvent | AgentAnnouncementEvent,
+    now: datetime,
+) -> bool:
+    """Return ``True`` iff *event* is a TTL'd claim whose expiry has passed.
+
+    Only :class:`AgentAnnouncementEvent` with a bound ``ttl_minutes``
+    can expire. Everything else -- audit-driven :class:`BroadcastEvent`
+    rows and announcements without a TTL -- is never "expired" and so
+    always survives an ``active_only`` filter.
+    """
+    if not isinstance(event, AgentAnnouncementEvent):
+        return False
+    expires_at = event.expires_at
+    return expires_at is not None and expires_at <= now
+
+
 def event_matches(
     event: BroadcastEvent | AgentAnnouncementEvent,
     *,
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    work_ref: str | None = None,
+    active_only: bool = False,
+    now: datetime | None = None,
 ) -> bool:
-    """Return ``True`` iff *event* matches every non-``None`` filter.
+    """Return ``True`` iff *event* matches every active filter.
 
     Exact-match semantics on each non-``None`` field; mirrors
-    :func:`meho_backplane.api.v1.feed._passes_filter`.
+    :func:`meho_backplane.api.v1.feed._passes_filter`. All matching runs
+    on the raw model *before* :func:`dump_event_wire` wraps agent prose,
+    so the untrusted envelope never affects narrowing.
 
     Two event classes share the broadcast stream: the audit-driven
     :class:`BroadcastEvent` (one event per audited operation, written
@@ -263,19 +312,21 @@ def event_matches(
     the agent-authored :class:`AgentAnnouncementEvent` (one event per
     ``meho.broadcast.announce`` call, written by
     :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`).
-    They share ``principal_sub`` but diverge on ``op_class`` and
-    target attribution:
+    They share ``principal_sub`` but diverge on the other filters:
 
     * **op_class filter:** Only audit-driven events carry an
       ``op_class``. Announcements have no operation classification, so
-      a caller asking ``filter.op_class=write`` is asking for a
-      specific *operation* class -- an announcement doesn't qualify
-      regardless of its content. (Mirrors the "untagged event doesn't
-      satisfy a target filter" rule below.)
-    * **target filter:** :class:`BroadcastEvent` carries ``target_name``;
-      :class:`AgentAnnouncementEvent` carries ``target``. Both behave
-      identically under a non-``None`` filter -- events with no target
-      attribution (either field ``None``) never qualify.
+      an announcement never qualifies regardless of its content.
+    * **target filter:** matches a :class:`BroadcastEvent`'s
+      ``target_name`` or an :class:`AgentAnnouncementEvent`'s ``target``
+      / any of its ``targets`` (see :func:`_target_matches`).
+    * **work_ref filter:** only announcements carry a ``work_ref``; a
+      :class:`BroadcastEvent` never qualifies (see
+      :func:`_work_ref_matches`).
+    * **active_only:** when ``True``, drops TTL'd announcement claims
+      whose ``expires_at`` (``ts + ttl_minutes``) is at or before
+      ``now`` (defaulting to the current UTC instant). Non-TTL events
+      always pass (see :func:`_is_expired_claim`).
     """
     if op_class is not None:
         # AgentAnnouncementEvent has no ``op_class``; the caller asked
@@ -286,11 +337,11 @@ def event_matches(
             return False
     if principal is not None and event.principal_sub != principal:
         return False
-    if target is not None:
-        event_target = event.target_name if isinstance(event, BroadcastEvent) else event.target
-        if event_target != target:
-            return False
-    return True
+    if target is not None and not _target_matches(event, target):
+        return False
+    if work_ref is not None and not _work_ref_matches(event, work_ref):
+        return False
+    return not (active_only and _is_expired_claim(event, now or datetime.now(UTC)))
 
 
 def parse_entry(
@@ -377,12 +428,27 @@ def parse_entry(
         return None
 
 
-#: Announcement fields that carry agent-authored free text. Kept in
-#: one place so every LLM-facing dump site wraps the same set; the
+#: Scalar announcement fields that carry agent-authored free text. Kept
+#: in one place so every LLM-facing dump site wraps the same set; the
 #: audit-driven :class:`BroadcastEvent` has no counterpart (its
 #: ``payload`` is server-derived and redacted upstream, its op fields
-#: are chassis-classified — none are agent prose).
-_ANNOUNCEMENT_UNTRUSTED_FIELDS: Final[tuple[str, ...]] = ("activity", "scope", "target")
+#: are chassis-classified — none are agent prose). The structured
+#: coordination fields (``planned_op_class`` / ``ttl_minutes`` /
+#: ``run_id`` / ``phase`` / ``ts`` / ``expires_at``) are deliberately
+#: absent: they are server-validated typed values that cannot carry an
+#: injection, so they are served UNWRAPPED (see
+#: :mod:`meho_backplane.broadcast.agent_events`).
+_ANNOUNCEMENT_UNTRUSTED_FIELDS: Final[tuple[str, ...]] = (
+    "activity",
+    "scope",
+    "target",
+    "work_ref",
+)
+
+#: List-valued announcement fields whose *elements* carry agent-authored
+#: free text. Wrapped per-element on display (the value is a
+#: ``list[str]``, not a scalar, so it needs its own dump branch).
+_ANNOUNCEMENT_UNTRUSTED_LIST_FIELDS: Final[tuple[str, ...]] = ("targets",)
 
 
 def dump_event_wire(
@@ -419,6 +485,12 @@ def dump_event_wire(
             value = data.get(field)
             if isinstance(value, str):
                 data[field] = wrap_untrusted_text(value)
+        for field in _ANNOUNCEMENT_UNTRUSTED_LIST_FIELDS:
+            value = data.get(field)
+            if isinstance(value, list):
+                data[field] = [
+                    wrap_untrusted_text(item) if isinstance(item, str) else item for item in value
+                ]
     return data
 
 
@@ -429,6 +501,8 @@ async def _list_recent_events_core(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    work_ref: str | None,
+    active_only: bool,
     limit: int,
 ) -> dict[str, Any]:
     """Read recent events for *operator*'s tenant; the shared core body.
@@ -474,6 +548,9 @@ async def _list_recent_events_core(
         ),
     )
 
+    # Pin one ``now`` for the whole page so a slow XRANGE parse can't
+    # let an ``active_only`` claim flip expiry-state mid-page.
+    now = datetime.now(UTC)
     matched: list[dict[str, Any]] = []
     for entry_id, fields in raw_entries:
         event = parse_entry(entry_id, fields, stream_key=key)
@@ -484,6 +561,9 @@ async def _list_recent_events_core(
             op_class=op_class,
             principal=principal,
             target=target,
+            work_ref=work_ref,
+            active_only=active_only,
+            now=now,
         ):
             continue
         # ``cursor`` is the Valkey stream entry id, self-labelled to
@@ -517,6 +597,8 @@ async def list_recent_events_strict(
     op_class: str | None = None,
     principal: str | None = None,
     target: str | None = None,
+    work_ref: str | None = None,
+    active_only: bool = False,
     limit: int = 100,
 ) -> dict[str, Any]:
     """Fail-loud variant: re-raises any :class:`RedisError` from Valkey.
@@ -531,6 +613,10 @@ async def list_recent_events_strict(
     :class:`InvalidSinceError`; wire-layer callers map that to
     ``-32602`` Invalid Params.
 
+    ``work_ref`` narrows to announcement claims linked to that opaque
+    change-ticket reference; ``active_only`` drops TTL'd claims whose
+    ``expires_at`` has already elapsed (see :func:`event_matches`).
+
     Mirrors the fail-loud contract on
     :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
     (its write-side counterpart).
@@ -541,6 +627,8 @@ async def list_recent_events_strict(
         op_class=op_class,
         principal=principal,
         target=target,
+        work_ref=work_ref,
+        active_only=active_only,
         limit=limit,
     )
 
@@ -552,6 +640,8 @@ async def list_recent_events_fail_soft(
     op_class: str | None = None,
     principal: str | None = None,
     target: str | None = None,
+    work_ref: str | None = None,
+    active_only: bool = False,
     limit: int = 100,
 ) -> dict[str, Any]:
     """Fail-soft variant: a :class:`RedisError` returns the empty result.
@@ -581,6 +671,8 @@ async def list_recent_events_fail_soft(
             op_class=op_class,
             principal=principal,
             target=target,
+            work_ref=work_ref,
+            active_only=active_only,
             limit=limit,
         )
     except RedisError as exc:

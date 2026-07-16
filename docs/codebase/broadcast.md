@@ -54,6 +54,17 @@ Three layers, separated for traceability:
    fields: `event_id` / `audit_id` on operation rows; announcement
    rows have no UUID (until #2547 mints one).
 
+   **Read-side `filter` object (MCP recent/watch).** Both tools accept a
+   `filter` object narrowing by exact-match `op_class` / `principal` /
+   `target` / `work_ref`, plus the boolean `active_only`. `target`
+   matches a `BroadcastEvent`'s `target_name` or an announcement's single
+   `target` **or any entry in its `targets` list**. `work_ref` matches
+   an announcement's `work_ref` only (an audit-derived event never has
+   one). `active_only` (default `false`) drops TTL'd announcement claims
+   whose `expires_at` has elapsed; non-TTL events (announcements without
+   a TTL, and all audit-derived rows) always pass. All matching runs on
+   the raw model before the untrusted-text wrap (#2544).
+
 ## Key types
 
 - `BroadcastEvent` (`broadcast/events.py`) — every audited operation
@@ -63,9 +74,36 @@ Three layers, separated for traceability:
   `event_kind = "audit_derived"` discriminator.
 - `AgentAnnouncementEvent` (`broadcast/agent_events.py`) — agent-
   authored announcements published via `meho.broadcast.announce`.
-  Fields: `tenant_id`, `principal_sub`, `activity`, `target`,
-  `scope`, `phase`. `event_kind = "agent_announcement"` discriminator
-  so readers can dispatch on the kind.
+  Fields: `tenant_id`, `principal_sub`, `activity`, `target`, `scope`,
+  `phase`, plus the optional **structured intent claims** (Broadcast
+  v2, #2544): `targets` (list, ≤10 names, each ≤256 chars — supersedes
+  the single `target` for multi-target work), `planned_op_class` (the
+  declared op class, spanning the full `classify_op` taxonomy),
+  `ttl_minutes` (1..1440), `work_ref` (opaque change-ticket ref, ≤256,
+  same convention as `AgentRun.work_ref`), `run_id` (UUID). A derived
+  `expires_at` computed field (`ts + ttl_minutes`, or `None`) drives
+  the `active_only` read filter. `kind` / `event_kind =
+  "agent_announcement"` discriminator so readers can dispatch on the
+  kind. All claim fields are optional with back-compatible defaults
+  (`targets=[]`, the rest `None`), so pre-v2 stream entries parse
+  unchanged.
+
+  **Structure is trusted; prose is quarantined.** The typed fields
+  (`planned_op_class`, `ttl_minutes`, `run_id`, `phase`, `ts`,
+  `expires_at`) are server-validated bounded enums / ints / UUIDs /
+  timestamps — they cannot carry a prompt injection, so `dump_event_wire`
+  serves them **unwrapped** as trustworthy coordination data. The
+  free-text fields (`activity`, `scope`, `target`, `targets[]`,
+  `work_ref`) stay agent-authored prose and keep the untrusted-content
+  envelope (`_ANNOUNCEMENT_UNTRUSTED_FIELDS` +
+  `_ANNOUNCEMENT_UNTRUSTED_LIST_FIELDS`, wrapped per-element for the
+  list). All filtering (`event_matches`) runs on the raw model **before**
+  the wrap, so narrowing is unaffected by the envelope — the same split
+  the pre-existing `target` filter already relied on. Invalid claims
+  (11 targets, `ttl_minutes=0`, a 257-char `work_ref`, a non-UUID
+  `run_id`, an out-of-enum `planned_op_class`) reject at the MCP
+  boundary with JSON-RPC `-32602`, belt-and-suspenders with the
+  pydantic `Field` bounds on the model.
 - `op_class` sensitivity taxonomy (`classify_op` / `redact_payload` in
   `broadcast/events.py`) — derived from the op-id (no per-descriptor
   column), drives how `payload` is redacted before publish:

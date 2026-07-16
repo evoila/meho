@@ -251,6 +251,8 @@ def event_matches(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    actor_sub: str | None = None,
+    work_ref: str | None = None,
 ) -> bool:
     """Return ``True`` iff *event* matches every non-``None`` filter.
 
@@ -276,6 +278,13 @@ def event_matches(
       :class:`AgentAnnouncementEvent` carries ``target``. Both behave
       identically under a non-``None`` filter -- events with no target
       attribution (either field ``None``) never qualify.
+    * **actor_sub / work_ref filters:** the lineage keys projected onto
+      :class:`BroadcastEvent` (T3 #2545). ``actor_sub`` answers "what
+      has this delegated agent been doing" (the RFC 8693 actor, distinct
+      from ``principal``, which matches the human/subject); ``work_ref``
+      groups every operation tied to one external change ticket. Only
+      audit-driven events carry these — an announcement doesn't qualify
+      for either filter, same rule as ``op_class``.
     """
     if op_class is not None:
         # AgentAnnouncementEvent has no ``op_class``; the caller asked
@@ -289,6 +298,17 @@ def event_matches(
     if target is not None:
         event_target = event.target_name if isinstance(event, BroadcastEvent) else event.target
         if event_target != target:
+            return False
+    if actor_sub is not None:
+        # Lineage is audit-driven only; an announcement carries no actor.
+        if isinstance(event, AgentAnnouncementEvent):
+            return False
+        if event.actor_sub != actor_sub:
+            return False
+    if work_ref is not None:
+        if isinstance(event, AgentAnnouncementEvent):
+            return False
+        if event.work_ref != work_ref:
             return False
     return True
 
@@ -429,6 +449,8 @@ async def _list_recent_events_core(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    actor_sub: str | None,
+    work_ref: str | None,
     limit: int,
 ) -> dict[str, Any]:
     """Read recent events for *operator*'s tenant; the shared core body.
@@ -480,6 +502,8 @@ async def _list_recent_events_core(
             op_class=op_class,
             principal=principal,
             target=target,
+            actor_sub=actor_sub,
+            work_ref=work_ref,
         ):
             continue
         # ``id`` is the Valkey stream entry id; the cursor a caller
@@ -509,6 +533,8 @@ async def list_recent_events_strict(
     op_class: str | None = None,
     principal: str | None = None,
     target: str | None = None,
+    actor_sub: str | None = None,
+    work_ref: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
     """Fail-loud variant: re-raises any :class:`RedisError` from Valkey.
@@ -533,6 +559,8 @@ async def list_recent_events_strict(
         op_class=op_class,
         principal=principal,
         target=target,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
         limit=limit,
     )
 
@@ -544,6 +572,8 @@ async def list_recent_events_fail_soft(
     op_class: str | None = None,
     principal: str | None = None,
     target: str | None = None,
+    actor_sub: str | None = None,
+    work_ref: str | None = None,
     limit: int = 100,
 ) -> dict[str, Any]:
     """Fail-soft variant: a :class:`RedisError` returns the empty result.
@@ -573,6 +603,8 @@ async def list_recent_events_fail_soft(
             op_class=op_class,
             principal=principal,
             target=target,
+            actor_sub=actor_sub,
+            work_ref=work_ref,
             limit=limit,
         )
     except RedisError as exc:

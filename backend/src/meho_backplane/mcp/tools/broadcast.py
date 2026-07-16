@@ -113,14 +113,21 @@ _log = structlog.get_logger(__name__)
 # ===========================================================================
 
 
-def _extract_filter(arguments: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
-    """Extract the three ``filter.*`` sub-keys, asserting string-or-absent.
+def _extract_filter(
+    arguments: dict[str, Any],
+) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+    """Extract the five ``filter.*`` sub-keys, asserting string-or-absent.
 
     The wire schema's ``filter`` object permits each sub-key to be
     omitted entirely OR set to a string. Anything else (a number, a
     list, an object) surfaces as JSON-RPC ``-32602`` -- the JSON
     Schema validator at the dispatcher layer catches structural
     violations; this helper picks the typed view for the handler.
+
+    ``actor_sub`` and ``work_ref`` are the lineage filters (T3 #2545):
+    ``actor_sub`` narrows to a delegated agent's own work (the RFC 8693
+    actor, distinct from ``principal`` which matches the human subject),
+    ``work_ref`` groups events by external change ticket.
     """
     filter_obj = arguments.get("filter") or {}
     if not isinstance(filter_obj, dict):
@@ -128,10 +135,18 @@ def _extract_filter(arguments: dict[str, Any]) -> tuple[str | None, str | None, 
     op_class = filter_obj.get("op_class")
     principal = filter_obj.get("principal")
     target = filter_obj.get("target")
-    for name, value in (("op_class", op_class), ("principal", principal), ("target", target)):
+    actor_sub = filter_obj.get("actor_sub")
+    work_ref = filter_obj.get("work_ref")
+    for name, value in (
+        ("op_class", op_class),
+        ("principal", principal),
+        ("target", target),
+        ("actor_sub", actor_sub),
+        ("work_ref", work_ref),
+    ):
         if value is not None and not isinstance(value, str):
             raise McpInvalidParamsError(f"filter.{name}: must be a string when provided")
-    return op_class, principal, target
+    return op_class, principal, target, actor_sub, work_ref
 
 
 async def _handler_recent(
@@ -176,7 +191,7 @@ async def _handler_recent(
     since = cursor_arg if cursor_arg is not None else since_arg
     if since is not None and not isinstance(since, str):
         raise McpInvalidParamsError("cursor: must be a string when provided")
-    op_class, principal, target = _extract_filter(arguments)
+    op_class, principal, target, actor_sub, work_ref = _extract_filter(arguments)
     raw_limit = arguments.get("limit", 100)
     if not isinstance(raw_limit, int) or isinstance(raw_limit, bool):
         raise McpInvalidParamsError("limit: must be an integer in [1, 1000]")
@@ -189,6 +204,8 @@ async def _handler_recent(
             op_class=op_class,
             principal=principal,
             target=target,
+            actor_sub=actor_sub,
+            work_ref=work_ref,
             limit=raw_limit,
         )
     except InvalidSinceError as exc:
@@ -206,7 +223,8 @@ register_mcp_tool(
             "timestamp ('2026-05-25T10:00:00Z') or a Valkey stream "
             "cursor ('1747800000000-0') to override. The 'filter' "
             "object narrows by exact-match op_class / principal "
-            "(JWT 'sub') / target (target_name). 'limit' caps the "
+            "(JWT 'sub') / target (target_name) / actor_sub (the "
+            "delegated agent) / work_ref (change ticket). 'limit' caps the "
             "page at 1..1000 (default 100); the response's "
             "'next_cursor' round-trips as the next call's 'cursor' "
             "for gap-free pagination. 'since' is accepted as a "
@@ -266,6 +284,28 @@ register_mcp_tool(
                             "minLength": 1,
                             "maxLength": 256,
                             "description": ("Exact-match filter on event target_name."),
+                        },
+                        "actor_sub": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": (
+                                "Exact-match filter on the RFC 8693 actor "
+                                "(the delegated agent that acted). Answers "
+                                "'what has this agent been doing' -- distinct "
+                                "from 'principal', which matches the human "
+                                "subject the agent acted for."
+                            ),
+                        },
+                        "work_ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": (
+                                "Exact-match filter on the external "
+                                "change-ticket reference, grouping every "
+                                "event tied to one ticket / CR / issue."
+                            ),
                         },
                     },
                     "additionalProperties": False,
@@ -663,6 +703,8 @@ def _filter_xread_items(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    actor_sub: str | None,
+    work_ref: str | None,
 ) -> list[dict[str, Any]]:
     """Parse + filter the XREAD batch into the wire-shape events list.
 
@@ -690,6 +732,8 @@ def _filter_xread_items(
             op_class=op_class,
             principal=principal,
             target=target,
+            actor_sub=actor_sub,
+            work_ref=work_ref,
         ):
             continue
         matched.append({"id": entry_id, **dump_event_wire(event)})
@@ -703,6 +747,8 @@ async def _watch_events_impl(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    actor_sub: str | None,
+    work_ref: str | None,
     timeout_ms: int,
 ) -> dict[str, Any]:
     """Long-poll the operator's tenant stream for entries strictly past *since_cursor*.
@@ -754,6 +800,8 @@ async def _watch_events_impl(
         op_class=op_class,
         principal=principal,
         target=target,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
     )
     return {"events": matched, "next_cursor": next_cursor}
 
@@ -795,7 +843,7 @@ async def _handler_watch(
         raise McpInvalidParamsError(
             "cursor: required, must be a non-empty Valkey stream cursor",
         )
-    op_class, principal, target = _extract_filter(arguments)
+    op_class, principal, target, actor_sub, work_ref = _extract_filter(arguments)
     timeout_ms = _validate_timeout_ms(arguments.get("timeout_ms"))
     return await _watch_events_impl(
         operator,
@@ -803,6 +851,8 @@ async def _handler_watch(
         op_class=op_class,
         principal=principal,
         target=target,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
         timeout_ms=timeout_ms,
     )
 
@@ -829,7 +879,8 @@ register_mcp_tool(
             "accepted as a deprecated alias for 'cursor' (v0.8.0 wire "
             "shape) and is mutually exclusive with it. The 'filter' "
             "object narrows by exact-match op_class / principal "
-            "(JWT 'sub') / target (target_name). Tenant scoping is "
+            "(JWT 'sub') / target (target_name) / actor_sub (the "
+            "delegated agent) / work_ref (change ticket). Tenant scoping is "
             "structural -- every watch targets the operator's own tenant "
             "stream; there is no input that could request another "
             "tenant's stream. Payloads inherit the publisher-side "
@@ -889,6 +940,28 @@ register_mcp_tool(
                             "minLength": 1,
                             "maxLength": 256,
                             "description": ("Exact-match filter on event target_name."),
+                        },
+                        "actor_sub": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": (
+                                "Exact-match filter on the RFC 8693 actor "
+                                "(the delegated agent that acted). Answers "
+                                "'what has this agent been doing' -- distinct "
+                                "from 'principal', which matches the human "
+                                "subject the agent acted for."
+                            ),
+                        },
+                        "work_ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 256,
+                            "description": (
+                                "Exact-match filter on the external "
+                                "change-ticket reference, grouping every "
+                                "event tied to one ticket / CR / issue."
+                            ),
                         },
                     },
                     "additionalProperties": False,

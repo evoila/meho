@@ -483,7 +483,14 @@ async def test_publish_agent_announcement_propagates_exception() -> None:
 def test_successful_publish_returns_event_id(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """On success the handler returns ``{event_id: <Valkey entry id>}``."""
+    """On success the handler returns the entry id as ``cursor`` + ``event_id``.
+
+    Both keys carry the Valkey stream entry id of the appended
+    announcement: ``cursor`` is the self-labelled canonical name
+    (round-trips through recent/watch's ``cursor`` arg, #2479);
+    ``event_id`` is the legacy alias kept for wire compatibility --
+    it is NOT a durable event UUID.
+    """
     client, _op = client_with_operator
     bc = get_broadcast_client()
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
@@ -492,7 +499,7 @@ def test_successful_publish_returns_event_id(
             _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
         )
     result = _result_dict(resp)
-    assert result == {"event_id": "1747800000000-7"}
+    assert result == {"event_id": "1747800000000-7", "cursor": "1747800000000-7"}
 
 
 @pytest.mark.parametrize(
@@ -757,11 +764,15 @@ class TestBroadcastAnnounceIntegration:
             },
         )
         assert "event_id" in result
+        # Announce self-labels the entry id as ``cursor`` (#2479);
+        # ``event_id`` is the legacy alias of the same stream cursor.
+        assert result["cursor"] == result["event_id"]
 
         recent = await _handler_recent(op, {})
         assert len(recent["events"]) == 1
         event = recent["events"][0]
         assert event["event_kind"] == "agent_announcement"
+        assert event["cursor"] == result["cursor"]
         # dump_event_wire re-serves agent-authored free text inside the
         # untrusted-content envelope (_ANNOUNCEMENT_UNTRUSTED_FIELDS).
         assert event["activity"] == wrap_untrusted_text("investigating")

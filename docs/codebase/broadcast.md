@@ -45,6 +45,15 @@ Three layers, separated for traceability:
    The SSE backlog prelude is the v0.8.0 fix for #1305 — see *Known
    issues* below.
 
+   **Row identifier semantics (MCP recent/watch, #2479).** Every event
+   row the two MCP read tools return carries the entry's Valkey stream
+   id twice: `cursor` (self-labelled; round-trips as the tools'
+   `cursor` input arg) and `id` (legacy alias of the same value —
+   unlike every other MCP surface, a broadcast row's `id` is NOT the
+   row's domain UUID). The durable identifiers live on the event
+   fields: `event_id` / `audit_id` on operation rows; announcement
+   rows have no UUID (until #2547 mints one).
+
 ## Key types
 
 - `BroadcastEvent` (`broadcast/events.py`) — every audited operation
@@ -132,7 +141,10 @@ MCP tools/call meho.broadcast.announce
     → publish_agent_announcement(AgentAnnouncementEvent)  ← fail-loud
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
       → returns Valkey entry id verbatim
-    → returns {event_id} to the agent
+    → returns {event_id, cursor} to the agent
+      (both the stream entry id — `cursor` is the canonical
+       self-labelled name, #2479; `event_id` is the legacy alias
+       and NOT a durable UUID: announcements carry no UUID)
 ```
 
 ### Read path (SSE)

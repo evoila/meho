@@ -96,7 +96,7 @@ def _getaddrinfo_for_tests(
 
 
 @pytest.fixture(autouse=True)
-def _mock_getaddrinfo_for_test_hosts() -> Generator[None, None, None]:
+def _mock_getaddrinfo_for_test_hosts() -> Generator[None]:
     """Patch ``socket.getaddrinfo`` for the SSRF guard so test HTTPS URLs
     resolve to a public IP without real DNS, and the guard passes.
 

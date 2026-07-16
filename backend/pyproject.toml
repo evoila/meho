@@ -3,7 +3,7 @@ name = "meho-backplane"
 version = "0.1.0-dev"
 description = "MEHO governance-layer backplane (HTTP server, observability, audit, federation)"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.14"
 license = "Apache-2.0"
 dependencies = [
     "fastapi>=0.139.0,<0.140",
@@ -103,13 +103,16 @@ dependencies = [
     # ``jsonschema`` dependency; used metaschema-only (no semantic add-ons).
     "openapi-spec-validator>=0.9.0",
     # Full presented TLS certificate-chain inspection for the synthetic
-    # ``net.tls_inspect`` diagnostic op (#2407). Stdlib ``ssl`` on Python
-    # 3.12 (the ``requires-python`` floor) exposes only the **leaf** via
-    # ``getpeercert`` — the full-chain ``SSLSocket.get_unverified_chain()``
-    # is 3.13+. pyOpenSSL's ``Connection.get_peer_cert_chain()`` returns
-    # the whole chain the server sent on an unverified handshake, and each
-    # cert's ``.to_cryptography()`` hands off to the ``cryptography`` x509
-    # parser already used elsewhere. Apache-2.0 (license-check clean).
+    # ``net.tls_inspect`` diagnostic op (#2407). pyOpenSSL's
+    # ``Connection.get_peer_cert_chain()`` returns the whole chain the
+    # server sent on an unverified handshake, and each cert's
+    # ``.to_cryptography()`` hands off to the ``cryptography`` x509 parser
+    # already used elsewhere. Apache-2.0 (license-check clean).
+    # NOTE: this dep predates the 3.14 floor, when stdlib ``ssl`` exposed
+    # only the **leaf** via ``getpeercert``. The full-chain
+    # ``SSLSocket.get_unverified_chain()`` is 3.13+, so it is now always
+    # available and pyOpenSSL can be retired here — deliberately left for
+    # a follow-up rather than folded into the interpreter migration.
     "pyopenssl>=25.0.0",
     # Direct runtime dependency now: ``net.tls_inspect`` parses each
     # presented cert via ``cryptography.x509`` (subject/SAN/issuer/validity
@@ -175,7 +178,17 @@ artifacts = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+# Deliberately pinned *below* the ``requires-python`` floor, so it must be
+# set explicitly — left unset, ruff infers py314 from ``requires-python``.
+# At py314 the formatter applies PEP 758 and rewrites every
+# ``except (A, B):`` into ``except A, B:`` (34 files). That form is valid
+# only on 3.14+, and reads exactly like Python 2's ``except E, name:``,
+# which bound the exception to a name instead of catching a second type —
+# a meaning-inverting lookalike for anyone skimming. Nothing here needs
+# 3.14-only syntax, so the runtime moved to 3.14 while the syntax ruff may
+# emit stays conservative. Revisit as a deliberate style decision, not as
+# a side effect of an interpreter bump.
+target-version = "py313"
 src = ["src", "tests"]
 
 [tool.ruff.lint]
@@ -261,7 +274,7 @@ extend-immutable-calls = [
 
 [tool.mypy]
 strict = true
-python_version = "3.12"
+python_version = "3.14"
 files = ["src"]
 
 # authlib publishes no type stubs (the maintainer migrated typing

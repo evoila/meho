@@ -10,8 +10,8 @@ import (
 // newDependentsCmd returns the `meho topology dependents` command.
 //
 //	meho topology dependents <name|alias> [--depth N] [--kind <edge_kind>]
-//	  [--node-kind <node_kind>] [--json] [--backplane <url>]
-//	# GET /api/v1/topology/dependents/<name>?depth=N&kind_filter=...&kind=...
+//	  [--node-kind <node_kind>] [--include-stale=false] [--json] [--backplane <url>]
+//	# GET /api/v1/topology/dependents/<name>?depth=N&kind_filter=...&kind=...&include_stale=...
 //
 // Reverse closure: every node that depends on <name> ("what would
 // break if I delete this"). The blast-radius verb consumer-needs.md
@@ -21,6 +21,7 @@ func newDependentsCmd() *cobra.Command {
 		depth             int
 		edgeKind          string
 		nodeKind          string
+		includeStale      bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -55,11 +56,12 @@ func newDependentsCmd() *cobra.Command {
 				Depth:             depth,
 				EdgeKind:          edgeKind,
 				NodeKind:          nodeKind,
+				IncludeStale:      includeStale,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
 	}
-	addClosureFlags(cmd, &depth, &edgeKind, &nodeKind, &backplaneOverride, &jsonOut)
+	addClosureFlags(cmd, &depth, &edgeKind, &nodeKind, &backplaneOverride, &includeStale, &jsonOut)
 	return cmd
 }

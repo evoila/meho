@@ -416,6 +416,12 @@ async def test_scenario2_performance_10k_nodes(stable_connector: None) -> None:
     assert path.nodes[0].name == TEN_K.hub_name
     assert path.nodes[-1].name == target_node
     assert path.total_hops == 5
+    # #2538 chain provenance rides along: every non-root hop names its
+    # exact edge and predecessor; the root carries NULLs.
+    assert (path.nodes[0].parent_node_id, path.nodes[0].via_edge_id) == (None, None)
+    for prev, node in zip(path.nodes, path.nodes[1:], strict=False):
+        assert node.parent_node_id == prev.id
+        assert node.via_edge_id is not None
     assert path_ms < 1500.0, (
         f"find_path BFS on 10k nodes took {path_ms:.1f} ms "
         f"(documented expectation: < 150 ms on the fixture)"

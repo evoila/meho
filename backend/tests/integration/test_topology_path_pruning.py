@@ -181,6 +181,9 @@ def _params(
         "from_kind": None,
         "to_kind": None,
         "max_hops": max_hops,
+        # #2538 staleness opt-out — the harness always walks the
+        # default last-refresh-wins view.
+        "include_stale": True,
     }
 
 

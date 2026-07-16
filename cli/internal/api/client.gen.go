@@ -6506,13 +6506,24 @@ type TopologyHistoryResult struct {
 // transitive ones depth “2“, and so on. “via_edge_kind“ is the
 // “graph_edge.kind“ of the edge used to reach this node, or
 // “None“ for the root (which is reached by no edge).
+//
+// “parent_node_id“ / “via_edge_id“ (#2538) are the chain
+// provenance: the “graph_node.id“ the walk stepped from and the
+// “graph_edge.id“ it walked to reach this node, both “None“ on
+// the root row. They let a caller reconstruct the exact dependency
+// chain from the flat closure list without follow-up edge lookups —
+// every “parent_node_id“ in a closure result is itself a row of
+// that result. Additive with “None“ defaults so pre-#2538
+// constructors and payloads stay valid.
 type TopologyNode struct {
-	Depth       int                     `json:"depth"`
-	Id          openapi_types.UUID      `json:"id"`
-	Kind        string                  `json:"kind"`
-	Name        string                  `json:"name"`
-	Properties  *map[string]interface{} `json:"properties,omitempty"`
-	ViaEdgeKind *string                 `json:"via_edge_kind"`
+	Depth        int                     `json:"depth"`
+	Id           openapi_types.UUID      `json:"id"`
+	Kind         string                  `json:"kind"`
+	Name         string                  `json:"name"`
+	ParentNodeId *openapi_types.UUID     `json:"parent_node_id"`
+	Properties   *map[string]interface{} `json:"properties,omitempty"`
+	ViaEdgeId    *openapi_types.UUID     `json:"via_edge_id"`
+	ViaEdgeKind  *string                 `json:"via_edge_kind"`
 }
 
 // TopologyPath An ordered shortest path between two nodes.
@@ -7604,6 +7615,9 @@ type DependenciesApiV1TopologyDependenciesNameGetParams struct {
 	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
 	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
 
+	// IncludeStale Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only — the same view the edge inventory listing shows.
+	IncludeStale *bool `form:"include_stale,omitempty" json:"include_stale,omitempty"`
+
 	// Envelope Opt into the unified REST↔MCP envelope shape per docs/codebase/api-shape-conventions.md §4. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).
 	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
@@ -7614,6 +7628,9 @@ type DependentsApiV1TopologyDependentsNameGetParams struct {
 	Depth      *int    `form:"depth,omitempty" json:"depth,omitempty"`
 	Kind       *string `form:"kind,omitempty" json:"kind,omitempty"`
 	KindFilter *string `form:"kind_filter,omitempty" json:"kind_filter,omitempty"`
+
+	// IncludeStale Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only — the same view the edge inventory listing shows.
+	IncludeStale *bool `form:"include_stale,omitempty" json:"include_stale,omitempty"`
 
 	// Envelope Opt into the unified REST↔MCP envelope shape per docs/codebase/api-shape-conventions.md §4. Pass `v2` to receive `{kind, nodes}`; omit to keep the v0.8.0 bare-list default. The opt-in is non-breaking across release cycles (G0.16-T6 Finding E #1312).
 	Envelope      *string `form:"envelope,omitempty" json:"envelope,omitempty"`
@@ -7671,11 +7688,14 @@ type HistoryRouteApiV1TopologyHistoryNameGetParams struct {
 
 // PathApiV1TopologyPathGetParams defines parameters for PathApiV1TopologyPathGet.
 type PathApiV1TopologyPathGetParams struct {
-	From          string  `form:"from" json:"from"`
-	To            string  `form:"to" json:"to"`
-	FromKind      *string `form:"from_kind,omitempty" json:"from_kind,omitempty"`
-	ToKind        *string `form:"to_kind,omitempty" json:"to_kind,omitempty"`
-	MaxHops       *int    `form:"max_hops,omitempty" json:"max_hops,omitempty"`
+	From     string  `form:"from" json:"from"`
+	To       string  `form:"to" json:"to"`
+	FromKind *string `form:"from_kind,omitempty" json:"from_kind,omitempty"`
+	ToKind   *string `form:"to_kind,omitempty" json:"to_kind,omitempty"`
+	MaxHops  *int    `form:"max_hops,omitempty" json:"max_hops,omitempty"`
+
+	// IncludeStale Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only — the same view the edge inventory listing shows.
+	IncludeStale  *bool   `form:"include_stale,omitempty" json:"include_stale,omitempty"`
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -23989,6 +24009,22 @@ func NewDependenciesApiV1TopologyDependenciesNameGetRequest(server string, name 
 
 		}
 
+		if params.IncludeStale != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_stale", runtime.ParamLocationQuery, *params.IncludeStale); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
 		if params.Envelope != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "envelope", runtime.ParamLocationQuery, *params.Envelope); err != nil {
@@ -24095,6 +24131,22 @@ func NewDependentsApiV1TopologyDependentsNameGetRequest(server string, name stri
 		if params.KindFilter != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind_filter", runtime.ParamLocationQuery, *params.KindFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeStale != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_stale", runtime.ParamLocationQuery, *params.IncludeStale); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -24789,6 +24841,22 @@ func NewPathApiV1TopologyPathGetRequest(server string, params *PathApiV1Topology
 		if params.MaxHops != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "max_hops", runtime.ParamLocationQuery, *params.MaxHops); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.IncludeStale != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "include_stale", runtime.ParamLocationQuery, *params.IncludeStale); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

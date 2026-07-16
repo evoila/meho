@@ -145,8 +145,9 @@ func newBulkImportCmd() *cobra.Command {
 			"`from` and `to` accept either a bare string (the common " +
 			"case) or a `{name, kind}` map when an endpoint is " +
 			"ambiguous and the operator wants to pin the kind. `kind` " +
-			"must be one of the closed 10-kind GraphEdgeKind vocabulary " +
-			"(`meho topology annotate --help` lists every kind).\n\n" +
+			"is any lowercase kind slug (the vocabulary is open); " +
+			"prefer a well-known kind when one fits " +
+			"(`meho topology annotate --help` lists them).\n\n" +
 			"--dry-run returns the per-row plan (create / update / " +
 			"conflict) and writes nothing; --json emits the raw response " +
 			"JSON for piping into a downstream consumer.\n\n" +
@@ -258,16 +259,15 @@ func parseBulkImportDoc(data []byte) (*bulkImportDoc, error) {
 
 // buildBulkImportBody projects the YAML-decoded `bulkImportDoc` onto
 // the generated `api.UnderscoreBulkImportRequest` body. The kind
-// rides as a typed `api.GraphEdgeKind` so the generated parser's
-// closed-vocabulary contract is the wire-level check (operators see
-// the substrate's per-row 422 message on a bad kind, same shape as
-// the pre-migration `httpError` ladder).
+// rides as a plain string; the backend's slug-pattern check is the
+// wire-level gate (operators see the substrate's per-row 422 message
+// on a malformed kind — the vocabulary itself is open per T1 #2534).
 func buildBulkImportBody(doc *bulkImportDoc, dryRun bool) api.UnderscoreBulkImportRequest {
 	edges := make([]api.UnderscoreBulkImportEdge, 0, len(doc.Edges))
 	for _, e := range doc.Edges {
 		edge := api.UnderscoreBulkImportEdge{
 			From: api.UnderscoreEdgeEndpoint{Name: e.From.Name},
-			Kind: api.GraphEdgeKind(e.Kind),
+			Kind: e.Kind,
 			To:   api.UnderscoreEdgeEndpoint{Name: e.To.Name},
 		}
 		if e.From.Kind != "" {

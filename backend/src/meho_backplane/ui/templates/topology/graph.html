@@ -178,8 +178,8 @@
           aria-label="Filter nodes by kind"
         >
           <option value="">All kinds</option>
-          {# ``node_kind_options`` is the closed enum
-             (``_GRAPH_NODE_KINDS``) the route handler ships -- single
+          {# ``node_kind_options`` is the well-known set
+             (``WELL_KNOWN_NODE_KINDS``) the route handler ships -- single
              source of truth shared with the T1 tabular surface. -#}
           {% for option in node_kind_options %}
             <option value="{{ option }}" {% if option == kind_filter %}selected{% endif %}>

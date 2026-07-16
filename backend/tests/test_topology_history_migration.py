@@ -28,7 +28,7 @@ Coverage matrix (Task #856 acceptance criteria):
   ``removed``) and rejects anything else with :class:`IntegrityError`.
 * **Drift guard** -- :class:`GraphHistoryChangeKind` and the migration's
   inlined ``_CHANGE_KINDS`` tuple stay in sync; the same drift guard
-  pattern :class:`GraphEdgeKind` / :data:`_GRAPH_EDGE_KINDS` follows
+  pattern :class:`GraphHistoryChangeKind` follows
   for the live-edge vocabulary.
 * **ORM round-trip** -- inserting a :class:`GraphNodeHistory` /
   :class:`GraphEdgeHistory` round-trips every field through SQLite
@@ -532,7 +532,8 @@ def test_change_kind_enum_has_exactly_three_members() -> None:
 def test_change_kind_enum_matches_ck_constraint_tuple() -> None:
     """:data:`_GRAPH_HISTORY_CHANGE_KINDS` mirrors :class:`GraphHistoryChangeKind`.
 
-    Same drift-guard pattern :data:`_GRAPH_EDGE_KINDS` follows for the
+    Same drift-guard pattern the graph tables' kind CHECKs followed
+    pre-#2534 for the
     live-edge vocabulary: the Python type-level enum and the DB-layer
     ``CHECK change_kind IN (...)`` constraint must move in lock-step.
     Equality is the regression guard at unit-test time.

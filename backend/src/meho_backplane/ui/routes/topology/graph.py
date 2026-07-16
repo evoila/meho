@@ -66,7 +66,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
-from meho_backplane.db.models import _GRAPH_NODE_KINDS, GraphEdge, GraphNode
+from meho_backplane.db.models import WELL_KNOWN_NODE_KINDS, GraphEdge, GraphNode
 from meho_backplane.topology.query import TopologyNodeListEntry, list_nodes
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
@@ -352,11 +352,12 @@ def _build_template_context(
     -- every key is consumed by ``topology/graph.html``.
 
     ``node_kind_options`` mirrors the T1 (#880) ``table.py`` pattern of
-    sourcing the kind filter dropdown from the closed enum
-    (:data:`meho_backplane.db.models._GRAPH_NODE_KINDS`) rather than
-    hard-coding the vocabulary in the template. When the closed enum
-    widens (a new connector contributes a new ``kind``), both the
-    table and graph dropdowns pick up the new option for free.
+    sourcing the kind filter dropdown from the well-known set
+    (:data:`meho_backplane.db.models.WELL_KNOWN_NODE_KINDS`) rather than
+    hard-coding the vocabulary in the template. The kind space is open
+    (T1 #2534); nodes of a novel kind still render — the dropdown just
+    lists the documented core set (surfacing novel kinds in the filter
+    is future console work).
     """
     return {
         "page_title": "Topology",
@@ -369,9 +370,10 @@ def _build_template_context(
         "edge_count": edge_count,
         "graph_node_cap": GRAPH_NODE_CAP,
         "truncated": truncated,
-        # Sourced from the closed enum -- single source of truth shared
-        # with the T1 tabular surface (``table.py._node_kind_options``).
-        "node_kind_options": sorted(_GRAPH_NODE_KINDS),
+        # Sourced from the well-known set -- single source of truth
+        # shared with the T1 tabular surface
+        # (``table.py._node_kind_options``).
+        "node_kind_options": sorted(WELL_KNOWN_NODE_KINDS),
         # ``selected_id`` is the cross-link payload: when the operator
         # clicks a table row's "Show in graph" button (or arrived via
         # ``?view=graph&selected=<id>`` from any source), the init
@@ -504,7 +506,7 @@ def _build_overlay_template_context(
         "edge_count": edge_count,
         "graph_node_cap": GRAPH_NODE_CAP,
         "truncated": truncated,
-        "node_kind_options": sorted(_GRAPH_NODE_KINDS),
+        "node_kind_options": sorted(WELL_KNOWN_NODE_KINDS),
         # No table cross-link target in overlay mode -- empty string
         # so Jinja's ``StrictUndefined`` env does not raise on the
         # template read.

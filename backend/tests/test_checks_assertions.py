@@ -379,6 +379,19 @@ def test_sum_aggregate_non_finite_result_is_unknown() -> None:
     assert "finite" in out.evidence["reason"]
 
 
+def test_sum_aggregate_bignum_plus_float_overflow_is_unknown() -> None:
+    # #2504 review B2: an arbitrary-precision int (reachable via json.loads)
+    # summed with a float promotes the int to float and raises OverflowError.
+    # The evaluator must never raise on payload data -> unknown, not a crash.
+    out = _eval(
+        {"path": "$.xs[*]", "aggregate": "sum"},
+        {"type": "threshold", "op": "gt", "critical": 0},
+        {"xs": [10**400, 1.5]},
+    )
+    assert out.state == "unknown"
+    assert "overflow" in out.evidence["reason"]
+
+
 @pytest.mark.parametrize("field", ["degraded", "critical"])
 @pytest.mark.parametrize("bound", [float("nan"), float("inf"), float("-inf")])
 def test_threshold_non_finite_bound_rejected_at_parse(field: str, bound: float) -> None:
@@ -619,6 +632,7 @@ def test_evaluator_never_raises_or_emits_skip() -> None:
         {"a": {"b": {"c": [1, 2]}}},
         {"summary": "reduced markdown", "handle": "s3://bucket/key"},  # a reducer summary dict
         {"disks": [{"free_pct": 3.1}, {"free_pct": "n/a"}]},
+        {"disks": [{"free_pct": 10**400}, {"free_pct": 1.5}]},  # bignum+float sum overflow (B2)
     ]
     specs = [
         ({"path": "$.a", "aggregate": None}, {"type": "equals", "value": 1}),

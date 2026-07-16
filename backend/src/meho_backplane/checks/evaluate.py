@@ -188,7 +188,13 @@ def _aggregate(values: list[Any], aggregate: str) -> tuple[Any, str | None]:
             if isinstance(element, float) and not math.isfinite(element):
                 return None, f"aggregate {aggregate!r} requires finite numbers, found {element!r}"
         if aggregate == "sum":
-            total = sum(values)
+            try:
+                total = sum(values)
+            except OverflowError:
+                # A huge int summed with a float promotes the int to float and
+                # overflows (e.g. [10**400, 1.5], reachable via json.loads);
+                # the payload cannot be judged, so it is unknown, not a raise.
+                return None, "aggregate 'sum' overflows the float range"
             if isinstance(total, float) and not math.isfinite(total):
                 return None, f"aggregate 'sum' is non-finite ({total!r})"
             return total, None

@@ -23,8 +23,12 @@ the result into the MCP wire shape. Service-level errors map to
 :class:`~meho_backplane.mcp.server.McpInvalidParamsError`: the safe-only
 guard surfaces ``sensor_requires_safe_operation``, an unknown op
 ``sensor_operation_not_found``, a duplicate name ``sensor_name_conflict``,
-and a not-found / cross-tenant delete target ``sensor_not_found`` -- the
-same codes the REST route surfaces. Each handler binds the same audit-side
+a cross-tenant create by a non-platform-admin
+``cross_tenant_requires_platform_admin`` (the shared
+:func:`~meho_backplane.auth.rbac.authorize_tenant_scope` seam the REST
+route uses, the #1638 IDOR primitive), and a not-found / cross-tenant
+delete target ``sensor_not_found`` -- the same codes the REST route
+surfaces. Each handler binds the same audit-side
 contextvars the REST handlers do so an MCP call produces an audit row
 identical in shape (modulo the ``method="MCP"`` distinction).
 """
@@ -35,9 +39,11 @@ import uuid
 from typing import Any, Final
 
 import structlog
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.checks.schemas import SensorCreate, SensorRead
 from meho_backplane.checks.service import (
     SensorAdminService,
@@ -172,13 +178,24 @@ async def _create_handler(
         payload = SensorCreate.model_validate(arguments)
     except ValidationError as exc:
         raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
-    # Cross-tenant admin: when payload.tenant_id is provided, route the
-    # create under that tenant -- but only for tenant_admin callers.
-    target_tenant = operator.tenant_id
-    if payload.tenant_id is not None:
-        if operator.tenant_role != TenantRole.TENANT_ADMIN:
-            raise McpInvalidParamsError("tenant_id_requires_tenant_admin")
-        target_tenant = payload.tenant_id
+    # Cross-tenant admin: a payload.tenant_id naming a *different* tenant
+    # crosses the tenant boundary, which is a platform-level capability --
+    # not something tenant-admin *rank* confers. Reuse the REST route's
+    # shared authz seam (authorize_tenant_scope, the #1638 cross-tenant
+    # IDOR primitive) rather than gating on rank: the tool already requires
+    # tenant_admin, so a rank check would be dead code and let any
+    # tenant-admin write a sensor into any tenant. authorize_tenant_scope
+    # returns the caller's own tenant for the same-tenant / null case and
+    # only allows a different tenant for operator.platform_admin.
+    try:
+        target_tenant = authorize_tenant_scope(operator, payload.tenant_id)
+    except HTTPException as exc:
+        # 403 cross_tenant_requires_platform_admin -> the MCP wire-error;
+        # the same detail token the REST caller sees (there is no MCP
+        # analogue for 403, so invalid-params is the closest shape). Mirrors
+        # meho_backplane.mcp.tools.broadcast_overrides._http_to_mcp.
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        raise McpInvalidParamsError(detail) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_SENSOR_OP_IDS["create"],
         audit_op_class="write",
@@ -220,9 +237,14 @@ register_mcp_tool(
             "Optional: target (dispatch target object), params (op params "
             "object), severity ('degraded'|'critical', default 'critical'), "
             "for_seconds (hold-time hysteresis, default 0), identity_sub "
-            "(default '__sensor__'), tenant_id (tenant_admin-only "
-            "cross-tenant target). A duplicate name -> 'sensor_name_conflict'. "
-            "There is no update/pause path (status is set-at-create-only). "
+            "(default '__sensor__'), tenant_id (platform-admin-only "
+            "cross-tenant target; a non-platform tenant-admin naming "
+            "another tenant is refused with "
+            "'cross_tenant_requires_platform_admin'). A duplicate name -> "
+            "'sensor_name_conflict'. "
+            "There is no update/pause path -- status is server-initialized "
+            "to 'active' at create (clients cannot supply it) and "
+            "runner-parked to 'paused' by #2505. "
             "Response: {sensor_id, sensor: {...}}."
         ),
         inputSchema={
@@ -286,8 +308,11 @@ register_mcp_tool(
                     "format": "uuid",
                     "description": (
                         "Target tenant UUID for cross-tenant admin create "
-                        "(tenant_admin only). When omitted or null, the sensor "
-                        "is created under the caller's tenant."
+                        "(platform-admin only, the #1638 cross-tenant "
+                        "capability -- a non-platform tenant-admin naming a "
+                        "different tenant is refused with "
+                        "'cross_tenant_requires_platform_admin'). When omitted "
+                        "or null, the sensor is created under the caller's tenant."
                     ),
                 },
             },

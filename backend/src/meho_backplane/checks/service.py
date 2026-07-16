@@ -152,6 +152,28 @@ class SensorNameConflictError(Exception):
         super().__init__(f"a sensor named {name!r} already exists in this tenant")
 
 
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """Return whether *exc* is a unique-constraint violation.
+
+    Mirrors :func:`meho_backplane.agents.service._is_unique_violation` and
+    the convention service: PG (asyncpg) exposes the SQLSTATE via
+    ``orig.sqlstate`` -- ``23505`` is ``unique_violation``; SQLite emits the
+    documented ``UNIQUE constraint failed`` substring. The ``pgcode``
+    fallback survives a future psycopg wiring.
+
+    Narrowing matters here because :meth:`SensorAdminService.create` can pass
+    a cross-tenant ``tenant_id`` (platform-admin path): a bogus one trips the
+    tenant FK, and a future tightening migration could add a CHECK. Those are
+    genuine integrity failures, not a duplicate name -- returning ``False``
+    lets them propagate as a 500 rather than a misleading 409
+    ``sensor_name_conflict``.
+    """
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    orig_msg = str(orig or exc)
+    return sqlstate == "23505" or "UNIQUE constraint failed" in orig_msg
+
+
 def _row_to_read(row: Sensor) -> SensorRead:
     """Materialise a :class:`Sensor` ORM row as the wire shape.
 
@@ -201,6 +223,11 @@ class SensorAdminService:
         SensorNameConflictError
             The ``(tenant_id, name)`` pair is already taken. The boundary
             maps this to 409 ``sensor_name_conflict``.
+        sqlalchemy.exc.IntegrityError
+            Any *other* integrity failure (a tenant-FK violation from a
+            bogus cross-tenant ``tenant_id``, a CHECK from a future
+            tightening migration) propagates rather than being misreported
+            as a name conflict -- the boundary maps it to a 500.
         """
         # Safe-only create guard -- resolve the descriptor and refuse a
         # non-safe / unknown op before any DB write.
@@ -243,9 +270,15 @@ class SensorAdminService:
                 )
                 await session.commit()
             except IntegrityError as exc:
-                # The unique (tenant_id, name) index rejected a duplicate.
                 await session.rollback()
-                raise SensorNameConflictError(payload.name) from exc
+                if _is_unique_violation(exc):
+                    # The unique (tenant_id, name) index rejected a duplicate.
+                    raise SensorNameConflictError(payload.name) from exc
+                # Any other integrity failure (a tenant-FK violation from a
+                # bogus cross-tenant tenant_id, a CHECK from a future
+                # tightening migration) is not a name conflict -- re-raise so
+                # it surfaces as a 500 rather than a misleading 409.
+                raise
             await session.refresh(row)
             return _row_to_read(row)
 

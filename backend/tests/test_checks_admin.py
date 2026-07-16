@@ -258,6 +258,66 @@ async def test_service_create_rejects_duplicate_name() -> None:
         )
 
 
+def test_is_unique_violation_classifies_dialects() -> None:
+    """The narrow classifier flags only unique violations, not FK / CHECK."""
+    from sqlalchemy.exc import IntegrityError
+
+    from meho_backplane.checks import service as checks_service
+
+    class _FakeOrigError(Exception):
+        def __init__(self, msg: str, sqlstate: str | None = None) -> None:
+            super().__init__(msg)
+            if sqlstate is not None:
+                self.sqlstate = sqlstate
+
+    def _err(msg: str, sqlstate: str | None = None) -> IntegrityError:
+        return IntegrityError("stmt", {}, _FakeOrigError(msg, sqlstate))
+
+    # PG unique violation (SQLSTATE 23505) and the SQLite substring -> True.
+    assert checks_service._is_unique_violation(_err("dupe", sqlstate="23505")) is True
+    assert (
+        checks_service._is_unique_violation(_err("UNIQUE constraint failed: sensor.name")) is True
+    )
+    # FK violation (23503) and an arbitrary CHECK failure -> False (propagate).
+    assert (
+        checks_service._is_unique_violation(_err("FOREIGN KEY constraint failed", sqlstate="23503"))
+        is False
+    )
+    assert checks_service._is_unique_violation(_err("CHECK constraint failed")) is False
+
+
+@pytest.mark.asyncio
+async def test_service_create_non_unique_integrity_error_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-unique IntegrityError is not misreported as a 409 name conflict.
+
+    A platform-admin may target another tenant; a bogus ``tenant_id`` trips
+    the tenant FK. That is a genuine integrity failure, not a duplicate name,
+    so it must propagate rather than surface as ``sensor_name_conflict``.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from meho_backplane.checks import service as checks_service
+
+    await _seed_tenant_and_safe_op()
+
+    class _FakeOrigError(Exception):
+        sqlstate = "23503"  # foreign_key_violation
+
+    async def _raise_fk(*_args: Any, **_kwargs: Any) -> Sensor:
+        raise IntegrityError(
+            "INSERT INTO sensor ...", {}, _FakeOrigError("FOREIGN KEY constraint failed")
+        )
+
+    monkeypatch.setattr(checks_service, "create_sensor", _raise_fk)
+    service = SensorAdminService()
+    with pytest.raises(IntegrityError):
+        await service.create(
+            tenant_id=_TENANT_A, created_by_sub="op-admin", payload=_create_payload(name="fk")
+        )
+
+
 # ---------------------------------------------------------------------------
 # Service layer -- list / get / delete / tenant boundary
 # ---------------------------------------------------------------------------
@@ -402,6 +462,71 @@ async def test_record_sensor_result_projection_and_state_since() -> None:
         assert row is not None
         assert row.last_state == "critical"
         assert _naive(row.state_since) == _naive(t2)
+
+
+@pytest.mark.asyncio
+async def test_record_sensor_result_ignores_stale_evaluated_at() -> None:
+    """A result older than (or equal to) last_evaluated_at is ignored (monotonicity).
+
+    An out-of-order or retried persist must not overwrite a newer projection
+    nor move ``state_since`` backwards.
+    """
+    await _seed_tenant_and_safe_op()
+    service = SensorAdminService()
+    entry = await service.create(
+        tenant_id=_TENANT_A, created_by_sub="op-admin", payload=_create_payload()
+    )
+    sessionmaker = get_sessionmaker()
+    t_old = datetime(2026, 7, 16, 12, 0, 0, tzinfo=UTC)
+    t_new = datetime(2026, 7, 16, 12, 5, 0, tzinfo=UTC)
+
+    # Record the newer result first (unknown -> critical is a change).
+    async with sessionmaker() as session:
+        changed = await record_sensor_result(
+            session,
+            sensor_id=entry.id,
+            state="critical",
+            value=99,
+            evidence={"observed": 99},
+            evaluated_at=t_new,
+        )
+        await session.commit()
+        assert changed is True
+
+    # A stale (older) result must not overwrite the newer projection.
+    async with sessionmaker() as session:
+        changed = await record_sensor_result(
+            session,
+            sensor_id=entry.id,
+            state="ok",
+            value=1,
+            evidence={"observed": 1},
+            evaluated_at=t_old,
+        )
+        await session.commit()
+        assert changed is False
+
+    # A duplicate (equal timestamp) is likewise a no-op.
+    async with sessionmaker() as session:
+        changed = await record_sensor_result(
+            session,
+            sensor_id=entry.id,
+            state="ok",
+            value=2,
+            evidence={"observed": 2},
+            evaluated_at=t_new,
+        )
+        await session.commit()
+        assert changed is False
+
+    async with sessionmaker() as session:
+        row = await session.get(Sensor, entry.id)
+        assert row is not None
+        # The stale / duplicate writes left the newer projection intact.
+        assert row.last_state == "critical"
+        assert row.last_value == 99
+        assert _naive(row.last_evaluated_at) == _naive(t_new)
+        assert _naive(row.state_since) == _naive(t_new)
 
 
 # ---------------------------------------------------------------------------

@@ -110,6 +110,18 @@ async def create_sensor(
     return row
 
 
+def _as_utc(dt: datetime) -> datetime:
+    """Normalise a possibly-naive datetime to UTC-aware for comparison.
+
+    ``DateTime(timezone=True)`` round-trips *naive* on aiosqlite (the
+    unit-test path) and *aware* on PG; the runner always evaluates in UTC,
+    so a naive stored value denotes a UTC instant. Attaching UTC to naive
+    values lets the monotonicity comparison work on either dialect without
+    raising ``TypeError`` on a naive-vs-aware compare.
+    """
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
 async def record_sensor_result(
     session: AsyncSession,
     *,
@@ -122,10 +134,19 @@ async def record_sensor_result(
     """Update the latest-state projection for *sensor_id*; return state-changed.
 
     Updates ``last_state`` / ``last_value`` / ``last_evidence`` /
-    ``last_evaluated_at`` on every call, and bumps ``state_since`` **only**
-    when ``state`` differs from the row's current ``last_state`` -- so
-    #2506's ``for:`` hold-time hysteresis can read how long the current
-    state has held. Returns ``True`` iff the state changed.
+    ``last_evaluated_at``, and bumps ``state_since`` **only** when ``state``
+    differs from the row's current ``last_state`` -- so #2506's ``for:``
+    hold-time hysteresis can read how long the current state has held.
+    Returns ``True`` iff the state changed.
+
+    **Monotonicity guard.** A result whose ``evaluated_at`` is not strictly
+    newer than the row's recorded ``last_evaluated_at`` is ignored (returns
+    ``False`` without mutating the projection). #2505's runner is the single
+    serialised evaluator, but a retried or reordered persist -- the gateway
+    batch-post (#2415-T3) can deliver remote results out of order -- must not
+    overwrite a newer projection with a stale one, nor move ``state_since``
+    backwards. An equal timestamp is treated as an already-recorded
+    idempotent retry.
 
     A ``sensor_id`` that names no row (deleted between an evaluation and
     the persist) returns ``False`` without raising -- the runner treats
@@ -133,6 +154,11 @@ async def record_sensor_result(
     """
     row = await session.get(Sensor, sensor_id)
     if row is None:
+        return False
+    if row.last_evaluated_at is not None and _as_utc(evaluated_at) <= _as_utc(
+        row.last_evaluated_at
+    ):
+        # Stale or duplicate result -- keep the newer projection intact.
         return False
     changed = row.last_state != state
     row.last_state = state

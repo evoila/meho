@@ -125,8 +125,10 @@ connector-related release-notes line.
   repository function `record_sensor_result`. Exposed as tenant-scoped CRUD
   across REST (`GET/POST /api/v1/sensors`, `DELETE /api/v1/sensors/{id}`),
   MCP (`meho.sensor.list`/`create`/`delete`), and CLI
-  (`meho sensor list`/`create`/`delete`); no update/pause path
-  (set-at-create-only), hard delete, migration `0064`.
+  (`meho sensor list`/`create`/`delete`); `status` is server-initialized
+  to `active` at create and runner-parked to `paused` by #2505 (clients
+  cannot supply it), with no update/pause path — hard delete only,
+  migration `0064`.
 
 ### Performance — `find_path` per-branch target pruning + dense-mesh envelope + topology concurrency coverage (#2535)
 

@@ -75,8 +75,10 @@ fire-history the audit trail needs post-delete.
 
 Surfaces: REST (`api/v1/sensors.py`, registered in `main.py`), MCP
 (`mcp/tools/sensors.py`, auto-loaded), Go CLI (`cli/internal/cmd/sensor/`).
-There is **no** update / pause / resume path — `status` is set-at-create
--only and transitions to `paused` only via #2505's parking.
+There is **no** update / pause / resume path — `status` is
+server-initialized to `active` at create (clients cannot supply it; a body
+carrying `status` is a 422) and transitions to `paused` only via #2505's
+runner parking.
 
 ## Dependencies
 

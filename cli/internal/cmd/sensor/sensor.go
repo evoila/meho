@@ -37,6 +37,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -168,11 +169,31 @@ var validSeverities = map[string]bool{"degraded": true, "critical": true}
 // (exit 2) with a `meho login` hint.
 var errMissingAccessToken = errors.New("meho: stored token has no access_token")
 
+// maxSensorListRows mirrors the server-enforced list ceiling
+// (checks.service.MAX_LIST_LIMIT, the `--limit` upper bound): a full page
+// carries at most this many SensorRead rows.
+const maxSensorListRows int64 = 500
+
+// maxSensorRowBytes is a generous per-row ceiling for the body cap: the
+// bounded columns (name<=128, connector_id/op_id<=256, cron<=128) plus the
+// 8 KiB assertion cap and headroom for the last_value / last_evidence
+// projection. 64 KiB/row keeps a valid full page well under the cap while
+// still bounding an unbounded / adversarial body.
+const maxSensorRowBytes int64 = 64 << 10
+
 // responseBodyCap bounds the bytes the sensor verb tree's transport reads
 // off any backplane response body before surfacing *http.MaxBytesError.
-// 1 MiB is generous for a paginated sensor list (limit 500 with full row
-// payloads including evidence maps stays well under it).
-const responseBodyCap int64 = 1 << 20
+// Derived from the server list bound (rows x per-row ceiling = 32 MiB) so a
+// valid `--limit 500` page cannot trip the cap. The fixed 1 MiB cap it
+// replaces could truncate a large-but-legitimate list, since the row's
+// last_evidence projection is not tiny.
+const responseBodyCap int64 = maxSensorListRows * maxSensorRowBytes
+
+// requestTimeout bounds a single sensor request end-to-end (connect +
+// headers + body read) so a hung backplane connection cannot pin a verb
+// indefinitely -- the commands carry no context deadline of their own.
+// Matches the 30 s convention the keycloak admin client uses.
+const requestTimeout = 30 * time.Second
 
 // capRoundTripper wraps an http.RoundTripper so every response body is
 // re-bound to an http.MaxBytesReader before the typed-client parsers get a
@@ -205,6 +226,11 @@ func cappedHTTPClient(base *http.Client) *http.Client {
 		transport = http.DefaultTransport
 	}
 	clone.Transport = &capRoundTripper{base: transport, limit: responseBodyCap}
+	if clone.Timeout == 0 {
+		// Impose a finite request timeout only when the caller didn't set
+		// one, so a future caller-supplied client keeps its own deadline.
+		clone.Timeout = requestTimeout
+	}
 	return &clone
 }
 
@@ -376,6 +402,22 @@ func decodeDetailString(body string) string {
 	return strings.TrimSpace(body)
 }
 
+// sanitizeCell renders an untrusted persisted string safe for terminal
+// output: control characters (including ESC, which drives ANSI/CSI escape
+// sequences, and CR/LF, which could rewrite a table row) are replaced with
+// U+FFFD so a crafted sensor name / cron expression / timezone cannot move
+// the cursor, recolour, or clear the operator's terminal when a list or
+// summary is printed. The --json path serialises the raw value unchanged
+// (machine consumers re-escape).
+func sanitizeCell(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return '\uFFFD'
+		}
+		return r
+	}, s)
+}
+
 // printSensorSummary renders one sensor as a key-value summary, consuming
 // api.SensorRead directly so drift in the backend model surfaces here at
 // `go build` time rather than at runtime.
@@ -385,20 +427,20 @@ func printSensorSummary(w io.Writer, s *api.SensorRead) {
 	}
 	fmt.Fprintf(w, "%-22s %s\n", "id:", s.Id.String())
 	fmt.Fprintf(w, "%-22s %s\n", "tenant_id:", s.TenantId.String())
-	fmt.Fprintf(w, "%-22s %s\n", "name:", s.Name)
-	fmt.Fprintf(w, "%-22s %s\n", "connector_id:", s.ConnectorId)
-	fmt.Fprintf(w, "%-22s %s\n", "op_id:", s.OpId)
+	fmt.Fprintf(w, "%-22s %s\n", "name:", sanitizeCell(s.Name))
+	fmt.Fprintf(w, "%-22s %s\n", "connector_id:", sanitizeCell(s.ConnectorId))
+	fmt.Fprintf(w, "%-22s %s\n", "op_id:", sanitizeCell(s.OpId))
 	fmt.Fprintf(w, "%-22s %s\n", "status:", string(s.Status))
 	if s.StatusReason != nil && *s.StatusReason != "" {
-		fmt.Fprintf(w, "%-22s %s\n", "status_reason:", *s.StatusReason)
+		fmt.Fprintf(w, "%-22s %s\n", "status_reason:", sanitizeCell(*s.StatusReason))
 	}
 	fmt.Fprintf(w, "%-22s %s\n", "cadence_kind:", string(s.CadenceKind))
 	if s.IntervalSeconds != nil {
 		fmt.Fprintf(w, "%-22s %ds\n", "interval_seconds:", *s.IntervalSeconds)
 	}
 	if s.CronExpr != nil {
-		fmt.Fprintf(w, "%-22s %s\n", "cron_expr:", *s.CronExpr)
-		fmt.Fprintf(w, "%-22s %s\n", "timezone:", s.Timezone)
+		fmt.Fprintf(w, "%-22s %s\n", "cron_expr:", sanitizeCell(*s.CronExpr))
+		fmt.Fprintf(w, "%-22s %s\n", "timezone:", sanitizeCell(s.Timezone))
 	}
 	if s.NextFireAt != nil {
 		fmt.Fprintf(w, "%-22s %s\n", "next_fire_at:", formatTime(s.NextFireAt))

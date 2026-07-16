@@ -158,6 +158,21 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected("--severity must be one of: degraded, critical"), opts.JSONOut)
 	}
+	// Defense-in-depth: reject negative durations before building the
+	// request (the backend validates too). Independent of the cadence
+	// discriminator below, which governs which duration is *required*.
+	if opts.IntervalSeconds < 0 {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"--interval-seconds must be non-negative; got %d", opts.IntervalSeconds)),
+			opts.JSONOut)
+	}
+	if opts.ForSeconds < 0 {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"--for-seconds must be non-negative; got %d", opts.ForSeconds)),
+			opts.JSONOut)
+	}
 	// Per-cadence discriminator pre-check (the backend's Pydantic validator
 	// is the ultimate gate; checking here gives immediate rejection).
 	switch opts.CadenceKind {

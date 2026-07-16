@@ -22,15 +22,15 @@ import (
 // backplane 422 surface an unfamiliar value.
 //
 // Mirrors the generated `api.EditOpBodySafetyLevel` enum constants
-// (`Safe` / `Caution` / `Dangerous`) so the validator and the wire
-// shape stay in lockstep. The generator-shipped enum values are the
-// authoritative source — we keep this map only to render the verb's
-// helptext + the "expected one of" message in the same order the
-// operator sees in --help.
+// (`EditOpBodySafetyLevelSafe` / `…Caution` / `…Dangerous`) so the
+// validator and the wire shape stay in lockstep. The generator-shipped
+// enum values are the authoritative source — we keep this map only to
+// render the verb's helptext + the "expected one of" message in the same
+// order the operator sees in --help.
 var validSafetyLevels = map[string]api.EditOpBodySafetyLevel{
-	"safe":      api.Safe,
-	"caution":   api.Caution,
-	"dangerous": api.Dangerous,
+	"safe":      api.EditOpBodySafetyLevelSafe,
+	"caution":   api.EditOpBodySafetyLevelCaution,
+	"dangerous": api.EditOpBodySafetyLevelDangerous,
 }
 
 // newEditOpCmd returns the `meho connector edit-op` command.

@@ -21,9 +21,9 @@ import (
 
 // Defines values for AgentModelTier.
 const (
-	Deep     AgentModelTier = "deep"
-	Fast     AgentModelTier = "fast"
-	Standard AgentModelTier = "standard"
+	AgentModelTierDeep     AgentModelTier = "deep"
+	AgentModelTierFast     AgentModelTier = "fast"
+	AgentModelTierStandard AgentModelTier = "standard"
 )
 
 // Defines values for AgentRunStatus.
@@ -46,35 +46,35 @@ const (
 
 // Defines values for AuthModel.
 const (
-	Impersonation        AuthModel = "impersonation"
-	PerUser              AuthModel = "per_user"
-	SharedServiceAccount AuthModel = "shared_service_account"
+	AuthModelImpersonation        AuthModel = "impersonation"
+	AuthModelPerUser              AuthModel = "per_user"
+	AuthModelSharedServiceAccount AuthModel = "shared_service_account"
 )
 
 // Defines values for BroadcastOverrideCreateDetail.
 const (
-	Aggregate BroadcastOverrideCreateDetail = "aggregate"
-	Full      BroadcastOverrideCreateDetail = "full"
+	BroadcastOverrideCreateDetailAggregate BroadcastOverrideCreateDetail = "aggregate"
+	BroadcastOverrideCreateDetailFull      BroadcastOverrideCreateDetail = "full"
 )
 
 // Defines values for BroadcastOverrideCreateScopeField.
 const (
-	Namespace  BroadcastOverrideCreateScopeField = "namespace"
-	TargetName BroadcastOverrideCreateScopeField = "target_name"
+	BroadcastOverrideCreateScopeFieldNamespace  BroadcastOverrideCreateScopeField = "namespace"
+	BroadcastOverrideCreateScopeFieldTargetName BroadcastOverrideCreateScopeField = "target_name"
 )
 
 // Defines values for CandidateHintConfidence.
 const (
-	High   CandidateHintConfidence = "high"
-	Low    CandidateHintConfidence = "low"
-	Medium CandidateHintConfidence = "medium"
+	CandidateHintConfidenceHigh   CandidateHintConfidence = "high"
+	CandidateHintConfidenceLow    CandidateHintConfidence = "low"
+	CandidateHintConfidenceMedium CandidateHintConfidence = "medium"
 )
 
 // Defines values for ConfirmVerifyResponseAnswer.
 const (
-	Escalate ConfirmVerifyResponseAnswer = "escalate"
-	No       ConfirmVerifyResponseAnswer = "no"
-	Yes      ConfirmVerifyResponseAnswer = "yes"
+	ConfirmVerifyResponseAnswerEscalate ConfirmVerifyResponseAnswer = "escalate"
+	ConfirmVerifyResponseAnswerNo       ConfirmVerifyResponseAnswer = "no"
+	ConfirmVerifyResponseAnswerYes      ConfirmVerifyResponseAnswer = "yes"
 )
 
 // Defines values for ConnectorListItemKind.
@@ -87,8 +87,8 @@ const (
 
 // Defines values for ConnectorListItemState.
 const (
-	Ingested   ConnectorListItemState = "ingested"
-	Registered ConnectorListItemState = "registered"
+	ConnectorListItemStateIngested   ConnectorListItemState = "ingested"
+	ConnectorListItemStateRegistered ConnectorListItemState = "registered"
 )
 
 // Defines values for ConnectorReviewPayloadKind.
@@ -101,24 +101,24 @@ const (
 
 // Defines values for ConnectorSpecEntryCatalogIngest.
 const (
-	SpecOnly  ConnectorSpecEntryCatalogIngest = "spec-only"
-	Supported ConnectorSpecEntryCatalogIngest = "supported"
+	ConnectorSpecEntryCatalogIngestSpecOnly  ConnectorSpecEntryCatalogIngest = "spec-only"
+	ConnectorSpecEntryCatalogIngestSupported ConnectorSpecEntryCatalogIngest = "supported"
 )
 
 // Defines values for ConventionKind.
 const (
-	Operational ConventionKind = "operational"
-	Reference   ConventionKind = "reference"
-	Workflow    ConventionKind = "workflow"
+	ConventionKindOperational ConventionKind = "operational"
+	ConventionKindReference   ConventionKind = "reference"
+	ConventionKindWorkflow    ConventionKind = "workflow"
 )
 
 // Defines values for CriterionResultName.
 const (
-	DailyUseDuration CriterionResultName = "daily_use_duration"
-	EvalPrecision    CriterionResultName = "eval_precision"
-	MehoVsBaseline   CriterionResultName = "meho_vs_baseline"
-	OpenBlockers     CriterionResultName = "open_blockers"
-	OperatorBreadth  CriterionResultName = "operator_breadth"
+	CriterionResultNameDailyUseDuration CriterionResultName = "daily_use_duration"
+	CriterionResultNameEvalPrecision    CriterionResultName = "eval_precision"
+	CriterionResultNameMehoVsBaseline   CriterionResultName = "meho_vs_baseline"
+	CriterionResultNameOpenBlockers     CriterionResultName = "open_blockers"
+	CriterionResultNameOperatorBreadth  CriterionResultName = "operator_breadth"
 )
 
 // Defines values for CriterionResultVerdict.
@@ -137,9 +137,9 @@ const (
 
 // Defines values for EditOpBodySafetyLevel.
 const (
-	Caution   EditOpBodySafetyLevel = "caution"
-	Dangerous EditOpBodySafetyLevel = "dangerous"
-	Safe      EditOpBodySafetyLevel = "safe"
+	EditOpBodySafetyLevelCaution   EditOpBodySafetyLevel = "caution"
+	EditOpBodySafetyLevelDangerous EditOpBodySafetyLevel = "dangerous"
+	EditOpBodySafetyLevelSafe      EditOpBodySafetyLevel = "safe"
 )
 
 // Defines values for EditOpWarningCode.
@@ -194,12 +194,12 @@ const (
 
 // Defines values for IngestRequestAuthScheme.
 const (
-	Basic             IngestRequestAuthScheme = "basic"
-	Oauth2Mint        IngestRequestAuthScheme = "oauth2_mint"
-	SessionLogin      IngestRequestAuthScheme = "session_login"
-	SessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
-	SessionLoginToken IngestRequestAuthScheme = "session_login_token"
-	StaticHeader      IngestRequestAuthScheme = "static_header"
+	IngestRequestAuthSchemeBasic             IngestRequestAuthScheme = "basic"
+	IngestRequestAuthSchemeOauth2Mint        IngestRequestAuthScheme = "oauth2_mint"
+	IngestRequestAuthSchemeSessionLogin      IngestRequestAuthScheme = "session_login"
+	IngestRequestAuthSchemeSessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
+	IngestRequestAuthSchemeSessionLoginToken IngestRequestAuthScheme = "session_login_token"
+	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
 // Defines values for KindFilterValue.
@@ -220,9 +220,9 @@ const (
 
 // Defines values for PermissionVerdict.
 const (
-	AutoExecute   PermissionVerdict = "auto-execute"
-	Deny          PermissionVerdict = "deny"
-	NeedsApproval PermissionVerdict = "needs-approval"
+	PermissionVerdictAutoExecute   PermissionVerdict = "auto-execute"
+	PermissionVerdictDeny          PermissionVerdict = "deny"
+	PermissionVerdictNeedsApproval PermissionVerdict = "needs-approval"
 )
 
 // Defines values for PrincipalKind.
@@ -263,8 +263,8 @@ const (
 
 // Defines values for ScheduledTriggerInFlightPolicy.
 const (
-	FailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
-	Resume        ScheduledTriggerInFlightPolicy = "resume"
+	ScheduledTriggerInFlightPolicyFailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
+	ScheduledTriggerInFlightPolicyResume        ScheduledTriggerInFlightPolicy = "resume"
 )
 
 // Defines values for ScheduledTriggerKind.
@@ -383,31 +383,31 @@ const (
 
 // Defines values for TargetCreateProduct.
 const (
-	Argocd     TargetCreateProduct = "argocd"
-	Bind9      TargetCreateProduct = "bind9"
-	Fleet      TargetCreateProduct = "fleet"
-	Gcloud     TargetCreateProduct = "gcloud"
-	Gh         TargetCreateProduct = "gh"
-	Harbor     TargetCreateProduct = "harbor"
-	Hetzner    TargetCreateProduct = "hetzner"
-	Holodeck   TargetCreateProduct = "holodeck"
-	K8s        TargetCreateProduct = "k8s"
-	Keycloak   TargetCreateProduct = "keycloak"
-	Loki       TargetCreateProduct = "loki"
-	Mongodb    TargetCreateProduct = "mongodb"
-	Nsx        TargetCreateProduct = "nsx"
-	Pfsense    TargetCreateProduct = "pfsense"
-	Postgres   TargetCreateProduct = "postgres"
-	Prometheus TargetCreateProduct = "prometheus"
-	Proxmox    TargetCreateProduct = "proxmox"
-	Rabbitmq   TargetCreateProduct = "rabbitmq"
-	Rke2       TargetCreateProduct = "rke2"
-	Sddc       TargetCreateProduct = "sddc"
-	Vault      TargetCreateProduct = "vault"
-	Vcfa       TargetCreateProduct = "vcfa"
-	Vmware     TargetCreateProduct = "vmware"
-	Vrli       TargetCreateProduct = "vrli"
-	Vrops      TargetCreateProduct = "vrops"
+	TargetCreateProductArgocd     TargetCreateProduct = "argocd"
+	TargetCreateProductBind9      TargetCreateProduct = "bind9"
+	TargetCreateProductFleet      TargetCreateProduct = "fleet"
+	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
+	TargetCreateProductGh         TargetCreateProduct = "gh"
+	TargetCreateProductHarbor     TargetCreateProduct = "harbor"
+	TargetCreateProductHetzner    TargetCreateProduct = "hetzner"
+	TargetCreateProductHolodeck   TargetCreateProduct = "holodeck"
+	TargetCreateProductK8s        TargetCreateProduct = "k8s"
+	TargetCreateProductKeycloak   TargetCreateProduct = "keycloak"
+	TargetCreateProductLoki       TargetCreateProduct = "loki"
+	TargetCreateProductMongodb    TargetCreateProduct = "mongodb"
+	TargetCreateProductNsx        TargetCreateProduct = "nsx"
+	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
+	TargetCreateProductPostgres   TargetCreateProduct = "postgres"
+	TargetCreateProductPrometheus TargetCreateProduct = "prometheus"
+	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
+	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
+	TargetCreateProductRke2       TargetCreateProduct = "rke2"
+	TargetCreateProductSddc       TargetCreateProduct = "sddc"
+	TargetCreateProductVault      TargetCreateProduct = "vault"
+	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
+	TargetCreateProductVmware     TargetCreateProduct = "vmware"
+	TargetCreateProductVrli       TargetCreateProduct = "vrli"
+	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 )
 
 // Defines values for TemplateSummaryStatus.
@@ -419,30 +419,30 @@ const (
 
 // Defines values for TenantRole.
 const (
-	Operator    TenantRole = "operator"
-	ReadOnly    TenantRole = "read_only"
-	TenantAdmin TenantRole = "tenant_admin"
+	TenantRoleOperator    TenantRole = "operator"
+	TenantRoleReadOnly    TenantRole = "read_only"
+	TenantRoleTenantAdmin TenantRole = "tenant_admin"
 )
 
 // Defines values for ThresholdCompareOp.
 const (
-	Gt  ThresholdCompareOp = "gt"
-	Gte ThresholdCompareOp = "gte"
-	Lt  ThresholdCompareOp = "lt"
-	Lte ThresholdCompareOp = "lte"
+	ThresholdCompareOpGt  ThresholdCompareOp = "gt"
+	ThresholdCompareOpGte ThresholdCompareOp = "gte"
+	ThresholdCompareOpLt  ThresholdCompareOp = "lt"
+	ThresholdCompareOpLte ThresholdCompareOp = "lte"
 )
 
 // Defines values for TopologyDiffEntryChangeKind.
 const (
-	Created TopologyDiffEntryChangeKind = "created"
-	Removed TopologyDiffEntryChangeKind = "removed"
-	Updated TopologyDiffEntryChangeKind = "updated"
+	TopologyDiffEntryChangeKindCreated TopologyDiffEntryChangeKind = "created"
+	TopologyDiffEntryChangeKindRemoved TopologyDiffEntryChangeKind = "removed"
+	TopologyDiffEntryChangeKindUpdated TopologyDiffEntryChangeKind = "updated"
 )
 
 // Defines values for TopologyDiffEntrySource.
 const (
-	Edge TopologyDiffEntrySource = "edge"
-	Node TopologyDiffEntrySource = "node"
+	TopologyDiffEntrySourceEdge TopologyDiffEntrySource = "edge"
+	TopologyDiffEntrySourceNode TopologyDiffEntrySource = "node"
 )
 
 // Defines values for UnderscoreKindFilter.
@@ -456,8 +456,8 @@ const (
 
 // Defines values for UnderscoreSortDirection.
 const (
-	Asc  UnderscoreSortDirection = "asc"
-	Desc UnderscoreSortDirection = "desc"
+	UnderscoreSortDirectionAsc  UnderscoreSortDirection = "asc"
+	UnderscoreSortDirectionDesc UnderscoreSortDirection = "desc"
 )
 
 // Defines values for UnderscoreStatusFilter.
@@ -470,8 +470,8 @@ const (
 
 // Defines values for UnderscoreViewMode.
 const (
-	Graph UnderscoreViewMode = "graph"
-	Table UnderscoreViewMode = "table"
+	UnderscoreViewModeGraph UnderscoreViewMode = "graph"
+	UnderscoreViewModeTable UnderscoreViewMode = "table"
 )
 
 // Defines values for MehoBackplaneUiRoutesConnectorsListViewSortColumn.
@@ -513,10 +513,10 @@ const (
 
 // Defines values for UsageEndpointApiV1RetrieveUsageGetParamsSurface.
 const (
-	All        UsageEndpointApiV1RetrieveUsageGetParamsSurface = "all"
-	Kb         UsageEndpointApiV1RetrieveUsageGetParamsSurface = "kb"
-	Memory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
-	Operations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceAll        UsageEndpointApiV1RetrieveUsageGetParamsSurface = "all"
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceKb         UsageEndpointApiV1RetrieveUsageGetParamsSurface = "kb"
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceMemory     UsageEndpointApiV1RetrieveUsageGetParamsSurface = "memory"
+	UsageEndpointApiV1RetrieveUsageGetParamsSurfaceOperations UsageEndpointApiV1RetrieveUsageGetParamsSurface = "operations"
 )
 
 // Defines values for ListRunsApiV1RunbooksRunsGetParamsStatus.
@@ -550,14 +550,14 @@ const (
 
 // Defines values for ListSensorsApiV1SensorsGetParamsStatus.
 const (
-	Active ListSensorsApiV1SensorsGetParamsStatus = "active"
-	Paused ListSensorsApiV1SensorsGetParamsStatus = "paused"
+	ListSensorsApiV1SensorsGetParamsStatusActive ListSensorsApiV1SensorsGetParamsStatus = "active"
+	ListSensorsApiV1SensorsGetParamsStatusPaused ListSensorsApiV1SensorsGetParamsStatus = "paused"
 )
 
 // Defines values for ListSensorsApiV1SensorsGetParamsCadenceKind.
 const (
-	Cron     ListSensorsApiV1SensorsGetParamsCadenceKind = "cron"
-	Interval ListSensorsApiV1SensorsGetParamsCadenceKind = "interval"
+	ListSensorsApiV1SensorsGetParamsCadenceKindCron     ListSensorsApiV1SensorsGetParamsCadenceKind = "cron"
+	ListSensorsApiV1SensorsGetParamsCadenceKindInterval ListSensorsApiV1SensorsGetParamsCadenceKind = "interval"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -576,9 +576,9 @@ const (
 
 // Defines values for RunbooksRunsUiRunbooksRunsGetParamsStatus.
 const (
-	Abandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
-	Completed  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
-	InProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
+	RunbooksRunsUiRunbooksRunsGetParamsStatusAbandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
+	RunbooksRunsUiRunbooksRunsGetParamsStatusCompleted  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
+	RunbooksRunsUiRunbooksRunsGetParamsStatusInProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
 )
 
 // AbortRunRequest Request body for “meho.runbook.abort“ -- terminate the run mid-flight.

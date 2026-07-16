@@ -230,8 +230,12 @@ func printListTable(w io.Writer, r *api.SensorListResponse) {
 		if s.NextFireAt != nil {
 			next = formatTime(s.NextFireAt)
 		}
+		// Name / cadence carry operator-persisted free-form text (the
+		// sensor name, cron expression, timezone); sanitize so terminal
+		// control chars / ANSI escapes can't affect the operator's terminal.
+		// The --json path (runList) serialises the raw values unchanged.
 		fmt.Fprintf(w, "%-36s %-20s %-8s %-10s %-22s %-24s %s\n",
-			s.Id.String(), s.Name, string(s.Status), string(s.LastState),
-			cadence, next, string(s.Severity))
+			s.Id.String(), sanitizeCell(s.Name), string(s.Status), string(s.LastState),
+			sanitizeCell(cadence), next, string(s.Severity))
 	}
 }

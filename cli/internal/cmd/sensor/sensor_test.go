@@ -510,6 +510,34 @@ func TestRunCreateRejectsIntervalWithoutSeconds(t *testing.T) {
 	}
 }
 
+func TestRunCreateRejectsNegativeIntervalSeconds(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runCreate(cmd, createOptions{
+		Name: "x", ConnectorID: "c-1.0", OpID: "o", AssertionArg: stubAssertion,
+		CadenceKind: "interval", IntervalSeconds: -5,
+	})
+	if err == nil {
+		t.Fatalf("expected validation error for negative --interval-seconds")
+	}
+	if !strings.Contains(stderr.String(), "--interval-seconds must be non-negative") {
+		t.Errorf("expected non-negative message; got %q", stderr.String())
+	}
+}
+
+func TestRunCreateRejectsNegativeForSeconds(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runCreate(cmd, createOptions{
+		Name: "x", ConnectorID: "c-1.0", OpID: "o", AssertionArg: stubAssertion,
+		CadenceKind: "interval", IntervalSeconds: 60, ForSeconds: -1,
+	})
+	if err == nil {
+		t.Fatalf("expected validation error for negative --for-seconds")
+	}
+	if !strings.Contains(stderr.String(), "--for-seconds must be non-negative") {
+		t.Errorf("expected non-negative message; got %q", stderr.String())
+	}
+}
+
 func TestRunCreateRejectsInvalidTenantUUID(t *testing.T) {
 	cmd, _, stderr := newRunCmd(t)
 	err := runCreate(cmd, createOptions{
@@ -690,5 +718,19 @@ func TestPrintSensorSummaryHasAllKeys(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in summary; got %q", want, out)
 		}
+	}
+}
+
+func TestSanitizeCellNeutralizesControlChars(t *testing.T) {
+	// An ANSI/CSI colour escape + CR + LF embedded in a persisted field
+	// must not survive into a rendered table/summary cell.
+	got := sanitizeCell("ok\x1b[31mRED\x1b[0m\rmore\n")
+	if strings.ContainsAny(got, "\x1b\r\n") {
+		t.Fatalf("control chars survived sanitize: %q", got)
+	}
+	// Ordinary printable text (including non-ASCII) is preserved verbatim.
+	const printable = "disk-space é 名前"
+	if sanitizeCell(printable) != printable {
+		t.Errorf("printable text altered: %q", sanitizeCell(printable))
 	}
 }

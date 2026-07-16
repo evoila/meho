@@ -107,6 +107,29 @@ connector-related release-notes line.
   emits only the four observable states. The spec models reject unknown fields
   (`extra="forbid"`) and non-finite threshold bounds, so a typo'd assertion
   field is a 422 at create rather than a silently dropped key.
+
+### Added — Sensor entity + registry (#2503)
+
+- Add the `sensor` table + `SensorAdminService` — the first persisted
+  entity of the deterministic check layer (#2503). A Sensor pins an
+  `(op + args + assertion + cadence + severity)` tuple; registration
+  accepts only `safety_level='safe'` operations, refusing a non-safe or
+  unknown op with a structured 422 at create
+  (`sensor_requires_safe_operation` / `sensor_operation_not_found`) — an
+  honesty guard, not the security boundary (the dispatch-time policy gate
+  still runs on every evaluation). The `assertion` payload is validated at
+  the wire by #2504's `AssertionSpec`; the cadence is a discriminated union
+  (`interval_seconds` 5..86400 XOR `cron_expr` + timezone); results live as
+  a latest-state projection on the row
+  (`last_state`/`last_value`/`last_evidence`/`state_since`) written by one
+  repository function `record_sensor_result`. Exposed as tenant-scoped CRUD
+  across REST (`GET/POST /api/v1/sensors`, `DELETE /api/v1/sensors/{id}`),
+  MCP (`meho.sensor.list`/`create`/`delete`), and CLI
+  (`meho sensor list`/`create`/`delete`); `status` is server-initialized
+  to `active` at create and runner-parked to `paused` by #2505 (clients
+  cannot supply it), with no update/pause path — hard delete only,
+  migration `0064`.
+
 ### Performance — `find_path` per-branch target pruning + dense-mesh envelope + topology concurrency coverage (#2535)
 
 - Bound `find_path`'s recursive walk per branch: `_PATH_SQL` gains a

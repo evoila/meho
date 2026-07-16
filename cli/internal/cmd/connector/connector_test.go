@@ -491,7 +491,7 @@ func TestBuildIngestRequestAuthScheme(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildIngestRequest: %v", err)
 		}
-		if body.AuthScheme == nil || *body.AuthScheme != api.SessionLoginToken {
+		if body.AuthScheme == nil || *body.AuthScheme != api.IngestRequestAuthSchemeSessionLoginToken {
 			t.Fatalf("AuthScheme = %v, want session_login_token", body.AuthScheme)
 		}
 		if body.AuthSecretFields == nil {
@@ -2768,7 +2768,7 @@ func TestPatchOpEscapesOpID(t *testing.T) {
 	defer srv.Close()
 	primeToken(t, srv.URL)
 
-	safety := api.Dangerous
+	safety := api.EditOpBodySafetyLevelDangerous
 	resp, err := patchOp(context.Background(), srv.URL, "vmware-rest-9.0", "GET:/api/vcenter/cluster", api.EditOpBody{SafetyLevel: &safety})
 	if err != nil {
 		t.Fatalf("patchOp: %v", err)

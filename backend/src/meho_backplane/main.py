@@ -99,6 +99,7 @@ from meho_backplane.api.v1.runner_principals import (
 )
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
+from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -931,6 +932,13 @@ app.include_router(api_v1_checks_router)
 # body tenant_id to act cross-tenant for admin operations. Every
 # mutation writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_scheduler_router)
+# I2416-T2503 -- Sensor admin surface (deterministic check layer). GET
+# /sensors (list, paginated, operator-level; carries the latest-result
+# projection), POST /sensors (create, tenant_admin; safe-only op guard),
+# DELETE /sensors/{id} (hard delete, tenant_admin). Tenant-scoped via the
+# JWT; platform_admin may pass tenant_filter / a body tenant_id to act
+# cross-tenant. Every mutation writes an audit row under op_class=write.
+app.include_router(api_v1_sensors_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``

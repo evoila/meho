@@ -7767,6 +7767,222 @@
         }
       }
     },
+    "/api/v1/sensors": {
+      "get": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "List Sensors",
+        "description": "List sensors for the operator's tenant, newest-first.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a *different* tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability. The list response carries\nthe latest-result projection (``last_state`` / ``last_evaluated_at`` /\n...), which is the status view for each sensor.",
+        "operationId": "list_sensors_api_v1_sensors_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "active",
+                "paused"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "cadence_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "interval",
+                "cron"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Cadence Kind"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Create Sensor",
+        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409.",
+        "operationId": "create_sensor_api_v1_sensors_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SensorCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sensors/{sensor_id}": {
+      "delete": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Delete Sensor",
+        "description": "Hard-delete one sensor by id.\n\n``tenant_admin`` only. A cross-tenant / absent id returns 404\n``sensor_not_found`` -- never 403 -- so the existence of a sensor is\nnot leaked across the tenant boundary. The delete is a hard ``DELETE``:\nno tombstone row is retained.",
+        "operationId": "delete_sensor_api_v1_sensors__sensor_id__delete",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals": {
       "get": {
         "tags": [
@@ -19236,6 +19452,51 @@
         "title": "AskDocsResponse",
         "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract."
       },
+      "AssertionSpec": {
+        "properties": {
+          "select": {
+            "$ref": "#/components/schemas/SelectSpec"
+          },
+          "compare": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ThresholdCompare"
+              },
+              {
+                "$ref": "#/components/schemas/EqualsCompare"
+              },
+              {
+                "$ref": "#/components/schemas/InCompare"
+              },
+              {
+                "$ref": "#/components/schemas/BoolCompare"
+              },
+              {
+                "$ref": "#/components/schemas/FreshnessCompare"
+              }
+            ],
+            "title": "Compare",
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "bool": "#/components/schemas/BoolCompare",
+                "equals": "#/components/schemas/EqualsCompare",
+                "freshness": "#/components/schemas/FreshnessCompare",
+                "in": "#/components/schemas/InCompare",
+                "threshold": "#/components/schemas/ThresholdCompare"
+              }
+            }
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "select",
+          "compare"
+        ],
+        "title": "AssertionSpec",
+        "description": "A full assertion: one select stage feeding one typed comparator.\n\n#2503 imports this model to validate a Sensor's ``assertion`` payload at\nthe wire (a bad path or comparator is a 422 at create); #2505 feeds it the\nop-result payload; #2506 rolls the outcomes up into a Dashboard."
+      },
       "AssignmentDocument": {
         "properties": {
           "items": {
@@ -21357,6 +21618,27 @@
         "type": "object",
         "title": "Body_vault_put_ui_vault_put_post"
       },
+      "BoolCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "bool",
+            "title": "Type"
+          },
+          "expect": {
+            "type": "boolean",
+            "title": "Expect",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "BoolCompare",
+        "description": "Boolean comparator: the value must be strictly ``bool``.\n\nA non-boolean observed value is ``unknown`` (no truthiness coercion);\na boolean that does not match :attr:`expect` is ``critical``."
+      },
       "BroadcastOverrideCreate": {
         "properties": {
           "op_id_pattern": {
@@ -23145,6 +23427,41 @@
         "title": "EnableReadsResponse",
         "description": "Response body for ``POST /api/v1/connectors/{id}/enable-reads`` (G0.25-T7 #1749).\n\nThe bulk read-class enable path returns ``200`` with a count\nrather than ``204`` (the enable / disable transition shape) so the\noperator and the generated Go client see how many ops the action\nflipped \u2014 the AC requires the audit row carry a count, and echoing\nit on the wire lets the CLI render ``enabled N read operation(s)``\nwithout a follow-up review fetch.\n\n``connector_id`` echoes the targeted connector so a ``--json``\npipeline has a self-contained artifact. ``ops_enabled`` is the\nnumber of read-class ops that flipped from ``is_enabled=false`` to\n``true``; it is ``0`` on the idempotent re-run (every read already\nenabled), in which case no audit row was written. Both fields are\nrequired (no default) so the OpenAPI schema marks them\nalways-present and the Go client gets plain value types."
       },
+      "EqualsCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "equals",
+            "title": "Type"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "nullable": true,
+            "title": "Value"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "value"
+        ],
+        "title": "EqualsCompare",
+        "description": "Strict-equality comparator: ``ok`` on match, ``critical`` otherwise.\n\nEquality is type-strict for booleans -- ``True`` never equals ``1`` -- so\nthe ``value`` operand keeps whatever JSON scalar type it was given (Pydantic\nsmart-union preserves it) and the evaluator compares with matching strictness."
+      },
       "EvalRequest": {
         "properties": {
           "surface": {
@@ -23284,6 +23601,36 @@
         ],
         "title": "ForkInfo",
         "description": "Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
+      },
+      "FreshnessCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "freshness",
+            "title": "Type"
+          },
+          "max_age_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "exclusiveMinimum": true,
+            "title": "Max Age Seconds"
+          },
+          "degraded_age_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "exclusiveMinimum": true,
+            "nullable": true,
+            "title": "Degraded Age Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "max_age_seconds"
+        ],
+        "title": "FreshnessCompare",
+        "description": "Age comparator over a timestamp carried in the payload.\n\nThe observed value is the timestamp: an RFC3339 string (which **must**\ncarry a timezone offset -- a naive string is ``unknown`` because a\nhost-TZ-dependent comparison is banned) or an ``int``/``float`` of epoch\nseconds interpreted as UTC. ``age = now - timestamp``; ``age >\nmax_age_seconds`` is ``critical``, ``> degraded_age_seconds`` (when set)\nis ``degraded``, otherwise ``ok`` (a future timestamp is ``ok``). ``now``\nis injected by the caller -- the op-result envelope carries no timestamp\nfield of its own."
       },
       "GatewayCommandEnvelope": {
         "properties": {
@@ -23465,6 +23812,45 @@
         ],
         "title": "HealthResponse",
         "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"always\"`` \u2014 any ``Mcp-Session-Id`` header the client sends is\n  captured into ``audit_log.agent_session_id``; a missing header is\n  accepted (the row's session id lands as NULL). This is the\n  default and what G8.2 audit-replay needs to light up on a stock\n  deploy.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in\n  compliance deploys that forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
+      },
+      "InCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "in",
+            "title": "Type"
+          },
+          "values": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ],
+              "nullable": true
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Values"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "values"
+        ],
+        "title": "InCompare",
+        "description": "Membership comparator: ``ok`` if the value strict-equals a member.\n\nSame boolean strictness as :class:`EqualsCompare`, applied per member."
       },
       "IngestJobHandle": {
         "properties": {
@@ -26223,6 +26609,330 @@
         "title": "SearchDocsResponse",
         "description": "Successful response shape for ``/api/v1/search_docs``.\n\n``chunks`` is the corpus's ranked cited-chunk list (best first),\nprojected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`\nsurface so the wire contract is decoupled from the corpus's. Frozen\nso an accidental post-construction mutation surfaces as a pydantic\nerror rather than a silently-altered response.\n\n``grounded`` is the **out-of-corpus discipline signal** (#133): ``True``\nwhen retrieval returned at least one chunk to ground on, ``False`` when it\nreturned none. A consumer must treat ``grounded=False`` as *\"the corpus\nhas no answer\"* and **not** fall back to ungrounded generation \u2014 the\nfeature's contract (*empty/low-score = not in the corpus; do not silently\nfall back to training data*). The verdict is computed server-side by the\nshared :func:`~meho_backplane.docs_search.retrieval_is_grounded` seam \u2014\nthe **same** determination ``ask_docs`` uses to short-circuit to its \"no\ngrounded answer\" reply, so the two surfaces never diverge.\n\n**Score scale + limits of this signal.** Each chunk's ``score`` is the\ncorpus's raw relevance score \u2014 an **opaque, backend-defined scale** MEHO\ndoes not normalise or threshold; do not compare it across collections or\nagainst a fixed cutoff. ``grounded`` is therefore **presence-based**, not\nrelevance-judged: a query that retrieves topically-irrelevant chunks at\nhigh scores still reports ``grounded=True``. Distinguishing that case\nneeds a calibrated per-collection score floor, deferred as the Option-A\nfollow-on (evoila-bosnia/meho-internal#133); it will refine\n``retrieval_is_grounded`` in one place for both surfaces."
       },
+      "SelectSpec": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "aggregate": {
+            "type": "string",
+            "enum": [
+              "max",
+              "min",
+              "sum",
+              "count",
+              "any",
+              "all"
+            ],
+            "nullable": true,
+            "title": "Aggregate"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "SelectSpec",
+        "description": "The select stage: a dotted path and at most one bounded aggregate.\n\nWith no aggregate the path must resolve to a scalar; with an aggregate it\nmust resolve to a list (either a ``[*]`` projection or a directly selected\narray). The path is compiled at model-parse time so an invalid grammar is\na 422, not an evaluation-time surprise."
+      },
+      "SensorCadenceKind": {
+        "type": "string",
+        "enum": [
+          "interval",
+          "cron"
+        ],
+        "title": "SensorCadenceKind",
+        "description": "Closed enum of the two cadence shapes a :class:`Sensor` may carry.\n\nInitiative #2416 (parent goal #221), Task #2503. One ``sensor`` row\ncarries exactly one cadence, selected by this discriminator; the\ninvariant is enforced by the DB-side ``ck_sensor_cadence_fields``\nCHECK that pairs each kind with its mandatory column (mirroring\n:class:`ScheduledTriggerKind`).\n\nMembers:\n\n* :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The\n  sub-minute path #2505's interval-tick loop drives.\n* :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The\n  >=1-minute path #2505 rides on #804's durable scheduler discipline.\n\nClosed enum: widening it is a coordinated DB + model change so the\nenum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration\n``0064``'s frozen tuple cannot drift."
+      },
+      "SensorCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Op Id"
+          },
+          "target": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "assertion": {
+            "$ref": "#/components/schemas/AssertionSpec"
+          },
+          "cadence_kind": {
+            "$ref": "#/components/schemas/SensorCadenceKind"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "maximum": 86400.0,
+            "minimum": 5.0,
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Timezone",
+            "default": "UTC"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity",
+            "default": "critical"
+          },
+          "for_seconds": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "For Seconds",
+            "default": 0
+          },
+          "identity_sub": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Identity Sub",
+            "default": "__sensor__"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "connector_id",
+          "op_id",
+          "assertion",
+          "cadence_kind"
+        ],
+        "title": "SensorCreate",
+        "description": "Request body for ``POST /api/v1/sensors``.\n\nDiscriminated by *cadence_kind*: exactly one of ``interval_seconds``\n(interval cadence, 5..86400 s) / ``cron_expr`` + ``timezone`` (cron\ncadence) must be set, matching the DB-side ``ck_sensor_cadence_fields``\ninvariant. The :meth:`_validate_cadence_and_assertion` validator\nenforces this at the wire, validates the cron expression + timezone\nexactly as :mod:`meho_backplane.scheduler.schemas` does, and caps the\nserialized assertion size.\n\n``status`` is deliberately **not** a field: sensors are\nset-at-create-only (like scheduled triggers), and a row is only ever\nparked (``status='paused'``) by #2505's runner, never at create. With\n``extra=\"forbid\"`` a body carrying ``status`` is a 422.\n\n*identity_sub* defaults to ``\"__sensor__\"`` (the sentinel #2505's\nrunner dispatches under). *tenant_id* (optional) lets a platform-admin\ncaller target another tenant; the boundary enforces the RBAC."
+      },
+      "SensorListResponse": {
+        "properties": {
+          "sensors": {
+            "items": {
+              "$ref": "#/components/schemas/SensorRead"
+            },
+            "type": "array",
+            "title": "Sensors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensors"
+        ],
+        "title": "SensorListResponse",
+        "description": "Response envelope for ``GET /api/v1/sensors``.\n\nWrapped in ``{\"sensors\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape\n:class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`\nadopted."
+      },
+      "SensorRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "target": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "assertion": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Assertion"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SensorStatus"
+          },
+          "status_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Status Reason"
+          },
+          "cadence_kind": {
+            "$ref": "#/components/schemas/SensorCadenceKind"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Fire At"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity"
+          },
+          "for_seconds": {
+            "type": "integer",
+            "title": "For Seconds"
+          },
+          "last_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Last State"
+          },
+          "last_value": {
+            "title": "Last Value"
+          },
+          "last_evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Last Evidence"
+          },
+          "last_evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Evaluated At"
+          },
+          "state_since": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "State Since"
+          },
+          "identity_sub": {
+            "type": "string",
+            "title": "Identity Sub"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "connector_id",
+          "op_id",
+          "target",
+          "params",
+          "assertion",
+          "status",
+          "status_reason",
+          "cadence_kind",
+          "interval_seconds",
+          "cron_expr",
+          "timezone",
+          "next_fire_at",
+          "severity",
+          "for_seconds",
+          "last_state",
+          "last_value",
+          "last_evidence",
+          "last_evaluated_at",
+          "state_since",
+          "identity_sub",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SensorRead",
+        "description": "Response shape for one ``sensor`` row.\n\nMirrors :class:`~meho_backplane.db.models.Sensor`'s column set,\nprojected to the wire types the JSON renderer can serialise. Includes\nthe latest-result projection (``last_state`` / ``last_value`` /\n``last_evidence`` / ``last_evaluated_at`` / ``state_since``) so the\nlist response carries the current status view (there is no REST\nGET-by-id -- the mould exposes none). ``frozen=True`` so a route\nhandler cannot mutate the row after returning it."
+      },
+      "SensorSeverity": {
+        "type": "string",
+        "enum": [
+          "degraded",
+          "critical"
+        ],
+        "title": "SensorSeverity",
+        "description": "Worst dashboard state a failing assertion on a :class:`Sensor` may drive.\n\nThe per-sensor cap #2506 applies to the rollup: a ``degraded``-severity\nsensor whose assertion fails contributes at most ``degraded``, a\n``critical`` one contributes ``critical``. The five-state vocabulary\nitself is declared once in #2504's :data:`CheckState`; this is only\nthe two operator-selectable severities."
+      },
+      "SensorStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused"
+        ],
+        "title": "SensorStatus",
+        "description": "Closed lifecycle status of a :class:`Sensor`.\n\n``ScheduledTriggerStatus`` minus the trigger-only terminal states:\na sensor is either eligible for evaluation (:attr:`ACTIVE`) or held\n(:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is\nnot accepted at create; #2505 parks a row to ``paused`` (plus a\n``status_reason``) when it hits an unparseable persisted cadence, and\n#2506's rollup derives ``skip`` for paused rows."
+      },
       "ShowTemplateResponse": {
         "properties": {
           "slug": {
@@ -27210,6 +27920,43 @@
         ],
         "title": "TenantRole",
         "description": "Per-tenant role granted to the operator by the JWT issuer.\n\nThe set is intentionally small in v0.2: a closed three-value enum\nlets the RBAC primitive (Task #234, ``require_role``) make\nexhaustive comparisons without leaking arbitrary string handling\ninto route code. A richer policy engine \u2014 topology-aware\npermissions, ABAC, approval workflows \u2014 is a separate v0.2.next\nGoal; widening this enum is the only ratcheting mechanism in the\ninterim.\n\nValues are the literal strings the Keycloak protocol-mapper recipe\n(Task #235) emits, so a JWT carrying ``\"tenant_admin\"`` materialises\ncleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in\n3.11+) gives the members ``str`` semantics for free, so\n``f\"role={role}\"`` renders as ``\"role=tenant_admin\"`` rather than\n``\"role=TenantRole.TENANT_ADMIN\"``."
+      },
+      "ThresholdCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "threshold",
+            "title": "Type"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "gt",
+              "gte",
+              "lt",
+              "lte"
+            ],
+            "title": "Op"
+          },
+          "degraded": {
+            "type": "number",
+            "nullable": true,
+            "title": "Degraded"
+          },
+          "critical": {
+            "type": "number",
+            "nullable": true,
+            "title": "Critical"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "op"
+        ],
+        "title": "ThresholdCompare",
+        "description": "Numeric-bound comparator: ``ok`` / ``degraded`` / ``critical``.\n\nThe observed value is tested ``value <op> bound``. ``critical`` is checked\nbefore ``degraded``, so the more-severe band wins. At least one bound is\nrequired; when both are set they must be ordered by severity for the\noperator direction (``gt``/``gte``: ``degraded <= critical``; ``lt``/``lte``:\n``degraded >= critical``). Non-numeric (or boolean) input is ``unknown``."
       },
       "Thresholds": {
         "properties": {

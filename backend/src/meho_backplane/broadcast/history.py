@@ -260,16 +260,18 @@ def _target_matches(event: BroadcastEvent | AgentAnnouncementEvent, target: str)
 
 
 def _work_ref_matches(event: BroadcastEvent | AgentAnnouncementEvent, work_ref: str) -> bool:
-    """Exact-match the ``work_ref`` filter; only announcements carry one.
+    """Exact-match the ``work_ref`` filter against either event kind.
 
-    A :class:`BroadcastEvent` has no ``work_ref`` field, so it can never
-    satisfy a ``work_ref`` filter -- the caller asked for an
-    announcement-linked claim. Mirrors the ``op_class``-vs-announcement
-    asymmetry (an announcement never satisfies an ``op_class`` filter).
+    Two event kinds now carry a ``work_ref``: an
+    :class:`AgentAnnouncementEvent`'s declared change-ticket reference
+    (T1 #2544) and a :class:`BroadcastEvent`'s projected lineage
+    ``work_ref`` (T3 #2545, read off the publish-site contextvar). A
+    single ``work_ref`` filter matches whichever kind carries the ref,
+    so a query for one ticket surfaces both the agent's declared intent
+    and the operations it drove. Events with an unset ``work_ref`` never
+    qualify (``None != <filter>``).
     """
-    if isinstance(event, AgentAnnouncementEvent):
-        return event.work_ref == work_ref
-    return False
+    return event.work_ref == work_ref
 
 
 def _is_expired_claim(
@@ -295,6 +297,7 @@ def event_matches(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    actor_sub: str | None = None,
     work_ref: str | None = None,
     active_only: bool = False,
     now: datetime | None = None,
@@ -320,9 +323,15 @@ def event_matches(
     * **target filter:** matches a :class:`BroadcastEvent`'s
       ``target_name`` or an :class:`AgentAnnouncementEvent`'s ``target``
       / any of its ``targets`` (see :func:`_target_matches`).
-    * **work_ref filter:** only announcements carry a ``work_ref``; a
-      :class:`BroadcastEvent` never qualifies (see
-      :func:`_work_ref_matches`).
+    * **actor_sub filter:** the RFC 8693 actor projected onto
+      :class:`BroadcastEvent` (T3 #2545) -- answers "what has this
+      delegated agent been doing", distinct from ``principal`` (the
+      human/subject the agent acted for). Audit-driven events only; an
+      announcement never qualifies, same rule as ``op_class``.
+    * **work_ref filter:** matches any event tied to that external
+      change ticket -- an :class:`AgentAnnouncementEvent`'s declared
+      ``work_ref`` (T1 #2544) OR a :class:`BroadcastEvent`'s projected
+      lineage ``work_ref`` (T3 #2545) (see :func:`_work_ref_matches`).
     * **active_only:** when ``True``, drops TTL'd announcement claims
       whose ``expires_at`` (``ts + ttl_minutes``) is at or before
       ``now`` (defaulting to the current UTC instant). Non-TTL events
@@ -339,6 +348,12 @@ def event_matches(
         return False
     if target is not None and not _target_matches(event, target):
         return False
+    if actor_sub is not None:
+        # Lineage is audit-driven only; an announcement carries no actor.
+        if isinstance(event, AgentAnnouncementEvent):
+            return False
+        if event.actor_sub != actor_sub:
+            return False
     if work_ref is not None and not _work_ref_matches(event, work_ref):
         return False
     return not (active_only and _is_expired_claim(event, now or datetime.now(UTC)))
@@ -501,6 +516,7 @@ async def _list_recent_events_core(
     op_class: str | None,
     principal: str | None,
     target: str | None,
+    actor_sub: str | None,
     work_ref: str | None,
     active_only: bool,
     limit: int,
@@ -561,6 +577,7 @@ async def _list_recent_events_core(
             op_class=op_class,
             principal=principal,
             target=target,
+            actor_sub=actor_sub,
             work_ref=work_ref,
             active_only=active_only,
             now=now,
@@ -597,6 +614,7 @@ async def list_recent_events_strict(
     op_class: str | None = None,
     principal: str | None = None,
     target: str | None = None,
+    actor_sub: str | None = None,
     work_ref: str | None = None,
     active_only: bool = False,
     limit: int = 100,
@@ -613,9 +631,11 @@ async def list_recent_events_strict(
     :class:`InvalidSinceError`; wire-layer callers map that to
     ``-32602`` Invalid Params.
 
-    ``work_ref`` narrows to announcement claims linked to that opaque
-    change-ticket reference; ``active_only`` drops TTL'd claims whose
-    ``expires_at`` has already elapsed (see :func:`event_matches`).
+    ``actor_sub`` narrows to a delegated agent's own operations (T3
+    #2545); ``work_ref`` narrows to any event -- an announcement claim
+    or an audit-driven operation -- linked to that opaque change-ticket
+    reference; ``active_only`` drops TTL'd claims whose ``expires_at``
+    has already elapsed (see :func:`event_matches`).
 
     Mirrors the fail-loud contract on
     :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
@@ -627,6 +647,7 @@ async def list_recent_events_strict(
         op_class=op_class,
         principal=principal,
         target=target,
+        actor_sub=actor_sub,
         work_ref=work_ref,
         active_only=active_only,
         limit=limit,
@@ -640,6 +661,7 @@ async def list_recent_events_fail_soft(
     op_class: str | None = None,
     principal: str | None = None,
     target: str | None = None,
+    actor_sub: str | None = None,
     work_ref: str | None = None,
     active_only: bool = False,
     limit: int = 100,
@@ -671,6 +693,7 @@ async def list_recent_events_fail_soft(
             op_class=op_class,
             principal=principal,
             target=target,
+            actor_sub=actor_sub,
             work_ref=work_ref,
             active_only=active_only,
             limit=limit,

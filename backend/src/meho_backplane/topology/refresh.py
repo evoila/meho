@@ -63,6 +63,7 @@ from meho_backplane.connectors.resolver import resolve_connector
 from meho_backplane.connectors.schemas import EdgeHint, NodeHint, TopologyHints
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog, GraphEdge, GraphHistoryChangeKind, GraphNode
+from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.operations._handler_resolve import (
     get_or_create_connector_instance,
 )
@@ -972,6 +973,7 @@ async def _publish_refresh_event(
     or edge names — so the read-class default holds without a redactor
     pass (Initiative #363 item 11).
     """
+    lineage = resolve_broadcast_lineage()
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=datetime.now(UTC),
@@ -994,6 +996,9 @@ async def _publish_refresh_event(
             "removed_nodes": result.removed_nodes,
             "removed_edges": result.removed_edges,
         },
+        actor_sub=lineage.actor_sub,
+        agent_session_id=lineage.agent_session_id,
+        work_ref=lineage.work_ref,
     )
     await publish_event(event)
 

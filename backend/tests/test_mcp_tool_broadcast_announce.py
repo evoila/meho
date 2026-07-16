@@ -89,6 +89,40 @@ def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _disable_announce_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the per-principal rate limit for the wire-surface tests.
+
+    These tests mock ``xadd`` on the fast client and never open a socket;
+    the rate limiter (G6.5-T6 #2546) would otherwise issue a real
+    ``INCR``/``EXPIRE`` against the stub URL and fail. Setting the knob to
+    ``0`` exercises the limiter's real "unlimited" early-return (no Valkey
+    round-trip), so these tests stay socket-free. The limiter's own
+    behaviour is covered in ``test_broadcast_announce_rate_limit.py`` (unit)
+    and this file's Docker-gated integration suite exercises the real
+    ``_handler_announce`` under a configured limit.
+
+    Runs after ``_isolated_broadcast_client`` (which clears the settings
+    cache) via the explicit dependency below, so the ``0`` is what the
+    next ``get_settings()`` reads.
+
+    The env knob documents intent, but the load-bearing guard is the
+    ``enforce_announce_rate_limit`` patch: the env->``get_settings``
+    route alone is fragile under the app fixture, which can repopulate
+    the ``lru_cache`` with the default limit after the cache clear
+    (passed single-process locally, tripped a real socket ->
+    ``-32603 ConnectionError`` under xdist ``loadscope`` in CI on the
+    sibling ``test_broadcast_structured_claims.py``). Patching the
+    function bypasses settings caching entirely.
+    """
+    monkeypatch.setenv("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "0")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        "meho_backplane.mcp.tools.broadcast.enforce_announce_rate_limit",
+        AsyncMock(return_value=None),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

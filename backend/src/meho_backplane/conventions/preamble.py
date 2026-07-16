@@ -93,6 +93,9 @@ from meho_backplane.runbooks.priming import assemble_runbook_priming
 __all__ = [
     "BLOCK_END",
     "BLOCK_START",
+    "BROADCAST_BLOCK_END",
+    "BROADCAST_BLOCK_START",
+    "BROADCAST_DISCIPLINE_BAND",
     "GUARD_PREFIX",
     "PreambleAssembly",
     "PreambleResult",
@@ -126,6 +129,58 @@ BLOCK_START: Final[str] = "<<TENANT_CONVENTIONS"
 #: :data:`BLOCK_START`; see its docstring for why a body cannot
 #: escape the block by including this literal.
 BLOCK_END: Final[str] = "END_TENANT_CONVENTIONS>>"
+
+
+#: Delimiters for the broadcast-discipline band (G6.5-T6 #2546). Unlike
+#: the conventions block, the wrapped content is MEHO-authored *trusted*
+#: guidance (not tenant free text), so no ``GUARD_PREFIX`` is needed --
+#: the delimiters exist for band separation and grep-friendliness, in the
+#: same shape as the runbook-priming band's ``<<RUNBOOK_PRIMING ...>>``.
+BROADCAST_BLOCK_START: Final[str] = "<<BROADCAST_DISCIPLINE>>"
+
+#: Closing delimiter for the broadcast-discipline band. Pairs with
+#: :data:`BROADCAST_BLOCK_START`.
+BROADCAST_BLOCK_END: Final[str] = "<<END_BROADCAST_DISCIPLINE>>"
+
+
+#: The broadcast coordination discipline, injected into every assembled
+#: preamble (G6.5-T6 #2546). Before this band the server-assembled
+#: preamble carried zero broadcast content -- the four-step discipline
+#: lived only in an optional consumer onboarding template. Static text:
+#: it has no tenant-specific data source, so it is always present
+#: (exactly once) regardless of whether the tenant has any operational
+#: conventions. Names the dotted MCP tool names (``meho.broadcast.*``)
+#: so an agent reading the preamble can act on it directly. This is
+#: advisory guidance, not an enforced gate -- MEHO never blocks work on
+#: a missing announcement (the discipline stays substrate-minimal); the
+#: only server-side enforcement is the per-principal write rate limit
+#: the band mentions so agents announce transitions, not in a loop.
+BROADCAST_DISCIPLINE_BAND: Final[str] = "\n".join(
+    [
+        BROADCAST_BLOCK_START,
+        "## Broadcast coordination discipline",
+        "",
+        "This tenant shares a live coordination channel so concurrent "
+        "agents and operators avoid crossfire. Follow this discipline:",
+        "",
+        "1. Before starting work on a target, call `meho.broadcast.recent` "
+        "(optionally with `filter.target`) to check for conflicting "
+        "in-flight activity; if another principal is already working the "
+        "target, surface the conflict before proceeding. "
+        "`meho.broadcast.watch` long-polls the same feed for live tailing.",
+        "2. Announce intent with `meho.broadcast.announce` "
+        '(`phase="start"`), naming the target(s) and the expected work.',
+        "3. During long work, re-announce progress "
+        '(`phase="update"`) so the shared awareness stays fresh.',
+        '4. On completion, announce the outcome (`phase="completion"`).',
+        "",
+        "This is coordination guidance, not an enforced gate: MEHO does "
+        "not block work on a missing announcement. Announce meaningful "
+        "transitions rather than looping -- announces are rate-limited "
+        "per principal.",
+        BROADCAST_BLOCK_END,
+    ],
+)
 
 
 class PreambleResult(NamedTuple):
@@ -265,10 +320,13 @@ async def assemble_preamble(
     count past *max_tokens* (and every entry after it) is dropped
     whole and recorded in :attr:`PreambleResult.dropped_slugs`.
 
-    Empty tenant + no in-progress runs returns ``PreambleResult("", [])``
-    -- caller decides how to surface "no preamble" (the MCP
-    ``_initialize`` wrapper maps it to ``instructions: None`` on the
-    wire).
+    Every assembled preamble carries the static
+    :data:`BROADCAST_DISCIPLINE_BAND` (G6.5-T6 #2546), so an empty tenant
+    with no in-progress runs returns that band as ``text`` (not the empty
+    string) with ``dropped_slugs == []``. The MCP ``_initialize`` wrapper
+    therefore always populates the ``instructions`` field -- the
+    broadcast coordination discipline reaches every session, including
+    fresh-adoption tenants that have configured no conventions yet.
 
     G12.4-T2 (#1316) extended the signature with the operator's
     ``sub`` so the assembler can call
@@ -497,29 +555,49 @@ def _combine_bands(
     priming_text: str,
     catalogue_text: str = "",
 ) -> str:
-    """Stitch the conventions, priming, and catalogue bands into the preamble.
+    """Stitch the broadcast, conventions, priming, and catalogue bands together.
 
     G12.4-T2 (#1316) added the priming band; G4.6-T4 (#1553) added the
-    doc-collection catalogue band as a third. The bands render in a fixed
-    order — conventions, then priming, then catalogue — joined by a
-    blank-line separator, with **empty bands dropped entirely** so the
-    join introduces no leading / trailing separator.
+    doc-collection catalogue band; G6.5-T6 (#2546) prepends the
+    :data:`BROADCAST_DISCIPLINE_BAND`. The bands render in a fixed order
+    — broadcast discipline, then conventions, then priming, then
+    catalogue — joined by a blank-line separator, with **empty bands
+    dropped entirely** so the join introduces no leading / trailing
+    separator.
 
-    Byte-identity invariants the tests pin:
+    The broadcast band leads because it is MEHO-wide coordination
+    protocol that frames all subsequent work, and because it is static
+    (no data source) it is **always present exactly once** — so every
+    assembled preamble now carries broadcast content, even for a tenant
+    with no operational conventions and an operator with no in-progress
+    runs. This is the intended behaviour change of #2546: the
+    server-assembled preamble previously carried zero broadcast content.
 
-    * Only conventions present -> the conventions text alone, byte-identical
-      to the pre-T2 shape (no trailing blank line, no separator).
+    Byte-identity invariants the tests pin (relative to the broadcast
+    band, which is now always the first band):
+
+    * Conventions present -> the broadcast band, then the conventions
+      text (its ``BLOCK_START``/``BLOCK_END`` delimiters unchanged as the
+      trailing band when priming + catalogue are absent).
     * Only priming present (empty conventions + empty catalogue) -> the
-      priming text alone, byte-identical to the pre-T4 priming-only shape.
+      broadcast band, then the priming text.
     * A non-docs tenant (``capabilities=None`` or no entitled collections)
-      passes ``catalogue_text=""`` -> the assembled text is identical to
-      its pre-T4 (conventions + priming) shape.
+      passes ``catalogue_text=""`` -> the catalogue band drops cleanly.
 
-    Two newlines between adjacent bands (e.g. conventions
-    ``END_TENANT_CONVENTIONS>>`` and priming
-    ``<<RUNBOOK_PRIMING — CRITICAL>>``) so they render as separate
-    paragraphs. Each band carries its own delimiters; the separator sits
-    between bands, never inside one.
+    Two newlines between adjacent bands (e.g. broadcast
+    ``<<END_BROADCAST_DISCIPLINE>>`` and conventions
+    ``<<TENANT_CONVENTIONS``) so they render as separate paragraphs. Each
+    band carries its own delimiters; the separator sits between bands,
+    never inside one.
     """
-    bands = [band for band in (conventions_text, priming_text, catalogue_text) if band]
+    bands = [
+        band
+        for band in (
+            BROADCAST_DISCIPLINE_BAND,
+            conventions_text,
+            priming_text,
+            catalogue_text,
+        )
+        if band
+    ]
     return "\n\n".join(bands)

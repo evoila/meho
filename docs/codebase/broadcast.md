@@ -70,8 +70,29 @@ Three layers, separated for traceability:
 - `BroadcastEvent` (`broadcast/events.py`) — every audited operation
   publishes one. Fields: `event_id` (UUID), `ts`, `tenant_id`,
   `principal_sub`, `principal_name`, `target_name`, `op_id`,
-  `op_class`, `result_status`, `audit_id`, `payload`.
-  `event_kind = "audit_derived"` discriminator.
+  `op_class`, `result_status`, `audit_id`, `payload`, plus the lineage
+  trio `actor_sub`, `agent_session_id` (UUID), `work_ref` (all
+  `| None`). `event_kind = "audit_derived"` discriminator.
+  - **Lineage projection (T3 #2545).** The three lineage fields mirror
+    the `audit_log` columns of the same name: `actor_sub` is the
+    RFC 8693 actor (the delegated agent that acted, distinct from
+    `principal_sub` = the human/subject it acted for);
+    `agent_session_id` groups every operation one agent run produced;
+    `work_ref` ties the operation to an external change ticket. Every
+    `BroadcastEvent` construction site reads them off the publish-site
+    contextvars via `resolve_broadcast_lineage()`
+    (`operations/_audit.py`) — the same `resolve_actor_sub()` /
+    `agent_session_id_var` / `work_ref_var` the sibling audit-row writer
+    reads — so a delegated agent's work is attributable to the agent on
+    the feed instead of broadcasting under the human's `principal_sub`.
+    Server-derived and trusted: no untrusted-prose envelope applies (the
+    envelope guards agent free text on `AgentAnnouncementEvent` only).
+    Optional with `None` defaults, so pre-T3 stream entries that predate
+    the fields still validate on read. `event_matches`
+    (`broadcast/history.py`) and the `meho.broadcast.recent` /
+    `meho.broadcast.watch` `filter` object gained matching `actor_sub`
+    and `work_ref` exact-match filters ("what has this agent been
+    doing"); an announcement never qualifies for a lineage filter.
 - `AgentAnnouncementEvent` (`broadcast/agent_events.py`) — agent-
   authored announcements published via `meho.broadcast.announce`.
   Fields: `tenant_id`, `principal_sub`, `activity`, `target`, `scope`,
@@ -176,6 +197,12 @@ HTTP request
 ```
 MCP tools/call meho.broadcast.announce
   → _handler_announce (mcp/tools/broadcast.py)
+    → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
+      → (skipped when broadcast_announce_rate_per_minute == 0)
+      → MULTI: INCR meho:ratelimit:announce:{tenant}:{sub}:{minute}
+               EXPIRE …  60
+      → count > limit → AnnounceRateLimitExceeded
+           → McpRateLimitedError → JSON-RPC -32000 (retry-after in data)
     → publish_agent_announcement(AgentAnnouncementEvent)  ← fail-loud
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
       → returns Valkey entry id verbatim
@@ -184,6 +211,22 @@ MCP tools/call meho.broadcast.announce
        self-labelled name, #2479; `event_id` is the legacy alias
        and NOT a durable UUID: announcements carry no UUID)
 ```
+
+The rate limit (G6.5-T6 #2546) is a per-`(tenant, principal)`
+fixed-window counter (the canonical Redis `INCR` rate-limiter pattern)
+enforced **before** the publish. It protects the count-trimmed stream
+(`MAXLEN ~ 10000`): without it, one looping principal could evict the
+whole tenant's coordination window in a burst. Default 10 announces per
+60 s window (`broadcast_announce_rate_per_minute`, `0` disables). The
+counter lives on the same fast broadcast client as the publish and is
+fail-loud for the same reason — a Valkey wobble must not silently let a
+principal bypass the cap. See `broadcast/rate_limit.py`.
+
+The four-step broadcast discipline (check `meho.broadcast.recent` →
+announce `start` → `update` → `completion`) is seeded into every MCP
+session preamble as a static band (`BROADCAST_DISCIPLINE_BAND` in
+`conventions/preamble.py`, #2546) so agents receive it without relying
+on the optional consumer onboarding template.
 
 ### Read path (SSE)
 

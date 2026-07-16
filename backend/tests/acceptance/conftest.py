@@ -252,6 +252,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # must be listed so the non-cascading multi-table TRUNCATE can drop
     # ``tenant`` / ``agent_definition`` without a FK-constraint error.
     "scheduled_trigger",
+    # ``sensor.tenant_id`` is a real ``REFERENCES tenant(id)`` FK from
+    # migration ``0064`` (Initiative #2416 T2503). Same rule: PG rejects
+    # truncating ``tenant`` unless every referencing table is listed in the
+    # same statement, so ``sensor`` must appear here or every PG-backed
+    # acceptance test errors at setup with ``cannot truncate a table
+    # referenced in a foreign key constraint``.
+    "sensor",
     "targets",
     "tenant",
 )

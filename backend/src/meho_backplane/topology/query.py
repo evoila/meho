@@ -516,9 +516,39 @@ async def find_dependencies(
 # CYCLE bookkeeping set (independent of ``node_ids``). The hop bound plus
 # the CYCLE guard terminate the search on cyclic graphs; ``ORDER BY hops
 # LIMIT 1`` yields a shortest path.
+#
+# Per-branch target pruning (#2535). The non-recursive ``target`` CTE
+# resolves the destination id once; the recursive term refuses to extend
+# a branch whose frontier row already *is* the target (``NOT EXISTS``
+# against ``target``). A branch that reaches the target stops growing —
+# extending past a hit can never shorten a path to that same hit, and
+# the CYCLE guard already forbids re-entering the target on the same
+# branch, so pruning removes only rows the final select could never
+# pick. On a dense mesh (branch factor b) the unpruned walk enumerates
+# ~b^hops simple paths regardless of where the target sits; the pruned
+# walk bounds every branch at its first hit. Results are byte-identical:
+# same shortest path, same ``None`` on unreachable. Only *per-branch*
+# pruning is expressible — PostgreSQL restricts the recursive
+# self-reference (one reference, not in a subquery), so a global
+# "some branch already found the target at h hops" cross-branch stop
+# cannot be written, and ``ORDER BY hops LIMIT 1`` cannot terminate
+# evaluation early because the sort must consume the full walk (PG 16
+# §7.8 — lazy CTE evaluation does not apply once the parent sorts).
+# Referencing the *non-recursive* ``target`` CTE inside the recursive
+# term's subquery is legal; the restriction covers only ``walk`` itself.
+# The unreachable-target worst case still enumerates the whole
+# ≤max_hops ball — that envelope is pinned by the dense-mesh benchmark
+# in ``tests/integration/test_topology_path_pruning.py``.
 _PATH_SQL = text(
     """
     WITH RECURSIVE
+    target AS (
+        SELECT id
+        FROM graph_node
+        WHERE name = :to_name
+          AND tenant_id = :tenant_id
+          AND (CAST(:to_kind AS text) IS NULL OR kind = :to_kind)
+    ),
     bi_edge AS (
         SELECT from_node_id AS src, to_node_id AS dst, kind
         FROM graph_edge
@@ -549,6 +579,7 @@ _PATH_SQL = text(
         FROM bi_edge be
         JOIN walk w ON be.src = w.node_id
         WHERE w.hops < :max_hops
+          AND NOT EXISTS (SELECT 1 FROM target t WHERE t.id = w.node_id)
     ) CYCLE node_id SET is_cycle USING visited
     SELECT w.hops, w.node_ids, w.edge_kinds
     FROM walk w

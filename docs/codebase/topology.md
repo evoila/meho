@@ -428,6 +428,27 @@ LIMIT 1` yields a shortest path. A second query materialises the
 winning path's node rows; `_build_path_nodes` re-orders them into path
 sequence and attaches `depth` / `via_edge_kind`.
 
+**Per-branch target pruning (#2535).** The walk enumerates simple
+paths, so on a dense mesh its row count grows ~branch_factor^hops. A
+non-recursive `target` CTE resolves the destination id once, and the
+recursive term carries `NOT EXISTS (SELECT 1 FROM target t WHERE t.id
+= w.node_id)` — a branch that reaches the target stops growing.
+Extending past a hit can never shorten a path to that same hit (and
+the CYCLE guard already forbids re-entering the target on the same
+branch), so pruning removes only rows the final select could never
+pick: results are identical, cost is bounded per branch. Referencing
+the non-recursive `target` CTE from the recursive term's subquery is
+legal — PostgreSQL's recursive-term restrictions cover only the
+recursive self-reference (`walk`), which must appear exactly once and
+not inside a subquery. That same restriction is why **global**
+cross-branch early termination cannot be written, and `ORDER BY hops
+LIMIT 1` cannot stop evaluation early because the sort consumes the
+full walk. The unreachable-target worst case therefore still
+enumerates the whole ≤`max_hops` ball; its envelope is pinned by
+`tests/integration/test_topology_path_pruning.py` on a dense
+`MeshSpec` mesh (row-count pin + load-invariant timing ratio, see
+`docs/architecture/topology.md` §Performance expectations).
+
 ### Cycle safety
 
 The `CYCLE` clause makes PostgreSQL track the visited-node set per
@@ -1393,8 +1414,12 @@ shape.
 - **PostgreSQL-only read path.** The `WITH RECURSIVE ... CYCLE` clause
   is not implemented by SQLite, so the query verbs cannot run on the
   unit suite's per-test SQLite DB. Tests live in
-  `backend/tests/integration/test_topology_query.py` against a real
-  `pgvector/pgvector:pg16` testcontainer (Docker-gated skip on
+  `backend/tests/integration/test_topology_query.py` (plus the
+  dense-mesh pruning/worst-case suite in
+  `backend/tests/integration/test_topology_path_pruning.py` and the
+  refresh-vs-annotate concurrency suite in
+  `backend/tests/integration/test_topology_concurrency.py`) against a
+  real `pgvector/pgvector:pg16` testcontainer (Docker-gated skip on
   no-Docker sandboxes; runs in CI). The pure Pydantic result-model
   contracts (deep `properties` immutability, `TopologyPath` invariants)
   have no DB dependency and are unit-tested in
@@ -1423,6 +1448,10 @@ shape.
 - Per-connector `discover_topology` overrides — each G3.x Initiative.
 - The advisory lock is a multi-replica stampede guard only; a single
   process serialises naturally and the SQLite test path no-ops it.
+  The real-PG lock path (skip while held, proceed after release) is
+  pinned by
+  `test_scheduler_advisory_lock_skips_and_releases_on_real_pg` in
+  `backend/tests/integration/test_topology_concurrency.py`.
 
 ## References
 

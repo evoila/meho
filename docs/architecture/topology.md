@@ -311,6 +311,7 @@ Against a seeded ~10k-node / ~10k-edge tenant graph
 |---|---|
 | `find_dependents` depth 16 | < 100 ms |
 | `find_path` BFS | < 150 ms |
+| `find_path` worst case (dense mesh, unreachable target, `max_hops=32`) | < 500 ms (~31k walk rows on the 16-node `MeshSpec` benchmark mesh) |
 | `refresh_target_topology` (insert/update bottleneck) | < 500 ms |
 
 The `graph_edge_tenant_from_idx` / `graph_edge_tenant_to_idx` indexes
@@ -322,6 +323,39 @@ these against a real `pgvector/pgvector:pg16` container in the split-CI
 so ordinary runner variance doesn't flake the gate while an
 order-of-magnitude regression still fails it. The >10k-node case is a
 v0.3 concern, addressed only when a real tenant hits it.
+
+### `find_path` on dense meshes (#2535)
+
+The forest fixture's out-degree-1 shape hides `find_path`'s real cost
+profile: the bidirectional walk enumerates **simple paths**, which
+grow ~branch_factor^hops on a dense mesh (converging paths, cycles),
+not linearly with node count. Two mitigations bound it:
+
+- **Per-branch target pruning** in `_PATH_SQL` — the destination id
+  resolves in a non-recursive `target` CTE and the recursive term
+  refuses to extend a branch whose frontier row already is the target.
+  Behavior is identical (same shortest hop count, same `None`); on the
+  20-node pruning mesh the walk drops from 1 544 to 795 materialised
+  rows (regression-pinned in
+  `backend/tests/integration/test_topology_path_pruning.py`). Global
+  cross-branch early termination is **not** expressible — PostgreSQL
+  allows exactly one recursive self-reference, outside subqueries, and
+  `ORDER BY hops LIMIT 1` must consume the full walk before sorting.
+- **The `max_hops` bound** (route ceiling 32) — the only guard when
+  the target is unreachable, because pruning never fires. That worst
+  case (dense cyclic 16-node mesh, unreachable target, `max_hops=32`)
+  is CI-pinned: ~31k walk rows (exact row count asserted — it is a
+  deterministic function of the graph, immune to runner load), a
+  hops-32/hops-8 wall-clock ratio gate (~7.7 healthy, ceiling 20), and
+  a generous 5 s absolute backstop. Measured median on a dev laptop:
+  ~120 ms.
+
+The dense shapes come from the `MeshSpec` / `seed_mesh_graph`
+generator (same fixture module): layered meshes with configurable
+`branch_factor` (converging paths), `cycle_stride` (back-edges),
+mixed edge kinds, and optional soft-deleted rows — which the traversal
+verbs still walk (soft-delete is retention, not visibility; see
+§Soft-delete semantics).
 
 ## Tenant boundary
 

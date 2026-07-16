@@ -558,12 +558,13 @@ def test_topology_ui_bulk_invalid_rows_surface_every_error_together() -> None:
     _seed_node(tenant_id=_TENANT_A, kind="principal", name="sa-foo")
     _seed_node(tenant_id=_TENANT_A, kind="vault-role", name="role-bar")
 
-    # Row 0: unknown edge kind. Row 1: unresolvable endpoint. Two DISTINCT
+    # Row 0: malformed edge-kind slug (T1 #2534: rejection is by shape,
+    # not membership). Row 1: unresolvable endpoint. Two DISTINCT
     # row failures -> the panel must surface BOTH, not abort on the first.
     rows = (
         "edges:\n"
         "  - from: { name: sa-foo, kind: principal }\n"
-        "    kind: made-up-kind\n"
+        "    kind: 'Made Up Kind!'\n"
         "    to: { name: role-bar, kind: vault-role }\n"
         "  - from: { name: ghost-node, kind: principal }\n"
         "    kind: authenticates-via\n"
@@ -591,7 +592,7 @@ def test_topology_ui_bulk_invalid_rows_surface_every_error_together() -> None:
     indices = set(re.findall(r'data-test="bulk-row-error" data-row-index="(\d+)"', body))
     assert indices >= {"0", "1"}, indices
     # The invalid-kind row names the bad kind; the missing-node row is present.
-    assert "made-up-kind" in body
+    assert "Made Up Kind!" in body
     assert "ghost-node" in body
     # Nothing persisted.
     assert _count_edges(_TENANT_A) == 0

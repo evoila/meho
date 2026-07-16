@@ -176,20 +176,6 @@ const (
 	GatewayResultBodyOutcomeSucceeded GatewayResultBodyOutcome = "succeeded"
 )
 
-// Defines values for GraphEdgeKind.
-const (
-	AuthenticatesVia GraphEdgeKind = "authenticates-via"
-	BackedUpBy       GraphEdgeKind = "backed-up-by"
-	BelongsTo        GraphEdgeKind = "belongs-to"
-	DependsOn        GraphEdgeKind = "depends-on"
-	Mounts           GraphEdgeKind = "mounts"
-	PolicyBinds      GraphEdgeKind = "policy-binds"
-	ReplicatesTo     GraphEdgeKind = "replicates-to"
-	RoutesThrough    GraphEdgeKind = "routes-through"
-	RoutesVia        GraphEdgeKind = "routes-via"
-	RunsOn           GraphEdgeKind = "runs-on"
-)
-
 // Defines values for IngestJobHandleStatus.
 const (
 	IngestJobHandleStatusDegraded  IngestJobHandleStatus = "degraded"
@@ -3771,54 +3757,6 @@ type GatewayResultBody struct {
 // GatewayResultBodyOutcome Terminal outcome to record for the command.
 type GatewayResultBodyOutcome string
 
-// GraphEdgeKind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
-//
-// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-// operator-curated cross-system kinds that auto-discovery cannot infer
-// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-// is closed -- widening it is a coordinated DB + model change (new
-// migration, new enum member, new decision row) so the v0.2.next
-// policy-engine grammar parsing “kind“ stays portable across tenants.
-//
-// The four auto-discoverable kinds (refresh service writes these on
-// every probe-derived edge):
-//
-//   - :attr:`RUNS_ON` -- “vm“ “runs-on“ “host“, “pod“ “runs-on“
-//     “node“: the physical / scheduling host of a workload.
-//   - :attr:`MOUNTS` -- “vm“ “mounts“ “datastore“, “pod“ “mounts“
-//     “volume“: storage attachment.
-//   - :attr:`ROUTES_THROUGH` -- “ingress“ “routes-through“ “service“,
-//     “service“ “routes-through“ “pod“: network routing path.
-//   - :attr:`BELONGS_TO` -- “pod“ “belongs-to“ “namespace“, “vm“
-//     “belongs-to“ “host“ (logical group membership).
-//
-// The six curated-only kinds (operator-asserted via
-// “meho topology annotate“; cannot be derived from probes):
-//
-//   - :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
-//     (e.g. “k8s-sa-foo“ -> “vault-role-bar“). The canonical
-//     cross-system example.
-//   - :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
-//     “service-X“ -> “database-Y“ where neither side knows about the
-//     other in its own probe output).
-//   - :attr:`REPLICATES_TO` -- operator-asserted replication relationship
-//     between two storage / database nodes.
-//   - :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
-//   - :attr:`ROUTES_VIA` -- operator-asserted network path through an
-//     intermediary (e.g., “vm-A“ -> “firewall-X“ -> “vm-B“ when the
-//     probes only see point-to-point reachability).
-//   - :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
-//     connector boundaries (e.g., “kubernetes-namespace-prod“ ->
-//     “vault-policy-prod-read“).
-//
-// Mirrors the closed-enum pattern :class:`AuthModel`
-// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-// :class:`enum.StrEnum` paired with a portable DB “CHECK“ constraint,
-// both moved in lock-step by one Alembic migration so the enum and the
-// constraint cannot drift.
-type GraphEdgeKind string
-
 // GroupingResultModel Pydantic projection of
 // :class:`~meho_backplane.operations.ingest.llm_groups.GroupingResult`.
 //
@@ -6749,12 +6687,12 @@ type VaultStatus struct {
 
 // UnderscoreAnnotateEdgeRequest Inbound body for “POST /api/v1/topology/edges“.
 //
-// “kind“ is typed against :class:`GraphEdgeKind` so an unknown kind
+// “kind“ is typed against :data:`_EdgeKindSlug` so a malformed kind
 // fails Pydantic validation (HTTP 422) **before** the service runs —
 // the service still raises :class:`InvalidEdgeKindError` for
 // non-route callers, but at the HTTP boundary the operator gets the
-// standard FastAPI validation error shape (with the candidate list in
-// the error context) rather than a 500-shaped diagnostic.
+// standard FastAPI validation error shape (with the pattern in the
+// error context) rather than a 500-shaped diagnostic.
 //
 // The keyword “from“ is reserved in Python so the attribute name is
 // “from_endpoint“; “alias="from"“ keeps the wire shape the issue
@@ -6774,55 +6712,8 @@ type UnderscoreAnnotateEdgeRequest struct {
 	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
 	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
 	From UnderscoreEdgeEndpoint `json:"from"`
-
-	// Kind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
-	//
-	// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-	// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-	// operator-curated cross-system kinds that auto-discovery cannot infer
-	// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-	// is closed -- widening it is a coordinated DB + model change (new
-	// migration, new enum member, new decision row) so the v0.2.next
-	// policy-engine grammar parsing ``kind`` stays portable across tenants.
-	//
-	// The four auto-discoverable kinds (refresh service writes these on
-	// every probe-derived edge):
-	//
-	// * :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``
-	//   ``node``: the physical / scheduling host of a workload.
-	// * :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``
-	//   ``volume``: storage attachment.
-	// * :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,
-	//   ``service`` ``routes-through`` ``pod``: network routing path.
-	// * :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``
-	//   ``belongs-to`` ``host`` (logical group membership).
-	//
-	// The six curated-only kinds (operator-asserted via
-	// ``meho topology annotate``; cannot be derived from probes):
-	//
-	// * :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
-	//   (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical
-	//   cross-system example.
-	// * :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
-	//   ``service-X`` -> ``database-Y`` where neither side knows about the
-	//   other in its own probe output).
-	// * :attr:`REPLICATES_TO` -- operator-asserted replication relationship
-	//   between two storage / database nodes.
-	// * :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
-	// * :attr:`ROUTES_VIA` -- operator-asserted network path through an
-	//   intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the
-	//   probes only see point-to-point reachability).
-	// * :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
-	//   connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
-	//   ``vault-policy-prod-read``).
-	//
-	// Mirrors the closed-enum pattern :class:`AuthModel`
-	// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-	// :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
-	// both moved in lock-step by one Alembic migration so the enum and the
-	// constraint cannot drift.
-	Kind GraphEdgeKind `json:"kind"`
-	Note *string       `json:"note"`
+	Kind string                 `json:"kind"`
+	Note *string                `json:"note"`
 
 	// To Inbound JSON shape for one annotation endpoint.
 	//
@@ -6840,7 +6731,7 @@ type UnderscoreAnnotateEdgeRequest struct {
 // Same wire shape as :class:`_AnnotateEdgeRequest` (“{from, kind, to,
 // note?, evidence_url?}“) — “from“ is bound via “alias“ because
 // it is a Python keyword. “kind“ is typed against
-// :class:`GraphEdgeKind` so an unknown kind fails at the boundary
+// :data:`_EdgeKindSlug` so a malformed kind fails at the boundary
 // (HTTP 422) before any service call runs, and the per-row error
 // surfaces inside the standard FastAPI validation envelope with the
 // row index in “loc“. “extra="forbid"“ rejects typo'd keys so a
@@ -6858,55 +6749,8 @@ type UnderscoreBulkImportEdge struct {
 	// field; ``extra="forbid"`` rejects typo'd keys at the boundary
 	// (``{from: {nme: ...}}`` is a 422, not a silently-ignored body).
 	From UnderscoreEdgeEndpoint `json:"from"`
-
-	// Kind Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
-	//
-	// Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-	// the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-	// operator-curated cross-system kinds that auto-discovery cannot infer
-	// (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-	// is closed -- widening it is a coordinated DB + model change (new
-	// migration, new enum member, new decision row) so the v0.2.next
-	// policy-engine grammar parsing ``kind`` stays portable across tenants.
-	//
-	// The four auto-discoverable kinds (refresh service writes these on
-	// every probe-derived edge):
-	//
-	// * :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``
-	//   ``node``: the physical / scheduling host of a workload.
-	// * :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``
-	//   ``volume``: storage attachment.
-	// * :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,
-	//   ``service`` ``routes-through`` ``pod``: network routing path.
-	// * :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``
-	//   ``belongs-to`` ``host`` (logical group membership).
-	//
-	// The six curated-only kinds (operator-asserted via
-	// ``meho topology annotate``; cannot be derived from probes):
-	//
-	// * :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node
-	//   (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical
-	//   cross-system example.
-	// * :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.
-	//   ``service-X`` -> ``database-Y`` where neither side knows about the
-	//   other in its own probe output).
-	// * :attr:`REPLICATES_TO` -- operator-asserted replication relationship
-	//   between two storage / database nodes.
-	// * :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.
-	// * :attr:`ROUTES_VIA` -- operator-asserted network path through an
-	//   intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the
-	//   probes only see point-to-point reachability).
-	// * :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses
-	//   connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
-	//   ``vault-policy-prod-read``).
-	//
-	// Mirrors the closed-enum pattern :class:`AuthModel`
-	// (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-	// :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
-	// both moved in lock-step by one Alembic migration so the enum and the
-	// constraint cannot drift.
-	Kind GraphEdgeKind `json:"kind"`
-	Note *string       `json:"note"`
+	Kind string                 `json:"kind"`
+	Note *string                `json:"note"`
 
 	// To Inbound JSON shape for one annotation endpoint.
 	//
@@ -7790,14 +7634,14 @@ type DiffRouteApiV1TopologyDiffGetParams struct {
 
 // ListEdgesRouteApiV1TopologyEdgesGetParams defines parameters for ListEdgesRouteApiV1TopologyEdgesGet.
 type ListEdgesRouteApiV1TopologyEdgesGetParams struct {
-	Kind          *GraphEdgeKind `form:"kind,omitempty" json:"kind,omitempty"`
-	Source        *string        `form:"source,omitempty" json:"source,omitempty"`
-	From          *string        `form:"from,omitempty" json:"from,omitempty"`
-	To            *string        `form:"to,omitempty" json:"to,omitempty"`
-	Conflicts     *bool          `form:"conflicts,omitempty" json:"conflicts,omitempty"`
-	Limit         *int           `form:"limit,omitempty" json:"limit,omitempty"`
-	Offset        *int           `form:"offset,omitempty" json:"offset,omitempty"`
-	Authorization *string        `json:"authorization,omitempty"`
+	Kind          *string `form:"kind,omitempty" json:"kind,omitempty"`
+	Source        *string `form:"source,omitempty" json:"source,omitempty"`
+	From          *string `form:"from,omitempty" json:"from,omitempty"`
+	To            *string `form:"to,omitempty" json:"to,omitempty"`
+	Conflicts     *bool   `form:"conflicts,omitempty" json:"conflicts,omitempty"`
+	Limit         *int    `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int    `form:"offset,omitempty" json:"offset,omitempty"`
+	Authorization *string `json:"authorization,omitempty"`
 }
 
 // AnnotateEdgeRouteApiV1TopologyEdgesPostParams defines parameters for AnnotateEdgeRouteApiV1TopologyEdgesPost.

@@ -39,7 +39,9 @@ boundaries (a Kubernetes ServiceAccount authenticating against a
 Vault role, a service depending on a database in a different
 product) and that no single probe can ever see.
 
-The shape is one closed ten-kind vocabulary, two write verbs
+The shape is one open, slug-validated kind vocabulary with a
+documented ten-kind well-known core (T1
+[#2534](https://github.com/evoila/meho/issues/2534)), two write verbs
 (`annotate` / `unannotate`), one listing verb (`list-edges`), and a
 deterministic §6 conflict-resolution policy so a wrong assertion is
 recoverable in one CLI call.
@@ -74,8 +76,8 @@ for callers wiring their own tooling.
 
 ## When to annotate, when not to
 
-The closed vocabulary splits cleanly into two halves and the rule of
-thumb follows from the split:
+The well-known vocabulary splits cleanly into two halves and the rule
+of thumb follows from the split:
 
 - **Six curated-only kinds** (`authenticates-via`, `depends-on`,
   `replicates-to`, `backed-up-by`, `routes-via`, `policy-binds`) — no
@@ -196,24 +198,29 @@ ships the non-k8s populator. Recording the commitment now means you can
 model `runs-on` correctly today without fear that a later populator
 will punish you for it.
 
-## The closed 10-kind vocabulary
+## The well-known 10-kind set
 
-The vocabulary is closed. Widening it is a coordinated DB + model +
-decision-row change (a new Alembic migration, a new
-[`GraphEdgeKind`](../../backend/src/meho_backplane/db/models.py) enum
-member, and a row in
-[`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md))
-so the v0.2.next policy-engine grammar parsing `kind` stays portable
-across tenants. The same table is rendered by
-`meho topology annotate --help` and pinned into the MCP tool's
-`inputSchema` enum, so an operator can never spell a kind the backend
-won't accept.
+The vocabulary is **open** since T1
+[#2534](https://github.com/evoila/meho/issues/2534): any lowercase
+slug (2-63 chars; letters/digits joined by `.`, `_` or `-`) is a
+valid edge kind, and the ten kinds below survive as the *documented
+well-known set* — prefer one when it fits, reach for a novel slug
+(`resolves-to`, `same-as`, ...) when none does (see
+[docs/architecture/topology.md](../architecture/topology.md) for the
+slug grammar and the `same-as` identity-stitching convention).
+Widening the *well-known* set is a docs + enum change (a new
+[`GraphEdgeKind`](../../backend/src/meho_backplane/db/models.py)
+member — no migration needed). The same table is rendered by
+`meho topology annotate --help` and echoed in the MCP tool's `kind`
+description as suggestions.
 
 The descriptions below match `meho topology annotate --help` verbatim
 — if you grep the CLI source
 ([`cli/internal/cmd/topology/annotate.go`](../../cli/internal/cmd/topology/annotate.go)
 `edgeKindVocabulary`), you'll see the same strings. They are the same
-strings the MCP `inputSchema` rejects unknown kinds against.
+strings the MCP write tools echo as *advisory suggestions* in their
+`kind` description — the `inputSchema` validates the slug pattern
+only, never membership in this table.
 
 | Kind                 | Source       | Description (verbatim from `--help`)                                                       |
 | -------------------- | ------------ | ------------------------------------------------------------------------------------------ |
@@ -232,9 +239,12 @@ Rule of thumb in one line: a row marked **auto** is written by a
 probe — *do not annotate*. A row marked **curated** is invisible to
 probes — annotate it when the relationship exists.
 
-If a kind isn't in the table, the backend will refuse the call at the
-HTTP boundary with **422** and the candidate kinds echoed in
-`detail.kinds` — no need to grep the source to find the spelling.
+A kind that isn't in the table is **not** refused — any valid slug
+(lowercase alphanumeric runs joined by single `.` / `_` / `-`, 2-63
+chars) passes straight through. Only a *malformed* slug is rejected
+at the HTTP boundary with **422**; the error detail carries the slug
+`pattern` plus the well-known kinds under `well_known_kinds` as
+suggestions — no need to grep the source to find a spelling.
 
 ## CLI walkthrough
 
@@ -485,12 +495,13 @@ the `topology` router (`/api/v1/topology` prefix). The full request
 shapes:
 
 - `POST /api/v1/topology/edges` — body
-  `{"from": {"name": str, "kind"?: str}, "kind": GraphEdgeKind, "to":
+  `{"from": {"name": str, "kind"?: str}, "kind": str, "to":
   {"name": str, "kind"?: str}, "note"?: str, "evidence_url"?: str}`.
   Returns `201 TopologyEdge` (the typed Pydantic envelope, same
-  shape `GET /edges` returns). The body's `kind` is typed against
-  the `GraphEdgeKind` enum so an unknown value is rejected with
-  **422** before the service runs. **Role:** `tenant_admin`.
+  shape `GET /edges` returns). The body's `kind` is a slug-patterned
+  string (`KIND_SLUG_PATTERN`, 2-63 chars) so a malformed slug is
+  rejected with **422** before the service runs, while a
+  novel-but-valid kind passes through. **Role:** `tenant_admin`.
 - `DELETE /api/v1/topology/edges/{edge_id}` — returns `204 No
   Content` on success; **409 `auto_edge_deletion`** on an auto row
   with the verbatim remediation message; **404** on a missing /
@@ -619,10 +630,12 @@ would let a probing operator distinguish "row never existed" from
 - **Self-edges.** Asserting `nodeX kind nodeX` returns **422
   `self_edge`** — every curated kind expresses a relationship
   between two distinct nodes.
-- **Unknown kind.** A typo'd kind is rejected at the
-  Pydantic / `inputSchema` boundary with HTTP 422 (REST) or
-  JSON-RPC `-32602` (MCP); the response echoes the closed candidate
-  list so the operator can correct without reading the source.
+- **Malformed kind.** A kind that violates the slug grammar
+  (uppercase, spaces, punctuation, length outside 2-63) is rejected
+  at the Pydantic / `inputSchema` boundary with HTTP 422 (REST) or
+  JSON-RPC `-32602` (MCP); the response names the pattern and echoes
+  the well-known kinds as suggestions. A well-formed novel kind is
+  accepted — the vocabulary is open.
 - **Role gating on writes.** `annotate` / `unannotate` require
   `tenant_admin`. An `operator`-role caller never sees the
   `meho.topology.*` tools in `tools/list` and a direct `tools/call`
@@ -639,8 +652,9 @@ would let a probing operator distinguish "row never existed" from
 ## References
 
 - **Parent Initiative:** G9.2
-  [#364](https://github.com/evoila/meho/issues/364) — closed
-  10-kind vocabulary + curated-edge surface.
+  [#364](https://github.com/evoila/meho/issues/364) — the original
+  closed 10-kind vocabulary + curated-edge surface (the vocabulary
+  lock was reversed by [#2534](https://github.com/evoila/meho/issues/2534)).
 - **Parent Goal:** G9
   [#220](https://github.com/evoila/meho/issues/220) — the topology
   graph + history half of the v0.2 chassis.

@@ -90,7 +90,13 @@ from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import GraphEdgeKind, Tenant
+from meho_backplane.db.models import (
+    KIND_SLUG_MAX_LENGTH,
+    KIND_SLUG_MIN_LENGTH,
+    KIND_SLUG_PATTERN,
+    GraphEdgeKind,
+    Tenant,
+)
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -160,11 +166,12 @@ _TIMELINE_LIMIT_MAX: Final[int] = 1000
 #: don't (same reasoning T3 used for the REST and CLI defaults).
 _HISTORY_LIMIT_MAX: Final[int] = 5000
 
-#: Canonical ``GraphEdgeKind`` values, materialised once at module load
-#: so the inputSchema enum + the kind_filter description stay in lock-step
-#: with :class:`~meho_backplane.db.models.GraphEdgeKind` without
-#: duplicating the ten-string list. A future widening of the enum
-#: surfaces in both the schema and the description automatically.
+#: Well-known ``GraphEdgeKind`` values, materialised once at module
+#: load so the inputSchema descriptions' suggestion lists stay in
+#: lock-step with :class:`~meho_backplane.db.models.GraphEdgeKind`
+#: without duplicating the ten-string list. The vocabulary is open
+#: (T1 #2534): the write schemas constrain `kind` by slug pattern,
+#: not by membership, and this list is advisory.
 _EDGE_KIND_VALUES: Final[list[str]] = sorted(k.value for k in GraphEdgeKind)
 
 
@@ -250,8 +257,9 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "kinds, restricts the walk to edges of that kind "
                 "(e.g. `runs-on`, `mounts`, `routes-through`, "
                 "`belongs-to`). For `kind=edges`, restricts the flat "
-                "listing to edges of that kind. Closed v0.2 vocabulary: "
-                f"one of {_EDGE_KIND_VALUES}. Ignored for `path`."
+                "listing to edges of that kind. The vocabulary is "
+                f"open; well-known kinds: {_EDGE_KIND_VALUES}. "
+                "Ignored for `path`."
             ),
             "maxLength": 64,
         },
@@ -1412,16 +1420,26 @@ _ANNOTATE_INPUT_SCHEMA: Final[dict[str, Any]] = {
         },
         "kind": {
             "type": "string",
-            "enum": _EDGE_KIND_VALUES,
+            "pattern": KIND_SLUG_PATTERN,
+            "minLength": KIND_SLUG_MIN_LENGTH,
+            "maxLength": KIND_SLUG_MAX_LENGTH,
             "description": (
-                "Closed v0.2 edge-kind vocabulary. Operator-curated "
-                "kinds (`authenticates-via`, `depends-on`, "
+                "Edge kind: a lowercase slug (letters/digits joined "
+                "by `.`, `_` or `-`; 2-63 chars). The vocabulary is "
+                "open — any slug matching the pattern is accepted — "
+                "but prefer a well-known kind when one fits. "
+                "Operator-curated well-known kinds "
+                "(`authenticates-via`, `depends-on`, "
                 "`replicates-to`, `backed-up-by`, `routes-via`, "
                 "`policy-binds`) cover the cross-system relationships "
                 "auto-discovery cannot infer — those are the canonical "
                 "use cases. The four auto-discoverable kinds "
                 "(`runs-on`, `mounts`, `routes-through`, `belongs-to`) "
-                "are accepted too. A curated assertion of an auto-kind "
+                "are accepted too, as are novel kinds "
+                "(`resolves-to`, `same-as`, ...) when no well-known "
+                "kind describes the relationship — `same-as` is the "
+                "documented convention for cross-system identity "
+                "stitching. A curated assertion of an auto-kind "
                 "lands as a §6 conflict marker *only when a competing "
                 "**auto** edge already exists for that pair* — i.e. on "
                 "a pair a probe covers (today, only the Kubernetes "
@@ -1557,10 +1575,11 @@ async def _annotate_handler(
       ``-32602`` (operator-actionable input problem; same shape the
       closure kinds use).
     * :class:`InvalidEdgeKindError` is structurally unreachable —
-      ``kind`` is enum-pinned by the inputSchema — but the catch is
-      retained as a belt-and-suspenders guard against a future enum
-      drift between :class:`GraphEdgeKind` and the cached
-      :data:`_EDGE_KIND_VALUES`.
+      ``kind`` is pattern-pinned by the inputSchema and the service
+      validates the same slug grammar — but the catch is retained as
+      a belt-and-suspenders guard against a future drift between the
+      schema's ``pattern`` and the service-side
+      :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`.
     """
     sessionmaker = get_sessionmaker()
     from_name: str = arguments["from_name"]
@@ -1686,9 +1705,12 @@ _UNANNOTATE_INPUT_SCHEMA: Final[dict[str, Any]] = {
         },
         "kind": {
             "type": "string",
-            "enum": list(_EDGE_KIND_VALUES),
+            "pattern": KIND_SLUG_PATTERN,
+            "minLength": KIND_SLUG_MIN_LENGTH,
+            "maxLength": KIND_SLUG_MAX_LENGTH,
             "description": (
-                "Triple selector: the edge's `graph_edge.kind`. Must "
+                "Triple selector: the edge's `graph_edge.kind` (any "
+                "lowercase kind slug; the vocabulary is open). Must "
                 "appear together with `from_name` and `to_name`."
             ),
         },

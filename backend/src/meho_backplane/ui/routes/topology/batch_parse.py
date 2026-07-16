@@ -19,7 +19,7 @@ list of ``{from, kind, to, note?, evidence_url?}`` rows, where ``from`` /
 resolves the paste-vs-upload precedence, decodes the bytes, and coerces every
 row into a :class:`~meho_backplane.topology.bulk_import.BulkImportRow`; the
 ``kind`` is forwarded verbatim so the service's per-row ``invalid_bulk``
-aggregation surfaces an out-of-vocabulary kind alongside every other bad row.
+aggregation surfaces a malformed kind slug alongside every other bad row.
 """
 
 from __future__ import annotations
@@ -110,9 +110,10 @@ def _row_from_mapping(row: Any, *, index: int) -> BulkImportRow:
 
     Validates the row is a mapping carrying ``from`` / ``kind`` / ``to`` and
     coerces the endpoints + optional ``note`` / ``evidence_url``. The
-    ``kind`` is forwarded verbatim — the service canonicalises it against
-    :class:`~meho_backplane.db.models.GraphEdgeKind` and aggregates an
-    out-of-vocabulary kind into the per-row ``invalid_bulk`` error, so the
+    ``kind`` is forwarded verbatim — the service validates it against the
+    open slug grammar
+    (:data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`) and aggregates a
+    malformed kind into the per-row ``invalid_bulk`` error, so the
     panel surfaces it alongside every other bad row rather than aborting here
     on the first one.
 

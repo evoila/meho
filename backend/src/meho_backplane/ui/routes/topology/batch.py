@@ -150,9 +150,10 @@ _EDGE_CHANGED_EVENT = "meho:topology-edge-changed"
 #: ``targets.yaml`` import surface's ``_YAML_MAX_BYTES``.
 _BULK_MAX_BYTES = 256 * 1024
 
-#: The closed edge-kind vocabulary surfaced to the panel (single source of
-#: truth — a future widening of :class:`GraphEdgeKind` lands in the panel's
-#: hint list for free).
+#: The well-known edge kinds surfaced to the panel's hint list. The
+#: vocabulary is open (T1 #2534) — any valid kind slug is accepted per
+#: row — so this list is advisory (single source of truth: a future
+#: widening of :class:`GraphEdgeKind` lands in the hint list for free).
 _EDGE_KIND_OPTIONS = [k.value for k in GraphEdgeKind]
 
 

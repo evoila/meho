@@ -157,29 +157,29 @@
     role="search"
     aria-label="Filter topology nodes"
   >
-    <div class="card-body grid gap-3 md:grid-cols-4">
+    <div class="card-body grid gap-3 md:grid-cols-4 md:items-end">
       <input type="hidden" name="view" value="graph" />
-      <label class="form-control md:col-span-2">
-        <span class="label-text">Search by name</span>
+      <label class="flex flex-col gap-1 md:col-span-2">
+        <span class="text-sm font-medium">Search by name</span>
         <input
           type="search"
           name="q"
           value="{{ name_filter }}"
           placeholder="Substring match (case-insensitive)"
-          class="input input-bordered input-sm"
+          class="input input-sm w-full"
           aria-label="Filter nodes by name"
         />
       </label>
-      <label class="form-control">
-        <span class="label-text">Kind</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Kind</span>
         <select
           name="kind"
-          class="select select-bordered select-sm"
+          class="select select-sm w-full"
           aria-label="Filter nodes by kind"
         >
           <option value="">All kinds</option>
-          {# ``node_kind_options`` is the closed enum
-             (``_GRAPH_NODE_KINDS``) the route handler ships -- single
+          {# ``node_kind_options`` is the well-known set
+             (``WELL_KNOWN_NODE_KINDS``) the route handler ships -- single
              source of truth shared with the T1 tabular surface. -#}
           {% for option in node_kind_options %}
             <option value="{{ option }}" {% if option == kind_filter %}selected{% endif %}>
@@ -188,10 +188,11 @@
           {% endfor %}
         </select>
       </label>
-      <div class="form-control">
-        <span class="label-text">&nbsp;</span>
-        <button type="submit" class="btn btn-sm btn-primary">Apply</button>
-      </div>
+      {#- ``self-end`` bottom-aligns the button with the search / kind
+          controls (whose columns are taller by one label row);
+          ``justify-self-end`` right-aligns it and ``w-1/2`` gives it the
+          requested half-column width. -#}
+      <button type="submit" class="btn btn-sm btn-primary w-1/2 self-end justify-self-end">Apply</button>
     </div>
   </form>
 

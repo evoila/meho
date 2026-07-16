@@ -39,7 +39,12 @@ from typing import Any, Final
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import _GRAPH_NODE_KINDS
+from meho_backplane.db.models import (
+    KIND_SLUG_MAX_LENGTH,
+    KIND_SLUG_MIN_LENGTH,
+    KIND_SLUG_PATTERN,
+    WELL_KNOWN_NODE_KINDS,
+)
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.topology.nodes import (
@@ -52,12 +57,12 @@ __all__: list[str] = []
 
 _CREATE_NODE_TOOL_NAME: Final[str] = "meho.topology.create_node"
 
-#: Closed v0.2 graph-node vocabulary, materialised once at module
-#: load. Sourced from :data:`_GRAPH_NODE_KINDS` so a future widening of
-#: the kind set surfaces in the inputSchema enum automatically — same
-#: lock-step discipline ``mcp.tools.topology`` uses for
-#: :data:`_EDGE_KIND_VALUES`.
-_NODE_KIND_VALUES: Final[list[str]] = sorted(_GRAPH_NODE_KINDS)
+#: Well-known graph-node kinds, materialised once at module load.
+#: Sourced from :data:`WELL_KNOWN_NODE_KINDS` so the description's
+#: suggestion list tracks the documented core set automatically. The
+#: vocabulary is open (T1 #2534): the schema constrains `kind` by slug
+#: pattern, not by membership.
+_NODE_KIND_VALUES: Final[list[str]] = sorted(WELL_KNOWN_NODE_KINDS)
 
 
 _CREATE_NODE_INPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -65,13 +70,18 @@ _CREATE_NODE_INPUT_SCHEMA: Final[dict[str, Any]] = {
     "properties": {
         "kind": {
             "type": "string",
-            "enum": _NODE_KIND_VALUES,
+            "pattern": KIND_SLUG_PATTERN,
+            "minLength": KIND_SLUG_MIN_LENGTH,
+            "maxLength": KIND_SLUG_MAX_LENGTH,
             "description": (
-                "Closed v0.2 graph-node-kind vocabulary. The four "
-                "auto-discoverable kinds (`target`, `vm`, `host`, "
-                "`pod`, ...) are accepted here too — manual seeds are "
-                "useful when an agent needs to assert a curated edge "
-                "against a target that has not yet been refreshed. "
+                "Node kind: a lowercase slug (letters/digits joined "
+                "by `.`, `_` or `-`; 2-63 chars). The vocabulary is "
+                "open — any slug matching the pattern is accepted — "
+                "but prefer a well-known kind when one fits: "
+                + ", ".join(f"`{k}`" for k in _NODE_KIND_VALUES)
+                + ". Novel kinds (`dns-record`, `keycloak-realm`, "
+                "`database`, ...) are the right call when no "
+                "well-known kind describes the resource class. "
                 "Inner-graph kinds like `vault-role`, `vault-mount`, "
                 "`principal` are the canonical use case: those rows "
                 "cannot be auto-discovered (no probe walks the Vault "
@@ -157,17 +167,18 @@ async def _create_node_handler(
     """Dispatch a ``meho.topology.create_node`` call to :func:`create_or_get_node`.
 
     The dispatcher has already jsonschema-validated *arguments* against
-    :data:`_CREATE_NODE_INPUT_SCHEMA`, so ``kind`` is guaranteed to be
-    in the closed vocabulary and ``name`` is guaranteed non-empty.
+    :data:`_CREATE_NODE_INPUT_SCHEMA`, so ``kind`` is guaranteed to
+    match the slug pattern and ``name`` is guaranteed non-empty.
     Tenant scope comes from *operator* inside the service — never from
     *arguments* (``additionalProperties: false`` already rejects a
     smuggled ``tenant_id`` at the schema layer).
 
     :class:`InvalidNodeKindError` is structurally unreachable from this
-    front — ``kind`` is enum-pinned by the inputSchema — but the catch
-    is retained as a belt-and-suspenders guard against a future enum
-    drift between :data:`_GRAPH_NODE_KINDS` and the cached
-    :data:`_NODE_KIND_VALUES`.
+    front — ``kind`` is pattern-pinned by the inputSchema and the
+    service validates the same grammar — but the catch is retained as
+    a belt-and-suspenders guard against a future drift between the
+    schema's ``pattern`` and the service-side
+    :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:

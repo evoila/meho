@@ -94,11 +94,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Final
+from typing import Annotated, Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
@@ -109,7 +109,14 @@ from meho_backplane.connectors import (
     NoMatchingConnector,
 )
 from meho_backplane.db.engine import get_raw_session
-from meho_backplane.db.models import GraphEdge, GraphEdgeKind, GraphNode
+from meho_backplane.db.models import (
+    KIND_SLUG_MAX_LENGTH,
+    KIND_SLUG_MIN_LENGTH,
+    KIND_SLUG_PATTERN,
+    GraphEdge,
+    GraphEdgeKind,
+    GraphNode,
+)
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.topology.annotate import (
     AutoEdgeDeletionError,
@@ -707,15 +714,35 @@ class _EdgeEndpoint(BaseModel):
         return NodeRef(name=self.name, kind=self.kind)
 
 
+#: Wire type for an edge kind under the open vocabulary (T1 #2534):
+#: any lowercase slug matching
+#: :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN` (2-63 chars).
+#: Pydantic enforces the same grammar the service-side
+#: :func:`~meho_backplane.db.models.is_valid_kind_slug` checks, so a
+#: malformed kind 422s at the HTTP boundary while a novel-but-valid
+#: kind (``resolves-to``, ``same-as``) passes straight through. The
+#: constraints surface as ``pattern`` / ``minLength`` / ``maxLength``
+#: in the generated OpenAPI schema (the old closed ``GraphEdgeKind``
+#: enum component becomes a plain constrained string on the wire).
+_EdgeKindSlug = Annotated[
+    str,
+    StringConstraints(
+        min_length=KIND_SLUG_MIN_LENGTH,
+        max_length=KIND_SLUG_MAX_LENGTH,
+        pattern=KIND_SLUG_PATTERN,
+    ),
+]
+
+
 class _AnnotateEdgeRequest(BaseModel):
     """Inbound body for ``POST /api/v1/topology/edges``.
 
-    ``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind
+    ``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind
     fails Pydantic validation (HTTP 422) **before** the service runs —
     the service still raises :class:`InvalidEdgeKindError` for
     non-route callers, but at the HTTP boundary the operator gets the
-    standard FastAPI validation error shape (with the candidate list in
-    the error context) rather than a 500-shaped diagnostic.
+    standard FastAPI validation error shape (with the pattern in the
+    error context) rather than a 500-shaped diagnostic.
 
     The keyword ``from`` is reserved in Python so the attribute name is
     ``from_endpoint``; ``alias="from"`` keeps the wire shape the issue
@@ -732,7 +759,7 @@ class _AnnotateEdgeRequest(BaseModel):
     )
 
     from_endpoint: _EdgeEndpoint = Field(alias="from")
-    kind: GraphEdgeKind
+    kind: _EdgeKindSlug
     to_endpoint: _EdgeEndpoint = Field(alias="to")
     note: str | None = Field(default=None, max_length=2000)
     evidence_url: str | None = Field(default=None, max_length=2000)
@@ -784,24 +811,25 @@ async def annotate_edge_route(
             session,
             operator,
             body.from_endpoint.to_ref(),
-            body.kind.value,
+            body.kind,
             body.to_endpoint.to_ref(),
             note=body.note,
             evidence_url=body.evidence_url,
         )
     except InvalidEdgeKindError as exc:
-        # The Pydantic ``kind: GraphEdgeKind`` field rejects unknown
+        # The Pydantic ``kind: _EdgeKindSlug`` field rejects malformed
         # kinds at the boundary, so this branch only ever fires for a
-        # mid-flight enum widening where Pydantic accepts a value the
-        # service-layer ``_validate_kind`` does not yet recognise.
-        # Re-raise as 422 with the candidate list so the operator's
-        # diagnostic still matches the Pydantic-rejected case.
+        # drift between the wire pattern and the service-layer
+        # ``_validate_kind`` grammar. Re-raise as 422 with the pattern
+        # and the well-known suggestions so the operator's diagnostic
+        # still matches the Pydantic-rejected case.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "error": "invalid_edge_kind",
                 "kind": exc.kind,
-                "kinds": sorted(k.value for k in GraphEdgeKind),
+                "pattern": KIND_SLUG_PATTERN,
+                "well_known_kinds": sorted(k.value for k in GraphEdgeKind),
             },
         ) from exc
     except AmbiguousNodeError as exc:
@@ -885,7 +913,7 @@ async def unannotate_edge_route(
 
 @router.get("/edges", response_model=list[TopologyEdge])
 async def list_edges_route(
-    kind: GraphEdgeKind | None = Query(default=None),
+    kind: _EdgeKindSlug | None = Query(default=None),
     source: str | None = Query(default=None, pattern="^(auto|curated)$"),
     from_name: str | None = Query(default=None, alias="from"),
     to_name: str | None = Query(default=None, alias="to"),
@@ -907,8 +935,9 @@ async def list_edges_route(
     Python keyword); the tenant boundary comes from ``operator.tenant_id``
     and is non-overrideable by query string or body.
 
-    ``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind
-    is rejected at the HTTP boundary (422) before the helper runs;
+    ``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind
+    is rejected at the HTTP boundary (422) before the helper runs
+    (any well-formed slug is a legal filter — the vocabulary is open);
     ``source`` is constrained to the two ``graph_edge.source`` values
     by a regex pattern; ``conflicts=true`` forwards
     ``conflicts_only=True`` to surface the recoverability listing for
@@ -936,7 +965,7 @@ async def list_edges_route(
         edges = await list_edges(
             session,
             operator.tenant_id,
-            kind=kind.value if kind is not None else None,
+            kind=kind,
             source=source,
             from_ref=from_name,
             to_ref=to_name,
@@ -960,7 +989,7 @@ class _BulkImportEdge(BaseModel):
     Same wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,
     note?, evidence_url?}``) — ``from`` is bound via ``alias`` because
     it is a Python keyword. ``kind`` is typed against
-    :class:`GraphEdgeKind` so an unknown kind fails at the boundary
+    :data:`_EdgeKindSlug` so a malformed kind fails at the boundary
     (HTTP 422) before any service call runs, and the per-row error
     surfaces inside the standard FastAPI validation envelope with the
     row index in ``loc``. ``extra="forbid"`` rejects typo'd keys so a
@@ -971,7 +1000,7 @@ class _BulkImportEdge(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
     from_endpoint: _EdgeEndpoint = Field(alias="from")
-    kind: GraphEdgeKind
+    kind: _EdgeKindSlug
     to_endpoint: _EdgeEndpoint = Field(alias="to")
     note: str | None = Field(default=None, max_length=2000)
     evidence_url: str | None = Field(default=None, max_length=2000)
@@ -1086,7 +1115,7 @@ async def bulk_import_edges_route(
     rows = [
         BulkImportRow(
             from_ref=edge.from_endpoint.to_ref(),
-            kind=edge.kind.value,
+            kind=edge.kind,
             to_ref=edge.to_endpoint.to_ref(),
             note=edge.note,
             evidence_url=edge.evidence_url,

@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — agent-principal Keycloak-orphan rollback + bounded name (#2523)
+
+- Close the two credential-lifecycle gaps in the agent-principal register
+  path, mirroring the runner-principal fix (#2502 / PR #2508). **(1) Orphan
+  rollback:** previously, if `create_client` succeeded but the following
+  `get_client_secret` failed, the just-created, enabled Keycloak client was
+  left orphaned — a live, token-issuing identity un-listable and un-revocable
+  through MEHO — because the `except` only handled the 409-conflict path. The
+  Phase-1 create+secret-capture is now extracted into a
+  `_provision_keycloak_client` helper whose `except BaseException` arm deletes
+  the just-created client on **any** post-create failure before re-raising
+  (its own cleanup errors are caught + logged so they never mask the original
+  cause), honouring the module's "Keycloak failure → no DB row" contract.
+  **(2) Bounded name:** `AgentPrincipalCreate.name` gains a `max_length`
+  bound sourced from the shared `NAME_MAX_LENGTH = 128` constant reused from
+  the runner path (not a second literal), applied to the intake `Field` **and**
+  the show/revoke `Path` params so intake and by-name lookup cannot drift — a
+  name past 128 chars is now rejected 422 at the schema boundary instead of
+  registering into an unreachable kill switch —
+  `backend/src/meho_backplane/auth/agent_principals.py`,
+  `backend/src/meho_backplane/api/v1/agent_principals.py` (#2523).
+
 ### Security — gcloud docstring reword to clear FP secret alert (#2493)
 
 - Reword the SA-JSON-key-refusal docstring in

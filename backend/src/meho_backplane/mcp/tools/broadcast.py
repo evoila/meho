@@ -96,8 +96,10 @@ from meho_backplane.broadcast import (
     TTL_MIN_MINUTES,
     WORK_REF_MAX_CHARS,
     AgentAnnouncementEvent,
+    AnnounceRateLimitError,
     InvalidSinceError,
     PlannedOpClass,
+    enforce_announce_rate_limit,
     get_broadcast_blocking_client,
     list_recent_events_strict,
     publish_agent_announcement,
@@ -109,7 +111,7 @@ from meho_backplane.broadcast.history import (
     stream_key,
 )
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
-from meho_backplane.mcp.server import McpInvalidParamsError
+from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
 __all__: list[str] = []
 
@@ -611,7 +613,28 @@ async def _handler_announce(
         raise McpInvalidParamsError(
             "phase: must be one of 'start', 'update', 'completion'",
         )
+    # Parse + validate the structured intent claims (T1 #2544) first, so
+    # a malformed request from a looping caller still gets a clean
+    # ``-32602`` rather than being masked by the rate-limit gate below.
     claims = _parse_announce_claims(arguments)
+    # Per-principal flood control BEFORE the publish (G6.5-T6 #2546): the
+    # tenant stream is count-trimmed (``BROADCAST_MAXLEN`` = 10000), so a
+    # looping principal could otherwise evict the whole tenant's
+    # coordination window in a burst. Runs after cheap arg validation but
+    # before the expensive publish. Over-limit surfaces as a typed
+    # ``-32000`` rate-limited error carrying the window details -- the
+    # fail-loud announce contract is preserved (no silent drop).
+    try:
+        await enforce_announce_rate_limit(operator.tenant_id, operator.sub)
+    except AnnounceRateLimitError as exc:
+        raise McpRateLimitedError(
+            str(exc),
+            data={
+                "limit": exc.limit,
+                "window_seconds": exc.window_seconds,
+                "retry_after_seconds": exc.retry_after_seconds,
+            },
+        ) from exc
     return await _publish_agent_announcement_impl(
         operator,
         activity=activity,
@@ -666,7 +689,11 @@ register_mcp_tool(
             "and round-trips through meho.broadcast.recent/watch's "
             "'cursor' arg for verification; 'event_id' is a legacy "
             "alias of the same stream cursor, NOT a durable event "
-            "UUID (announcements carry no UUID)."
+            "UUID (announcements carry no UUID). Announces are "
+            "rate-limited per principal (default 10 per minute); "
+            "exceeding the limit returns a -32000 error naming the "
+            "window and a retry-after -- announce meaningful "
+            "transitions, not a tight loop."
         ),
         inputSchema={
             "type": "object",

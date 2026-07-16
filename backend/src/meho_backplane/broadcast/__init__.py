@@ -56,10 +56,18 @@ from meho_backplane.broadcast.publisher import (
     publish_agent_announcement,
     publish_event,
 )
+from meho_backplane.broadcast.rate_limit import (
+    ANNOUNCE_RATE_LIMIT_WINDOW_SECONDS,
+    BROADCAST_ANNOUNCE_RATE_LIMITED_TOTAL,
+    AnnounceRateLimitError,
+    enforce_announce_rate_limit,
+)
 
 __all__ = [
     "ACTIVITY_MAX_CHARS",
+    "ANNOUNCE_RATE_LIMIT_WINDOW_SECONDS",
     "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
+    "BROADCAST_ANNOUNCE_RATE_LIMITED_TOTAL",
     "BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS",
     "BROADCAST_EVENTS_PUBLISHED_TOTAL",
     "BROADCAST_MAXLEN",
@@ -73,6 +81,7 @@ __all__ = [
     "TTL_MIN_MINUTES",
     "WORK_REF_MAX_CHARS",
     "AgentAnnouncementEvent",
+    "AnnounceRateLimitError",
     "BroadcastEvent",
     "InvalidSinceError",
     "PlannedOpClass",
@@ -81,6 +90,7 @@ __all__ = [
     "compute_effective_broadcast_detail",
     "dispose_broadcast_blocking_client",
     "dispose_broadcast_client",
+    "enforce_announce_rate_limit",
     "get_broadcast_blocking_client",
     "get_broadcast_client",
     "invalidate_tenant_cache",

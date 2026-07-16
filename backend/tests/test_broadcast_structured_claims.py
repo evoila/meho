@@ -61,11 +61,28 @@ _RUN_ID: UUID = UUID("99999999-9999-9999-9999-999999999999")
 
 @pytest.fixture(autouse=True)
 def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Pin a stub broadcast URL + reset the cached client around each test."""
+    """Pin a stub broadcast URL + reset the cached client around each test.
+
+    Also neutralises the per-principal announce rate limit (G6.5-T6
+    #2546) so these wire tests -- which mock ``xadd`` and never open a
+    socket -- don't trip the limiter's real ``INCR``/``EXPIRE``. The
+    ``0`` env knob documents intent, but the load-bearing guard is the
+    ``enforce_announce_rate_limit`` patch: the env->``get_settings``
+    route alone is fragile under the app fixture, which can repopulate
+    the ``lru_cache`` with the default limit after this fixture clears
+    it (passed single-process locally, tripped a real socket ->
+    ``-32603 ConnectionError`` under xdist ``loadscope`` in CI). Patching
+    the function bypasses settings caching entirely.
+    """
     monkeypatch.setenv("BROADCAST_REDIS_URL", "redis://broadcast.test:6379")
+    monkeypatch.setenv("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "0")
     get_settings.cache_clear()
     reset_broadcast_client_for_testing()
-    yield
+    with patch(
+        "meho_backplane.mcp.tools.broadcast.enforce_announce_rate_limit",
+        new=AsyncMock(return_value=None),
+    ):
+        yield
     reset_broadcast_client_for_testing()
     get_settings.cache_clear()
 

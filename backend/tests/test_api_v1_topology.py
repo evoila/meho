@@ -146,6 +146,7 @@ def _make_node(name: str, kind: str = "host", depth: int = 0) -> TopologyNode:
         id=uuid.uuid4(),
         kind=kind,
         name=name,
+        source="auto",
         properties={"seeded": name},
         depth=depth,
         via_edge_kind=None if depth == 0 else "runs-on",

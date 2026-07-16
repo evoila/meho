@@ -25,11 +25,14 @@ the bootstrap gap. It mirrors the
   ``graph_node_tenant_kind_name_idx`` unique key drives the lookup;
   a repeat call refreshes ``last_seen`` + merges ``properties`` instead
   of erroring with a unique-constraint violation. Manual seeds set
-  ``discovered_by=operator.sub`` (the operator is the canonical author);
-  an idempotent re-seed of an already-curated row keeps that author,
-  while a re-seed over an auto-discovered row promotes
-  ``discovered_by`` to the operator (same shape as
-  :func:`annotate_edge`'s auto→curated promotion).
+  ``source='curated'`` + ``discovered_by=operator.sub`` (the operator
+  is the canonical author); an idempotent re-seed of an
+  already-curated row keeps that author, while a re-seed over an
+  auto-discovered row promotes it to ``source='curated'`` +
+  ``discovered_by=operator.sub`` (same shape as
+  :func:`annotate_edge`'s auto→curated promotion; #2536). The
+  ``source`` column is what the refresh service keys its curated-node
+  durability discipline on.
 * **Audit + broadcast.** One ``audit_log`` row (``op_id=
   'topology.create_node'``, ``op_class='write'``) + one broadcast event
   per call. ``op_class`` is set explicitly: ``.create_node`` is not in
@@ -297,6 +300,9 @@ async def _publish(
         )
 
 
+# code-quality-allow: pre-existing >100-line function (210 lines on
+# main, ~140 of them contract docstring); #2536 adds only the
+# source='curated' stamp + promotion flip.
 async def create_or_get_node(
     session: AsyncSession,
     operator: Operator,
@@ -322,19 +328,20 @@ async def create_or_get_node(
     Idempotency keyed on the unique
     ``graph_node_tenant_kind_name_idx`` (``(tenant_id, kind, name)``):
 
-    * **Absent row** → insert with ``discovered_by=operator.sub``
+    * **Absent row** → insert with ``source='curated'`` +
+      ``discovered_by=operator.sub``
       (operator is the canonical author for manual seeds),
       ``target_id=None`` (manual seeds reference targets by separate
-      annotation; the refresh service is the only path that adopts a
-      node onto a target), ``properties = {note, evidence_url,
+      annotation; the refresh service adopts only auto nodes onto a
+      target), ``properties = {note, evidence_url,
       seeded_by, seeded_at}``, ``first_seen = last_seen = now``.
     * **Existing row** → merge the four manual-seed property keys
       (``note``, ``evidence_url``, ``seeded_by``, ``seeded_at``) onto
       the existing ``properties`` JSONB (auto-discovered keys like
       ``status``, ``phase`` are preserved), refresh ``last_seen``,
-      promote ``discovered_by`` to the operator iff the existing row
-      was probe-derived (mirrors the
-      :func:`annotate_edge` auto→curated promotion). Returns
+      promote to ``source='curated'`` + ``discovered_by=operator.sub``
+      iff the existing row was probe-derived (mirrors the
+      :func:`annotate_edge` auto→curated promotion; #2536). Returns
       ``was_created=False``.
 
     Writes one ``audit_log`` row (``op_id='topology.create_node'``,
@@ -421,6 +428,7 @@ async def create_or_get_node(
                 kind=canonical_kind,
                 name=name,
                 target_id=None,
+                source="curated",
                 properties=dict(seed_props),
                 discovered_by=operator.sub,
                 first_seen=now,
@@ -448,15 +456,18 @@ async def create_or_get_node(
                 merged[key] = value
             existing.properties = merged
             existing.last_seen = now
-            # Promote ``discovered_by`` iff the row was probe-derived.
-            # An auto-discovered row that the operator now seeds
-            # becomes operator-authored from this call onward — same
-            # shape as :func:`annotate_edge`'s auto→curated promotion.
-            # The promoted node is still recognized by future refresh
-            # cycles (refresh keys on ``(tenant_id, kind, name)``, not
-            # on ``discovered_by``) but the audit trail credits the
-            # operator as the canonical author.
-            if existing.discovered_by not in {operator.sub}:
+            # Promote the row to ``source='curated'`` iff it was
+            # probe-derived, and credit the operator as the canonical
+            # author — same shape as :func:`annotate_edge`'s
+            # auto→curated promotion (#2536). From this call onward
+            # the refresh service treats the node as operator-owned:
+            # a probe re-observation bumps ``last_seen`` only (no
+            # property overwrite, no ``target_id`` adoption) and no
+            # refresh soft-deletes it. The promoted node is still
+            # recognized by future refresh cycles (refresh keys on
+            # ``(tenant_id, kind, name)``, not on ``source``).
+            if existing.source != "curated":
+                existing.source = "curated"
                 existing.discovered_by = operator.sub
             node = existing
             was_created = False

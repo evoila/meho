@@ -18,6 +18,12 @@ is the single write path into the topology graph:
    * Soft-delete (``last_seen = NULL``) rows in the DB but absent from
      the snapshot.
 
+   ``source='curated'`` rows (operator-seeded nodes, operator-asserted
+   edges) are exempt from the property/adoption half of that contract:
+   a probe re-observation bumps ``last_seen`` only, and no refresh
+   ever soft-deletes a curated node (#2536; edge discipline since
+   #595).
+
    Nodes are keyed by ``(kind, name)`` (the ``graph_node`` natural key
    within a tenant); edges by ``(from_kind, from_name, to_kind,
    to_name, kind)``. Edge endpoints are mapped to ``graph_node.id`` via
@@ -306,6 +312,7 @@ def _insert_discovered_node(
         kind=hint.kind,
         name=hint.name,
         target_id=target_id,
+        source="auto",
         properties=dict(hint.properties),
         discovered_by=discovered_by,
         first_seen=now,
@@ -347,10 +354,11 @@ def _update_existing_node(
     returns ``False`` -- the row is touched but neither counted nor
     recorded.
 
-    Adopts the row onto this target: a node first seen as a manual
-    annotation (``target_id IS NULL``) or discovered by another
-    target is now observed by *this* target's probe, so this target
-    owns its lifecycle (and its future soft-delete) going forward.
+    **Auto rows only** (the caller dispatches ``source='curated'``
+    rows to :func:`_refresh_curated_node` -- #2536). Adopts the row
+    onto this target: an auto node discovered by another target is
+    now observed by *this* target's probe, so this target owns its
+    lifecycle (and its future soft-delete) going forward.
     """
     is_meaningful_update = (
         row.last_seen is None
@@ -376,6 +384,52 @@ def _update_existing_node(
             valid_from=now,
         )
     return is_meaningful_update
+
+
+def _refresh_curated_node(
+    session: AsyncSession,
+    *,
+    row: GraphNode,
+    tenant_id: uuid.UUID,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> bool:
+    """Bump ``last_seen`` on a curated node; return ``True`` if it was a
+    meaningful change.
+
+    Node-side mirror of :func:`_refresh_curated_edge` (#2536). Curated
+    nodes are operator-owned: the probe's view of the row is not
+    authoritative. The refresh only records that the probe still
+    observes the node (``last_seen`` bump); the operator-supplied
+    ``note`` / ``evidence_url`` / ``seeded_*`` properties stay
+    untouched and the row is **not** adopted onto the refreshing
+    target (``target_id`` unchanged). Without this branch
+    :func:`_update_existing_node` overwrote ``properties`` wholesale
+    and claimed ``target_id``, silently destroying exactly the curated
+    cross-system context the graph exists to hold.
+
+    A *resurrected* curated row (was soft-deleted, now re-observed)
+    is operator-observable and warrants an ``updated`` history row.
+    A pure heartbeat (already-live curated node re-seen) is not
+    counted and no history row fires.
+    """
+    resurrected = row.last_seen is None
+    if resurrected:
+        before = node_snapshot(row)
+        row.last_seen = now
+        record_node_change(
+            session,
+            node_id=row.id,
+            tenant_id=tenant_id,
+            change_kind=GraphHistoryChangeKind.UPDATED,
+            before=before,
+            after=node_snapshot(row),
+            audit_id=audit_id,
+            valid_from=now,
+        )
+        return True
+    row.last_seen = now
+    return False
 
 
 def _soft_remove_node(
@@ -405,6 +459,56 @@ def _soft_remove_node(
         audit_id=audit_id,
         valid_from=now,
     )
+
+
+def _soft_delete_missing_nodes(
+    session: AsyncSession,
+    *,
+    existing_by_key: dict[tuple[str, str], GraphNode],
+    discovered_by_key: dict[tuple[str, str], NodeHint],
+    tenant_id: uuid.UUID,
+    target_id: uuid.UUID,
+    now: datetime,
+    audit_id: uuid.UUID,
+) -> int:
+    """Soft-delete this target's auto nodes absent from the snapshot.
+
+    Returns the number of freshly soft-deleted rows. The pass walks
+    every loaded candidate row and skips, in order:
+
+    * rows the snapshot still asserts (not missing);
+    * ``source='curated'`` rows — curated nodes are never soft-deleted
+      by a refresh: no probe owns their lifecycle. This guard is
+      load-bearing for rows promoted from auto (a
+      :func:`~meho_backplane.topology.nodes.create_or_get_node`
+      re-seed over a probe-discovered row keeps its historical
+      ``target_id``, so the ownership check alone would not skip
+      them). #2536;
+    * rows owned by another target (or an unowned manual annotation) —
+      absence from *this* target's snapshot is expected, not a
+      removal; the owning target's own refresh decides their fate;
+    * rows already soft-deleted on a prior refresh (not a fresh
+      removal).
+    """
+    removed = 0
+    for key, row in existing_by_key.items():
+        if key in discovered_by_key:
+            continue
+        if row.source == "curated":
+            continue
+        if row.target_id != target_id:
+            continue
+        if row.last_seen is None:
+            continue
+        _soft_remove_node(
+            session,
+            row=row,
+            tenant_id=tenant_id,
+            now=now,
+            audit_id=audit_id,
+        )
+        removed += 1
+    return removed
 
 
 async def _reconcile_nodes(
@@ -445,7 +549,7 @@ async def _reconcile_nodes(
         _node_key(n.kind, n.name): n for n in nodes
     }
 
-    added = updated = removed = 0
+    added = updated = 0
     live_key_to_id: dict[tuple[str, str], uuid.UUID] = {}
     all_key_to_id: dict[tuple[str, str], uuid.UUID] = {
         key: row.id for key, row in existing_by_key.items()
@@ -467,6 +571,21 @@ async def _reconcile_nodes(
             all_key_to_id[key] = new_id
             added += 1
             continue
+        if row.source == "curated":
+            # Operator-owned row re-observed by a probe: heartbeat
+            # only -- no property overwrite, no target adoption
+            # (mirrors the edge pass's _refresh_curated_edge branch,
+            # #2536).
+            if _refresh_curated_node(
+                session,
+                row=row,
+                tenant_id=tenant_id,
+                now=now,
+                audit_id=audit_id,
+            ):
+                updated += 1
+            live_key_to_id[key] = row.id
+            continue
         if _update_existing_node(
             session,
             row=row,
@@ -479,25 +598,15 @@ async def _reconcile_nodes(
             updated += 1
         live_key_to_id[key] = row.id
 
-    for key, row in existing_by_key.items():
-        if key in discovered_by_key:
-            continue
-        if row.target_id != target_id:
-            # Owned by another target (or a manual annotation): not in
-            # this target's snapshot is expected, not a removal. The
-            # owning target's own refresh decides its fate.
-            continue
-        if row.last_seen is None:
-            # Already soft-deleted on a prior refresh; not a fresh removal.
-            continue
-        _soft_remove_node(
-            session,
-            row=row,
-            tenant_id=tenant_id,
-            now=now,
-            audit_id=audit_id,
-        )
-        removed += 1
+    removed = _soft_delete_missing_nodes(
+        session,
+        existing_by_key=existing_by_key,
+        discovered_by_key=discovered_by_key,
+        tenant_id=tenant_id,
+        target_id=target_id,
+        now=now,
+        audit_id=audit_id,
+    )
 
     return added, updated, removed, live_key_to_id, all_key_to_id
 

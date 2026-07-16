@@ -195,18 +195,19 @@ _DEFAULT_MAX_HOPS = 8
 def _row_to_node(row: Row[Any]) -> TopologyNode:
     """Map a traversal result row to a :class:`TopologyNode`.
 
-    The recursive CTE projects exactly ``id, kind, name, properties,
-    depth, via_edge_kind``; ``is_cycle`` / ``path`` are CYCLE-clause
-    bookkeeping filtered out in SQL and never selected into the row.
-    ``properties`` arrives as a ``dict`` from JSONB on asyncpg (or a
-    JSON string on the rare passthrough); the model's validator
-    freezes it.
+    The recursive CTE projects exactly ``id, kind, name, source,
+    properties, depth, via_edge_kind``; ``is_cycle`` / ``path`` are
+    CYCLE-clause bookkeeping filtered out in SQL and never selected
+    into the row. ``properties`` arrives as a ``dict`` from JSONB on
+    asyncpg (or a JSON string on the rare passthrough); the model's
+    validator freezes it.
     """
     mapping = row._mapping
     return TopologyNode(
         id=mapping["id"],
         kind=mapping["kind"],
         name=mapping["name"],
+        source=mapping["source"],
         properties=mapping["properties"] or {},
         depth=mapping["depth"],
         via_edge_kind=mapping["via_edge_kind"],
@@ -239,6 +240,7 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.id            AS id,
             n.kind          AS kind,
             n.name          AS name,
+            n.source        AS source,
             n.properties    AS properties,
             0               AS depth,
             CAST(NULL AS text) AS via_edge_kind
@@ -251,6 +253,7 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.id,
             n.kind,
             n.name,
+            n.source,
             n.properties,
             w.depth + 1,
             e.kind
@@ -263,10 +266,10 @@ _TRAVERSAL_SQL_REVERSE = text(
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
           AND e.properties->>'superseded_by' IS NULL
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, properties, depth, via_edge_kind
+    SELECT id, kind, name, source, properties, depth, via_edge_kind
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, properties, depth, via_edge_kind
+            id, kind, name, source, properties, depth, via_edge_kind
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
@@ -289,6 +292,7 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.id            AS id,
             n.kind          AS kind,
             n.name          AS name,
+            n.source        AS source,
             n.properties    AS properties,
             0               AS depth,
             CAST(NULL AS text) AS via_edge_kind
@@ -301,6 +305,7 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.id,
             n.kind,
             n.name,
+            n.source,
             n.properties,
             w.depth + 1,
             e.kind
@@ -313,10 +318,10 @@ _TRAVERSAL_SQL_FORWARD = text(
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
           AND e.properties->>'superseded_by' IS NULL
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, properties, depth, via_edge_kind
+    SELECT id, kind, name, source, properties, depth, via_edge_kind
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, properties, depth, via_edge_kind
+            id, kind, name, source, properties, depth, via_edge_kind
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
@@ -600,7 +605,7 @@ _PATH_SQL = text(
 # sequence.
 _PATH_NODES_SQL = text(
     """
-    SELECT id, kind, name, properties
+    SELECT id, kind, name, source, properties
     FROM graph_node
     WHERE tenant_id = :tenant_id
       AND id = ANY(:node_ids)
@@ -627,6 +632,7 @@ def _build_path_nodes(
                 id=m["id"],
                 kind=m["kind"],
                 name=m["name"],
+                source=m["source"],
                 properties=m["properties"] or {},
                 depth=position,
                 via_edge_kind=None if position == 0 else edge_kinds[position - 1],
@@ -1047,10 +1053,13 @@ class TopologyNodeListEntry:
       graph nodes; populated for nodes that are themselves a
       registered target). Drives the "recent ops" filter on the
       detail drawer — only target-backed nodes carry audit rows.
+    * ``source`` — ``'auto'`` (probe-derived) or ``'curated'``
+      (operator-seeded / promoted; #2536).
     * ``first_seen`` / ``last_seen`` — observation timestamps.
       ``last_seen`` is NULL after a refresh soft-delete; the helper
       excludes such rows by default.
-    * ``discovered_by`` — the connector slug or ``curated`` marker.
+    * ``discovered_by`` — the connector slug or the seeding
+      operator's JWT ``sub``.
     * ``children_count`` — number of inbound non-soft-deleted edges
       (``graph_edge.to_node_id = node.id AND last_seen IS NOT NULL``).
       The same count :func:`find_dependents` walks. ``0`` for a leaf.
@@ -1064,6 +1073,7 @@ class TopologyNodeListEntry:
         "kind",
         "last_seen",
         "name",
+        "source",
         "target_id",
     )
 
@@ -1074,6 +1084,7 @@ class TopologyNodeListEntry:
         kind: str,
         name: str,
         target_id: UUID | None,
+        source: str,
         first_seen: datetime,
         last_seen: datetime | None,
         discovered_by: str,
@@ -1083,12 +1094,16 @@ class TopologyNodeListEntry:
         self.kind = kind
         self.name = name
         self.target_id = target_id
+        self.source = source
         self.first_seen = first_seen
         self.last_seen = last_seen
         self.discovered_by = discovered_by
         self.children_count = children_count
 
 
+# code-quality-allow: pre-existing >100-line function (147 lines on
+# main, ~65 of them parameter docstring); #2536 adds only the `source`
+# column to the projection + row mapping.
 async def list_nodes(
     session: AsyncSession,
     tenant_id: UUID,
@@ -1198,6 +1213,7 @@ async def list_nodes(
         GraphNode.kind,
         GraphNode.name,
         GraphNode.target_id,
+        GraphNode.source,
         GraphNode.first_seen,
         GraphNode.last_seen,
         GraphNode.discovered_by,
@@ -1229,6 +1245,7 @@ async def list_nodes(
             kind=row.kind,
             name=row.name,
             target_id=row.target_id,
+            source=row.source,
             first_seen=row.first_seen,
             last_seen=row.last_seen,
             discovered_by=row.discovered_by,

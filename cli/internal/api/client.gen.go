@@ -6505,13 +6505,16 @@ type TopologyHistoryResult struct {
 // depth “0“, its immediate dependents/dependencies are depth “1“,
 // transitive ones depth “2“, and so on. “via_edge_kind“ is the
 // “graph_edge.kind“ of the edge used to reach this node, or
-// “None“ for the root (which is reached by no edge).
+// “None“ for the root (which is reached by no edge). “source“
+// is “'auto'“ (probe-derived) or “'curated'“ (operator-seeded /
+// promoted; #2536) — mirrors :attr:`TopologyEdge.source`.
 type TopologyNode struct {
 	Depth       int                     `json:"depth"`
 	Id          openapi_types.UUID      `json:"id"`
 	Kind        string                  `json:"kind"`
 	Name        string                  `json:"name"`
 	Properties  *map[string]interface{} `json:"properties,omitempty"`
+	Source      string                  `json:"source"`
 	ViaEdgeKind *string                 `json:"via_edge_kind"`
 }
 

@@ -218,7 +218,9 @@ The descriptions below match `meho topology annotate --help` verbatim
 — if you grep the CLI source
 ([`cli/internal/cmd/topology/annotate.go`](../../cli/internal/cmd/topology/annotate.go)
 `edgeKindVocabulary`), you'll see the same strings. They are the same
-strings the MCP `inputSchema` rejects unknown kinds against.
+strings the MCP write tools echo as *advisory suggestions* in their
+`kind` description — the `inputSchema` validates the slug pattern
+only, never membership in this table.
 
 | Kind                 | Source       | Description (verbatim from `--help`)                                                       |
 | -------------------- | ------------ | ------------------------------------------------------------------------------------------ |
@@ -237,9 +239,12 @@ Rule of thumb in one line: a row marked **auto** is written by a
 probe — *do not annotate*. A row marked **curated** is invisible to
 probes — annotate it when the relationship exists.
 
-If a kind isn't in the table, the backend will refuse the call at the
-HTTP boundary with **422** and the candidate kinds echoed in
-`detail.kinds` — no need to grep the source to find the spelling.
+A kind that isn't in the table is **not** refused — any valid slug
+(lowercase alphanumeric runs joined by single `.` / `_` / `-`, 2-63
+chars) passes straight through. Only a *malformed* slug is rejected
+at the HTTP boundary with **422**; the error detail carries the slug
+`pattern` plus the well-known kinds under `well_known_kinds` as
+suggestions — no need to grep the source to find a spelling.
 
 ## CLI walkthrough
 
@@ -490,12 +495,13 @@ the `topology` router (`/api/v1/topology` prefix). The full request
 shapes:
 
 - `POST /api/v1/topology/edges` — body
-  `{"from": {"name": str, "kind"?: str}, "kind": GraphEdgeKind, "to":
+  `{"from": {"name": str, "kind"?: str}, "kind": str, "to":
   {"name": str, "kind"?: str}, "note"?: str, "evidence_url"?: str}`.
   Returns `201 TopologyEdge` (the typed Pydantic envelope, same
-  shape `GET /edges` returns). The body's `kind` is typed against
-  the `GraphEdgeKind` enum so an unknown value is rejected with
-  **422** before the service runs. **Role:** `tenant_admin`.
+  shape `GET /edges` returns). The body's `kind` is a slug-patterned
+  string (`KIND_SLUG_PATTERN`, 2-63 chars) so a malformed slug is
+  rejected with **422** before the service runs, while a
+  novel-but-valid kind passes through. **Role:** `tenant_admin`.
 - `DELETE /api/v1/topology/edges/{edge_id}` — returns `204 No
   Content` on success; **409 `auto_edge_deletion`** on an auto row
   with the verbatim remediation message; **404** on a missing /

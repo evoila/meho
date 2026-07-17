@@ -114,6 +114,7 @@ def test_node_provenance_fields_round_trip() -> None:
         id=uuid4(),
         kind="vm",
         name="vm1",
+        source="auto",
         depth=1,
         via_edge_kind="runs-on",
         parent_node_id=parent,

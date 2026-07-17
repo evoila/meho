@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507)
+
+- **Check-runner never-raises hardening (#2505):** a non-`TimeoutError` exception
+  from `dispatch()` now maps to an `unknown` outcome (`reason=dispatch_error`)
+  instead of escaping `_run_evaluation` and stranding the sensor's projection.
+  Corrected the dispatch-identity docstring, which over-claimed the safe-only
+  guarantee holds at dispatch — it is enforced at Sensor *create* time; the
+  runner does not re-validate `safety_level`.
+- **Investigator suppression + key collisions (#2507):** the noise-suppression
+  lookup now uses an exact `(scope, slug)` `recall` instead of a capped substring
+  query that could push the exact entry past its limit and silently fail to
+  suppress a known-noise cause. Work-refs and topology group keys now include the
+  dashboard id / a digest of the `(kind, name)` identity, so causes and dashboards
+  whose names slugify to the same string no longer share a suppression key or an
+  in-flight work-ref.
 ## [0.23.0] - 2026-07-17
 
 ### Added — topology open node/edge kind vocabularies (#2555)

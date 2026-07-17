@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — retire the expired RDC image-push `repository_dispatch` notify
+
+- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
+  `.github/workflows/image.yml` (and its now-dead job-level
+  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
+  renewed, so the step — gated on the secret being present, not valid — failed
+  loud on every `main`/tag push with a `401` while the image build / sign /
+  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
+  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
+  the GitHub Releases feed. The cross-repo handshake docs are marked retired
+  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
+
 ### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507)
 
 - **Check-runner never-raises hardening (#2505):** a non-`TimeoutError` exception

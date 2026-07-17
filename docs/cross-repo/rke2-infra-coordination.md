@@ -31,13 +31,12 @@ the consumer:
    can't merge. This is the per-PR ephemeral-cluster discipline MEHO.X
    never had — every G2.0–G2.6 PR closes the real-target feedback loop
    before merge against a real (not mocked) Kubernetes API.
-2. **`repository_dispatch` deploy trigger** (G2.7-T3, [#51](https://github.com/evoila-bosnia/meho-internal/issues/51)).
-   Every merge to `main` on `evoila/meho` builds, signs, and pushes a
-   new backplane image to GHCR, then dispatches a
-   `repository_dispatch` event to `evoila-bosnia/claude-rdc-hetzner-dc`
-   carrying the new image digest. The consumer side decides whether to
-   roll the dogfooding instance forward (currently: yes, on every
-   green merge).
+2. **`repository_dispatch` deploy trigger** (G2.7-T3, [#51](https://github.com/evoila-bosnia/meho-internal/issues/51))
+   — **RETIRED 2026-07-17** (see Section 3). Every merge to `main` on
+   `evoila/meho` still builds, signs, and pushes a new backplane image to GHCR,
+   but the producer no longer dispatches a `meho-image-pushed` event: the
+   `RDC_DISPATCH_TOKEN` PAT was not renewed. The consumer rolls forward by
+   tracking new GHCR tags / GitHub Releases instead.
 
 Both edges cross the rke2-infra cluster boundary, and both need the
 consumer side to provision auth + RBAC for the `evoila/meho` GitHub
@@ -239,17 +238,21 @@ to GitHub Actions, `kubectl auth can-i delete namespace default`
 returns `no` and `kubectl auth can-i delete namespace meho-ci-pr-1`
 returns `yes`. The Verification section below scripts both checks.
 
-### 3. `repository_dispatch` consumer workflow
+### 3. `repository_dispatch` consumer workflow — RETIRED 2026-07-17
 
-`evoila/meho`'s `main` push image workflow (G2.7-T3, #51) sends a
+> **Retired.** The producer-side `Notify claude-rdc-hetzner-dc
+> (repository_dispatch)` step was removed from
+> [`.github/workflows/image.yml`](../../.github/workflows/image.yml) in the
+> post-v0.23.0 cleanup: the `RDC_DISPATCH_TOKEN` PAT was not being renewed and
+> the step failed loud on every main/tag push (401). MEHO no longer pushes a
+> `meho-image-pushed` event. The consumer rolls forward by tracking new tags on
+> `ghcr.io/evoila/meho` / the [GitHub Releases](https://github.com/evoila/meho/releases)
+> feed (the image is still built, pushed, signed, and attested on every main/tag
+> push). The event contract below is kept for historical reference only.
+
+`evoila/meho`'s `main` push image workflow (G2.7-T3, #51) **formerly** sent a
 `repository_dispatch` event to
-`evoila-bosnia/claude-rdc-hetzner-dc` with the shape below. The
-producer-side step lives at the tail of
-[`.github/workflows/image.yml`](../../.github/workflows/image.yml)
-(`Notify claude-rdc-hetzner-dc (repository_dispatch)`); its
-implementation rationale is documented in
-[`docs/codebase/backend.md`](../codebase/backend.md) under
-"Cross-repo deploy trigger (Task #51)".
+`evoila-bosnia/claude-rdc-hetzner-dc` with the shape below.
 
 | Field | Value |
 | --- | --- |
@@ -368,7 +371,7 @@ mirror the acceptance criteria on
 | Coordination ticket filed on `evoila-bosnia/claude-rdc-hetzner-dc` | pending | RDC maintainers | Linked to this doc + Initiative [#48](https://github.com/evoila-bosnia/meho-internal/issues/48) |
 | kube-apiserver OIDC trust configured (Option A) **OR** `RDC_KUBECONFIG` secret stored (Option B) | pending | RDC maintainers | Prefer Option A; document choice on the coordination ticket |
 | Namespace-scoped RBAC enforcing `meho-ci-*` | pending | RDC maintainers | Includes the admission-policy half of the scoping (see Section 2) |
-| Consumer workflow listening for `meho-image-pushed` repository_dispatch | pending | RDC maintainers | Filename suggested `.github/workflows/meho-deploy.yml` |
+| ~~Consumer workflow listening for `meho-image-pushed` repository_dispatch~~ | retired | — | Producer step removed 2026-07-17 (RDC_DISPATCH_TOKEN not renewed); track GHCR tags / Releases instead |
 | `manifests/meho/{values-rdc.yaml,install.sh,smoke.sh,README.md}` landed | pending | RDC maintainers | Also tracked in Goal [#11](https://github.com/evoila-bosnia/meho-internal/issues/11) cross-repo deps |
 | `claude-rdc-hetzner-dc/CLAUDE.md` documents the MEHO event contract | pending | RDC maintainers | Mirror of this doc's Section 3 |
 

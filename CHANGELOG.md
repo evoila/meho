@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — deterministic sensor check-runner (#2505)
+
+- Add `meho_backplane.checks.runner` — the lifespan-owned, no-LLM evaluation
+  loop that closes the check layer (#2505). Each tick claims every due
+  `Sensor` (#2503), dispatches its `safe` op through the operations
+  `dispatch()` seam under a synthetic per-tenant identity (`sub` from the
+  sensor's `identity_sub`, `principal_kind=user` → the policy gate
+  auto-executes the safe op), feeds the payload to #2504's pure
+  `evaluate_assertion`, and persists `{state, value, evidence, evaluated_at}`
+  via `record_sensor_result`. One loop drives both cadence kinds — sub-minute
+  `interval` on the tick grid, `>=1`-minute `cron` via the scheduler's
+  `next_fire_after` — riding #804's belt-and-braces durability
+  (`pg_try_advisory_lock` under a distinct key + `FOR UPDATE SKIP LOCKED`
+  claim + conditional advance-before-dispatch), so evaluation is at-most-once
+  per scheduled instant across replicas: a crashed or overlapping evaluation
+  surfaces as staleness, never a double-fire. Evaluations run as tracked
+  background tasks (never awaited under the lock — the #1502 wedge class),
+  bounded by a concurrency semaphore + per-evaluation timeout and a per-sensor
+  overlap guard; any non-`ok` dispatch or a timeout maps the sensor to
+  `unknown`. A row whose persisted cadence no longer parses is parked to
+  `paused` with a `status_reason`. Gated on `SENSOR_RUNNER_ENABLED`
+  (default on), cadence via `SENSOR_RUNNER_TICK_INTERVAL_SECONDS` (default
+  10 s). No migration, no new route.
+
 ### Added — Sensor assertion evaluator (#2504)
 
 - Add `meho_backplane.checks` with a pure, no-I/O bounded assertion

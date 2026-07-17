@@ -115,6 +115,7 @@ from meho_backplane.broadcast import (
     dispose_broadcast_client,
     get_broadcast_client,
 )
+from meho_backplane.checks.runner import start_sensor_runner, stop_sensor_runner
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
@@ -442,6 +443,7 @@ class _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
+    sensor_runner: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
     gateway_deadman: asyncio.Task[None] | None
@@ -491,6 +493,12 @@ def _start_background_tasks() -> _BackgroundTasks:
     scheduler: asyncio.Task[None] | None = None
     if settings.scheduler_enabled:
         scheduler = start_scheduler()
+    # Initiative #2416 (#2505) — deterministic sensor check-runner. Gated on
+    # SENSOR_RUNNER_ENABLED so operators running an external evaluator (or the
+    # test path without a runner) can opt out.
+    sensor_runner: asyncio.Task[None] | None = None
+    if settings.sensor_runner_enabled:
+        sensor_runner = start_sensor_runner()
     # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
     # running an external lease-reclaim mechanism (DBOS Transact, a
     # workflow engine) can disable the in-tree reaper without
@@ -519,6 +527,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
         scheduler=scheduler,
+        sensor_runner=sensor_runner,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
         gateway_deadman=gateway_deadman,
@@ -539,6 +548,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
+    if tasks.sensor_runner is not None:
+        await stop_sensor_runner(tasks.sensor_runner)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
     if tasks.approval_expiry is not None:

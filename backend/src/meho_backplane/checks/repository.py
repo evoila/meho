@@ -24,8 +24,10 @@ flush-not-commit discipline
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.checks.assertions import CheckState
@@ -33,7 +35,10 @@ from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorStatus
 from meho_backplane.scheduler.cron import next_fire_after
 
 __all__ = [
+    "advance_sensor_next_fire",
+    "claim_due_sensors",
     "create_sensor",
+    "park_sensor",
     "record_sensor_result",
 ]
 
@@ -169,3 +174,144 @@ async def record_sensor_result(
         row.state_since = evaluated_at
     await session.flush()
     return changed
+
+
+async def claim_due_sensors(
+    session: AsyncSession,
+    *,
+    now: datetime,
+    limit: int,
+) -> Sequence[Sensor]:
+    """Return up to *limit* active sensors whose ``next_fire_at`` <= *now*.
+
+    Copies :func:`meho_backplane.scheduler.repository.claim_due_triggers`'s
+    belt-and-braces replica-safety discipline onto the ``sensor`` table:
+
+    * On PostgreSQL: ``SELECT ... WHERE ... FOR UPDATE SKIP LOCKED`` so a
+      second claimer in another transaction (another replica, another
+      process) never receives a row this transaction has locked. The row
+      locks release on the caller's commit / rollback, so the runner holds
+      them across the conditional advance in
+      :func:`advance_sensor_next_fire` (the claim-advance sequence).
+    * On SQLite (the unit-test path): the locking clause no-ops (SQLite has
+      a single writer at a time). Single-fire across two in-process ticks is
+      enforced by the conditional ``UPDATE ... WHERE next_fire_at=:previous``
+      in :func:`advance_sensor_next_fire`.
+
+    ``next_fire_at <= now`` excludes NULL rows (a NULL comparison is NULL
+    under SQL), so only rows with a materialised next-fire are claimed. The
+    ``ORDER BY next_fire_at ASC`` fires the most-overdue sensors first (a
+    deployment resuming after a pause walks its backlog forward), riding
+    #2503's partial ``sensor_due_idx (status, next_fire_at) WHERE
+    status='active'``.
+    """
+    conn = await session.connection()
+    stmt = (
+        select(Sensor)
+        .where(
+            Sensor.status == SensorStatus.ACTIVE.value,
+            Sensor.next_fire_at <= now,
+        )
+        .order_by(Sensor.next_fire_at.asc())
+        .limit(limit)
+    )
+    if conn.dialect.name == "postgresql":
+        stmt = stmt.with_for_update(skip_locked=True)
+    result = await session.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def advance_sensor_next_fire(
+    session: AsyncSession,
+    row: Sensor,
+    *,
+    fire_instant: datetime,
+) -> Sensor | None:
+    """Advance *row*'s ``next_fire_at`` past *fire_instant*; return the row.
+
+    Handles both cadence kinds uniformly:
+
+    * ``interval`` -- ``next_fire_at = fire_instant + interval_seconds``.
+    * ``cron`` -- ``next_fire_at = next_fire_after(cron_expr, fire_instant,
+      timezone)`` (:func:`meho_backplane.scheduler.cron.next_fire_after`, the
+      same materialisation :func:`create_sensor` used at insert).
+
+    The advance is a conditional UPDATE (``WHERE status='active' AND
+    next_fire_at=:previous``) that mirrors
+    :func:`meho_backplane.scheduler.repository.advance_cron_trigger`: a
+    concurrent claimer that already advanced this row (the SKIP-LOCKED-less
+    dialect race, or the belt-and-braces guard on PG) matches zero rows, so
+    this call returns ``None`` and the runner skips the dispatch -- the other
+    claimer owns this tick. The advance commits (via the caller) *before* the
+    dispatch, so a slow or crashed evaluation cannot delay or double-fire the
+    next scheduled instant (the at-most-once contract #804 proved).
+
+    Returns the row on a successful advance, ``None`` when the conditional
+    UPDATE matched zero rows (another claimer won the race).
+
+    Raises:
+        ~meho_backplane.scheduler.cron.InvalidCronExpressionError: the
+            persisted ``cron_expr`` no longer parses (the runner catches this
+            and parks the row via :func:`park_sensor`).
+        ~meho_backplane.scheduler.cron.InvalidTimezoneError: the persisted
+            ``timezone`` is not a resolvable IANA name (same park path).
+    """
+    previous_next = row.next_fire_at
+    if row.cadence_kind == SensorCadenceKind.CRON.value:
+        # ``ck_sensor_cadence_fields`` guarantees a cron row carries a
+        # non-NULL cron_expr; assert it for the type-checker. A corrupt
+        # *value* (unparseable expression / timezone) raises out of
+        # next_fire_after, which the runner catches to park the row.
+        assert row.cron_expr is not None
+        new_next = next_fire_after(row.cron_expr, fire_instant, row.timezone)
+    else:
+        # ``ck_sensor_cadence_fields`` guarantees an interval row carries a
+        # non-NULL interval_seconds.
+        assert row.interval_seconds is not None
+        new_next = fire_instant + timedelta(seconds=row.interval_seconds)
+    stmt = (
+        update(Sensor)
+        .where(
+            Sensor.id == row.id,
+            Sensor.status == SensorStatus.ACTIVE.value,
+            Sensor.next_fire_at == previous_next,
+        )
+        .values(next_fire_at=new_next)
+    )
+    result = await session.execute(stmt)
+    await session.flush()
+    rowcount: int = result.rowcount  # type: ignore[attr-defined]
+    if rowcount == 0:
+        return None
+    # Refresh the in-memory object so the caller reads the advanced value
+    # without re-querying.
+    row.next_fire_at = new_next
+    return row
+
+
+async def park_sensor(
+    session: AsyncSession,
+    sensor_id: uuid.UUID,
+    *,
+    reason: str,
+) -> None:
+    """Transition a corrupt sensor to ``status='paused'`` with a reason.
+
+    Called by #2505's runner for a row whose persisted cadence no longer
+    computes a next fire (an unparseable ``cron_expr`` / ``timezone`` that
+    bypassed the create-time validator). Parking stops the runner from
+    re-tripping on the same bad row every tick; the *reason* is stamped onto
+    ``status_reason`` so the parked state explains itself on #2506's read
+    surfaces. Mirrors
+    :func:`meho_backplane.scheduler.loop._park_trigger`. Flush-not-commit --
+    the caller owns the transaction (and commits so a sibling-row rollback
+    later in the tick cannot revert the park)."""
+    await session.execute(
+        update(Sensor)
+        .where(Sensor.id == sensor_id)
+        .values(
+            status=SensorStatus.PAUSED.value,
+            status_reason=reason,
+        )
+    )
+    await session.flush()

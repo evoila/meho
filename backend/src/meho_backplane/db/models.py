@@ -1814,10 +1814,14 @@ class GraphEdgeKind(StrEnum):
     POLICY_BINDS = "policy-binds"
 
 
-#: Closed enum of :attr:`GraphEdge.source` -- ``auto`` for
-#: probe-derived edges (T3 refresh), ``curated`` reserved for the
-#: operator-asserted edges G9.2 lands. v0.2 writes ``auto`` exclusively.
-_GRAPH_EDGE_SOURCES: tuple[str, ...] = ("auto", "curated")
+#: Closed enum of :attr:`GraphNode.source` / :attr:`GraphEdge.source`
+#: -- ``auto`` for probe-derived rows (T3 refresh), ``curated`` for
+#: operator-asserted ones (G9.2 edges; #2536 node seeds via
+#: :func:`meho_backplane.topology.nodes.create_or_get_node`). Shared
+#: between ``ck_graph_node_source`` (migration ``0065``) and
+#: ``ck_graph_edge_source`` (migration ``0007``) so the two halves of
+#: the curated-durability discipline cannot drift.
+_GRAPH_SOURCES: tuple[str, ...] = ("auto", "curated")
 
 
 def _ck_in(column: str, values: tuple[str, ...]) -> str:
@@ -1888,6 +1892,17 @@ class GraphNode(Base):
       datastore). ``SET NULL`` because removing a target should not
       cascade-delete the topology data the agent may still want to
       reason about; the node lives on as a non-target row.
+    * ``source`` -- Text NOT NULL DEFAULT ``'auto'`` with a DB-layer
+      ``CHECK source IN (...)`` constraint (migration ``0065``;
+      mirrors :attr:`GraphEdge.source` / ``ck_graph_edge_source``).
+      ``auto`` for probe-derived rows (T3 refresh); ``curated`` for
+      operator/agent-seeded rows
+      (:func:`meho_backplane.topology.nodes.create_or_get_node`).
+      The refresh service keys its curated-node durability discipline
+      on this column (#2536): a probe re-observation of a curated
+      node bumps ``last_seen`` only -- no property overwrite, no
+      ``target_id`` adoption -- and no refresh ever soft-deletes a
+      curated node.
     * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
       ``{}``. Per-node structured data the connector populates at
       discover time (e.g. a VM's power state, a pod's status phase);
@@ -1895,9 +1910,9 @@ class GraphNode(Base):
       evolution without DDL changes.
     * ``discovered_by`` -- Text NOT NULL. Connector product slug
       (``vmware``, ``kubernetes``, ``vault``, ...) when probe-derived,
-      or ``curated`` for operator-asserted rows (G9.2). No CHECK
-      constraint -- the value space is open-ended as new connectors
-      land.
+      or the operator's JWT ``sub`` for manually-seeded rows (G9.2).
+      No CHECK constraint -- the value space is open-ended as new
+      connectors land.
     * ``first_seen`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
       server default via the migration; the ORM also declares
       ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
@@ -1940,6 +1955,7 @@ class GraphNode(Base):
         nullable=True,
         default=None,
     )
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="auto")
     properties: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,
@@ -1969,6 +1985,10 @@ class GraphNode(Base):
         sa.CheckConstraint(
             _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("source", _GRAPH_SOURCES),
+            name="ck_graph_node_source",
         ),
     )
 
@@ -2103,7 +2123,7 @@ class GraphEdge(Base):
             name="ck_graph_edge_kind",
         ),
         sa.CheckConstraint(
-            _ck_in("source", _GRAPH_EDGE_SOURCES),
+            _ck_in("source", _GRAPH_SOURCES),
             name="ck_graph_edge_source",
         ),
     )

@@ -469,6 +469,7 @@ async def test_scenario3_cycle_terminates(stable_connector: None) -> None:
                     tenant_id=TENANT_A_ID,
                     kind="vm",
                     name=name,
+                    source="auto",
                     properties={},
                     discovered_by="test",
                 )

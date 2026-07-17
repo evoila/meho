@@ -37,6 +37,7 @@ def _node(name: str, *, depth: int = 0, properties: dict | None = None) -> Topol
         id=uuid4(),
         kind="vm",
         name=name,
+        source="auto",
         properties=properties if properties is not None else {},
         depth=depth,
         via_edge_kind=None,

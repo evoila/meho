@@ -12,7 +12,7 @@ the substrate is covered in :mod:`tests.test_topology_create_node`):
   -32602 ``forbidden``.
 * ``tools/call meho.topology.create_node {kind, name}`` creates a
   fresh ``graph_node`` row in the operator's tenant and returns
-  ``{node_id, kind, name, was_created: true}``.
+  ``{node_id, kind, name, source: "curated", was_created: true}``.
 * A repeat ``tools/call`` is idempotent — returns ``was_created:
   false`` and refreshes the existing row's ``last_seen`` + manual-seed
   properties without duplicating.
@@ -241,6 +241,7 @@ async def test_create_node_inserts_row_and_returns_was_created_true(
     payload = json.loads(body["result"]["content"][0]["text"])
     assert payload["kind"] == "vault-role"
     assert payload["name"] == "rdc-vault"
+    assert payload["source"] == "curated"
     assert payload["was_created"] is True
     assert uuid.UUID(payload["node_id"])  # valid UUID
 

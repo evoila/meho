@@ -79,6 +79,7 @@ async def _seed_node(
         kind=kind,
         name=name,
         target_id=target_id,
+        source="auto",
         properties={"seeded": name},
         discovered_by="test",
     )

@@ -153,10 +153,13 @@ _CREATE_NODE_DESCRIPTION: Final[str] = (
     "seeds for those kinds work (idempotent on the unique index) but "
     "duplicate the refresh service's job; if you find yourself doing "
     "it routinely, run a refresh instead.\n\n"
-    "Returns `{node_id, kind, name, was_created}`. `was_created=true` "
-    "means a fresh row was inserted; `false` means an existing row "
-    "was refreshed (the call is still a success — the bootstrap "
-    "precondition is satisfied either way)."
+    "Returns `{node_id, kind, name, source, was_created}`. "
+    "`was_created=true` means a fresh row was inserted; `false` means "
+    "an existing row was refreshed (the call is still a success — the "
+    "bootstrap precondition is satisfied either way). `source` is "
+    "always `curated` after this call: seeded nodes are "
+    "operator-owned, so connector refreshes bump their `last_seen` "
+    "without overwriting properties and never soft-delete them."
 )
 
 
@@ -198,6 +201,7 @@ async def _create_node_handler(
         "node_id": str(result.node.id),
         "kind": result.node.kind,
         "name": result.node.name,
+        "source": result.node.source,
         "was_created": result.was_created,
     }
 
@@ -213,9 +217,18 @@ register_mcp_tool(
                 "node_id": {"type": "string"},
                 "kind": {"type": "string"},
                 "name": {"type": "string"},
+                "source": {
+                    "type": "string",
+                    "enum": ["auto", "curated"],
+                    "description": (
+                        "Always `curated` after this call — a fresh seed "
+                        "inserts curated, a re-seed over a probe-discovered "
+                        "row promotes it (#2536)."
+                    ),
+                },
                 "was_created": {"type": "boolean"},
             },
-            "required": ["node_id", "kind", "name", "was_created"],
+            "required": ["node_id", "kind", "name", "source", "was_created"],
         },
         required_role=TenantRole.TENANT_ADMIN,
         op_class="write",

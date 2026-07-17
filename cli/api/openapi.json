@@ -28871,6 +28871,10 @@
             "type": "string",
             "title": "Name"
           },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
           "properties": {
             "additionalProperties": true,
             "type": "object",
@@ -28891,11 +28895,12 @@
           "id",
           "kind",
           "name",
+          "source",
           "depth",
           "via_edge_kind"
         ],
         "title": "TopologyNode",
-        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge)."
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`."
       },
       "TopologyPath": {
         "properties": {

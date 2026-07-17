@@ -90,7 +90,122 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
+## [0.24.0] - 2026-07-17
+
+This release **completes Broadcast v2 (Initiative #2543)** — the final
+three of seven tasks land the durable half of the agent coordination
+channel: announcements now survive a Valkey restart, humans see them on
+every read surface, and write-class dispatches carry a target-activity
+advisory so a caller learns another principal is already active.
+
+### Added — durable agent announcements: table, retention prune, recent DB backfill, real event UUIDs (#2547 / #2565)
+
+- Announcements previously lived only on the count-trimmed per-tenant
+  Valkey stream (`BROADCAST_MAXLEN=10000`), which the broadcast subchart
+  runs with persistence disabled — a restart wiped the whole coordination
+  window. This lands the durable half of Broadcast v2 (Initiative #2543,
+  T2).
+- New append-only `agent_announcement` table (Alembic migration `0067`,
+  down_revision `0066`) persisting the typed claim fields (#2544) plus
+  lineage: `id` UUID PK, `tenant_id`, `principal_sub`, `activity`,
+  `target`, `scope`, `targets`, `phase`, `planned_op_class`,
+  `ttl_minutes`, `work_ref`, `run_id`, `created_at`; indexes on
+  `(tenant_id, created_at DESC)` and `(tenant_id, work_ref)`.
+  `AgentAnnouncementEvent.event_id` is now a real per-announcement UUID
+  minted at publish — written to the row PK, the stream entry, and the
+  announce ack — genuinely distinct from `cursor` (the stream entry id),
+  closing the #2479 misnomer. The durable row is written before the
+  `XADD`; both legs fail loud so the agent knows if the announcement did
+  not land.
+- `meho.broadcast.recent` backfills from the table when the requested
+  window predates the stream's oldest surviving entry (or the stream is
+  empty after a restart), deduped by `event_id` and bounded by the page
+  limit; best-effort, so an archive-read failure degrades to stream-only
+  results (`watch` is deliberately not backfilled — a forward live tail
+  has no archive dimension). A weekly retention-prune sweep deletes rows
+  older than `BROADCAST_ANNOUNCEMENT_RETENTION_DAYS` (default 90, `0` =
+  keep-forever), emitting one INTERNAL audit row per non-no-op tick and
+  gated by `BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED`. Three new
+  `BROADCAST_ANNOUNCEMENT_*` knobs are surfaced across settings + Helm
+  values/schema/configmap.
+
+### Added — humans see agent announcements: SSE union validation + console history/stream + CLI (#2549 / #2564)
+
+- The intent stream was write-only for humans: the SSE pipeline validated
+  every entry as `BroadcastEvent`, so announcement JSON failed validation
+  and was skipped as malformed, and the console history pane hard-dropped
+  announcements. Announcements now surface on every human-facing read
+  (Broadcast v2, Initiative #2543, T5).
+- `_process_entries` (`api/v1/feed.py`) union-validates on the wire `kind`
+  discriminator (`select_event_model`, shared by the XREAD and XRANGE
+  paths), so both `BroadcastEvent` and `AgentAnnouncementEvent` flow to
+  SSE consumers as first-class frames on `/api/v1/feed` and
+  `/ui/broadcast/stream`; genuinely malformed entries still skip. The
+  console history renders both kinds through the shared `_event_row.html`
+  partial (announcements show a principal badge, phase chip, escaped
+  quoted activity, and the #2544 claim fields), and the former hard drop
+  became a user-facing `?kind=` filter (All / Operations / Announcements).
+- The human-facing read path serialises via `_dump_event_plain` (escaping
+  at render), so the LLM untrusted-text envelope (`dump_event_wire`, kept
+  for the MCP `recent`/`watch`/`tenant_feed` LLM-facing paths) is not
+  applied to the pane. `meho status --watch` (Go CLI) tolerates and
+  renders the new frame kind; the OpenAPI snapshot + generated client are
+  regenerated for the new `?kind=` history query parameter.
+
+### Added — dispatch-time target-activity advisory on write ops (#2550 / #2567)
+
+- A write-class dispatch on a target with recent peer activity now carries
+  `extras["target_activity_advisory"]` on its `OperationResult` success
+  response, so a caller doing a write learns another principal is already
+  active there (Broadcast v2, Initiative #2543, T7). This is **post-op
+  awareness — not a lock or a block**; pre-op checking stays the
+  discipline's `meho.broadcast.recent` read step.
+- The advisory projects up to five most-recent peer entries to structured
+  fields only (`principal_sub`, `actor_sub`, `kind`, `op_id`/`phase`,
+  `ts`) — announcement free text never enters the response. The caller's
+  own activity (principal + actor) is excluded; a sibling agent under the
+  same human surfaces as a peer. Read-class dispatches short-circuit
+  before any Valkey call, so the hot read path pays nothing; the lookup is
+  fail-open and bounded (a single newest-first `XREVRANGE` capped at 100),
+  gated by `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default 30, `0` =
+  off). Sampling newest-first via `XREVRANGE` (not the oldest-first
+  history helper) fixes the busy-target inversion where a tenant emitting
+  >100 events inside the window would have sampled window-*start* activity
+  instead of the newest peer.
+
+### Added — `meho.topology.bulk_import` MCP tool + `superseded` on annotate return (#2539 / #2582)
+
+- Give the agent surface the propose→plan→apply loop humans already have
+  on the REST/CLI/console bulk-import fronts. The new
+  `meho.topology.bulk_import` MCP tool (`tenant_admin`) defaults
+  `dry_run=true` — read-shaped, never parks, surfaces every row's
+  diagnostic on the `-32602` `error.data` (the REST 422 `invalid_bulk`
+  analogue). `dry_run=false` dispatches an apply-only targetless typed op
+  through the exact #2537 substrate the single writes use: an AGENT
+  principal parks the whole batch as one `ApprovalRequest`, a human
+  `tenant_admin` applies immediately, and approve-time re-dispatch applies
+  all rows atomically — no second approval queue, no new endpoints. The
+  1000-row cap is enforced at the tool boundary; the plan returns inline
+  under the cap.
+- `meho.topology.annotate`'s return shape gains a `superseded` list — the
+  ids of the auto edges an assertion displaced (already present on the
+  shared audit/broadcast payload, so this is an additive return-shape
+  change via the plan-returning `annotate_edge_with_plan`, leaving the
+  wide `annotate_edge` caller base untouched).
+
+### Changed — retire the expired RDC image-push `repository_dispatch` notify (#2578)
+
+- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
+  `.github/workflows/image.yml` (and its now-dead job-level
+  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
+  renewed, so the step — gated on the secret being present, not valid — failed
+  loud on every `main`/tag push with a `401` while the image build / sign /
+  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
+  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
+  the GitHub Releases feed. The cross-repo handshake docs are marked retired
+  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
+
+### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577 / #2581)
 
 - `meho targets import` failed against every v0.21.0+ backplane — `--dry-run`
   included — with `decode list response: json: cannot unmarshal object into Go
@@ -109,19 +224,7 @@ connector-related release-notes line.
   which is why the suite stayed green while the shipped verb was broken; they
   now serve the same envelope the backplane emits.
 
-### Changed — retire the expired RDC image-push `repository_dispatch` notify
-
-- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
-  `.github/workflows/image.yml` (and its now-dead job-level
-  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
-  renewed, so the step — gated on the secret being present, not valid — failed
-  loud on every `main`/tag push with a `401` while the image build / sign /
-  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
-  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
-  the GitHub Releases feed. The cross-repo handshake docs are marked retired
-  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
-
-### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507)
+### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507 / #2574)
 
 - **Check-runner never-raises hardening (#2505):** a non-`TimeoutError` exception
   from `dispatch()` now maps to an `unknown` outcome (`reason=dispatch_error`)
@@ -136,6 +239,25 @@ connector-related release-notes line.
   dashboard id / a digest of the `(kind, name)` identity, so causes and dashboards
   whose names slugify to the same string no longer share a suppression key or an
   in-flight work-ref.
+
+### Documentation — retire obsolete MVP-era planning docs; rehome the locked-decisions ADR (#2579, #2580)
+
+- Retire the frozen MVP-era planning docs (#2579): `mvp-roadmap.md` mapped
+  MVP1–9 onto v0.2–v0.11 and had been stale since 2026-06-05 (12 releases
+  behind), and its companion `release-plan.md` addressed a long-resolved
+  v0.2–v0.5-era divergence. The CHANGELOG + GitHub Releases are the live
+  record; the one inbound reference (from `api-shape-conventions.md`) is
+  dropped, leaving no dangling links.
+- Rehome the locked-decisions ADR out of its v0.2 wrapper (#2580): move
+  `docs/planning/v0.2-decisions.md` → `docs/decisions/locked-decisions.md`
+  (retiring `docs/planning/` entirely), retitle to "MEHO locked
+  architecture decisions", and strip 36 lines of dead v0.2 planning
+  scaffolding. The register's content is live — 12 load-bearing decisions
+  cited by ~84 places across source, migrations, tests, and docs; the `#N`
+  numbering is documented as never renumbered. All 87 references re-pointed
+  and verified (0 broken); migration docstring edits are comment-only (no
+  DDL, single head at `0066`).
+
 ## [0.23.0] - 2026-07-17
 
 ### Added — topology open node/edge kind vocabularies (#2555)

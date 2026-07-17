@@ -1174,13 +1174,21 @@ a trailing comment: `anchore/sbom-action@…` (v0.24.0),
 `actions/upload-artifact@…` (v7.0.1). Renovate / Dependabot bumps
 these on the same review cadence as `sigstore/cosign-installer`.
 
-### Cross-repo deploy trigger (Task #51)
+### Cross-repo deploy trigger (Task #51) — RETIRED 2026-07-17
 
-After image push, sign, attest, and scan, `image.yml`'s final step
-fires a `repository_dispatch` event of type `meho-image-pushed` at
+> **Retired.** The `Notify claude-rdc-hetzner-dc (repository_dispatch)` step was
+> removed from `image.yml` in the post-v0.23.0 cleanup — the
+> `RDC_DISPATCH_TOKEN` PAT was not being renewed and the step failed loud on
+> every main/tag push (401). The image is still built, signed, attested, and
+> scanned on every main/tag push; the consumer now rolls forward by tracking new
+> GHCR tags / GitHub Releases rather than a pushed event. The rest of this
+> section describes the removed mechanism for historical reference.
+
+Formerly, after image push, sign, attest, and scan, `image.yml`'s final step
+fired a `repository_dispatch` event of type `meho-image-pushed` at
 [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)
 — the dogfooding consumer that operates MEHO against the rke2-infra
-lab cluster. The dispatch is the upstream half of the cross-repo
+lab cluster. The dispatch was the upstream half of the cross-repo
 handshake; the consumer-side listener (`.github/workflows/meho-deploy.yml`
 on the consumer) is consumer-owned per Goal #11's cross-repo deps.
 

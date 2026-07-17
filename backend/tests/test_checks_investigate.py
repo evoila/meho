@@ -482,9 +482,10 @@ async def test_correlation_two_groups_and_determinism(monkeypatch: pytest.Monkey
     keys_first = [g.key for g in groups]
     keys_second = [g.key for g in await inv._correlate(operator, [a, b, c])]
     assert keys_first == keys_second
-    # The A+B group is keyed on the deepest shared node.
+    # The A+B group is keyed on the deepest shared node, with a digest of the
+    # (kind, name) identity appended so slug-colliding causes stay distinct.
     ab_group = next(g for g in groups if {m.name for m in g.members} == {"a", "b"})
-    assert ab_group.key == "datastore-shared"
+    assert ab_group.key == f"datastore-shared-{inv._identity_digest('datastore', 'shared')}"
 
 
 @pytest.mark.asyncio
@@ -500,6 +501,20 @@ async def test_correlation_untracked_anchor_is_singleton(monkeypatch: pytest.Mon
     groups = await inv._correlate(_admin_operator(), [m])
     assert len(groups) == 1
     assert groups[0].key == inv._sensor_group_key(m)
+
+
+def test_slug_colliding_identities_get_distinct_keys() -> None:
+    """Slug-lossy identities must not share a suppression/work key: the identity
+    digest disambiguates causes that ``_slugify`` collapses to the same string."""
+    # `prod/db` and `prod db` both slugify to `prod-db`; names made only of
+    # out-of-alphabet characters both collapse to the `node` fallback -- the
+    # digest keeps all of them distinct.
+    assert inv._slugify("prod/db") == inv._slugify("prod db")
+    assert inv._slugify("///") == inv._slugify("@@@") == "node"
+    assert inv._identity_digest("host", "prod/db") != inv._identity_digest("host", "prod db")
+    assert inv._identity_digest("host", "///") != inv._identity_digest("host", "@@@")
+    # Stable across calls (deterministic keys).
+    assert inv._identity_digest("host", "prod/db") == inv._identity_digest("host", "prod/db")
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +549,12 @@ async def test_one_cause_one_investigation(monkeypatch: pytest.MonkeyPatch) -> N
     await run_investigation(tenant_id=_TENANT, dashboard=dashboard, members=members)
 
     assert len(stub.calls) == 1
-    assert stub.calls[0].work_ref == "checks:prod:datastore-shared"
+    # work_ref carries the dashboard id (collision-safe across same-slug dashboards)
+    # and the topology group_key carries a digest of the (kind, name) identity.
+    expected_group = f"datastore-shared-{inv._identity_digest('datastore', 'shared')}"
+    assert (
+        stub.calls[0].work_ref == f"checks:{dashboard.dashboard_id.hex[:8]}:prod:{expected_group}"
+    )
 
 
 @pytest.mark.asyncio
@@ -545,10 +565,14 @@ async def test_in_flight_dedupe_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     stub = _install_stub()
     member = _member("solo", target=None)
     group_key = inv._sensor_group_key(member)
-    await _seed_agent_run(work_ref=f"checks:prod:{group_key}", status=AgentRunStatus.RUNNING.value)
+    dashboard = _dash(name="prod")
+    await _seed_agent_run(
+        work_ref=f"checks:{dashboard.dashboard_id.hex[:8]}:prod:{group_key}",
+        status=AgentRunStatus.RUNNING.value,
+    )
 
     with capture_logs() as logs:
-        await run_investigation(tenant_id=_TENANT, dashboard=_dash(name="prod"), members=[member])
+        await run_investigation(tenant_id=_TENANT, dashboard=dashboard, members=[member])
 
     assert stub.calls == []
     assert any(e["event"] == "checks_investigation_skipped_in_flight" for e in logs)
@@ -569,6 +593,46 @@ async def test_suppression_reescalate_false_skips(monkeypatch: pytest.MonkeyPatc
         slug=f"checks-noise-{group_key}",
         metadata={"source": "checks-investigator", "re_escalate": False},
     )
+
+    with capture_logs() as logs:
+        await run_investigation(tenant_id=_TENANT, dashboard=_dash(name="prod"), members=[member])
+
+    assert stub.calls == []
+    assert any(e["event"] == "checks_investigation_suppressed" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_suppression_exact_lookup_survives_substring_collisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The exact suppression entry still fires even when many noise slugs contain
+    its key as a substring -- the old capped substring query could push the exact
+    entry past the limit and silently fail to suppress; the exact recall cannot."""
+    await _seed_definition()
+    _patch_creds(monkeypatch)
+    stub = _install_stub()
+    member = _member("solo", target=None)
+    group_key = inv._sensor_group_key(member)
+    exact_slug = f"checks-noise-{group_key}"
+    operator = _admin_operator()
+    memory = MemoryService()
+    await memory.remember(
+        operator,
+        MemoryScope.TENANT,
+        "verdict: benign\n",
+        slug=exact_slug,
+        metadata={"source": "checks-investigator", "re_escalate": False},
+    )
+    # Decoys whose slugs CONTAIN exact_slug as a substring -- these crowd out the
+    # exact entry under a capped substring query (30 > the former limit of 25).
+    for i in range(30):
+        await memory.remember(
+            operator,
+            MemoryScope.TENANT,
+            "noise\n",
+            slug=f"{exact_slug}-decoy-{i:02d}",
+            metadata={"source": "checks-investigator", "re_escalate": True},
+        )
 
     with capture_logs() as logs:
         await run_investigation(tenant_id=_TENANT, dashboard=_dash(name="prod"), members=[member])

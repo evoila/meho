@@ -232,6 +232,23 @@ _DEPTH_MAX = 64
 _MAX_HOPS_DEFAULT = 8
 _MAX_HOPS_MAX = 32
 
+#: Shared ``include_stale`` query param for the three traversal verbs
+#: (#2538). Default ``True`` preserves the last-refresh-wins contract
+#: (soft-deleted rows stay reachable); ``false`` restricts the walk to
+#: live rows (``last_seen IS NOT NULL``) — the same view
+#: ``GET /topology/edges`` shows. Declared once so the three routes
+#: cannot drift on default or prose.
+_INCLUDE_STALE_QUERY = Query(
+    default=True,
+    description=(
+        "Include soft-deleted (stale) nodes and edges in the walk. "
+        "Defaults to true (last-refresh-wins: rows a refresh "
+        "soft-deleted stay reachable). Pass false to restrict the "
+        "traversal to live rows only — the same view the edge "
+        "inventory listing shows."
+    ),
+)
+
 
 #: OpenAPI 404 + 409 declarations for the closure routes (``dependents``
 #: / ``dependencies``). Declared at module scope so the two routes share
@@ -398,6 +415,7 @@ async def dependents(
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    include_stale: bool = _INCLUDE_STALE_QUERY,
     envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
 ) -> list[TopologyNode] | dict[str, object]:
@@ -414,6 +432,13 @@ async def dependents(
     (``ambiguous_node``) rather than silently merging unrelated
     closures. ``kind_filter`` restricts the walk to edges of that
     ``graph_edge.kind``.
+
+    Each non-root row carries ``parent_node_id`` / ``via_edge_id``
+    (#2538) — the node the walk stepped from and the edge it walked —
+    so the caller reconstructs the exact dependency chain from the
+    flat list. ``include_stale=false`` opts out of the default
+    last-refresh-wins view and drops soft-deleted nodes/edges from
+    the walk.
 
     G0.18-T4 (#1357, RDC #789 N2) — an anchor name with no matching
     :class:`~meho_backplane.db.models.GraphNode` in the tenant returns
@@ -453,6 +478,7 @@ async def dependents(
             kind=kind,
             depth=depth,
             kind_filter=kind_filter,
+            include_stale=include_stale,
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
@@ -472,6 +498,7 @@ async def dependencies(
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    include_stale: bool = _INCLUDE_STALE_QUERY,
     envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
 ) -> list[TopologyNode] | dict[str, object]:
@@ -479,9 +506,11 @@ async def dependencies(
 
     The mirror of :func:`dependents` — same shape, same one-row-per-
     node closure dedupe, same ``kind`` disambiguation contract, same
-    tenant scoping, **same G0.18-T4 (#1357) untracked-anchor
-    treatment** (404 ``node_untracked`` rather than an empty list) —
-    walking edges out of the current node rather than into it. Wraps
+    tenant scoping, same #2538 chain provenance (``parent_node_id`` /
+    ``via_edge_id``) and ``include_stale`` opt-out, **same G0.18-T4
+    (#1357) untracked-anchor treatment** (404 ``node_untracked``
+    rather than an empty list) — walking edges out of the current
+    node rather than into it. Wraps
     :func:`~meho_backplane.topology.query.find_dependencies`. Honours
     the same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)
     returning ``{"kind": "dependencies", "nodes": [...]}``.
@@ -497,6 +526,7 @@ async def dependencies(
             kind=kind,
             depth=depth,
             kind_filter=kind_filter,
+            include_stale=include_stale,
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
@@ -517,6 +547,7 @@ async def path(
     from_kind: str | None = Query(default=None),
     to_kind: str | None = Query(default=None),
     max_hops: int = Query(default=_MAX_HOPS_DEFAULT, ge=1, le=_MAX_HOPS_MAX),
+    include_stale: bool = _INCLUDE_STALE_QUERY,
     operator: Operator = _require_operator,
 ) -> TopologyPath | None:
     """Shortest unweighted path from ``from`` to ``to``, or ``null``.
@@ -533,6 +564,12 @@ async def path(
     ``from_kind`` / ``to_kind`` pin each endpoint independently; an
     unpinned name resolving to multiple kinds returns 409
     (``ambiguous_node``).
+
+    Each non-root path node carries ``via_edge_id`` (the exact edge of
+    the hop) and ``parent_node_id`` (the previous node) per #2538.
+    ``include_stale=false`` drops soft-deleted nodes/edges from the
+    search — on both edge directions, so a stale edge is never walked
+    backwards into a path.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_PATH,
@@ -546,6 +583,7 @@ async def path(
             from_kind=from_kind,
             to_kind=to_kind,
             max_hops=max_hops,
+            include_stale=include_stale,
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc

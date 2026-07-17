@@ -1312,7 +1312,7 @@
           "topology"
         ],
         "summary": "Dependents",
-        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 (the substrate's depth-0 anchor\nrow), so a tracked node with no dependents returns a one-element\nlist with the root.\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.\n\nG0.18-T4 (#1357, RDC #789 N2) \u2014 an anchor name with no matching\n:class:`~meho_backplane.db.models.GraphNode` in the tenant returns\n**404 ``node_untracked``** rather than an empty list. Pre-G0.18-T4\nthe route returned ``[]`` for an untracked anchor, which conflated\n\"tracked, nothing depends on me\" with \"anchor isn't in the graph\nat all\" \u2014 for the pre-destructive blast-radius use case the empty\nlist read as \"safe to delete,\" a false-negative. Auto-discovery\nis k8s-only (only\n:class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`\noverrides\n:meth:`~meho_backplane.connectors.base.Connector.discover_topology`),\nso every registered ``vault`` / ``vcenter`` / ``nsx`` /\n``sddc-manager`` / ``gh`` target currently surfaces as untracked\nuntil non-k8s populators or a curated annotation lands. The\ndistinct 404 lets the CLI / MCP front render the explicit \"not\nin graph \u2014 `meho topology refresh` first / annotate the\nrelationships\" prompt instead of misleading the operator.\n\nG0.16-T6 Finding E (#1312) \u2014 opt-in to the REST\u2194MCP envelope\nagreement per ``docs/codebase/api-shape-conventions.md`` \u00a74.\nDefault response stays the v0.8.0 bare ``list[TopologyNode]`` so\nno client breaks; passing ``?envelope=v2`` returns the\ndiscriminated envelope ``{\"kind\": \"dependents\", \"nodes\": [...]}``\nmatching the MCP ``query_topology`` tool's shape. The convention\ndoc names \"migration is REST-toward-MCP, not the other way\";\nthe v2 opt-in is the migration mechanism.",
+        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 (the substrate's depth-0 anchor\nrow), so a tracked node with no dependents returns a one-element\nlist with the root.\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.\n\nEach non-root row carries ``parent_node_id`` / ``via_edge_id``\n(#2538) \u2014 the node the walk stepped from and the edge it walked \u2014\nso the caller reconstructs the exact dependency chain from the\nflat list. ``include_stale=false`` opts out of the default\nlast-refresh-wins view and drops soft-deleted nodes/edges from\nthe walk.\n\nG0.18-T4 (#1357, RDC #789 N2) \u2014 an anchor name with no matching\n:class:`~meho_backplane.db.models.GraphNode` in the tenant returns\n**404 ``node_untracked``** rather than an empty list. Pre-G0.18-T4\nthe route returned ``[]`` for an untracked anchor, which conflated\n\"tracked, nothing depends on me\" with \"anchor isn't in the graph\nat all\" \u2014 for the pre-destructive blast-radius use case the empty\nlist read as \"safe to delete,\" a false-negative. Auto-discovery\nis k8s-only (only\n:class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`\noverrides\n:meth:`~meho_backplane.connectors.base.Connector.discover_topology`),\nso every registered ``vault`` / ``vcenter`` / ``nsx`` /\n``sddc-manager`` / ``gh`` target currently surfaces as untracked\nuntil non-k8s populators or a curated annotation lands. The\ndistinct 404 lets the CLI / MCP front render the explicit \"not\nin graph \u2014 `meho topology refresh` first / annotate the\nrelationships\" prompt instead of misleading the operator.\n\nG0.16-T6 Finding E (#1312) \u2014 opt-in to the REST\u2194MCP envelope\nagreement per ``docs/codebase/api-shape-conventions.md`` \u00a74.\nDefault response stays the v0.8.0 bare ``list[TopologyNode]`` so\nno client breaks; passing ``?envelope=v2`` returns the\ndiscriminated envelope ``{\"kind\": \"dependents\", \"nodes\": [...]}``\nmatching the MCP ``query_topology`` tool's shape. The convention\ndoc names \"migration is REST-toward-MCP, not the other way\";\nthe v2 opt-in is the migration mechanism.",
         "operationId": "dependents_api_v1_topology_dependents__name__get",
         "parameters": [
           {
@@ -1355,6 +1355,18 @@
               "nullable": true,
               "title": "Kind Filter"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "envelope",
@@ -1498,7 +1510,7 @@
           "topology"
         ],
         "summary": "Dependencies",
-        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping, **same G0.18-T4 (#1357) untracked-anchor\ntreatment** (404 ``node_untracked`` rather than an empty list) \u2014\nwalking edges out of the current node rather than into it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`. Honours\nthe same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)\nreturning ``{\"kind\": \"dependencies\", \"nodes\": [...]}``.",
+        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping, same #2538 chain provenance (``parent_node_id`` /\n``via_edge_id``) and ``include_stale`` opt-out, **same G0.18-T4\n(#1357) untracked-anchor treatment** (404 ``node_untracked``\nrather than an empty list) \u2014 walking edges out of the current\nnode rather than into it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`. Honours\nthe same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)\nreturning ``{\"kind\": \"dependencies\", \"nodes\": [...]}``.",
         "operationId": "dependencies_api_v1_topology_dependencies__name__get",
         "parameters": [
           {
@@ -1541,6 +1553,18 @@
               "nullable": true,
               "title": "Kind Filter"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "envelope",
@@ -1684,7 +1708,7 @@
           "topology"
         ],
         "summary": "Path",
-        "description": "Shortest unweighted path from ``from`` to ``to``, or ``null``.\n\nWraps :func:`~meho_backplane.topology.query.find_path`. The query\nparams are ``from`` / ``to`` (matching the Initiative #363 route\nspec ``?from=A&to=B``); the handler binds them via ``alias`` since\n``from`` is a Python keyword. Walks edges in both directions so the\npath follows the graph's connectivity rather than only its edge\norientation. Returns ``null`` (HTTP 200) when *to* is unreachable\nfrom *from* within ``max_hops`` or either endpoint does not exist\nin this tenant \u2014 unreachability is a valid answer, not an error.\n\n``from_kind`` / ``to_kind`` pin each endpoint independently; an\nunpinned name resolving to multiple kinds returns 409\n(``ambiguous_node``).",
+        "description": "Shortest unweighted path from ``from`` to ``to``, or ``null``.\n\nWraps :func:`~meho_backplane.topology.query.find_path`. The query\nparams are ``from`` / ``to`` (matching the Initiative #363 route\nspec ``?from=A&to=B``); the handler binds them via ``alias`` since\n``from`` is a Python keyword. Walks edges in both directions so the\npath follows the graph's connectivity rather than only its edge\norientation. Returns ``null`` (HTTP 200) when *to* is unreachable\nfrom *from* within ``max_hops`` or either endpoint does not exist\nin this tenant \u2014 unreachability is a valid answer, not an error.\n\n``from_kind`` / ``to_kind`` pin each endpoint independently; an\nunpinned name resolving to multiple kinds returns 409\n(``ambiguous_node``).\n\nEach non-root path node carries ``via_edge_id`` (the exact edge of\nthe hop) and ``parent_node_id`` (the previous node) per #2538.\n``include_stale=false`` drops soft-deleted nodes/edges from the\nsearch \u2014 on both edge directions, so a stale edge is never walked\nbackwards into a path.",
         "operationId": "path_api_v1_topology_path_get",
         "parameters": [
           {
@@ -1736,6 +1760,18 @@
               "default": 8,
               "title": "Max Hops"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "authorization",
@@ -28888,6 +28924,18 @@
             "type": "string",
             "nullable": true,
             "title": "Via Edge Kind"
+          },
+          "parent_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Node Id"
+          },
+          "via_edge_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Via Edge Id"
           }
         },
         "type": "object",
@@ -28900,7 +28948,7 @@
           "via_edge_kind"
         ],
         "title": "TopologyNode",
-        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`."
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid."
       },
       "TopologyPath": {
         "properties": {

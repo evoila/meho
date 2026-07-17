@@ -371,6 +371,18 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Ignored for the closure kinds."
             ),
         },
+        "include_stale": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "For `dependents` / `dependencies` / `path`: when "
+                "`true` (the default), soft-deleted nodes and edges "
+                "stay reachable (last-refresh-wins — the row was real "
+                "at the last observation). Pass `false` to restrict "
+                "the walk to live rows only, matching the `edges` "
+                "inventory view. Ignored for the other kinds."
+            ),
+        },
         "since": {
             "type": ["string", "null"],
             "description": (
@@ -524,7 +536,12 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "returns -32602 naming the candidate kinds.\n\n"
     "Returns `{kind, nodes: [TopologyNode, ...]}` for the closure kinds "
     "(root at depth 0, so a one-element list means 'exists but nothing "
-    "depends on it'); when the anchor is not tracked in the topology "
+    "depends on it'). Each non-root node carries `parent_node_id` + "
+    "`via_edge_id` — the node it hangs off and the exact edge walked — "
+    "so the dependency chain reconstructs from the flat list without "
+    "extra calls. Soft-deleted rows stay reachable by default; pass "
+    "`include_stale: false` to walk live rows only. When the anchor is "
+    "not tracked in the topology "
     'graph for this tenant, returns `{kind, status: "node_untracked", '
     "name, nodes: []}` (and `node_kind` when `node_kind=` was supplied) "
     "rather than -32602 — auto-discovery is k8s-only today, so every "
@@ -618,6 +635,7 @@ async def _query_topology_handler(
             from_kind=arguments.get("node_kind"),
             to_kind=arguments.get("to_node_kind"),
             max_hops=int(arguments.get("max_hops", _MAX_HOPS_DEFAULT)),
+            include_stale=bool(arguments.get("include_stale", True)),
         )
     except AmbiguousNodeError as exc:
         raise McpInvalidParamsError(str(exc)) from exc
@@ -664,6 +682,7 @@ async def _closure_facet(
     node_kind = arguments.get("node_kind")
     depth = int(arguments.get("depth", _DEPTH_DEFAULT))
     kind_filter = arguments.get("kind_filter")
+    include_stale = bool(arguments.get("include_stale", True))
     verb = find_dependents if kind == "dependents" else find_dependencies
     try:
         nodes = await verb(
@@ -672,6 +691,7 @@ async def _closure_facet(
             kind=node_kind,
             depth=depth,
             kind_filter=kind_filter,
+            include_stale=include_stale,
         )
     except NodeNotFoundError as exc:
         return _node_untracked_envelope(kind, exc)

@@ -60,9 +60,11 @@ import uuid
 from typing import Any, Final
 
 import structlog
+from fastapi import HTTPException
 from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.scheduler.schemas import (
@@ -212,18 +214,24 @@ async def _create_handler(
         payload = ScheduledTriggerCreate.model_validate(arguments)
     except ValidationError as exc:
         raise McpInvalidParamsError(f"invalid arguments: {exc}") from exc
-    # Cross-tenant admin: when payload.tenant_id is provided, route the
-    # create under that tenant -- but only for tenant_admin callers.
-    # Operator-role callers attempting cross-tenant create surface as
-    # invalid-params (mirrors the REST 403 contract). A silent drop
-    # would mis-place the trigger under the caller's own tenant and
-    # quietly break the cross-tenant admin path on the MCP transport
-    # (review M1 on PR #1128).
-    target_tenant = operator.tenant_id
-    if payload.tenant_id is not None:
-        if operator.tenant_role != TenantRole.TENANT_ADMIN:
-            raise McpInvalidParamsError("tenant_id_requires_tenant_admin")
-        target_tenant = payload.tenant_id
+    # Cross-tenant admin: a payload.tenant_id naming a *different* tenant
+    # crosses the tenant boundary, which is a platform-level capability --
+    # not something tenant-admin *rank* confers. Reuse the REST route's
+    # shared authz seam (authorize_tenant_scope, the #1638 cross-tenant
+    # IDOR primitive) rather than gating on rank: this tool already
+    # requires tenant_admin, so a rank check would be dead code and let
+    # any tenant-admin write a trigger into any tenant. authorize_tenant_scope
+    # returns the caller's own tenant for the same-tenant / null case and
+    # only allows a different tenant for operator.platform_admin.
+    try:
+        target_tenant = authorize_tenant_scope(operator, payload.tenant_id)
+    except HTTPException as exc:
+        # 403 cross_tenant_requires_platform_admin -> the MCP wire-error;
+        # the same detail token the REST caller sees (there is no MCP
+        # analogue for 403, so invalid-params is the closest shape). Mirrors
+        # meho_backplane.mcp.tools.broadcast_overrides._http_to_mcp.
+        detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        raise McpInvalidParamsError(detail) from exc
     structlog.contextvars.bind_contextvars(
         audit_op_id=_SCHEDULER_OP_IDS["create"],
         audit_op_class="write",
@@ -266,14 +274,14 @@ register_mcp_tool(
             "Optional: timezone (IANA name, default 'UTC'), "
             "identity_sub (default '__scheduler__'), "
             "in_flight_policy ('fail_into_audit'|'resume', default "
-            "'fail_into_audit'), tenant_id (UUID; tenant_admin-only "
+            "'fail_into_audit'), tenant_id (UUID; platform-admin-only "
             "cross-tenant target), work_ref (change-ticket reference "
             "inherited by every dispatched run's audit rows). Invalid "
             "cron expression -> error with "
             "detail 'invalid_arguments'; unknown agent_definition_id -> "
             "'agent_definition_not_found'; a cron/one_off with no usable "
-            "inputs -> invalid arguments (422); non-admin passing tenant_id -> "
-            "'tenant_id_requires_tenant_admin'. Response: {trigger_id, "
+            "inputs -> invalid arguments (422); a non-platform-admin passing "
+            "another tenant's id -> 'cross_tenant_requires_platform_admin'. Response: {trigger_id, "
             "trigger: {...}}."
         ),
         inputSchema={
@@ -331,9 +339,9 @@ register_mcp_tool(
                     "format": "uuid",
                     "description": (
                         "Target tenant UUID for cross-tenant admin create "
-                        "(tenant_admin only; operator-role callers see "
-                        "'tenant_id_requires_tenant_admin'). When omitted "
-                        "or null, the trigger is created under the "
+                        "(platform-admin only; a non-platform-admin naming "
+                        "another tenant sees 'cross_tenant_requires_platform_admin'). "
+                        "When omitted or null, the trigger is created under the "
                         "caller's tenant."
                     ),
                 },

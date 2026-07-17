@@ -151,6 +151,43 @@ for *its* tool surface, parallel to the MCP front-end's `register_mcp_tool`
 registrations — both adapt the same `meta_tools` handlers; neither wraps the
 other.
 
+### Broadcast coordination tools (#2548)
+
+Beyond the connector-execution tools, the catalog carries three broadcast
+coordination tools so a hosted run is a first-class reader and writer on the
+tenant's shared feed (`meho:feed:{tenant_id}`) rather than a mute
+participant:
+
+- `broadcast_announce` — publish intent / progress / completion.
+- `broadcast_recent` — read recent feed events (peer announcements + audit
+  events).
+- `broadcast_watch` — a single bounded long-poll (≤30s) for new events; no
+  background subscription.
+
+These do **not** re-implement the feed. `_build_broadcast_meta_tools` in
+`toolset.py` resolves the `(inputSchema, handler)` pairs the MCP surface
+already registered for `meho.broadcast.{announce,recent,watch}` (via the
+registry's `get_tool`) and reuses the handlers verbatim, so the agent's wire
+shape — the #2544 structured claims, the #2545 actor/work_ref lineage, the
+#2546 announce rate limit, and the untrusted-prose envelope
+(`dump_event_wire`) on reads — is identical to every other surface's. The
+read tools reuse the MCP `inputSchema` unchanged; `broadcast_announce` reuses
+it minus `run_id` / `work_ref`, which the wrapper stamps from the ambient run
+context (`current_agent_run_id_var` + `work_ref_var`, the same ContextVars the
+audit writers and `approval_wait` read) so announcements auto-group under the
+run without the model self-reporting a spoofable id. Handler-side errors
+(`McpInvalidParamsError`, the announce `McpRateLimitedError`) are re-raised as
+`ModelRetry` so a bad argument or a rate-limit hands feedback to the model
+instead of aborting the run.
+
+All three carry an `OPERATOR` floor (matching the MCP tools' `required_role`)
+and register only when a definition's `toolset` admits them — the same
+`spec ∩ identity-permissions` intersection as every other meta-tool. A
+definition with `toolset is None` uses the legacy `_register_default_meta_tools`
+fallback (the original two tools) and does not gain the broadcast surface; a
+definition wanting coordination lists them (or omits `meta_tools` to take the
+whole catalog).
+
 ## Invocation surface (T4 #811)
 
 The public way to *run* a defined agent: synchronous block-and-return for

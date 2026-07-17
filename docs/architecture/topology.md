@@ -354,17 +354,20 @@ A refresh that no longer sees a previously-discovered node or edge
   back to a timestamp (the row is revived in place, not re-inserted —
   the `(tenant_id, kind, name)` natural key is stable, so the tenant's
   node count does not grow on revival).
-- **Read-verb visibility caveat.** The G9.1-T4 traversal CTE does
-  **not** filter `last_seen IS NULL` — a soft-deleted node is still
-  reachable by `find_dependents` / `find_dependencies` / `find_path`.
-  Point-in-time ("when did this disappear?") reads are served by the
-  separate G9.3 history/diff/timeline verbs over the retained rows;
-  G9.3 ([#365](https://github.com/evoila/meho/issues/365)) did not add
-  `last_seen` filtering to the traversal CTE. Soft-delete is purely a
-  *retention* mechanism, not an immediate visibility change for the
-  traversal verbs. Operators reading blast radius in v0.2 should treat
-  the graph as last-refresh-wins; a stale edge persists until the next
-  successful refresh of its owning target re-derives the snapshot.
+- **Read-verb visibility caveat.** The G9.1-T4 traversal CTE keeps
+  soft-deleted rows reachable **by default** — a soft-deleted node is
+  still returned by `find_dependents` / `find_dependencies` /
+  `find_path`. Point-in-time ("when did this disappear?") reads are
+  served by the separate G9.3 history/diff/timeline verbs over the
+  retained rows. Soft-delete is primarily a *retention* mechanism, not
+  an immediate visibility change for the traversal verbs. Operators
+  reading blast radius should treat the graph as last-refresh-wins; a
+  stale edge persists until the next successful refresh of its owning
+  target re-derives the snapshot. Since #2538 the three traversal
+  verbs accept a per-query `include_stale=false` opt-out (REST query
+  param / CLI `--include-stale=false` / MCP `include_stale`) that
+  filters `last_seen IS NULL` nodes and edges from the walk — the
+  same live view `list_edges` shows — without changing the default.
 
 ## Performance expectations
 

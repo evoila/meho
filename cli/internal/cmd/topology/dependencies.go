@@ -10,8 +10,8 @@ import (
 // newDependenciesCmd returns the `meho topology dependencies` command.
 //
 //	meho topology dependencies <name|alias> [--depth N] [--kind <edge_kind>]
-//	  [--node-kind <node_kind>] [--json] [--backplane <url>]
-//	# GET /api/v1/topology/dependencies/<name>?depth=N&kind_filter=...&kind=...
+//	  [--node-kind <node_kind>] [--include-stale=false] [--json] [--backplane <url>]
+//	# GET /api/v1/topology/dependencies/<name>?depth=N&kind_filter=...&kind=...&include_stale=...
 //
 // Forward closure: everything <name> depends on ("what I need to be
 // healthy"). The mirror of `dependents` — same shape, same one-row-
@@ -22,6 +22,7 @@ func newDependenciesCmd() *cobra.Command {
 		depth             int
 		edgeKind          string
 		nodeKind          string
+		includeStale      bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -44,11 +45,12 @@ func newDependenciesCmd() *cobra.Command {
 				Depth:             depth,
 				EdgeKind:          edgeKind,
 				NodeKind:          nodeKind,
+				IncludeStale:      includeStale,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
 		},
 	}
-	addClosureFlags(cmd, &depth, &edgeKind, &nodeKind, &backplaneOverride, &jsonOut)
+	addClosureFlags(cmd, &depth, &edgeKind, &nodeKind, &backplaneOverride, &includeStale, &jsonOut)
 	return cmd
 }

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 
 	"github.com/evoila/meho/cli/internal/api"
@@ -193,6 +194,20 @@ func TestBuildPathQuerySetsFromTo(t *testing.T) {
 	}
 }
 
+// TestBuildPathParamsIncludeStale — #2538: the wire param is omitted
+// for the default (true, the server default) and sent only when the
+// operator opts out with --include-stale=false.
+func TestBuildPathParamsIncludeStale(t *testing.T) {
+	got := buildPathParams(pathOptions{From: "a", To: "b", IncludeStale: true})
+	if got.IncludeStale != nil {
+		t.Errorf("IncludeStale should be omitted when true (server default): %v", got.IncludeStale)
+	}
+	got = buildPathParams(pathOptions{From: "a", To: "b", IncludeStale: false})
+	if got.IncludeStale == nil || *got.IncludeStale != false {
+		t.Errorf("IncludeStale: got %v; want false", got.IncludeStale)
+	}
+}
+
 // TestPrintNodeClosureEmpty — the defensive zero-row branch renders
 // a no-result line without the header. Since G0.18-T4 (#1357) an
 // untracked anchor surfaces as a 404 `node_untracked` that
@@ -245,21 +260,65 @@ func TestFormatNotFoundNodeUntrackedWithKind(t *testing.T) {
 	}
 }
 
-// TestPrintNodeClosureRendersRows — root (depth 0, empty via) plus a
-// dependent with its via-edge kind.
+// TestPrintNodeClosureRendersRows — root (depth 0, empty via/parent)
+// plus a dependent with its via-edge kind and its parent resolved to
+// the root's name (#2538 chain provenance).
 func TestPrintNodeClosureRendersRows(t *testing.T) {
 	via := "runs-on"
+	rootID := uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	edgeID := uuid.MustParse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 	rows := []api.TopologyNode{
-		{Kind: "host", Name: "esxi-1", Depth: 0, ViaEdgeKind: nil},
-		{Kind: "vm", Name: "web-1", Depth: 1, ViaEdgeKind: &via},
+		{Id: rootID, Kind: "host", Name: "esxi-1", Depth: 0, ViaEdgeKind: nil},
+		{
+			Id:           uuid.MustParse("99999999-8888-7777-6666-555555555555"),
+			Kind:         "vm",
+			Name:         "web-1",
+			Depth:        1,
+			ViaEdgeKind:  &via,
+			ParentNodeId: &rootID,
+			ViaEdgeId:    &edgeID,
+		},
 	}
 	var buf bytes.Buffer
 	printNodeClosure(&buf, "esxi-1", rows)
 	out := buf.String()
-	for _, want := range []string{"DEPTH", "KIND", "esxi-1", "web-1", "runs-on"} {
+	for _, want := range []string{"DEPTH", "KIND", "PARENT", "esxi-1", "web-1", "runs-on"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printNodeClosure missing %q in %q", want, out)
 		}
+	}
+	// The dependent's PARENT cell resolves to the root's name, not the
+	// raw UUID.
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	last := lines[len(lines)-1]
+	if !strings.Contains(last, "esxi-1") {
+		t.Errorf("dependent row should render parent name esxi-1; got %q", last)
+	}
+	if strings.Contains(last, rootID.String()) {
+		t.Errorf("dependent row should not fall back to the raw parent UUID; got %q", last)
+	}
+}
+
+// TestPrintNodeClosureUnresolvedParentFallsBackToUUID — a parent id
+// missing from the result set (contract drift) renders the raw UUID
+// rather than being dropped.
+func TestPrintNodeClosureUnresolvedParentFallsBackToUUID(t *testing.T) {
+	via := "runs-on"
+	ghost := uuid.MustParse("00000000-1111-2222-3333-444444444444")
+	rows := []api.TopologyNode{
+		{
+			Id:           uuid.MustParse("99999999-8888-7777-6666-555555555555"),
+			Kind:         "vm",
+			Name:         "web-1",
+			Depth:        1,
+			ViaEdgeKind:  &via,
+			ParentNodeId: &ghost,
+		},
+	}
+	var buf bytes.Buffer
+	printNodeClosure(&buf, "web-1", rows)
+	if !strings.Contains(buf.String(), ghost.String()) {
+		t.Errorf("unresolved parent should render its raw UUID; got %q", buf.String())
 	}
 }
 

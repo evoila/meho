@@ -24,8 +24,8 @@ const _maxHopsMax = 32
 // newPathCmd returns the `meho topology path <from> <to>` command.
 //
 //	meho topology path <from> <to> [--max-hops N]
-//	  [--from-kind K] [--to-kind K] [--json] [--backplane <url>]
-//	# GET /api/v1/topology/path?from=A&to=B&max_hops=N
+//	  [--from-kind K] [--to-kind K] [--include-stale=false] [--json] [--backplane <url>]
+//	# GET /api/v1/topology/path?from=A&to=B&max_hops=N&include_stale=...
 //
 // Shortest unweighted path between two named nodes. v0.2 is
 // unweighted (every edge costs one hop) and walks edges in both
@@ -36,6 +36,7 @@ func newPathCmd() *cobra.Command {
 		maxHops           int
 		fromKind          string
 		toKind            string
+		includeStale      bool
 		jsonOut           bool
 		backplaneOverride string
 	)
@@ -61,6 +62,7 @@ func newPathCmd() *cobra.Command {
 				MaxHops:           maxHops,
 				FromKind:          fromKind,
 				ToKind:            toKind,
+				IncludeStale:      includeStale,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
 			})
@@ -72,6 +74,8 @@ func newPathCmd() *cobra.Command {
 		"pin the `from` endpoint to one node kind when its name is ambiguous")
 	cmd.Flags().StringVar(&toKind, "to-kind", "",
 		"pin the `to` endpoint to one node kind when its name is ambiguous")
+	cmd.Flags().BoolVar(&includeStale, "include-stale", true,
+		"include soft-deleted (stale) nodes and edges in the search (last-refresh-wins); pass --include-stale=false for live rows only")
 	cmd.Flags().BoolVar(&jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human chain")
 	cmd.Flags().StringVar(&backplaneOverride, "backplane", "",
@@ -80,11 +84,15 @@ func newPathCmd() *cobra.Command {
 }
 
 type pathOptions struct {
-	From              string
-	To                string
-	MaxHops           int
-	FromKind          string
-	ToKind            string
+	From     string
+	To       string
+	MaxHops  int
+	FromKind string
+	ToKind   string
+	// IncludeStale mirrors the route's include_stale query param
+	// (#2538); only sent on the wire when false (true is the server
+	// default).
+	IncludeStale      bool
 	JSONOut           bool
 	BackplaneOverride string
 }
@@ -141,6 +149,10 @@ func buildPathParams(opts pathOptions) *api.PathApiV1TopologyPathGetParams {
 	if opts.ToKind != "" {
 		tk := opts.ToKind
 		params.ToKind = &tk
+	}
+	if !opts.IncludeStale {
+		f := false
+		params.IncludeStale = &f
 	}
 	return params
 }

@@ -238,7 +238,7 @@ import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Final
+from typing import Final, get_args
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
@@ -260,6 +260,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
+
+# The set-wide five-state check vocabulary is declared exactly once, in
+# #2504's assertion spec module (:mod:`meho_backplane.checks.assertions`).
+# The ``sensor`` table's ``last_state`` CHECK is drift-guarded against
+# it in :mod:`tests.test_db_sensor`; ``db.models`` never re-declares the
+# enum. The import is safe against a cycle: the ``checks`` package is
+# dependency-pure (stdlib + pydantic + itself) and never imports ``db``.
+from meho_backplane.checks.assertions import CheckState
 
 __all__ = [
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
@@ -1806,10 +1814,14 @@ class GraphEdgeKind(StrEnum):
     POLICY_BINDS = "policy-binds"
 
 
-#: Closed enum of :attr:`GraphEdge.source` -- ``auto`` for
-#: probe-derived edges (T3 refresh), ``curated`` reserved for the
-#: operator-asserted edges G9.2 lands. v0.2 writes ``auto`` exclusively.
-_GRAPH_EDGE_SOURCES: tuple[str, ...] = ("auto", "curated")
+#: Closed enum of :attr:`GraphNode.source` / :attr:`GraphEdge.source`
+#: -- ``auto`` for probe-derived rows (T3 refresh), ``curated`` for
+#: operator-asserted ones (G9.2 edges; #2536 node seeds via
+#: :func:`meho_backplane.topology.nodes.create_or_get_node`). Shared
+#: between ``ck_graph_node_source`` (migration ``0066``) and
+#: ``ck_graph_edge_source`` (migration ``0007``) so the two halves of
+#: the curated-durability discipline cannot drift.
+_GRAPH_SOURCES: tuple[str, ...] = ("auto", "curated")
 
 
 def _ck_in(column: str, values: tuple[str, ...]) -> str:
@@ -1880,6 +1892,17 @@ class GraphNode(Base):
       datastore). ``SET NULL`` because removing a target should not
       cascade-delete the topology data the agent may still want to
       reason about; the node lives on as a non-target row.
+    * ``source`` -- Text NOT NULL DEFAULT ``'auto'`` with a DB-layer
+      ``CHECK source IN (...)`` constraint (migration ``0066``;
+      mirrors :attr:`GraphEdge.source` / ``ck_graph_edge_source``).
+      ``auto`` for probe-derived rows (T3 refresh); ``curated`` for
+      operator/agent-seeded rows
+      (:func:`meho_backplane.topology.nodes.create_or_get_node`).
+      The refresh service keys its curated-node durability discipline
+      on this column (#2536): a probe re-observation of a curated
+      node bumps ``last_seen`` only -- no property overwrite, no
+      ``target_id`` adoption -- and no refresh ever soft-deletes a
+      curated node.
     * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
       ``{}``. Per-node structured data the connector populates at
       discover time (e.g. a VM's power state, a pod's status phase);
@@ -1887,9 +1910,9 @@ class GraphNode(Base):
       evolution without DDL changes.
     * ``discovered_by`` -- Text NOT NULL. Connector product slug
       (``vmware``, ``kubernetes``, ``vault``, ...) when probe-derived,
-      or ``curated`` for operator-asserted rows (G9.2). No CHECK
-      constraint -- the value space is open-ended as new connectors
-      land.
+      or the operator's JWT ``sub`` for manually-seeded rows (G9.2).
+      No CHECK constraint -- the value space is open-ended as new
+      connectors land.
     * ``first_seen`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
       server default via the migration; the ORM also declares
       ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
@@ -1932,6 +1955,7 @@ class GraphNode(Base):
         nullable=True,
         default=None,
     )
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="auto")
     properties: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,
@@ -1961,6 +1985,10 @@ class GraphNode(Base):
         sa.CheckConstraint(
             _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("source", _GRAPH_SOURCES),
+            name="ck_graph_node_source",
         ),
     )
 
@@ -2095,7 +2123,7 @@ class GraphEdge(Base):
             name="ck_graph_edge_kind",
         ),
         sa.CheckConstraint(
-            _ck_in("source", _GRAPH_EDGE_SOURCES),
+            _ck_in("source", _GRAPH_SOURCES),
             name="ck_graph_edge_source",
         ),
     )
@@ -5822,5 +5850,487 @@ class RunbookRunStepState(Base):
         sa.CheckConstraint(
             "state IN ('pending', 'in_progress', 'verified', 'failed')",
             name="ck_runbook_run_step_states_state",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sensor — the deterministic check layer's registration substrate
+# (Initiative #2416, Task #2503)
+# ---------------------------------------------------------------------------
+
+
+class SensorCadenceKind(StrEnum):
+    """Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+
+    Initiative #2416 (parent goal #221), Task #2503. One ``sensor`` row
+    carries exactly one cadence, selected by this discriminator; the
+    invariant is enforced by the DB-side ``ck_sensor_cadence_fields``
+    CHECK that pairs each kind with its mandatory column (mirroring
+    :class:`ScheduledTriggerKind`).
+
+    Members:
+
+    * :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The
+      sub-minute path #2505's interval-tick loop drives.
+    * :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The
+      >=1-minute path #2505 rides on #804's durable scheduler discipline.
+
+    Closed enum: widening it is a coordinated DB + model change so the
+    enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+    ``0064``'s frozen tuple cannot drift.
+    """
+
+    INTERVAL = "interval"
+    CRON = "cron"
+
+
+class SensorStatus(StrEnum):
+    """Closed lifecycle status of a :class:`Sensor`.
+
+    ``ScheduledTriggerStatus`` minus the trigger-only terminal states:
+    a sensor is either eligible for evaluation (:attr:`ACTIVE`) or held
+    (:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is
+    not accepted at create; #2505 parks a row to ``paused`` (plus a
+    ``status_reason``) when it hits an unparseable persisted cadence, and
+    #2506's rollup derives ``skip`` for paused rows.
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+
+
+class SensorSeverity(StrEnum):
+    """Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+
+    The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+    sensor whose assertion fails contributes at most ``degraded``, a
+    ``critical`` one contributes ``critical``. The five-state vocabulary
+    itself is declared once in #2504's :data:`CheckState`; this is only
+    the two operator-selectable severities.
+    """
+
+    DEGRADED = "degraded"
+    CRITICAL = "critical"
+
+
+#: Closed ``sensor.cadence_kind`` vocabulary -- derived from
+#: :class:`SensorCadenceKind` so the enum and the DB-layer CHECK cannot
+#: drift. The drift guard in :mod:`tests.test_db_sensor` asserts equality
+#: at unit-test time; migration ``0064`` records its own frozen literal.
+_SENSOR_CADENCE_KINDS: tuple[str, ...] = tuple(k.value for k in SensorCadenceKind)
+
+#: Closed ``sensor.status`` vocabulary -- lock-step with :class:`SensorStatus`.
+_SENSOR_STATUSES: tuple[str, ...] = tuple(s.value for s in SensorStatus)
+
+#: Closed ``sensor.severity`` vocabulary -- lock-step with :class:`SensorSeverity`.
+_SENSOR_SEVERITIES: tuple[str, ...] = tuple(s.value for s in SensorSeverity)
+
+#: Closed ``sensor.last_state`` vocabulary -- the five-state check
+#: vocabulary declared once in #2504's :data:`CheckState`. ``db.models``
+#: does NOT re-declare it (no ``SensorState`` enum); ``last_state``'s
+#: CHECK is populated from ``CheckState``'s members and drift-guarded
+#: against them in :mod:`tests.test_db_sensor`.
+_SENSOR_LAST_STATES: tuple[str, ...] = get_args(CheckState)
+
+#: Discriminated-union invariant for the cadence union: exactly one of
+#: ``interval_seconds`` / ``cron_expr`` carries the semantics, the other
+#: is NULL. Portable ``(cadence_kind = '...' AND col IS NOT NULL AND
+#: other IS NULL)`` form -- no dialect-specific syntax. Migration
+#: ``0064`` records the same predicate as a frozen snapshot; the drift
+#: guard in :mod:`tests.test_db_sensor` asserts equality against this
+#: constant.
+_SENSOR_CADENCE_FIELDS_CHECK: str = (
+    "("
+    "(cadence_kind = 'interval' AND interval_seconds IS NOT NULL "
+    "AND cron_expr IS NULL) OR "
+    "(cadence_kind = 'cron' AND cron_expr IS NOT NULL "
+    "AND interval_seconds IS NULL)"
+    ")"
+)
+
+
+class Sensor(Base):
+    """One row per deterministic check the check layer evaluates.
+
+    Initiative #2416 (parent goal #221), Task #2503. The first persisted
+    entity of the check layer: a Sensor pins an ``(op + args + assertion
+    + cadence + severity)`` tuple that #2505's runner evaluates on a
+    schedule and #2506's Dashboard rolls up. Modelled on
+    :class:`ScheduledTrigger` (the durable-row mould) but a deliberately
+    separate table -- ``ScheduledTrigger.agent_definition_id`` is
+    ``NOT NULL`` with a real FK, so the trigger row structurally cannot
+    carry an op-based check.
+
+    Single-table cadence union
+    --------------------------
+
+    ``cadence_kind`` discriminates ``interval_seconds`` (the sub-minute
+    interval-tick path) from ``cron_expr`` + ``timezone`` (the >=1-minute
+    cron path). A DB-side ``CHECK`` (``ck_sensor_cadence_fields``)
+    enforces the invariant -- the right column populated, the other
+    NULL -- exactly as ``ck_scheduled_trigger_kind_fields`` does for the
+    trigger. ``next_fire_at`` is materialised at create for both kinds so
+    #2505's claim query (``status='active' AND next_fire_at <= now``) is
+    uniform; the composite partial index ``sensor_due_idx`` drives it.
+
+    Latest-state projection (not a results table)
+    ---------------------------------------------
+
+    Sensor results live as a projection ON the row -- ``last_state`` /
+    ``last_value`` / ``last_evidence`` / ``last_evaluated_at`` /
+    ``state_since`` -- the in-repo precedent #2327's scheduler skip-state
+    set. #2506's rollup and ``for:`` hold-time hysteresis need only the
+    current state and how long it has held (``state_since``), never
+    history; a results table would demand retention/pruning, speculative
+    until an operator asks for history. The named write path is one
+    repository function
+    (:func:`~meho_backplane.checks.repository.record_sensor_result`).
+
+    Storage-only
+    ------------
+
+    The model carries no transition logic (the discipline
+    :class:`ScheduledTrigger` / :class:`AgentRun` follow). The admin
+    service (:class:`~meho_backplane.checks.service.SensorAdminService`)
+    owns create/list/get/delete; #2505's runner owns claim/advance/park
+    and the ``record_sensor_result`` write; #2506 consumes the
+    projection.
+    """
+
+    __tablename__ = "sensor"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK -- clean-slate table, mould parity
+    # with ScheduledTrigger. An orphan sensor for a typo'd tenant id
+    # surfaces as IntegrityError at insert.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Operator-facing handle -- Sensors are first-class and referenced by
+    # Dashboards (#2506), so the name is unique per tenant (the
+    # ``sensor_tenant_name_idx`` unique index below).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Op identity: ``connector_id`` is parsed into (product, version,
+    # impl_id) and, with ``op_id``, resolves the EndpointDescriptor whose
+    # ``safety_level`` the create-time guard reads. Stored verbatim so
+    # #2505 dispatches the same op the operator registered.
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Portable dispatch target (a target UUID / descriptor the op is
+    # scoped to). ``none_as_null=True`` keeps SQL NULL distinct from the
+    # JSON literal ``'null'`` -- the discipline the trigger's
+    # ``event_filter`` uses.
+    target: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # Op params, NOT NULL default ``{}`` (an op with no extra params
+    # carries an empty dict, never NULL).
+    params: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    # The assertion spec, NOT NULL. Validated at the wire by parsing into
+    # #2504's ``AssertionSpec`` (a bad path / comparator is a 422 at
+    # create); stored as the serialised dict. #2505 feeds it the op-result
+    # payload; #2506 renders the outcome.
+    assertion: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+    )
+    # Lifecycle status. Default ``active`` on insert; #2505 parks a row to
+    # ``paused`` (with a ``status_reason``). The runner only evaluates
+    # ``active`` rows.
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=SensorStatus.ACTIVE.value,
+    )
+    # Machine tag for why a row was parked -- written by #2505 when it
+    # parks a row with an unparseable persisted cadence. NULL on a healthy
+    # row.
+    status_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # Cadence discriminator -- exactly one of ``interval_seconds`` /
+    # ``cron_expr`` populated; the DB-side ``ck_sensor_cadence_fields``
+    # CHECK enforces the invariant.
+    cadence_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    interval_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=None,
+    )
+    cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Per-sensor IANA timezone name for cron evaluation. Defaults to
+    # ``UTC`` (the same backstop the trigger's ``timezone`` uses).
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
+    # Materialised next-fire timestamp #2505's claim query scans. Set at
+    # create for both cadence kinds; indexed (with ``status``) via the
+    # partial ``sensor_due_idx``.
+    next_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Worst rollup state a failing assertion may drive (#2506 caps the
+    # rollup at this). Default ``critical``.
+    severity: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=SensorSeverity.CRITICAL.value,
+    )
+    # ``for:`` hold-time hysteresis input (#2506). Seconds a failing state
+    # must persist before it counts; NOT NULL default 0. Stored here
+    # because it is per-sensor configuration exactly like ``severity``.
+    for_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    # Latest-state projection (Decision D). ``last_state`` carries the
+    # five-state vocabulary #2504's ``CheckState`` declares (default
+    # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
+    # when the state changes so #2506's ``for:`` hysteresis can read how
+    # long the current state has held.
+    last_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="unknown",
+    )
+    # The observed scalar the comparator judged (``AssertionOutcome.value``
+    # is a JSON scalar, not a dict), or NULL when unknown.
+    last_value: Mapped[object | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    last_evidence: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    state_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Identity ``sub`` #2505's runner dispatches under -- the sensor
+    # analogue of the trigger's ``__scheduler__`` sentinel.
+    identity_sub: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="__sensor__",
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # #2505's claim query scans ``WHERE status='active' ORDER BY
+        # next_fire_at``. Composite b-tree on (status, next_fire_at),
+        # partial on PG to only carry the rows the runner claims.
+        Index(
+            "sensor_due_idx",
+            "status",
+            "next_fire_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'active'"),
+        ),
+        # Tenant-scoped list (admin surface).
+        Index(
+            "sensor_tenant_idx",
+            "tenant_id",
+            "cadence_kind",
+            postgresql_using="btree",
+        ),
+        # Sensors are referenced by name from Dashboards (#2506); the name
+        # is unique within a tenant.
+        Index(
+            "sensor_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("cadence_kind", _SENSOR_CADENCE_KINDS),
+            name="ck_sensor_cadence_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _SENSOR_STATUSES),
+            name="ck_sensor_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("severity", _SENSOR_SEVERITIES),
+            name="ck_sensor_severity",
+        ),
+        # ``last_state`` over exactly #2504's ``CheckState`` members. The
+        # drift guard asserts this value set equals ``CheckState``.
+        sa.CheckConstraint(
+            _ck_in("last_state", _SENSOR_LAST_STATES),
+            name="ck_sensor_last_state",
+        ),
+        # Cadence discriminated-union invariant -- see
+        # :data:`_SENSOR_CADENCE_FIELDS_CHECK`.
+        sa.CheckConstraint(
+            _SENSOR_CADENCE_FIELDS_CHECK,
+            name="ck_sensor_cadence_fields",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard -- named composition of Sensors with a five-state worst-of rollup
+# (Initiative #2416, Task #2506)
+# ---------------------------------------------------------------------------
+
+
+#: Closed ``check_dashboards.last_rollup_state`` vocabulary -- the five-state
+#: check vocabulary declared once in #2504's :data:`CheckState`. ``db.models``
+#: does NOT re-declare it; the memo column's CHECK is populated from
+#: ``CheckState``'s members, the same discipline ``sensor.last_state`` follows.
+_CHECK_DASHBOARD_ROLLUP_STATES: tuple[str, ...] = get_args(CheckState)
+
+
+class CheckDashboard(Base):
+    """One named, tenant-scoped composition of Sensors (#2506).
+
+    A Dashboard references member Sensors many-to-many through the
+    :class:`CheckDashboardSensor` association table (Sensors are defined once
+    by #2503 and referenced by many Dashboards). The serving rollup -- the
+    five-state worst-of fold over the members' latest-state projection -- is
+    **evaluated on read** (decision on #2506;
+    :mod:`meho_backplane.checks.rollup`), never materialised on this row.
+
+    ``last_rollup_state`` is a transition-detection memo shipped UNWRITTEN by
+    this Task: #2507's hook at #2505's persist seam is its only writer, and
+    this Task's read path never touches it. It exists now so the S5 (#2507)
+    green->non-green edge detector has a column to compare against without a
+    later migration.
+
+    Storage-only -- no rollup logic on the model (the discipline
+    :class:`Sensor` / :class:`ScheduledTrigger` follow). The admin service
+    (:class:`~meho_backplane.checks.dashboard_service.CheckDashboardAdminService`)
+    owns create / list / get / delete and computes the rollup on read.
+    """
+
+    __tablename__ = "check_dashboards"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    # Real REFERENCES tenant(id) FK -- clean-slate table, mould parity with
+    # Sensor / ScheduledTrigger. An orphan dashboard for a typo'd tenant id
+    # surfaces as IntegrityError at insert.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Operator-facing handle -- unique per tenant (the
+    # ``check_dashboard_tenant_name_idx`` unique index below).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Transition-detection memo (#2507). Shipped unwritten by this Task; NULL
+    # until #2507's hook maintains it. The CHECK admits NULL plus the
+    # five-state vocabulary.
+    last_rollup_state: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Tenant-scoped list (admin surface).
+        Index(
+            "check_dashboard_tenant_idx",
+            "tenant_id",
+            postgresql_using="btree",
+        ),
+        # A Dashboard name is unique within a tenant (operator-facing handle).
+        Index(
+            "check_dashboard_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        # ``last_rollup_state`` over exactly #2504's ``CheckState`` members;
+        # NULL is admitted (the memo is unwritten until #2507).
+        sa.CheckConstraint(
+            _ck_in("last_rollup_state", _CHECK_DASHBOARD_ROLLUP_STATES),
+            name="ck_check_dashboards_last_rollup_state",
+        ),
+    )
+
+
+class CheckDashboardSensor(Base):
+    """Association row joining a :class:`CheckDashboard` to a member :class:`Sensor`.
+
+    The first pure many-to-many association table in the schema (no prior
+    ``secondary`` / ``sa.Table`` exists). Composite PK
+    ``(dashboard_id, sensor_id)`` is the natural join key; both columns are
+    real FKs with ``ondelete="CASCADE"`` (the :class:`RunbookRunStepState`
+    mould) so deleting a Dashboard or a Sensor removes only the memberships,
+    never the other side. Membership is set at Dashboard-create only -- there
+    is no PUT; an "edit" is delete + recreate (the trigger-immutability
+    posture).
+    """
+
+    __tablename__ = "check_dashboard_sensors"
+
+    dashboard_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("check_dashboards.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    sensor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("sensor.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Reverse lookup "which Dashboards reference this Sensor" + the index
+        # PG wants behind the ``sensor_id`` FK's cascade.
+        Index(
+            "check_dashboard_sensors_sensor_idx",
+            "sensor_id",
+            postgresql_using="btree",
         ),
     )

@@ -6,7 +6,7 @@
 # friendly snapshot at cli/api/openapi.json.
 #
 # FastAPI emits OpenAPI 3.1 by default; oapi-codegen v2 doesn't yet
-# support 3.1 (upstream issue #373), so we downgrade two
+# support 3.1 (upstream issue #373), so we downgrade three
 # 3.1-specific constructs to their 3.0 equivalents on the way out:
 #
 #   1. The document `openapi` field is rewritten from "3.1.x" to
@@ -14,8 +14,14 @@
 #   2. `anyOf: [<type>, {"type": "null"}]` (FastAPI's encoding for
 #      Optional[T]) is collapsed to `{<type>, "nullable": true}` —
 #      the 3.0 idiom.
+#   3. Numeric `exclusiveMinimum` / `exclusiveMaximum` (the JSON
+#      Schema 2020-12 form Pydantic's `Field(gt=...)` / `lt=...`
+#      emit) are rewritten to the 3.0 draft-4 idiom: a `minimum` /
+#      `maximum` bound plus a boolean `exclusiveMinimum` /
+#      `exclusiveMaximum: true`. oapi-codegen v2 models these fields
+#      as bool and rejects the numeric form outright.
 #
-# Both transforms are lossless for v0.1's spec; if a richer 3.1
+# All transforms are lossless for the current spec; if a richer 3.1
 # construct ever lands in the backplane (`type: ["string","null"]`
 # array form, prefixItems on tuples, etc.) extend this script
 # alongside the change. The Makefile `snapshot-openapi` target
@@ -62,11 +68,44 @@ def _downgrade_anyof_null(node: Any) -> Any:
     return node
 
 
+def _downgrade_exclusive_bounds(node: Any) -> Any:
+    """Rewrite OpenAPI 3.1 numeric exclusive bounds to the 3.0 boolean idiom.
+
+    JSON Schema 2020-12 (OpenAPI 3.1) spells an exclusive bound as a
+    *number* (``exclusiveMinimum: 0``); OpenAPI 3.0 / draft-4 spells it as
+    a *boolean* modifier on ``minimum`` (``minimum: 0`` +
+    ``exclusiveMinimum: true``). Pydantic's ``Field(gt=...)`` / ``lt=...``
+    emit the 3.1 numeric form (e.g. the check layer's ``FreshnessCompare``
+    ``max_age_seconds`` exposed via ``SensorCreate.assertion``), which
+    oapi-codegen v2 rejects with "cannot unmarshal number into field
+    Schema.exclusiveMinimum of type bool". Convert both bounds in place.
+    ``bool`` is checked first because it is an ``int`` subclass -- an
+    already-3.0 boolean value must pass through untouched.
+    """
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if (
+                key in ("exclusiveMinimum", "exclusiveMaximum")
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            ):
+                out["minimum" if key == "exclusiveMinimum" else "maximum"] = value
+                out[key] = True
+            else:
+                out[key] = _downgrade_exclusive_bounds(value)
+        return out
+    if isinstance(node, list):
+        return [_downgrade_exclusive_bounds(v) for v in node]
+    return node
+
+
 def downgrade(spec: dict) -> dict:
     """Apply all 3.1 → 3.0 transforms on a copy of the spec."""
     spec = json.loads(json.dumps(spec))  # deep copy
     spec["openapi"] = "3.0.3"
     spec = _downgrade_anyof_null(spec)
+    spec = _downgrade_exclusive_bounds(spec)
     return spec
 
 

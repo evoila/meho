@@ -14,9 +14,6 @@ Companion documents:
   to honestly describe a connector's ship state.
 - [error-message-shape.md](error-message-shape.md) — how to shape error
   envelopes (sibling discipline, codified out of `#697`'s feedback).
-- [`docs/planning/mvp-roadmap.md`](../planning/mvp-roadmap.md) — where
-  the strategic decisions captured in §1 below get translated into
-  release scope.
 
 ## 1. Strategic context — curated daily-driver + OpenAPI escape hatch
 

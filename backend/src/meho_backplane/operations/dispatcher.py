@@ -224,6 +224,7 @@ import httpx
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.history import build_target_activity_advisory
 from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
@@ -753,7 +754,12 @@ async def _reduce_and_audit_success(
         redaction_policy_id=redaction.policy_id,
         handle_metadata=_handle_metadata_for_audit(handle),
     )
-    return wrap_ok_result(op_id, summary, duration_ms, handle)
+    advisory = await build_target_activity_advisory(
+        operator,
+        op_id=descriptor.op_id,
+        target_name=getattr(target, "name", None),
+    )
+    return wrap_ok_result(op_id, summary, duration_ms, handle, extras=advisory)
 
 
 async def _run_branch_with_error_handling(

@@ -80,23 +80,26 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
 import structlog
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.broadcast.events import BroadcastEvent
+from meho_backplane.broadcast.events import BroadcastEvent, classify_op
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
     "OP_CLASS_ENUM",
     "InvalidSinceError",
+    "build_target_activity_advisory",
     "default_since_ms",
     "dump_event_wire",
     "event_matches",
@@ -705,3 +708,132 @@ async def list_recent_events_fail_soft(
             stream_key=stream_key(operator.tenant_id),
         )
         return {"events": [], "next_cursor": None}
+
+
+#: op_class values that carry the dispatch-time target-activity advisory
+#: (#2550). Only mutating classes qualify -- a write is where crossfire
+#: matters. Read-class dispatches (``read`` / ``credential_read`` /
+#: ``audit_query`` / ``other`` / ``approval``) skip the stream read
+#: entirely, keeping the hot read path free of the lookup.
+_ADVISORY_WRITE_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"write", "credential_write", "credential_mint"}
+)
+
+#: Maximum advisory entries surfaced on a single dispatch response. The
+#: advisory is an awareness nudge, not an audit -- the caller who needs
+#: the full picture queries ``meho.broadcast.recent``.
+_ADVISORY_MAX_ENTRIES: Final[int] = 5
+
+#: Bounded scan cap for the advisory stream read. The window (settings
+#: knob) already bounds the range in time; this caps the entry count so
+#: a burst inside the window can't turn one dispatch into an unbounded
+#: XRANGE.
+_ADVISORY_SCAN_LIMIT: Final[int] = 100
+
+#: The ``extras`` key the advisory rides on the :class:`OperationResult`.
+ADVISORY_EXTRAS_KEY: Final[str] = "target_activity_advisory"
+
+
+def _advisory_entry(event: dict[str, Any]) -> dict[str, Any]:
+    """Project one stream event dict onto the compact advisory shape.
+
+    Structured, server-derived fields ONLY -- ``principal_sub`` /
+    ``actor_sub`` (lineage), ``kind``, the operation's ``op_id`` or the
+    announcement's ``phase``, and ``ts``. Agent-authored free text
+    (``activity`` / ``scope`` / ``target`` / ``targets``) is deliberately
+    excluded: the untrusted-prose envelope never enters an op response
+    (Initiative #2543, review finding 27). ``kind`` maps the on-stream
+    discriminator ``agent_announcement`` to the advisory's
+    ``announcement`` label; every other event is an ``operation``.
+    """
+    is_announcement = event.get("kind") == "agent_announcement"
+    entry: dict[str, Any] = {
+        "principal_sub": event.get("principal_sub"),
+        "kind": "announcement" if is_announcement else "operation",
+        "ts": event.get("ts"),
+    }
+    actor_sub = event.get("actor_sub")
+    if actor_sub is not None:
+        entry["actor_sub"] = actor_sub
+    if is_announcement:
+        phase = event.get("phase")
+        if phase is not None:
+            entry["phase"] = phase
+    else:
+        entry["op_id"] = event.get("op_id")
+    return entry
+
+
+async def build_target_activity_advisory(
+    operator: Operator,
+    *,
+    op_id: str,
+    target_name: str | None,
+) -> dict[str, Any]:
+    """Build the ``extras`` fragment advising of recent peer activity.
+
+    Post-op awareness for a write-class dispatch (#2550): when the op
+    mutates a target that another principal has touched recently -- an
+    operation or an active announcement claim -- the response carries a
+    compact advisory so the caller learns about the overlap at the moment
+    it matters. This is NOT a lock or a block; pre-op checking remains the
+    discipline's ``meho.broadcast.recent`` read step.
+
+    Returns ``{"target_activity_advisory": [...]}`` with up to
+    :data:`_ADVISORY_MAX_ENTRIES` most-recent peer entries, or an empty
+    dict (no key added) when the advisory does not apply. The empty-dict
+    short-circuits, in order:
+
+    * the feature is disabled (``dispatch_activity_advisory_window_minutes
+      == 0``);
+    * the op is not write-class (read-class dispatches perform no stream
+      read -- the frozenset check returns before any Valkey call);
+    * the dispatch has no target;
+    * no peer activity was found in the window.
+
+    Fail-open and bounded: the read goes through the fail-soft history
+    helper (a Valkey teardown warn-logs and yields no advisory rather
+    than failing the op), and a broad guard swallows any other error so a
+    bug in the advisory path never converts a successful op into a
+    failure. The scan is a single time-bounded XRANGE capped at
+    :data:`_ADVISORY_SCAN_LIMIT`.
+    """
+    window_minutes = get_settings().dispatch_activity_advisory_window_minutes
+    if window_minutes <= 0:
+        return {}
+    if classify_op(op_id) not in _ADVISORY_WRITE_OP_CLASSES:
+        return {}
+    if not target_name:
+        return {}
+
+    caller_principal = operator.sub
+    caller_actor = resolve_actor_sub()
+    try:
+        since = (datetime.now(UTC) - timedelta(minutes=window_minutes)).isoformat()
+        page = await list_recent_events_fail_soft(
+            operator,
+            since=since,
+            target=target_name,
+            active_only=True,
+            limit=_ADVISORY_SCAN_LIMIT,
+        )
+        entries = [
+            _advisory_entry(event)
+            for event in page["events"]
+            if not (
+                event.get("principal_sub") == caller_principal
+                and event.get("actor_sub") == caller_actor
+            )
+        ]
+    except Exception:
+        # Advisory is best-effort awareness; a bug in this path must
+        # never convert a successful dispatch into a failure.
+        _log.warning(
+            "target_activity_advisory_failed",
+            stream_key=stream_key(operator.tenant_id),
+        )
+        return {}
+
+    if not entries:
+        return {}
+    return {ADVISORY_EXTRAS_KEY: entries[-_ADVISORY_MAX_ENTRIES:]}

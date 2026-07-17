@@ -1026,6 +1026,12 @@ class Settings(BaseModel):
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
     broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
+    #: Look-back window (minutes) for the dispatch-time target-activity
+    #: advisory (#2550). A write-class dispatch on a target with peer
+    #: activity inside this window carries a compact
+    #: ``extras["target_activity_advisory"]`` on its response. ``0``
+    #: disables the feature entirely (no stream read on any dispatch).
+    dispatch_activity_advisory_window_minutes: int = Field(default=30, ge=0)
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
@@ -1636,6 +1642,9 @@ def get_settings() -> Settings:
         ),
         broadcast_announce_rate_per_minute=int(
             os.environ.get("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "10"),
+        ),
+        dispatch_activity_advisory_window_minutes=int(
+            os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),

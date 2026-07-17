@@ -256,6 +256,53 @@ Frame shape is byte-compatible with the API edge — the `_process_entries`
 helper, the cursor resolver, and the backlog prelude are imported
 verbatim from `api/v1/feed.py`.
 
+### Read path (dispatch-time target-activity advisory)
+
+On the **success path of a write-class dispatch**, the operation response
+carries a compact advisory of recent *peer* activity on the same target so
+the caller learns another principal is already active there — post-op
+awareness, not a lock or a block (pre-op checking stays the discipline's
+`meho.broadcast.recent` read step). The advisory rides
+`OperationResult.extras["target_activity_advisory"]`
+(`connectors/schemas.py`), the established envelope-extension slot.
+
+```
+dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
+  → build_target_activity_advisory(operator, op_id, target_name)
+      [gate — returns {} without any stream read when:]
+        · settings.dispatch_activity_advisory_window_minutes == 0
+        · classify_op(op_id) not in {write, credential_write, credential_mint}
+        · target_name is None
+      [otherwise — one bounded read:]
+        → list_recent_events_fail_soft(target=target_name,
+                                       active_only=True, limit=100,
+                                       since=now - window)
+        → drop entries where (principal_sub, actor_sub) == the caller's
+        → project each survivor to structured fields only, newest 5
+  → wrap_ok_result(..., extras=advisory)
+```
+
+Design contract:
+
+- **Write-class only.** Read-class dispatches (`read` / `credential_read`
+  / `audit_query` / `other` / `approval`) short-circuit on the frozenset
+  check before any Valkey call — the hot read path pays nothing.
+- **Structure only, no prose.** Each entry is
+  `{principal_sub, actor_sub?, kind (operation|announcement), op_id?/phase?, ts}`.
+  The untrusted announcement free-text fields (`activity` / `scope` /
+  `target` / `targets`) are never projected — the untrusted-prose envelope
+  does not enter an op response (Initiative #2543, review finding 27).
+- **Self-excluded.** An entry whose `principal_sub` *and* `actor_sub` both
+  match the caller is the caller's own activity and is dropped; a sibling
+  agent under the same human (distinct `actor_sub`) is a peer and surfaces.
+- **Fail-open and bounded.** A Valkey teardown warn-logs
+  (`broadcast_history_fetch_failed`) and yields no advisory; any other
+  error is swallowed (`target_activity_advisory_failed`). The scan is a
+  single time-bounded XRANGE capped at 100 entries. A missing advisory
+  never fails or delays the dispatch.
+- **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
+  `30`, `0` = off) gates the whole feature.
+
 ## Dependencies
 
 - `redis.asyncio` (redis-py 7.4) — Valkey 9.x is wire-compatible with

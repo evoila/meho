@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — scheduler MCP tool cross-tenant IDOR parity fix
+
+- Close a cross-tenant write IDOR on the `meho.scheduler.create` MCP tool: it
+  gated a cross-tenant `tenant_id` on tenant-admin *rank*, but the tool already
+  requires tenant_admin, so any tenant-admin could schedule a trigger into any
+  tenant. The handler now enforces the same shared `authorize_tenant_scope`
+  platform-admin seam its own REST route uses (the #1638 primitive) — a
+  non-platform-admin naming another tenant is refused with
+  `cross_tenant_requires_platform_admin`. Brings the MCP surface to parity with
+  the sibling Sensor MCP fix (#2503). Adds MCP regression tests (tenant-admin
+  refused cross-tenant; platform-admin allowed).
+
 ### Added — tiered-triage investigator wiring (#2507)
 
 - Wire a **diagnose-only investigator** to Dashboard non-green transitions

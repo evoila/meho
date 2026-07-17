@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0065_add_graph_node_source``.
+"""Behavioural tests for Alembic migration ``0066_add_graph_node_source``.
 
 Initiative #2533 (Topology v2), Task #2536 (T2). The migration adds
 ``graph_node.source`` (``TEXT NOT NULL DEFAULT 'auto'``, CHECK
@@ -11,23 +11,23 @@ backfills ``source='curated'`` for rows carrying the manual-seed
 
 Coverage:
 
-* **Backfill** — a pre-0065 row with ``seeded_by`` in ``properties``
+* **Backfill** — a pre-0066 row with ``seeded_by`` in ``properties``
   lands as ``curated``; a probe-discovered row (no stamp) lands as
   ``auto``.
-* **Default** — a post-0065 insert that omits ``source`` gets
+* **Default** — a post-0066 insert that omits ``source`` gets
   ``'auto'`` from the server default.
-* **CHECK** — a post-0065 insert with an out-of-vocabulary ``source``
+* **CHECK** — a post-0066 insert with an out-of-vocabulary ``source``
   is rejected with :class:`IntegrityError`.
 * **Sibling-CHECK survival** — ``ck_graph_node_kind`` still rejects a
   malformed kind after the batch table rebuild (the SQLite batch-mode
   caveat migration ``0063`` pinned for the edge table, now pinned for
   the node table).
-* **Round-trip** — ``upgrade 0065`` → ``downgrade 0064`` (column gone)
-  → ``upgrade 0065`` is clean; the backfill replays identically.
+* **Round-trip** — ``upgrade 0066`` → ``downgrade 0065`` (column gone)
+  → ``upgrade 0066`` is clean; the backfill replays identically.
 
 **Idempotency pinning (0049/0050/0054/0055 footgun).** Every
 forward / round-trip step targets this migration's **own** revision
-(``0065``) and its ``down_revision`` (``0064``), never ``head`` — so a
+(``0066``) and its ``down_revision`` (``0065``), never ``head`` — so a
 future head migration cannot silently change what these tests
 exercise. SQLite is the test driver; the migration branches only on
 the backfill predicate (PG ``properties ? 'seeded_by'`` vs SQLite
@@ -54,8 +54,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0065"
-_DOWN_REVISION = "0064"
+_REVISION = "0066"
+_DOWN_REVISION = "0065"
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL (sync fixture)."""
-    db_path = tmp_path / "migration_0065.db"
+    db_path = tmp_path / "migration_0066.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -106,14 +106,14 @@ def _seed_tenant(sync_url: str) -> str:
     return tenant_id
 
 
-def _insert_node_pre_0065(
+def _insert_node_pre_0066(
     sync_url: str,
     tenant_id: str,
     *,
     name: str,
     properties: dict[str, Any],
 ) -> str:
-    """Insert a ``graph_node`` row at revision 0064 (no ``source`` column)."""
+    """Insert a ``graph_node`` row at revision 0065 (no ``source`` column)."""
     node_id = str(uuid.uuid4())
     eng = sa_create_engine(sync_url)
     try:
@@ -139,7 +139,7 @@ def _insert_node_pre_0065(
     return node_id
 
 
-def _insert_node_post_0065(
+def _insert_node_post_0066(
     sync_url: str,
     tenant_id: str,
     *,
@@ -147,7 +147,7 @@ def _insert_node_post_0065(
     kind: str = "vm",
     source: str | None = None,
 ) -> None:
-    """Insert a row post-0065; ``source=None`` omits the column (default)."""
+    """Insert a row post-0066; ``source=None`` omits the column (default)."""
     columns = "id, tenant_id, kind, name, properties, discovered_by, first_seen"
     values = ":id, :tenant_id, :kind, :name, '{}', 'source-test', :first_seen"
     params: dict[str, Any] = {
@@ -188,11 +188,11 @@ def _select_source(sync_url: str, node_id: str) -> str:
 def test_backfill_marks_seeded_rows_curated_and_probe_rows_auto(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """The 0065 backfill keys on the ``properties.seeded_by`` stamp."""
+    """The 0066 backfill keys on the ``properties.seeded_by`` stamp."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _DOWN_REVISION)
     tenant_id = _seed_tenant(sync_url)
-    seeded_id = _insert_node_pre_0065(
+    seeded_id = _insert_node_pre_0066(
         sync_url,
         tenant_id,
         name="manually-seeded",
@@ -202,7 +202,7 @@ def test_backfill_marks_seeded_rows_curated_and_probe_rows_auto(
             "seeded_at": "2026-01-01T00:00:00+00:00",
         },
     )
-    probe_id = _insert_node_pre_0065(
+    probe_id = _insert_node_pre_0066(
         sync_url,
         tenant_id,
         name="probe-discovered",
@@ -218,11 +218,11 @@ def test_backfill_marks_seeded_rows_curated_and_probe_rows_auto(
 def test_post_upgrade_insert_defaults_to_auto(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """A post-0065 insert omitting ``source`` gets ``'auto'`` from the default."""
+    """A post-0066 insert omitting ``source`` gets ``'auto'`` from the default."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
     tenant_id = _seed_tenant(sync_url)
-    _insert_node_post_0065(sync_url, tenant_id, name="defaulted")
+    _insert_node_post_0066(sync_url, tenant_id, name="defaulted")
 
     eng = sa_create_engine(sync_url)
     try:
@@ -244,16 +244,16 @@ def test_check_rejects_unknown_source(
     tenant_id = _seed_tenant(sync_url)
 
     with pytest.raises(IntegrityError):
-        _insert_node_post_0065(sync_url, tenant_id, name="bad-source", source="inferred")
+        _insert_node_post_0066(sync_url, tenant_id, name="bad-source", source="inferred")
 
-    _insert_node_post_0065(sync_url, tenant_id, name="ok-auto", source="auto")
-    _insert_node_post_0065(sync_url, tenant_id, name="ok-curated", source="curated")
+    _insert_node_post_0066(sync_url, tenant_id, name="ok-auto", source="auto")
+    _insert_node_post_0066(sync_url, tenant_id, name="ok-curated", source="curated")
 
 
 def test_sibling_kind_check_survives_batch_rebuild(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``ck_graph_node_kind`` still rejects a malformed kind post-0065.
+    """``ck_graph_node_kind`` still rejects a malformed kind post-0066.
 
     The SQLite batch-mode caveat: :func:`op.batch_alter_table` rebuilds
     the table, and only **named** CHECK constraints participate in the
@@ -265,13 +265,13 @@ def test_sibling_kind_check_survives_batch_rebuild(
     tenant_id = _seed_tenant(sync_url)
 
     with pytest.raises(IntegrityError):
-        _insert_node_post_0065(sync_url, tenant_id, name="bad-kind", kind="DNS-Record")
+        _insert_node_post_0066(sync_url, tenant_id, name="bad-kind", kind="DNS-Record")
 
 
 def test_downgrade_then_upgrade_round_trips(
     alembic_cfg: tuple[Config, str],
 ) -> None:
-    """``downgrade 0064`` drops the column; ``upgrade 0065`` replays the backfill.
+    """``downgrade 0065`` drops the column; ``upgrade 0066`` replays the backfill.
 
     Pinned to this migration's own revision on both legs (never
     ``head``). The seeded row's ``properties.seeded_by`` stamp survives
@@ -280,7 +280,7 @@ def test_downgrade_then_upgrade_round_trips(
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _DOWN_REVISION)
     tenant_id = _seed_tenant(sync_url)
-    seeded_id = _insert_node_pre_0065(
+    seeded_id = _insert_node_pre_0066(
         sync_url,
         tenant_id,
         name="round-trip-seed",

@@ -617,7 +617,12 @@ async def find_dependencies(
 # stepped-to node (the ``dn`` join in the recursive term), so a
 # soft-deleted node cannot appear as an intermediate hop even over a
 # live edge. The two endpoints named by the caller are exempt,
-# mirroring the closure verbs' anchor exemption.
+# mirroring the closure verbs' anchor exemption: the ``from`` endpoint
+# enters through the base term (no staleness predicate) and the ``to``
+# endpoint is exempted in the recursive term by the ``EXISTS`` against
+# the non-recursive ``target`` CTE — without that arm the undirected
+# search would be asymmetric (a stale ``to`` endpoint unreachable
+# while the swapped argument order finds the path).
 _PATH_SQL = text(
     """
     WITH RECURSIVE
@@ -664,7 +669,11 @@ _PATH_SQL = text(
         JOIN graph_node dn ON dn.id = be.dst
         WHERE w.hops < :max_hops
           AND dn.tenant_id = :tenant_id
-          AND (CAST(:include_stale AS boolean) OR dn.last_seen IS NOT NULL)
+          AND (
+              CAST(:include_stale AS boolean)
+              OR dn.last_seen IS NOT NULL
+              OR EXISTS (SELECT 1 FROM target t WHERE t.id = dn.id)
+          )
           AND NOT EXISTS (SELECT 1 FROM target t WHERE t.id = w.node_id)
     ) CYCLE node_id SET is_cycle USING visited
     SELECT w.hops, w.node_ids, w.edge_kinds, w.edge_ids
@@ -767,7 +776,11 @@ async def find_path(
     walkable (last-refresh-wins). ``False`` restricts the search to
     live nodes and edges — applied on both ``bi_edge`` legs so a stale
     edge cannot be walked backwards into a path, and on every
-    intermediate node. The two named endpoints are exempt.
+    intermediate node. The two named endpoints are exempt — the
+    ``from`` endpoint via the walk's base term, the ``to`` endpoint via
+    the ``target``-CTE exemption in the recursive term — so
+    reachability under ``include_stale=False`` is symmetric in
+    argument order.
     """
     tenant_id = str(operator.tenant_id)
 

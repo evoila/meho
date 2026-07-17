@@ -567,6 +567,28 @@ async def test_include_stale_false_filters_reversed_bi_edge_leg(
 
 
 @_skip_no_docker
+async def test_include_stale_false_exempts_both_path_endpoints(
+    stale_chain: dict[str, uuid.UUID],
+) -> None:
+    """Acceptance (#2538, PR #2561 B1): the two endpoints named by the
+    caller are exempt from the staleness filter, so the undirected
+    search agrees on reachability in both argument orders even when an
+    endpoint is soft-deleted. Soft-deleting ``root`` exercises the
+    exemption on both sides: as the ``to`` endpoint (recursive-term
+    ``target``-CTE exemption) and as the ``from`` endpoint (base term).
+    """
+    op = _operator(TENANT_A_ID)
+    await _soft_delete_node(stale_chain["root"])
+
+    forward = await find_path(op, "leaf", "root", include_stale=False)
+    reverse = await find_path(op, "root", "leaf", include_stale=False)
+    assert forward is not None and reverse is not None
+    assert forward.total_hops == 2 and reverse.total_hops == 2
+    assert [n.name for n in forward.nodes] == ["leaf", "mid", "root"]
+    assert [n.name for n in reverse.nodes] == ["root", "mid", "leaf"]
+
+
+@_skip_no_docker
 async def test_find_dependents_untracked_vs_tracked_no_deps(
     known_graph: dict[str, uuid.UUID],
 ) -> None:

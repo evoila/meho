@@ -397,7 +397,11 @@ boolean) OR ...` idiom:
 - `find_path`: on **both** `bi_edge` legs (same both-legs rule as the
   superseded-edge guard — missing the reversed leg would let a stale
   edge be walked backwards into a path) and on the stepped-to node
-  (`dn` join in the recursive term).
+  (`dn` join in the recursive term), where the `to` endpoint is
+  exempted via `EXISTS` against the non-recursive `target` CTE — the
+  `from` endpoint enters through the walk's base term, so both named
+  endpoints stay reachable and `include_stale=False` reachability is
+  symmetric in argument order.
 
 The anchor / endpoint rows named by the caller are exempt — anchor
 existence is governed by the `NodeNotFoundError` / silent-`None`

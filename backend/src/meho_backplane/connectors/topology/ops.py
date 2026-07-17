@@ -63,6 +63,8 @@ from typing import TYPE_CHECKING, Any
 from meho_backplane.connectors.topology.schemas import (
     ANNOTATE_PARAMETER_SCHEMA,
     ANNOTATE_RESPONSE_SCHEMA,
+    BULK_IMPORT_PARAMETER_SCHEMA,
+    BULK_IMPORT_RESPONSE_SCHEMA,
     CREATE_NODE_PARAMETER_SCHEMA,
     CREATE_NODE_RESPONSE_SCHEMA,
     UNANNOTATE_PARAMETER_SCHEMA,
@@ -71,7 +73,12 @@ from meho_backplane.connectors.topology.schemas import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import GraphNode
 from meho_backplane.operations.typed_register import register_typed_operation
-from meho_backplane.topology.annotate import NodeRef, annotate_edge, unannotate_edge
+from meho_backplane.topology.annotate import NodeRef, annotate_edge_with_plan, unannotate_edge
+from meho_backplane.topology.bulk_import import (
+    build_bulk_import_rows,
+    bulk_import_edges,
+    serialize_bulk_result,
+)
 from meho_backplane.topology.nodes import create_or_get_node
 
 if TYPE_CHECKING:
@@ -80,11 +87,13 @@ if TYPE_CHECKING:
 
 __all__ = [
     "TOPOLOGY_ANNOTATE_OP_ID",
+    "TOPOLOGY_BULK_IMPORT_OP_ID",
     "TOPOLOGY_CREATE_NODE_OP_ID",
     "TOPOLOGY_GRAPH_CONNECTOR_ID",
     "TOPOLOGY_UNANNOTATE_OP_ID",
     "register_topology_graph_operations",
     "topology_annotate",
+    "topology_bulk_import",
     "topology_create_node",
     "topology_unannotate",
 ]
@@ -99,6 +108,7 @@ TOPOLOGY_GRAPH_CONNECTOR_ID = "topology-graph-1.x"
 TOPOLOGY_ANNOTATE_OP_ID = "topology.annotate"
 TOPOLOGY_CREATE_NODE_OP_ID = "topology.create_node"
 TOPOLOGY_UNANNOTATE_OP_ID = "topology.unannotate"
+TOPOLOGY_BULK_IMPORT_OP_ID = "topology.bulk_import"
 
 _GROUP_KEY = "graph"
 _GROUP_WHEN_TO_USE = (
@@ -136,7 +146,7 @@ async def topology_annotate(
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
-        edge = await annotate_edge(
+        plan = await annotate_edge_with_plan(
             session,
             operator,
             NodeRef(str(params["from_name"]), params.get("from_node_kind")),
@@ -145,6 +155,7 @@ async def topology_annotate(
             note=params.get("note"),
             evidence_url=params.get("evidence_url"),
         )
+        edge = plan.edge
         # Re-load the endpoint nodes for the response shape. The service
         # returns the edge only; mapping back to the human-readable
         # `(kind, name)` pair is this shim's job.
@@ -162,6 +173,12 @@ async def topology_annotate(
     props = edge.properties or {}
     raw_conflicts = props.get("conflicts_with")
     conflicts = list(raw_conflicts) if isinstance(raw_conflicts, list) else []
+    # `superseded` (#2539): the auto edges this assertion displaced.
+    # Already computed inside the write and stamped on the shared audit /
+    # broadcast payload (`annotate._audit_payload`) — surfacing it on the
+    # return is a shape change, not a new query. It equals the audit
+    # payload's list by construction.
+    superseded = [str(s) for s in plan.audit_payload.get("superseded", [])]
     return {
         "edge_id": str(edge.id),
         "from": {
@@ -177,6 +194,7 @@ async def topology_annotate(
         "kind": edge.kind,
         "source": edge.source,
         "conflicts": conflicts,
+        "superseded": superseded,
     }
 
 
@@ -252,6 +270,33 @@ async def topology_unannotate(
             to_ref=to_ref,
         )
     return {"edge_id": str(removed_id)}
+
+
+async def topology_bulk_import(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Apply a batch of curated ``graph_edge`` assertions atomically.
+
+    Op-id: ``topology.bulk_import``. Targetless typed op — the **apply**
+    half of ``meho.topology.bulk_import`` (#2539). Only the gated apply
+    path dispatches here; the free dry-run plan calls the service
+    directly from the MCP front and never reaches the dispatcher. The
+    dispatcher has already validated *params* against
+    :data:`~meho_backplane.connectors.topology.schemas.BULK_IMPORT_PARAMETER_SCHEMA`
+    (``rows`` only — no ``dry_run``), so this handler always applies.
+
+    The whole batch lives in one transaction: a validation failure on
+    any row rolls the whole thing back
+    (:class:`~meho_backplane.topology.bulk_import.BulkImportValidationError`
+    propagates to the dispatcher's ``connector_error`` envelope, which
+    the MCP shim maps to -32602). Per-row audit + broadcast fire one per
+    applied row inside the service, mirroring the single-edge annotate.
+    """
+    rows = build_bulk_import_rows(params["rows"])
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await bulk_import_edges(session, operator, rows, dry_run=False)
+    return serialize_bulk_result(result)
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +400,44 @@ _OPERATION_SPECS: tuple[dict[str, Any], ...] = (
                 "from_name": "Triple selector, with kind + to_name.",
             },
             "output_shape": "{'edge_id': '<removed-uuid>'}",
+        },
+    },
+    {
+        "op_id": TOPOLOGY_BULK_IMPORT_OP_ID,
+        "handler": topology_bulk_import,
+        "summary": "Apply a batch of curated graph_edge assertions atomically.",
+        "description": (
+            "Applies up to 1000 curated `graph_edge` assertions in one "
+            "all-or-nothing transaction — a single invalid row rolls the "
+            "whole batch back. This is the apply half of the "
+            "`meho.topology.bulk_import` tool; the free dry-run plan is a "
+            "read-shaped service call that never dispatches here. Each "
+            "row is one `topology.annotate` (both endpoints must already "
+            "exist). Tenant-scoped automatically. Agent-principal calls "
+            "park the whole batch as one approval request; human "
+            "tenant_admin calls execute immediately."
+        ),
+        "parameter_schema": BULK_IMPORT_PARAMETER_SCHEMA,
+        "response_schema": BULK_IMPORT_RESPONSE_SCHEMA,
+        "tags": ["topology", "write", "curated-edge", "bulk"],
+        "llm_instructions": {
+            "when_to_use": (
+                "Seed a whole cross-system inventory in one atomic pass "
+                "instead of looping single annotate calls. Dry-run first "
+                "to see the per-row plan, then apply."
+            ),
+            "parameter_hints": {
+                "rows": (
+                    "Required. Array of {from_name, kind, to_name, "
+                    "from_node_kind?, to_node_kind?, note?, evidence_url?} "
+                    "objects; 1-1000 rows."
+                ),
+            },
+            "output_shape": (
+                "{'dry_run', 'created', 'updated', 'conflicts', 'rows': "
+                "[{index, action, edge_id, from_name, from_kind, to_name, "
+                "to_kind, kind, superseded, conflicts}]}"
+            ),
         },
     },
 )

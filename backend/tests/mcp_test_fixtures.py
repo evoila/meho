@@ -210,6 +210,7 @@ def isolated_registry() -> Iterator[None]:
         runbook_runs,
         runbooks,
         topology,
+        topology_bulk_import,
         topology_create_node,
     )
     from meho_backplane.mcp.tools import broadcast as broadcast_tools
@@ -271,6 +272,14 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(doc_collections_create_tool)
     importlib.reload(topology)
     importlib.reload(topology_create_node)
+    # #2539: the batch curated-edge authoring tool
+    # (``meho.topology.bulk_import``) lives in its own module (mirroring
+    # topology_create_node) so ``mcp.tools.topology`` does not grow past
+    # the 600-line guidance; it joins the reload list for the same reason
+    # every other tool module does -- the autouse ``clear_registries()``
+    # above would otherwise leave it unregistered in any test file that
+    # imports this fixture after the first one runs in the process.
+    importlib.reload(topology_bulk_import)
     # G12.2-T4 (#1298): the runbook template MCP tools
     # (``meho.runbook.*_template`` x 6) join the reload list for the same
     # reason every other tool module does -- the autouse

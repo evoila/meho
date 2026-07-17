@@ -868,3 +868,242 @@ async def test_refresh_with_k8s_style_populator_is_idempotent_on_recall() -> Non
         ("namespace", "default"),
         ("node", "ctrl-plane-1"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Curated-node durability (#2536)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_curated_node(
+    tenant_id: uuid.UUID,
+    *,
+    kind: str,
+    name: str,
+    target_id: uuid.UUID | None = None,
+    last_seen: datetime | None = None,
+) -> uuid.UUID:
+    """Insert one ``source='curated'`` node shaped like a manual seed."""
+    node_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            GraphNode(
+                id=node_id,
+                tenant_id=tenant_id,
+                kind=kind,
+                name=name,
+                target_id=target_id,
+                source="curated",
+                properties={
+                    "note": "seeded from INVENTORY.md L42",
+                    "evidence_url": "https://example.test/inv#L42",
+                    "seeded_by": "op-1",
+                    "seeded_at": datetime.now(UTC).isoformat(),
+                },
+                discovered_by="op-1",
+                first_seen=datetime.now(UTC),
+                last_seen=last_seen,
+            )
+        )
+        await session.commit()
+    return node_id
+
+
+async def _load_node(tenant_id: uuid.UUID, name: str) -> GraphNode:
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        return (
+            await session.execute(
+                select(GraphNode).where(
+                    GraphNode.tenant_id == tenant_id,
+                    GraphNode.name == name,
+                )
+            )
+        ).scalar_one()
+
+
+@pytest.mark.asyncio
+async def test_refresh_does_not_clobber_or_adopt_curated_node() -> None:
+    """A probe re-observation of a curated node is a heartbeat only.
+
+    The snapshot re-asserts the seeded ``(kind, name)`` with probe
+    properties; the curated row keeps its operator bag (``note`` /
+    ``evidence_url`` / ``seeded_*``), keeps ``target_id IS NULL``,
+    keeps ``source='curated'``, and only ``last_seen`` moves. The
+    heartbeat is not counted as ``updated`` (mirrors the curated-edge
+    discipline).
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    op = _operator(tenant_id)
+    seeded_at = datetime(2026, 1, 1, tzinfo=UTC)
+    await _seed_curated_node(tenant_id, kind="vm", name="vm-a", last_seen=seeded_at)
+
+    _FakeConnector.hints = _hints_3n2e()
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(target, op)
+
+    # vm-a is curated (heartbeat, not counted); vm-b + ds-1 are new.
+    assert result.added_nodes == 2
+    assert result.updated_nodes == 0
+    assert result.removed_nodes == 0
+    # Edges resolve their endpoints through the curated node as usual.
+    assert result.added_edges == 2
+
+    vm_a = await _load_node(tenant_id, "vm-a")
+    assert vm_a.source == "curated"
+    assert vm_a.target_id is None, "curated nodes are never adopted onto a target"
+    assert vm_a.properties["note"] == "seeded from INVENTORY.md L42"
+    assert vm_a.properties["evidence_url"] == "https://example.test/inv#L42"
+    assert vm_a.properties["seeded_by"] == "op-1"
+    assert "power" not in vm_a.properties, "probe properties must not overwrite the operator bag"
+    assert vm_a.last_seen is not None
+    assert vm_a.last_seen.replace(tzinfo=UTC) > seeded_at, "last_seen must bump on re-observation"
+
+
+@pytest.mark.asyncio
+async def test_refresh_never_soft_deletes_curated_node() -> None:
+    """A refresh whose snapshot lacks the curated node leaves it live.
+
+    Runs a first refresh that re-observes the curated node, then a
+    second one without it — the pre-#2536 behaviour adopted the node
+    onto the target during the first refresh and soft-deleted it on
+    the second.
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    op = _operator(tenant_id)
+    await _seed_curated_node(tenant_id, kind="vm", name="vm-a", last_seen=datetime.now(UTC))
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        _FakeConnector.hints = _hints_3n2e()
+        await refresh_target_topology(target, op)
+        # vm-a (and its edge) gone from discovery.
+        _FakeConnector.hints = TopologyHints(
+            discovered_at=datetime.now(UTC),
+            nodes=(
+                NodeHint(kind="vm", name="vm-b"),
+                NodeHint(kind="datastore", name="ds-1"),
+            ),
+            edges=(
+                EdgeHint(
+                    from_kind="vm",
+                    from_name="vm-b",
+                    to_kind="datastore",
+                    to_name="ds-1",
+                    kind="mounts",
+                ),
+            ),
+        )
+        result = await refresh_target_topology(target, op)
+
+    assert result.removed_nodes == 0, "curated node absence is not a removal"
+    vm_a = await _load_node(tenant_id, "vm-a")
+    assert vm_a.last_seen is not None, "curated node must survive the probe dropping it"
+    assert vm_a.source == "curated"
+    assert vm_a.target_id is None
+
+
+@pytest.mark.asyncio
+async def test_promoted_curated_node_with_target_id_survives_owner_refresh() -> None:
+    """The soft-delete guard keys on ``source``, not on ``target_id``.
+
+    A node promoted auto→curated by a re-seed keeps the ``target_id``
+    from its auto days, so the ownership check alone would soft-delete
+    it when the owning target's snapshot drops it. The explicit
+    curated guard must win.
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    op = _operator(tenant_id)
+    await _seed_curated_node(
+        tenant_id,
+        kind="vm",
+        name="promoted-vm",
+        target_id=target.id,
+        last_seen=datetime.now(UTC),
+    )
+
+    _FakeConnector.hints = TopologyHints(
+        discovered_at=datetime.now(UTC),
+        nodes=(NodeHint(kind="vm", name="vm-z"),),
+        edges=(),
+    )
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(target, op)
+
+    assert result.removed_nodes == 0
+    promoted = await _load_node(tenant_id, "promoted-vm")
+    assert promoted.last_seen is not None, (
+        "a promoted curated node must not be soft-deleted by its former owner's refresh"
+    )
+
+
+@pytest.mark.asyncio
+async def test_resurrected_curated_node_counts_as_updated() -> None:
+    """A soft-deleted curated node re-observed by a probe resurrects.
+
+    ``last_seen NULL → now`` is operator-observable (the node returns
+    to traversal), so it counts as ``updated`` — mirroring
+    ``_refresh_curated_edge``'s resurrect semantics. Properties and
+    ``target_id`` still stay untouched.
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    op = _operator(tenant_id)
+    await _seed_curated_node(tenant_id, kind="vm", name="vm-a", last_seen=None)
+
+    _FakeConnector.hints = _hints_3n2e()
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(target, op)
+
+    assert result.updated_nodes == 1
+    assert result.removed_nodes == 0
+    vm_a = await _load_node(tenant_id, "vm-a")
+    assert vm_a.last_seen is not None
+    assert vm_a.source == "curated"
+    assert vm_a.target_id is None
+    assert vm_a.properties["note"] == "seeded from INVENTORY.md L42"
+
+
+@pytest.mark.asyncio
+async def test_auto_node_reconcile_unchanged_by_source_column() -> None:
+    """Auto rows keep the pre-#2536 reconcile behaviour byte-for-byte.
+
+    Fabricates the same target-NULL row the #673 regression test uses
+    (``source`` defaults to ``'auto'``) and pins that adoption +
+    property overwrite still apply to auto rows — the curated branch
+    must not widen.
+    """
+    _register_fake()
+    tenant_id, target = await _seed_tenant_and_target()
+    op = _operator(tenant_id)
+    sessionmaker = get_sessionmaker()
+    auto_id = uuid.uuid4()
+    async with sessionmaker() as session:
+        session.add(
+            GraphNode(
+                id=auto_id,
+                tenant_id=tenant_id,
+                kind="vm",
+                name="vm-a",
+                target_id=None,
+                properties={},
+                discovered_by="faketopo",
+                first_seen=datetime.now(UTC),
+                last_seen=datetime.now(UTC),
+            )
+        )
+        await session.commit()
+
+    _FakeConnector.hints = _hints_3n2e()
+    with patch(_PUBLISH, new=AsyncMock()):
+        result = await refresh_target_topology(target, op)
+
+    assert result.updated_nodes == 1
+    vm_a = await _load_node(tenant_id, "vm-a")
+    assert vm_a.id == auto_id
+    assert vm_a.source == "auto"
+    assert vm_a.target_id == target.id, "auto nodes are still adopted"
+    assert vm_a.properties == {"power": "on"}, "auto nodes still take probe properties"

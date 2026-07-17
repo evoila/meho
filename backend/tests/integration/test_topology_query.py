@@ -109,6 +109,7 @@ async def _seed_node(
         tenant_id=tenant_id,
         kind=kind,
         name=name,
+        source="auto",
         properties={"seeded": name},
         discovered_by="test",
     )

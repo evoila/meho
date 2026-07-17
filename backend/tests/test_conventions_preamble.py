@@ -57,6 +57,8 @@ import pytest
 from meho_backplane.conventions.preamble import (
     BLOCK_END,
     BLOCK_START,
+    BROADCAST_BLOCK_START,
+    BROADCAST_DISCIPLINE_BAND,
     GUARD_PREFIX,
     assemble_preamble,
 )
@@ -141,17 +143,47 @@ async def _insert_convention(
 
 
 @pytest.mark.asyncio
-async def test_empty_tenant_returns_empty_string_and_no_drops() -> None:
-    """Empty tenant (no conventions) returns ``("", [])``.
+async def test_empty_tenant_gets_broadcast_band_only_and_no_drops() -> None:
+    """Empty tenant (no conventions) still gets the broadcast-discipline band.
 
-    Acceptance criterion: "Empty tenant (no conventions) ->
-    ``PreambleResult("", [])``." The caller (MCP ``_initialize``)
-    maps the empty string to ``instructions: None`` on the wire so
-    the spec-optional field is omitted entirely from the response.
+    G6.5-T6 (#2546): the static broadcast-discipline band is injected
+    into every assembled preamble, so a fresh-adoption tenant with no
+    operational conventions and no in-progress runs receives that band
+    (not the empty string) with no dropped slugs. The band appears
+    exactly once, and no conventions block is present.
     """
     result = await assemble_preamble(uuid.uuid4(), _NO_RUNS_OPERATOR)
-    assert result.text == ""
+    assert result.text == BROADCAST_DISCIPLINE_BAND
+    assert result.text.count(BROADCAST_BLOCK_START) == 1
+    assert BLOCK_START not in result.text
     assert result.dropped_slugs == []
+
+
+@pytest.mark.asyncio
+async def test_broadcast_discipline_band_present_exactly_once() -> None:
+    """The discipline band appears exactly once and names the dotted tools.
+
+    Acceptance criterion (#2546): the assembled preamble contains the
+    discipline band exactly once; the band text names the dotted MCP
+    tool names. Verified alongside a populated conventions block so the
+    invariant holds when other bands are present too.
+    """
+    tenant = uuid.uuid4()
+    await _insert_convention(
+        tenant_id=tenant,
+        slug="rbac",
+        title="RBAC is canonical",
+        body="Every operation runs through MEHO's RBAC layer.",
+        priority=100,
+    )
+
+    result = await assemble_preamble(tenant, _NO_RUNS_OPERATOR)
+
+    assert result.text.count(BROADCAST_BLOCK_START) == 1
+    assert "meho.broadcast.recent" in result.text
+    assert "meho.broadcast.announce" in result.text
+    # The band leads the preamble (coordination protocol frames the work).
+    assert result.text.startswith(BROADCAST_BLOCK_START)
 
 
 @pytest.mark.asyncio
@@ -518,14 +550,17 @@ async def test_zero_in_progress_runs_is_byte_identical_to_pre_t2_shape() -> None
 
     result = await assemble_preamble(tenant, _NO_RUNS_OPERATOR)
 
-    # Regression guard against accidental whitespace insertion: the
-    # assembled text begins with the conventions BLOCK_START and ends
-    # with the conventions BLOCK_END -- nothing trails the
-    # END_TENANT_CONVENTIONS>> marker. A future refactor that
-    # unconditionally appends "\n\n" before the priming text would
-    # make the assembled text end with "\n\n" instead of the
-    # terminator, and this assertion would fire.
-    assert result.text.startswith(BLOCK_START)
+    # Regression guard against accidental whitespace insertion: since
+    # G6.5-T6 (#2546) the always-on broadcast-discipline band leads the
+    # preamble, so the text begins with BROADCAST_BLOCK_START and the
+    # conventions block follows. Nothing trails the conventions
+    # END_TENANT_CONVENTIONS>> marker (it is the last band when there
+    # are no runs / no catalogue). A future refactor that
+    # unconditionally appends "\n\n" before the priming text would make
+    # the assembled text end with "\n\n" instead of the terminator, and
+    # this assertion would fire.
+    assert result.text.startswith(BROADCAST_BLOCK_START)
+    assert BLOCK_START in result.text
     assert result.text.endswith(BLOCK_END)
     # No priming-band markers appear when there are no runs -- the
     # priming helper returns text="" and the assembler skips the

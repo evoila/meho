@@ -90,6 +90,109 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — tiered-triage investigator wiring (#2507)
+
+- Wire a **diagnose-only investigator** to Dashboard non-green transitions
+  (#2507). When a Dashboard's five-state rollup crosses from green into
+  `degraded` / `critical` — detected at the check-runner's result-persist seam
+  against the `last_rollup_state` memo #2506 reserved — the affected non-green
+  Sensors are correlated through the topology blast-radius graph so one
+  underlying cause produces exactly **one** investigation, tenant memory is
+  checked for a known-noise policy that suppresses re-escalation, and only
+  novel, non-suppressed groups fire a real, durable, budget-gated agent run via
+  `AgentInvoker.run_scheduled`. The investigator is **diagnose-only**: its
+  structured finding lands in the durable `agent_run` row and is written back
+  to memory (`checks-noise-<group-key>`) as the noise-suppression policy;
+  `recommended_action` is advisory text and any change op the agent attempts
+  parks in the existing approval queue — this wiring never executes one.
+  Opt-in per tenant by creating an enabled agent definition named
+  `checks-investigator` (`CHECKS_INVESTIGATOR_AGENT`); budget-gated and
+  kill-switchable through the invoker path. No migration (the memo column is
+  #2506's DDL). See `docs/codebase/checks-investigator.md`.
+
+### Added — Dashboard entity + five-state rollup + /ui/checks (#2506)
+
+- Add the **Dashboard** entity (#2506): a named, tenant-scoped composition of
+  Sensors (many-to-many) that rolls its members up into one five-state
+  worst-of answer to "is everything OK?". The rollup is a pure, evaluated-on-
+  read fold (`meho_backplane.checks.rollup`): `UNKNOWN -> degraded`, a
+  per-Sensor `severity` cap (a `degraded`-severity Sensor never drives a
+  dashboard to `critical`), and `for:` hold-time hysteresis (a failing state
+  contributes only once it has held for `for_seconds`; recovery is immediate).
+  `SKIP` (paused / unreachable-by-design) and `UNKNOWN` (never-evaluated /
+  overdue) are first-class states — `SKIP` is excluded from the fold, zero
+  members roll up to `unknown`, all-`skip` rolls up to `skip`. Ships a minimal
+  REST CRUD (`POST/GET/DELETE /api/v1/checks/dashboards` — create/delete are
+  `tenant_admin`, cross-tenant writes require `platform_admin`; a foreign
+  member id is 422 `sensor_not_found`) and a read-only `/ui/checks` console
+  (list with a 30 s auto-refresh + per-Dashboard detail showing each member's
+  raw/effective state, pending marker, and last evidence). A
+  `last_rollup_state` memo column ships unwritten for #2507's transition
+  detection. Migration `0065`.
+### Added — deterministic sensor check-runner (#2505)
+
+- Add `meho_backplane.checks.runner` — the lifespan-owned, no-LLM evaluation
+  loop that closes the check layer (#2505). Each tick claims every due
+  `Sensor` (#2503), dispatches its `safe` op through the operations
+  `dispatch()` seam under a synthetic per-tenant identity (`sub` from the
+  sensor's `identity_sub`, `principal_kind=user` → the policy gate
+  auto-executes the safe op), feeds the payload to #2504's pure
+  `evaluate_assertion`, and persists `{state, value, evidence, evaluated_at}`
+  via `record_sensor_result`. One loop drives both cadence kinds — sub-minute
+  `interval` on the tick grid, `>=1`-minute `cron` via the scheduler's
+  `next_fire_after` — riding #804's belt-and-braces durability
+  (`pg_try_advisory_lock` under a distinct key + `FOR UPDATE SKIP LOCKED`
+  claim + conditional advance-before-dispatch), so evaluation is at-most-once
+  per scheduled instant across replicas: a crashed or overlapping evaluation
+  surfaces as staleness, never a double-fire. Evaluations run as tracked
+  background tasks (never awaited under the lock — the #1502 wedge class),
+  bounded by a concurrency semaphore + per-evaluation timeout and a per-sensor
+  overlap guard; any non-`ok` dispatch or a timeout maps the sensor to
+  `unknown`. A row whose persisted cadence no longer parses is parked to
+  `paused` with a `status_reason`. Gated on `SENSOR_RUNNER_ENABLED`
+  (default on), cadence via `SENSOR_RUNNER_TICK_INTERVAL_SECONDS` (default
+  10 s). No migration, no new route.
+
+### Added — Sensor assertion evaluator (#2504)
+
+- Add `meho_backplane.checks` with a pure, no-I/O bounded assertion
+  evaluator (#2504): a `select -> compare` function mapping an op-result
+  payload to a typed `{state, value, evidence}` verdict. The select stage is
+  a strict dotted-path subset (`$.a[*].b`, at most one wildcard) plus at most
+  one bounded aggregate (`max`/`min`/`sum`/`count`/`any`/`all`); the compare
+  stage is one of five typed comparators
+  (`threshold`/`equals`/`in`/`bool`/`freshness`). No free-form assertion
+  language and no new dependency. The five-state check vocabulary
+  (`ok`/`degraded`/`critical`/`unknown`/`skip`) is declared once here for the
+  Initiative #2416 check layer; the evaluator never raises on payload data
+  (every mismatch becomes `unknown` with a reason -- including a non-finite
+  `NaN`/`Infinity` observed or aggregated value, which cannot be judged) and
+  emits only the four observable states. The spec models reject unknown fields
+  (`extra="forbid"`) and non-finite threshold bounds, so a typo'd assertion
+  field is a 422 at create rather than a silently dropped key.
+
+### Added — Sensor entity + registry (#2503)
+
+- Add the `sensor` table + `SensorAdminService` — the first persisted
+  entity of the deterministic check layer (#2503). A Sensor pins an
+  `(op + args + assertion + cadence + severity)` tuple; registration
+  accepts only `safety_level='safe'` operations, refusing a non-safe or
+  unknown op with a structured 422 at create
+  (`sensor_requires_safe_operation` / `sensor_operation_not_found`) — an
+  honesty guard, not the security boundary (the dispatch-time policy gate
+  still runs on every evaluation). The `assertion` payload is validated at
+  the wire by #2504's `AssertionSpec`; the cadence is a discriminated union
+  (`interval_seconds` 5..86400 XOR `cron_expr` + timezone); results live as
+  a latest-state projection on the row
+  (`last_state`/`last_value`/`last_evidence`/`state_since`) written by one
+  repository function `record_sensor_result`. Exposed as tenant-scoped CRUD
+  across REST (`GET/POST /api/v1/sensors`, `DELETE /api/v1/sensors/{id}`),
+  MCP (`meho.sensor.list`/`create`/`delete`), and CLI
+  (`meho sensor list`/`create`/`delete`); `status` is server-initialized
+  to `active` at create and runner-parked to `paused` by #2505 (clients
+  cannot supply it), with no update/pause path — hard delete only,
+  migration `0064`.
+
 ### Performance — `find_path` per-branch target pruning + dense-mesh envelope + topology concurrency coverage (#2535)
 
 - Bound `find_path`'s recursive walk per branch: `_PATH_SQL` gains a

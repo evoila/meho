@@ -92,6 +92,7 @@ from meho_backplane.operations._audit import (
     parent_audit_id_var,
     policy_decision_var,
     resolve_agent_session_id,
+    resolve_broadcast_lineage,
     work_ref_var,
 )
 from meho_backplane.operations._errors import result_already_resumed, result_denied
@@ -1244,6 +1245,7 @@ async def publish_approval_event(
         from meho_backplane.broadcast.publisher import publish_event
 
         broadcast_op_id = f"approval.{decision}"
+        lineage = resolve_broadcast_lineage()
         event = BroadcastEvent(
             event_id=uuid.uuid4(),
             ts=datetime.now(UTC),
@@ -1261,6 +1263,9 @@ async def publish_approval_event(
                 "connector_id": request.connector_id,
                 "approval_op_id": request.op_id,
             },
+            actor_sub=lineage.actor_sub,
+            agent_session_id=lineage.agent_session_id,
+            work_ref=lineage.work_ref,
         )
         await publish_event(event)
     except Exception:

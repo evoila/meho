@@ -85,7 +85,9 @@ class TopologyNode(BaseModel):
     depth ``0``, its immediate dependents/dependencies are depth ``1``,
     transitive ones depth ``2``, and so on. ``via_edge_kind`` is the
     ``graph_edge.kind`` of the edge used to reach this node, or
-    ``None`` for the root (which is reached by no edge).
+    ``None`` for the root (which is reached by no edge). ``source``
+    is ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /
+    promoted; #2536) — mirrors :attr:`TopologyEdge.source`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -93,6 +95,7 @@ class TopologyNode(BaseModel):
     id: UUID
     kind: str
     name: str
+    source: str
     properties: dict[str, Any] = Field(default_factory=dict)
     depth: int
     via_edge_kind: str | None

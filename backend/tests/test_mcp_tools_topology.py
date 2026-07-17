@@ -69,6 +69,7 @@ def _node(name: str, kind: str, depth: int, via: str | None) -> TopologyNode:
         id=UUID(int=depth + 1),
         kind=kind,
         name=name,
+        source="auto",
         properties={},
         depth=depth,
         via_edge_kind=via,

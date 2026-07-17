@@ -342,7 +342,16 @@ CREATE_NODE_RESPONSE_SCHEMA: dict[str, Any] = {
         "node_id": {"type": "string"},
         "kind": {"type": "string"},
         "name": {"type": "string"},
+        "source": {
+            "type": "string",
+            "enum": ["auto", "curated"],
+            "description": (
+                "Always `curated` after this call — a fresh seed "
+                "inserts curated, a re-seed over a probe-discovered "
+                "row promotes it (#2536)."
+            ),
+        },
         "was_created": {"type": "boolean"},
     },
-    "required": ["node_id", "kind", "name", "was_created"],
+    "required": ["node_id", "kind", "name", "source", "was_created"],
 }

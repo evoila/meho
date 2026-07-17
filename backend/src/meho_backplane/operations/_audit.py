@@ -48,6 +48,7 @@ from meho_backplane.operations._errors import status_code_for_result
 
 __all__ = [
     "AgentRunAuditMeta",
+    "BroadcastLineage",
     "agent_run_audit_meta_var",
     "agent_session_id_var",
     "audit_and_broadcast_safe",
@@ -55,6 +56,7 @@ __all__ = [
     "policy_decision_var",
     "publish_broadcast",
     "resolve_agent_session_id",
+    "resolve_broadcast_lineage",
     "run_id_var",
     "step_id_var",
     "work_ref_var",
@@ -225,6 +227,43 @@ def resolve_agent_session_id() -> uuid.UUID | None:
     except ValueError:
         _log.warning("audit_lineage_malformed_mcp_session_id", value=raw)
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastLineage:
+    """The publish-site lineage keys projected onto a broadcast event.
+
+    A single read of the three contextvars the sibling audit-row writer
+    (:func:`write_audit_row`) already consumes, packaged so every
+    :class:`~meho_backplane.broadcast.events.BroadcastEvent` construction
+    site projects the same actor / session / work_ref lineage the durable
+    ``audit_log`` row records for the same operation. Frozen so the value
+    handed to a construction site cannot drift between read and use.
+    """
+
+    actor_sub: str | None
+    agent_session_id: uuid.UUID | None
+    work_ref: str | None
+
+
+def resolve_broadcast_lineage() -> BroadcastLineage:
+    """Read the current task's lineage contextvars for a broadcast event.
+
+    Mirrors :func:`write_audit_row`'s three reads so the real-time
+    broadcast carries the same lineage the audit row does: the RFC 8693
+    actor (:func:`~meho_backplane.auth.delegation.resolve_actor_sub`), the
+    agent-run session (:data:`agent_session_id_var`), and the external
+    change-ticket reference (:data:`work_ref_var`). All three default to
+    ``None`` outside a delegated / agent-run / work-ref-bound context —
+    the correct value for a direct human request, which is why a
+    delegated agent's work now broadcasts under ``actor_sub`` = the agent
+    while ``principal_sub`` stays the human.
+    """
+    return BroadcastLineage(
+        actor_sub=resolve_actor_sub(),
+        agent_session_id=agent_session_id_var.get(),
+        work_ref=work_ref_var.get(),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -574,6 +613,7 @@ async def publish_broadcast(
     )
     raw_target_name = getattr(target, "name", None) if target is not None else None
     target_name = raw_target_name if isinstance(raw_target_name, str) else None
+    lineage = resolve_broadcast_lineage()
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=datetime.now(UTC),
@@ -586,6 +626,9 @@ async def publish_broadcast(
         result_status=result_status,
         audit_id=audit_id,
         payload=payload,
+        actor_sub=lineage.actor_sub,
+        agent_session_id=lineage.agent_session_id,
+        work_ref=lineage.work_ref,
     )
     await publish_event(event)
 

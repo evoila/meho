@@ -21,9 +21,9 @@ import (
 
 // Defines values for AgentModelTier.
 const (
-	Deep     AgentModelTier = "deep"
-	Fast     AgentModelTier = "fast"
-	Standard AgentModelTier = "standard"
+	AgentModelTierDeep     AgentModelTier = "deep"
+	AgentModelTierFast     AgentModelTier = "fast"
+	AgentModelTierStandard AgentModelTier = "standard"
 )
 
 // Defines values for AgentRunStatus.
@@ -46,35 +46,35 @@ const (
 
 // Defines values for AuthModel.
 const (
-	Impersonation        AuthModel = "impersonation"
-	PerUser              AuthModel = "per_user"
-	SharedServiceAccount AuthModel = "shared_service_account"
+	AuthModelImpersonation        AuthModel = "impersonation"
+	AuthModelPerUser              AuthModel = "per_user"
+	AuthModelSharedServiceAccount AuthModel = "shared_service_account"
 )
 
 // Defines values for BroadcastOverrideCreateDetail.
 const (
-	Aggregate BroadcastOverrideCreateDetail = "aggregate"
-	Full      BroadcastOverrideCreateDetail = "full"
+	BroadcastOverrideCreateDetailAggregate BroadcastOverrideCreateDetail = "aggregate"
+	BroadcastOverrideCreateDetailFull      BroadcastOverrideCreateDetail = "full"
 )
 
 // Defines values for BroadcastOverrideCreateScopeField.
 const (
-	Namespace  BroadcastOverrideCreateScopeField = "namespace"
-	TargetName BroadcastOverrideCreateScopeField = "target_name"
+	BroadcastOverrideCreateScopeFieldNamespace  BroadcastOverrideCreateScopeField = "namespace"
+	BroadcastOverrideCreateScopeFieldTargetName BroadcastOverrideCreateScopeField = "target_name"
 )
 
 // Defines values for CandidateHintConfidence.
 const (
-	High   CandidateHintConfidence = "high"
-	Low    CandidateHintConfidence = "low"
-	Medium CandidateHintConfidence = "medium"
+	CandidateHintConfidenceHigh   CandidateHintConfidence = "high"
+	CandidateHintConfidenceLow    CandidateHintConfidence = "low"
+	CandidateHintConfidenceMedium CandidateHintConfidence = "medium"
 )
 
 // Defines values for ConfirmVerifyResponseAnswer.
 const (
-	Escalate ConfirmVerifyResponseAnswer = "escalate"
-	No       ConfirmVerifyResponseAnswer = "no"
-	Yes      ConfirmVerifyResponseAnswer = "yes"
+	ConfirmVerifyResponseAnswerEscalate ConfirmVerifyResponseAnswer = "escalate"
+	ConfirmVerifyResponseAnswerNo       ConfirmVerifyResponseAnswer = "no"
+	ConfirmVerifyResponseAnswerYes      ConfirmVerifyResponseAnswer = "yes"
 )
 
 // Defines values for ConnectorListItemKind.
@@ -87,8 +87,8 @@ const (
 
 // Defines values for ConnectorListItemState.
 const (
-	Ingested   ConnectorListItemState = "ingested"
-	Registered ConnectorListItemState = "registered"
+	ConnectorListItemStateIngested   ConnectorListItemState = "ingested"
+	ConnectorListItemStateRegistered ConnectorListItemState = "registered"
 )
 
 // Defines values for ConnectorReviewPayloadKind.
@@ -101,24 +101,24 @@ const (
 
 // Defines values for ConnectorSpecEntryCatalogIngest.
 const (
-	SpecOnly  ConnectorSpecEntryCatalogIngest = "spec-only"
-	Supported ConnectorSpecEntryCatalogIngest = "supported"
+	ConnectorSpecEntryCatalogIngestSpecOnly  ConnectorSpecEntryCatalogIngest = "spec-only"
+	ConnectorSpecEntryCatalogIngestSupported ConnectorSpecEntryCatalogIngest = "supported"
 )
 
 // Defines values for ConventionKind.
 const (
-	Operational ConventionKind = "operational"
-	Reference   ConventionKind = "reference"
-	Workflow    ConventionKind = "workflow"
+	ConventionKindOperational ConventionKind = "operational"
+	ConventionKindReference   ConventionKind = "reference"
+	ConventionKindWorkflow    ConventionKind = "workflow"
 )
 
 // Defines values for CriterionResultName.
 const (
-	DailyUseDuration CriterionResultName = "daily_use_duration"
-	EvalPrecision    CriterionResultName = "eval_precision"
-	MehoVsBaseline   CriterionResultName = "meho_vs_baseline"
-	OpenBlockers     CriterionResultName = "open_blockers"
-	OperatorBreadth  CriterionResultName = "operator_breadth"
+	CriterionResultNameDailyUseDuration CriterionResultName = "daily_use_duration"
+	CriterionResultNameEvalPrecision    CriterionResultName = "eval_precision"
+	CriterionResultNameMehoVsBaseline   CriterionResultName = "meho_vs_baseline"
+	CriterionResultNameOpenBlockers     CriterionResultName = "open_blockers"
+	CriterionResultNameOperatorBreadth  CriterionResultName = "operator_breadth"
 )
 
 // Defines values for CriterionResultVerdict.
@@ -135,11 +135,65 @@ const (
 	DailyUsageBucketSurfaceOperations DailyUsageBucketSurface = "operations"
 )
 
+// Defines values for DashboardDetailLastRollupState.
+const (
+	DashboardDetailLastRollupStateCritical DashboardDetailLastRollupState = "critical"
+	DashboardDetailLastRollupStateDegraded DashboardDetailLastRollupState = "degraded"
+	DashboardDetailLastRollupStateOk       DashboardDetailLastRollupState = "ok"
+	DashboardDetailLastRollupStateSkip     DashboardDetailLastRollupState = "skip"
+	DashboardDetailLastRollupStateUnknown  DashboardDetailLastRollupState = "unknown"
+)
+
+// Defines values for DashboardDetailState.
+const (
+	DashboardDetailStateCritical DashboardDetailState = "critical"
+	DashboardDetailStateDegraded DashboardDetailState = "degraded"
+	DashboardDetailStateOk       DashboardDetailState = "ok"
+	DashboardDetailStateSkip     DashboardDetailState = "skip"
+	DashboardDetailStateUnknown  DashboardDetailState = "unknown"
+)
+
+// Defines values for DashboardMemberViewEffectiveState.
+const (
+	DashboardMemberViewEffectiveStateCritical DashboardMemberViewEffectiveState = "critical"
+	DashboardMemberViewEffectiveStateDegraded DashboardMemberViewEffectiveState = "degraded"
+	DashboardMemberViewEffectiveStateOk       DashboardMemberViewEffectiveState = "ok"
+	DashboardMemberViewEffectiveStateSkip     DashboardMemberViewEffectiveState = "skip"
+	DashboardMemberViewEffectiveStateUnknown  DashboardMemberViewEffectiveState = "unknown"
+)
+
+// Defines values for DashboardMemberViewRawState.
+const (
+	DashboardMemberViewRawStateCritical DashboardMemberViewRawState = "critical"
+	DashboardMemberViewRawStateDegraded DashboardMemberViewRawState = "degraded"
+	DashboardMemberViewRawStateOk       DashboardMemberViewRawState = "ok"
+	DashboardMemberViewRawStateSkip     DashboardMemberViewRawState = "skip"
+	DashboardMemberViewRawStateUnknown  DashboardMemberViewRawState = "unknown"
+)
+
+// Defines values for DashboardReadLastRollupState.
+const (
+	DashboardReadLastRollupStateCritical DashboardReadLastRollupState = "critical"
+	DashboardReadLastRollupStateDegraded DashboardReadLastRollupState = "degraded"
+	DashboardReadLastRollupStateOk       DashboardReadLastRollupState = "ok"
+	DashboardReadLastRollupStateSkip     DashboardReadLastRollupState = "skip"
+	DashboardReadLastRollupStateUnknown  DashboardReadLastRollupState = "unknown"
+)
+
+// Defines values for DashboardReadState.
+const (
+	DashboardReadStateCritical DashboardReadState = "critical"
+	DashboardReadStateDegraded DashboardReadState = "degraded"
+	DashboardReadStateOk       DashboardReadState = "ok"
+	DashboardReadStateSkip     DashboardReadState = "skip"
+	DashboardReadStateUnknown  DashboardReadState = "unknown"
+)
+
 // Defines values for EditOpBodySafetyLevel.
 const (
-	Caution   EditOpBodySafetyLevel = "caution"
-	Dangerous EditOpBodySafetyLevel = "dangerous"
-	Safe      EditOpBodySafetyLevel = "safe"
+	EditOpBodySafetyLevelCaution   EditOpBodySafetyLevel = "caution"
+	EditOpBodySafetyLevelDangerous EditOpBodySafetyLevel = "dangerous"
+	EditOpBodySafetyLevelSafe      EditOpBodySafetyLevel = "safe"
 )
 
 // Defines values for EditOpWarningCode.
@@ -194,12 +248,12 @@ const (
 
 // Defines values for IngestRequestAuthScheme.
 const (
-	Basic             IngestRequestAuthScheme = "basic"
-	Oauth2Mint        IngestRequestAuthScheme = "oauth2_mint"
-	SessionLogin      IngestRequestAuthScheme = "session_login"
-	SessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
-	SessionLoginToken IngestRequestAuthScheme = "session_login_token"
-	StaticHeader      IngestRequestAuthScheme = "static_header"
+	IngestRequestAuthSchemeBasic             IngestRequestAuthScheme = "basic"
+	IngestRequestAuthSchemeOauth2Mint        IngestRequestAuthScheme = "oauth2_mint"
+	IngestRequestAuthSchemeSessionLogin      IngestRequestAuthScheme = "session_login"
+	IngestRequestAuthSchemeSessionLoginBasic IngestRequestAuthScheme = "session_login_basic"
+	IngestRequestAuthSchemeSessionLoginToken IngestRequestAuthScheme = "session_login_token"
+	IngestRequestAuthSchemeStaticHeader      IngestRequestAuthScheme = "static_header"
 )
 
 // Defines values for KindFilterValue.
@@ -220,9 +274,9 @@ const (
 
 // Defines values for PermissionVerdict.
 const (
-	AutoExecute   PermissionVerdict = "auto-execute"
-	Deny          PermissionVerdict = "deny"
-	NeedsApproval PermissionVerdict = "needs-approval"
+	PermissionVerdictAutoExecute   PermissionVerdict = "auto-execute"
+	PermissionVerdictDeny          PermissionVerdict = "deny"
+	PermissionVerdictNeedsApproval PermissionVerdict = "needs-approval"
 )
 
 // Defines values for PrincipalKind.
@@ -263,8 +317,8 @@ const (
 
 // Defines values for ScheduledTriggerInFlightPolicy.
 const (
-	FailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
-	Resume        ScheduledTriggerInFlightPolicy = "resume"
+	ScheduledTriggerInFlightPolicyFailIntoAudit ScheduledTriggerInFlightPolicy = "fail_into_audit"
+	ScheduledTriggerInFlightPolicyResume        ScheduledTriggerInFlightPolicy = "resume"
 )
 
 // Defines values for ScheduledTriggerKind.
@@ -280,6 +334,43 @@ const (
 	ScheduledTriggerStatusCancelled ScheduledTriggerStatus = "cancelled"
 	ScheduledTriggerStatusFired     ScheduledTriggerStatus = "fired"
 	ScheduledTriggerStatusPaused    ScheduledTriggerStatus = "paused"
+)
+
+// Defines values for SelectSpecAggregate.
+const (
+	SelectSpecAggregateAll   SelectSpecAggregate = "all"
+	SelectSpecAggregateAny   SelectSpecAggregate = "any"
+	SelectSpecAggregateCount SelectSpecAggregate = "count"
+	SelectSpecAggregateMax   SelectSpecAggregate = "max"
+	SelectSpecAggregateMin   SelectSpecAggregate = "min"
+	SelectSpecAggregateSum   SelectSpecAggregate = "sum"
+)
+
+// Defines values for SensorCadenceKind.
+const (
+	SensorCadenceKindCron     SensorCadenceKind = "cron"
+	SensorCadenceKindInterval SensorCadenceKind = "interval"
+)
+
+// Defines values for SensorReadLastState.
+const (
+	SensorReadLastStateCritical SensorReadLastState = "critical"
+	SensorReadLastStateDegraded SensorReadLastState = "degraded"
+	SensorReadLastStateOk       SensorReadLastState = "ok"
+	SensorReadLastStateSkip     SensorReadLastState = "skip"
+	SensorReadLastStateUnknown  SensorReadLastState = "unknown"
+)
+
+// Defines values for SensorSeverity.
+const (
+	SensorSeverityCritical SensorSeverity = "critical"
+	SensorSeverityDegraded SensorSeverity = "degraded"
+)
+
+// Defines values for SensorStatus.
+const (
+	SensorStatusActive SensorStatus = "active"
+	SensorStatusPaused SensorStatus = "paused"
 )
 
 // Defines values for ShowTemplateResponseStatus.
@@ -346,31 +437,31 @@ const (
 
 // Defines values for TargetCreateProduct.
 const (
-	Argocd     TargetCreateProduct = "argocd"
-	Bind9      TargetCreateProduct = "bind9"
-	Fleet      TargetCreateProduct = "fleet"
-	Gcloud     TargetCreateProduct = "gcloud"
-	Gh         TargetCreateProduct = "gh"
-	Harbor     TargetCreateProduct = "harbor"
-	Hetzner    TargetCreateProduct = "hetzner"
-	Holodeck   TargetCreateProduct = "holodeck"
-	K8s        TargetCreateProduct = "k8s"
-	Keycloak   TargetCreateProduct = "keycloak"
-	Loki       TargetCreateProduct = "loki"
-	Mongodb    TargetCreateProduct = "mongodb"
-	Nsx        TargetCreateProduct = "nsx"
-	Pfsense    TargetCreateProduct = "pfsense"
-	Postgres   TargetCreateProduct = "postgres"
-	Prometheus TargetCreateProduct = "prometheus"
-	Proxmox    TargetCreateProduct = "proxmox"
-	Rabbitmq   TargetCreateProduct = "rabbitmq"
-	Rke2       TargetCreateProduct = "rke2"
-	Sddc       TargetCreateProduct = "sddc"
-	Vault      TargetCreateProduct = "vault"
-	Vcfa       TargetCreateProduct = "vcfa"
-	Vmware     TargetCreateProduct = "vmware"
-	Vrli       TargetCreateProduct = "vrli"
-	Vrops      TargetCreateProduct = "vrops"
+	TargetCreateProductArgocd     TargetCreateProduct = "argocd"
+	TargetCreateProductBind9      TargetCreateProduct = "bind9"
+	TargetCreateProductFleet      TargetCreateProduct = "fleet"
+	TargetCreateProductGcloud     TargetCreateProduct = "gcloud"
+	TargetCreateProductGh         TargetCreateProduct = "gh"
+	TargetCreateProductHarbor     TargetCreateProduct = "harbor"
+	TargetCreateProductHetzner    TargetCreateProduct = "hetzner"
+	TargetCreateProductHolodeck   TargetCreateProduct = "holodeck"
+	TargetCreateProductK8s        TargetCreateProduct = "k8s"
+	TargetCreateProductKeycloak   TargetCreateProduct = "keycloak"
+	TargetCreateProductLoki       TargetCreateProduct = "loki"
+	TargetCreateProductMongodb    TargetCreateProduct = "mongodb"
+	TargetCreateProductNsx        TargetCreateProduct = "nsx"
+	TargetCreateProductPfsense    TargetCreateProduct = "pfsense"
+	TargetCreateProductPostgres   TargetCreateProduct = "postgres"
+	TargetCreateProductPrometheus TargetCreateProduct = "prometheus"
+	TargetCreateProductProxmox    TargetCreateProduct = "proxmox"
+	TargetCreateProductRabbitmq   TargetCreateProduct = "rabbitmq"
+	TargetCreateProductRke2       TargetCreateProduct = "rke2"
+	TargetCreateProductSddc       TargetCreateProduct = "sddc"
+	TargetCreateProductVault      TargetCreateProduct = "vault"
+	TargetCreateProductVcfa       TargetCreateProduct = "vcfa"
+	TargetCreateProductVmware     TargetCreateProduct = "vmware"
+	TargetCreateProductVrli       TargetCreateProduct = "vrli"
+	TargetCreateProductVrops      TargetCreateProduct = "vrops"
 )
 
 // Defines values for TemplateSummaryStatus.
@@ -382,22 +473,30 @@ const (
 
 // Defines values for TenantRole.
 const (
-	Operator    TenantRole = "operator"
-	ReadOnly    TenantRole = "read_only"
-	TenantAdmin TenantRole = "tenant_admin"
+	TenantRoleOperator    TenantRole = "operator"
+	TenantRoleReadOnly    TenantRole = "read_only"
+	TenantRoleTenantAdmin TenantRole = "tenant_admin"
+)
+
+// Defines values for ThresholdCompareOp.
+const (
+	ThresholdCompareOpGt  ThresholdCompareOp = "gt"
+	ThresholdCompareOpGte ThresholdCompareOp = "gte"
+	ThresholdCompareOpLt  ThresholdCompareOp = "lt"
+	ThresholdCompareOpLte ThresholdCompareOp = "lte"
 )
 
 // Defines values for TopologyDiffEntryChangeKind.
 const (
-	Created TopologyDiffEntryChangeKind = "created"
-	Removed TopologyDiffEntryChangeKind = "removed"
-	Updated TopologyDiffEntryChangeKind = "updated"
+	TopologyDiffEntryChangeKindCreated TopologyDiffEntryChangeKind = "created"
+	TopologyDiffEntryChangeKindRemoved TopologyDiffEntryChangeKind = "removed"
+	TopologyDiffEntryChangeKindUpdated TopologyDiffEntryChangeKind = "updated"
 )
 
 // Defines values for TopologyDiffEntrySource.
 const (
-	Edge TopologyDiffEntrySource = "edge"
-	Node TopologyDiffEntrySource = "node"
+	TopologyDiffEntrySourceEdge TopologyDiffEntrySource = "edge"
+	TopologyDiffEntrySourceNode TopologyDiffEntrySource = "node"
 )
 
 // Defines values for UnderscoreKindFilter.
@@ -411,8 +510,8 @@ const (
 
 // Defines values for UnderscoreSortDirection.
 const (
-	Asc  UnderscoreSortDirection = "asc"
-	Desc UnderscoreSortDirection = "desc"
+	UnderscoreSortDirectionAsc  UnderscoreSortDirection = "asc"
+	UnderscoreSortDirectionDesc UnderscoreSortDirection = "desc"
 )
 
 // Defines values for UnderscoreStatusFilter.
@@ -425,8 +524,8 @@ const (
 
 // Defines values for UnderscoreViewMode.
 const (
-	Graph UnderscoreViewMode = "graph"
-	Table UnderscoreViewMode = "table"
+	UnderscoreViewModeGraph UnderscoreViewMode = "graph"
+	UnderscoreViewModeTable UnderscoreViewMode = "table"
 )
 
 // Defines values for MehoBackplaneUiRoutesConnectorsListViewSortColumn.
@@ -490,17 +589,29 @@ const (
 
 // Defines values for ListTriggersApiV1SchedulerTriggersGetParamsKind.
 const (
-	Cron   ListTriggersApiV1SchedulerTriggersGetParamsKind = "cron"
-	Event  ListTriggersApiV1SchedulerTriggersGetParamsKind = "event"
-	OneOff ListTriggersApiV1SchedulerTriggersGetParamsKind = "one_off"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindCron   ListTriggersApiV1SchedulerTriggersGetParamsKind = "cron"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindEvent  ListTriggersApiV1SchedulerTriggersGetParamsKind = "event"
+	ListTriggersApiV1SchedulerTriggersGetParamsKindOneOff ListTriggersApiV1SchedulerTriggersGetParamsKind = "one_off"
 )
 
 // Defines values for ListTriggersApiV1SchedulerTriggersGetParamsStatus.
 const (
-	Active    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "active"
-	Cancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
-	Fired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
-	Paused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusActive    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "active"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusCancelled ListTriggersApiV1SchedulerTriggersGetParamsStatus = "cancelled"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusFired     ListTriggersApiV1SchedulerTriggersGetParamsStatus = "fired"
+	ListTriggersApiV1SchedulerTriggersGetParamsStatusPaused    ListTriggersApiV1SchedulerTriggersGetParamsStatus = "paused"
+)
+
+// Defines values for ListSensorsApiV1SensorsGetParamsStatus.
+const (
+	ListSensorsApiV1SensorsGetParamsStatusActive ListSensorsApiV1SensorsGetParamsStatus = "active"
+	ListSensorsApiV1SensorsGetParamsStatusPaused ListSensorsApiV1SensorsGetParamsStatus = "paused"
+)
+
+// Defines values for ListSensorsApiV1SensorsGetParamsCadenceKind.
+const (
+	ListSensorsApiV1SensorsGetParamsCadenceKindCron     ListSensorsApiV1SensorsGetParamsCadenceKind = "cron"
+	ListSensorsApiV1SensorsGetParamsCadenceKindInterval ListSensorsApiV1SensorsGetParamsCadenceKind = "interval"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -519,9 +630,9 @@ const (
 
 // Defines values for RunbooksRunsUiRunbooksRunsGetParamsStatus.
 const (
-	Abandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
-	Completed  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
-	InProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
+	RunbooksRunsUiRunbooksRunsGetParamsStatusAbandoned  RunbooksRunsUiRunbooksRunsGetParamsStatus = "abandoned"
+	RunbooksRunsUiRunbooksRunsGetParamsStatusCompleted  RunbooksRunsUiRunbooksRunsGetParamsStatus = "completed"
+	RunbooksRunsUiRunbooksRunsGetParamsStatusInProgress RunbooksRunsUiRunbooksRunsGetParamsStatus = "in_progress"
 )
 
 // AbortRunRequest Request body for “meho.runbook.abort“ -- terminate the run mid-flight.
@@ -1083,6 +1194,28 @@ type AskDocsRequest struct {
 type AskDocsResponse struct {
 	Answer    string                   `json:"answer"`
 	Citations []map[string]interface{} `json:"citations"`
+}
+
+// AssertionSpec A full assertion: one select stage feeding one typed comparator.
+//
+// #2503 imports this model to validate a Sensor's “assertion“ payload at
+// the wire (a bad path or comparator is a 422 at create); #2505 feeds it the
+// op-result payload; #2506 rolls the outcomes up into a Dashboard.
+type AssertionSpec struct {
+	Compare AssertionSpec_Compare `json:"compare"`
+
+	// Select The select stage: a dotted path and at most one bounded aggregate.
+	//
+	// With no aggregate the path must resolve to a scalar; with an aggregate it
+	// must resolve to a list (either a ``[*]`` projection or a directly selected
+	// array). The path is compiled at model-parse time so an invalid grammar is
+	// a 422, not an evaluation-time surprise.
+	Select SelectSpec `json:"select"`
+}
+
+// AssertionSpec_Compare defines model for AssertionSpec.Compare.
+type AssertionSpec_Compare struct {
+	union json.RawMessage
 }
 
 // AssignmentDocument Full-document “PUT“ body: replaces a runner's assignment wholesale.
@@ -2317,6 +2450,15 @@ type BodyVaultPutUiVaultPutPost struct {
 	Target *string `json:"target,omitempty"`
 }
 
+// BoolCompare Boolean comparator: the value must be strictly “bool“.
+//
+// A non-boolean observed value is “unknown“ (no truthiness coercion);
+// a boolean that does not match :attr:`expect` is “critical“.
+type BoolCompare struct {
+	Expect *bool  `json:"expect,omitempty"`
+	Type   string `json:"type"`
+}
+
 // BroadcastOverrideCreate Incoming POST body. Pydantic v2 strict.
 //
 // “extra="forbid"“ rejects unknown fields with 422 -- catches a
@@ -3220,6 +3362,130 @@ type DailyUsageBucket struct {
 // DailyUsageBucketSurface defines model for DailyUsageBucket.Surface.
 type DailyUsageBucketSurface string
 
+// DashboardCreate Request body for “POST /api/v1/checks/dashboards“.
+//
+// Membership is set at create only (no PUT; "edit" is delete + recreate,
+// the trigger-immutability posture). An empty “sensor_ids“ is permitted --
+// a member-less Dashboard rolls up to “unknown“ (the zero-member rule) --
+// but duplicates are de-duplicated by the service before insert. A foreign
+// or absent sensor id is refused 422 “sensor_not_found“ at the boundary.
+//
+// *tenant_id* (optional) lets a platform-admin caller target another
+// tenant; the boundary enforces the RBAC via “authorize_tenant_scope“.
+type DashboardCreate struct {
+	Description *string               `json:"description"`
+	Name        string                `json:"name"`
+	SensorIds   *[]openapi_types.UUID `json:"sensor_ids,omitempty"`
+	TenantId    *openapi_types.UUID   `json:"tenant_id"`
+}
+
+// DashboardDetail Response shape for “GET /api/v1/checks/dashboards/{id}“.
+//
+// Extends :class:`DashboardRead` with the per-member breakdown the console
+// detail page + the REST detail expose.
+type DashboardDetail struct {
+	CreatedAt       time.Time                       `json:"created_at"`
+	CreatedBySub    string                          `json:"created_by_sub"`
+	Description     *string                         `json:"description"`
+	Id              openapi_types.UUID              `json:"id"`
+	LastRollupState *DashboardDetailLastRollupState `json:"last_rollup_state"`
+	MemberCount     int                             `json:"member_count"`
+	Members         []DashboardMemberView           `json:"members"`
+	Name            string                          `json:"name"`
+	State           DashboardDetailState            `json:"state"`
+	TenantId        openapi_types.UUID              `json:"tenant_id"`
+	UpdatedAt       time.Time                       `json:"updated_at"`
+}
+
+// DashboardDetailLastRollupState defines model for DashboardDetail.LastRollupState.
+type DashboardDetailLastRollupState string
+
+// DashboardDetailState defines model for DashboardDetail.State.
+type DashboardDetailState string
+
+// DashboardListResponse Response envelope for “GET /api/v1/checks/dashboards“.
+//
+// Wrapped in “{"dashboards": [...]}“ so a future paging / cursor field
+// can land non-breakingly -- the same shape the Sensor list adopts.
+type DashboardListResponse struct {
+	Dashboards []DashboardRead `json:"dashboards"`
+}
+
+// DashboardMemberView One member Sensor as rendered on a Dashboard detail read.
+//
+// Carries the raw + rolled-up per-member states (“raw_state“ /
+// “effective_state“ / “pending“ from
+// :mod:`meho_backplane.checks.rollup`) plus the Sensor context an operator
+// needs to act -- the op identity, the severity cap, the “for:“ window,
+// the hysteresis clock (“state_since“), and the last observed value /
+// evidence.
+type DashboardMemberView struct {
+	ConnectorId     string                            `json:"connector_id"`
+	EffectiveState  DashboardMemberViewEffectiveState `json:"effective_state"`
+	ForSeconds      int                               `json:"for_seconds"`
+	LastEvaluatedAt *time.Time                        `json:"last_evaluated_at"`
+	LastEvidence    *map[string]interface{}           `json:"last_evidence"`
+	LastValue       interface{}                       `json:"last_value"`
+	Name            string                            `json:"name"`
+	NextFireAt      *time.Time                        `json:"next_fire_at"`
+	OpId            string                            `json:"op_id"`
+	Pending         bool                              `json:"pending"`
+	RawState        DashboardMemberViewRawState       `json:"raw_state"`
+	SensorId        openapi_types.UUID                `json:"sensor_id"`
+
+	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+	//
+	// The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+	// sensor whose assertion fails contributes at most ``degraded``, a
+	// ``critical`` one contributes ``critical``. The five-state vocabulary
+	// itself is declared once in #2504's :data:`CheckState`; this is only
+	// the two operator-selectable severities.
+	Severity   SensorSeverity `json:"severity"`
+	StateSince *time.Time     `json:"state_since"`
+
+	// Status Closed lifecycle status of a :class:`Sensor`.
+	//
+	// ``ScheduledTriggerStatus`` minus the trigger-only terminal states:
+	// a sensor is either eligible for evaluation (:attr:`ACTIVE`) or held
+	// (:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is
+	// not accepted at create; #2505 parks a row to ``paused`` (plus a
+	// ``status_reason``) when it hits an unparseable persisted cadence, and
+	// #2506's rollup derives ``skip`` for paused rows.
+	Status SensorStatus `json:"status"`
+}
+
+// DashboardMemberViewEffectiveState defines model for DashboardMemberView.EffectiveState.
+type DashboardMemberViewEffectiveState string
+
+// DashboardMemberViewRawState defines model for DashboardMemberView.RawState.
+type DashboardMemberViewRawState string
+
+// DashboardRead Response shape for one Dashboard row on the list surface.
+//
+// Carries the rolled-up “state“ (evaluated on read) and the
+// “member_count“ so the list answers "is everything OK?" per Dashboard
+// without a detail fetch. “last_rollup_state“ is the memo column (always
+// NULL until #2507 writes it). “frozen=True“ so a handler cannot mutate
+// the row after returning it.
+type DashboardRead struct {
+	CreatedAt       time.Time                     `json:"created_at"`
+	CreatedBySub    string                        `json:"created_by_sub"`
+	Description     *string                       `json:"description"`
+	Id              openapi_types.UUID            `json:"id"`
+	LastRollupState *DashboardReadLastRollupState `json:"last_rollup_state"`
+	MemberCount     int                           `json:"member_count"`
+	Name            string                        `json:"name"`
+	State           DashboardReadState            `json:"state"`
+	TenantId        openapi_types.UUID            `json:"tenant_id"`
+	UpdatedAt       time.Time                     `json:"updated_at"`
+}
+
+// DashboardReadLastRollupState defines model for DashboardRead.LastRollupState.
+type DashboardReadLastRollupState string
+
+// DashboardReadState defines model for DashboardRead.State.
+type DashboardReadState string
+
 // DbStatus Database migration status.
 //
 // “migrated“ is “True“ when the DB-migration-state probe reports
@@ -3653,6 +3919,33 @@ type EnableReadsResponse struct {
 	OpsEnabled  int    `json:"ops_enabled"`
 }
 
+// EqualsCompare Strict-equality comparator: “ok“ on match, “critical“ otherwise.
+//
+// Equality is type-strict for booleans -- “True“ never equals “1“ -- so
+// the “value“ operand keeps whatever JSON scalar type it was given (Pydantic
+// smart-union preserves it) and the evaluator compares with matching strictness.
+type EqualsCompare struct {
+	Type  string               `json:"type"`
+	Value *EqualsCompare_Value `json:"value"`
+}
+
+// EqualsCompareValue0 defines model for .
+type EqualsCompareValue0 = string
+
+// EqualsCompareValue1 defines model for .
+type EqualsCompareValue1 = int
+
+// EqualsCompareValue2 defines model for .
+type EqualsCompareValue2 = float32
+
+// EqualsCompareValue3 defines model for .
+type EqualsCompareValue3 = bool
+
+// EqualsCompare_Value defines model for EqualsCompare.Value.
+type EqualsCompare_Value struct {
+	union json.RawMessage
+}
+
 // EvalRequest POST body for “/api/v1/retrieve/eval“.
 //
 // Frozen + extra=forbid so a typo (“surfaces“ instead of
@@ -3722,6 +4015,22 @@ type ForkInfo struct {
 	InFlightRunCount int    `json:"in_flight_run_count"`
 	Slug             string `json:"slug"`
 	Version          int    `json:"version"`
+}
+
+// FreshnessCompare Age comparator over a timestamp carried in the payload.
+//
+// The observed value is the timestamp: an RFC3339 string (which **must**
+// carry a timezone offset -- a naive string is “unknown“ because a
+// host-TZ-dependent comparison is banned) or an “int“/“float“ of epoch
+// seconds interpreted as UTC. “age = now - timestamp“; “age >
+// max_age_seconds“ is “critical“, “> degraded_age_seconds“ (when set)
+// is “degraded“, otherwise “ok“ (a future timestamp is “ok“). “now“
+// is injected by the caller -- the op-result envelope carries no timestamp
+// field of its own.
+type FreshnessCompare struct {
+	DegradedAgeSeconds *float32 `json:"degraded_age_seconds"`
+	MaxAgeSeconds      float32  `json:"max_age_seconds"`
+	Type               string   `json:"type"`
 }
 
 // GatewayCommandEnvelope The claimed-command envelope returned by “GET .../next“ (200).
@@ -3847,6 +4156,31 @@ type HealthResponse struct {
 	// structured string for the CLI to render on failure paths — a class name
 	// or error code, never an unbounded exception message or a secret value.
 	Vault VaultStatus `json:"vault"`
+}
+
+// InCompare Membership comparator: “ok“ if the value strict-equals a member.
+//
+// Same boolean strictness as :class:`EqualsCompare`, applied per member.
+type InCompare struct {
+	Type   string                  `json:"type"`
+	Values []InCompare_Values_Item `json:"values"`
+}
+
+// InCompareValues0 defines model for .
+type InCompareValues0 = string
+
+// InCompareValues1 defines model for .
+type InCompareValues1 = int
+
+// InCompareValues2 defines model for .
+type InCompareValues2 = float32
+
+// InCompareValues3 defines model for .
+type InCompareValues3 = bool
+
+// InCompare_Values_Item defines model for InCompare.values.Item.
+type InCompare_Values_Item struct {
+	union json.RawMessage
 }
 
 // IngestJobHandle Response body for “POST /api/v1/connectors/ingest“ (HTTP 202).
@@ -5733,6 +6067,213 @@ type SearchDocsResponse struct {
 	Grounded bool        `json:"grounded"`
 }
 
+// SelectSpec The select stage: a dotted path and at most one bounded aggregate.
+//
+// With no aggregate the path must resolve to a scalar; with an aggregate it
+// must resolve to a list (either a “[*]“ projection or a directly selected
+// array). The path is compiled at model-parse time so an invalid grammar is
+// a 422, not an evaluation-time surprise.
+type SelectSpec struct {
+	Aggregate *SelectSpecAggregate `json:"aggregate"`
+	Path      string               `json:"path"`
+}
+
+// SelectSpecAggregate defines model for SelectSpec.Aggregate.
+type SelectSpecAggregate string
+
+// SensorCadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+//
+// Initiative #2416 (parent goal #221), Task #2503. One “sensor“ row
+// carries exactly one cadence, selected by this discriminator; the
+// invariant is enforced by the DB-side “ck_sensor_cadence_fields“
+// CHECK that pairs each kind with its mandatory column (mirroring
+// :class:`ScheduledTriggerKind`).
+//
+// Members:
+//
+//   - :attr:`INTERVAL` -- fire every “interval_seconds“ (5..86400). The
+//     sub-minute path #2505's interval-tick loop drives.
+//   - :attr:`CRON` -- fire on a 5-field “cron_expr“ in “timezone“. The
+//     >=1-minute path #2505 rides on #804's durable scheduler discipline.
+//
+// Closed enum: widening it is a coordinated DB + model change so the
+// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+// “0064“'s frozen tuple cannot drift.
+type SensorCadenceKind string
+
+// SensorCreate Request body for “POST /api/v1/sensors“.
+//
+// Discriminated by *cadence_kind*: exactly one of “interval_seconds“
+// (interval cadence, 5..86400 s) / “cron_expr“ + “timezone“ (cron
+// cadence) must be set, matching the DB-side “ck_sensor_cadence_fields“
+// invariant. The :meth:`_validate_cadence_and_assertion` validator
+// enforces this at the wire, validates the cron expression + timezone
+// exactly as :mod:`meho_backplane.scheduler.schemas` does, and caps the
+// serialized assertion size.
+//
+// “status“ is deliberately **not** a field: sensors are
+// set-at-create-only (like scheduled triggers), and a row is only ever
+// parked (“status='paused'“) by #2505's runner, never at create. With
+// “extra="forbid"“ a body carrying “status“ is a 422.
+//
+// *identity_sub* defaults to “"__sensor__"“ (the sentinel #2505's
+// runner dispatches under). *tenant_id* (optional) lets a platform-admin
+// caller target another tenant; the boundary enforces the RBAC.
+type SensorCreate struct {
+	// Assertion A full assertion: one select stage feeding one typed comparator.
+	//
+	// #2503 imports this model to validate a Sensor's ``assertion`` payload at
+	// the wire (a bad path or comparator is a 422 at create); #2505 feeds it the
+	// op-result payload; #2506 rolls the outcomes up into a Dashboard.
+	Assertion AssertionSpec `json:"assertion"`
+
+	// CadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+	//
+	// Initiative #2416 (parent goal #221), Task #2503. One ``sensor`` row
+	// carries exactly one cadence, selected by this discriminator; the
+	// invariant is enforced by the DB-side ``ck_sensor_cadence_fields``
+	// CHECK that pairs each kind with its mandatory column (mirroring
+	// :class:`ScheduledTriggerKind`).
+	//
+	// Members:
+	//
+	// * :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The
+	//   sub-minute path #2505's interval-tick loop drives.
+	// * :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The
+	//   >=1-minute path #2505 rides on #804's durable scheduler discipline.
+	//
+	// Closed enum: widening it is a coordinated DB + model change so the
+	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+	// ``0064``'s frozen tuple cannot drift.
+	CadenceKind     SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId     string                  `json:"connector_id"`
+	CronExpr        *string                 `json:"cron_expr"`
+	ForSeconds      *int                    `json:"for_seconds,omitempty"`
+	IdentitySub     *string                 `json:"identity_sub,omitempty"`
+	IntervalSeconds *int                    `json:"interval_seconds"`
+	Name            string                  `json:"name"`
+	OpId            string                  `json:"op_id"`
+	Params          *map[string]interface{} `json:"params,omitempty"`
+
+	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+	//
+	// The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+	// sensor whose assertion fails contributes at most ``degraded``, a
+	// ``critical`` one contributes ``critical``. The five-state vocabulary
+	// itself is declared once in #2504's :data:`CheckState`; this is only
+	// the two operator-selectable severities.
+	Severity *SensorSeverity         `json:"severity,omitempty"`
+	Target   *map[string]interface{} `json:"target"`
+	TenantId *openapi_types.UUID     `json:"tenant_id"`
+	Timezone *string                 `json:"timezone,omitempty"`
+}
+
+// SensorListResponse Response envelope for “GET /api/v1/sensors“.
+//
+// Wrapped in “{"sensors": [...]}“ so a future paging / cursor field
+// can land non-breakingly -- the same shape
+// :class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`
+// adopted.
+type SensorListResponse struct {
+	Sensors []SensorRead `json:"sensors"`
+}
+
+// SensorRead Response shape for one “sensor“ row.
+//
+// Mirrors :class:`~meho_backplane.db.models.Sensor`'s column set,
+// projected to the wire types the JSON renderer can serialise. Includes
+// the latest-result projection (“last_state“ / “last_value“ /
+// “last_evidence“ / “last_evaluated_at“ / “state_since“) so the
+// list response carries the current status view (there is no REST
+// GET-by-id -- the mould exposes none). “frozen=True“ so a route
+// handler cannot mutate the row after returning it.
+type SensorRead struct {
+	Assertion map[string]interface{} `json:"assertion"`
+
+	// CadenceKind Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+	//
+	// Initiative #2416 (parent goal #221), Task #2503. One ``sensor`` row
+	// carries exactly one cadence, selected by this discriminator; the
+	// invariant is enforced by the DB-side ``ck_sensor_cadence_fields``
+	// CHECK that pairs each kind with its mandatory column (mirroring
+	// :class:`ScheduledTriggerKind`).
+	//
+	// Members:
+	//
+	// * :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The
+	//   sub-minute path #2505's interval-tick loop drives.
+	// * :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The
+	//   >=1-minute path #2505 rides on #804's durable scheduler discipline.
+	//
+	// Closed enum: widening it is a coordinated DB + model change so the
+	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+	// ``0064``'s frozen tuple cannot drift.
+	CadenceKind     SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId     string                  `json:"connector_id"`
+	CreatedAt       time.Time               `json:"created_at"`
+	CreatedBySub    string                  `json:"created_by_sub"`
+	CronExpr        *string                 `json:"cron_expr"`
+	ForSeconds      int                     `json:"for_seconds"`
+	Id              openapi_types.UUID      `json:"id"`
+	IdentitySub     string                  `json:"identity_sub"`
+	IntervalSeconds *int                    `json:"interval_seconds"`
+	LastEvaluatedAt *time.Time              `json:"last_evaluated_at"`
+	LastEvidence    *map[string]interface{} `json:"last_evidence"`
+	LastState       SensorReadLastState     `json:"last_state"`
+	LastValue       interface{}             `json:"last_value"`
+	Name            string                  `json:"name"`
+	NextFireAt      *time.Time              `json:"next_fire_at"`
+	OpId            string                  `json:"op_id"`
+	Params          map[string]interface{}  `json:"params"`
+
+	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+	//
+	// The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+	// sensor whose assertion fails contributes at most ``degraded``, a
+	// ``critical`` one contributes ``critical``. The five-state vocabulary
+	// itself is declared once in #2504's :data:`CheckState`; this is only
+	// the two operator-selectable severities.
+	Severity   SensorSeverity `json:"severity"`
+	StateSince *time.Time     `json:"state_since"`
+
+	// Status Closed lifecycle status of a :class:`Sensor`.
+	//
+	// ``ScheduledTriggerStatus`` minus the trigger-only terminal states:
+	// a sensor is either eligible for evaluation (:attr:`ACTIVE`) or held
+	// (:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is
+	// not accepted at create; #2505 parks a row to ``paused`` (plus a
+	// ``status_reason``) when it hits an unparseable persisted cadence, and
+	// #2506's rollup derives ``skip`` for paused rows.
+	Status       SensorStatus            `json:"status"`
+	StatusReason *string                 `json:"status_reason"`
+	Target       *map[string]interface{} `json:"target"`
+	TenantId     openapi_types.UUID      `json:"tenant_id"`
+	Timezone     string                  `json:"timezone"`
+	UpdatedAt    time.Time               `json:"updated_at"`
+}
+
+// SensorReadLastState defines model for SensorRead.LastState.
+type SensorReadLastState string
+
+// SensorSeverity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+//
+// The per-sensor cap #2506 applies to the rollup: a “degraded“-severity
+// sensor whose assertion fails contributes at most “degraded“, a
+// “critical“ one contributes “critical“. The five-state vocabulary
+// itself is declared once in #2504's :data:`CheckState`; this is only
+// the two operator-selectable severities.
+type SensorSeverity string
+
+// SensorStatus Closed lifecycle status of a :class:`Sensor`.
+//
+// “ScheduledTriggerStatus“ minus the trigger-only terminal states:
+// a sensor is either eligible for evaluation (:attr:`ACTIVE`) or held
+// (:attr:`PAUSED`). This Task never writes “paused“ -- “status“ is
+// not accepted at create; #2505 parks a row to “paused“ (plus a
+// “status_reason“) when it hits an unparseable persisted cadence, and
+// #2506's rollup derives “skip“ for paused rows.
+type SensorStatus string
+
 // ShowTemplateResponse Full template surface returned by “meho.runbook.show_template“.
 //
 // The complete template including the ordered :attr:`steps` and the
@@ -6271,6 +6812,23 @@ type TemplateSummaryStatus string
 // “"role=TenantRole.TENANT_ADMIN"“.
 type TenantRole string
 
+// ThresholdCompare Numeric-bound comparator: “ok“ / “degraded“ / “critical“.
+//
+// The observed value is tested “value <op> bound“. “critical“ is checked
+// before “degraded“, so the more-severe band wins. At least one bound is
+// required; when both are set they must be ordered by severity for the
+// operator direction (“gt“/“gte“: “degraded <= critical“; “lt“/“lte“:
+// “degraded >= critical“). Non-numeric (or boolean) input is “unknown“.
+type ThresholdCompare struct {
+	Critical *float32           `json:"critical"`
+	Degraded *float32           `json:"degraded"`
+	Op       ThresholdCompareOp `json:"op"`
+	Type     string             `json:"type"`
+}
+
+// ThresholdCompareOp defines model for ThresholdCompare.Op.
+type ThresholdCompareOp string
+
 // Thresholds Per-metric green-band thresholds for a verdict computation.
 //
 // Frozen so the threshold object passed into :func:`verdict` cannot
@@ -6505,13 +7063,16 @@ type TopologyHistoryResult struct {
 // depth “0“, its immediate dependents/dependencies are depth “1“,
 // transitive ones depth “2“, and so on. “via_edge_kind“ is the
 // “graph_edge.kind“ of the edge used to reach this node, or
-// “None“ for the root (which is reached by no edge).
+// “None“ for the root (which is reached by no edge). “source“
+// is “'auto'“ (probe-derived) or “'curated'“ (operator-seeded /
+// promoted; #2536) — mirrors :attr:`TopologyEdge.source`.
 type TopologyNode struct {
 	Depth       int                     `json:"depth"`
 	Id          openapi_types.UUID      `json:"id"`
 	Kind        string                  `json:"kind"`
 	Name        string                  `json:"name"`
 	Properties  *map[string]interface{} `json:"properties,omitempty"`
+	Source      string                  `json:"source"`
 	ViaEdgeKind *string                 `json:"via_edge_kind"`
 }
 
@@ -7115,6 +7676,31 @@ type PutAssignmentApiV1ChecksAssignmentRunnerPutParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListDashboardsApiV1ChecksDashboardsGetParams defines parameters for ListDashboardsApiV1ChecksDashboardsGet.
+type ListDashboardsApiV1ChecksDashboardsGetParams struct {
+	Limit         *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int                `form:"offset,omitempty" json:"offset,omitempty"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// CreateDashboardApiV1ChecksDashboardsPostParams defines parameters for CreateDashboardApiV1ChecksDashboardsPost.
+type CreateDashboardApiV1ChecksDashboardsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams defines parameters for DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete.
+type DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// GetDashboardApiV1ChecksDashboardsDashboardIdGetParams defines parameters for GetDashboardApiV1ChecksDashboardsDashboardIdGet.
+type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
 type PostResultsApiV1ChecksResultsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -7555,6 +8141,33 @@ type CancelTriggerApiV1SchedulerTriggersTriggerIdDeleteParams struct {
 // SearchDocsEndpointApiV1SearchDocsPostParams defines parameters for SearchDocsEndpointApiV1SearchDocsPost.
 type SearchDocsEndpointApiV1SearchDocsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
+}
+
+// ListSensorsApiV1SensorsGetParams defines parameters for ListSensorsApiV1SensorsGet.
+type ListSensorsApiV1SensorsGetParams struct {
+	Limit         *int                                         `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int                                         `form:"offset,omitempty" json:"offset,omitempty"`
+	Status        *ListSensorsApiV1SensorsGetParamsStatus      `form:"status,omitempty" json:"status,omitempty"`
+	CadenceKind   *ListSensorsApiV1SensorsGetParamsCadenceKind `form:"cadence_kind,omitempty" json:"cadence_kind,omitempty"`
+	TenantFilter  *openapi_types.UUID                          `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string                                      `json:"authorization,omitempty"`
+}
+
+// ListSensorsApiV1SensorsGetParamsStatus defines parameters for ListSensorsApiV1SensorsGet.
+type ListSensorsApiV1SensorsGetParamsStatus string
+
+// ListSensorsApiV1SensorsGetParamsCadenceKind defines parameters for ListSensorsApiV1SensorsGet.
+type ListSensorsApiV1SensorsGetParamsCadenceKind string
+
+// CreateSensorApiV1SensorsPostParams defines parameters for CreateSensorApiV1SensorsPost.
+type CreateSensorApiV1SensorsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteSensorApiV1SensorsSensorIdDeleteParams defines parameters for DeleteSensorApiV1SensorsSensorIdDelete.
+type DeleteSensorApiV1SensorsSensorIdDeleteParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
 }
 
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
@@ -8071,6 +8684,9 @@ type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrid
 // PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody defines body for PutAssignmentApiV1ChecksAssignmentRunnerPut for application/json ContentType.
 type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocument
 
+// CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody defines body for CreateDashboardApiV1ChecksDashboardsPost for application/json ContentType.
+type CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody = DashboardCreate
+
 // PostResultsApiV1ChecksResultsPostJSONRequestBody defines body for PostResultsApiV1ChecksResultsPost for application/json ContentType.
 type PostResultsApiV1ChecksResultsPostJSONRequestBody = RunnerResultBatch
 
@@ -8157,6 +8773,9 @@ type CreateTriggerApiV1SchedulerTriggersPostJSONRequestBody = ScheduledTriggerCr
 
 // SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody defines body for SearchDocsEndpointApiV1SearchDocsPost for application/json ContentType.
 type SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody = SearchDocsRequest
+
+// CreateSensorApiV1SensorsPostJSONRequestBody defines body for CreateSensorApiV1SensorsPost for application/json ContentType.
+type CreateSensorApiV1SensorsPostJSONRequestBody = SensorCreate
 
 // CreateTargetApiV1TargetsPostJSONRequestBody defines body for CreateTargetApiV1TargetsPost for application/json ContentType.
 type CreateTargetApiV1TargetsPostJSONRequestBody = TargetCreate
@@ -8616,6 +9235,185 @@ func (t *ApproveResponseBody_DispatchResult) UnmarshalJSON(b []byte) error {
 	return err
 }
 
+// AsThresholdCompare returns the union data inside the AssertionSpec_Compare as a ThresholdCompare
+func (t AssertionSpec_Compare) AsThresholdCompare() (ThresholdCompare, error) {
+	var body ThresholdCompare
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromThresholdCompare overwrites any union data inside the AssertionSpec_Compare as the provided ThresholdCompare
+func (t *AssertionSpec_Compare) FromThresholdCompare(v ThresholdCompare) error {
+	v.Type = "threshold"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeThresholdCompare performs a merge with any union data inside the AssertionSpec_Compare, using the provided ThresholdCompare
+func (t *AssertionSpec_Compare) MergeThresholdCompare(v ThresholdCompare) error {
+	v.Type = "threshold"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsEqualsCompare returns the union data inside the AssertionSpec_Compare as a EqualsCompare
+func (t AssertionSpec_Compare) AsEqualsCompare() (EqualsCompare, error) {
+	var body EqualsCompare
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromEqualsCompare overwrites any union data inside the AssertionSpec_Compare as the provided EqualsCompare
+func (t *AssertionSpec_Compare) FromEqualsCompare(v EqualsCompare) error {
+	v.Type = "equals"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeEqualsCompare performs a merge with any union data inside the AssertionSpec_Compare, using the provided EqualsCompare
+func (t *AssertionSpec_Compare) MergeEqualsCompare(v EqualsCompare) error {
+	v.Type = "equals"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsInCompare returns the union data inside the AssertionSpec_Compare as a InCompare
+func (t AssertionSpec_Compare) AsInCompare() (InCompare, error) {
+	var body InCompare
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInCompare overwrites any union data inside the AssertionSpec_Compare as the provided InCompare
+func (t *AssertionSpec_Compare) FromInCompare(v InCompare) error {
+	v.Type = "in"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInCompare performs a merge with any union data inside the AssertionSpec_Compare, using the provided InCompare
+func (t *AssertionSpec_Compare) MergeInCompare(v InCompare) error {
+	v.Type = "in"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsBoolCompare returns the union data inside the AssertionSpec_Compare as a BoolCompare
+func (t AssertionSpec_Compare) AsBoolCompare() (BoolCompare, error) {
+	var body BoolCompare
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromBoolCompare overwrites any union data inside the AssertionSpec_Compare as the provided BoolCompare
+func (t *AssertionSpec_Compare) FromBoolCompare(v BoolCompare) error {
+	v.Type = "bool"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeBoolCompare performs a merge with any union data inside the AssertionSpec_Compare, using the provided BoolCompare
+func (t *AssertionSpec_Compare) MergeBoolCompare(v BoolCompare) error {
+	v.Type = "bool"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsFreshnessCompare returns the union data inside the AssertionSpec_Compare as a FreshnessCompare
+func (t AssertionSpec_Compare) AsFreshnessCompare() (FreshnessCompare, error) {
+	var body FreshnessCompare
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromFreshnessCompare overwrites any union data inside the AssertionSpec_Compare as the provided FreshnessCompare
+func (t *AssertionSpec_Compare) FromFreshnessCompare(v FreshnessCompare) error {
+	v.Type = "freshness"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeFreshnessCompare performs a merge with any union data inside the AssertionSpec_Compare, using the provided FreshnessCompare
+func (t *AssertionSpec_Compare) MergeFreshnessCompare(v FreshnessCompare) error {
+	v.Type = "freshness"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t AssertionSpec_Compare) Discriminator() (string, error) {
+	var discriminator struct {
+		Discriminator string `json:"type"`
+	}
+	err := json.Unmarshal(t.union, &discriminator)
+	return discriminator.Discriminator, err
+}
+
+func (t AssertionSpec_Compare) ValueByDiscriminator() (interface{}, error) {
+	discriminator, err := t.Discriminator()
+	if err != nil {
+		return nil, err
+	}
+	switch discriminator {
+	case "bool":
+		return t.AsBoolCompare()
+	case "equals":
+		return t.AsEqualsCompare()
+	case "freshness":
+		return t.AsFreshnessCompare()
+	case "in":
+		return t.AsInCompare()
+	case "threshold":
+		return t.AsThresholdCompare()
+	default:
+		return nil, errors.New("unknown discriminator value: " + discriminator)
+	}
+}
+
+func (t AssertionSpec_Compare) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *AssertionSpec_Compare) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // AsCallOperationBodyTarget0 returns the union data inside the CallOperationBody_Target as a CallOperationBodyTarget0
 func (t CallOperationBody_Target) AsCallOperationBodyTarget0() (CallOperationBodyTarget0, error) {
 	var body CallOperationBodyTarget0
@@ -8736,6 +9534,234 @@ func (t DecideResponseBody_DispatchResult) MarshalJSON() ([]byte, error) {
 }
 
 func (t *DecideResponseBody_DispatchResult) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsEqualsCompareValue0 returns the union data inside the EqualsCompare_Value as a EqualsCompareValue0
+func (t EqualsCompare_Value) AsEqualsCompareValue0() (EqualsCompareValue0, error) {
+	var body EqualsCompareValue0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromEqualsCompareValue0 overwrites any union data inside the EqualsCompare_Value as the provided EqualsCompareValue0
+func (t *EqualsCompare_Value) FromEqualsCompareValue0(v EqualsCompareValue0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeEqualsCompareValue0 performs a merge with any union data inside the EqualsCompare_Value, using the provided EqualsCompareValue0
+func (t *EqualsCompare_Value) MergeEqualsCompareValue0(v EqualsCompareValue0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsEqualsCompareValue1 returns the union data inside the EqualsCompare_Value as a EqualsCompareValue1
+func (t EqualsCompare_Value) AsEqualsCompareValue1() (EqualsCompareValue1, error) {
+	var body EqualsCompareValue1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromEqualsCompareValue1 overwrites any union data inside the EqualsCompare_Value as the provided EqualsCompareValue1
+func (t *EqualsCompare_Value) FromEqualsCompareValue1(v EqualsCompareValue1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeEqualsCompareValue1 performs a merge with any union data inside the EqualsCompare_Value, using the provided EqualsCompareValue1
+func (t *EqualsCompare_Value) MergeEqualsCompareValue1(v EqualsCompareValue1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsEqualsCompareValue2 returns the union data inside the EqualsCompare_Value as a EqualsCompareValue2
+func (t EqualsCompare_Value) AsEqualsCompareValue2() (EqualsCompareValue2, error) {
+	var body EqualsCompareValue2
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromEqualsCompareValue2 overwrites any union data inside the EqualsCompare_Value as the provided EqualsCompareValue2
+func (t *EqualsCompare_Value) FromEqualsCompareValue2(v EqualsCompareValue2) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeEqualsCompareValue2 performs a merge with any union data inside the EqualsCompare_Value, using the provided EqualsCompareValue2
+func (t *EqualsCompare_Value) MergeEqualsCompareValue2(v EqualsCompareValue2) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsEqualsCompareValue3 returns the union data inside the EqualsCompare_Value as a EqualsCompareValue3
+func (t EqualsCompare_Value) AsEqualsCompareValue3() (EqualsCompareValue3, error) {
+	var body EqualsCompareValue3
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromEqualsCompareValue3 overwrites any union data inside the EqualsCompare_Value as the provided EqualsCompareValue3
+func (t *EqualsCompare_Value) FromEqualsCompareValue3(v EqualsCompareValue3) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeEqualsCompareValue3 performs a merge with any union data inside the EqualsCompare_Value, using the provided EqualsCompareValue3
+func (t *EqualsCompare_Value) MergeEqualsCompareValue3(v EqualsCompareValue3) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t EqualsCompare_Value) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *EqualsCompare_Value) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
+// AsInCompareValues0 returns the union data inside the InCompare_Values_Item as a InCompareValues0
+func (t InCompare_Values_Item) AsInCompareValues0() (InCompareValues0, error) {
+	var body InCompareValues0
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInCompareValues0 overwrites any union data inside the InCompare_Values_Item as the provided InCompareValues0
+func (t *InCompare_Values_Item) FromInCompareValues0(v InCompareValues0) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInCompareValues0 performs a merge with any union data inside the InCompare_Values_Item, using the provided InCompareValues0
+func (t *InCompare_Values_Item) MergeInCompareValues0(v InCompareValues0) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsInCompareValues1 returns the union data inside the InCompare_Values_Item as a InCompareValues1
+func (t InCompare_Values_Item) AsInCompareValues1() (InCompareValues1, error) {
+	var body InCompareValues1
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInCompareValues1 overwrites any union data inside the InCompare_Values_Item as the provided InCompareValues1
+func (t *InCompare_Values_Item) FromInCompareValues1(v InCompareValues1) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInCompareValues1 performs a merge with any union data inside the InCompare_Values_Item, using the provided InCompareValues1
+func (t *InCompare_Values_Item) MergeInCompareValues1(v InCompareValues1) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsInCompareValues2 returns the union data inside the InCompare_Values_Item as a InCompareValues2
+func (t InCompare_Values_Item) AsInCompareValues2() (InCompareValues2, error) {
+	var body InCompareValues2
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInCompareValues2 overwrites any union data inside the InCompare_Values_Item as the provided InCompareValues2
+func (t *InCompare_Values_Item) FromInCompareValues2(v InCompareValues2) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInCompareValues2 performs a merge with any union data inside the InCompare_Values_Item, using the provided InCompareValues2
+func (t *InCompare_Values_Item) MergeInCompareValues2(v InCompareValues2) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsInCompareValues3 returns the union data inside the InCompare_Values_Item as a InCompareValues3
+func (t InCompare_Values_Item) AsInCompareValues3() (InCompareValues3, error) {
+	var body InCompareValues3
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromInCompareValues3 overwrites any union data inside the InCompare_Values_Item as the provided InCompareValues3
+func (t *InCompare_Values_Item) FromInCompareValues3(v InCompareValues3) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeInCompareValues3 performs a merge with any union data inside the InCompare_Values_Item, using the provided InCompareValues3
+func (t *InCompare_Values_Item) MergeInCompareValues3(v InCompareValues3) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t InCompare_Values_Item) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *InCompare_Values_Item) UnmarshalJSON(b []byte) error {
 	err := t.union.UnmarshalJSON(b)
 	return err
 }
@@ -9527,6 +10553,20 @@ type ClientInterface interface {
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListDashboardsApiV1ChecksDashboardsGet request
+	ListDashboardsApiV1ChecksDashboardsGet(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateDashboardApiV1ChecksDashboardsPostWithBody request with any body
+	CreateDashboardApiV1ChecksDashboardsPostWithBody(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateDashboardApiV1ChecksDashboardsPost(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete request
+	DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetDashboardApiV1ChecksDashboardsDashboardIdGet request
+	GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostResultsApiV1ChecksResultsPostWithBody request with any body
 	PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -9785,6 +10825,17 @@ type ClientInterface interface {
 	SearchDocsEndpointApiV1SearchDocsPostWithBody(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	SearchDocsEndpointApiV1SearchDocsPost(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSensorsApiV1SensorsGet request
+	ListSensorsApiV1SensorsGet(ctx context.Context, params *ListSensorsApiV1SensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateSensorApiV1SensorsPostWithBody request with any body
+	CreateSensorApiV1SensorsPostWithBody(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateSensorApiV1SensorsPost(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, body CreateSensorApiV1SensorsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteSensorApiV1SensorsSensorIdDelete request
+	DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -10079,6 +11130,12 @@ type ClientInterface interface {
 
 	// UiBroadcastStreamUiBroadcastStreamGet request
 	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiChecksListUiChecksGet request
+	UiChecksListUiChecksGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ChecksDetailUiChecksDashboardIdGet request
+	ChecksDetailUiChecksDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsListUiConnectorsGetWithBody request with any body
 	UiConnectorsListUiConnectorsGetWithBody(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11328,6 +12385,66 @@ func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context
 	return c.Client.Do(req)
 }
 
+func (c *Client) ListDashboardsApiV1ChecksDashboardsGet(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListDashboardsApiV1ChecksDashboardsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateDashboardApiV1ChecksDashboardsPostWithBody(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateDashboardApiV1ChecksDashboardsPost(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateDashboardApiV1ChecksDashboardsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteRequest(c.Server, dashboardId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetDashboardApiV1ChecksDashboardsDashboardIdGetRequest(c.Server, dashboardId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPostResultsApiV1ChecksResultsPostRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
@@ -12470,6 +13587,54 @@ func (c *Client) SearchDocsEndpointApiV1SearchDocsPostWithBody(ctx context.Conte
 
 func (c *Client) SearchDocsEndpointApiV1SearchDocsPost(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSearchDocsEndpointApiV1SearchDocsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListSensorsApiV1SensorsGet(ctx context.Context, params *ListSensorsApiV1SensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSensorsApiV1SensorsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateSensorApiV1SensorsPostWithBody(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateSensorApiV1SensorsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateSensorApiV1SensorsPost(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, body CreateSensorApiV1SensorsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateSensorApiV1SensorsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(c.Server, sensorId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -13778,6 +14943,30 @@ func (c *Client) UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDelete(
 
 func (c *Client) UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiBroadcastStreamUiBroadcastStreamGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiChecksListUiChecksGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiChecksListUiChecksGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ChecksDetailUiChecksDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewChecksDetailUiChecksDashboardIdGetRequest(c.Server, dashboardId)
 	if err != nil {
 		return nil, err
 	}
@@ -18992,6 +20181,299 @@ func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server string
 	return req, nil
 }
 
+// NewListDashboardsApiV1ChecksDashboardsGetRequest generates requests for ListDashboardsApiV1ChecksDashboardsGet
+func NewListDashboardsApiV1ChecksDashboardsGetRequest(server string, params *ListDashboardsApiV1ChecksDashboardsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateDashboardApiV1ChecksDashboardsPostRequest calls the generic CreateDashboardApiV1ChecksDashboardsPost builder with application/json body
+func NewCreateDashboardApiV1ChecksDashboardsPostRequest(server string, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody generates requests for CreateDashboardApiV1ChecksDashboardsPost with any type of body
+func NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody(server string, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteRequest generates requests for DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete
+func NewDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteRequest(server string, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "dashboard_id", runtime.ParamLocationPath, dashboardId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetDashboardApiV1ChecksDashboardsDashboardIdGetRequest generates requests for GetDashboardApiV1ChecksDashboardsDashboardIdGet
+func NewGetDashboardApiV1ChecksDashboardsDashboardIdGetRequest(server string, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "dashboard_id", runtime.ParamLocationPath, dashboardId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPostResultsApiV1ChecksResultsPostRequest calls the generic PostResultsApiV1ChecksResultsPost builder with application/json body
 func NewPostResultsApiV1ChecksResultsPostRequest(server string, params *PostResultsApiV1ChecksResultsPostParams, body PostResultsApiV1ChecksResultsPostJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -23435,6 +24917,260 @@ func NewSearchDocsEndpointApiV1SearchDocsPostRequestWithBody(server string, para
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListSensorsApiV1SensorsGetRequest generates requests for ListSensorsApiV1SensorsGet
+func NewListSensorsApiV1SensorsGetRequest(server string, params *ListSensorsApiV1SensorsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.CadenceKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cadence_kind", runtime.ParamLocationQuery, *params.CadenceKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateSensorApiV1SensorsPostRequest calls the generic CreateSensorApiV1SensorsPost builder with application/json body
+func NewCreateSensorApiV1SensorsPostRequest(server string, params *CreateSensorApiV1SensorsPostParams, body CreateSensorApiV1SensorsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateSensorApiV1SensorsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateSensorApiV1SensorsPostRequestWithBody generates requests for CreateSensorApiV1SensorsPost with any type of body
+func NewCreateSensorApiV1SensorsPostRequestWithBody(server string, params *CreateSensorApiV1SensorsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteSensorApiV1SensorsSensorIdDeleteRequest generates requests for DeleteSensorApiV1SensorsSensorIdDelete
+func NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(server string, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -28082,6 +29818,67 @@ func NewUiBroadcastStreamUiBroadcastStreamGetRequest(server string, params *UiBr
 		}
 
 		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiChecksListUiChecksGetRequest generates requests for UiChecksListUiChecksGet
+func NewUiChecksListUiChecksGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/checks")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewChecksDetailUiChecksDashboardIdGetRequest generates requests for ChecksDetailUiChecksDashboardIdGet
+func NewChecksDetailUiChecksDashboardIdGetRequest(server string, dashboardId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "dashboard_id", runtime.ParamLocationPath, dashboardId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/checks/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -35162,6 +36959,20 @@ type ClientWithResponsesInterface interface {
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
 
+	// ListDashboardsApiV1ChecksDashboardsGetWithResponse request
+	ListDashboardsApiV1ChecksDashboardsGetWithResponse(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error)
+
+	// CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse request with any body
+	CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error)
+
+	CreateDashboardApiV1ChecksDashboardsPostWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error)
+
+	// DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse request
+	DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse, error)
+
+	// GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse request
+	GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse, error)
+
 	// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with any body
 	PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
 
@@ -35420,6 +37231,17 @@ type ClientWithResponsesInterface interface {
 	SearchDocsEndpointApiV1SearchDocsPostWithBodyWithResponse(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SearchDocsEndpointApiV1SearchDocsPostResponse, error)
 
 	SearchDocsEndpointApiV1SearchDocsPostWithResponse(ctx context.Context, params *SearchDocsEndpointApiV1SearchDocsPostParams, body SearchDocsEndpointApiV1SearchDocsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*SearchDocsEndpointApiV1SearchDocsPostResponse, error)
+
+	// ListSensorsApiV1SensorsGetWithResponse request
+	ListSensorsApiV1SensorsGetWithResponse(ctx context.Context, params *ListSensorsApiV1SensorsGetParams, reqEditors ...RequestEditorFn) (*ListSensorsApiV1SensorsGetResponse, error)
+
+	// CreateSensorApiV1SensorsPostWithBodyWithResponse request with any body
+	CreateSensorApiV1SensorsPostWithBodyWithResponse(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSensorApiV1SensorsPostResponse, error)
+
+	CreateSensorApiV1SensorsPostWithResponse(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, body CreateSensorApiV1SensorsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSensorApiV1SensorsPostResponse, error)
+
+	// DeleteSensorApiV1SensorsSensorIdDeleteWithResponse request
+	DeleteSensorApiV1SensorsSensorIdDeleteWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteSensorApiV1SensorsSensorIdDeleteResponse, error)
 
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
@@ -35714,6 +37536,12 @@ type ClientWithResponsesInterface interface {
 
 	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
 	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
+
+	// UiChecksListUiChecksGetWithResponse request
+	UiChecksListUiChecksGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiChecksListUiChecksGetResponse, error)
+
+	// ChecksDetailUiChecksDashboardIdGetWithResponse request
+	ChecksDetailUiChecksDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ChecksDetailUiChecksDashboardIdGetResponse, error)
 
 	// UiConnectorsListUiConnectorsGetWithBodyWithResponse request with any body
 	UiConnectorsListUiConnectorsGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error)
@@ -37211,6 +39039,97 @@ func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListDashboardsApiV1ChecksDashboardsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListDashboardsApiV1ChecksDashboardsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListDashboardsApiV1ChecksDashboardsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateDashboardApiV1ChecksDashboardsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *DashboardDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateDashboardApiV1ChecksDashboardsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateDashboardApiV1ChecksDashboardsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -38763,6 +40682,74 @@ func (r SearchDocsEndpointApiV1SearchDocsPostResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r SearchDocsEndpointApiV1SearchDocsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListSensorsApiV1SensorsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SensorListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSensorsApiV1SensorsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSensorsApiV1SensorsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateSensorApiV1SensorsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *SensorRead
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateSensorApiV1SensorsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateSensorApiV1SensorsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteSensorApiV1SensorsSensorIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -40536,6 +42523,49 @@ func (r UiBroadcastStreamUiBroadcastStreamGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiBroadcastStreamUiBroadcastStreamGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiChecksListUiChecksGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiChecksListUiChecksGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiChecksListUiChecksGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ChecksDetailUiChecksDashboardIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ChecksDetailUiChecksDashboardIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ChecksDetailUiChecksDashboardIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -44094,6 +46124,50 @@ func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithRes
 	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
 }
 
+// ListDashboardsApiV1ChecksDashboardsGetWithResponse request returning *ListDashboardsApiV1ChecksDashboardsGetResponse
+func (c *ClientWithResponses) ListDashboardsApiV1ChecksDashboardsGetWithResponse(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error) {
+	rsp, err := c.ListDashboardsApiV1ChecksDashboardsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListDashboardsApiV1ChecksDashboardsGetResponse(rsp)
+}
+
+// CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse request with arbitrary body returning *CreateDashboardApiV1ChecksDashboardsPostResponse
+func (c *ClientWithResponses) CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error) {
+	rsp, err := c.CreateDashboardApiV1ChecksDashboardsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateDashboardApiV1ChecksDashboardsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateDashboardApiV1ChecksDashboardsPostWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error) {
+	rsp, err := c.CreateDashboardApiV1ChecksDashboardsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateDashboardApiV1ChecksDashboardsPostResponse(rsp)
+}
+
+// DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse request returning *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse
+func (c *ClientWithResponses) DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse, error) {
+	rsp, err := c.DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete(ctx, dashboardId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse(rsp)
+}
+
+// GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse request returning *GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse
+func (c *ClientWithResponses) GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse, error) {
+	rsp, err := c.GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx, dashboardId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse(rsp)
+}
+
 // PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with arbitrary body returning *PostResultsApiV1ChecksResultsPostResponse
 func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
 	rsp, err := c.PostResultsApiV1ChecksResultsPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -44927,6 +47001,41 @@ func (c *ClientWithResponses) SearchDocsEndpointApiV1SearchDocsPostWithResponse(
 		return nil, err
 	}
 	return ParseSearchDocsEndpointApiV1SearchDocsPostResponse(rsp)
+}
+
+// ListSensorsApiV1SensorsGetWithResponse request returning *ListSensorsApiV1SensorsGetResponse
+func (c *ClientWithResponses) ListSensorsApiV1SensorsGetWithResponse(ctx context.Context, params *ListSensorsApiV1SensorsGetParams, reqEditors ...RequestEditorFn) (*ListSensorsApiV1SensorsGetResponse, error) {
+	rsp, err := c.ListSensorsApiV1SensorsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSensorsApiV1SensorsGetResponse(rsp)
+}
+
+// CreateSensorApiV1SensorsPostWithBodyWithResponse request with arbitrary body returning *CreateSensorApiV1SensorsPostResponse
+func (c *ClientWithResponses) CreateSensorApiV1SensorsPostWithBodyWithResponse(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateSensorApiV1SensorsPostResponse, error) {
+	rsp, err := c.CreateSensorApiV1SensorsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateSensorApiV1SensorsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateSensorApiV1SensorsPostWithResponse(ctx context.Context, params *CreateSensorApiV1SensorsPostParams, body CreateSensorApiV1SensorsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateSensorApiV1SensorsPostResponse, error) {
+	rsp, err := c.CreateSensorApiV1SensorsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateSensorApiV1SensorsPostResponse(rsp)
+}
+
+// DeleteSensorApiV1SensorsSensorIdDeleteWithResponse request returning *DeleteSensorApiV1SensorsSensorIdDeleteResponse
+func (c *ClientWithResponses) DeleteSensorApiV1SensorsSensorIdDeleteWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteSensorApiV1SensorsSensorIdDeleteResponse, error) {
+	rsp, err := c.DeleteSensorApiV1SensorsSensorIdDelete(ctx, sensorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -45875,6 +47984,24 @@ func (c *ClientWithResponses) UiBroadcastStreamUiBroadcastStreamGetWithResponse(
 		return nil, err
 	}
 	return ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp)
+}
+
+// UiChecksListUiChecksGetWithResponse request returning *UiChecksListUiChecksGetResponse
+func (c *ClientWithResponses) UiChecksListUiChecksGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiChecksListUiChecksGetResponse, error) {
+	rsp, err := c.UiChecksListUiChecksGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiChecksListUiChecksGetResponse(rsp)
+}
+
+// ChecksDetailUiChecksDashboardIdGetWithResponse request returning *ChecksDetailUiChecksDashboardIdGetResponse
+func (c *ClientWithResponses) ChecksDetailUiChecksDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ChecksDetailUiChecksDashboardIdGetResponse, error) {
+	rsp, err := c.ChecksDetailUiChecksDashboardIdGet(ctx, dashboardId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseChecksDetailUiChecksDashboardIdGetResponse(rsp)
 }
 
 // UiConnectorsListUiConnectorsGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsListUiConnectorsGetResponse
@@ -49136,6 +51263,131 @@ func ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp *http.Response
 	return response, nil
 }
 
+// ParseListDashboardsApiV1ChecksDashboardsGetResponse parses an HTTP response from a ListDashboardsApiV1ChecksDashboardsGetWithResponse call
+func ParseListDashboardsApiV1ChecksDashboardsGetResponse(rsp *http.Response) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListDashboardsApiV1ChecksDashboardsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateDashboardApiV1ChecksDashboardsPostResponse parses an HTTP response from a CreateDashboardApiV1ChecksDashboardsPostWithResponse call
+func ParseCreateDashboardApiV1ChecksDashboardsPostResponse(rsp *http.Response) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateDashboardApiV1ChecksDashboardsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest DashboardDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse parses an HTTP response from a DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse call
+func ParseDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse(rsp *http.Response) (*DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse parses an HTTP response from a GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse call
+func ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse(rsp *http.Response) (*GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePostResultsApiV1ChecksResultsPostResponse parses an HTTP response from a PostResultsApiV1ChecksResultsPostWithResponse call
 func ParsePostResultsApiV1ChecksResultsPostResponse(rsp *http.Response) (*PostResultsApiV1ChecksResultsPostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -51309,6 +53561,98 @@ func ParseSearchDocsEndpointApiV1SearchDocsPostResponse(rsp *http.Response) (*Se
 	return response, nil
 }
 
+// ParseListSensorsApiV1SensorsGetResponse parses an HTTP response from a ListSensorsApiV1SensorsGetWithResponse call
+func ParseListSensorsApiV1SensorsGetResponse(rsp *http.Response) (*ListSensorsApiV1SensorsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSensorsApiV1SensorsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SensorListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateSensorApiV1SensorsPostResponse parses an HTTP response from a CreateSensorApiV1SensorsPostWithResponse call
+func ParseCreateSensorApiV1SensorsPostResponse(rsp *http.Response) (*CreateSensorApiV1SensorsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateSensorApiV1SensorsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest SensorRead
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse parses an HTTP response from a DeleteSensorApiV1SensorsSensorIdDeleteWithResponse call
+func ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp *http.Response) (*DeleteSensorApiV1SensorsSensorIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteSensorApiV1SensorsSensorIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseListTargetsApiV1TargetsGetResponse parses an HTTP response from a ListTargetsApiV1TargetsGetWithResponse call
 func ParseListTargetsApiV1TargetsGetResponse(rsp *http.Response) (*ListTargetsApiV1TargetsGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -53454,6 +55798,48 @@ func ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp *http.Response) (*Ui
 	}
 
 	response := &UiBroadcastStreamUiBroadcastStreamGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiChecksListUiChecksGetResponse parses an HTTP response from a UiChecksListUiChecksGetWithResponse call
+func ParseUiChecksListUiChecksGetResponse(rsp *http.Response) (*UiChecksListUiChecksGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiChecksListUiChecksGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseChecksDetailUiChecksDashboardIdGetResponse parses an HTTP response from a ChecksDetailUiChecksDashboardIdGetWithResponse call
+func ParseChecksDetailUiChecksDashboardIdGetResponse(rsp *http.Response) (*ChecksDetailUiChecksDashboardIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ChecksDetailUiChecksDashboardIdGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

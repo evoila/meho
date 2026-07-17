@@ -208,6 +208,7 @@ async def topology_create_node(
         "node_id": str(result.node.id),
         "kind": result.node.kind,
         "name": result.node.name,
+        "source": result.node.source,
         "was_created": result.was_created,
     }
 
@@ -322,7 +323,9 @@ _OPERATION_SPECS: tuple[dict[str, Any], ...] = (
                 "kind": "Required. Node kind slug, e.g. 'vault-role' or 'dns-record'.",
                 "name": "Required. Unique within (tenant, kind, name).",
             },
-            "output_shape": "{'node_id', 'kind', 'name', 'was_created': bool}",
+            "output_shape": (
+                "{'node_id', 'kind', 'name', 'source': 'curated', 'was_created': bool}"
+            ),
         },
     },
     {

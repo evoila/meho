@@ -5,7 +5,7 @@
 
 Broadcast v2 Initiative #2543, Task #2547 (T2). The
 :class:`~meho_backplane.db.models.AgentAnnouncement` table
-(migration ``0064``) is the durable archive of every agent-authored
+(migration ``0066``) is the durable archive of every agent-authored
 announcement -- one append-only row per ``meho.broadcast.announce`` call.
 Without a retention policy it grows unbounded: a fleet of announce-happy
 agents adds rows every coordination cycle, indefinitely.
@@ -122,7 +122,7 @@ async def _delete_announcements_older_than(cutoff: datetime) -> int:
 
     The DELETE is bounded by the ``created_at < cutoff`` predicate -- no
     unbounded LIMIT-less statement that could lock the table. The filter
-    rides the ``(tenant_id, created_at DESC)`` index (migration ``0064``)
+    rides the ``(tenant_id, created_at DESC)`` index (migration ``0066``)
     in reverse, so even a large archive prunes in seconds.
 
     ``rowcount`` is only typed on the concrete ``CursorResult`` the

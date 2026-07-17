@@ -280,7 +280,7 @@ window. Operations persist forever in `audit_log`; coordination *intent*
 had no durable home until T2.
 
 **Archive table.** `publish_agent_announcement` writes an append-only
-`agent_announcement` row (migration `0064`, model
+`agent_announcement` row (migration `0066`, model
 `db/models.py::AgentAnnouncement`) keyed on the event's minted UUID
 (`event_id`), persisting the typed claim fields (T1 #2544) and lineage.
 The row is written **before** the `XADD` so a stream-side failure never

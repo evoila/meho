@@ -3,8 +3,8 @@
 
 """Create the ``agent_announcement`` table (append-only durable announcements).
 
-Revision ID: 0064
-Revises: 0063
+Revision ID: 0066
+Revises: 0065
 Create Date: 2026-07-17
 
 Broadcast v2 Initiative #2543, Task #2547 (T2). Gives agent-authored
@@ -92,8 +92,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
-revision: str = "0064"
-down_revision: str | None = "0063"
+revision: str = "0066"
+down_revision: str | None = "0065"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

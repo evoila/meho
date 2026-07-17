@@ -42,7 +42,7 @@ rejected at 422 ``extra_forbidden`` per
 #729); the route never reads tenant from the body. Cross-tenant
 queries are impossible by construction.
 
-Audit-on-audit-query (decision #3, ``docs/planning/v0.2-decisions.md``)
+Audit-on-audit-query (decision #3, ``docs/decisions/locked-decisions.md``)
 ======================================================================
 
 Every route binds two audit-override contextvars before calling the

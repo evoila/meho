@@ -7,7 +7,7 @@ Initiative #337 (G10.0 Frontend chassis) lands the operator-facing web UI
 on top of the backplane FastAPI process. The console is served at ``/ui/*``
 from the same uvicorn worker that already serves ``/api/v1/*`` and
 ``/mcp`` -- one process, one TLS termination, one ingress, one auth
-boundary (per v0.2-decisions.md #10).
+boundary (per locked-decisions.md #10).
 
 This Task (#863, G10.0-T2) ships the **chassis** only: the module layout
 that T3 / T4 / T5 fill in. No FastAPI routes are wired yet (T5 #866 mounts
@@ -31,7 +31,7 @@ Module map:
   Authorization Code + PKCE flow; ``__init__.py`` is a stub for this
   Task.
 
-Stack (locked, v0.2-decisions.md #9):
+Stack (locked, locked-decisions.md #9):
 
 * **HTMX 2.0.9** for partial swaps.
 * **Jinja2 >= 3.1.6** (already a backplane dep) for HTML templating.

@@ -12,7 +12,7 @@ Initiative #229 (G7.1 Tenant conventions + Layer 2 starter), Task
 turns the conventions feature into something usable for the
 ``rdc-internal`` tenant by seeding the initial content extracted from
 the consumer's ``CLAUDE.md`` per `decision #4
-<../../../docs/planning/v0.2-decisions.md>`_ (operational rules only;
+<../../../docs/decisions/locked-decisions.md>`_ (operational rules only;
 repo-discipline rules stay in the consumer's repo).
 
 T1 (#313) created ``tenant_conventions`` + ``tenant_convention_history``;
@@ -68,7 +68,7 @@ What it does
 The 8 conventions
 -----------------
 
-Per `decision #4 <../../../docs/planning/v0.2-decisions.md>`_'s explicit
+Per `decision #4 <../../../docs/decisions/locked-decisions.md>`_'s explicit
 list (Vault canonical, naming rule, secret-handling, CLI-wrapper
 fallback, sensitive-lab-specifics-stay-private) plus three
 operational rules pulled forward from cross-team operating practice
@@ -183,7 +183,7 @@ Cross-references
 ----------------
 
 * Initiative #229 (G7.1) -- the tenant conventions + Layer 2 starter
-  rollup. Decision #4 (``docs/planning/v0.2-decisions.md``) is the
+  rollup. Decision #4 (``docs/decisions/locked-decisions.md``) is the
   authoritative partition between operational rules (migrated here)
   and repo-discipline rules (stay in the consumer's CLAUDE.md).
 * T1 (#313) -- created the two tables this migration writes to.

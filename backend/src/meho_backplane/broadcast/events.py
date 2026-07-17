@@ -12,7 +12,7 @@ downstream consumer relies on.
 
 PII discipline lives in :func:`classify_op` + :func:`redact_payload`.
 The classifier is policy-locked by decision #3 in
-``docs/planning/v0.2-decisions.md`` — credential reads and audit-query
+``docs/decisions/locked-decisions.md`` — credential reads and audit-query
 responses broadcast aggregate-only by default; everything else
 broadcasts in full. Per-op opt-in to flip a sensitive class to full
 detail is a G6.3 surface; T2 ships the conservative default.
@@ -47,7 +47,7 @@ Why aggregate-only-by-default for the sensitive classes:
 References
 ----------
 
-* Decision #3 — ``docs/planning/v0.2-decisions.md``.
+* Decision #3 — ``docs/decisions/locked-decisions.md``.
 * MCP audit shape (G0.5-T5, the in-tree precedent for similar
   redaction discipline) —
   :func:`meho_backplane.mcp.audit.write_mcp_audit_row`.
@@ -553,7 +553,7 @@ def redact_payload(
 
     *detail* is the G6.3-T2 (#379) extension. When ``None`` (the
     pre-G6.3 default), the function falls back to decision #3 of
-    ``docs/planning/v0.2-decisions.md`` -- aggregate for sensitive
+    ``docs/decisions/locked-decisions.md`` -- aggregate for sensitive
     classes (``credential_read`` / ``credential_mint`` /
     ``credential_write`` / ``audit_query``), full for everything else.
     When ``"aggregate"`` or ``"full"`` is passed

@@ -19,7 +19,7 @@ The audit log is **WORM-grade** (write-once, read-many) — written synchronousl
 
 - **Role.** Every audit verb requires `operator` role minimum. `read_only` callers get HTTP 403 (CLI exit code 5); `tenant_admin` is also accepted (same tenant scope as `operator` — there is no admin escape hatch).
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>` when needed.
-- **Filter intent stays local.** Per [decision #3](../planning/v0.2-decisions.md), the broadcast event emitted for every `query_audit` call is **aggregate-only** — `{op_id, result_status, row_count}`. Slack subscribers and the SSE feed never see which principal you queried, which target, or which op_id pattern. Your investigation intent is yours.
+- **Filter intent stays local.** Per [decision #3](../decisions/locked-decisions.md), the broadcast event emitted for every `query_audit` call is **aggregate-only** — `{op_id, result_status, row_count}`. Slack subscribers and the SSE feed never see which principal you queried, which target, or which op_id pattern. Your investigation intent is yours.
 
 ## The five CLI verbs
 

@@ -15,7 +15,7 @@ One sentence: tenant-scoped retrieval of the team's distilled vendor knowledge (
 
 The kb layer does not own a storage table of its own. It is a thin, kb-shaped vocabulary (slug, snippet, `KbEntry`) over the G0.4 retrieval substrate's `documents` table, pinned to `source="kb"`. Every kb row is a `documents` row with `source="kb"` and `kind="kb-entry"`; the natural key is `(tenant_id, source, source_id)` where `source_id` is the slug. Hybrid BM25 + cosine retrieval, tenant scoping, and the body-hash re-embed short-circuit are all inherited from G0.4 (#225) — G4.1 adds the vocabulary, the four consumer surfaces, and the ingestion file-walker.
 
-This realises [decision #2](../planning/v0.2-decisions.md) (one-shot import + ≥1-month overlap; operator-driven retire).
+This realises [decision #2](../decisions/locked-decisions.md) (one-shot import + ≥1-month overlap; operator-driven retire).
 
 ## Module shape
 
@@ -117,7 +117,7 @@ Per CLAUDE.md postulate 5, the agent never sees vendor-specific tools. The kb fl
 
 - [Initiative #331 G4.1](https://github.com/evoila/meho/issues/331) — scope + DoD. Tasks: T1 [#415](https://github.com/evoila/meho/issues/415), T2 [#416](https://github.com/evoila/meho/issues/416), T3 [#417](https://github.com/evoila/meho/issues/417), T4 [#418](https://github.com/evoila/meho/issues/418), T5 [#419](https://github.com/evoila/meho/issues/419), T6 [#420](https://github.com/evoila/meho/issues/420).
 - Substrate: [#225 G0.4 retrieval substrate](https://github.com/evoila/meho/issues/225) — `index_document` ([`retrieval/indexer.py`](../../backend/src/meho_backplane/retrieval/indexer.py)), `retrieve` ([`retrieval/retriever.py`](../../backend/src/meho_backplane/retrieval/retriever.py)).
-- [decision #2](../planning/v0.2-decisions.md) — one-shot import + 1-month overlap.
+- [decision #2](../decisions/locked-decisions.md) — one-shot import + 1-month overlap.
 - Downstream: [#373 G4.3](https://github.com/evoila/meho/issues/373) — retrieval migration tooling (eval + `meho retrieval retire-checklist`).
 - Canary acceptance: [`backend/tests/acceptance/test_g41_kb_canary.py`](../../backend/tests/acceptance/test_g41_kb_canary.py) (T5 #419).
 - [docs/architecture/connectors.md](connectors.md), [docs/architecture/mcp.md](mcp.md), [docs/architecture/audit.md](audit.md).

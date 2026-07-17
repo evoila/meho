@@ -43,7 +43,7 @@ convention bodies are accepted.
 
 Issue body cites the heuristic explicitly: "estimate its token cost
 (the same heuristic T4's assembler uses)" and "~3.3 chars/token per
-the doc". v0.2-decisions.md §G7 doc (referenced in the
+the doc". locked-decisions.md §G7 doc (referenced in the
 [tenant_conventions](../../../../docs/codebase/tenant_conventions.md)
 codebase artifact) names the constant.
 """

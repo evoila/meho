@@ -244,7 +244,7 @@ consulted v2 `resolve_connector`) is closed by this helper.
 
 ## References
 
-- [v0.1-spec L267-292 "Versioned connectors + targets"](../planning/v0.2-decisions.md) — fingerprint shape.
+- [v0.1-spec L267-292 "Versioned connectors + targets"](../decisions/locked-decisions.md) — fingerprint shape.
 - [Initiative #388 G0.6](https://github.com/evoila/meho/issues/388) — substrate scope.
 - [Task #393 G0.6-T2](https://github.com/evoila/meho/issues/393) — this resolver.
 - [Task #394 G0.6-T3](https://github.com/evoila/meho/issues/394) — Connector ABC `version` / `impl_id` / `supported_version_range` / `priority` class attrs.

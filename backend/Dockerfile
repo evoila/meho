@@ -91,7 +91,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------- Operator-console CSS (Initiative #337, Task #863) ---------------
 # Build the compiled Tailwind 4 + DaisyUI 5 bundle for the /ui surface using
 # the **standalone Tailwind CLI binary** -- no `node_modules`, no `npm`, no
-# parallel CI job (decision #10 in docs/planning/v0.2-decisions.md).
+# parallel CI job (decision #10 in docs/decisions/locked-decisions.md).
 #
 # The CLI is pinned by version AND SHA256, mirroring the kubeconform install
 # pattern in .github/workflows/ci.yml so the supply-chain audit trail records

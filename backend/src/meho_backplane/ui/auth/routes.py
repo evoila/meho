@@ -42,7 +42,7 @@ Cookie attributes
 
 The session cookie is the only piece of user-controllable state the
 browser holds. Its attributes are non-negotiable per the BFF threat
-model (decision #11 in :file:`docs/planning/v0.2-decisions.md`):
+model (decision #11 in :file:`docs/decisions/locked-decisions.md`):
 
 * ``HttpOnly`` -- JS cannot read the cookie. Defeats every
   XSS-to-token exfiltration vector.

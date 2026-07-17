@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
+
+- `meho targets import` failed against every v0.21.0+ backplane — `--dry-run`
+  included — with `decode list response: json: cannot unmarshal object into Go
+  value of type []struct { Name string }`. The verb's pre-flight existence check
+  still decoded `GET /api/v1/targets` as the bare array it returned before
+  #2338 converged the route onto the `{items, next_cursor}` envelope, so the
+  import died before building a plan or writing anything. With `meho targets
+  create` retired (#1574), CLI target registration had no fallback.
+- The existence check now decodes the generated `api.TargetListResponse` and
+  pages on `next_cursor` instead of a page-length heuristic. Decoding the
+  generated type means a future list-shape change fails `go build` rather than
+  the operator's import: #2338 swept the sibling verbs by type and could not
+  see this file's private decoder, and #2383's follow-up audit checked
+  server-side tests only. The import's own doubles — the unit `fakeDoer` and
+  four end-to-end `httptest` servers — each minted their own bare-array body,
+  which is why the suite stayed green while the shipped verb was broken; they
+  now serve the same envelope the backplane emits.
+
 ### Changed — retire the expired RDC image-push `repository_dispatch` notify
 
 - Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from

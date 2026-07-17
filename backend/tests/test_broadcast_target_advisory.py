@@ -16,8 +16,11 @@ Coverage mirrors the acceptance criteria on the issue:
 * advisory entries carry structured fields ONLY -- zero agent prose
   (``activity`` / ``scope`` / ``target`` / ``targets``);
 * the caller's own activity is excluded (principal + actor);
-* a Valkey teardown fails open (no key, op unaffected, warn-logged),
-  the same mold as the ``publish_event`` fail-open path;
+* the read is newest-first (``XREVRANGE``), so the newest peer activity
+  surfaces even on a target emitting more events in the window than the
+  scan cap -- the busy-target crossfire case an oldest-first ``XRANGE`` +
+  ``COUNT`` would silently invert;
+* a Valkey teardown fails open (no key, op unaffected, warn-logged);
 * read-class dispatch performs no stream read (call-count assertion);
 * the ``0`` window knob disables the feature entirely;
 * :func:`wrap_ok_result` plumbs the advisory onto the frozen
@@ -59,8 +62,8 @@ def _isolated_broadcast_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None
     """Pin a stub broadcast URL + a 30-min advisory window per test.
 
     Mirrors ``test_mcp_tool_broadcast_recent``: per-test patches replace
-    ``xrange`` so no socket ever opens, and the settings cache is cleared
-    so the env pins take effect.
+    the stream read so no socket ever opens, and the settings cache is
+    cleared so the env pins take effect.
     """
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
@@ -131,11 +134,23 @@ def _entry(
     return entry_id, {"event": event.model_dump_json()}
 
 
-def _seed_xrange(entries: list[tuple[str, dict[str, str]]]) -> AsyncMock:
-    """Patch the broadcast client's ``xrange`` to return *entries*."""
+def _seed_xrevrange(chrono_entries: list[tuple[str, dict[str, str]]]) -> Any:
+    """Patch the broadcast client's ``xrevrange`` with a faithful fake.
+
+    Given entries in chronological (oldest-first) order, the fake honours
+    real ``XREVRANGE ... COUNT n`` semantics: it returns the NEWEST *n*
+    entries, newest-first. This is exactly what makes the advisory's
+    newest-first read correct on a busy target -- the ``COUNT`` cap keeps
+    the tail, not the head.
+    """
+
+    async def _call(name: str, **kwargs: Any) -> list[tuple[str, dict[str, str]]]:
+        count = kwargs.get("count")
+        page = chrono_entries if count is None else chrono_entries[-count:]
+        return list(reversed(page))
+
     bc = get_broadcast_client()
-    mock = AsyncMock(return_value=entries)
-    return patch.object(bc, "xrange", new=mock)
+    return patch.object(bc, "xrevrange", new=_call)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +164,7 @@ async def test_peer_operation_and_announcement_surface() -> None:
         _entry(_announcement(principal_sub="user-a"), "1747800000000-0"),
         _entry(_op_event(principal_sub="user-a"), "1747800001000-0"),
     ]
-    with _seed_xrange(entries):
+    with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id="vsphere.vm.create",
@@ -168,7 +183,7 @@ async def test_peer_operation_and_announcement_surface() -> None:
 async def test_different_target_carries_no_advisory() -> None:
     """B's write on a target with no peer activity gets no key."""
     entries = [_entry(_op_event(principal_sub="user-a"), "1747800001000-0")]
-    with _seed_xrange(entries):
+    with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id="vsphere.vm.create",
@@ -185,7 +200,7 @@ async def test_different_target_carries_no_advisory() -> None:
 async def test_advisory_carries_no_prose_fields() -> None:
     """Advisory entries expose structured fields only -- no agent prose."""
     entries = [_entry(_announcement(principal_sub="user-a"), "1747800000000-0")]
-    with _seed_xrange(entries):
+    with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id="vsphere.vm.create",
@@ -202,7 +217,7 @@ async def test_excludes_caller_own_principal_and_actor() -> None:
         _entry(_op_event(principal_sub="user-b"), "1747800000000-0"),
         _entry(_op_event(principal_sub="user-a"), "1747800001000-0"),
     ]
-    with _seed_xrange(entries):
+    with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id="vsphere.vm.create",
@@ -226,7 +241,7 @@ async def test_peer_agent_under_same_human_is_not_self() -> None:
             "1747800001000-0",
         ),
     ]
-    with _seed_xrange(entries), actor_delegation("agent:me"):
+    with _seed_xrevrange(entries), actor_delegation("agent:me"):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id="vsphere.vm.create",
@@ -237,11 +252,11 @@ async def test_peer_agent_under_same_human_is_not_self() -> None:
 
 
 async def test_advisory_capped_at_five_most_recent() -> None:
-    """At most five peer entries, newest last."""
+    """At most five peer entries, chronological (newest last)."""
     entries = [
         _entry(_op_event(principal_sub=f"user-{i}"), f"17478000{i:02d}000-0") for i in range(8)
     ]
-    with _seed_xrange(entries):
+    with _seed_xrevrange(entries):
         advisory = await build_target_activity_advisory(
             _operator("caller"),
             op_id="vsphere.vm.create",
@@ -250,6 +265,35 @@ async def test_advisory_capped_at_five_most_recent() -> None:
     peers = advisory[ADVISORY_EXTRAS_KEY]
     assert len(peers) == 5
     assert [p["principal_sub"] for p in peers] == [f"user-{i}" for i in range(3, 8)]
+
+
+async def test_newest_peer_surfaces_beyond_scan_cap() -> None:
+    """>_ADVISORY_SCAN_LIMIT events: the NEWEST peer activity still wins.
+
+    The regression this fix targets: an oldest-first ``XRANGE`` + ``COUNT
+    100`` samples window-START activity and never fetches the newest peer
+    on a busy target. The newest-first ``XREVRANGE`` keeps the tail, so
+    the 3 peer events that follow 100 caller-own events surface.
+    """
+    own = [_entry(_op_event(principal_sub="user-b"), f"17478{i:06d}000-0") for i in range(100)]
+    peers = [
+        _entry(
+            _op_event(principal_sub="peer-x", op_id=f"vsphere.vm.delete-{i}"),
+            f"17479{i:06d}000-0",
+        )
+        for i in range(3)
+    ]
+    with _seed_xrevrange(own + peers):
+        advisory = await build_target_activity_advisory(
+            _operator("user-b"),
+            op_id="vsphere.vm.create",
+            target_name=_TARGET,
+        )
+    surfaced = advisory[ADVISORY_EXTRAS_KEY]
+    assert len(surfaced) == 3
+    assert {p["principal_sub"] for p in surfaced} == {"peer-x"}
+    # chronological order restored: the newest peer op is last.
+    assert [p["op_id"] for p in surfaced] == [f"vsphere.vm.delete-{i}" for i in range(3)]
 
 
 # ---------------------------------------------------------------------------
@@ -266,7 +310,7 @@ async def test_fail_open_on_valkey_teardown() -> None:
     with (
         patch.object(
             bc,
-            "xrange",
+            "xrevrange",
             new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
         ),
         structlog.testing.capture_logs() as logs,
@@ -277,7 +321,7 @@ async def test_fail_open_on_valkey_teardown() -> None:
             target_name=_TARGET,
         )
     assert advisory == {}
-    assert any(entry["event"] == "broadcast_history_fetch_failed" for entry in logs)
+    assert any(entry["event"] == "target_activity_advisory_failed" for entry in logs)
 
 
 @pytest.mark.parametrize(
@@ -288,7 +332,7 @@ async def test_read_class_dispatch_performs_no_lookup(op_id: str) -> None:
     """Read-class ops short-circuit before any stream read."""
     bc = get_broadcast_client()
     xr = AsyncMock(return_value=[])
-    with patch.object(bc, "xrange", new=xr):
+    with patch.object(bc, "xrevrange", new=xr):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id=op_id,
@@ -306,7 +350,7 @@ async def test_window_zero_disables_and_skips_lookup(
     get_settings.cache_clear()
     bc = get_broadcast_client()
     xr = AsyncMock(return_value=[])
-    with patch.object(bc, "xrange", new=xr):
+    with patch.object(bc, "xrevrange", new=xr):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id="vsphere.vm.create",
@@ -320,7 +364,7 @@ async def test_no_target_skips_lookup() -> None:
     """A target-less dispatch performs no stream read."""
     bc = get_broadcast_client()
     xr = AsyncMock(return_value=[])
-    with patch.object(bc, "xrange", new=xr):
+    with patch.object(bc, "xrevrange", new=xr):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
             op_id="vsphere.vm.create",

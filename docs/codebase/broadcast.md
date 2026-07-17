@@ -266,19 +266,20 @@ awareness, not a lock or a block (pre-op checking stays the discipline's
 `OperationResult.extras["target_activity_advisory"]`
 (`connectors/schemas.py`), the established envelope-extension slot.
 
-```
+```text
 dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
   → build_target_activity_advisory(operator, op_id, target_name)
       [gate — returns {} without any stream read when:]
         · settings.dispatch_activity_advisory_window_minutes == 0
         · classify_op(op_id) not in {write, credential_write, credential_mint}
         · target_name is None
-      [otherwise — one bounded read:]
-        → list_recent_events_fail_soft(target=target_name,
-                                       active_only=True, limit=100,
-                                       since=now - window)
+      [otherwise — one bounded, newest-first read:]
+        → XREVRANGE meho:feed:{tenant} + <since-ms> COUNT 100
+          (newest-first, so the COUNT cap keeps the newest window
+           entries — not the oldest, which an XRANGE + COUNT would)
+        → parse + event_matches(target=target_name, active_only=True)
         → drop entries where (principal_sub, actor_sub) == the caller's
-        → project each survivor to structured fields only, newest 5
+        → keep the newest 5, restore chronological order
   → wrap_ok_result(..., extras=advisory)
 ```
 
@@ -295,11 +296,17 @@ Design contract:
 - **Self-excluded.** An entry whose `principal_sub` *and* `actor_sub` both
   match the caller is the caller's own activity and is dropped; a sibling
   agent under the same human (distinct `actor_sub`) is a peer and surfaces.
-- **Fail-open and bounded.** A Valkey teardown warn-logs
-  (`broadcast_history_fetch_failed`) and yields no advisory; any other
-  error is swallowed (`target_activity_advisory_failed`). The scan is a
-  single time-bounded XRANGE capped at 100 entries. A missing advisory
-  never fails or delays the dispatch.
+- **Newest-first, so the cap keeps what matters.** The read is a single
+  `XREVRANGE` (newest-first) time-bounded by the window and capped at 100
+  entries; the newest five surviving peer entries are then re-ordered
+  chronologically. An oldest-first `XRANGE` + `COUNT` would clip the tail
+  and silently invert the "most-recent" contract on a busy target.
+- **Fail-open and bounded.** Any error in the lookup (a Valkey teardown
+  included) is swallowed and warn-logged (`target_activity_advisory_failed`),
+  yielding no advisory rather than failing the op. The lookup *is* awaited
+  on the success path, so it adds one small, bounded stream read to a
+  write dispatch's latency — it never fails the dispatch, and the cost is
+  capped by the `COUNT`.
 - **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
   `30`, `0` = off) gates the whole feature.
 

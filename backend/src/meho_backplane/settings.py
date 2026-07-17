@@ -1238,6 +1238,16 @@ class Settings(BaseModel):
     # shape so operators using an external scheduler can opt out.
     scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3600)
     scheduler_enabled: bool = True
+    # Initiative #2416 (#2505) — deterministic sensor check-runner. The
+    # lifespan-owned interval-tick loop scans for due Sensor rows and evaluates
+    # each (dispatch → assertion → projection) with no LLM in the path.
+    # ``tick_interval`` bounds how often it scans; the default (10 s) supports
+    # the sub-minute interval cadence a Sensor may carry (sub-tick cadences
+    # quantize to this grid, documented on the runner module). ``enabled``
+    # mirrors the SCHEDULER_ENABLED shape so an operator running an external
+    # evaluator (or the test path without a runner) can opt out.
+    sensor_runner_enabled: bool = True
+    sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
     # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
     # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
     # wants ``(client_id, client_secret)``; the scheduler resolves
@@ -1770,6 +1780,12 @@ def get_settings() -> Settings:
         ),
         scheduler_enabled=parse_bool_env(
             os.environ.get("SCHEDULER_ENABLED", "true"),
+        ),
+        sensor_runner_tick_interval_seconds=int(
+            os.environ.get("SENSOR_RUNNER_TICK_INTERVAL_SECONDS", "10"),
+        ),
+        sensor_runner_enabled=parse_bool_env(
+            os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
         ),
         scheduler_agent_secret_env_pattern=os.environ.get(
             "SCHEDULER_AGENT_SECRET_ENV_PATTERN",

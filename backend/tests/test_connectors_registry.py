@@ -344,6 +344,14 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                     # KeyError: 'KEYCLOAK_ISSUER_URL' (this test pins no env).
                     approval_expiry_enabled=False,
                     scheduler_enabled=False,
+                    # Initiative #2416 (#2505) added the sensor check-runner,
+                    # gated on SENSOR_RUNNER_ENABLED (default on). Pin it off —
+                    # a bare MagicMock attribute is truthy, so without this the
+                    # gate reads True and the real start_sensor_runner runs
+                    # _runner_loop, which reads the MagicMock
+                    # sensor_runner_tick_interval_seconds and blows up in
+                    # asyncio.sleep.
+                    sensor_runner_enabled=False,
                     agent_run_reaper_enabled=False,
                     event_drain_enabled=False,
                     # Initiative #2415 (#2501) added the gateway dead-man
@@ -380,6 +388,11 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
                 stop_scheduler=AsyncMock(),
+                # #2505 — sensor check-runner. Defensive patch (the gate above
+                # is pinned off) so a future default flip can't smuggle the
+                # real runner (and its get_settings() tick read) back in.
+                start_sensor_runner=MagicMock(),
+                stop_sensor_runner=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),
@@ -457,6 +470,11 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                     # sweeper and KeyError on KEYCLOAK_ISSUER_URL.
                     approval_expiry_enabled=False,
                     scheduler_enabled=False,
+                    # #2505 sensor check-runner — pin off; a bare MagicMock
+                    # attribute is truthy, which would start the real runner
+                    # (its _runner_loop reads the MagicMock tick interval and
+                    # blows up in asyncio.sleep). Same shape as the sibling.
+                    sensor_runner_enabled=False,
                     agent_run_reaper_enabled=False,
                     event_drain_enabled=False,
                     # #2501 gateway dead-man sweeper — pin off; a bare
@@ -488,6 +506,10 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 "meho_backplane.main",
                 start_scheduler=MagicMock(),
                 stop_scheduler=AsyncMock(),
+                # #2505 sensor check-runner — defensive patch (see the sibling
+                # lifespan test) so the real runner can never start here.
+                start_sensor_runner=MagicMock(),
+                stop_sensor_runner=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),

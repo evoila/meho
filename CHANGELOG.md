@@ -90,6 +90,16 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Documentation — correct the stale `targets` write-verb framing (#2588)
+
+- `docs/codebase/cli.md` described the `create` / `update` / `delete` write
+  verbs as "deferred", implying they are still planned. In reality
+  registration and updates flow through `meho targets import` (POST for new
+  rows, PATCH under `--update`), and a standalone `create` verb was ruled out
+  in favour of file-based import (#1574 / #1559). Only `delete` has no CLI
+  surface yet. Both the overview and the "Out of scope (v0.2)" note are
+  rewritten to state this accurately.
+
 ## [0.24.0] - 2026-07-17
 
 This release **completes Broadcast v2 (Initiative #2543)** — the final

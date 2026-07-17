@@ -94,6 +94,7 @@ from meho_backplane.ui.routes.agents.runs import build_runs_router
 from meho_backplane.ui.routes.approvals import build_approvals_router
 from meho_backplane.ui.routes.audit import build_audit_router
 from meho_backplane.ui.routes.broadcast import build_router as build_broadcast_router
+from meho_backplane.ui.routes.checks import build_checks_router
 from meho_backplane.ui.routes.connectors import build_router as build_connectors_router
 from meho_backplane.ui.routes.conventions import build_conventions_router
 from meho_backplane.ui.routes.corpus import build_corpus_router
@@ -120,6 +121,7 @@ __all__ = [
     "build_approvals_router",
     "build_audit_router",
     "build_broadcast_router",
+    "build_checks_router",
     "build_connectors_router",
     "build_conventions_router",
     "build_corpus_router",
@@ -221,6 +223,13 @@ def build_router() -> APIRouter:
     # literal-prefix routes register before the ``{trigger_id}`` detail
     # route inside that router so ``"create"`` is never bound as an id.
     router.include_router(build_scheduler_router())
+    # Checks console (I2416-T2506): ``/ui/checks`` Dashboard list (one glance
+    # answering "is everything OK?") + ``/ui/checks/{dashboard_id}`` detail
+    # (rollup badge + member table). The literal ``/ui/checks`` list route is
+    # registered before the ``{dashboard_id}`` detail route inside that router
+    # so a first-match-wins lookup never shadows the list path; included before
+    # the stubs aggregate so its concrete paths win against ``/ui/{slug}``.
+    router.include_router(build_checks_router())
     # Operations launcher (G10.9-T1 #1879): ``/ui/operations`` +
     # ``/ui/operations/search`` + ``/ui/operations/descriptor/{id}``. The
     # only ``{param}`` route sits under the distinct

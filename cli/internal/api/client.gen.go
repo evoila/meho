@@ -135,6 +135,60 @@ const (
 	DailyUsageBucketSurfaceOperations DailyUsageBucketSurface = "operations"
 )
 
+// Defines values for DashboardDetailLastRollupState.
+const (
+	DashboardDetailLastRollupStateCritical DashboardDetailLastRollupState = "critical"
+	DashboardDetailLastRollupStateDegraded DashboardDetailLastRollupState = "degraded"
+	DashboardDetailLastRollupStateOk       DashboardDetailLastRollupState = "ok"
+	DashboardDetailLastRollupStateSkip     DashboardDetailLastRollupState = "skip"
+	DashboardDetailLastRollupStateUnknown  DashboardDetailLastRollupState = "unknown"
+)
+
+// Defines values for DashboardDetailState.
+const (
+	DashboardDetailStateCritical DashboardDetailState = "critical"
+	DashboardDetailStateDegraded DashboardDetailState = "degraded"
+	DashboardDetailStateOk       DashboardDetailState = "ok"
+	DashboardDetailStateSkip     DashboardDetailState = "skip"
+	DashboardDetailStateUnknown  DashboardDetailState = "unknown"
+)
+
+// Defines values for DashboardMemberViewEffectiveState.
+const (
+	DashboardMemberViewEffectiveStateCritical DashboardMemberViewEffectiveState = "critical"
+	DashboardMemberViewEffectiveStateDegraded DashboardMemberViewEffectiveState = "degraded"
+	DashboardMemberViewEffectiveStateOk       DashboardMemberViewEffectiveState = "ok"
+	DashboardMemberViewEffectiveStateSkip     DashboardMemberViewEffectiveState = "skip"
+	DashboardMemberViewEffectiveStateUnknown  DashboardMemberViewEffectiveState = "unknown"
+)
+
+// Defines values for DashboardMemberViewRawState.
+const (
+	DashboardMemberViewRawStateCritical DashboardMemberViewRawState = "critical"
+	DashboardMemberViewRawStateDegraded DashboardMemberViewRawState = "degraded"
+	DashboardMemberViewRawStateOk       DashboardMemberViewRawState = "ok"
+	DashboardMemberViewRawStateSkip     DashboardMemberViewRawState = "skip"
+	DashboardMemberViewRawStateUnknown  DashboardMemberViewRawState = "unknown"
+)
+
+// Defines values for DashboardReadLastRollupState.
+const (
+	DashboardReadLastRollupStateCritical DashboardReadLastRollupState = "critical"
+	DashboardReadLastRollupStateDegraded DashboardReadLastRollupState = "degraded"
+	DashboardReadLastRollupStateOk       DashboardReadLastRollupState = "ok"
+	DashboardReadLastRollupStateSkip     DashboardReadLastRollupState = "skip"
+	DashboardReadLastRollupStateUnknown  DashboardReadLastRollupState = "unknown"
+)
+
+// Defines values for DashboardReadState.
+const (
+	DashboardReadStateCritical DashboardReadState = "critical"
+	DashboardReadStateDegraded DashboardReadState = "degraded"
+	DashboardReadStateOk       DashboardReadState = "ok"
+	DashboardReadStateSkip     DashboardReadState = "skip"
+	DashboardReadStateUnknown  DashboardReadState = "unknown"
+)
+
 // Defines values for EditOpBodySafetyLevel.
 const (
 	EditOpBodySafetyLevelCaution   EditOpBodySafetyLevel = "caution"
@@ -3307,6 +3361,130 @@ type DailyUsageBucket struct {
 
 // DailyUsageBucketSurface defines model for DailyUsageBucket.Surface.
 type DailyUsageBucketSurface string
+
+// DashboardCreate Request body for “POST /api/v1/checks/dashboards“.
+//
+// Membership is set at create only (no PUT; "edit" is delete + recreate,
+// the trigger-immutability posture). An empty “sensor_ids“ is permitted --
+// a member-less Dashboard rolls up to “unknown“ (the zero-member rule) --
+// but duplicates are de-duplicated by the service before insert. A foreign
+// or absent sensor id is refused 422 “sensor_not_found“ at the boundary.
+//
+// *tenant_id* (optional) lets a platform-admin caller target another
+// tenant; the boundary enforces the RBAC via “authorize_tenant_scope“.
+type DashboardCreate struct {
+	Description *string               `json:"description"`
+	Name        string                `json:"name"`
+	SensorIds   *[]openapi_types.UUID `json:"sensor_ids,omitempty"`
+	TenantId    *openapi_types.UUID   `json:"tenant_id"`
+}
+
+// DashboardDetail Response shape for “GET /api/v1/checks/dashboards/{id}“.
+//
+// Extends :class:`DashboardRead` with the per-member breakdown the console
+// detail page + the REST detail expose.
+type DashboardDetail struct {
+	CreatedAt       time.Time                       `json:"created_at"`
+	CreatedBySub    string                          `json:"created_by_sub"`
+	Description     *string                         `json:"description"`
+	Id              openapi_types.UUID              `json:"id"`
+	LastRollupState *DashboardDetailLastRollupState `json:"last_rollup_state"`
+	MemberCount     int                             `json:"member_count"`
+	Members         []DashboardMemberView           `json:"members"`
+	Name            string                          `json:"name"`
+	State           DashboardDetailState            `json:"state"`
+	TenantId        openapi_types.UUID              `json:"tenant_id"`
+	UpdatedAt       time.Time                       `json:"updated_at"`
+}
+
+// DashboardDetailLastRollupState defines model for DashboardDetail.LastRollupState.
+type DashboardDetailLastRollupState string
+
+// DashboardDetailState defines model for DashboardDetail.State.
+type DashboardDetailState string
+
+// DashboardListResponse Response envelope for “GET /api/v1/checks/dashboards“.
+//
+// Wrapped in “{"dashboards": [...]}“ so a future paging / cursor field
+// can land non-breakingly -- the same shape the Sensor list adopts.
+type DashboardListResponse struct {
+	Dashboards []DashboardRead `json:"dashboards"`
+}
+
+// DashboardMemberView One member Sensor as rendered on a Dashboard detail read.
+//
+// Carries the raw + rolled-up per-member states (“raw_state“ /
+// “effective_state“ / “pending“ from
+// :mod:`meho_backplane.checks.rollup`) plus the Sensor context an operator
+// needs to act -- the op identity, the severity cap, the “for:“ window,
+// the hysteresis clock (“state_since“), and the last observed value /
+// evidence.
+type DashboardMemberView struct {
+	ConnectorId     string                            `json:"connector_id"`
+	EffectiveState  DashboardMemberViewEffectiveState `json:"effective_state"`
+	ForSeconds      int                               `json:"for_seconds"`
+	LastEvaluatedAt *time.Time                        `json:"last_evaluated_at"`
+	LastEvidence    *map[string]interface{}           `json:"last_evidence"`
+	LastValue       interface{}                       `json:"last_value"`
+	Name            string                            `json:"name"`
+	NextFireAt      *time.Time                        `json:"next_fire_at"`
+	OpId            string                            `json:"op_id"`
+	Pending         bool                              `json:"pending"`
+	RawState        DashboardMemberViewRawState       `json:"raw_state"`
+	SensorId        openapi_types.UUID                `json:"sensor_id"`
+
+	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+	//
+	// The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+	// sensor whose assertion fails contributes at most ``degraded``, a
+	// ``critical`` one contributes ``critical``. The five-state vocabulary
+	// itself is declared once in #2504's :data:`CheckState`; this is only
+	// the two operator-selectable severities.
+	Severity   SensorSeverity `json:"severity"`
+	StateSince *time.Time     `json:"state_since"`
+
+	// Status Closed lifecycle status of a :class:`Sensor`.
+	//
+	// ``ScheduledTriggerStatus`` minus the trigger-only terminal states:
+	// a sensor is either eligible for evaluation (:attr:`ACTIVE`) or held
+	// (:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is
+	// not accepted at create; #2505 parks a row to ``paused`` (plus a
+	// ``status_reason``) when it hits an unparseable persisted cadence, and
+	// #2506's rollup derives ``skip`` for paused rows.
+	Status SensorStatus `json:"status"`
+}
+
+// DashboardMemberViewEffectiveState defines model for DashboardMemberView.EffectiveState.
+type DashboardMemberViewEffectiveState string
+
+// DashboardMemberViewRawState defines model for DashboardMemberView.RawState.
+type DashboardMemberViewRawState string
+
+// DashboardRead Response shape for one Dashboard row on the list surface.
+//
+// Carries the rolled-up “state“ (evaluated on read) and the
+// “member_count“ so the list answers "is everything OK?" per Dashboard
+// without a detail fetch. “last_rollup_state“ is the memo column (always
+// NULL until #2507 writes it). “frozen=True“ so a handler cannot mutate
+// the row after returning it.
+type DashboardRead struct {
+	CreatedAt       time.Time                     `json:"created_at"`
+	CreatedBySub    string                        `json:"created_by_sub"`
+	Description     *string                       `json:"description"`
+	Id              openapi_types.UUID            `json:"id"`
+	LastRollupState *DashboardReadLastRollupState `json:"last_rollup_state"`
+	MemberCount     int                           `json:"member_count"`
+	Name            string                        `json:"name"`
+	State           DashboardReadState            `json:"state"`
+	TenantId        openapi_types.UUID            `json:"tenant_id"`
+	UpdatedAt       time.Time                     `json:"updated_at"`
+}
+
+// DashboardReadLastRollupState defines model for DashboardRead.LastRollupState.
+type DashboardReadLastRollupState string
+
+// DashboardReadState defines model for DashboardRead.State.
+type DashboardReadState string
 
 // DbStatus Database migration status.
 //
@@ -7495,6 +7673,31 @@ type PutAssignmentApiV1ChecksAssignmentRunnerPutParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// ListDashboardsApiV1ChecksDashboardsGetParams defines parameters for ListDashboardsApiV1ChecksDashboardsGet.
+type ListDashboardsApiV1ChecksDashboardsGetParams struct {
+	Limit         *int                `form:"limit,omitempty" json:"limit,omitempty"`
+	Offset        *int                `form:"offset,omitempty" json:"offset,omitempty"`
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// CreateDashboardApiV1ChecksDashboardsPostParams defines parameters for CreateDashboardApiV1ChecksDashboardsPost.
+type CreateDashboardApiV1ChecksDashboardsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams defines parameters for DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete.
+type DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
+// GetDashboardApiV1ChecksDashboardsDashboardIdGetParams defines parameters for GetDashboardApiV1ChecksDashboardsDashboardIdGet.
+type GetDashboardApiV1ChecksDashboardsDashboardIdGetParams struct {
+	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
+	Authorization *string             `json:"authorization,omitempty"`
+}
+
 // PostResultsApiV1ChecksResultsPostParams defines parameters for PostResultsApiV1ChecksResultsPost.
 type PostResultsApiV1ChecksResultsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -8477,6 +8680,9 @@ type CreateOverrideApiV1BroadcastOverridesPostJSONRequestBody = BroadcastOverrid
 
 // PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody defines body for PutAssignmentApiV1ChecksAssignmentRunnerPut for application/json ContentType.
 type PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody = AssignmentDocument
+
+// CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody defines body for CreateDashboardApiV1ChecksDashboardsPost for application/json ContentType.
+type CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody = DashboardCreate
 
 // PostResultsApiV1ChecksResultsPostJSONRequestBody defines body for PostResultsApiV1ChecksResultsPost for application/json ContentType.
 type PostResultsApiV1ChecksResultsPostJSONRequestBody = RunnerResultBatch
@@ -10344,6 +10550,20 @@ type ClientInterface interface {
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// ListDashboardsApiV1ChecksDashboardsGet request
+	ListDashboardsApiV1ChecksDashboardsGet(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CreateDashboardApiV1ChecksDashboardsPostWithBody request with any body
+	CreateDashboardApiV1ChecksDashboardsPostWithBody(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CreateDashboardApiV1ChecksDashboardsPost(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete request
+	DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetDashboardApiV1ChecksDashboardsDashboardIdGet request
+	GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostResultsApiV1ChecksResultsPostWithBody request with any body
 	PostResultsApiV1ChecksResultsPostWithBody(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -10907,6 +11127,12 @@ type ClientInterface interface {
 
 	// UiBroadcastStreamUiBroadcastStreamGet request
 	UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiChecksListUiChecksGet request
+	UiChecksListUiChecksGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ChecksDetailUiChecksDashboardIdGet request
+	ChecksDetailUiChecksDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiConnectorsListUiConnectorsGetWithBody request with any body
 	UiConnectorsListUiConnectorsGetWithBody(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -12146,6 +12372,66 @@ func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPutWithBody(ctx context
 
 func (c *Client) PutAssignmentApiV1ChecksAssignmentRunnerPut(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequest(c.Server, runner, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListDashboardsApiV1ChecksDashboardsGet(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListDashboardsApiV1ChecksDashboardsGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateDashboardApiV1ChecksDashboardsPostWithBody(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody(c.Server, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CreateDashboardApiV1ChecksDashboardsPost(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCreateDashboardApiV1ChecksDashboardsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteRequest(c.Server, dashboardId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetDashboardApiV1ChecksDashboardsDashboardIdGetRequest(c.Server, dashboardId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -14654,6 +14940,30 @@ func (c *Client) UiBroadcastOverridesDeleteUiBroadcastOverridesOverrideIdDelete(
 
 func (c *Client) UiBroadcastStreamUiBroadcastStreamGet(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiBroadcastStreamUiBroadcastStreamGetRequest(c.Server, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiChecksListUiChecksGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiChecksListUiChecksGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ChecksDetailUiChecksDashboardIdGet(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewChecksDetailUiChecksDashboardIdGetRequest(c.Server, dashboardId)
 	if err != nil {
 		return nil, err
 	}
@@ -19849,6 +20159,299 @@ func NewPutAssignmentApiV1ChecksAssignmentRunnerPutRequestWithBody(server string
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListDashboardsApiV1ChecksDashboardsGetRequest generates requests for ListDashboardsApiV1ChecksDashboardsGet
+func NewListDashboardsApiV1ChecksDashboardsGetRequest(server string, params *ListDashboardsApiV1ChecksDashboardsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Offset != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "offset", runtime.ParamLocationQuery, *params.Offset); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewCreateDashboardApiV1ChecksDashboardsPostRequest calls the generic CreateDashboardApiV1ChecksDashboardsPost builder with application/json body
+func NewCreateDashboardApiV1ChecksDashboardsPostRequest(server string, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody(server, params, "application/json", bodyReader)
+}
+
+// NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody generates requests for CreateDashboardApiV1ChecksDashboardsPost with any type of body
+func NewCreateDashboardApiV1ChecksDashboardsPostRequestWithBody(server string, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteRequest generates requests for DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete
+func NewDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteRequest(server string, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "dashboard_id", runtime.ParamLocationPath, dashboardId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetDashboardApiV1ChecksDashboardsDashboardIdGetRequest generates requests for GetDashboardApiV1ChecksDashboardsDashboardIdGet
+func NewGetDashboardApiV1ChecksDashboardsDashboardIdGetRequest(server string, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "dashboard_id", runtime.ParamLocationPath, dashboardId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/checks/dashboards/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.TenantFilter != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "tenant_filter", runtime.ParamLocationQuery, *params.TenantFilter); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -29222,6 +29825,67 @@ func NewUiBroadcastStreamUiBroadcastStreamGetRequest(server string, params *UiBr
 	return req, nil
 }
 
+// NewUiChecksListUiChecksGetRequest generates requests for UiChecksListUiChecksGet
+func NewUiChecksListUiChecksGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/checks")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewChecksDetailUiChecksDashboardIdGetRequest generates requests for ChecksDetailUiChecksDashboardIdGet
+func NewChecksDetailUiChecksDashboardIdGetRequest(server string, dashboardId openapi_types.UUID) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "dashboard_id", runtime.ParamLocationPath, dashboardId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/checks/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiConnectorsListUiConnectorsGetRequest calls the generic UiConnectorsListUiConnectorsGet builder with application/json body
 func NewUiConnectorsListUiConnectorsGetRequest(server string, params *UiConnectorsListUiConnectorsGetParams, body UiConnectorsListUiConnectorsGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -36292,6 +36956,20 @@ type ClientWithResponsesInterface interface {
 
 	PutAssignmentApiV1ChecksAssignmentRunnerPutWithResponse(ctx context.Context, runner string, params *PutAssignmentApiV1ChecksAssignmentRunnerPutParams, body PutAssignmentApiV1ChecksAssignmentRunnerPutJSONRequestBody, reqEditors ...RequestEditorFn) (*PutAssignmentApiV1ChecksAssignmentRunnerPutResponse, error)
 
+	// ListDashboardsApiV1ChecksDashboardsGetWithResponse request
+	ListDashboardsApiV1ChecksDashboardsGetWithResponse(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error)
+
+	// CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse request with any body
+	CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error)
+
+	CreateDashboardApiV1ChecksDashboardsPostWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error)
+
+	// DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse request
+	DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse, error)
+
+	// GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse request
+	GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse, error)
+
 	// PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with any body
 	PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error)
 
@@ -36855,6 +37533,12 @@ type ClientWithResponsesInterface interface {
 
 	// UiBroadcastStreamUiBroadcastStreamGetWithResponse request
 	UiBroadcastStreamUiBroadcastStreamGetWithResponse(ctx context.Context, params *UiBroadcastStreamUiBroadcastStreamGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastStreamUiBroadcastStreamGetResponse, error)
+
+	// UiChecksListUiChecksGetWithResponse request
+	UiChecksListUiChecksGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiChecksListUiChecksGetResponse, error)
+
+	// ChecksDetailUiChecksDashboardIdGetWithResponse request
+	ChecksDetailUiChecksDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ChecksDetailUiChecksDashboardIdGetResponse, error)
 
 	// UiConnectorsListUiConnectorsGetWithBodyWithResponse request with any body
 	UiConnectorsListUiConnectorsGetWithBodyWithResponse(ctx context.Context, params *UiConnectorsListUiConnectorsGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiConnectorsListUiConnectorsGetResponse, error)
@@ -38352,6 +39036,97 @@ func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r PutAssignmentApiV1ChecksAssignmentRunnerPutResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListDashboardsApiV1ChecksDashboardsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListDashboardsApiV1ChecksDashboardsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListDashboardsApiV1ChecksDashboardsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CreateDashboardApiV1ChecksDashboardsPostResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON201      *DashboardDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r CreateDashboardApiV1ChecksDashboardsPostResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CreateDashboardApiV1ChecksDashboardsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *DashboardDetail
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -41745,6 +42520,49 @@ func (r UiBroadcastStreamUiBroadcastStreamGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiBroadcastStreamUiBroadcastStreamGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiChecksListUiChecksGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiChecksListUiChecksGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiChecksListUiChecksGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ChecksDetailUiChecksDashboardIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ChecksDetailUiChecksDashboardIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ChecksDetailUiChecksDashboardIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -45303,6 +46121,50 @@ func (c *ClientWithResponses) PutAssignmentApiV1ChecksAssignmentRunnerPutWithRes
 	return ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp)
 }
 
+// ListDashboardsApiV1ChecksDashboardsGetWithResponse request returning *ListDashboardsApiV1ChecksDashboardsGetResponse
+func (c *ClientWithResponses) ListDashboardsApiV1ChecksDashboardsGetWithResponse(ctx context.Context, params *ListDashboardsApiV1ChecksDashboardsGetParams, reqEditors ...RequestEditorFn) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error) {
+	rsp, err := c.ListDashboardsApiV1ChecksDashboardsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListDashboardsApiV1ChecksDashboardsGetResponse(rsp)
+}
+
+// CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse request with arbitrary body returning *CreateDashboardApiV1ChecksDashboardsPostResponse
+func (c *ClientWithResponses) CreateDashboardApiV1ChecksDashboardsPostWithBodyWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error) {
+	rsp, err := c.CreateDashboardApiV1ChecksDashboardsPostWithBody(ctx, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateDashboardApiV1ChecksDashboardsPostResponse(rsp)
+}
+
+func (c *ClientWithResponses) CreateDashboardApiV1ChecksDashboardsPostWithResponse(ctx context.Context, params *CreateDashboardApiV1ChecksDashboardsPostParams, body CreateDashboardApiV1ChecksDashboardsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error) {
+	rsp, err := c.CreateDashboardApiV1ChecksDashboardsPost(ctx, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCreateDashboardApiV1ChecksDashboardsPostResponse(rsp)
+}
+
+// DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse request returning *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse
+func (c *ClientWithResponses) DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse, error) {
+	rsp, err := c.DeleteDashboardApiV1ChecksDashboardsDashboardIdDelete(ctx, dashboardId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse(rsp)
+}
+
+// GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse request returning *GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse
+func (c *ClientWithResponses) GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, params *GetDashboardApiV1ChecksDashboardsDashboardIdGetParams, reqEditors ...RequestEditorFn) (*GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse, error) {
+	rsp, err := c.GetDashboardApiV1ChecksDashboardsDashboardIdGet(ctx, dashboardId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse(rsp)
+}
+
 // PostResultsApiV1ChecksResultsPostWithBodyWithResponse request with arbitrary body returning *PostResultsApiV1ChecksResultsPostResponse
 func (c *ClientWithResponses) PostResultsApiV1ChecksResultsPostWithBodyWithResponse(ctx context.Context, params *PostResultsApiV1ChecksResultsPostParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostResultsApiV1ChecksResultsPostResponse, error) {
 	rsp, err := c.PostResultsApiV1ChecksResultsPostWithBody(ctx, params, contentType, body, reqEditors...)
@@ -47119,6 +47981,24 @@ func (c *ClientWithResponses) UiBroadcastStreamUiBroadcastStreamGetWithResponse(
 		return nil, err
 	}
 	return ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp)
+}
+
+// UiChecksListUiChecksGetWithResponse request returning *UiChecksListUiChecksGetResponse
+func (c *ClientWithResponses) UiChecksListUiChecksGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiChecksListUiChecksGetResponse, error) {
+	rsp, err := c.UiChecksListUiChecksGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiChecksListUiChecksGetResponse(rsp)
+}
+
+// ChecksDetailUiChecksDashboardIdGetWithResponse request returning *ChecksDetailUiChecksDashboardIdGetResponse
+func (c *ClientWithResponses) ChecksDetailUiChecksDashboardIdGetWithResponse(ctx context.Context, dashboardId openapi_types.UUID, reqEditors ...RequestEditorFn) (*ChecksDetailUiChecksDashboardIdGetResponse, error) {
+	rsp, err := c.ChecksDetailUiChecksDashboardIdGet(ctx, dashboardId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseChecksDetailUiChecksDashboardIdGetResponse(rsp)
 }
 
 // UiConnectorsListUiConnectorsGetWithBodyWithResponse request with arbitrary body returning *UiConnectorsListUiConnectorsGetResponse
@@ -50363,6 +51243,131 @@ func ParsePutAssignmentApiV1ChecksAssignmentRunnerPutResponse(rsp *http.Response
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest AssignmentDocumentResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListDashboardsApiV1ChecksDashboardsGetResponse parses an HTTP response from a ListDashboardsApiV1ChecksDashboardsGetWithResponse call
+func ParseListDashboardsApiV1ChecksDashboardsGetResponse(rsp *http.Response) (*ListDashboardsApiV1ChecksDashboardsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListDashboardsApiV1ChecksDashboardsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCreateDashboardApiV1ChecksDashboardsPostResponse parses an HTTP response from a CreateDashboardApiV1ChecksDashboardsPostWithResponse call
+func ParseCreateDashboardApiV1ChecksDashboardsPostResponse(rsp *http.Response) (*CreateDashboardApiV1ChecksDashboardsPostResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CreateDashboardApiV1ChecksDashboardsPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest DashboardDetail
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse parses an HTTP response from a DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteWithResponse call
+func ParseDeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse(rsp *http.Response) (*DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteDashboardApiV1ChecksDashboardsDashboardIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse parses an HTTP response from a GetDashboardApiV1ChecksDashboardsDashboardIdGetWithResponse call
+func ParseGetDashboardApiV1ChecksDashboardsDashboardIdGetResponse(rsp *http.Response) (*GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetDashboardApiV1ChecksDashboardsDashboardIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest DashboardDetail
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -54790,6 +55795,48 @@ func ParseUiBroadcastStreamUiBroadcastStreamGetResponse(rsp *http.Response) (*Ui
 	}
 
 	response := &UiBroadcastStreamUiBroadcastStreamGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiChecksListUiChecksGetResponse parses an HTTP response from a UiChecksListUiChecksGetWithResponse call
+func ParseUiChecksListUiChecksGetResponse(rsp *http.Response) (*UiChecksListUiChecksGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiChecksListUiChecksGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseChecksDetailUiChecksDashboardIdGetResponse parses an HTTP response from a ChecksDetailUiChecksDashboardIdGetWithResponse call
+func ParseChecksDetailUiChecksDashboardIdGetResponse(rsp *http.Response) (*ChecksDetailUiChecksDashboardIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ChecksDetailUiChecksDashboardIdGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

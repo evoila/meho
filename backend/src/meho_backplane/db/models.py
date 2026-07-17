@@ -6184,3 +6184,133 @@ class Sensor(Base):
             name="ck_sensor_cadence_fields",
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard -- named composition of Sensors with a five-state worst-of rollup
+# (Initiative #2416, Task #2506)
+# ---------------------------------------------------------------------------
+
+
+#: Closed ``check_dashboards.last_rollup_state`` vocabulary -- the five-state
+#: check vocabulary declared once in #2504's :data:`CheckState`. ``db.models``
+#: does NOT re-declare it; the memo column's CHECK is populated from
+#: ``CheckState``'s members, the same discipline ``sensor.last_state`` follows.
+_CHECK_DASHBOARD_ROLLUP_STATES: tuple[str, ...] = get_args(CheckState)
+
+
+class CheckDashboard(Base):
+    """One named, tenant-scoped composition of Sensors (#2506).
+
+    A Dashboard references member Sensors many-to-many through the
+    :class:`CheckDashboardSensor` association table (Sensors are defined once
+    by #2503 and referenced by many Dashboards). The serving rollup -- the
+    five-state worst-of fold over the members' latest-state projection -- is
+    **evaluated on read** (decision on #2506;
+    :mod:`meho_backplane.checks.rollup`), never materialised on this row.
+
+    ``last_rollup_state`` is a transition-detection memo shipped UNWRITTEN by
+    this Task: #2507's hook at #2505's persist seam is its only writer, and
+    this Task's read path never touches it. It exists now so the S5 (#2507)
+    green->non-green edge detector has a column to compare against without a
+    later migration.
+
+    Storage-only -- no rollup logic on the model (the discipline
+    :class:`Sensor` / :class:`ScheduledTrigger` follow). The admin service
+    (:class:`~meho_backplane.checks.dashboard_service.CheckDashboardAdminService`)
+    owns create / list / get / delete and computes the rollup on read.
+    """
+
+    __tablename__ = "check_dashboards"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    # Real REFERENCES tenant(id) FK -- clean-slate table, mould parity with
+    # Sensor / ScheduledTrigger. An orphan dashboard for a typo'd tenant id
+    # surfaces as IntegrityError at insert.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Operator-facing handle -- unique per tenant (the
+    # ``check_dashboard_tenant_name_idx`` unique index below).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Transition-detection memo (#2507). Shipped unwritten by this Task; NULL
+    # until #2507's hook maintains it. The CHECK admits NULL plus the
+    # five-state vocabulary.
+    last_rollup_state: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Tenant-scoped list (admin surface).
+        Index(
+            "check_dashboard_tenant_idx",
+            "tenant_id",
+            postgresql_using="btree",
+        ),
+        # A Dashboard name is unique within a tenant (operator-facing handle).
+        Index(
+            "check_dashboard_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        # ``last_rollup_state`` over exactly #2504's ``CheckState`` members;
+        # NULL is admitted (the memo is unwritten until #2507).
+        sa.CheckConstraint(
+            _ck_in("last_rollup_state", _CHECK_DASHBOARD_ROLLUP_STATES),
+            name="ck_check_dashboards_last_rollup_state",
+        ),
+    )
+
+
+class CheckDashboardSensor(Base):
+    """Association row joining a :class:`CheckDashboard` to a member :class:`Sensor`.
+
+    The first pure many-to-many association table in the schema (no prior
+    ``secondary`` / ``sa.Table`` exists). Composite PK
+    ``(dashboard_id, sensor_id)`` is the natural join key; both columns are
+    real FKs with ``ondelete="CASCADE"`` (the :class:`RunbookRunStepState`
+    mould) so deleting a Dashboard or a Sensor removes only the memberships,
+    never the other side. Membership is set at Dashboard-create only -- there
+    is no PUT; an "edit" is delete + recreate (the trigger-immutability
+    posture).
+    """
+
+    __tablename__ = "check_dashboard_sensors"
+
+    dashboard_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("check_dashboards.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    sensor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("sensor.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Reverse lookup "which Dashboards reference this Sensor" + the index
+        # PG wants behind the ``sensor_id`` FK's cascade.
+        Index(
+            "check_dashboard_sensors_sensor_idx",
+            "sensor_id",
+            postgresql_using="btree",
+        ),
+    )

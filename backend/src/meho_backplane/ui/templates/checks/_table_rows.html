@@ -1,0 +1,62 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Checks Dashboard table-rows fragment (Task #2506).
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``list.html`` on the initial
+      full-page render.
+    * As the standalone fragment ``GET /ui/checks`` returns when the
+      ``HX-Request`` header is set (the 30s auto-refresh poll). HTMX
+      outerHTML-swaps it into the existing ``#checks-table-body`` element.
+
+  The ``Updated`` column renders a relative string ("3 h ago") with a
+  tooltip carrying the full ISO timestamp. Pure server-side via the ``_rel``
+  macro; no JS, no client date library.
+-#}
+{% macro _rel(ts) -%}
+  {%- set ago = (now_utc - ts).total_seconds() | int -%}
+  {%- if ago < 60 -%}just now
+  {%- elif ago < 3600 -%}{{ (ago // 60) }} min ago
+  {%- elif ago < 86400 -%}{{ (ago // 3600) }} h ago
+  {%- elif ago < 604800 -%}{{ (ago // 86400) }} d ago
+  {%- else -%}{{ ts.strftime("%Y-%m-%d") }}
+  {%- endif -%}
+{%- endmacro %}
+<tbody id="checks-table-body">
+  {% if rows %}
+    {% for row in rows %}
+      <tr data-dashboard-id="{{ row.id }}">
+        <td class="font-medium">{{ row.name }}</td>
+        <td>
+          <span class="badge {{ row.state_badge }} badge-sm">{{ row.state }}</span>
+        </td>
+        <td class="text-xs">{{ row.member_count }}</td>
+        <td>
+          {% if row.updated_at %}
+            <span class="text-xs" title="{{ row.updated_at.isoformat() }}">{{ _rel(row.updated_at) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <a
+            href="/ui/checks/{{ row.id }}"
+            class="btn btn-ghost btn-xs"
+            aria-label="View dashboard {{ row.name }}"
+          >
+            View
+          </a>
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="5" class="text-center text-sm opacity-60 py-6">
+        No dashboards yet. Compose Sensors into a dashboard via
+        <code>POST /api/v1/checks/dashboards</code>.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

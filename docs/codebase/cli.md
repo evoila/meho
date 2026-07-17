@@ -2012,9 +2012,10 @@ targets registry (Initiative #224). The v0.2 surface ships:
 
 `import.go` implements `meho targets import <file>` with the
 flags called out in the issue body: `--update` (PATCH existing
-targets instead of erroring), `--dry-run` (print the plan; no API
-calls), `--json` (structured plan output), `--backplane` (override
-the configured backplane URL).
+targets instead of erroring), `--dry-run` (print the plan; one
+listing `GET`, zero writes — #1785 made the preview existence-aware,
+so it is read-only rather than offline), `--json` (structured plan
+output), `--backplane` (override the configured backplane URL).
 
 **Mapping rules.** The CLI parses the YAML as a generic
 `map[string]any` per entry and partitions every key:
@@ -2048,6 +2049,22 @@ in tenant). Default mode aborts the whole import on the first
 duplicate — operators have to re-run with `--update` to opt into
 PATCH semantics. The plan is built before *any* write fires, so a
 partial-conflict YAML never leaves the tenant half-imported.
+
+`listExistingNames` decodes that listing into the generated
+`api.TargetListResponse` (`{items, next_cursor}` per
+`docs/codebase/api-shape-conventions.md` §2) and walks pages until
+`next_cursor` is null. Both are load-bearing. The response type is
+generated, so a future list-shape change fails `go build` here
+instead of the operator's import; a decoder private to `import.go` is
+exactly what #2338 could not see when it converged this route off the
+bare array and swept the sibling verbs by type, and the import fake
+minting its own bare-array body is why the suite stayed green while
+`meho targets import` was hard-broken on every v0.21.0+ backplane
+(#2577). Termination follows `next_cursor` rather than page length
+because the route proves a further page by over-fetching `limit + 1`;
+page length cannot decide an exact-multiple final page. The write
+half of the verb deliberately stays untyped — see the sparse-PATCH
+contract below.
 
 **Sparse-PATCH contract.** The PATCH body for each updated entry
 is sparse: only keys present in the YAML appear, with `name` and

@@ -145,6 +145,7 @@ async def test_create_node_inserts_fresh_row() -> None:
     assert result.was_created is True
     assert result.node.kind == "vault-role"
     assert result.node.name == "rdc-vault"
+    assert result.node.source == "curated"
     assert result.node.discovered_by == "op-1"
     assert result.node.target_id is None
     assert result.node.properties["note"] == "seeded from INVENTORY.md L42"
@@ -241,11 +242,50 @@ async def test_create_node_over_auto_promotes_discovered_by() -> None:
             )
 
     assert result.was_created is False
+    assert result.node.source == "curated"
     assert result.node.discovered_by == "op-1"
     # Auto-discovered keys are preserved alongside the manual-seed bag.
     assert result.node.properties["status"] == "running"
     assert result.node.properties["note"] == "taking ownership for cross-system depends-on"
     assert result.node.properties["seeded_by"] == "op-1"
+
+
+@pytest.mark.asyncio
+async def test_reseed_of_curated_row_keeps_original_author() -> None:
+    """A re-seed of an already-curated row does not re-credit ``discovered_by``.
+
+    Mirrors :func:`annotate_edge`'s promotion shape (#2536): the
+    ``source``/``discovered_by`` flip happens only on the auto→curated
+    transition. A second operator re-seeding an already-curated row
+    refreshes the manual-seed property bag (``seeded_by`` reflects the
+    latest seeder) but the canonical author stays with the original
+    seeder — same as a re-annotate of a curated edge.
+    """
+    tenant_id = await _seed_tenant()
+    sessionmaker = get_sessionmaker()
+
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            await create_or_get_node(
+                session,
+                _operator(tenant_id, sub="op-original"),
+                kind="service",
+                name="shared-svc",
+            )
+        async with sessionmaker() as session:
+            result = await create_or_get_node(
+                session,
+                _operator(tenant_id, sub="op-second"),
+                kind="service",
+                name="shared-svc",
+                note="second seeder's note",
+            )
+
+    assert result.was_created is False
+    assert result.node.source == "curated"
+    assert result.node.discovered_by == "op-original"
+    assert result.node.properties["seeded_by"] == "op-second"
+    assert result.node.properties["note"] == "second seeder's note"
 
 
 # ---------------------------------------------------------------------------

@@ -74,6 +74,9 @@ from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
 from meho_backplane.api.v1.checks import router as api_v1_checks_router
+from meho_backplane.api.v1.checks_dashboards import (
+    router as api_v1_checks_dashboards_router,
+)
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -99,6 +102,7 @@ from meho_backplane.api.v1.runner_principals import (
 )
 from meho_backplane.api.v1.scheduler import router as api_v1_scheduler_router
 from meho_backplane.api.v1.search_docs import router as api_v1_search_docs_router
+from meho_backplane.api.v1.sensors import router as api_v1_sensors_router
 from meho_backplane.api.v1.targets import router as api_v1_targets_router
 from meho_backplane.api.v1.topology import router as api_v1_topology_router
 from meho_backplane.api.well_known import router as well_known_router
@@ -114,6 +118,7 @@ from meho_backplane.broadcast import (
     dispose_broadcast_client,
     get_broadcast_client,
 )
+from meho_backplane.checks.runner import start_sensor_runner, stop_sensor_runner
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
@@ -441,6 +446,7 @@ class _BackgroundTasks:
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
+    sensor_runner: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
     gateway_deadman: asyncio.Task[None] | None
@@ -490,6 +496,12 @@ def _start_background_tasks() -> _BackgroundTasks:
     scheduler: asyncio.Task[None] | None = None
     if settings.scheduler_enabled:
         scheduler = start_scheduler()
+    # Initiative #2416 (#2505) — deterministic sensor check-runner. Gated on
+    # SENSOR_RUNNER_ENABLED so operators running an external evaluator (or the
+    # test path without a runner) can opt out.
+    sensor_runner: asyncio.Task[None] | None = None
+    if settings.sensor_runner_enabled:
+        sensor_runner = start_sensor_runner()
     # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
     # running an external lease-reclaim mechanism (DBOS Transact, a
     # workflow engine) can disable the in-tree reaper without
@@ -518,6 +530,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
         scheduler=scheduler,
+        sensor_runner=sensor_runner,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
         gateway_deadman=gateway_deadman,
@@ -538,6 +551,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
+    if tasks.sensor_runner is not None:
+        await stop_sensor_runner(tasks.sensor_runner)
     if tasks.scheduler is not None:
         await stop_scheduler(tasks.scheduler)
     if tasks.approval_expiry is not None:
@@ -931,6 +946,22 @@ app.include_router(api_v1_checks_router)
 # body tenant_id to act cross-tenant for admin operations. Every
 # mutation writes an audit row and broadcasts under op_class=write.
 app.include_router(api_v1_scheduler_router)
+# I2416-T2503 -- Sensor admin surface (deterministic check layer). GET
+# /sensors (list, paginated, operator-level; carries the latest-result
+# projection), POST /sensors (create, tenant_admin; safe-only op guard),
+# DELETE /sensors/{id} (hard delete, tenant_admin). Tenant-scoped via the
+# JWT; platform_admin may pass tenant_filter / a body tenant_id to act
+# cross-tenant. Every mutation writes an audit row under op_class=write.
+app.include_router(api_v1_sensors_router)
+# I2416-T2506 -- Dashboard admin surface (five-state worst-of rollup). POST
+# /checks/dashboards (create, tenant_admin; 422 sensor_not_found on a foreign
+# member id), GET /checks/dashboards (list, operator-level; each row carries
+# its rolled-up state), GET /checks/dashboards/{id} (rollup + per-member
+# breakdown, operator), DELETE /checks/dashboards/{id} (hard delete,
+# tenant_admin). Tenant-scoped via the JWT; platform_admin may act
+# cross-tenant. Distinct module from api_v1_checks_router (the #2415 gateway
+# assignment/result surface) -- the ``dashboards`` sub-path does not collide.
+app.include_router(api_v1_checks_dashboards_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``

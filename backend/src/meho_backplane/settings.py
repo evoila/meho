@@ -395,6 +395,16 @@ class Settings(BaseModel):
         Default 24 matches the locked v0.2 decision-3 contract. T3
         (#309) will use this to set ``XADD MAXLEN`` / ``MINID`` trim
         on every publish; T1 only carries the knob.
+    broadcast_announce_rate_per_minute:
+        Per-``(tenant, principal)`` fixed-window cap on
+        ``meho.broadcast.announce`` writes, enforced before the publish
+        (G6.5-T6 #2546). Protects the count-trimmed tenant stream
+        (``BROADCAST_MAXLEN`` = 10000) from a single looping principal
+        evicting the whole tenant's coordination window. Default 10 per
+        60 s window; ``0`` disables the limit entirely (no Valkey
+        round-trip on the announce hot path). Over-limit announces are
+        rejected with a typed JSON-RPC error naming the window — the
+        fail-loud announce contract is preserved (no silent drop).
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1015,6 +1025,7 @@ class Settings(BaseModel):
         min_length=1,
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
+    broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
@@ -1227,6 +1238,27 @@ class Settings(BaseModel):
     # shape so operators using an external scheduler can opt out.
     scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3600)
     scheduler_enabled: bool = True
+    # Initiative #2416 (#2505) — deterministic sensor check-runner. The
+    # lifespan-owned interval-tick loop scans for due Sensor rows and evaluates
+    # each (dispatch → assertion → projection) with no LLM in the path.
+    # ``tick_interval`` bounds how often it scans; the default (10 s) supports
+    # the sub-minute interval cadence a Sensor may carry (sub-tick cadences
+    # quantize to this grid, documented on the runner module). ``enabled``
+    # mirrors the SCHEDULER_ENABLED shape so an operator running an external
+    # evaluator (or the test path without a runner) can opt out.
+    sensor_runner_enabled: bool = True
+    sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    # Initiative #2416 (#2507) — tiered-triage investigator wiring. A Dashboard
+    # green→non-green transition (detected at #2505's persist seam) fires a
+    # diagnose-only agent run via ``AgentInvoker.run_scheduled`` against the
+    # tenant's enabled definition whose name matches ``checks_investigator_agent``
+    # (opt-in: absent/disabled ⇒ the wiring logs and skips). A deep investigation
+    # routinely outlives ``agent_sync_timeout_seconds`` (converts to async), so
+    # ``checks_investigation_poll_timeout_seconds`` bounds the background poll that
+    # waits for the terminal finding before the memory write-back. Set via
+    # ``CHECKS_INVESTIGATOR_AGENT`` / ``CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS``.
+    checks_investigator_agent: str = "checks-investigator"
+    checks_investigation_poll_timeout_seconds: int = Field(default=600, ge=1, le=86400)
     # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
     # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
     # wants ``(client_id, client_secret)``; the scheduler resolves
@@ -1623,6 +1655,9 @@ def get_settings() -> Settings:
         broadcast_retention_hours=int(
             os.environ.get("BROADCAST_RETENTION_HOURS", "24"),
         ),
+        broadcast_announce_rate_per_minute=int(
+            os.environ.get("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "10"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -1756,6 +1791,19 @@ def get_settings() -> Settings:
         ),
         scheduler_enabled=parse_bool_env(
             os.environ.get("SCHEDULER_ENABLED", "true"),
+        ),
+        sensor_runner_tick_interval_seconds=int(
+            os.environ.get("SENSOR_RUNNER_TICK_INTERVAL_SECONDS", "10"),
+        ),
+        sensor_runner_enabled=parse_bool_env(
+            os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
+        ),
+        checks_investigator_agent=os.environ.get(
+            "CHECKS_INVESTIGATOR_AGENT",
+            "checks-investigator",
+        ),
+        checks_investigation_poll_timeout_seconds=int(
+            os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
         scheduler_agent_secret_env_pattern=os.environ.get(
             "SCHEDULER_AGENT_SECRET_ENV_PATTERN",

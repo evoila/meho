@@ -85,7 +85,9 @@ class TopologyNode(BaseModel):
     depth ``0``, its immediate dependents/dependencies are depth ``1``,
     transitive ones depth ``2``, and so on. ``via_edge_kind`` is the
     ``graph_edge.kind`` of the edge used to reach this node, or
-    ``None`` for the root (which is reached by no edge).
+    ``None`` for the root (which is reached by no edge). ``source``
+    is ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /
+    promoted; #2536) — mirrors :attr:`TopologyEdge.source`.
 
     ``parent_node_id`` / ``via_edge_id`` (#2538) are the chain
     provenance: the ``graph_node.id`` the walk stepped from and the
@@ -102,6 +104,7 @@ class TopologyNode(BaseModel):
     id: UUID
     kind: str
     name: str
+    source: str
     properties: dict[str, Any] = Field(default_factory=dict)
     depth: int
     via_edge_kind: str | None

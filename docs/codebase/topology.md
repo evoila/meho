@@ -60,9 +60,12 @@ models that G9.1-T1 (#448, migration `0007`) created.
   gate), then idempotent
   upsert on the `graph_node_tenant_kind_name_idx`
   (`(tenant_id, kind, name)`) unique key. Manual seeds set
-  `discovered_by=operator.sub`; a re-seed over an auto-discovered row
-  promotes `discovered_by` to the operator (mirrors `annotate_edge`'s
-  auto→curated promotion). Writes one audit row
+  `source='curated'` + `discovered_by=operator.sub`; a re-seed over an
+  auto-discovered row promotes it to `source='curated'` +
+  `discovered_by=operator.sub` (mirrors `annotate_edge`'s
+  auto→curated promotion; #2536). The `source` column is what shields
+  curated nodes from refresh overwrites, target adoption, and
+  refresh-driven soft-deletes. Writes one audit row
   (`op_id="topology.create_node"`, `op_class="write"`,
   `method="CREATE_NODE"`) and publishes one broadcast event
   (fail-open after commit). Closes the **empty-tenant bootstrap gap**:
@@ -196,6 +199,7 @@ as a warning callout next to the counts (#2210).
 | `id` | `UUID` | `graph_node.id`. |
 | `kind` | `str` | `graph_node.kind` (open slug vocabulary since migration 0063 / T1 #2534; `WELL_KNOWN_NODE_KINDS` is the documented core set). |
 | `name` | `str` | `graph_node.name`, unique within `(tenant_id, kind)`. |
+| `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-seeded / promoted; #2536). Mirrors `TopologyEdge.source`. |
 | `properties` | `dict` | `graph_node.properties` JSONB; wrapped in `MappingProxyType` after validation so the frozen model is deeply immutable, serialised back to a plain `dict`. |
 | `depth` | `int` | Distance from the query root: root = 0, immediate = 1, transitive = 2, … |
 | `via_edge_kind` | `str \| None` | The `graph_edge.kind` of the edge used to reach this node; `None` for the root. |
@@ -258,19 +262,29 @@ separately via `resolve_node`.
    the tenant, every row whose `(kind, name)` is in the snapshot **or**
    whose `target_id` is the refreshing target's id:
    - INSERT nodes in the snapshot with no existing `(tenant, kind, name)`
-     row.
-   - For a node already present under *any* `target_id` (another
-     target's discovery, or a manual annotation with `target_id IS
-     NULL`): refresh `last_seen`, apply the probe `properties`, and
-     **adopt** the row onto the refreshing target (`target_id` claimed)
-     so this target owns its lifecycle going forward. A no-change
-     refresh of an already-owned node only touches `last_seen`, so the
-     `unchanged` path reports zero `updated`.
-   - Soft-delete (set `last_seen = NULL`) only nodes **owned by the
-     refreshing target** (`target_id == target_id`) that are absent
-     from the snapshot. Rows owned by another target — or a manual
-     annotation — are never soft-deleted by a refresh that does not own
-     them. A node already soft-deleted is not re-counted.
+     row (`source='auto'`).
+   - For an **auto** node already present under *any* `target_id`
+     (another target's discovery): refresh `last_seen`, apply the probe
+     `properties`, and **adopt** the row onto the refreshing target
+     (`target_id` claimed) so this target owns its lifecycle going
+     forward. A no-change refresh of an already-owned node only touches
+     `last_seen`, so the `unchanged` path reports zero `updated`.
+   - For a **curated** node (`source='curated'` — operator-seeded via
+     `create_or_get_node`, or promoted by a re-seed over an auto row):
+     bump `last_seen` only (`_refresh_curated_node`, the node-side
+     mirror of `_refresh_curated_edge`; #2536). No property overwrite,
+     no `target_id` adoption — the probe's view of an operator-owned
+     row is not authoritative. A resurrected curated node
+     (`last_seen IS NULL → now`) counts as `updated` and emits a
+     history row; a pure heartbeat does neither.
+   - Soft-delete (set `last_seen = NULL`) only **auto** nodes owned by
+     the refreshing target (`target_id == target_id`) that are absent
+     from the snapshot. Rows owned by another target are never
+     soft-deleted by a refresh that does not own them, and curated
+     nodes are never soft-deleted by *any* refresh (the explicit
+     `source == 'curated'` guard is load-bearing for promoted rows,
+     which keep the historical `target_id` from their auto days;
+     #2536). A node already soft-deleted is not re-counted.
    Returns two key→id maps: `live` (snapshot-present nodes only) and
    `all` (every loaded node, including soft-deleted ones owned by this
    target).
@@ -660,7 +674,9 @@ Edge reconciliation is identical, with one extra wrinkle: the
 `updated` history row even though the only changed column is
 `last_seen` — the resurrection is operator-observable (the edge
 returned to traversal), so it warrants a row. A pure heartbeat on
-an already-live curated edge does not.
+an already-live curated edge does not. Since #2536 the node pass
+carries the same wrinkle: `_refresh_curated_node` emits `updated`
+only for a resurrected curated node, never for a heartbeat.
 
 ### Annotate path
 
@@ -907,10 +923,13 @@ SSE / Slack feed.
    merge the four manual-seed property keys (`note`,
    `evidence_url`, `seeded_by`, `seeded_at`) onto the existing JSONB
    (auto-discovered keys like `status`, `phase` are preserved),
-   refresh `last_seen`, and promote `discovered_by` to the operator
-   iff the existing row was probe-derived (auto→curated promotion;
-   matches `annotate_edge`'s shape). Absent → `INSERT` a fresh row
-   with `discovered_by=operator.sub`, `target_id=None` (manual seeds
+   refresh `last_seen`, and promote to `source='curated'` +
+   `discovered_by=operator.sub` iff the existing row was
+   probe-derived (auto→curated promotion; matches `annotate_edge`'s
+   shape; #2536 — the `source` flip is what moves the row under the
+   refresh service's curated-durability discipline). Absent →
+   `INSERT` a fresh row with `source='curated'`,
+   `discovered_by=operator.sub`, `target_id=None` (manual seeds
    never adopt onto a target — only the refresh service does that),
    `properties={note, evidence_url, seeded_by, seeded_at}`,
    `first_seen = last_seen = now`; `before` is `None`.
@@ -955,24 +974,26 @@ can never disagree about which mutations committed.
 insert — the unique index guarantees one row per triple, and the
 refresh service's `_node_key((kind, name))` lookup recognises
 operator-seeded rows on the next probe (refresh keys on the same
-unique tuple, not on `discovered_by`). A manually-seeded node that
-the refresh service later discovers is adopted normally: refresh
-keeps `(tenant_id, kind, name)` as its identity, updates
-`last_seen` + `properties` from the probe payload, and the operator
-retains audit-trail authorship (the `audit_log` row from this verb
-is permanent — even an auto-rewrite of `discovered_by` by a
-subsequent refresh does not erase it).
+unique tuple, not on `discovered_by`). A seeded node the refresh
+service later re-observes is heartbeat-only, never adopted:
+`_refresh_curated_node` bumps `last_seen` and nothing else —
+`properties`, `target_id`, and `discovered_by` are untouched
+(`source='curated'` is the shield; #2536), and no refresh ever
+soft-deletes the row. Audit-trail authorship is likewise permanent:
+the `audit_log` row from this verb outlives any number of
+subsequent probe re-observations.
 
 **Not a refresh trigger.** This verb is a manual seed for nodes the
 operator wants to assert directly (the empty-tenant bootstrap entry
 point, or curated inner-graph nodes the probes cannot derive). It
 does not run any probe, does not write edges, and does not set
-`target_id`. If the seeded node corresponds to a target that
-should be auto-discovered going forward, run
-`meho topology refresh <target>` after the bootstrap: the refresh
-will adopt the node onto the target (`target_id` gets set, the
-node's properties pick up probe-derived shape) without losing the
-manual-seed audit trail.
+`target_id`. The adopt-onto-target workflow (`target_id` claimed,
+properties reshaped from the probe payload) applies to
+`source='auto'` rows only; it no longer exists for seeded nodes.
+A seeded node stays operator-owned forever — `target_id=None`,
+properties exactly as asserted — until the operator deletes it and
+lets a refresh re-discover the resource as a fresh `source='auto'`
+row.
 
 ## Diff query (read half — G9.3-T4 #860)
 

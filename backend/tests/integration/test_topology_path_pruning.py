@@ -221,6 +221,7 @@ async def prune_mesh(pg_engine: None) -> dict[str, uuid.UUID]:
             tenant_id=TENANT_A_ID,
             kind="vm",
             name="prune-island",
+            source="auto",
             properties={},
             discovered_by="test",
         )
@@ -349,6 +350,7 @@ async def worst_mesh(pg_engine: None) -> dict[str, uuid.UUID]:
             tenant_id=TENANT_A_ID,
             kind="vm",
             name="worst-island",
+            source="auto",
             properties={},
             discovered_by="test",
         )

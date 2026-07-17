@@ -6,6 +6,10 @@ Valkey 9.x Stream (`meho:feed:{tenant_id}`); the SSE surface
 (`/api/v1/feed` and `/ui/broadcast/stream`) and the MCP tools
 (`meho.broadcast.recent`, `meho.broadcast.watch`,
 `meho.broadcast.announce`) all read or write to that single substrate.
+MEHO-hosted agent runs reach the same substrate through the agent
+meta-tool bridge (`broadcast_announce` / `broadcast_recent` /
+`broadcast_watch`, #2548), which reuses these MCP handlers — see
+`docs/codebase/agent-runtime.md` § Broadcast coordination tools.
 
 ## Overview
 
@@ -41,6 +45,7 @@ Three layers, separated for traceability:
    | MCP watch | `meho.broadcast.watch` | `XREAD BLOCK` | caller-supplied `since_cursor` (required) | None — caller pins |
    | MCP resource | `tenant_feed` snapshot | `XREVRANGE + COUNT 50` | n/a | Latest 50 |
    | UI history | `GET /ui/broadcast/history` | `XRANGE` | 30-min window | All entries in window |
+   | Agent bridge | `broadcast_recent` / `broadcast_watch` meta-tools (#2548) | reuse the MCP recent/watch handlers | as MCP recent/watch | as MCP recent/watch |
 
    The SSE backlog prelude is the v0.8.0 fix for #1305 — see *Known
    issues* below.
@@ -280,7 +285,7 @@ window. Operations persist forever in `audit_log`; coordination *intent*
 had no durable home until T2.
 
 **Archive table.** `publish_agent_announcement` writes an append-only
-`agent_announcement` row (migration `0066`, model
+`agent_announcement` row (migration `0067`, model
 `db/models.py::AgentAnnouncement`) keyed on the event's minted UUID
 (`event_id`), persisting the typed claim fields (T1 #2544) and lineage.
 The row is written **before** the `XADD` so a stream-side failure never

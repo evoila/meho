@@ -236,6 +236,7 @@ async def _seed_node(
                 kind=kind,
                 name=name,
                 target_id=None,
+                source="auto",
                 properties={},
                 discovered_by="test",
                 first_seen=datetime.now(UTC),

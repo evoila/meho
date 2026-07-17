@@ -1280,6 +1280,27 @@ class Settings(BaseModel):
     # shape so operators using an external scheduler can opt out.
     scheduler_tick_interval_seconds: int = Field(default=30, ge=1, le=3600)
     scheduler_enabled: bool = True
+    # Initiative #2416 (#2505) — deterministic sensor check-runner. The
+    # lifespan-owned interval-tick loop scans for due Sensor rows and evaluates
+    # each (dispatch → assertion → projection) with no LLM in the path.
+    # ``tick_interval`` bounds how often it scans; the default (10 s) supports
+    # the sub-minute interval cadence a Sensor may carry (sub-tick cadences
+    # quantize to this grid, documented on the runner module). ``enabled``
+    # mirrors the SCHEDULER_ENABLED shape so an operator running an external
+    # evaluator (or the test path without a runner) can opt out.
+    sensor_runner_enabled: bool = True
+    sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    # Initiative #2416 (#2507) — tiered-triage investigator wiring. A Dashboard
+    # green→non-green transition (detected at #2505's persist seam) fires a
+    # diagnose-only agent run via ``AgentInvoker.run_scheduled`` against the
+    # tenant's enabled definition whose name matches ``checks_investigator_agent``
+    # (opt-in: absent/disabled ⇒ the wiring logs and skips). A deep investigation
+    # routinely outlives ``agent_sync_timeout_seconds`` (converts to async), so
+    # ``checks_investigation_poll_timeout_seconds`` bounds the background poll that
+    # waits for the terminal finding before the memory write-back. Set via
+    # ``CHECKS_INVESTIGATOR_AGENT`` / ``CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS``.
+    checks_investigator_agent: str = "checks-investigator"
+    checks_investigation_poll_timeout_seconds: int = Field(default=600, ge=1, le=86400)
     # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
     # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
     # wants ``(client_id, client_secret)``; the scheduler resolves
@@ -1821,6 +1842,19 @@ def get_settings() -> Settings:
         ),
         scheduler_enabled=parse_bool_env(
             os.environ.get("SCHEDULER_ENABLED", "true"),
+        ),
+        sensor_runner_tick_interval_seconds=int(
+            os.environ.get("SENSOR_RUNNER_TICK_INTERVAL_SECONDS", "10"),
+        ),
+        sensor_runner_enabled=parse_bool_env(
+            os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
+        ),
+        checks_investigator_agent=os.environ.get(
+            "CHECKS_INVESTIGATOR_AGENT",
+            "checks-investigator",
+        ),
+        checks_investigation_poll_timeout_seconds=int(
+            os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
         scheduler_agent_secret_env_pattern=os.environ.get(
             "SCHEDULER_AGENT_SECRET_ENV_PATTERN",

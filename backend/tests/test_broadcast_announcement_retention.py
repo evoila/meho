@@ -17,7 +17,7 @@ copies) for the ``agent_announcement`` archive:
 * **Loop survives a bad tick; start/stop lifecycle is clean.**
 
 Runs against the autouse SQLite-backed engine the suite pre-migrates to
-``alembic upgrade head`` (so migration ``0066`` has created the table).
+``alembic upgrade head`` (so migration ``0067`` has created the table).
 """
 
 from __future__ import annotations

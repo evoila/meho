@@ -265,6 +265,7 @@ async def test_refresh_vs_annotate_concurrent_writes_hold_invariants(
                 tenant_id=TENANT_A_ID,
                 kind="service",
                 name="ext-svc",
+                source="auto",
                 properties={},
                 discovered_by="test",
             )

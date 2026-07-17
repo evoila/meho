@@ -83,6 +83,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
     KIND_SLUG_MAX_LENGTH,
@@ -564,6 +565,7 @@ def _build_audit_row(
         id=audit_id,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
+        actor_sub=resolve_actor_sub(),
         tenant_id=operator.tenant_id,
         target_id=target_id,
         method=method,

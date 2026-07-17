@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for Alembic migration ``0066_create_agent_announcement``.
+"""Behavioural tests for Alembic migration ``0067_create_agent_announcement``.
 
 Broadcast v2 Initiative #2543, Task #2547 (T2). Creates the append-only
 ``agent_announcement`` table -- the durable archive of every
 agent-authored announcement -- plus its two indexes. This is the
-initiative's **only** migration; it was renumbered from ``0064`` to
-``0066`` to chain onto the current head (``0065``) after ``0064`` /
-``0065`` were taken by migrations that landed on main after this branch
-was cut (#2559 sensor -> 0064, #2568 dashboards / #2562 graph-node-source
--> 0065).
+initiative's **only** migration; it was renumbered (0064 -> 0066 -> 0067)
+to chain onto the moving head as migrations landed on main after this
+branch was cut: #2559 took 0064 (create_sensor), #2568 took 0065
+(create_check_dashboards), and #2562 took 0066 (add_graph_node_source).
+It now chains on ``0066`` (add_graph_node_source), the current head.
 
 **Idempotency pinning (0049/0050/0053/0055/0057/0058 footgun).** Every
 forward / round-trip step targets this migration's **own** revision
-(``0066``) and its ``down_revision`` (``0065``), never ``head`` -- so a
+(``0067``) and its ``down_revision`` (``0066``), never ``head`` -- so a
 future head migration cannot make ``upgrade("head")`` re-run this
 ``create_table`` on a schema that already has it. SQLite is the test
 driver and the migration uses only generic DDL, so PG parity holds.
@@ -35,8 +35,8 @@ from meho_backplane.db.engine import reset_engine_for_testing
 from meho_backplane.db.migrations import alembic_config
 from meho_backplane.settings import get_settings
 
-_REVISION = "0066"
-_DOWN_REVISION = "0065"
+_REVISION = "0067"
+_DOWN_REVISION = "0066"
 _TABLE = "agent_announcement"
 _EXPECTED_COLUMNS = {
     "id",
@@ -65,7 +65,7 @@ def alembic_cfg(
     tmp_path: Path,
 ) -> Iterator[tuple[Config, str]]:
     """Pin env, reset caches, return an Alembic config + sync URL."""
-    db_path = tmp_path / "migration_0066.db"
+    db_path = tmp_path / "migration_0067.db"
     async_url = f"sqlite+aiosqlite:///{db_path}"
     sync_url = f"sqlite:///{db_path}"
     monkeypatch.setenv("DATABASE_URL", async_url)
@@ -128,7 +128,7 @@ def _table_names(sync_url: str) -> set[str]:
 
 
 def test_upgrade_creates_agent_announcement_table(alembic_cfg: tuple[Config, str]) -> None:
-    """``upgrade 0066`` creates ``agent_announcement`` with the full column set."""
+    """``upgrade 0067`` creates ``agent_announcement`` with the full column set."""
     cfg, sync_url = alembic_cfg
     command.upgrade(cfg, _REVISION)
 
@@ -156,7 +156,7 @@ def test_upgrade_creates_indexes(alembic_cfg: tuple[Config, str]) -> None:
 
 
 def test_downgrade_then_upgrade_round_trips(alembic_cfg: tuple[Config, str]) -> None:
-    """``downgrade "0065"`` drops the table; ``upgrade "0066"`` recreates it.
+    """``downgrade "0066"`` drops the table; ``upgrade "0067"`` recreates it.
 
     Pinned to this migration's own revision on both legs (never ``head``)
     so a future head migration cannot break the round-trip -- the

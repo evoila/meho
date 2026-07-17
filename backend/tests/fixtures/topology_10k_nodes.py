@@ -150,6 +150,7 @@ async def seed_perf_graph(
             tenant_id=tenant_id,
             kind="host",
             name=spec.hub_name,
+            source="auto",
             properties={"role": "perf-hub"},
             discovered_by="test",
         )
@@ -166,6 +167,7 @@ async def seed_perf_graph(
                     tenant_id=tenant_id,
                     kind="vm",
                     name=f"perf-{chain}-{level}",
+                    source="auto",
                     properties={},
                     discovered_by="test",
                 )
@@ -310,6 +312,7 @@ async def seed_mesh_graph(
                     tenant_id=tenant_id,
                     kind="vm",
                     name=spec.node_name(layer, col),
+                    source="auto",
                     properties={},
                     discovered_by="test",
                 )

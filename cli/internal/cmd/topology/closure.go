@@ -42,6 +42,11 @@ type closureOptions struct {
 	// param). Empty → unpinned; an ambiguous name then returns 409
 	// ambiguous_node and the renderer points the operator back here.
 	NodeKind string
+	// IncludeStale mirrors the route's include_stale query param
+	// (#2538). True (the default) keeps soft-deleted rows reachable
+	// (last-refresh-wins); false restricts the walk to live rows.
+	// Only sent on the wire when false — true is the server default.
+	IncludeStale bool
 	// JSONOut emits the raw []TopologyNode envelope.
 	JSONOut bool
 	// BackplaneOverride overrides the configured backplane URL.
@@ -138,15 +143,23 @@ func getClosure(
 		k := opts.NodeKind
 		anchorKindPtr = &k
 	}
+	// Omit include_stale when true — that is the server default, and
+	// omitting keeps the wire shape identical to pre-#2538 calls.
+	var includeStalePtr *bool
+	if !opts.IncludeStale {
+		f := false
+		includeStalePtr = &f
+	}
 
 	var statusCode int
 	var body []byte
 	switch opts.Verb {
 	case "dependents":
 		params := &api.DependentsApiV1TopologyDependentsNameGetParams{
-			Depth:      depthPtr,
-			KindFilter: kindFilterPtr,
-			Kind:       anchorKindPtr,
+			Depth:        depthPtr,
+			KindFilter:   kindFilterPtr,
+			Kind:         anchorKindPtr,
+			IncludeStale: includeStalePtr,
 		}
 		statusCode, body, err = doClosureCall(ctx, authed,
 			func(ctx context.Context) (*http.Response, error) {
@@ -154,9 +167,10 @@ func getClosure(
 			})
 	case "dependencies":
 		params := &api.DependenciesApiV1TopologyDependenciesNameGetParams{
-			Depth:      depthPtr,
-			KindFilter: kindFilterPtr,
-			Kind:       anchorKindPtr,
+			Depth:        depthPtr,
+			KindFilter:   kindFilterPtr,
+			Kind:         anchorKindPtr,
+			IncludeStale: includeStalePtr,
 		}
 		statusCode, body, err = doClosureCall(ctx, authed,
 			func(ctx context.Context) (*http.Response, error) {
@@ -219,7 +233,7 @@ func addClosureFlags(
 	cmd *cobra.Command,
 	depth *int,
 	edgeKind, nodeKind, backplane *string,
-	jsonOut *bool,
+	includeStale, jsonOut *bool,
 ) {
 	cmd.Flags().IntVar(depth, "depth", 0,
 		fmt.Sprintf("max traversal depth (1..%d, server default 16 when omitted)", _depthMax))
@@ -227,6 +241,8 @@ func addClosureFlags(
 		"restrict the walk to edges of this kind (e.g. runs-on, mounts, routes-through, belongs-to)")
 	cmd.Flags().StringVar(nodeKind, "node-kind", "",
 		"pin the anchor to one node kind when the name is ambiguous across kinds")
+	cmd.Flags().BoolVar(includeStale, "include-stale", true,
+		"include soft-deleted (stale) nodes and edges in the walk (last-refresh-wins); pass --include-stale=false for live rows only")
 	cmd.Flags().BoolVar(jsonOut, "json", false,
 		"emit machine-readable JSON to stdout instead of the human table")
 	cmd.Flags().StringVar(backplane, "backplane", "",

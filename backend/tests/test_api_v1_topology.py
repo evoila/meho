@@ -8,8 +8,9 @@ Coverage matrix (G9.1-T5 / Task #453 acceptance criteria):
 * **Route mounting** — the four topology routes appear on
   :mod:`meho_backplane.main`'s app and in the OpenAPI document.
 * **dependents / dependencies / path** — each route wraps its T4 verb,
-  forwards the query params (depth / kind / kind_filter / max_hops),
-  and serialises the frozen result model over the wire.
+  forwards the query params (depth / kind / kind_filter / max_hops /
+  include_stale, #2538), and serialises the frozen result model over
+  the wire.
 * **path returns null** — an unreachable pair yields HTTP 200 with a
   ``null`` body (unreachability is a valid answer, not an error).
 * **Ambiguous anchor → 409** — :class:`AmbiguousNodeError` from the
@@ -146,6 +147,7 @@ def _make_node(name: str, kind: str = "host", depth: int = 0) -> TopologyNode:
         id=uuid.uuid4(),
         kind=kind,
         name=name,
+        source="auto",
         properties={"seeded": name},
         depth=depth,
         via_edge_kind=None if depth == 0 else "runs-on",
@@ -248,10 +250,36 @@ def test_dependents_wraps_find_dependents_and_forwards_params(client: TestClient
     body = resp.json()
     assert [n["name"] for n in body] == ["host1", "vm1"]
     assert body[1]["via_edge_kind"] == "runs-on"
+    # #2538 chain provenance is part of the serialised shape (null on
+    # the factory-built rows; the substrate fills it from the CTE).
+    assert body[0]["parent_node_id"] is None
+    assert body[0]["via_edge_id"] is None
     # The query params are forwarded as keyword args to the T4 verb.
     _, kwargs = fake.call_args
-    assert kwargs == {"kind": "host", "depth": 8, "kind_filter": "runs-on"}
+    assert kwargs == {
+        "kind": "host",
+        "depth": 8,
+        "kind_filter": "runs-on",
+        "include_stale": True,
+    }
     assert fake.call_args.args[1] == "host1"
+
+
+def test_dependents_forwards_include_stale_false(client: TestClient) -> None:
+    """``?include_stale=false`` (#2538) reaches the T4 verb as a bool."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[_make_node("host1", "host", 0)])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_dependents", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/dependents/host1?include_stale=false",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    assert fake.call_args.kwargs["include_stale"] is False
 
 
 def test_dependents_envelope_v2_returns_kind_nodes_shape(
@@ -462,6 +490,25 @@ def test_path_returns_serialised_path(client: TestClient) -> None:
     # `from` / `to` query params are forwarded positionally.
     assert fake.call_args.args[1:] == ("a", "b")
     assert fake.call_args.kwargs["max_hops"] == 5
+    # #2538: default include_stale=true is forwarded explicitly.
+    assert fake.call_args.kwargs["include_stale"] is True
+
+
+def test_path_forwards_include_stale_false(client: TestClient) -> None:
+    """``?include_stale=false`` (#2538) reaches ``find_path`` as a bool."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=None)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_path", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/path?from=a&to=b&include_stale=false",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    assert fake.call_args.kwargs["include_stale"] is False
 
 
 def test_path_unreachable_returns_200_null(client: TestClient) -> None:

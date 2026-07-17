@@ -439,6 +439,37 @@ topology:
   # the loop entirely (no audit-row noise, no log line).
   historyPruneEnabled: true
 
+# Durable-announcement retention (Broadcast v2 #2547). Agent-authored
+# announcements published via `meho.broadcast.announce` are persisted to
+# an append-only `agent_announcement` DB table (the durable archive that
+# outlives the ~24h Valkey stream). The retention prune -- registered in
+# the FastAPI lifespan as a weekly `asyncio.create_task` loop, the same
+# mold as the topology-history prune -- deletes rows older than
+# `retentionDays`. Disable `pruneEnabled` only when an external retention
+# mechanism reaps rows instead. Distinct from the broadcast subchart
+# (`broadcast:` above, the Valkey substrate) and from the stream
+# read-window heuristic (`BROADCAST_RETENTION_HOURS`, unset -> default).
+broadcastAnnouncement:
+  # -- Maximum age (in days) of `agent_announcement` rows the retention
+  # prune preserves. Rows whose `created_at` is older than
+  # `now() - retentionDays` are deleted in one bounded batch per run.
+  # Default 90 gives a quarterly cross-shift coordination window. Set `0`
+  # for keep-forever -- the prune task still runs as a heartbeat but every
+  # tick is a no-op; operators picking 0 accept unbounded disk growth in
+  # exchange for full historical retention. Range [0, 3650] (10y ceiling).
+  retentionDays: 90
+  # -- Cadence of the in-process announcement retention prune sweeper, in
+  # seconds. Default 604800 (7d / weekly). Range [60, 604800]: below one
+  # minute the prune competes with the announce write load; the ceiling
+  # is the documented weekly cadence.
+  pruneIntervalSeconds: 604800
+  # -- Whether to start the in-process announcement retention prune
+  # sweeper. Set false when an external retention mechanism reaps rows
+  # instead. Distinct from `retentionDays: 0`: `0` keeps the loop running
+  # but every tick is a no-op heartbeat; `false` skips starting the loop
+  # entirely (no audit-row noise, no log line).
+  pruneEnabled: true
+
 postgres:
   # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
   # explicitly excludes a bundled PG subchart); typically reached over the

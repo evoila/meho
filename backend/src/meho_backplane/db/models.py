@@ -2567,6 +2567,127 @@ class GraphEdgeHistory(Base):
     )
 
 
+class AgentAnnouncement(Base):
+    """An append-only durable record of one agent-authored announcement.
+
+    Broadcast v2 Initiative #2543, Task #2547 (T2). The durable home for
+    the coordination *intent* an agent publishes via
+    ``meho.broadcast.announce``. Until this table, an announcement lived
+    only on the count-trimmed per-tenant Valkey stream
+    (``BROADCAST_MAXLEN`` = 10000) which the broadcast subchart runs with
+    persistence disabled (``save ""`` / ``appendonly no``) -- so a Valkey
+    restart wiped the whole coordination window and cross-shift
+    coordination ("does this conflict with what agent A said yesterday?")
+    had no substrate. This row is that substrate: the stream stays the
+    hot real-time path, this table is the archive
+    (``meho.broadcast.recent`` backfills from here when the requested
+    window predates the stream's oldest surviving entry).
+
+    Append-only by contract: the application never issues an UPDATE
+    against this table, and the only DELETE is the retention prune
+    (:mod:`meho_backplane.broadcast.announcement_retention`) which drops
+    rows older than ``broadcast_announcement_retention_days`` in one
+    audited bounded batch per tick -- the same mold as
+    :class:`GraphNodeHistory` / :class:`GraphEdgeHistory` (migration
+    ``0012``, prune :mod:`meho_backplane.topology.history_retention`).
+
+    Row identity is the real per-announcement UUID (#2479 / #2547): the
+    ``id`` minted at publish time is written both here (as the PK) and
+    onto the stream entry's JSON as ``event_id``, so a reader correlating
+    the two surfaces sees one stable UUID. This finally makes the
+    announce return's ``event_id`` (the UUID) genuinely distinct from
+    ``cursor`` (the Valkey stream entry id) -- historically they were the
+    same mislabelled cursor.
+
+    Schema decisions:
+
+    * ``id`` -- ``UUID`` PK, minted Python-side at publish
+      (:class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`'s
+      ``event_id`` default). Not a ``BIGSERIAL`` like the history tables:
+      the value must be known *before* the row is written so the same
+      UUID can ride the stream entry, which a server-assigned counter
+      cannot provide without a read-back round-trip.
+    * ``tenant_id`` -- ``UUID`` NOT NULL with a real
+      ``REFERENCES tenant(id)`` FK. Brand-new substrate, no chassis-era
+      rows -- same rationale as :class:`GraphNodeHistory.tenant_id`.
+    * ``principal_sub`` -- ``Text`` NOT NULL. The announcing operator's
+      JWT ``sub`` claim, copied verbatim from the event.
+    * ``activity`` -- ``Text`` NOT NULL. The free-text announcement body.
+      Persisted raw; the untrusted-content envelope is applied on the
+      read/serve boundary (:func:`dump_event_wire`), not in storage.
+    * ``target`` -- ``Text`` nullable. The legacy single-target
+      attribution (T1 #2544). Persisted alongside ``targets`` so a row
+      is a faithful archive of the event even for pre-``targets``
+      announcements.
+    * ``scope`` -- ``Text`` nullable. Optional free-form scope hint.
+    * ``targets`` -- portable ``JSON`` -> ``JSONB`` NOT NULL DEFAULT
+      ``[]``. The typed multi-target claim list (T1 #2544).
+    * ``phase`` -- ``Text`` NOT NULL. ``"start"`` / ``"update"`` /
+      ``"completion"``; no DB-side CHECK (the pydantic ``Literal`` on the
+      event is the boundary guard, and a future phase value should not
+      require a migration to land on the archive).
+    * ``planned_op_class`` -- ``Text`` nullable. The declared intent
+      op-class (T1 #2544).
+    * ``ttl_minutes`` -- ``Integer`` nullable. The claim lifetime;
+      readers derive ``expires_at = created_at + ttl_minutes``.
+    * ``work_ref`` -- ``Text`` nullable. Opaque change-ticket reference,
+      same convention as :attr:`AgentRun.work_ref`.
+    * ``run_id`` -- ``UUID`` nullable. The agent run the announcement
+      belongs to (T1 #2544 / lineage #2545). Soft reference, no FK --
+      the run may live in a different retention window than the archive.
+    * ``created_at`` -- ``timestamptz`` NOT NULL. The event's server-side
+      ``ts`` (handler entry wall clock), carried verbatim so the archive
+      timeline matches the stream timeline. PG-side ``now()`` server
+      default plus an ORM ``default`` for the SQLite dev/test path.
+
+    Indexes (declared at the migration layer, not here, because the
+    ``(tenant_id, created_at DESC)`` DESC ordering does not round-trip
+    through Alembic autogenerate -- same discipline as the history
+    tables):
+
+    * ``agent_announcement_tenant_created_at_idx`` --
+      ``(tenant_id, created_at DESC)``. Drives the recent-window archive
+      backfill (newest-first tenant scan) and the retention prune's
+      bounded ``created_at < cutoff`` delete.
+    * ``agent_announcement_tenant_work_ref_idx`` --
+      ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
+      filter, mirroring :class:`AgentRun`'s
+      ``agent_run_tenant_work_ref_idx``.
+    """
+
+    __tablename__ = "agent_announcement"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    activity: Mapped[str] = mapped_column(Text, nullable=False)
+    target: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    targets: Mapped[list[str]] = mapped_column(
+        _PORTABLE_ARRAY,
+        nullable=False,
+        default=list,
+    )
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    planned_op_class: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    ttl_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    work_ref: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+
 class WebSession(Base):
     """One row per active BFF (Backend-for-Frontend) operator session.
 

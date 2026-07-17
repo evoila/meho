@@ -50,14 +50,18 @@ Three layers, separated for traceability:
    The SSE backlog prelude is the v0.8.0 fix for #1305 — see *Known
    issues* below.
 
-   **Row identifier semantics (MCP recent/watch, #2479).** Every event
-   row the two MCP read tools return carries the entry's Valkey stream
-   id twice: `cursor` (self-labelled; round-trips as the tools'
+   **Row identifier semantics (MCP recent/watch, #2479 / #2547).** Every
+   event row the two MCP read tools return carries the entry's Valkey
+   stream id twice: `cursor` (self-labelled; round-trips as the tools'
    `cursor` input arg) and `id` (legacy alias of the same value —
    unlike every other MCP surface, a broadcast row's `id` is NOT the
    row's domain UUID). The durable identifiers live on the event
-   fields: `event_id` / `audit_id` on operation rows; announcement
-   rows have no UUID (until #2547 mints one).
+   fields: `event_id` / `audit_id` on operation rows; and, since #2547,
+   `event_id` on announcement rows too — a genuine per-announcement UUID
+   minted at publish (equal to the durable `agent_announcement` row's PK),
+   now distinct from the stream `cursor`. A DB-backfilled announcement
+   (see *Durable announcements* below) carries `event_id` but a **null**
+   `cursor` / `id` (it has no Valkey stream entry of its own).
 
    **Read-side `filter` object (MCP recent/watch).** Both tools accept a
    `filter` object narrowing by exact-match `op_class` / `principal` /
@@ -100,7 +104,10 @@ Three layers, separated for traceability:
     doing"); an announcement never qualifies for a lineage filter.
 - `AgentAnnouncementEvent` (`broadcast/agent_events.py`) — agent-
   authored announcements published via `meho.broadcast.announce`.
-  Fields: `tenant_id`, `principal_sub`, `activity`, `target`, `scope`,
+  Fields: `event_id` (UUID, minted at publish via `default_factory=uuid4`
+  — the real per-announcement identity, #2547; also the durable
+  `agent_announcement` row's PK, served unwrapped), `tenant_id`,
+  `principal_sub`, `activity`, `target`, `scope`,
   `phase`, plus the optional **structured intent claims** (Broadcast
   v2, #2544): `targets` (list, ≤10 names, each ≤256 chars — supersedes
   the single `target` for multi-target work), `planned_op_class` (the
@@ -216,13 +223,20 @@ MCP tools/call meho.broadcast.announce
       → count > limit → AnnounceRateLimitExceeded
            → McpRateLimitedError → JSON-RPC -32000 (retry-after in data)
     → publish_agent_announcement(AgentAnnouncementEvent)  ← fail-loud
+      → INSERT agent_announcement (id = event.event_id, typed claims)  ← durable, first
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
       → returns Valkey entry id verbatim
     → returns {event_id, cursor} to the agent
-      (both the stream entry id — `cursor` is the canonical
-       self-labelled name, #2479; `event_id` is the legacy alias
-       and NOT a durable UUID: announcements carry no UUID)
+      (`event_id` is the real per-announcement UUID minted at publish —
+       equal to the durable row's id and to the event's `event_id` on
+       recent/watch reads, #2547; `cursor` is the stream entry id, the
+       canonical self-labelled name, #2479. The two are now distinct.)
 ```
+
+The durable INSERT runs **before** the `XADD` so the archive is never
+lost to a stream-side failure; both legs are fail-loud (a persistence or
+publish failure surfaces to the agent as JSON-RPC `-32603`, not a silent
+drop). See *Durable announcements* below.
 
 The rate limit (G6.5-T6 #2546) is a per-`(tenant, principal)`
 fixed-window counter (the canonical Redis `INCR` rate-limiter pattern)
@@ -373,6 +387,60 @@ Design contract:
   capped by the `COUNT`.
 - **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
   `30`, `0` = off) gates the whole feature.
+
+## Durable announcements (#2547)
+
+The Valkey stream is the hot real-time path but not durable: it is
+count-trimmed at `BROADCAST_MAXLEN = 10_000` and the broadcast subchart
+runs with persistence disabled (`save ""` / `appendonly no` — "streams
+are ephemeral by design"), so a restart wipes the whole coordination
+window. Operations persist forever in `audit_log`; coordination *intent*
+had no durable home until T2.
+
+**Archive table.** `publish_agent_announcement` writes an append-only
+`agent_announcement` row (migration `0067`, model
+`db/models.py::AgentAnnouncement`) keyed on the event's minted UUID
+(`event_id`), persisting the typed claim fields (T1 #2544) and lineage.
+The row is written **before** the `XADD` so a stream-side failure never
+costs the durable record; both legs are fail-loud. Columns: `id` (UUID
+PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
+`targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
+`work_ref`, `run_id`, `created_at` (the event's `ts`). Indexes:
+`(tenant_id, created_at DESC)` (recent backfill + prune) and
+`(tenant_id, work_ref)` (filter). This is the split Kubernetes draws
+between its bounded Events TTL and the durable records it expects
+elsewhere.
+
+**Recent DB backfill.** `meho.broadcast.recent` reads the archive when
+the requested window reaches before the stream's oldest surviving entry
+(`_backfill_recent_from_db` in `broadcast/history.py`). The stream
+`XRANGE` from the window start defines the covered range; the gap
+`[window_start, oldest_stream_entry)` (or the whole window when the
+stream is empty — the restart / `FLUSHALL` shape) is filled from the DB,
+deduped against the stream page by `event_id` and bounded by the
+remaining page budget. Backfilled rows carry `event_id` but a **null**
+`cursor` / `id`. Only wall-clock windows (default or ISO `cursor`)
+backfill; a stream-cursor `cursor` is forward pagination and skips it.
+`op_class` / `actor_sub` filters short-circuit (no announcement carries
+either). `watch` does **not** backfill — it is a forward live-tail poll
+for events strictly past a cursor, which has no archive dimension. Deep
+DB-only pagination is out of scope (T5 owns deep-history UX).
+
+**Retention prune.** `broadcast/announcement_retention.py` is a
+lifespan-owned weekly `asyncio` loop (a deliberate copy of the
+topology-history prune mold, `topology/history_retention.py`) that
+deletes rows older than `broadcast_announcement_retention_days` (default
+90) in one bounded audited batch per tick. `days=0` is the keep-forever
+opt-out (a no-op heartbeat, no DELETE, no audit row);
+`broadcast_announcement_prune_enabled=false` skips starting the loop
+entirely. Each non-no-op tick writes one `INTERNAL` audit row
+(`operator_sub='system:broadcast-announcement-retention'`,
+`path='broadcast.announcement.prune'`, `payload={dropped_rows,
+retention_days, cutoff}`) attributed to the system-wide sentinel tenant.
+Helm knobs: `broadcastAnnouncement.{retentionDays,pruneIntervalSeconds,pruneEnabled}`
+(env `BROADCAST_ANNOUNCEMENT_*`). This is distinct from
+`broadcast_retention_hours` (the *stream* read-window heuristic, a
+different substrate).
 
 ## Dependencies
 

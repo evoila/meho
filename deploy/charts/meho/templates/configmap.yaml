@@ -182,3 +182,11 @@ data:
   TOPOLOGY_HISTORY_RETENTION_DAYS: {{ .Values.topology.historyRetentionDays | quote }}
   TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS: {{ .Values.topology.historyPruneIntervalSeconds | quote }}
   TOPOLOGY_HISTORY_PRUNE_ENABLED: {{ .Values.topology.historyPruneEnabled | quote }}
+  # Broadcast v2 T2 (#2547) — durable-announcement retention knobs. The
+  # env-var names are the backplane's contract
+  # (`backend/src/meho_backplane/settings.py`). `retentionDays: 0` is the
+  # keep-forever sentinel; `pruneEnabled: false` skips starting the
+  # in-process prune loop entirely.
+  BROADCAST_ANNOUNCEMENT_RETENTION_DAYS: {{ .Values.broadcastAnnouncement.retentionDays | quote }}
+  BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS: {{ .Values.broadcastAnnouncement.pruneIntervalSeconds | quote }}
+  BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED: {{ .Values.broadcastAnnouncement.pruneEnabled | quote }}

@@ -936,24 +936,26 @@ can never disagree about which mutations committed.
 insert — the unique index guarantees one row per triple, and the
 refresh service's `_node_key((kind, name))` lookup recognises
 operator-seeded rows on the next probe (refresh keys on the same
-unique tuple, not on `discovered_by`). A manually-seeded node that
-the refresh service later discovers is adopted normally: refresh
-keeps `(tenant_id, kind, name)` as its identity, updates
-`last_seen` + `properties` from the probe payload, and the operator
-retains audit-trail authorship (the `audit_log` row from this verb
-is permanent — even an auto-rewrite of `discovered_by` by a
-subsequent refresh does not erase it).
+unique tuple, not on `discovered_by`). A seeded node the refresh
+service later re-observes is heartbeat-only, never adopted:
+`_refresh_curated_node` bumps `last_seen` and nothing else —
+`properties`, `target_id`, and `discovered_by` are untouched
+(`source='curated'` is the shield; #2536), and no refresh ever
+soft-deletes the row. Audit-trail authorship is likewise permanent:
+the `audit_log` row from this verb outlives any number of
+subsequent probe re-observations.
 
 **Not a refresh trigger.** This verb is a manual seed for nodes the
 operator wants to assert directly (the empty-tenant bootstrap entry
 point, or curated inner-graph nodes the probes cannot derive). It
 does not run any probe, does not write edges, and does not set
-`target_id`. If the seeded node corresponds to a target that
-should be auto-discovered going forward, run
-`meho topology refresh <target>` after the bootstrap: the refresh
-will adopt the node onto the target (`target_id` gets set, the
-node's properties pick up probe-derived shape) without losing the
-manual-seed audit trail.
+`target_id`. The adopt-onto-target workflow (`target_id` claimed,
+properties reshaped from the probe payload) applies to
+`source='auto'` rows only; it no longer exists for seeded nodes.
+A seeded node stays operator-owned forever — `target_id=None`,
+properties exactly as asserted — until the operator deletes it and
+lets a refresh re-discover the resource as a fresh `source='auto'`
+row.
 
 ## Diff query (read half — G9.3-T4 #860)
 

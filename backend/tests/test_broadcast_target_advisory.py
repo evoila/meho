@@ -303,7 +303,6 @@ async def test_newest_peer_surfaces_beyond_scan_cap() -> None:
 
 async def test_fail_open_on_valkey_teardown() -> None:
     """A Valkey teardown yields no advisory and never raises."""
-    import structlog
     from redis import exceptions as redis_exceptions
 
     bc = get_broadcast_client()
@@ -313,7 +312,14 @@ async def test_fail_open_on_valkey_teardown() -> None:
             "xrevrange",
             new=AsyncMock(side_effect=redis_exceptions.ConnectionError("refused")),
         ),
-        structlog.testing.capture_logs() as logs,
+        # Assert on the module logger directly rather than
+        # ``structlog.testing.capture_logs()``: capture_logs swaps the
+        # processor chain but does NOT intercept the module-level
+        # BoundLogger cached under the production
+        # ``cache_logger_on_first_use=True`` config, so it intermittently
+        # misses this warn (a test-observation flake, not a code bug —
+        # the fail-open log IS emitted).
+        patch("meho_backplane.broadcast.history._log") as mock_log,
     ):
         advisory = await build_target_activity_advisory(
             _operator("user-b"),
@@ -321,7 +327,10 @@ async def test_fail_open_on_valkey_teardown() -> None:
             target_name=_TARGET,
         )
     assert advisory == {}
-    assert any(entry["event"] == "target_activity_advisory_failed" for entry in logs)
+    assert any(
+        call.args and call.args[0] == "target_activity_advisory_failed"
+        for call in mock_log.warning.call_args_list
+    )
 
 
 @pytest.mark.parametrize(

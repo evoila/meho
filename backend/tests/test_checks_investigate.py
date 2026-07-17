@@ -336,7 +336,13 @@ def _succeeded_outcome(finding: ChecksFinding, *, run_id: UUID | None = None) ->
 
 def _node(kind: str, name: str, depth: int) -> TopologyNode:
     return TopologyNode(
-        id=uuid4(), kind=kind, name=name, properties={}, depth=depth, via_edge_kind=None
+        id=uuid4(),
+        kind=kind,
+        name=name,
+        source="auto",
+        properties={},
+        depth=depth,
+        via_edge_kind=None,
     )
 
 

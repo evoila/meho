@@ -3,8 +3,8 @@
 
 """Add ``graph_node.source`` + backfill curated seeds (#2536).
 
-Revision ID: 0065
-Revises: 0064
+Revision ID: 0066
+Revises: 0065
 Create Date: 2026-07-16
 
 Initiative #2533 (Topology v2), Task #2536 (T2, the second and final
@@ -55,13 +55,24 @@ Reversibility contract
 
 ``downgrade()`` drops the CHECK and the column. The auto/curated
 distinction is lost (rows survive; the ``properties.seeded_by``
-convention remains recoverable), which restores the pre-0065 state
+convention remains recoverable), which restores the pre-0066 state
 exactly — no pre-check is needed because no row can violate the
 narrowed schema.
 
 The migration is self-contained: the source vocabulary is inlined
 (never imported from :mod:`meho_backplane.db.models`) because Alembic
 must run against any historical revision's model graph.
+
+Renumbering note (was ``0065``)
+-------------------------------
+
+This migration originally shipped as revision ``0065`` (PR #2562),
+colliding with ``0065_create_check_dashboards``; it was renumbered to
+``0066`` chaining after that revision. If you already applied it under
+the old id, fix your ``alembic_version`` bookkeeping by hand:
+``alembic stamp 0066`` if both 0065 migrations were applied, or apply
+``0065_create_check_dashboards`` manually and then stamp — the schema
+changes themselves are identical and need no replay.
 """
 
 from collections.abc import Sequence
@@ -70,8 +81,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0065"
-down_revision: str | None = "0064"
+revision: str = "0066"
+down_revision: str | None = "0065"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

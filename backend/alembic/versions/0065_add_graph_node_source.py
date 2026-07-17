@@ -3,8 +3,8 @@
 
 """Add ``graph_node.source`` + backfill curated seeds (#2536).
 
-Revision ID: 0064
-Revises: 0063
+Revision ID: 0065
+Revises: 0064
 Create Date: 2026-07-16
 
 Initiative #2533 (Topology v2), Task #2536 (T2, the second and final
@@ -55,7 +55,7 @@ Reversibility contract
 
 ``downgrade()`` drops the CHECK and the column. The auto/curated
 distinction is lost (rows survive; the ``properties.seeded_by``
-convention remains recoverable), which restores the pre-0064 state
+convention remains recoverable), which restores the pre-0065 state
 exactly — no pre-check is needed because no row can violate the
 narrowed schema.
 
@@ -70,8 +70,8 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision: str = "0064"
-down_revision: str | None = "0063"
+revision: str = "0065"
+down_revision: str | None = "0064"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

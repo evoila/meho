@@ -108,6 +108,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks.assertions import AssertionOutcome, AssertionSpec
 from meho_backplane.checks.evaluate import evaluate_assertion
+from meho_backplane.checks.investigate import investigate_on_transition
 from meho_backplane.checks.repository import (
     advance_sensor_next_fire,
     claim_due_sensors,
@@ -331,7 +332,16 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
 
 
 async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> None:
-    """Write *outcome* onto the sensor's latest-state projection (own session)."""
+    """Write *outcome* onto the sensor's latest-state projection (own session).
+
+    After the projection commits, hand off to #2507's transition detector: it
+    recomputes the rollup for the Dashboards holding this sensor, maintains the
+    ``last_rollup_state`` memo, and fires a diagnose-only investigator on a
+    green->non-green edge. The hook never raises (its contract), so the persist
+    path is unaffected by any investigation-side failure -- and it runs on every
+    result (not only state changes) because a ``for:`` hold expiring flips a
+    Dashboard non-green with no sensor-state change.
+    """
     evaluated_at = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -344,6 +354,7 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
             evaluated_at=evaluated_at,
         )
         await session.commit()
+    await investigate_on_transition(sensor_id=snap.id, tenant_id=snap.tenant_id)
 
 
 async def _evaluate_and_record(snap: _SensorSnapshot) -> None:

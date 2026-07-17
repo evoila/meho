@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — tiered-triage investigator wiring (#2507)
+
+- Wire a **diagnose-only investigator** to Dashboard non-green transitions
+  (#2507). When a Dashboard's five-state rollup crosses from green into
+  `degraded` / `critical` — detected at the check-runner's result-persist seam
+  against the `last_rollup_state` memo #2506 reserved — the affected non-green
+  Sensors are correlated through the topology blast-radius graph so one
+  underlying cause produces exactly **one** investigation, tenant memory is
+  checked for a known-noise policy that suppresses re-escalation, and only
+  novel, non-suppressed groups fire a real, durable, budget-gated agent run via
+  `AgentInvoker.run_scheduled`. The investigator is **diagnose-only**: its
+  structured finding lands in the durable `agent_run` row and is written back
+  to memory (`checks-noise-<group-key>`) as the noise-suppression policy;
+  `recommended_action` is advisory text and any change op the agent attempts
+  parks in the existing approval queue — this wiring never executes one.
+  Opt-in per tenant by creating an enabled agent definition named
+  `checks-investigator` (`CHECKS_INVESTIGATOR_AGENT`); budget-gated and
+  kill-switchable through the invoker path. No migration (the memo column is
+  #2506's DDL). See `docs/codebase/checks-investigator.md`.
+
 ### Added — Dashboard entity + five-state rollup + /ui/checks (#2506)
 
 - Add the **Dashboard** entity (#2506): a named, tenant-scoped composition of

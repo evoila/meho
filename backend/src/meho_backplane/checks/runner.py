@@ -75,8 +75,12 @@ with ``sub=sensor.identity_sub`` (#2503's per-row column, default
 ``TenantRole.OPERATOR`` -- the topology-refresh ``_system_operator`` mould with
 the sub sourced from the row. ``principal_kind`` defaults to ``USER``, so
 :func:`~meho_backplane.operations._validate.policy_gate` auto-executes the
-``safe`` op (#2503's registration guard guarantees a sensor only ever
-references a ``safe`` op; the agent-credential path is never touched here and
+``safe`` op (#2503's registration guard enforces ``safe`` **at Sensor create
+time**; the runner does not re-validate ``safety_level`` at dispatch, matching
+the platform's default-allow-on-``requires_approval`` policy, so an op
+re-registered to a higher safety level *after* a Sensor is created would still
+run here -- a caution/dangerous escalation is a platform-level concern, not
+re-gated in the runner. The agent-credential path is never touched here and
 no agent run may exist on this path). A connector requiring an operator-context
 Vault credential read fails closed for a synthetic operator -- such a dispatch
 returns a structured error and the sensor reads ``unknown``; targets with
@@ -314,6 +318,12 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
             "evaluation_timeout",
             timeout_seconds=_EVAL_TIMEOUT_SECONDS,
         )
+    except Exception as exc:
+        # Never-raises contract: dispatch() is contracted not to raise, but a
+        # connector/transport bug must not strand the sensor's projection --
+        # map it to ``unknown``, not a crashed task. (asyncio.CancelledError is
+        # a BaseException, so cooperative cancellation still propagates.)
+        return _unknown_outcome("dispatch_error", error=str(exc))
 
     if result.status != "ok":
         return _unknown_outcome(

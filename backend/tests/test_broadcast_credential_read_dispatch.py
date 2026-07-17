@@ -4,7 +4,7 @@
 """G6 ``credential_read`` classifier integration test (G3.3-T5 / #549).
 
 Load-bearing PII guarantee for the single most-used agent op. Decision
-#3 (``docs/planning/v0.2-decisions.md``) names ``vault.kv.read`` and
+#3 (``docs/decisions/locked-decisions.md``) names ``vault.kv.read`` and
 ``vault.kv.list`` as the canonical ``credential_read`` ops: the G6
 broadcast feed must emit an **aggregate-only** view for them — the
 fact that someone touched a credential, never *which* credential. No

@@ -674,7 +674,7 @@ would let a probing operator distinguish "row never existed" from
 - **Sibling operator doc — audit query:**
   [`docs/cross-repo/audit-query.md`](./audit-query.md).
 - **Vocabulary decision row:**
-  [`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md)
+  [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md)
   decision #6.
 - **CLAUDE.md guidance:** postulate 5 (narrow-waist agent surface),
   "What MEHO is NOT" bullets 1 + 2 (no per-op MCP tools; CLI / REST

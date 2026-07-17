@@ -16,7 +16,7 @@ emits from connector probes:
 
 G9.2 widens the closed vocabulary to ten kinds by adding the six
 operator-curated cross-system kinds that auto-discovery cannot infer
-(decision #6 in :file:`docs/planning/v0.2-decisions.md`):
+(decision #6 in :file:`docs/decisions/locked-decisions.md`):
 
 * ``authenticates-via`` -- principal -> identity-provider node.
 * ``depends-on`` -- cross-system functional dependency.

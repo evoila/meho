@@ -42,7 +42,7 @@ References
 * Valkey ``XADD``: https://valkey.io/commands/xadd/
 * Decision #3 (PII defaults the publisher relies on the upstream
   :func:`~meho_backplane.broadcast.events.redact_payload` to enforce):
-  ``docs/planning/v0.2-decisions.md``.
+  ``docs/decisions/locked-decisions.md``.
 """
 
 from __future__ import annotations

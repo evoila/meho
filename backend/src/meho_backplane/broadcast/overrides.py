@@ -105,7 +105,7 @@ _TENANT_CACHE: dict[UUID, tuple[list[BroadcastOverride], float]] = {}
 
 
 #: Op classes that aggregate-only by default per decision #3 in
-#: ``docs/planning/v0.2-decisions.md``. The resolver consults this set
+#: ``docs/decisions/locked-decisions.md``. The resolver consults this set
 #: rather than re-importing the classifier's internal vocabulary, so a
 #: future change to :func:`classify_op`'s output taxonomy lands in one
 #: place. MUST stay in lockstep with the aggregate-by-default set in

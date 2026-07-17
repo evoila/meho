@@ -80,6 +80,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
@@ -107,6 +108,7 @@ __all__ = [
     "list_recent_events_strict",
     "parse_entry",
     "parse_since",
+    "select_event_model",
     "stream_key",
 ]
 
@@ -362,6 +364,42 @@ def event_matches(
     return not (active_only and _is_expired_claim(event, now or datetime.now(UTC)))
 
 
+def select_event_model(
+    raw_event_json: str,
+) -> type[BroadcastEvent] | type[AgentAnnouncementEvent] | None:
+    """Peek the wire discriminator; pick the model class to validate against.
+
+    Reads only the top-level ``kind`` field (falling back to the historical
+    ``event_kind`` alias) via a cheap :func:`json.loads` pass, then returns
+    the concrete model class the caller should full-validate the same JSON
+    against:
+
+    * ``"agent_announcement"`` → :class:`AgentAnnouncementEvent`.
+    * anything else (including a missing discriminator on a pre-migration
+      entry) → :class:`BroadcastEvent`, the audit-driven default.
+
+    Returns ``None`` when *raw_event_json* is not decodable JSON, so each
+    caller can emit its own surface-specific skip log
+    (``broadcast_history_skipped_malformed_event`` here,
+    ``feed_skipped_malformed_event`` on the SSE edge) rather than sharing
+    one log name across two surfaces.
+
+    Single-sources the discriminator rule so the XRANGE read path
+    (:func:`parse_entry`) and the XREAD SSE path
+    (:func:`meho_backplane.api.v1.feed._process_entries`) dispatch on the
+    same field with the same fallback. BroadcastEvent's ``kind`` is an open
+    ``str`` (not a :class:`typing.Literal`) and pre-migration entries omit
+    it, so a pydantic tagged discriminated union is not usable; this manual
+    peek is the in-tree mold both callers share.
+    """
+    try:
+        peek = json.loads(raw_event_json)
+    except json.JSONDecodeError:
+        return None
+    discriminator = peek.get("kind") or peek.get("event_kind") if isinstance(peek, dict) else None
+    return AgentAnnouncementEvent if discriminator == "agent_announcement" else BroadcastEvent
+
+
 def parse_entry(
     entry_id: str,
     fields: dict[str, str],
@@ -414,27 +452,20 @@ def parse_entry(
             fields=list(fields.keys()),
         )
         return None
-    try:
-        # Cheap discriminator peek -- json.loads on a short string is
-        # microseconds; an XRANGE page of ``limit <= 1000`` events
-        # incurs at most one extra parse pass per entry. The full
-        # pydantic validation runs on the chosen model class below.
-        peek = json.loads(raw_event_json)
-    except json.JSONDecodeError:
+    # G0.16-T6 Finding F (#1312). :func:`select_event_model` peeks the new
+    # top-level ``kind`` discriminator, falling back to the historical
+    # ``event_kind`` field for v0.8.0 in-flight stream entries that haven't
+    # aged out via the publisher's ``MAXLEN ~`` trim yet. It returns ``None``
+    # on undecodable JSON; the full pydantic validation runs on the chosen
+    # model class below.
+    model_cls = select_event_model(raw_event_json)
+    if model_cls is None:
         _log.warning(
             "broadcast_history_skipped_malformed_event",
             stream_key=stream_key,
             entry_id=entry_id,
         )
         return None
-    # G0.16-T6 Finding F (#1312). Prefer the new top-level ``kind``
-    # discriminator; fall back to the historical ``event_kind`` field
-    # for v0.8.0 in-flight stream entries that haven't aged out via
-    # the publisher's ``MAXLEN ~`` trim yet.
-    discriminator = peek.get("kind") or peek.get("event_kind") if isinstance(peek, dict) else None
-    model_cls: type[BroadcastEvent] | type[AgentAnnouncementEvent] = (
-        AgentAnnouncementEvent if discriminator == "agent_announcement" else BroadcastEvent
-    )
     try:
         return model_cls.model_validate_json(raw_event_json)
     except ValidationError:
@@ -483,16 +514,19 @@ def dump_event_wire(
     than as bare context it might absorb as instructions. Audit-driven
     :class:`BroadcastEvent` dumps pass through unchanged.
 
-    Every surface that re-serves stream events to a model goes through
+    Every surface that re-serves stream events **to a model** goes through
     this helper — ``meho.broadcast.recent`` (via
-    :func:`_list_recent_events_core`), ``meho.broadcast.watch``
+    :func:`list_recent_events_strict`), ``meho.broadcast.watch``
     (:func:`meho_backplane.mcp.tools.broadcast._filter_xread_items`)
     and the ``meho://tenant/{tenant_id}/feed`` resource
     (:mod:`meho_backplane.mcp.resources.tenant_feed`). The UI history
     pane is *not* such a surface: it consumes
-    :func:`list_recent_events_fail_soft` but drops announcement-kind
-    events before rendering (``_is_audit_event``), and its HTML sink
-    escapes content separately.
+    :func:`list_recent_events_fail_soft`, which serialises via
+    :func:`_dump_event_plain` (no wrap) because the browser sink escapes
+    every field separately (Alpine ``x-text`` sets ``textContent``), and
+    the multi-line LLM guard envelope would be human-visible noise on a
+    feed row. #2549 renders announcements on that pane; the free text is
+    rendered as escaped quoted prose, not fed to a model.
 
     Filtering (:func:`event_matches`) runs on the *model*, before this
     dump, so ``target`` equality matching is unaffected by the wrap.
@@ -512,6 +546,23 @@ def dump_event_wire(
     return data
 
 
+def _dump_event_plain(
+    event: BroadcastEvent | AgentAnnouncementEvent,
+) -> dict[str, Any]:
+    """Serialise *event* for a non-LLM surface — no untrusted-text wrap.
+
+    The UI history pane (:func:`list_recent_events_fail_soft`) renders
+    every field through an HTML sink that escapes it (Alpine ``x-text``
+    sets ``textContent``), so the stored-prompt-injection guard envelope
+    :func:`dump_event_wire` applies for model-facing surfaces is neither
+    needed nor wanted here — it would surface the multi-line guard block
+    as literal row text. The counterpart split to :func:`dump_event_wire`:
+    LLM-facing reads wrap agent prose, human-facing reads escape it at the
+    sink and show the raw value.
+    """
+    return event.model_dump(mode="json")
+
+
 async def _list_recent_events_core(
     operator: Operator,
     *,
@@ -523,12 +574,21 @@ async def _list_recent_events_core(
     work_ref: str | None,
     active_only: bool,
     limit: int,
+    serialize: Callable[[BroadcastEvent | AgentAnnouncementEvent], dict[str, Any]],
 ) -> dict[str, Any]:
     """Read recent events for *operator*'s tenant; the shared core body.
 
     Internal -- callers pick :func:`list_recent_events_strict` or
     :func:`list_recent_events_fail_soft` so the failure-shape choice
     lives in the function name rather than a flag argument.
+
+    *serialize* is each wrapper's per-surface event serialiser (the same
+    named-contract-over-flag philosophy as the failure-shape split):
+    :func:`list_recent_events_strict` (LLM-facing MCP reads) passes
+    :func:`dump_event_wire` to wrap agent prose in the
+    stored-prompt-injection guard; :func:`list_recent_events_fail_soft`
+    (the human UI history pane) passes :func:`_dump_event_plain` to skip
+    the wrap because the browser sink escapes every field separately.
 
     Issues a single ``XRANGE`` over ``meho:feed:{operator.tenant_id}``
     from the resolved ``since`` lower bound to ``"+"`` (latest),
@@ -567,12 +627,61 @@ async def _list_recent_events_core(
         ),
     )
 
-    # Pin one ``now`` for the whole page so a slow XRANGE parse can't
-    # let an ``active_only`` claim flip expiry-state mid-page.
+    matched = _match_and_serialize_entries(
+        raw_entries,
+        stream_key=key,
+        op_class=op_class,
+        principal=principal,
+        target=target,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
+        active_only=active_only,
+        serialize=serialize,
+    )
+
+    # next_cursor pages forward from the LAST FETCHED entry, not the
+    # last matched one -- a page where every entry was filtered out
+    # still produces a non-null cursor so the caller can keep walking.
+    # When fewer entries came back than the limit, the caller has
+    # reached the live tail; ``None`` signals "no more pages right now"
+    # without precluding a later call.
+    next_cursor: str | None = raw_entries[-1][0] if len(raw_entries) == limit else None
+    return {"events": matched, "next_cursor": next_cursor}
+
+
+def _match_and_serialize_entries(
+    raw_entries: list[tuple[str, dict[str, str]]],
+    *,
+    stream_key: str,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+    actor_sub: str | None,
+    work_ref: str | None,
+    active_only: bool,
+    serialize: Callable[[BroadcastEvent | AgentAnnouncementEvent], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Parse, filter, and serialise one ``XRANGE`` page into event dicts.
+
+    Extracted from :func:`_list_recent_events_core` so the core stays
+    under the code-quality function-size ceiling. Pins one ``now`` for the
+    whole page so a slow parse can't let an ``active_only`` claim flip
+    expiry-state mid-page. Each surviving entry becomes
+    ``{"id", "cursor", **serialize(event)}``:
+
+    * ``cursor`` is the Valkey stream entry id, self-labelled to match the
+      ``cursor`` input arg it round-trips through (#2479); ``id`` is the
+      historical alias of the same value.
+    * ``serialize`` is the caller's per-surface serialiser:
+      :func:`dump_event_wire` (LLM-facing MCP reads, wraps announcement
+      free-text in the untrusted-content envelope) or
+      :func:`_dump_event_plain` (the UI pane, which escapes at its HTML
+      sink).
+    """
     now = datetime.now(UTC)
     matched: list[dict[str, Any]] = []
     for entry_id, fields in raw_entries:
-        event = parse_entry(entry_id, fields, stream_key=key)
+        event = parse_entry(entry_id, fields, stream_key=stream_key)
         if event is None:
             continue
         if not event_matches(
@@ -586,28 +695,8 @@ async def _list_recent_events_core(
             now=now,
         ):
             continue
-        # ``cursor`` is the Valkey stream entry id, self-labelled to
-        # match the ``cursor`` input arg it round-trips through
-        # (#2479); ``id`` is the historical alias of the same value —
-        # kept because every other MCP surface uses ``id`` for the
-        # row's domain UUID and broadcast rows predate that
-        # convention. The remaining fields come from the event model
-        # (including ``event_id`` as the durable UUID for BroadcastEvent
-        # or the announcement-id equivalent for AgentAnnouncementEvent).
-        # All coexist so the caller can correlate a stream-cursor walk
-        # with the canonical audit row via ``event_id`` / ``audit_id``.
-        # ``dump_event_wire`` wraps announcement free-text in the
-        # untrusted-content envelope (stored-prompt-injection guard).
-        matched.append({"id": entry_id, "cursor": entry_id, **dump_event_wire(event)})
-
-    # next_cursor pages forward from the LAST FETCHED entry, not the
-    # last matched one -- a page where every entry was filtered out
-    # still produces a non-null cursor so the caller can keep walking.
-    # When fewer entries came back than the limit, the caller has
-    # reached the live tail; ``None`` signals "no more pages right now"
-    # without precluding a later call.
-    next_cursor: str | None = raw_entries[-1][0] if len(raw_entries) == limit else None
-    return {"events": matched, "next_cursor": next_cursor}
+        matched.append({"id": entry_id, "cursor": entry_id, **serialize(event)})
+    return matched
 
 
 async def list_recent_events_strict(
@@ -643,6 +732,10 @@ async def list_recent_events_strict(
     Mirrors the fail-loud contract on
     :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
     (its write-side counterpart).
+
+    Serialises through :func:`dump_event_wire`: this is an LLM-facing MCP
+    read, so agent-authored announcement prose is wrapped in the
+    stored-prompt-injection guard envelope.
     """
     return await _list_recent_events_core(
         operator,
@@ -654,6 +747,7 @@ async def list_recent_events_strict(
         work_ref=work_ref,
         active_only=active_only,
         limit=limit,
+        serialize=dump_event_wire,
     )
 
 
@@ -688,6 +782,11 @@ async def list_recent_events_fail_soft(
     Mirrors the fail-open contract on
     :func:`~meho_backplane.broadcast.publisher.publish_event` (its
     write-side counterpart for non-load-bearing publishes).
+
+    Serialises through :func:`_dump_event_plain` (no untrusted-text wrap):
+    the sole caller is the human UI history pane, whose HTML sink escapes
+    every field separately, so the LLM guard envelope would only add
+    human-visible noise to a feed row (#2549).
     """
     try:
         return await _list_recent_events_core(
@@ -700,6 +799,7 @@ async def list_recent_events_fail_soft(
             work_ref=work_ref,
             active_only=active_only,
             limit=limit,
+            serialize=_dump_event_plain,
         )
     except RedisError as exc:
         _log.warning(

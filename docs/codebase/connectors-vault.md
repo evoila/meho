@@ -668,6 +668,6 @@ and a real Postgres audit store (reusing the integration conftest's
   (approle), https://developer.hashicorp.com/vault/api-docs/secret/identity
   (identity), https://developer.hashicorp.com/vault/api-docs/auth/token
   (token).
-- Decision #3 PII redaction: `docs/planning/v0.2-decisions.md`.
+- Decision #3 PII redaction: `docs/decisions/locked-decisions.md`.
 - CLAUDE.md postulates 1 (typed connectors first-class) and 7
   (synchronous append-only audit).

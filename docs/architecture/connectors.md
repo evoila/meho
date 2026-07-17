@@ -199,7 +199,7 @@ Connector (ABC)                                      ← G0.2-T1 (shipped)
 | SSH transport | `asyncssh` | Async-native (no `to_thread` offload). Shipped T4. |
 | Vault client | `hvac` (chassis-era) | Sync, wrapped in `asyncio.to_thread` already. |
 | Vendor: vSphere | **vSphere REST API** | NOT pyvmomi (SOAP, sync). NOT govc subprocess. v0.2 returns 501 for REST gaps; v0.2.next adds a govc fallback if needed. |
-| Vendor: Kubernetes | **`kubernetes_asyncio`** (locked [decision #8](../planning/v0.2-decisions.md)) | Async fork of the official Python client; mature; broad API coverage; loads kubeconfig from a dict — direct fit for the consumer's `kubeconfig`-in-Vault flow. Rejected: `kr8s` (smaller surface) and `kubectl` subprocess (per-op cost, harder to test). Skeleton landed in [G3.2-T1 (#321)](https://github.com/evoila/meho/issues/321) under [`backend/src/meho_backplane/connectors/kubernetes/`](../../backend/src/meho_backplane/connectors/kubernetes/). |
+| Vendor: Kubernetes | **`kubernetes_asyncio`** (locked [decision #8](../decisions/locked-decisions.md)) | Async fork of the official Python client; mature; broad API coverage; loads kubeconfig from a dict — direct fit for the consumer's `kubeconfig`-in-Vault flow. Rejected: `kr8s` (smaller surface) and `kubectl` subprocess (per-op cost, harder to test). Skeleton landed in [G3.2-T1 (#321)](https://github.com/evoila/meho/issues/321) under [`backend/src/meho_backplane/connectors/kubernetes/`](../../backend/src/meho_backplane/connectors/kubernetes/). |
 
 ## The registry
 
@@ -227,7 +227,7 @@ For an operator call like `meho operation call vmware-rest-9.0 vm.list --target 
 7. → JSONFlux reducer wraps the response (pass-through default in v0.2).
 8. Returns `OperationResult(status="ok", result=[...], duration_ms=42.3)`.
 9. `AuditMiddleware` writes one row with `tenant_id`, `target_id`, `op_id`, `params_hash`, plus any `parent_audit_id` for composite-child dispatches.
-10. G6 broadcast publishes an event (aggregate-only for `credential_read` op-class per decision #3 in [v0.2-decisions.md](../planning/v0.2-decisions.md)).
+10. G6 broadcast publishes an event (aggregate-only for `credential_read` op-class per decision #3 in [locked-decisions.md](../decisions/locked-decisions.md)).
 11. MCP path mirrors this: `tools/call name="call_operation"` dispatches through the same substrate. Vendor-specific identifiers (`vmware-rest-9.0`, `vm.list`) live in arguments, never in the MCP tool surface — see [CLAUDE.md](../../CLAUDE.md) postulate 5.
 
 ## Adding a new connector
@@ -292,5 +292,5 @@ For team workflow:
 - v0.1-spec §"Operations" L294–311 — three sources (auto-derived OpenAPI primary, hand-written secondary, runbooks tertiary).
 - v0.1-spec §"Per-target identity model" L447–454 — the AuthModel enum origin.
 - Consumer-needs.md §G3 L72–101 — contract requirements + connector tier priority.
-- [docs/planning/v0.2-decisions.md](../planning/v0.2-decisions.md) — locked decisions (track count, library choices, sequencing).
+- [docs/decisions/locked-decisions.md](../decisions/locked-decisions.md) — locked decisions (track count, library choices, sequencing).
 - [docs/architecture/mcp.md](mcp.md) — the parallel MCP-tool registry every operation also registers against.

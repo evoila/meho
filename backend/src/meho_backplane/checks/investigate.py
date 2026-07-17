@@ -82,6 +82,7 @@ neither blocks nor raises.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import re
 import time
 import uuid
@@ -175,11 +176,6 @@ _INVESTIGATOR_SUB = "__checks_investigator__"
 #: outlives the sync timeout (converts to async). A dumb constant, same posture
 #: as the runner's fixed bounds.
 _POLL_INTERVAL_SECONDS = 5.0
-
-#: Server-side ``list_memories`` page cap for a suppression lookup -- one slug's
-#: entries never exceed one row (``(scope, slug)`` is unique), so a tiny cap is
-#: ample; the substring filter may over-match, hence the exact-slug check.
-_MEMORY_LOOKUP_LIMIT = 25
 
 #: The three non-terminal ``agent_run`` statuses. An in-flight run in any of
 #: these states for the same ``(tenant_id, work_ref)`` suppresses a duplicate
@@ -649,7 +645,10 @@ def _group_key(
                 return (-min_depth, node[0], node[1])
 
             best = min(common, key=_rank)
-            return _slugify(f"{best[0]}-{best[1]}")
+            # Append a digest of the original (kind, name) so two distinct
+            # topology causes that slugify to the same string do not share a
+            # suppression key (which would suppress one when the other is muted).
+            return f"{_slugify(f'{best[0]}-{best[1]}')}-{_identity_digest(best[0], best[1])}"
     return min(_sensor_group_key(m) for m in members)
 
 
@@ -669,6 +668,19 @@ def _slugify(value: str) -> str:
     return slug or "node"
 
 
+def _identity_digest(*parts: str) -> str:
+    """Short stable digest disambiguating a slug from its source identity.
+
+    ``_slugify`` is lossy (``prod/db`` and ``prod db`` collapse to the same
+    slug; a separator-only name becomes ``node``), so two distinct identities
+    can otherwise share a suppression key / ``work_ref``. Appending this digest
+    of the *original* parts makes the key collision-resistant while staying in
+    the ``[a-z0-9_.-]`` slug alphabet.
+    """
+    raw = "\x00".join(parts).encode("utf-8", "surrogatepass")
+    return hashlib.sha256(raw).hexdigest()[:8]
+
+
 async def _investigate_group(
     operator: Operator,
     tenant_id: uuid.UUID,
@@ -684,7 +696,10 @@ async def _investigate_group(
     """
     settings = get_settings()
     group_key = group.key
-    work_ref = f"{_WORK_REF_PREFIX}:{dashboard.slug}:{group_key}"
+    # Include the dashboard id so two dashboards whose names slugify to the same
+    # value do not collide on ``work_ref`` (which would coalesce their unrelated
+    # in-flight investigations); the readable slug is kept for operators.
+    work_ref = f"{_WORK_REF_PREFIX}:{dashboard.dashboard_id.hex[:8]}:{dashboard.slug}:{group_key}"
     memory = MemoryService()
     try:
         if await _is_suppressed(memory, operator, group_key):
@@ -830,17 +845,16 @@ async def _is_suppressed(memory: MemoryService, operator: Operator, group_key: s
     Decided on metadata, never body prose, so no LLM call is needed to decide.
     """
     slug = f"{_NOISE_SLUG_PREFIX}{group_key}"
-    entries = await memory.list_memories(
-        operator,
-        scope=MemoryScope.TENANT,
-        slug_pattern=slug,
-        limit=_MEMORY_LOOKUP_LIMIT,
-    )
-    for entry in entries:
-        # slug_pattern is a substring filter; require the exact slug.
-        if entry.slug == slug:
-            return _is_falsey(entry.metadata.get("re_escalate"))
-    return False
+    # Exact (scope, slug) lookup. A ``list_memories(slug_pattern=...)`` query is
+    # a *substring* filter capped at a limit, so an exact suppression entry can
+    # be pushed past the cap by unrelated slugs that merely contain this one --
+    # silently failing to suppress a known-noise cause (a needless agent run).
+    # ``recall`` resolves the single ``(TENANT, slug)`` entry the closed loop
+    # writes via ``remember`` (same scope + slug), with no cap to hide behind.
+    entry = await memory.recall(operator, MemoryScope.TENANT, slug)
+    if entry is None:
+        return False
+    return _is_falsey(entry.metadata.get("re_escalate"))
 
 
 def _is_falsey(value: object) -> bool:

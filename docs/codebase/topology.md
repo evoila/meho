@@ -149,7 +149,11 @@ admin meta-tool `meho.topology.create_node` in
 `mcp/tools/topology.py` from accreting further past the 600-line
 guidance; the registry auto-discovers either way) that closes the
 empty-tenant bootstrap gap — same `tenant_admin` / `write` shape as
-the annotate pair.
+the annotate pair. #2539 added a fourth admin meta-tool
+`meho.topology.bulk_import` (own module `mcp/tools/topology_bulk_import.py`,
+same separate-module reason) — batch curated-edge authoring for the
+agent surface, closing the MCP half of the propose→plan→apply loop the
+REST / CLI / console bulk-import fronts already had.
 
 Since #2537 the three MCP write handlers no longer call the service
 primitives directly: they route through `operations.dispatch()` with
@@ -165,13 +169,36 @@ returns a `{status: awaiting_approval, approval_request_id, ...}`
 envelope; the write executes with the stored params when a human
 approves from any approvals surface), while a human tenant_admin rides
 the default-allow branch and executes immediately — same UX as before.
-The typed-op handlers unwrap params and call `annotate_edge` /
-`create_or_get_node` / `unannotate_edge` unchanged; domain errors come
+The typed-op handlers unwrap params and call `annotate_edge_with_plan` /
+`create_or_get_node` / `unannotate_edge` / `bulk_import_edges` unchanged;
+domain errors come
 back as `connector_error` results whose `exception_class` the MCP shim
 (`dispatch_topology_write` in `mcp/tools/topology.py`) maps back to
 JSON-RPC `-32602`. Each gated MCP write therefore produces one extra
 audit row (`method="DISPATCH"`, `path=<op_id>`, with
-`policy_decision`) alongside the service-level row. The REST + UI
+`policy_decision`) alongside the service-level row.
+
+`meho.topology.bulk_import` (#2539) is the one two-behaviour tool. Its
+`dry_run` param splits the path: `dry_run=true` (the default,
+read-shaped) calls `bulk_import_edges(dry_run=True)` **directly** — no
+dispatch, no gate — so an agent's harmless plan preview never parks; a
+`BulkImportValidationError` becomes a -32602 whose `error.data` carries
+every row's diagnostic (the REST `422 invalid_bulk` analogue).
+`dry_run=false` dispatches the apply-only typed op `topology.bulk_import`
+(registered with `rows` alone — no `dry_run`, so the parked
+`ApprovalRequest` holds exactly the batch to apply) through the same
+gate: an AGENT parks the whole batch as one request, a human applies
+immediately, and approve-time re-dispatch applies all rows in the
+service's all-or-nothing transaction. The 1000-row cap is enforced at
+the tool boundary via the `inputSchema` `maxItems` (mirroring the REST
+`_BULK_IMPORT_MAX_EDGES` guard); like `query_topology`'s inline edge
+list, the plan is returned inline under a hard row cap rather than a
+JSONFlux handle. `meho.topology.annotate`'s return shape gained a
+`superseded` list (#2539): the ids of the auto edges the assertion
+displaced — already stamped on the shared audit / broadcast payload, so
+surfacing them on the return is a shape change, not a new query (the
+handler reads `plan.audit_payload["superseded"]` from
+`annotate_edge_with_plan`, the plan-returning sibling of `annotate_edge`). The REST + UI
 write fronts are human-only surfaces and keep calling the service
 primitives directly. The three write ops are also discoverable /
 dispatchable through the generic agent meta-tools (`search_operations`
@@ -824,7 +851,7 @@ O(per_side_fetch) = O(limit + 1) per side, bounded by `limit ≤ 1000`.
 ### Audit class
 
 The REST route binds `audit_op_id="topology.timeline"` /
-`audit_op_class="audit_query"` per [decision #3](../planning/v0.2-decisions.md)
+`audit_op_class="audit_query"` per [decision #3](../decisions/locked-decisions.md)
 — temporal graph queries are inspections of system state, parallel
 to G8's audit-log query surface. The broadcast event carries only
 `{op_id, result_status, row_count}` so the request filter (which

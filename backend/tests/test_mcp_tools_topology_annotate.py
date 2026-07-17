@@ -392,12 +392,14 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
 ) -> None:
     """tools/call meho.topology.annotate {...} → curated row + 1 audit + 1 broadcast.
 
-    The dispatcher writes its own audit row at
+    Three audit axes since #2537: the MCP dispatcher writes its row at
     ``/mcp/tools/call/meho.topology.annotate`` (the per-MCP-call axis),
-    and ``annotate_edge`` writes a second row keyed
-    ``op_id='topology.annotate'`` (the service-level axis). The
-    issue's "one audit row + one broadcast event" applies to the
-    service emission — verified here.
+    the operations dispatcher writes a ``method='DISPATCH'`` row keyed
+    ``path='topology.annotate'`` (the policy-gated dispatch axis, new
+    in #2537), and ``annotate_edge`` writes the service-level row
+    (``method='ANNOTATE'``, same path). The issue's "one audit row +
+    one broadcast event" applies to the service emission — verified
+    here per ``(path, method)`` pair.
     """
     client, _op = client_with_operator
     await _seed_node(kind="principal", name="k8s-sa-foo")
@@ -456,11 +458,13 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
     assert edges[0].source == "curated"
     assert edges[0].properties["note"] == "canonical k8s SA → Vault role"
 
-    # Exactly one service-level audit row + one MCP dispatcher row.
-    service_rows = [a for a in audits if a.path == "topology.annotate"]
+    # Exactly one service-level audit row, one policy-gated dispatch
+    # row (#2537), and one MCP dispatcher row.
+    service_rows = [a for a in audits if a.path == "topology.annotate" and a.method == "ANNOTATE"]
+    gate_rows = [a for a in audits if a.path == "topology.annotate" and a.method == "DISPATCH"]
     dispatcher_rows = [a for a in audits if a.path == "/mcp/tools/call/meho.topology.annotate"]
     assert len(service_rows) == 1
-    assert service_rows[0].method == "ANNOTATE"
+    assert len(gate_rows) == 1
     assert len(dispatcher_rows) == 1
 
     # Exactly one broadcast event (the service-level emission).
@@ -1081,10 +1085,15 @@ def test_annotate_description_matches_actual_response_shape() -> None:
     assert entry is not None
     defn = entry[0]
     desc = defn.description
-    declared = set(defn.outputSchema.get("properties", {}).keys())
+    # Since #2537 the outputSchema is a oneOf tagged union: the executed
+    # domain shape (first branch) or the awaiting_approval envelope for
+    # a parked agent-principal write (second branch).
+    executed_shape, parked_shape = defn.outputSchema["oneOf"]
+    declared = set(executed_shape.get("properties", {}).keys())
     # outputSchema is the canonical contract — anything the description
     # *names* as a response key must be in it.
     assert declared == {"edge_id", "from", "to", "kind", "source", "conflicts"}
+    assert parked_shape["properties"]["status"] == {"const": "awaiting_approval"}
     # Belt-and-suspenders: the literal "Returns `{...}`" clause names
     # only the keys above.
     assert "Returns `{edge_id, from:" in desc

@@ -142,15 +142,41 @@ REST wrappers). G9.2-T7 (#598) widened the parametric tool with the
 `edges` facet (dispatches to `list_edges` — replaces a standalone
 `list_edges` meta-tool) and added the admin-namespace pair
 `meho.topology.annotate` / `meho.topology.unannotate`
-(`required_role=TENANT_ADMIN`, `op_class="write"`); both admin tools
-call `annotate_edge` / `unannotate_edge` directly and are visible only
+(`required_role=TENANT_ADMIN`, `op_class="write"`), visible only
 to a tenant_admin-scoped session. G0.9.1-T6 (#778) added a third
 admin meta-tool `meho.topology.create_node` in
 `mcp/tools/topology_create_node.py` (separate module to keep
 `mcp/tools/topology.py` from accreting further past the 600-line
 guidance; the registry auto-discovers either way) that closes the
-empty-tenant bootstrap gap — calls `create_or_get_node` directly,
-same `tenant_admin` / `write` shape as the annotate pair.
+empty-tenant bootstrap gap — same `tenant_admin` / `write` shape as
+the annotate pair.
+
+Since #2537 the three MCP write handlers no longer call the service
+primitives directly: they route through `operations.dispatch()` with
+the targetless typed ops `topology.annotate` / `topology.create_node`
+/ `topology.unannotate` registered by
+`connectors/topology/ops.py` under the synthetic connector id
+`topology-graph-1.x` (the `secret.move` mold — module-level handlers,
+`target=None`, `parse_connector_id`-compatible identity). The
+descriptors carry `safety_level="caution"` + `requires_approval=False`:
+an AGENT principal's write hits the needs-approval floor in
+`policy_gate` and parks as a durable `ApprovalRequest` (the MCP tool
+returns a `{status: awaiting_approval, approval_request_id, ...}`
+envelope; the write executes with the stored params when a human
+approves from any approvals surface), while a human tenant_admin rides
+the default-allow branch and executes immediately — same UX as before.
+The typed-op handlers unwrap params and call `annotate_edge` /
+`create_or_get_node` / `unannotate_edge` unchanged; domain errors come
+back as `connector_error` results whose `exception_class` the MCP shim
+(`dispatch_topology_write` in `mcp/tools/topology.py`) maps back to
+JSON-RPC `-32602`. Each gated MCP write therefore produces one extra
+audit row (`method="DISPATCH"`, `path=<op_id>`, with
+`policy_decision`) alongside the service-level row. The REST + UI
+write fronts are human-only surfaces and keep calling the service
+primitives directly. The three write ops are also discoverable /
+dispatchable through the generic agent meta-tools (`search_operations`
+/ `call_operation`) with identical gating, since the gate lives in the
+dispatcher, not the front.
 G9.1-T8 (#456) shipped the closing
 acceptance suite
 (`backend/tests/integration/test_topology_g91_acceptance.py` + the

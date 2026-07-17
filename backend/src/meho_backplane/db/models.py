@@ -1818,7 +1818,7 @@ class GraphEdgeKind(StrEnum):
 #: -- ``auto`` for probe-derived rows (T3 refresh), ``curated`` for
 #: operator-asserted ones (G9.2 edges; #2536 node seeds via
 #: :func:`meho_backplane.topology.nodes.create_or_get_node`). Shared
-#: between ``ck_graph_node_source`` (migration ``0065``) and
+#: between ``ck_graph_node_source`` (migration ``0066``) and
 #: ``ck_graph_edge_source`` (migration ``0007``) so the two halves of
 #: the curated-durability discipline cannot drift.
 _GRAPH_SOURCES: tuple[str, ...] = ("auto", "curated")
@@ -1893,7 +1893,7 @@ class GraphNode(Base):
       cascade-delete the topology data the agent may still want to
       reason about; the node lives on as a non-target row.
     * ``source`` -- Text NOT NULL DEFAULT ``'auto'`` with a DB-layer
-      ``CHECK source IN (...)`` constraint (migration ``0065``;
+      ``CHECK source IN (...)`` constraint (migration ``0066``;
       mirrors :attr:`GraphEdge.source` / ``ck_graph_edge_source``).
       ``auto`` for probe-derived rows (T3 refresh); ``curated`` for
       operator/agent-seeded rows

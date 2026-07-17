@@ -28,13 +28,13 @@ already serve `/api/v1/*` and `/mcp`.
 
 Locked decisions:
 
-- [#9 frontend stack](../planning/v0.2-decisions.md) — HTMX 2 + Jinja2
+- [#9 frontend stack](../decisions/locked-decisions.md) — HTMX 2 + Jinja2
   + Tailwind 4 + DaisyUI 5 + Alpine.js + Cytoscape.js.
-- [#10 deploy shape](../planning/v0.2-decisions.md) — server-rendered
+- [#10 deploy shape](../decisions/locked-decisions.md) — server-rendered
   from the existing FastAPI backplane at `/ui/*`; tiny static
   CSS+JS bundle at `/ui/static/*`. No second image, no separate
   ingress, no parallel CI job.
-- [#11 auth](../planning/v0.2-decisions.md) — Backend-for-Frontend
+- [#11 auth](../decisions/locked-decisions.md) — Backend-for-Frontend
   (BFF) with `HttpOnly; Secure; SameSite=Strict` session cookie;
   tokens stay server-side.
 
@@ -117,7 +117,7 @@ download (~38 MB binary) is the one-time cost.
 ## Session storage (Task #864)
 
 The BFF (Backend-for-Frontend) shape locked by
-[decision #11](../planning/v0.2-decisions.md) keeps tokens
+[decision #11](../decisions/locked-decisions.md) keeps tokens
 server-side. Task #864 ships the storage substrate the
 upcoming T4 login flow writes to:
 
@@ -1627,7 +1627,7 @@ against the SQLite fixture.
 
 ## References
 
-- v0.2 decisions [#9 / #10 / #11](../planning/v0.2-decisions.md).
+- v0.2 decisions [#9 / #10 / #11](../decisions/locked-decisions.md).
 - HTMX 2 — https://htmx.org/
 - HTMX `hx-trigger="every Ns"` — https://htmx.org/attributes/hx-trigger/
 - HTMX `htmx:afterSwap` event — https://htmx.org/events/#htmx:afterSwap

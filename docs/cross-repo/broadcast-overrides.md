@@ -24,7 +24,7 @@ deliberately conservative — a full-detail credential-read event
 leaks the path operators were touching; a full-detail audit-query
 event leaks the filter they were investigating and the rows it
 returned. The decision lives in
-[`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md)
+[`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md)
 under decision #3.
 
 G6.3 ([#376](https://github.com/evoila/meho/issues/376)) ships **two
@@ -513,4 +513,4 @@ $ meho audit query --since 1h --json | \
 * MCP Inspector CLI:
   <https://github.com/modelcontextprotocol/inspector>.
 * Decision #3 (aggregate-only-by-default classifier):
-  [`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md).
+  [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md).

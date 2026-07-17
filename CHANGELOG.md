@@ -7828,7 +7828,7 @@ authored v0.2.1 client code against the public REST surface.
   REST + CLI + MCP surfaces; tenant-scoped throughout. CLI:
   `meho topology refresh/dependents/dependencies/path` and
   `meho targets discover`. MCP: `query_topology` + `list_targets`
-  meta-tools. Implements ~70% of [decision #6](docs/planning/v0.2-decisions.md)'s
+  meta-tools. Implements ~70% of [decision #6](docs/decisions/locked-decisions.md)'s
   auto-discoverable half.
 - **G9.2 — Curated cross-system edges + annotation flow** (#364).
   Closed v0.2 10-kind edge vocabulary (Alembic 0010) extends the
@@ -7838,7 +7838,7 @@ authored v0.2.1 client code against the public REST surface.
   `properties.conflicts_with` markers; supersede-on-curate;
   refresh sticky-supersede. Tenant-boundary + 10k-node
   performance acceptance. Implements the ~30% operator-curated
-  half of [decision #6](docs/planning/v0.2-decisions.md).
+  half of [decision #6](docs/decisions/locked-decisions.md).
 
 ### Security
 

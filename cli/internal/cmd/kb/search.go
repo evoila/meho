@@ -50,7 +50,7 @@ func newSearchCmd() *cobra.Command {
 			"capped at 2000 chars and the result limit at 50 by the " +
 			"backend (G0.4-T5 contract). The route audits the query " +
 			"hash but not the raw query (decision #3 in " +
-			"docs/planning/v0.2-decisions.md).",
+			"docs/decisions/locked-decisions.md).",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

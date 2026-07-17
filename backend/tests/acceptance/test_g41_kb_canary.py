@@ -57,7 +57,7 @@ shipped by T1-T4 against the consumer's real ``kb/`` directory:
   rather than a hard floor; see the test docstring on
   :func:`test_eval_corpus_retrieval_quality_against_real_kb` for
   the math. The MEHO-vs-``grep -r kb/`` baseline comparison
-  (decision #2 from ``docs/planning/v0.2-decisions.md``) and the
+  (decision #2 from ``docs/decisions/locked-decisions.md``) and the
   operator-facing retire-decision narrative land in T6 #420's
   cross-repo runbook.
 

@@ -248,7 +248,7 @@ connector's set-shaped op; small lists land inline as before.
 
 `vault.kv.read` and `vault.kv.list` are the canonical
 `credential_read` ops (locked [decision
-#3](../planning/v0.2-decisions.md)). The broadcast publisher's
+#3](../decisions/locked-decisions.md)). The broadcast publisher's
 sensitivity classifier maps them via an explicit allowlist —
 `{vault.kv.read, vault.kv.list}` in
 [`backend/src/meho_backplane/broadcast/events.py`](../../backend/src/meho_backplane/broadcast/events.py)
@@ -356,7 +356,7 @@ pattern never had — that audit coverage is the point of migrating.
 - Tasks that shipped this surface: [#545](https://github.com/evoila/meho/issues/545) (KV-v2 ops), [#546](https://github.com/evoila/meho/issues/546) (sys ops), [#547](https://github.com/evoila/meho/issues/547) (auth ops), [#550](https://github.com/evoila/meho/issues/550) (CLI verbs).
 - Engineering companion: [`docs/codebase/connectors-vault.md`](../codebase/connectors-vault.md).
 - Federation-chain setup (prerequisite): [`vault-provisioning.md`](./vault-provisioning.md).
-- PII default (decision #3): [`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md); classifier [`backend/src/meho_backplane/broadcast/events.py`](../../backend/src/meho_backplane/broadcast/events.py).
+- PII default (decision #3): [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md); classifier [`backend/src/meho_backplane/broadcast/events.py`](../../backend/src/meho_backplane/broadcast/events.py).
 - Broadcast feed onboarding: [`broadcast-onboarding.md`](./broadcast-onboarding.md). Audit query: [`audit-query.md`](./audit-query.md).
 - Op handlers: [`backend/src/meho_backplane/connectors/vault/`](../../backend/src/meho_backplane/connectors/vault/) (`ops.py` KV, `ops_sys.py`, `ops_auth.py`). CLI verbs: [`cli/internal/cmd/vault/`](../../cli/internal/cmd/vault/).
 - Consumer wrappers retired: [`scripts/_secret-read.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/_secret-read.sh), [`scripts/vault.sh`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/scripts/vault.sh).

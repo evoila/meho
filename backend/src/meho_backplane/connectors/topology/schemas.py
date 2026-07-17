@@ -27,6 +27,10 @@ from meho_backplane.db.models import (
 __all__ = [
     "ANNOTATE_PARAMETER_SCHEMA",
     "ANNOTATE_RESPONSE_SCHEMA",
+    "BULK_IMPORT_MAX_EDGES",
+    "BULK_IMPORT_PARAMETER_SCHEMA",
+    "BULK_IMPORT_RESPONSE_SCHEMA",
+    "BULK_IMPORT_TOOL_INPUT_SCHEMA",
     "CREATE_NODE_PARAMETER_SCHEMA",
     "CREATE_NODE_RESPONSE_SCHEMA",
     "UNANNOTATE_PARAMETER_SCHEMA",
@@ -175,8 +179,20 @@ ANNOTATE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
         },
+        "superseded": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Ids of the `source='auto'` edges this assertion displaced "
+                "(§6 class 1 — same kind, different endpoint). The auto row "
+                "is stamped `properties.superseded_by=<this edge id>` and "
+                "drops out of traversal until this curated edge is removed. "
+                "Empty on a pair no probe covers. Matches the audit / "
+                "broadcast payload's `superseded` list exactly."
+            ),
+        },
     },
-    "required": ["edge_id", "from", "to", "kind", "source", "conflicts"],
+    "required": ["edge_id", "from", "to", "kind", "source", "conflicts", "superseded"],
 }
 
 UNANNOTATE_PARAMETER_SCHEMA: dict[str, Any] = {
@@ -354,4 +370,127 @@ CREATE_NODE_RESPONSE_SCHEMA: dict[str, Any] = {
         "was_created": {"type": "boolean"},
     },
     "required": ["node_id", "kind", "name", "source", "was_created"],
+}
+
+
+# ---------------------------------------------------------------------------
+# Bulk import (#2539) — batch curated-edge authoring for the agent surface.
+# ---------------------------------------------------------------------------
+
+#: Boundary ceiling on the number of edge rows one ``meho.topology.
+#: bulk_import`` call accepts. Mirrors the REST boundary cap
+#: (``api/v1/topology._BULK_IMPORT_MAX_EDGES`` = 1000) so the two fronts
+#: reject an oversized batch identically. The service layer
+#: (:func:`~meho_backplane.topology.bulk_import.bulk_import_edges`) is
+#: unbounded by design — the size guard belongs at each front boundary.
+BULK_IMPORT_MAX_EDGES = 1000
+
+#: Per-row shape is exactly one single-edge annotate's params
+#: (``from_name`` / ``kind`` / ``to_name`` + the optional kind pins,
+#: note, evidence_url). Reusing :data:`ANNOTATE_PARAMETER_SCHEMA`
+#: verbatim keeps the row grammar and the single-edge grammar from
+#: drifting — a bulk row is definitionally one annotate.
+_BULK_IMPORT_ROWS_PROPERTY: dict[str, Any] = {
+    "type": "array",
+    "minItems": 1,
+    "maxItems": BULK_IMPORT_MAX_EDGES,
+    "items": ANNOTATE_PARAMETER_SCHEMA,
+    "description": (
+        "The edges to import, in source order. Each row is one "
+        "`meho.topology.annotate` call's params: `from_name`, `kind`, "
+        "`to_name` are required; `from_node_kind` / `to_node_kind` pin "
+        "an ambiguous endpoint; `note` / `evidence_url` are optional "
+        f"free text. Between 1 and {BULK_IMPORT_MAX_EDGES} rows — an "
+        "oversized batch is rejected at the tool boundary before any "
+        "service call runs. Both endpoints of every row must already "
+        "exist as `graph_node` rows; seed them with "
+        "`meho.topology.create_node` first."
+    ),
+}
+
+#: Typed-op parameter schema (apply path only): the ``rows`` array with
+#: no ``dry_run`` — the dispatched op is always the apply, so the
+#: ``ApprovalRequest`` an agent parks carries exactly the batch to apply
+#: and nothing else. The MCP front routes the free dry-run away from
+#: dispatch, so ``dry_run`` never reaches this schema.
+BULK_IMPORT_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"rows": _BULK_IMPORT_ROWS_PROPERTY},
+    "required": ["rows"],
+    "additionalProperties": False,
+}
+
+#: MCP tool inputSchema: the ``rows`` array plus the ``dry_run`` toggle.
+#: ``dry_run`` defaults to ``true`` — the safe, read-shaped plan is the
+#: default; an agent opts into the gated apply explicitly with
+#: ``dry_run=false``.
+BULK_IMPORT_TOOL_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "rows": _BULK_IMPORT_ROWS_PROPERTY,
+        "dry_run": {
+            "type": "boolean",
+            "default": True,
+            "description": (
+                "When true (the default), returns the per-row "
+                "create/update/conflict plan without writing anything "
+                "and without parking — the free, read-shaped propose "
+                "step. When false, applies the whole batch atomically "
+                "(all-or-nothing): a human tenant_admin executes "
+                "immediately, an agent principal parks the batch as one "
+                "`ApprovalRequest` for a human to approve."
+            ),
+        },
+    },
+    "required": ["rows"],
+    "additionalProperties": False,
+}
+
+#: Response shape for both the dry-run plan and the applied result —
+#: mirrors :class:`~meho_backplane.topology.bulk_import.BulkImportResult`
+#: and the REST ``POST /edges/bulk`` body. ``edge_id`` is null on
+#: dry-run rows (no row exists yet) and on the rare post-commit reload
+#: miss; ``superseded`` / ``conflicts`` echo the §6 marker arrays.
+BULK_IMPORT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "dry_run": {"type": "boolean"},
+        "created": {"type": "integer"},
+        "updated": {"type": "integer"},
+        "conflicts": {"type": "integer"},
+        "rows": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "update", "conflict"],
+                    },
+                    "edge_id": {"type": ["string", "null"]},
+                    "from_name": {"type": "string"},
+                    "from_kind": {"type": "string"},
+                    "to_name": {"type": "string"},
+                    "to_kind": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "superseded": {"type": "array", "items": {"type": "string"}},
+                    "conflicts": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": [
+                    "index",
+                    "action",
+                    "edge_id",
+                    "from_name",
+                    "from_kind",
+                    "to_name",
+                    "to_kind",
+                    "kind",
+                    "superseded",
+                    "conflicts",
+                ],
+            },
+        },
+    },
+    "required": ["dry_run", "created", "updated", "conflicts", "rows"],
 }

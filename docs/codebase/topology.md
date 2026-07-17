@@ -18,9 +18,9 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 **Read half — entry points (async, read-only):**
 
-- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None)`
+- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
   — reverse traversal, "what depends on me".
-- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None)`
+- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
   — forward traversal, "what I depend on".
 - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
   — shortest unweighted path, or `None` if unreachable.
@@ -229,6 +229,8 @@ as a warning callout next to the counts (#2210).
 | `properties` | `dict` | `graph_node.properties` JSONB; wrapped in `MappingProxyType` after validation so the frozen model is deeply immutable, serialised back to a plain `dict`. |
 | `depth` | `int` | Distance from the query root: root = 0, immediate = 1, transitive = 2, … |
 | `via_edge_kind` | `str \| None` | The `graph_edge.kind` of the edge used to reach this node; `None` for the root. |
+| `parent_node_id` | `UUID \| None` | #2538 chain provenance: the `graph_node.id` the walk stepped from; `None` for the root. In a closure result the parent is always itself a row of that result, so the flat list reconstructs the exact dependency chain without follow-up edge lookups. Additive (`None` default). |
+| `via_edge_id` | `UUID \| None` | #2538 chain provenance: the `graph_edge.id` that was walked to reach this node; `None` for the root. Additive (`None` default). |
 
 ### `TopologyPath` — frozen Pydantic v2 (read half)
 
@@ -401,18 +403,51 @@ bind.
 
 The traversal is a single `WITH RECURSIVE walk AS (...) CYCLE id SET
 is_cycle USING path` statement. The anchor row is the root at depth 0
-(`via_edge_kind` NULL), filtered by `CAST(:kind AS text) IS NULL OR
-n.kind = :kind` so a pinned `kind` resolves the `(tenant_id, kind,
-name)` unique row. The recursive term joins `graph_edge` to the walk
-frontier, scoped on `tenant_id` on both the edge and the destination
-node, applies `CAST(:kind_filter AS text) IS NULL OR e.kind =
-:kind_filter`, and bounds `w.depth < :depth`. The final projection
-wraps the filtered walk in a `SELECT DISTINCT ON (id) ... ORDER BY id,
-depth, name` subquery (keeping the minimum-depth occurrence of each
-node) and re-orders the result by `(depth, name)`. `CYCLE` only
-prevents revisiting a node on the *same* branch; the `DISTINCT ON`
-collapse is what makes a converging DAG return one row per node rather
-than one row per path.
+(`via_edge_kind` / `parent_node_id` / `via_edge_id` NULL), filtered by
+`CAST(:kind AS text) IS NULL OR n.kind = :kind` so a pinned `kind`
+resolves the `(tenant_id, kind, name)` unique row. The recursive term
+joins `graph_edge` to the walk frontier, scoped on `tenant_id` on both
+the edge and the destination node, applies `CAST(:kind_filter AS text)
+IS NULL OR e.kind = :kind_filter`, bounds `w.depth < :depth`, and
+projects the chain provenance (`w.id AS parent_node_id`, `e.id AS
+via_edge_id` — #2538). The final projection wraps the filtered walk in
+a `SELECT DISTINCT ON (id) ... ORDER BY id, depth, name,
+parent_node_id, via_edge_id` subquery (keeping the minimum-depth
+occurrence of each node; the provenance columns extend the ORDER BY as
+a deterministic tie-break so converging equal-depth parents resolve
+identically on every run) and re-orders the result by `(depth, name)`.
+`CYCLE` only prevents revisiting a node on the *same* branch; the
+`DISTINCT ON` collapse is what makes a converging DAG return one row
+per node rather than one row per path.
+
+### Staleness opt-out (`include_stale`, #2538)
+
+Traversal defaults to **last-refresh-wins**: soft-deleted rows
+(`last_seen IS NULL`) stay reachable, because the row was real at the
+last observation and a blast-radius answer that silently forgets it is
+a false negative. `list_edges` takes the opposite default (a live
+inventory view). #2538 makes the disagreement per-query controllable:
+all three traversal verbs (`find_dependents` / `find_dependencies` /
+`find_path`) accept `include_stale: bool = True`. Passing `False` adds
+`last_seen IS NOT NULL` predicates via the `CAST(:include_stale AS
+boolean) OR ...` idiom:
+
+- closure verbs: on the stepped-to node **and** the walked edge in the
+  recursive term;
+- `find_path`: on **both** `bi_edge` legs (same both-legs rule as the
+  superseded-edge guard — missing the reversed leg would let a stale
+  edge be walked backwards into a path) and on the stepped-to node
+  (`dn` join in the recursive term), where the `to` endpoint is
+  exempted via `EXISTS` against the non-recursive `target` CTE — the
+  `from` endpoint enters through the walk's base term, so both named
+  endpoints stay reachable and `include_stale=False` reachability is
+  symmetric in argument order.
+
+The anchor / endpoint rows named by the caller are exempt — anchor
+existence is governed by the `NodeNotFoundError` / silent-`None`
+contracts, not staleness. The flag rides the whole stack: REST query
+param `include_stale` on all three routes, CLI `--include-stale=false`,
+MCP `query_topology.include_stale`.
 
 ### Anchor disambiguation
 
@@ -465,13 +500,16 @@ isn't in the graph."
 ### Path search
 
 `find_path` builds a `bi_edge` CTE — the union of forward and reversed
-tenant-scoped edges — so reachability is undirected while storage
-stays directed. The recursive `walk` accumulates `node_ids` and
-`edge_kinds` arrays; `CYCLE node_id SET is_cycle USING visited` plus
-the `hops < :max_hops` bound terminate the search. `ORDER BY hops
-LIMIT 1` yields a shortest path. A second query materialises the
-winning path's node rows; `_build_path_nodes` re-orders them into path
-sequence and attaches `depth` / `via_edge_kind`.
+tenant-scoped edges (each leg projecting the edge `id` since #2538) —
+so reachability is undirected while storage stays directed. The
+recursive `walk` accumulates `node_ids`, `edge_kinds`, and `edge_ids`
+arrays; `CYCLE node_id SET is_cycle USING visited` plus the `hops <
+:max_hops` bound terminate the search. `ORDER BY hops LIMIT 1` yields
+a shortest path. A second query materialises the winning path's node
+rows; `_build_path_nodes` re-orders them into path sequence and
+attaches `depth` / `via_edge_kind` / `via_edge_id` (positionally, hop
+`i` belongs to node `i+1`) plus `parent_node_id` (the previous node on
+the path).
 
 **Per-branch target pruning (#2535).** The walk enumerates simple
 paths, so on a dense mesh its row count grows ~branch_factor^hops. A
@@ -1304,7 +1342,7 @@ sits under the `/api/v1/targets` prefix, so its verb sits under the
 | Verb | Route | Default render |
 |---|---|---|
 | `meho topology refresh <target>` | `POST /topology/refresh/{t}` | `nodes: +A -R ~U` / `edges: +A -R ~U` summary |
-| `meho topology dependents <name>` | `GET /topology/dependents/{n}` | `DEPTH / KIND / NAME / VIA` table |
+| `meho topology dependents <name>` | `GET /topology/dependents/{n}` | `DEPTH / KIND / NAME / VIA / PARENT` table |
 | `meho topology dependencies <name>` | `GET /topology/dependencies/{n}` | same table, mirror direction |
 | `meho topology path <from> <to>` | `GET /topology/path?from=&to=` | `kind/name -> … (N hops)` chain |
 | `meho topology annotate <from> <kind> <to>` | `POST /topology/edges` | `annotated edge: ...` summary |
@@ -1494,17 +1532,19 @@ shape.
   resolution is deferred to the CLI/MCP fronts (T6/T7).
 - Streaming refresh progress for very large topologies — v0.2 is
   single-shot; deferred per Initiative #363.
-- Soft-delete is retention-only for the traversal verbs —
-  `find_dependents` / `find_dependencies` / `find_path` do **not**
-  filter `last_seen IS NULL`, so a soft-deleted node stays reachable
-  (last-refresh-wins). Only the list verbs (`list_edges` /
+- Soft-delete is retention-first for the traversal verbs —
+  `find_dependents` / `find_dependencies` / `find_path` keep
+  soft-deleted rows reachable **by default** (last-refresh-wins), with
+  a per-query `include_stale=False` opt-out since #2538 (see
+  §Staleness opt-out above). Only the list verbs (`list_edges` /
   `list_nodes`) exclude soft-deleted rows by default. Point-in-time
   visibility ("when did this disappear?") is answered by the dedicated
   history/diff/timeline verbs (G9.3,
   [#365](https://github.com/evoila/meho/issues/365)) over the retained
-  rows — G9.3 did not add `last_seen` filtering to the traversal CTE.
+  rows.
   See `docs/architecture/topology.md` §Soft-delete semantics; pinned by
-  `test_scenario4_soft_delete_retains_row`.
+  `test_scenario4_soft_delete_retains_row` and the #2538
+  `include_stale` toggle tests in `test_topology_query.py`.
 - Per-connector `discover_topology` overrides — each G3.x Initiative.
 - The advisory lock is a multi-replica stampede guard only; a single
   process serialises naturally and the SQLite test path no-ops it.

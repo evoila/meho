@@ -88,6 +88,15 @@ class TopologyNode(BaseModel):
     ``None`` for the root (which is reached by no edge). ``source``
     is ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /
     promoted; #2536) — mirrors :attr:`TopologyEdge.source`.
+
+    ``parent_node_id`` / ``via_edge_id`` (#2538) are the chain
+    provenance: the ``graph_node.id`` the walk stepped from and the
+    ``graph_edge.id`` it walked to reach this node, both ``None`` on
+    the root row. They let a caller reconstruct the exact dependency
+    chain from the flat closure list without follow-up edge lookups —
+    every ``parent_node_id`` in a closure result is itself a row of
+    that result. Additive with ``None`` defaults so pre-#2538
+    constructors and payloads stay valid.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -99,6 +108,8 @@ class TopologyNode(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
     depth: int
     via_edge_kind: str | None
+    parent_node_id: UUID | None = None
+    via_edge_id: UUID | None = None
 
     @model_validator(mode="after")
     def _freeze_properties(self) -> TopologyNode:

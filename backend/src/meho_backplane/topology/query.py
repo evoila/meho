@@ -196,11 +196,11 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
     """Map a traversal result row to a :class:`TopologyNode`.
 
     The recursive CTE projects exactly ``id, kind, name, source,
-    properties, depth, via_edge_kind``; ``is_cycle`` / ``path`` are
-    CYCLE-clause bookkeeping filtered out in SQL and never selected
-    into the row. ``properties`` arrives as a ``dict`` from JSONB on
-    asyncpg (or a JSON string on the rare passthrough); the model's
-    validator freezes it.
+    properties, depth, via_edge_kind, parent_node_id, via_edge_id``;
+    ``is_cycle`` / ``path`` are CYCLE-clause bookkeeping filtered out
+    in SQL and never selected into the row. ``properties`` arrives as
+    a ``dict`` from JSONB on asyncpg (or a JSON string on the rare
+    passthrough); the model's validator freezes it.
     """
     mapping = row._mapping
     return TopologyNode(
@@ -211,6 +211,8 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
         properties=mapping["properties"] or {},
         depth=mapping["depth"],
         via_edge_kind=mapping["via_edge_kind"],
+        parent_node_id=mapping["parent_node_id"],
+        via_edge_id=mapping["via_edge_id"],
     )
 
 
@@ -233,6 +235,24 @@ def _row_to_node(row: Row[Any]) -> TopologyNode:
 # is PG-only, per the docstring above). A row with no
 # ``superseded_by`` key reads ``NULL`` from ``->>`` and passes the
 # filter, so the guard does not affect non-superseded edges.
+#
+# Chain provenance (#2538): each recursive row also projects the
+# predecessor node (``w.id AS parent_node_id``) and the edge that was
+# walked (``e.id AS via_edge_id``), so a closure result reconstructs
+# the exact edge chain — which node hangs off which — without follow-up
+# ``list_edges`` calls. The anchor row carries NULLs (reached by no
+# edge). ``DISTINCT ON (id)`` keeps one row per node at minimum depth;
+# ``parent_node_id, via_edge_id`` extend the subquery ORDER BY as a
+# deterministic tie-break so equal-depth converging parents pick the
+# same provenance row on every run instead of an arbitrary one.
+#
+# Staleness opt-out (#2538): traversal is last-refresh-wins by default
+# (soft-deleted rows stay reachable). ``include_stale = FALSE`` adds
+# the ``last_seen IS NOT NULL`` predicate on both the stepped-to node
+# and the walked edge, aligning the closure with the ``list_edges``
+# live-inventory view on demand. The anchor row is never filtered —
+# the caller named it explicitly, and G0.18-T4's NodeNotFoundError
+# contract owns anchor existence.
 _TRAVERSAL_SQL_REVERSE = text(
     """
     WITH RECURSIVE walk AS (
@@ -243,7 +263,9 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.source        AS source,
             n.properties    AS properties,
             0               AS depth,
-            CAST(NULL AS text) AS via_edge_kind
+            CAST(NULL AS text) AS via_edge_kind,
+            CAST(NULL AS uuid) AS parent_node_id,
+            CAST(NULL AS uuid) AS via_edge_id
         FROM graph_node n
         WHERE n.name = :name
           AND n.tenant_id = :tenant_id
@@ -256,7 +278,9 @@ _TRAVERSAL_SQL_REVERSE = text(
             n.source,
             n.properties,
             w.depth + 1,
-            e.kind
+            e.kind,
+            w.id,
+            e.id
         FROM graph_edge e
         JOIN walk w ON e.to_node_id = w.id
         JOIN graph_node n ON n.id = e.from_node_id
@@ -265,15 +289,21 @@ _TRAVERSAL_SQL_REVERSE = text(
           AND w.depth < :depth
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
           AND e.properties->>'superseded_by' IS NULL
+          AND (
+              CAST(:include_stale AS boolean)
+              OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
+          )
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, properties, depth, via_edge_kind
+    SELECT id, kind, name, source, properties, depth, via_edge_kind,
+           parent_node_id, via_edge_id
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, source, properties, depth, via_edge_kind
+            id, kind, name, source, properties, depth, via_edge_kind,
+            parent_node_id, via_edge_id
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
-        ORDER BY id, depth, name
+        ORDER BY id, depth, name, parent_node_id, via_edge_id
     ) deduped
     ORDER BY depth, name
     """
@@ -284,7 +314,7 @@ _TRAVERSAL_SQL_REVERSE = text(
 # the two join columns differ from the reverse statement; everything
 # else (tenant scoping, kind pin, kind filter, depth bound, CYCLE
 # guard, closure-wide DISTINCT ON dedupe, ordering, §6 superseded-edge
-# exclusion) is identical.
+# exclusion, #2538 chain provenance + staleness opt-out) is identical.
 _TRAVERSAL_SQL_FORWARD = text(
     """
     WITH RECURSIVE walk AS (
@@ -295,7 +325,9 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.source        AS source,
             n.properties    AS properties,
             0               AS depth,
-            CAST(NULL AS text) AS via_edge_kind
+            CAST(NULL AS text) AS via_edge_kind,
+            CAST(NULL AS uuid) AS parent_node_id,
+            CAST(NULL AS uuid) AS via_edge_id
         FROM graph_node n
         WHERE n.name = :name
           AND n.tenant_id = :tenant_id
@@ -308,7 +340,9 @@ _TRAVERSAL_SQL_FORWARD = text(
             n.source,
             n.properties,
             w.depth + 1,
-            e.kind
+            e.kind,
+            w.id,
+            e.id
         FROM graph_edge e
         JOIN walk w ON e.from_node_id = w.id
         JOIN graph_node n ON n.id = e.to_node_id
@@ -317,15 +351,21 @@ _TRAVERSAL_SQL_FORWARD = text(
           AND w.depth < :depth
           AND (CAST(:kind_filter AS text) IS NULL OR e.kind = :kind_filter)
           AND e.properties->>'superseded_by' IS NULL
+          AND (
+              CAST(:include_stale AS boolean)
+              OR (n.last_seen IS NOT NULL AND e.last_seen IS NOT NULL)
+          )
     ) CYCLE id SET is_cycle USING path
-    SELECT id, kind, name, source, properties, depth, via_edge_kind
+    SELECT id, kind, name, source, properties, depth, via_edge_kind,
+           parent_node_id, via_edge_id
     FROM (
         SELECT DISTINCT ON (id)
-            id, kind, name, source, properties, depth, via_edge_kind
+            id, kind, name, source, properties, depth, via_edge_kind,
+            parent_node_id, via_edge_id
         FROM walk
         WHERE depth <= :depth
           AND NOT is_cycle
-        ORDER BY id, depth, name
+        ORDER BY id, depth, name, parent_node_id, via_edge_id
     ) deduped
     ORDER BY depth, name
     """
@@ -370,6 +410,7 @@ async def _traverse(
     depth: int,
     kind: str | None,
     kind_filter: str | None,
+    include_stale: bool,
     reverse: bool,
 ) -> list[TopologyNode]:
     """Shared dependents/dependencies recursive-CTE traversal.
@@ -423,6 +464,7 @@ async def _traverse(
                 "kind": anchor.kind,
                 "depth": depth,
                 "kind_filter": kind_filter,
+                "include_stale": include_stale,
             },
         )
         rows = result.fetchall()
@@ -437,6 +479,7 @@ async def find_dependents(
     kind: str | None = None,
     depth: int = _DEFAULT_DEPTH,
     kind_filter: str | None = None,
+    include_stale: bool = True,
 ) -> list[TopologyNode]:
     """Reverse traversal: every node that depends on *name_or_alias*.
 
@@ -445,6 +488,22 @@ async def find_dependents(
     is collapsed to its minimum-depth occurrence): the root at depth 0,
     its immediate dependents at depth 1, transitive dependents at depth
     2, and so on, up to and including ``depth``.
+
+    Each row carries chain provenance (#2538): ``parent_node_id`` is
+    the node the walk stepped from and ``via_edge_id`` the
+    ``graph_edge.id`` it walked, ``None`` on the root row. Together
+    they reconstruct the exact dependency chain from the flat list —
+    every parent is itself a row in the closure. When converging
+    parents tie at the node's minimum depth, the kept provenance pair
+    is the smallest ``(parent_node_id, via_edge_id)`` — arbitrary but
+    stable across repeated runs.
+
+    ``include_stale`` (default ``True``) preserves the
+    last-refresh-wins contract: soft-deleted rows (``last_seen IS
+    NULL``) stay reachable. Pass ``False`` to restrict the walk to
+    live nodes and edges — the same view :func:`list_edges` shows.
+    The anchor row is exempt (anchor existence is governed by the
+    :class:`NodeNotFoundError` contract, not staleness).
 
     ``kind`` pins the anchor to ``(tenant_id, kind, name_or_alias)``,
     the unique index. Omit it only when the name is unique across kinds
@@ -480,6 +539,7 @@ async def find_dependents(
         depth=depth,
         kind=kind,
         kind_filter=kind_filter,
+        include_stale=include_stale,
         reverse=True,
     )
 
@@ -491,15 +551,18 @@ async def find_dependencies(
     kind: str | None = None,
     depth: int = _DEFAULT_DEPTH,
     kind_filter: str | None = None,
+    include_stale: bool = True,
 ) -> list[TopologyNode]:
     """Forward traversal: everything *name_or_alias* depends on.
 
     The mirror of :func:`find_dependents` — same shape, same one-row-
     per-node closure dedupe, same ``kind`` disambiguation contract,
-    same tenant scoping, same cycle safety and depth bound — with edges
-    walked in the opposite direction (out of the current node rather
-    than into it). Root included at depth 0; an untracked anchor
-    raises :class:`NodeNotFoundError` (G0.18-T4 #1357 — see
+    same tenant scoping, same cycle safety and depth bound, same
+    chain provenance (``parent_node_id`` / ``via_edge_id``, #2538)
+    and same ``include_stale`` opt-out — with edges walked in the
+    opposite direction (out of the current node rather than into it).
+    Root included at depth 0; an untracked anchor raises
+    :class:`NodeNotFoundError` (G0.18-T4 #1357 — see
     :func:`find_dependents` for the full contract). An empty return
     list is structurally impossible.
     """
@@ -509,6 +572,7 @@ async def find_dependencies(
         depth=depth,
         kind=kind,
         kind_filter=kind_filter,
+        include_stale=include_stale,
         reverse=False,
     )
 
@@ -544,6 +608,26 @@ async def find_dependencies(
 # The unreachable-target worst case still enumerates the whole
 # ≤max_hops ball — that envelope is pinned by the dense-mesh benchmark
 # in ``tests/integration/test_topology_path_pruning.py``.
+#
+# Chain provenance (#2538): both ``bi_edge`` legs project the edge
+# ``id`` and the walk accumulates it in an ``edge_ids`` array parallel
+# to ``edge_kinds``, so the winning row identifies the exact edge of
+# every hop (``_build_path_nodes`` maps position ``i`` to node ``i+1``'s
+# ``via_edge_id``).
+#
+# Staleness opt-out (#2538): ``include_stale = FALSE`` filters
+# ``last_seen IS NOT NULL`` on **both** ``bi_edge`` legs (same
+# both-legs rule as the superseded guard — missing the reversed leg
+# would let a stale edge be walked backwards into a path) and on the
+# stepped-to node (the ``dn`` join in the recursive term), so a
+# soft-deleted node cannot appear as an intermediate hop even over a
+# live edge. The two endpoints named by the caller are exempt,
+# mirroring the closure verbs' anchor exemption: the ``from`` endpoint
+# enters through the base term (no staleness predicate) and the ``to``
+# endpoint is exempted in the recursive term by the ``EXISTS`` against
+# the non-recursive ``target`` CTE — without that arm the undirected
+# search would be asymmetric (a stale ``to`` endpoint unreachable
+# while the swapped argument order finds the path).
 _PATH_SQL = text(
     """
     WITH RECURSIVE
@@ -555,22 +639,25 @@ _PATH_SQL = text(
           AND (CAST(:to_kind AS text) IS NULL OR kind = :to_kind)
     ),
     bi_edge AS (
-        SELECT from_node_id AS src, to_node_id AS dst, kind
+        SELECT from_node_id AS src, to_node_id AS dst, kind, id
         FROM graph_edge
         WHERE tenant_id = :tenant_id
           AND properties->>'superseded_by' IS NULL
+          AND (CAST(:include_stale AS boolean) OR last_seen IS NOT NULL)
         UNION ALL
-        SELECT to_node_id AS src, from_node_id AS dst, kind
+        SELECT to_node_id AS src, from_node_id AS dst, kind, id
         FROM graph_edge
         WHERE tenant_id = :tenant_id
           AND properties->>'superseded_by' IS NULL
+          AND (CAST(:include_stale AS boolean) OR last_seen IS NOT NULL)
     ),
     walk AS (
         SELECT
             n.id                                   AS node_id,
             0                                      AS hops,
             ARRAY[n.id]                            AS node_ids,
-            CAST(ARRAY[] AS text[])                AS edge_kinds
+            CAST(ARRAY[] AS text[])                AS edge_kinds,
+            CAST(ARRAY[] AS uuid[])                AS edge_ids
         FROM graph_node n
         WHERE n.name = :from_name
           AND n.tenant_id = :tenant_id
@@ -580,13 +667,21 @@ _PATH_SQL = text(
             be.dst,
             w.hops + 1,
             w.node_ids || be.dst,
-            w.edge_kinds || be.kind
+            w.edge_kinds || be.kind,
+            w.edge_ids || be.id
         FROM bi_edge be
         JOIN walk w ON be.src = w.node_id
+        JOIN graph_node dn ON dn.id = be.dst
         WHERE w.hops < :max_hops
+          AND dn.tenant_id = :tenant_id
+          AND (
+              CAST(:include_stale AS boolean)
+              OR dn.last_seen IS NOT NULL
+              OR EXISTS (SELECT 1 FROM target t WHERE t.id = dn.id)
+          )
           AND NOT EXISTS (SELECT 1 FROM target t WHERE t.id = w.node_id)
     ) CYCLE node_id SET is_cycle USING visited
-    SELECT w.hops, w.node_ids, w.edge_kinds
+    SELECT w.hops, w.node_ids, w.edge_kinds, w.edge_ids
     FROM walk w
     JOIN graph_node tn
       ON tn.id = w.node_id
@@ -616,13 +711,18 @@ _PATH_NODES_SQL = text(
 def _build_path_nodes(
     node_ids: list[UUID],
     edge_kinds: list[str],
+    edge_ids: list[UUID],
     by_id: dict[UUID, Any],
 ) -> tuple[TopologyNode, ...]:
     """Assemble the ordered :class:`TopologyNode` tuple for a path.
 
     ``node_ids`` is the path sequence; ``by_id`` maps each id to its
-    fetched node mapping. ``via_edge_kind`` is ``None`` for the root
-    (position 0) and the kind of the ``(position-1)``-th hop otherwise.
+    fetched node mapping. ``via_edge_kind`` / ``via_edge_id`` are
+    ``None`` for the root (position 0) and the kind / id of the
+    ``(position-1)``-th hop otherwise (#2538 — positional derivation
+    unchanged, the edge id array is simply parallel to the kinds).
+    ``parent_node_id`` is the previous node on the path — in a path
+    the predecessor is by construction the prior position.
     """
     nodes: list[TopologyNode] = []
     for position, node_id in enumerate(node_ids):
@@ -636,6 +736,8 @@ def _build_path_nodes(
                 properties=m["properties"] or {},
                 depth=position,
                 via_edge_kind=None if position == 0 else edge_kinds[position - 1],
+                parent_node_id=None if position == 0 else node_ids[position - 1],
+                via_edge_id=None if position == 0 else edge_ids[position - 1],
             )
         )
     return tuple(nodes)
@@ -649,6 +751,7 @@ async def find_path(
     from_kind: str | None = None,
     to_kind: str | None = None,
     max_hops: int = _DEFAULT_MAX_HOPS,
+    include_stale: bool = True,
 ) -> TopologyPath | None:
     """Shortest unweighted path from *from_name* to *to_name*.
 
@@ -670,7 +773,20 @@ async def find_path(
 
     A second resolving query materialises the node rows in path order
     so the :class:`TopologyPath` carries full :class:`TopologyNode`
-    records, not bare ids.
+    records, not bare ids. Each non-root node carries ``via_edge_id``
+    (the exact ``graph_edge.id`` of the hop that reached it) alongside
+    the positional ``via_edge_kind``, plus ``parent_node_id`` (the
+    previous node on the path) — the #2538 chain-provenance fields.
+
+    ``include_stale`` (default ``True``) keeps soft-deleted rows
+    walkable (last-refresh-wins). ``False`` restricts the search to
+    live nodes and edges — applied on both ``bi_edge`` legs so a stale
+    edge cannot be walked backwards into a path, and on every
+    intermediate node. The two named endpoints are exempt — the
+    ``from`` endpoint via the walk's base term, the ``to`` endpoint via
+    the ``target``-CTE exemption in the recursive term — so
+    reachability under ``include_stale=False`` is symmetric in
+    argument order.
     """
     tenant_id = str(operator.tenant_id)
 
@@ -689,6 +805,7 @@ async def find_path(
                 "from_kind": from_kind,
                 "to_kind": to_kind,
                 "max_hops": max_hops,
+                "include_stale": include_stale,
             },
         )
         winner = path_result.first()
@@ -697,6 +814,7 @@ async def find_path(
 
         node_ids: list[UUID] = list(winner._mapping["node_ids"])
         edge_kinds: list[str] = list(winner._mapping["edge_kinds"])
+        edge_ids: list[UUID] = list(winner._mapping["edge_ids"])
         total_hops: int = winner._mapping["hops"]
 
         node_result = await session.execute(
@@ -705,7 +823,7 @@ async def find_path(
         )
         by_id = {r._mapping["id"]: r._mapping for r in node_result.fetchall()}
 
-    nodes = _build_path_nodes(node_ids, edge_kinds, by_id)
+    nodes = _build_path_nodes(node_ids, edge_kinds, edge_ids, by_id)
     return TopologyPath(nodes=nodes, total_hops=total_hops)
 
 
@@ -739,11 +857,11 @@ _MAX_EDGE_LIMIT = 1000
 # Soft-deleted edges (``e.last_seen IS NULL``) are excluded from this
 # listing by the ``e.last_seen IS NOT NULL`` predicate below — surfacing
 # them would clutter an inventory view with stale relationships. This is
-# the *opposite* of the traversal verbs (``find_dependents`` /
-# ``find_dependencies`` / ``find_path``), which do not filter
-# ``last_seen`` at all, so a soft-deleted node stays reachable
-# (last-refresh-wins); see ``docs/architecture/topology.md``
-# §Soft-delete semantics.
+# the *opposite default* of the traversal verbs (``find_dependents`` /
+# ``find_dependencies`` / ``find_path``), which keep soft-deleted rows
+# reachable (last-refresh-wins) unless the caller opts out with
+# ``include_stale=False`` (#2538); see
+# ``docs/architecture/topology.md`` §Soft-delete semantics.
 #
 # The ``conflicts_only`` predicate guards against the
 # ``jsonb_array_length`` non-array raise: the

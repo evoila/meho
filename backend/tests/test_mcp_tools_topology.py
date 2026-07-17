@@ -363,7 +363,65 @@ def test_query_topology_dependencies_passes_filters_through(
         "kind": "vm",
         "depth": 4,
         "kind_filter": "runs-on",
+        "include_stale": True,
     }
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_closure_forwards_include_stale_false(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#2538: `include_stale: false` reaches the closure verb as a bool."""
+    client, _op = client_with_operator
+    mock_dep = AsyncMock(return_value=[_node("vm-1", "vm", 0, None)])
+    with patch(_DEPENDENTS_PATCH, new=mock_dep):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 16,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "dependents",
+                        "target": "vm-1",
+                        "include_stale": False,
+                    },
+                },
+            },
+        )
+    assert response.json()["result"]["isError"] is False
+    assert mock_dep.await_args.kwargs["include_stale"] is False
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+def test_query_topology_path_forwards_include_stale_false(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#2538: `include_stale: false` reaches ``find_path`` as a kwarg."""
+    client, _op = client_with_operator
+    mock_path = AsyncMock(return_value=None)
+    with patch(_PATH_PATCH, new=mock_path):
+        response = client.post(
+            "/mcp",
+            json={
+                "jsonrpc": "2.0",
+                "id": 17,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_topology",
+                    "arguments": {
+                        "kind": "path",
+                        "from_name": "a",
+                        "to_name": "b",
+                        "include_stale": False,
+                    },
+                },
+            },
+        )
+    assert response.json()["result"]["isError"] is False
+    assert mock_path.await_args.kwargs["include_stale"] is False
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

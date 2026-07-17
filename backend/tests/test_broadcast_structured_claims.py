@@ -416,7 +416,9 @@ def test_announce_echoes_declared_claims_and_publishes_them(
         )
     result = _result_dict(resp)
     assert result["cursor"] == "1747800000000-0"
-    assert result["event_id"] == "1747800000000-0"
+    # T2 (#2547): event_id is a genuine UUID, distinct from the cursor.
+    assert result["event_id"] != result["cursor"]
+    assert UUID(result["event_id"]).version == 4
     assert result["targets"] == ["cluster-x"]
     assert result["planned_op_class"] == "write"
     assert result["ttl_minutes"] == 30
@@ -443,7 +445,7 @@ def test_announce_echoes_declared_claims_and_publishes_them(
 def test_bare_announce_keeps_pre_v2_ack_shape(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """No claims → the ack stays the pre-v2 ``{event_id, cursor}`` shape."""
+    """No claims → the ack stays the bare ``{event_id, cursor}`` shape."""
     client, _op = client_with_operator
     bc = get_broadcast_client()
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
@@ -451,7 +453,13 @@ def test_bare_announce_keeps_pre_v2_ack_shape(
             client,
             _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
         )
-    assert _result_dict(resp) == {"event_id": "1747800000000-7", "cursor": "1747800000000-7"}
+    result = _result_dict(resp)
+    # No declared claims -> only the two identity keys (no claim echoes).
+    assert set(result) == {"event_id", "cursor"}
+    assert result["cursor"] == "1747800000000-7"
+    # T2 (#2547): event_id is a genuine UUID, distinct from the cursor.
+    assert result["event_id"] != result["cursor"]
+    assert UUID(result["event_id"]).version == 4
 
 
 # ---------------------------------------------------------------------------

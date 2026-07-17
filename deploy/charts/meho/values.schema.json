@@ -501,6 +501,30 @@
         }
       }
     },
+    "broadcastAnnouncement": {
+      "type": "object",
+      "description": "Broadcast v2 T2 (#2547) durable-announcement retention knobs. Agent-authored announcements are persisted to an append-only `agent_announcement` DB table; the retention prune (`pruneEnabled` gated) is the only place the application deletes from it. `retentionDays: 0` is the keep-forever opt-out sentinel (the loop still runs as a logged heartbeat but every tick is a no-op); `pruneEnabled: false` skips starting the loop entirely. Distinct from the `broadcast` subchart (the Valkey substrate) and from the stream read-window heuristic (`BROADCAST_RETENTION_HOURS`). The Pydantic validators in `backend/src/meho_backplane/settings.py` enforce the same bounds at app startup.",
+      "additionalProperties": false,
+      "required": ["retentionDays", "pruneIntervalSeconds", "pruneEnabled"],
+      "properties": {
+        "retentionDays": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3650,
+          "description": "Maximum age (in days) of `agent_announcement` rows the prune preserves. Range [0, 3650]; 0 is the keep-forever opt-out sentinel; default 90 gives a quarterly cross-shift coordination window."
+        },
+        "pruneIntervalSeconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 604800,
+          "description": "Cadence of the in-process announcement retention prune sweeper, in seconds. Range [60, 604800]; default 604800 (7d / weekly)."
+        },
+        "pruneEnabled": {
+          "type": "boolean",
+          "description": "Whether to start the in-process announcement retention prune sweeper. Set false when an external retention mechanism reaps rows instead. Distinct from `retentionDays: 0` (which keeps the loop running but every tick is a no-op heartbeat)."
+        }
+      }
+    },
     "broadcast": {
       "type": "object",
       "description": "Activity-broadcast subchart values (Valkey 9.x per ADR 0005). When `broadcast.enabled` is false the subchart resources are skipped entirely; the rest of this block may be left at defaults in that mode. When enabled, the subchart's own values.schema.json (charts/broadcast/values.yaml shape) is also enforced — this block declares the top-level surface visible to the parent chart.",

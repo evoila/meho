@@ -405,6 +405,40 @@ class Settings(BaseModel):
         round-trip on the announce hot path). Over-limit announces are
         rejected with a typed JSON-RPC error naming the window — the
         fail-loud announce contract is preserved (no silent drop).
+    broadcast_announcement_retention_days:
+        Maximum age (in days) of ``agent_announcement`` rows the
+        Broadcast v2 T2 (#2547) retention prune task preserves. Rows
+        whose ``created_at`` is older than
+        ``now() - broadcast_announcement_retention_days`` are deleted in
+        one bounded batch per run. Default 90 gives a quarterly
+        cross-shift coordination window (the durable archive that
+        outlives the ~24h Valkey stream). ``0`` is the opt-out sentinel:
+        the prune becomes a no-op and the archive grows forever
+        (disk-growth tradeoff flagged in the Helm values comment). Range
+        ``[0, 3650]`` (10-year ceiling). Distinct from
+        ``broadcast_retention_hours`` (the *stream* read-window
+        heuristic) -- different substrate, independent window. Read once
+        per prune-tick through :func:`get_settings`'s cache.
+    broadcast_announcement_prune_interval_seconds:
+        Cadence of the #2547 retention prune background loop, in seconds.
+        The task (registered in the FastAPI lifespan) sleeps this long
+        between scans of ``agent_announcement``. Default 604800 (7 d /
+        weekly), mirroring the topology-history prune cadence. Range
+        ``[60, 604800]``: below one minute the prune competes with the
+        announce write load; the ceiling is the weekly cadence. Tests
+        override to sub-second values via env-var monkeypatch +
+        :func:`get_settings` cache-clear.
+    broadcast_announcement_prune_enabled:
+        Whether to start the #2547 retention prune background task in the
+        FastAPI lifespan. Default ``True``: the in-process ``asyncio``
+        loop is the shipped retention mechanism. Operators running an
+        external retention mechanism (k8s CronJob, archive-then-delete)
+        flip ``BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED=false`` so the chassis
+        does not race the external job. Distinct from
+        ``broadcast_announcement_retention_days=0``: ``0`` keeps the loop
+        running as a cheap heartbeat; ``enabled=False`` skips starting the
+        loop entirely (no audit-row noise, no log line). Read once at
+        lifespan startup; toggling post-start requires a pod restart.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1026,6 +1060,14 @@ class Settings(BaseModel):
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
     broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
+    # Broadcast v2 T2 (#2547) -- durable-announcement retention prune
+    # knobs. ``days=0`` is the keep-forever opt-out sentinel;
+    # ``enabled=False`` skips starting the background task entirely
+    # (mirrors the TOPOLOGY_HISTORY_* shape). Distinct from
+    # ``broadcast_retention_hours`` (the stream read-window heuristic).
+    broadcast_announcement_retention_days: int = Field(default=90, ge=0, le=3650)
+    broadcast_announcement_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
+    broadcast_announcement_prune_enabled: bool = True
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
@@ -1636,6 +1678,15 @@ def get_settings() -> Settings:
         ),
         broadcast_announce_rate_per_minute=int(
             os.environ.get("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "10"),
+        ),
+        broadcast_announcement_retention_days=int(
+            os.environ.get("BROADCAST_ANNOUNCEMENT_RETENTION_DAYS", "90"),
+        ),
+        broadcast_announcement_prune_interval_seconds=int(
+            os.environ.get("BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS", "604800"),
+        ),
+        broadcast_announcement_prune_enabled=parse_bool_env(
+            os.environ.get("BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED", "true"),
         ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),

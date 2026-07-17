@@ -56,6 +56,8 @@ from prometheus_client import Counter
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.broadcast.events import BroadcastEvent
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AgentAnnouncement
 
 __all__ = [
     "BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL",
@@ -133,6 +135,48 @@ def _stream_key(tenant_id: UUID) -> str:
     publisher call site.
     """
     return f"meho:feed:{tenant_id}"
+
+
+async def _persist_agent_announcement(event: AgentAnnouncementEvent) -> None:
+    """Write one durable :class:`AgentAnnouncement` row for *event*.
+
+    Broadcast v2 T2 (#2547). The durable archive half of the fail-loud
+    publish: the row is keyed on ``event.event_id`` (the same UUID the
+    stream entry carries) and persists the typed claim fields (T1 #2544)
+    so an announcement survives a Valkey restart and the ~24h stream trim
+    window. Written **before** the ``XADD`` in
+    :func:`publish_agent_announcement` so the durable record is the
+    priority: if the row commits but the stream write later fails, the
+    announcement is still archived and the fail-loud error lets the agent
+    retry; the durability contract is never traded for the hot-path
+    write.
+
+    Any DB-side exception propagates verbatim -- this is a fail-loud
+    entry point, so a persistence failure must surface to the caller
+    (mapped to JSON-RPC ``-32603`` by the MCP dispatcher) rather than be
+    swallowed. ``created_at`` is the event's server-side ``ts`` so the
+    archive timeline matches the stream timeline exactly.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            AgentAnnouncement(
+                id=event.event_id,
+                tenant_id=event.tenant_id,
+                principal_sub=event.principal_sub,
+                activity=event.activity,
+                target=event.target,
+                scope=event.scope,
+                targets=list(event.targets),
+                phase=event.phase,
+                planned_op_class=event.planned_op_class,
+                ttl_minutes=event.ttl_minutes,
+                work_ref=event.work_ref,
+                run_id=event.run_id,
+                created_at=event.ts,
+            )
+        )
+        await session.commit()
 
 
 async def publish_event(event: BroadcastEvent) -> None:
@@ -260,6 +304,11 @@ async def publish_agent_announcement(event: AgentAnnouncementEvent) -> str:
         violate the "one log line per failure" discipline the chassis
         observability guide enforces.
     """
+    # Durable archive first (T2 #2547): the DB row is the coordination
+    # window that survives a Valkey restart. Written before the XADD so a
+    # stream-side failure never costs the durable record. Fail-loud --
+    # any DB exception propagates to the -32603 path.
+    await _persist_agent_announcement(event)
     client = get_broadcast_client()
     entry_id = await client.xadd(
         _stream_key(event.tenant_id),

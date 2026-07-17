@@ -114,6 +114,10 @@ from meho_backplane.broadcast import (
     dispose_broadcast_client,
     get_broadcast_client,
 )
+from meho_backplane.broadcast.announcement_retention import (
+    start_announcement_retention_sweeper,
+    stop_announcement_retention_sweeper,
+)
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
@@ -438,6 +442,7 @@ class _BackgroundTasks:
     topology_scheduler: asyncio.Task[None]
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
+    announcement_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
@@ -472,6 +477,12 @@ def _start_background_tasks() -> _BackgroundTasks:
     topology_history: asyncio.Task[None] | None = None
     if settings.topology_history_prune_enabled:
         topology_history = start_topology_history_retention_sweeper()
+    # Broadcast v2 T2 #2547 — gated on BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED.
+    # ``RETENTION_DAYS=0`` keeps the loop running as a no-op heartbeat;
+    # ``PRUNE_ENABLED=false`` skips starting the loop entirely.
+    announcement_retention: asyncio.Task[None] | None = None
+    if settings.broadcast_announcement_prune_enabled:
+        announcement_retention = start_announcement_retention_sweeper()
     # G11.2-T6 #819 — gated on GRANT_EXPIRY_ENABLED so operators using
     # an external cleanup mechanism don't double-sweep.
     grant_expiry: asyncio.Task[None] | None = None
@@ -515,6 +526,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         topology_scheduler=topology_scheduler,
         memory_expiry=memory_expiry,
         topology_history=topology_history,
+        announcement_retention=announcement_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
         scheduler=scheduler,
@@ -544,6 +556,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
+    if tasks.announcement_retention is not None:
+        await stop_announcement_retention_sweeper(tasks.announcement_retention)
     if tasks.topology_history is not None:
         await stop_topology_history_retention_sweeper(tasks.topology_history)
     if tasks.memory_expiry is not None:

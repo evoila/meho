@@ -90,6 +90,138 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-07-17
+
+### Added — topology open node/edge kind vocabularies (#2555)
+
+- Open the graph node/edge `kind` vocabularies (Topology v2, Initiative #2533
+  T1). Migration `0063` drops the closed IN-list CHECK constraints
+  (`ck_graph_node_kind` / `ck_graph_edge_kind`, 14 + 10 enumerated kinds) and
+  replaces each with a portable minimal-shape CHECK (`length BETWEEN 2 AND 63
+  AND kind = lower(kind)`), following `0010`'s batch drop-and-recreate mold with
+  a downgrade pre-check that refuses to re-narrow while novel-kind rows exist.
+  Full slug validation moves to Python, single-sourced: `KIND_SLUG_PATTERN`
+  (`^[a-z0-9]+(?:[._-][a-z0-9]+)*$`, 2–63 chars) + `is_valid_kind_slug` in
+  `db/models.py` drive node/edge validation, the REST `StringConstraints` alias,
+  and the MCP `inputSchema`s (`pattern` replaces `enum`). The previously-closed
+  sets are demoted to a documented **convention** (`WELL_KNOWN_NODE_KINDS` /
+  `GraphEdgeKind`) surfaced as UI `datalist` suggestions + error hints, no
+  longer enforced; the UI annotate modal's kind field becomes free-text. Wire
+  schema + Go client regenerated (#2555).
+
+### Added — approval-gated agent authorship on topology writes (#2560)
+
+- Route `topology.annotate` / `topology.create_node` / `topology.unannotate`
+  through the dispatch/`policy_gate` seam as **targetless typed ops** (the
+  `secret.move` mold — synthetic connector `topology-graph-1.x`, module-level
+  handlers, `target=None`) in the new `connectors/topology/` subpackage, and
+  switch the three `meho.topology.*` MCP tool handlers from direct service calls
+  to `dispatch()`. The dial is `safety_level="caution"` + `requires_approval=
+  False`: an **agent** principal hits the needs-approval floor and parks as a
+  durable `ApprovalRequest` (the MCP tool returns `{status: awaiting_approval,
+  approval_request_id, …}`), while a human `tenant_admin` write rides the
+  default-allow branch and executes immediately — REST/UI/CLI untouched. No new
+  queue or endpoints: approval rides the existing `policy_gate` →
+  `create_pending_request` → resume substrate, inheriting the params-hash
+  substitution defence and the exactly-one-resumer latch. The topology audit-row
+  builders now stamp `actor_sub` so agent authorship is attributable (#2560).
+
+### Added — graph_node.source column + curated-node durability under refresh (#2562)
+
+- Add `graph_node.source` (`TEXT NOT NULL DEFAULT 'auto'`, CHECK mirroring
+  `ck_graph_edge_source`) via migration `0066` (renumbered from a duplicate
+  `0065` on main by #2570), with a backfill marking pre-existing manually-seeded
+  rows (`properties ? 'seeded_by'`) as `curated`. Curated nodes now get the same
+  refresh discipline as curated edges: a probe re-observation bumps `last_seen`
+  only — no property overwrite, no `target_id` adoption — and no refresh ever
+  soft-deletes a curated node (the soft-delete guard keys on `source`).
+  `create_or_get_node` stamps `source='curated'` on fresh seeds and promotes
+  auto rows on re-seed (keeping the original author). `source` is projected onto
+  every node surface (`TopologyNode`, `list_nodes`, MCP `query_topology` /
+  `create_node`, node-history snapshots); OpenAPI snapshot + Go client
+  regenerated (#2562).
+
+### Added — structured intent claims on `broadcast.announce` (#2557)
+
+- Add optional **structured intent claims** to `meho.broadcast.announce`
+  (Broadcast v2, Initiative #2543 keystone): `targets` (≤10 names),
+  `planned_op_class` (the full `classify_op` taxonomy), `ttl_minutes` (1..1440),
+  `work_ref`, `run_id`, plus a derived `expires_at` — turning announcements from
+  quarantined prose into coordination data. **Structure is trusted; prose is
+  quarantined**: server-validated enum/int/UUID/timestamp fields serialise
+  unwrapped, while free text (`activity`, `scope`, `target(s)`, `work_ref`)
+  keeps the untrusted-content envelope, and all filtering runs on the raw model
+  before the wrap. `meho.broadcast.recent`/`watch` gain `work_ref` + `active_only`
+  filters and the `target` filter now matches an announcement's `targets` list.
+  Fully back-compatible (every claim field optional-with-default; pre-v2 stream
+  entries parse unchanged); builds on #2479's self-labelled `cursor` (#2557).
+
+### Added — actor/session/work_ref lineage on `BroadcastEvent` (#2556)
+
+- Project `actor_sub` / `agent_session_id` / `work_ref` onto every
+  `BroadcastEvent` (Broadcast v2, Initiative #2543 T3) so a delegated agent
+  operation stops broadcasting under the delegating human's `principal_sub` — a
+  feed reader can now tell an agent's work from a human's, group a run's
+  operations, and join work to a ticket. A shared `resolve_broadcast_lineage()`
+  in `operations/_audit.py` reads the same publish-site contextvars the audit-row
+  writer consumes; every `BroadcastEvent` construction site (dispatch, chassis
+  HTTP, MCP, approvals, topology) projects them, pinned by a grep-based AST
+  invariant test. `event_matches` + `meho.broadcast.recent`/`watch` gain
+  `actor_sub` + `work_ref` exact-match filters. Additive, server-derived,
+  trusted (no untrusted-prose envelope); optional with `None` defaults so pre-T3
+  stream entries still validate (#2556).
+
+### Added — broadcast announce rate-limit + preamble seed discipline (#2558)
+
+- Protect and seed the broadcast coordination channel (G6.5-T6). **Write side:**
+  `announce` gains a per-`(tenant, principal)` fixed-window rate limit (canonical
+  Redis `INCR`) enforced **before** the publish, default 10/min via
+  `broadcast_announce_rate_per_minute` (`0` disables, no Valkey round-trip); an
+  over-limit call is a typed JSON-RPC `-32000` `RATE_LIMITED` error carrying
+  `{limit, window_seconds, retry_after_seconds}` — the fail-loud announce
+  contract is preserved (no silent drop). **Read side:** the server-assembled
+  session preamble now carries an always-on broadcast-discipline band naming the
+  dotted `meho.broadcast.*` tools (guidance, not enforcement). Also corrects the
+  stale consumer-onboarding template (claimed the tools were "not yet wired" —
+  false since #1092 — and used pre-rename underscore names) (#2558).
+
+### Added — broadcast announce/recent/watch as agent runtime meta-tools (#2563)
+
+- Add `broadcast_announce` / `broadcast_recent` / `broadcast_watch` to the agent
+  meta-tool catalog so MEHO-hosted agent runs are first-class readers and writers
+  on the tenant coordination feed (previously they had only the three dispatch
+  tools). The meta-tools reuse the existing `meho.broadcast.*` MCP handlers
+  verbatim (resolved from the registry via `get_tool`), so the agent wire shape
+  is identical to every other surface — including the structured claims (#2557),
+  lineage (#2556), and announce rate limit (#2558). `broadcast_announce`
+  auto-stamps `run_id`/`work_ref` from the ambient run context (the model never
+  sees or self-reports them); handler-side `McpInvalidParamsError` /
+  `McpRateLimitedError` become `ModelRetry` so the model corrects or backs off
+  instead of aborting the run. All three carry the `OPERATOR` floor and register
+  only when a definition's toolset admits them (#2563).
+
+### Fixed — operator console (topology) polish (#2540, #2470, #2469, #2454, #2552)
+
+- A cluster of operator-console fixes on the `/ui` topology surface: faster graph
+  wheel-zoom + layout declutter and filter-banner alignment (#2540, #2454),
+  node-drawer + annotate-edge form polish (#2470), no table overlap on narrow
+  screens with stacked timestamps (#2469), and htmx callers redirected to login
+  on an expired-session response instead of rendering a broken partial (#2552).
+  Also adds a browser favicon so the console is recognizable in tabs (#2455) and
+  a `list[str]` annotation on `_collect_2xx_response_codes` to clear a mypy
+  candidate (#2473).
+
+### Changed — dependency bumps
+
+- Bumped: `pydantic-ai-slim[anthropic,bedrock,openai]` →2.9.1→2.10.0 (#2444,
+  #2531), `uvicorn[standard]` →0.51.0 (#2438), `pyarrow` →25.0.0 with a mypy
+  override for the dropped `py.typed` (#2483), `mypy` 2.1.0→2.3.0 (#2441), `ruff`
+  0.15.20→0.15.21 (#2442), `google-auth` 2.55.1→2.56.0 (#2440, #2530), `croniter`
+  6.2.3→6.2.4 (#2437); CI/tooling — `github/codeql-action/upload-sarif`
+  4.36.2→4.37.0 (#2433), `goreleaser/goreleaser-action` 7.2.2→7.2.3 (#2434),
+  `astral-sh/setup-uv` 8.3.1→8.3.2 (#2435), `trufflesecurity/trufflehog`
+  3.95.8→3.95.9 (#2436), `SonarSource/sonarqube-scan-action` 8.2.0→8.2.1 (#2529).
+
 ### Security — scheduler MCP tool cross-tenant IDOR parity fix
 
 - Close a cross-tenant write IDOR on the `meho.scheduler.create` MCP tool: it
@@ -100,7 +232,7 @@ connector-related release-notes line.
   non-platform-admin naming another tenant is refused with
   `cross_tenant_requires_platform_admin`. Brings the MCP surface to parity with
   the sibling Sensor MCP fix (#2503). Adds MCP regression tests (tenant-admin
-  refused cross-tenant; platform-admin allowed).
+  refused cross-tenant; platform-admin allowed) (#2571).
 
 ### Added — tiered-triage investigator wiring (#2507)
 
@@ -347,7 +479,7 @@ connector-related release-notes line.
   conditional `WHERE stale_at IS NULL` flip keep it exactly-once under
   concurrent replicas. Recovery is data-driven — an accepted result
   ingestion clears the marker; the sweeper only ever flips. `stale_at IS NOT
-  NULL` maps to the `UNKNOWN` rollup state (#2416 / #2506). Migration `0061`
+  NULL` maps to the `UNKNOWN` rollup state (#2416 / #2506). Migration `0062`
   adds `runner_principal.last_seen_at` (+ index) and
   `runner_assignments.stale_at` (#2501).
 
@@ -413,7 +545,7 @@ connector-related release-notes line.
   idempotently — `(tenant, runner, result_uid)` dedups on-disk-spool re-posts
   and `received_at` is stamped by the central clock. The `runner/wire.py`
   models are widened in place, not forked (one schema on both ends). Migration
-  `0059` creates `runner_assignments` + `runner_check_results` (#2499).
+  `0060` creates `runner_assignments` + `runner_check_results` (#2499).
 ### Added — outbound long-poll gateway command plane (#2498)
 
 - Add the central command plane of the remote-execution gateway

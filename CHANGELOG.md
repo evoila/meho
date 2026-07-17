@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — Dashboard entity + five-state rollup + /ui/checks (#2506)
+
+- Add the **Dashboard** entity (#2506): a named, tenant-scoped composition of
+  Sensors (many-to-many) that rolls its members up into one five-state
+  worst-of answer to "is everything OK?". The rollup is a pure, evaluated-on-
+  read fold (`meho_backplane.checks.rollup`): `UNKNOWN -> degraded`, a
+  per-Sensor `severity` cap (a `degraded`-severity Sensor never drives a
+  dashboard to `critical`), and `for:` hold-time hysteresis (a failing state
+  contributes only once it has held for `for_seconds`; recovery is immediate).
+  `SKIP` (paused / unreachable-by-design) and `UNKNOWN` (never-evaluated /
+  overdue) are first-class states — `SKIP` is excluded from the fold, zero
+  members roll up to `unknown`, all-`skip` rolls up to `skip`. Ships a minimal
+  REST CRUD (`POST/GET/DELETE /api/v1/checks/dashboards` — create/delete are
+  `tenant_admin`, cross-tenant writes require `platform_admin`; a foreign
+  member id is 422 `sensor_not_found`) and a read-only `/ui/checks` console
+  (list with a 30 s auto-refresh + per-Dashboard detail showing each member's
+  raw/effective state, pending marker, and last evidence). A
+  `last_rollup_state` memo column ships unwritten for #2507's transition
+  detection. Migration `0065`.
+
 ### Added — Sensor assertion evaluator (#2504)
 
 - Add `meho_backplane.checks` with a pure, no-I/O bounded assertion

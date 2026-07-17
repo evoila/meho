@@ -1,0 +1,56 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Checks Dashboard list (Initiative #2416,
+  Task #2506). Extends ``base.html`` so the chrome matches the rest of the
+  console. One glance answers "is everything OK?": each row shows a
+  Dashboard's name, its five-state worst-of rollup badge, and its member
+  count.
+
+  Auto-refresh: the table arms an ``hx-trigger="every 30s"`` poll that
+  re-fetches ``GET /ui/checks`` (the ``HX-Request`` branch returns the
+  ``_table_rows.html`` fragment) and outerHTML-swaps only ``#checks-table-body``,
+  so the rolled-up states stay live without a manual refresh. Read-only in
+  v1 -- no create / delete affordances (REST is the single write path).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Checks &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Checks</h1>
+      <p class="text-sm opacity-70">
+        Dashboards roll many Sensors up into one five-state answer to "is
+        everything OK?". Click a row to inspect each member's state, the
+        <code>for:</code> hold, and the last evidence.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table
+      class="table table-sm"
+      hx-get="/ui/checks"
+      hx-trigger="every 30s"
+      hx-target="#checks-table-body"
+      hx-swap="outerHTML"
+    >
+      <thead>
+        <tr>
+          <th>Dashboard</th>
+          <th>State</th>
+          <th>Members</th>
+          <th>Updated</th>
+          <th class="w-24"></th>
+        </tr>
+      </thead>
+      {% include "checks/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

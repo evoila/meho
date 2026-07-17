@@ -74,6 +74,9 @@ from meho_backplane.api.v1.broadcast_overrides import (
     router as api_v1_broadcast_overrides_router,
 )
 from meho_backplane.api.v1.checks import router as api_v1_checks_router
+from meho_backplane.api.v1.checks_dashboards import (
+    router as api_v1_checks_dashboards_router,
+)
 from meho_backplane.api.v1.connectors_ingest import (
     router as api_v1_connectors_ingest_router,
 )
@@ -939,6 +942,15 @@ app.include_router(api_v1_scheduler_router)
 # JWT; platform_admin may pass tenant_filter / a body tenant_id to act
 # cross-tenant. Every mutation writes an audit row under op_class=write.
 app.include_router(api_v1_sensors_router)
+# I2416-T2506 -- Dashboard admin surface (five-state worst-of rollup). POST
+# /checks/dashboards (create, tenant_admin; 422 sensor_not_found on a foreign
+# member id), GET /checks/dashboards (list, operator-level; each row carries
+# its rolled-up state), GET /checks/dashboards/{id} (rollup + per-member
+# breakdown, operator), DELETE /checks/dashboards/{id} (hard delete,
+# tenant_admin). Tenant-scoped via the JWT; platform_admin may act
+# cross-tenant. Distinct module from api_v1_checks_router (the #2415 gateway
+# assignment/result surface) -- the ``dashboards`` sub-path does not collide.
+app.include_router(api_v1_checks_dashboards_router)
 # G11.2-T4/T5 (#817/#818) -- approval queue + surfacing channel.
 # GET /approvals (list pending), GET /approvals/{id} (inspect — T5 #818),
 # POST /approvals/{id}/approve (approve + re-dispatch via the ``_approved``

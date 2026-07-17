@@ -259,6 +259,15 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # acceptance test errors at setup with ``cannot truncate a table
     # referenced in a foreign key constraint``.
     "sensor",
+    # ``check_dashboards.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
+    # from migration ``0065`` (Initiative #2416 T2506); and
+    # ``check_dashboard_sensors`` FKs both ``check_dashboards`` and ``sensor``
+    # with ``ondelete=CASCADE``. Both must be listed so the non-cascading
+    # multi-table TRUNCATE can drop ``tenant`` / ``sensor`` without a
+    # FK-constraint error (the child join before its parent, though order is
+    # irrelevant in a single non-cascading TRUNCATE).
+    "check_dashboard_sensors",
+    "check_dashboards",
     "targets",
     "tenant",
 )

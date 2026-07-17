@@ -331,6 +331,6 @@ The G0.7 canary is currently stub-LLM-only — the acceptance test ships a deter
 - **Codebase doc:** [docs/codebase/spec-ingestion.md](../codebase/spec-ingestion.md) — internal symbol-level map; updated in lock-step with code changes.
 - **CLAUDE.md postulates:** postulate 1 (two connector kinds, both first-class); postulate 4 (operation grouping + LLM hints, operator-reviewable); postulate 5 (agent surface is meta-tools).
 - **v0.1-spec anchors:** [§3 Operations L289–313](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/v0.1-spec.md) (auto-derive primary); [§4 JSONFlux](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/v0.1-spec.md) (set-shaped result discipline the dispatcher applies after this pipeline produces the operation).
-- **ADR:** [v0.2-decisions.md](../planning/v0.2-decisions.md) — locked architecture decisions.
+- **ADR:** [locked-decisions.md](../decisions/locked-decisions.md) — locked architecture decisions.
 - **OpenAPI specifications:** [OpenAPI 3.0.3](https://spec.openapis.org/oas/v3.0.3.html); [OpenAPI 3.1.1](https://spec.openapis.org/oas/v3.1.1.html).
 - **Best-practices anchors:** `.claude/skills/implement-issue/ai_engineering_best_practices.md` (LLM prompt discipline, output-schema validation, operator-review gate before LLM-summarised content reaches agents); `.claude/skills/implement-issue/devops_best_practices.md` (architecture docs reflect shipped code; mermaid diagrams for control flow).

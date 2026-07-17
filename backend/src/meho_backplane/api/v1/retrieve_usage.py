@@ -24,7 +24,7 @@ Audit + broadcast contract
 --------------------------
 
 Reading audit_log is itself privacy-sensitive (decision #3,
-``docs/planning/v0.2-decisions.md``): a free-text broadcast of "operator
+``docs/decisions/locked-decisions.md``): a free-text broadcast of "operator
 X queried usage for tenant Y in window Z" would leak the investigation
 target. The route binds two audit overrides via the chassis contextvar
 mechanism (see :func:`meho_backplane.audit._publish_broadcast_event`):

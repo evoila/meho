@@ -130,7 +130,14 @@ Three layers, separated for traceability:
   `work_ref`) stay agent-authored prose and keep the untrusted-content
   envelope (`_ANNOUNCEMENT_UNTRUSTED_FIELDS` +
   `_ANNOUNCEMENT_UNTRUSTED_LIST_FIELDS`, wrapped per-element for the
-  list). All filtering (`event_matches`) runs on the raw model **before**
+  list) **only on LLM-facing re-serves**. The wrap is applied by the
+  read-side serialiser: `list_recent_events_strict` (the MCP
+  `broadcast.recent` tool) passes `dump_event_wire` (wraps prose);
+  `list_recent_events_fail_soft` (the UI history pane) passes
+  `_dump_event_plain` (no wrap) because the browser sink escapes every
+  field separately (Alpine `x-text` sets `textContent`) and the
+  multi-line guard block would be human-visible noise on a feed row
+  (#2549). All filtering (`event_matches`) runs on the raw model **before**
   the wrap, so narrowing is unaffected by the envelope — the same split
   the pre-existing `target` filter already relied on. Invalid claims
   (11 targets, `ttl_minutes=0`, a 257-char `work_ref`, a non-UUID
@@ -264,6 +271,24 @@ GET /api/v1/feed (Bearer JWT)
       → heartbeat on outbound silence ≥ 30s
 ```
 
+**Union validation (#2549).** `_process_entries` peeks the wire `kind`
+discriminator (`select_event_model`, shared with the XRANGE `parse_entry`)
+and validates each entry against `BroadcastEvent` *or*
+`AgentAnnouncementEvent`, so **both** audit-driven operations and
+agent-authored announcements ride the SSE feed as first-class
+`event: broadcast` frames. Before #2549 the generator validated only
+`BroadcastEvent` and dropped announcements on the resulting
+`ValidationError` (`feed_skipped_malformed_event`) — the feed was
+write-only for humans. Genuinely malformed entries (undecodable JSON,
+invalid payload of either kind) still skip with that log. Filtering
+delegates to `event_matches`, so an `op_class` filter narrows to
+operations only (an announcement has no op-class), while `principal` /
+`target` match both kinds (`target` against an announcement's `target`
+or any `targets[]`). The surviving entry's raw wire JSON is emitted
+verbatim (unwrapped); SSE consumers escape/render the agent prose on
+their side. `/ui/broadcast/stream` imports `_process_entries`, so the
+same union validation covers the browser feed.
+
 ### Read path (UI SSE bridge)
 
 `GET /ui/broadcast/stream` is the session-cookie-gated mirror of
@@ -273,7 +298,41 @@ GET /api/v1/feed (Bearer JWT)
 authenticates via `UISessionMiddleware` and the BFF session cookie.
 Frame shape is byte-compatible with the API edge — the `_process_entries`
 helper, the cursor resolver, and the backlog prelude are imported
-verbatim from `api/v1/feed.py`.
+verbatim from `api/v1/feed.py`. Since #2549 that shared helper
+union-validates both kinds, so announcements reach the browser feed too.
+
+**Rendering both kinds (#2549).** The shared row partial
+(`broadcast/_event_row.html`) branches on `ev.kind`: an operation renders
+the audit columns (`op_id` / `op_class` / `result_status` / `payload`); an
+announcement renders its agent-authored variant — a 📣 principal badge, a
+phase chip (`start` / `update` / `completion`), the `activity` as escaped
+quoted prose (bound via `x-text`, never `innerHTML`), the `target`/`targets`
+attribution, and a claim-metadata cell (`planned_op_class` · TTL ·
+`work_ref`, the #2544 structured fields). Rows key on `rowKey(ev)`
+(`event_id` → `cursor`/`id` → composite) because live announcement frames
+carry no durable id. The announcement row is not clickable — announcements
+have no `audit_id`, so `openDrawer` no-ops.
+
+**Adjacent stream consumers.** The dashboard recent-activity tray
+(`dashboard-feed.js`) and the connectors recent-ops card
+(`connectors-feed.js`) also subscribe to `/ui/broadcast/stream`. They are
+operation-activity surfaces (their row shape is the audit `BroadcastEvent`),
+so they **drop** announcement frames in `onSseMessage` — announcements
+render on the broadcast feed / history (their first-class home), not as
+blank operation rows.
+
+### Read path (UI history — Last 24h)
+
+`GET /ui/broadcast/history[?kind=]` renders the finite XRANGE replay pane
+via `list_recent_events_fail_soft` (fail-soft: a Valkey blip degrades to
+the empty state, not a 500). Since #2549 it renders **both** kinds through
+the same row partial; the former hard drop of announcement rows
+(`_is_audit_event`) became the optional `?kind=` filter
+(`operation` / `agent_announcement`, clamped by `_normalise_kind_filter`;
+absent renders both), surfaced as an "All / Operations / Announcements"
+button group that `hx-get`s the fragment back into `#broadcast-history`.
+The fail-soft path serialises via `_dump_event_plain` (unwrapped); the
+pane's HTML sink escapes announcement prose separately.
 
 ## Durable announcements (#2547)
 
@@ -578,6 +637,7 @@ investigation. #1305 is the closing fix.
   - `XREVRANGE` — https://valkey.io/commands/xrevrange/
 - SSE / EventSource — https://html.spec.whatwg.org/multipage/server-sent-events.html.
 - Untrusted-text envelope on announcement re-serve (`dump_event_wire`
-  wrapping `activity`/`scope`/`target` on the `recent`/`watch`/
-  `tenant_feed` LLM-facing paths) —
+  wrapping `activity`/`scope`/`target`/`work_ref` on the `recent`/`watch`/
+  `tenant_feed` LLM-facing paths; the human UI history + SSE surfaces
+  serve unwrapped and escape at the sink) —
   [`untrusted-text-envelope.md`](./untrusted-text-envelope.md).

@@ -461,7 +461,7 @@ def _resolve_op_id_and_class_override(
     verb suffix, so without the explicit ``op_class="audit_query"``
     override the broadcast would emit the full request payload and
     defeat the aggregate-only-for-audit-query discipline in decision
-    #3 of ``docs/planning/v0.2-decisions.md``.
+    #3 of ``docs/decisions/locked-decisions.md``.
 
     Returns ``(op_id, op_class_override_or_None)``. The op_class
     override is threaded into :func:`compute_effective_broadcast_detail`

@@ -67,7 +67,7 @@ only the **"prefer MEHO" routing rules**.
   imports.
 * The repo's `kb/` directory stays live as a fallback during the v0.2
   transition (~1 month per
-  [decision #2](https://github.com/evoila/meho/blob/main/docs/planning/v0.2-decisions.md));
+  [decision #2](https://github.com/evoila/meho/blob/main/docs/decisions/locked-decisions.md));
   after that, retire local reads.
 
 ### Memory (operator notes, behavioural preferences)

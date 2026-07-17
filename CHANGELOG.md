@@ -90,6 +90,52 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
+
+- `meho targets import` failed against every v0.21.0+ backplane — `--dry-run`
+  included — with `decode list response: json: cannot unmarshal object into Go
+  value of type []struct { Name string }`. The verb's pre-flight existence check
+  still decoded `GET /api/v1/targets` as the bare array it returned before
+  #2338 converged the route onto the `{items, next_cursor}` envelope, so the
+  import died before building a plan or writing anything. With `meho targets
+  create` retired (#1574), CLI target registration had no fallback.
+- The existence check now decodes the generated `api.TargetListResponse` and
+  pages on `next_cursor` instead of a page-length heuristic. Decoding the
+  generated type means a future list-shape change fails `go build` rather than
+  the operator's import: #2338 swept the sibling verbs by type and could not
+  see this file's private decoder, and #2383's follow-up audit checked
+  server-side tests only. The import's own doubles — the unit `fakeDoer` and
+  four end-to-end `httptest` servers — each minted their own bare-array body,
+  which is why the suite stayed green while the shipped verb was broken; they
+  now serve the same envelope the backplane emits.
+
+### Changed — retire the expired RDC image-push `repository_dispatch` notify
+
+- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
+  `.github/workflows/image.yml` (and its now-dead job-level
+  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
+  renewed, so the step — gated on the secret being present, not valid — failed
+  loud on every `main`/tag push with a `401` while the image build / sign /
+  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
+  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
+  the GitHub Releases feed. The cross-repo handshake docs are marked retired
+  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
+
+### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507)
+
+- **Check-runner never-raises hardening (#2505):** a non-`TimeoutError` exception
+  from `dispatch()` now maps to an `unknown` outcome (`reason=dispatch_error`)
+  instead of escaping `_run_evaluation` and stranding the sensor's projection.
+  Corrected the dispatch-identity docstring, which over-claimed the safe-only
+  guarantee holds at dispatch — it is enforced at Sensor *create* time; the
+  runner does not re-validate `safety_level`.
+- **Investigator suppression + key collisions (#2507):** the noise-suppression
+  lookup now uses an exact `(scope, slug)` `recall` instead of a capped substring
+  query that could push the exact entry past its limit and silently fail to
+  suppress a known-noise cause. Work-refs and topology group keys now include the
+  dashboard id / a digest of the `(kind, name)` identity, so causes and dashboards
+  whose names slugify to the same string no longer share a suppression key or an
+  in-flight work-ref.
 ## [0.23.0] - 2026-07-17
 
 ### Added — topology open node/edge kind vocabularies (#2555)
@@ -7782,7 +7828,7 @@ authored v0.2.1 client code against the public REST surface.
   REST + CLI + MCP surfaces; tenant-scoped throughout. CLI:
   `meho topology refresh/dependents/dependencies/path` and
   `meho targets discover`. MCP: `query_topology` + `list_targets`
-  meta-tools. Implements ~70% of [decision #6](docs/planning/v0.2-decisions.md)'s
+  meta-tools. Implements ~70% of [decision #6](docs/decisions/locked-decisions.md)'s
   auto-discoverable half.
 - **G9.2 — Curated cross-system edges + annotation flow** (#364).
   Closed v0.2 10-kind edge vocabulary (Alembic 0010) extends the
@@ -7792,7 +7838,7 @@ authored v0.2.1 client code against the public REST surface.
   `properties.conflicts_with` markers; supersede-on-curate;
   refresh sticky-supersede. Tenant-boundary + 10k-node
   performance acceptance. Implements the ~30% operator-curated
-  half of [decision #6](docs/planning/v0.2-decisions.md).
+  half of [decision #6](docs/decisions/locked-decisions.md).
 
 ### Security
 

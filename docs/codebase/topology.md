@@ -824,7 +824,7 @@ O(per_side_fetch) = O(limit + 1) per side, bounded by `limit ≤ 1000`.
 ### Audit class
 
 The REST route binds `audit_op_id="topology.timeline"` /
-`audit_op_class="audit_query"` per [decision #3](../planning/v0.2-decisions.md)
+`audit_op_class="audit_query"` per [decision #3](../decisions/locked-decisions.md)
 — temporal graph queries are inspections of system state, parallel
 to G8's audit-log query surface. The broadcast event carries only
 `{op_id, result_status, row_count}` so the request filter (which

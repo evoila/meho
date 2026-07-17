@@ -42,7 +42,7 @@ local Claude session from different angles:
 Layer 1 handles agents connecting *through* MEHO from anywhere;
 Layer 2 handles the operator's *local* Claude Code session reading
 their cloned repo. Both layers ship in v0.2; the layering is locked
-by [decision #5](../../planning/v0.2-decisions.md) in the v0.2
+by [decision #5](../../decisions/locked-decisions.md) in the v0.2
 planning notes.
 
 ## When to add files here

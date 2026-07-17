@@ -20,8 +20,8 @@ workflow) and the operator executing that delete + the rollback if it
 goes wrong.
 
 Locked decision the runbook executes:
-[`docs/planning/v0.2-decisions.md` decision #2 — *side-by-side with
-1-month overlap; retire when daily use shifts*](../planning/v0.2-decisions.md).
+[`docs/decisions/locked-decisions.md` decision #2 — *side-by-side with
+1-month overlap; retire when daily use shifts*](../decisions/locked-decisions.md).
 
 > The runbook is upstream of the actual retire-PR. MEHO ships the
 > tooling that makes the call (`retire-checklist` returns READY / REVIEW
@@ -276,7 +276,7 @@ scripts/setup-retrieval-migration-blocker-label.sh
 - Sibling runbooks (filed; not yet shipped — link when the docs land):
   - [G4.1-T6 #420](https://github.com/evoila/meho/issues/420) `docs/cross-repo/kb-migration.md`.
   - [G5.1-T6 #427](https://github.com/evoila/meho/issues/427) `docs/cross-repo/memory-migration.md`.
-- Decision #2: [`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md) — side-by-side migration + 1-month overlap + retire-when-daily-use-shifts.
+- Decision #2: [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md) — side-by-side migration + 1-month overlap + retire-when-daily-use-shifts.
 - Retire-checklist service: [`backend/src/meho_backplane/retrieval/retire.py`](../../backend/src/meho_backplane/retrieval/retire.py) (T6 #445).
 - Retire-checklist CLI: [`cli/internal/cmd/retrieval/retire_checklist.go`](../../cli/internal/cmd/retrieval/retire_checklist.go).
 - Codebase pointer (the retire-checklist control flow + threshold contract): [`docs/codebase/backend.md`](../codebase/backend.md) — search for "G4.3-T6 (Task #445) retire-decision verb".

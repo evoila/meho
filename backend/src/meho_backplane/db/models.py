@@ -2693,7 +2693,7 @@ class WebSession(Base):
 
     Initiative #337 (G10.0 Frontend chassis), Task #864 (T3). The
     operator-console is locked to the BFF custody shape per decision
-    #11 (``docs/planning/v0.2-decisions.md``): the browser holds an
+    #11 (``docs/decisions/locked-decisions.md``): the browser holds an
     opaque session-cookie value (the row's ``id``), the real OAuth
     access + refresh tokens live encrypted in this row, and every
     authenticated ``/ui/*`` request resolves operator identity by

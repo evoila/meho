@@ -68,6 +68,7 @@ from meho_backplane.api.v1.feed import router as feed_router
 from meho_backplane.audit import AuditMiddleware
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.broadcast import (
+    AgentAnnouncementEvent,
     BroadcastEvent,
     dispose_broadcast_blocking_client,
     dispose_broadcast_client,
@@ -221,6 +222,52 @@ def _make_event(
     )
 
 
+def _make_announcement(
+    *,
+    tenant_id: UUID = _TENANT_A,
+    principal_sub: str = "agent-bot",
+    activity: str = "rotating tokens on cluster X",
+    target: str | None = "cluster-x",
+    targets: list[str] | None = None,
+    phase: str = "start",
+    planned_op_class: str | None = "credential_write",
+    ttl_minutes: int | None = 30,
+    work_ref: str | None = "gh:evoila/meho#123",
+) -> AgentAnnouncementEvent:
+    """Build one agent-authored announcement for the union-validation tests."""
+    return AgentAnnouncementEvent(
+        tenant_id=tenant_id,
+        principal_sub=principal_sub,
+        activity=activity,
+        target=target,
+        targets=targets or [],
+        scope=None,
+        planned_op_class=planned_op_class,  # type: ignore[arg-type]
+        ttl_minutes=ttl_minutes,
+        work_ref=work_ref,
+        phase=phase,  # type: ignore[arg-type]
+        ts=datetime(2026, 5, 13, tzinfo=UTC),
+    )
+
+
+def _xread_returning_raw(items: list[tuple[str, dict[str, str]]]) -> AsyncMock:
+    """AsyncMock returning pre-built ``(entry_id, fields)`` items once, then idle.
+
+    Sibling of :func:`_xread_returning` for tests that mix event kinds on
+    one batch (the raw wire ``fields`` carry each kind's ``model_dump_json``).
+    """
+    call_count = {"n": 0}
+
+    async def _xread_side_effect(*_args: object, **_kwargs: object) -> object:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return [("meho:feed:<irrelevant>", items)]
+        await asyncio.sleep(0.01)
+        return None
+
+    return AsyncMock(side_effect=_xread_side_effect)
+
+
 def _xread_returning(events: list[BroadcastEvent]) -> AsyncMock:
     """AsyncMock that returns *events* on the first call, then awaits idle forever.
 
@@ -328,6 +375,33 @@ async def _drive_generator_with_one_batch(
             target=target,
         )
         return await _collect_n_frames(gen, n=1)
+
+
+async def _drive_generator_collecting(
+    items: list[tuple[str, dict[str, str]]],
+    *,
+    n: int,
+    op_class: str | None = None,
+    principal: str | None = None,
+    target: str | None = None,
+) -> list[str]:
+    """Push one batch through ``_feed_generator`` and collect up to *n* frames.
+
+    Sibling of :func:`_drive_generator_with_one_batch` for the union
+    tests that expect more than one surviving frame (a mixed operation +
+    announcement batch, or several announcements matching a filter).
+    """
+    broadcast_client = get_broadcast_blocking_client()
+    mock = _xread_returning_raw(items)
+    with patch.object(broadcast_client, "xread", new=mock):
+        gen = _feed_generator(
+            operator=_make_operator(),
+            cursor="$",
+            op_class=op_class,
+            principal=principal,
+            target=target,
+        )
+        return await _collect_n_frames(gen, n=n)
 
 
 # ---------------------------------------------------------------------------
@@ -1188,6 +1262,105 @@ class TestFeedGenerator:
         frames = await _drive_generator_with_one_batch(items)
         assert len(frames) == 1
         assert "id: 1715600000001-0" in frames[0]
+
+    async def test_announcement_flows_as_first_class_frame(self, _feed_env: None) -> None:
+        """#2549: an announcement is union-validated + emitted, not skipped.
+
+        Pre-#2549 the generator validated every entry as
+        :class:`BroadcastEvent` and dropped announcements on the resulting
+        :class:`pydantic.ValidationError`. Now the ``kind`` discriminator
+        picks :class:`AgentAnnouncementEvent`, so the announcement rides the
+        SSE feed as a typed ``event: broadcast`` frame carrying its
+        structured claim fields (#2544).
+        """
+        ann = _make_announcement(activity="rotating tokens on cluster X")
+        items = [("1715600000000-0", {"event": ann.model_dump_json()})]
+        frames = await _drive_generator_with_one_batch(items)
+        assert len(frames) == 1
+        assert frames[0].startswith("event: broadcast\n")
+        assert "id: 1715600000000-0" in frames[0]
+        decoded = json.loads(
+            next(line for line in frames[0].split("\n") if line.startswith("data: "))[
+                len("data: ") :
+            ]
+        )
+        assert decoded["kind"] == "agent_announcement"
+        assert decoded["activity"] == "rotating tokens on cluster X"
+        # Structured claim fields (#2544) survive on the wire unwrapped.
+        assert decoded["phase"] == "start"
+        assert decoded["planned_op_class"] == "credential_write"
+        assert decoded["ttl_minutes"] == 30
+        assert decoded["work_ref"] == "gh:evoila/meho#123"
+
+    async def test_mixed_operation_and_announcement_batch(self, _feed_env: None) -> None:
+        """Both kinds in one batch both survive (union validation, back-compat).
+
+        A pre-#2544 announcement (only ``event_kind``, no structured claim
+        fields) and an operation in the same batch both render — the
+        discriminator falls back to ``event_kind`` and the operation
+        default covers pre-migration entries.
+        """
+        op_event = _make_event(op_id="vsphere.vm.list")
+        ann = _make_announcement(
+            activity="investigating latency",
+            target=None,
+            planned_op_class=None,
+            ttl_minutes=None,
+            work_ref=None,
+            phase="update",
+        )
+        # Emulate a pre-#2544/T1 announcement wire shape: strip the newer
+        # top-level ``kind`` so only the historical ``event_kind`` alias
+        # discriminates it (back-compat replay).
+        ann_wire = json.loads(ann.model_dump_json())
+        ann_wire.pop("kind", None)
+        items = [
+            ("1715600000000-0", {"event": op_event.model_dump_json()}),
+            ("1715600000001-0", {"event": json.dumps(ann_wire)}),
+        ]
+        frames = await _drive_generator_collecting(items, n=2)
+        assert len(frames) == 2
+        assert "id: 1715600000000-0" in frames[0]
+        assert "id: 1715600000001-0" in frames[1]
+        ann_decoded = json.loads(
+            next(line for line in frames[1].split("\n") if line.startswith("data: "))[
+                len("data: ") :
+            ]
+        )
+        assert ann_decoded["event_kind"] == "agent_announcement"
+        assert ann_decoded["activity"] == "investigating latency"
+
+    async def test_op_class_filter_drops_announcements(self, _feed_env: None) -> None:
+        """An ``op_class`` filter narrows to operations; announcements drop.
+
+        Announcements carry no operation classification, so an operator
+        filtering the feed by ``op_class`` is asking for operations —
+        ``event_matches`` never matches an announcement under that filter.
+        """
+        op_event = _make_event(op_class="read", op_id="vsphere.vm.list")
+        ann = _make_announcement()
+        items = [
+            ("1715600000000-0", {"event": op_event.model_dump_json()}),
+            ("1715600000001-0", {"event": ann.model_dump_json()}),
+        ]
+        frames = await _drive_generator_with_one_batch(items, op_class="read")
+        assert len(frames) == 1
+        assert "id: 1715600000000-0" in frames[0]
+
+    async def test_announcement_matches_target_filter(self, _feed_env: None) -> None:
+        """A ``target`` filter matches an announcement's ``target`` / ``targets``."""
+        ann_hit = _make_announcement(target="cluster-x", targets=["kube-a"])
+        ann_via_list = _make_announcement(target=None, targets=["cluster-x"])
+        ann_miss = _make_announcement(target="cluster-y", targets=[])
+        items = [
+            ("1715600000000-0", {"event": ann_hit.model_dump_json()}),
+            ("1715600000001-0", {"event": ann_via_list.model_dump_json()}),
+            ("1715600000002-0", {"event": ann_miss.model_dump_json()}),
+        ]
+        frames = await _drive_generator_collecting(items, n=2, target="cluster-x")
+        assert len(frames) == 2
+        assert "id: 1715600000000-0" in frames[0]
+        assert "id: 1715600000001-0" in frames[1]
 
     async def test_xread_connection_error_emits_feed_error_then_closes(
         self,

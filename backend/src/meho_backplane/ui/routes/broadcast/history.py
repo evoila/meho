@@ -44,14 +44,17 @@ its empty state, not 500. That guarantee is what keeps the page
 useful when the broadcast subchart is unhealthy.
 
 The shared helper handles both :class:`BroadcastEvent` (audit-driven)
-and :class:`AgentAnnouncementEvent` (agent-authored). This pane today
-renders only :class:`BroadcastEvent` -- the row template binds to
-audit-event columns (``op_class`` / ``op_id`` / ``result_status`` /
-``payload``) that announcements don't carry. The post-helper filter
-in :func:`_fetch_history` drops announcement entries to keep the pane
-byte-compatible with the existing live SSE feed (which also drops
-announcements today). Adding announcement rendering is a follow-up
-that lives on the row template, not this route.
+and :class:`AgentAnnouncementEvent` (agent-authored). #2549 makes the
+pane render both: the shared row partial (``broadcast/_event_row.html``)
+branches on ``ev.kind`` so an operation renders the audit columns
+(``op_class`` / ``op_id`` / ``result_status`` / ``payload``) and an
+announcement renders its agent-authored variant (principal, phase chip,
+enveloped activity text shown as escaped quoted prose, plus the #2544
+structured claim fields -- targets / work_ref / TTL). The former hard
+drop in :func:`_fetch_history` becomes the optional ``?kind=`` filter
+(see :func:`_matches_kind_filter`), so an operator can still narrow the
+pane to one kind. This mirrors the SSE feed, which #2549 also union-
+validates so announcements flow as first-class frames.
 
 Why reuse the live feed's row + drawer
 ======================================
@@ -84,11 +87,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Final
 from uuid import UUID
 
 import structlog
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -129,34 +132,73 @@ def _window_start_iso(*, retention_hours: int, now: datetime) -> str:
     return start.isoformat().replace("+00:00", "Z")
 
 
-def _is_audit_event(event: dict[str, Any]) -> bool:
-    """Return ``True`` iff *event* is a :class:`BroadcastEvent` (audit-driven).
+#: The top-level discriminator value for an audit-driven
+#: :class:`~meho_backplane.broadcast.events.BroadcastEvent`. Pre-migration
+#: entries omit ``kind`` on the wire and are inferred as this.
+_OPERATION_KIND: Final[str] = "operation"
 
-    G0.16-T6 Finding F (#1312). The discriminator is the top-level
-    ``kind`` field per ``docs/codebase/api-shape-conventions.md`` §6:
-    ``"operation"`` for audit-driven :class:`BroadcastEvent`,
-    ``"agent_announcement"`` for :class:`AgentAnnouncementEvent`.
-    Falls back to the historical ``event_kind`` field for backward
-    compatibility with v0.8.0 stream entries still in the
-    publisher's ``MAXLEN ~`` window.
+#: The top-level discriminator value for an agent-authored
+#: :class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`.
+_ANNOUNCEMENT_KIND: Final[str] = "agent_announcement"
 
-    This route today renders only audit events -- the existing row
-    template binds to audit columns (``op_class`` / ``op_id`` /
-    ``result_status`` / ``payload``) that announcements don't carry.
-    Surfacing announcement-shape events through the existing
-    template would render blank cells. Adding announcement
-    rendering is a follow-up that lives on the row template, not
-    this route.
+#: The kind values the ``?kind=`` history filter honours. Anything else
+#: (blank, garbage) is treated as "no filter" -- the pane renders both
+#: kinds rather than 400-ing a browser-supplied query string.
+_KIND_FILTER_VALUES: Final[tuple[str, ...]] = (_OPERATION_KIND, _ANNOUNCEMENT_KIND)
+
+
+def _event_kind(event: dict[str, Any]) -> str:
+    """Return the normalised discriminator kind for a wire event dict.
+
+    G0.16-T6 Finding F (#1312). Prefers the top-level ``kind`` field per
+    ``docs/codebase/api-shape-conventions.md`` §6, falling back to the
+    historical ``event_kind`` alias for v0.8.0 stream entries still in the
+    publisher's ``MAXLEN ~`` window, and finally to :data:`_OPERATION_KIND`
+    for pre-migration audit rows that carry neither field.
     """
-    discriminator = event.get("kind") or event.get("event_kind")
-    return discriminator != "agent_announcement"
+    return event.get("kind") or event.get("event_kind") or _OPERATION_KIND
+
+
+def _matches_kind_filter(event: dict[str, Any], kind: str | None) -> bool:
+    """Return ``True`` iff *event* should render under the ``kind`` filter.
+
+    #2549 turns the former hard drop of announcement-kind events into a
+    user-facing kind filter:
+
+    * ``kind is None`` — no filter; both audit-driven operations and
+      agent-authored announcements render (the pane is no longer
+      write-only for humans).
+    * ``kind == "operation"`` — only audit-driven events (announcements
+      drop).
+    * ``kind == "agent_announcement"`` — only announcements.
+
+    The discriminator is normalised via :func:`_event_kind` so a
+    pre-migration audit row (no ``kind`` on the wire) still counts as an
+    operation.
+    """
+    if kind is None:
+        return True
+    return _event_kind(event) == kind
+
+
+def _normalise_kind_filter(raw: str | None) -> str | None:
+    """Clamp the browser-supplied ``?kind=`` value to a known kind or ``None``.
+
+    Returns the value only when it is one of :data:`_KIND_FILTER_VALUES`;
+    an empty string (the "All" sentinel the filter control submits) or any
+    unknown value maps to ``None`` (render both kinds). Keeps a hand-edited
+    or stale query string from silently emptying the pane.
+    """
+    return raw if raw in _KIND_FILTER_VALUES else None
 
 
 async def _fetch_history(
     tenant_id: UUID,
     operator_sub: str,
+    *,
+    kind: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Pull the last-24h audit events for *tenant_id*, newest-first, capped.
+    """Pull the last-24h events for *tenant_id*, newest-first, capped.
 
     Delegates to :func:`~meho_backplane.broadcast.list_recent_events_fail_soft`
     -- a single finite ``XRANGE`` over ``meho:feed:{tenant_id}`` from the
@@ -164,23 +206,27 @@ async def _fetch_history(
     :data:`IN_DOM_ROW_CAP` so the pane stays within the same in-DOM row
     budget as the live feed.
 
-    The helper returns ascending (oldest-first) dict-shaped events with
-    a stream-cursor ``id``; this route reverses to newest-first to match
-    the live feed's display order, then filters out
-    :class:`AgentAnnouncementEvent` entries to preserve the existing
-    row template's audit-event contract (see :func:`_is_audit_event`).
+    The helper returns ascending (oldest-first) dict-shaped events with a
+    stream-cursor ``id``. On the fail-soft path it serialises via
+    ``_dump_event_plain`` (no untrusted-text envelope) because this pane's
+    HTML sink escapes every field separately (Alpine ``x-text`` sets
+    ``textContent``); the announcement free text renders as escaped quoted
+    prose, never interpreted. This route reverses to newest-first to match
+    the live feed's display order and applies the optional ``kind`` filter
+    (see :func:`_matches_kind_filter`). Both event kinds render -- the
+    shared row partial branches on ``ev.kind`` so an announcement renders
+    its agent-authored variant and an operation renders the audit columns.
 
-    Fail-soft: a Valkey error returns an empty list (the pane renders
-    its empty state) rather than 500-ing the fragment. The helper logs
-    the structured warning; this route does not re-log or transform the
-    failure.
+    Fail-soft: a Valkey error returns an empty list (the pane renders its
+    empty state) rather than 500-ing the fragment. The helper logs the
+    structured warning; this route does not re-log or transform the failure.
 
-    *operator_sub* is the session's principal subject; the helper takes
-    a synthesised :class:`Operator` because its API is operator-scoped
-    even though the UI doesn't validate operator role for the read
-    (the session middleware already gated the request). The role on the
-    synthesised operator is OPERATOR (sufficient for the helper's
-    structural tenant check).
+    *operator_sub* is the session's principal subject; the helper takes a
+    synthesised :class:`Operator` because its API is operator-scoped even
+    though the UI doesn't validate operator role for the read (the session
+    middleware already gated the request). The role on the synthesised
+    operator is OPERATOR (sufficient for the helper's structural tenant
+    check).
     """
     operator = Operator(
         sub=operator_sub,
@@ -199,9 +245,9 @@ async def _fetch_history(
     )
     # XRANGE is ascending (oldest-first); the pane renders newest-first
     # to match the live feed's reverse-chronological order.
-    audit_events = [e for e in result["events"] if _is_audit_event(e)]
-    audit_events.reverse()
-    return audit_events
+    events = [e for e in result["events"] if _matches_kind_filter(e, kind)]
+    events.reverse()
+    return events
 
 
 #: Module-level :class:`fastapi.Depends` closure -- ruff B008 guard.
@@ -220,9 +266,17 @@ def build_history_router() -> APIRouter:
 
     async def _handler(
         request: Request,
+        kind: str | None = Query(
+            default=None,
+            max_length=64,
+            description=(
+                "Optional event-kind filter: 'operation' (audit-driven) or "
+                "'agent_announcement'. Absent/blank renders both kinds."
+            ),
+        ),
         session_ctx: UISessionContext = _require_ui_session_dep,
     ) -> HTMLResponse:
-        """``GET /ui/broadcast/history`` -- the Last-24h replay fragment.
+        """``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.
 
         Pulls the session tenant's last-24h events via the shared
         fail-soft read helper, passes them as a list the template
@@ -233,10 +287,17 @@ def build_history_router() -> APIRouter:
         the tab swaps it into the page's history container). The
         tenant comes from the validated session, never a query
         parameter.
+
+        The optional ``kind`` query parameter narrows the pane to a
+        single event kind (``operation`` / ``agent_announcement``); it is
+        clamped to a known kind by :func:`_normalise_kind_filter`, so a
+        blank or unknown value renders both kinds.
         """
+        kind_filter = _normalise_kind_filter(kind)
         events = await _fetch_history(
             session_ctx.tenant_id,
             session_ctx.operator_sub,
+            kind=kind_filter,
         )
         context: dict[str, object] = {
             "in_dom_row_cap": IN_DOM_ROW_CAP,
@@ -244,6 +305,9 @@ def build_history_router() -> APIRouter:
             "history_events": events,
             "history_count": len(events),
             "retention_hours": get_settings().broadcast_retention_hours,
+            "kind_filter": kind_filter or "",
+            "operation_kind": _OPERATION_KIND,
+            "announcement_kind": _ANNOUNCEMENT_KIND,
         }
         return get_templates().TemplateResponse(request, "broadcast/_history.html", context)
 

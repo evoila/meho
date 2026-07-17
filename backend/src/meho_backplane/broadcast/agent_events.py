@@ -118,7 +118,7 @@ References
   :mod:`meho_backplane.conventions.preamble`.
 * Decision #3 (PII defaults -- N/A here; agent-authored content is
   agent-controlled, not auto-redacted):
-  ``docs/planning/v0.2-decisions.md``.
+  ``docs/decisions/locked-decisions.md``.
 """
 
 from __future__ import annotations

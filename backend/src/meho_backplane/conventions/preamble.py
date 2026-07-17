@@ -25,7 +25,7 @@ Packing contract
 ----------------
 
 * Reads only ``kind='operational'`` rows (decision #4 in
-  ``docs/planning/v0.2-decisions.md``); ``workflow`` and
+  ``docs/decisions/locked-decisions.md``); ``workflow`` and
   ``reference`` rows are reference material the operator surfaces on
   demand and never enter the session preamble.
 * Orders the rows ``priority DESC, created_at ASC`` -- highest

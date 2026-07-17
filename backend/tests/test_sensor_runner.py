@@ -374,6 +374,31 @@ async def test_at_most_once_dispatch_that_raises_advances_and_does_not_refire(
 
 
 @pytest.mark.asyncio
+async def test_raising_dispatch_persists_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dispatch() that raises a non-timeout error persists ``unknown`` instead of
+    stranding the projection -- the ``_run_evaluation`` never-raises contract."""
+
+    async def _raising_dispatch(**_kwargs: Any) -> OperationResult:
+        raise RuntimeError("connector blew up")
+
+    monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _raising_dispatch)
+
+    sensor_id = await _create_interval_sensor(interval_seconds=300)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert row.last_evidence is not None
+    assert row.last_evidence["reason"] == "dispatch_error"
+    assert "connector blew up" in row.last_evidence["error"]
+
+
+@pytest.mark.asyncio
 async def test_two_concurrent_sensor_ticks_never_double_evaluate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

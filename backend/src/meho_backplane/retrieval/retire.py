@@ -71,7 +71,7 @@ References
   for the streak math.
 * :mod:`meho_backplane.retrieval.eval.runner` — eval pipeline whose
   ``EvalResult`` feeds criteria 3 + 4.
-* Decision #2: ``docs/planning/v0.2-decisions.md`` L39-L43.
+* Decision #2: ``docs/decisions/locked-decisions.md`` L39-L43.
 """
 
 from __future__ import annotations

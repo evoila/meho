@@ -396,7 +396,7 @@ async def test_workflow_and_reference_kinds_excluded_from_preamble() -> None:
 
     Acceptance criterion: "``kind='workflow'`` / ``kind='reference'``
     conventions are EXCLUDED from the preamble." Decision #4 in
-    ``docs/planning/v0.2-decisions.md``.
+    ``docs/decisions/locked-decisions.md``.
     """
     tenant = uuid.uuid4()
     await _insert_convention(

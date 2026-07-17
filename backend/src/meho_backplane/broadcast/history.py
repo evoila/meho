@@ -87,7 +87,6 @@ import structlog
 from pydantic import ValidationError
 from redis.exceptions import RedisError
 from sqlalchemy import select
-from sqlalchemy.exc import SQLAlchemyError
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
@@ -658,7 +657,14 @@ async def _backfill_recent_from_db(
             if work_ref is not None:
                 stmt = stmt.where(AgentAnnouncement.work_ref == work_ref)
             rows = list((await session.execute(stmt)).scalars().all())
-    except SQLAlchemyError as exc:
+    except Exception as exc:
+        # Best-effort: ANY failure reaching the archive degrades to
+        # stream-only results. This covers not just the query
+        # (SQLAlchemyError) but also engine/session setup -- e.g.
+        # ``get_sessionmaker`` -> ``get_engine`` -> ``get_settings`` in a
+        # context without full config. The archive augments the Valkey
+        # stream; it must never gate the primary read, so the guard is
+        # deliberately broad (the try body is scoped to DB access only).
         _log.warning(
             "broadcast_recent_backfill_failed",
             error_class=type(exc).__name__,

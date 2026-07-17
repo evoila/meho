@@ -334,6 +334,60 @@ button group that `hx-get`s the fragment back into `#broadcast-history`.
 The fail-soft path serialises via `_dump_event_plain` (unwrapped); the
 pane's HTML sink escapes announcement prose separately.
 
+### Read path (dispatch-time target-activity advisory)
+
+On the **success path of a write-class dispatch**, the operation response
+carries a compact advisory of recent *peer* activity on the same target so
+the caller learns another principal is already active there — post-op
+awareness, not a lock or a block (pre-op checking stays the discipline's
+`meho.broadcast.recent` read step). The advisory rides
+`OperationResult.extras["target_activity_advisory"]`
+(`connectors/schemas.py`), the established envelope-extension slot.
+
+```text
+dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
+  → build_target_activity_advisory(operator, op_id, target_name)
+      [gate — returns {} without any stream read when:]
+        · settings.dispatch_activity_advisory_window_minutes == 0
+        · classify_op(op_id) not in {write, credential_write, credential_mint}
+        · target_name is None
+      [otherwise — one bounded, newest-first read:]
+        → XREVRANGE meho:feed:{tenant} + <since-ms> COUNT 100
+          (newest-first, so the COUNT cap keeps the newest window
+           entries — not the oldest, which an XRANGE + COUNT would)
+        → parse + event_matches(target=target_name, active_only=True)
+        → drop entries where (principal_sub, actor_sub) == the caller's
+        → keep the newest 5, restore chronological order
+  → wrap_ok_result(..., extras=advisory)
+```
+
+Design contract:
+
+- **Write-class only.** Read-class dispatches (`read` / `credential_read`
+  / `audit_query` / `other` / `approval`) short-circuit on the frozenset
+  check before any Valkey call — the hot read path pays nothing.
+- **Structure only, no prose.** Each entry is
+  `{principal_sub, actor_sub?, kind (operation|announcement), op_id?/phase?, ts}`.
+  The untrusted announcement free-text fields (`activity` / `scope` /
+  `target` / `targets`) are never projected — the untrusted-prose envelope
+  does not enter an op response (Initiative #2543, review finding 27).
+- **Self-excluded.** An entry whose `principal_sub` *and* `actor_sub` both
+  match the caller is the caller's own activity and is dropped; a sibling
+  agent under the same human (distinct `actor_sub`) is a peer and surfaces.
+- **Newest-first, so the cap keeps what matters.** The read is a single
+  `XREVRANGE` (newest-first) time-bounded by the window and capped at 100
+  entries; the newest five surviving peer entries are then re-ordered
+  chronologically. An oldest-first `XRANGE` + `COUNT` would clip the tail
+  and silently invert the "most-recent" contract on a busy target.
+- **Fail-open and bounded.** Any error in the lookup (a Valkey teardown
+  included) is swallowed and warn-logged (`target_activity_advisory_failed`),
+  yielding no advisory rather than failing the op. The lookup *is* awaited
+  on the success path, so it adds one small, bounded stream read to a
+  write dispatch's latency — it never fails the dispatch, and the cost is
+  capped by the `COUNT`.
+- **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
+  `30`, `0` = off) gates the whole feature.
+
 ## Durable announcements (#2547)
 
 The Valkey stream is the hot real-time path but not durable: it is

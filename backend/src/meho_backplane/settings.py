@@ -1060,6 +1060,12 @@ class Settings(BaseModel):
     )
     broadcast_retention_hours: int = Field(default=24, gt=0)
     broadcast_announce_rate_per_minute: int = Field(default=10, ge=0)
+    #: Look-back window (minutes) for the dispatch-time target-activity
+    #: advisory (#2550). A write-class dispatch on a target with peer
+    #: activity inside this window carries a compact
+    #: ``extras["target_activity_advisory"]`` on its response. ``0``
+    #: disables the feature entirely (no stream read on any dispatch).
+    dispatch_activity_advisory_window_minutes: int = Field(default=30, ge=0)
     # Broadcast v2 T2 (#2547) -- durable-announcement retention prune
     # knobs. ``days=0`` is the keep-forever opt-out sentinel;
     # ``enabled=False`` skips starting the background task entirely
@@ -1699,6 +1705,9 @@ def get_settings() -> Settings:
         ),
         broadcast_announce_rate_per_minute=int(
             os.environ.get("BROADCAST_ANNOUNCE_RATE_PER_MINUTE", "10"),
+        ),
+        dispatch_activity_advisory_window_minutes=int(
+            os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),
         ),
         broadcast_announcement_retention_days=int(
             os.environ.get("BROADCAST_ANNOUNCEMENT_RETENTION_DAYS", "90"),

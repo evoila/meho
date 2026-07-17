@@ -7803,6 +7803,12 @@ type UiBroadcastFeedFragmentUiBroadcastFeedGetParams struct {
 	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
 }
 
+// UiBroadcastHistoryUiBroadcastHistoryGetParams defines parameters for UiBroadcastHistoryUiBroadcastHistoryGet.
+type UiBroadcastHistoryUiBroadcastHistoryGetParams struct {
+	// Kind Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds.
+	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
+}
+
 // UiBroadcastOverridesUiBroadcastOverridesGetParams defines parameters for UiBroadcastOverridesUiBroadcastOverridesGet.
 type UiBroadcastOverridesUiBroadcastOverridesGetParams struct {
 	OpId *string `form:"op_id,omitempty" json:"op_id,omitempty"`
@@ -10064,7 +10070,7 @@ type ClientInterface interface {
 	UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastHistoryUiBroadcastHistoryGet request
-	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastOverridesUiBroadcastOverridesGet request
 	UiBroadcastOverridesUiBroadcastOverridesGet(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13716,8 +13722,8 @@ func (c *Client) UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server)
+func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -27846,7 +27852,7 @@ func NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(server string, params *
 }
 
 // NewUiBroadcastHistoryUiBroadcastHistoryGetRequest generates requests for UiBroadcastHistoryUiBroadcastHistoryGet
-func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string) (*http.Request, error) {
+func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string, params *UiBroadcastHistoryUiBroadcastHistoryGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -27862,6 +27868,28 @@ func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string) (*http.Req
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -35699,7 +35727,7 @@ type ClientWithResponsesInterface interface {
 	UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error)
 
 	// UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request
-	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
+	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
 
 	// UiBroadcastOverridesUiBroadcastOverridesGetWithResponse request
 	UiBroadcastOverridesUiBroadcastOverridesGetWithResponse(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesUiBroadcastOverridesGetResponse, error)
@@ -40436,6 +40464,7 @@ func (r UiBroadcastFeedFragmentUiBroadcastFeedGetResponse) StatusCode() int {
 type UiBroadcastHistoryUiBroadcastHistoryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -45825,8 +45854,8 @@ func (c *ClientWithResponses) UiBroadcastFeedFragmentUiBroadcastFeedGetWithRespo
 }
 
 // UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request returning *UiBroadcastHistoryUiBroadcastHistoryGetResponse
-func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
-	rsp, err := c.UiBroadcastHistoryUiBroadcastHistoryGet(ctx, reqEditors...)
+func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
+	rsp, err := c.UiBroadcastHistoryUiBroadcastHistoryGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -53362,6 +53391,16 @@ func ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse(rsp *http.Response) (*
 	response := &UiBroadcastHistoryUiBroadcastHistoryGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

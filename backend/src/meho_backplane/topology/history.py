@@ -99,6 +99,7 @@ _NODE_SNAPSHOT_COLUMNS: tuple[str, ...] = (
     "kind",
     "name",
     "target_id",
+    "source",
     "properties",
     "discovered_by",
     "first_seen",

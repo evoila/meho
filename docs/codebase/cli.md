@@ -1263,18 +1263,26 @@ the canonical `/api/v1/targets` prefix.
   identically to a typo (cross-tenant refresh is impossible by
   construction).
 - `meho topology dependents <name|alias> [--depth N] [--kind K]
-  [--node-kind K]` — `GET /api/v1/topology/dependents/<name>`.
+  [--node-kind K] [--include-stale=false]` —
+  `GET /api/v1/topology/dependents/<name>`.
   Reverse closure ("what depends on me" — the blast-radius verb
   consumer-needs.md L258 specifies, run *before* a destructive op).
-  Renders a depth-ordered `DEPTH / KIND / NAME / VIA` table; the
-  anchor is row 0 (empty VIA) so an operator distinguishes "exists,
-  no dependents" (one row) from "not in this tenant" (zero rows).
+  Renders a depth-ordered `DEPTH / KIND / NAME / VIA / PARENT` table
+  (#2538: PARENT is the node this row hangs off, resolved to its name
+  from the closure itself; `--json` carries the raw `parent_node_id`
+  / `via_edge_id` fields); the anchor is row 0 (empty VIA/PARENT) so
+  an operator distinguishes "exists, no dependents" (one row) from
+  "not in this tenant" (zero rows). `--include-stale=false` restricts
+  the walk to live rows (default keeps soft-deleted rows reachable,
+  last-refresh-wins).
 - `meho topology dependencies <name|alias> [--depth N] [--kind K]
-  [--node-kind K]` — `GET /api/v1/topology/dependencies/<name>`.
+  [--node-kind K] [--include-stale=false]` —
+  `GET /api/v1/topology/dependencies/<name>`.
   Forward closure ("what I depend on") — the mirror of `dependents`,
   same table shape and contract, opposite walk direction.
 - `meho topology path <from> <to> [--max-hops N] [--from-kind K]
-  [--to-kind K]` — `GET /api/v1/topology/path?from=A&to=B`. Shortest
+  [--to-kind K] [--include-stale=false]` —
+  `GET /api/v1/topology/path?from=A&to=B`. Shortest
   unweighted path rendered as a `kind/name -> … (N hops)` chain, or
   the no-path line when unreachable / an endpoint is missing /
   cross-tenant (all the same `null` answer, exit 0, never an error).

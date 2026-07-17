@@ -1312,7 +1312,7 @@
           "topology"
         ],
         "summary": "Dependents",
-        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 (the substrate's depth-0 anchor\nrow), so a tracked node with no dependents returns a one-element\nlist with the root.\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.\n\nG0.18-T4 (#1357, RDC #789 N2) \u2014 an anchor name with no matching\n:class:`~meho_backplane.db.models.GraphNode` in the tenant returns\n**404 ``node_untracked``** rather than an empty list. Pre-G0.18-T4\nthe route returned ``[]`` for an untracked anchor, which conflated\n\"tracked, nothing depends on me\" with \"anchor isn't in the graph\nat all\" \u2014 for the pre-destructive blast-radius use case the empty\nlist read as \"safe to delete,\" a false-negative. Auto-discovery\nis k8s-only (only\n:class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`\noverrides\n:meth:`~meho_backplane.connectors.base.Connector.discover_topology`),\nso every registered ``vault`` / ``vcenter`` / ``nsx`` /\n``sddc-manager`` / ``gh`` target currently surfaces as untracked\nuntil non-k8s populators or a curated annotation lands. The\ndistinct 404 lets the CLI / MCP front render the explicit \"not\nin graph \u2014 `meho topology refresh` first / annotate the\nrelationships\" prompt instead of misleading the operator.\n\nG0.16-T6 Finding E (#1312) \u2014 opt-in to the REST\u2194MCP envelope\nagreement per ``docs/codebase/api-shape-conventions.md`` \u00a74.\nDefault response stays the v0.8.0 bare ``list[TopologyNode]`` so\nno client breaks; passing ``?envelope=v2`` returns the\ndiscriminated envelope ``{\"kind\": \"dependents\", \"nodes\": [...]}``\nmatching the MCP ``query_topology`` tool's shape. The convention\ndoc names \"migration is REST-toward-MCP, not the other way\";\nthe v2 opt-in is the migration mechanism.",
+        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 (the substrate's depth-0 anchor\nrow), so a tracked node with no dependents returns a one-element\nlist with the root.\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.\n\nEach non-root row carries ``parent_node_id`` / ``via_edge_id``\n(#2538) \u2014 the node the walk stepped from and the edge it walked \u2014\nso the caller reconstructs the exact dependency chain from the\nflat list. ``include_stale=false`` opts out of the default\nlast-refresh-wins view and drops soft-deleted nodes/edges from\nthe walk.\n\nG0.18-T4 (#1357, RDC #789 N2) \u2014 an anchor name with no matching\n:class:`~meho_backplane.db.models.GraphNode` in the tenant returns\n**404 ``node_untracked``** rather than an empty list. Pre-G0.18-T4\nthe route returned ``[]`` for an untracked anchor, which conflated\n\"tracked, nothing depends on me\" with \"anchor isn't in the graph\nat all\" \u2014 for the pre-destructive blast-radius use case the empty\nlist read as \"safe to delete,\" a false-negative. Auto-discovery\nis k8s-only (only\n:class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`\noverrides\n:meth:`~meho_backplane.connectors.base.Connector.discover_topology`),\nso every registered ``vault`` / ``vcenter`` / ``nsx`` /\n``sddc-manager`` / ``gh`` target currently surfaces as untracked\nuntil non-k8s populators or a curated annotation lands. The\ndistinct 404 lets the CLI / MCP front render the explicit \"not\nin graph \u2014 `meho topology refresh` first / annotate the\nrelationships\" prompt instead of misleading the operator.\n\nG0.16-T6 Finding E (#1312) \u2014 opt-in to the REST\u2194MCP envelope\nagreement per ``docs/codebase/api-shape-conventions.md`` \u00a74.\nDefault response stays the v0.8.0 bare ``list[TopologyNode]`` so\nno client breaks; passing ``?envelope=v2`` returns the\ndiscriminated envelope ``{\"kind\": \"dependents\", \"nodes\": [...]}``\nmatching the MCP ``query_topology`` tool's shape. The convention\ndoc names \"migration is REST-toward-MCP, not the other way\";\nthe v2 opt-in is the migration mechanism.",
         "operationId": "dependents_api_v1_topology_dependents__name__get",
         "parameters": [
           {
@@ -1355,6 +1355,18 @@
               "nullable": true,
               "title": "Kind Filter"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "envelope",
@@ -1498,7 +1510,7 @@
           "topology"
         ],
         "summary": "Dependencies",
-        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping, **same G0.18-T4 (#1357) untracked-anchor\ntreatment** (404 ``node_untracked`` rather than an empty list) \u2014\nwalking edges out of the current node rather than into it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`. Honours\nthe same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)\nreturning ``{\"kind\": \"dependencies\", \"nodes\": [...]}``.",
+        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping, same #2538 chain provenance (``parent_node_id`` /\n``via_edge_id``) and ``include_stale`` opt-out, **same G0.18-T4\n(#1357) untracked-anchor treatment** (404 ``node_untracked``\nrather than an empty list) \u2014 walking edges out of the current\nnode rather than into it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`. Honours\nthe same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)\nreturning ``{\"kind\": \"dependencies\", \"nodes\": [...]}``.",
         "operationId": "dependencies_api_v1_topology_dependencies__name__get",
         "parameters": [
           {
@@ -1541,6 +1553,18 @@
               "nullable": true,
               "title": "Kind Filter"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "envelope",
@@ -1684,7 +1708,7 @@
           "topology"
         ],
         "summary": "Path",
-        "description": "Shortest unweighted path from ``from`` to ``to``, or ``null``.\n\nWraps :func:`~meho_backplane.topology.query.find_path`. The query\nparams are ``from`` / ``to`` (matching the Initiative #363 route\nspec ``?from=A&to=B``); the handler binds them via ``alias`` since\n``from`` is a Python keyword. Walks edges in both directions so the\npath follows the graph's connectivity rather than only its edge\norientation. Returns ``null`` (HTTP 200) when *to* is unreachable\nfrom *from* within ``max_hops`` or either endpoint does not exist\nin this tenant \u2014 unreachability is a valid answer, not an error.\n\n``from_kind`` / ``to_kind`` pin each endpoint independently; an\nunpinned name resolving to multiple kinds returns 409\n(``ambiguous_node``).",
+        "description": "Shortest unweighted path from ``from`` to ``to``, or ``null``.\n\nWraps :func:`~meho_backplane.topology.query.find_path`. The query\nparams are ``from`` / ``to`` (matching the Initiative #363 route\nspec ``?from=A&to=B``); the handler binds them via ``alias`` since\n``from`` is a Python keyword. Walks edges in both directions so the\npath follows the graph's connectivity rather than only its edge\norientation. Returns ``null`` (HTTP 200) when *to* is unreachable\nfrom *from* within ``max_hops`` or either endpoint does not exist\nin this tenant \u2014 unreachability is a valid answer, not an error.\n\n``from_kind`` / ``to_kind`` pin each endpoint independently; an\nunpinned name resolving to multiple kinds returns 409\n(``ambiguous_node``).\n\nEach non-root path node carries ``via_edge_id`` (the exact edge of\nthe hop) and ``parent_node_id`` (the previous node) per #2538.\n``include_stale=false`` drops soft-deleted nodes/edges from the\nsearch \u2014 on both edge directions, so a stale edge is never walked\nbackwards into a path.",
         "operationId": "path_api_v1_topology_path_get",
         "parameters": [
           {
@@ -1736,6 +1760,18 @@
               "default": 8,
               "title": "Max Hops"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "authorization",
@@ -7942,6 +7978,257 @@
               "type": "string",
               "format": "uuid",
               "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/dashboards": {
+      "get": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "List Dashboards",
+        "description": "List Dashboards for the operator's tenant, newest-first.\n\nEach row carries its five-state rolled-up ``state`` (evaluated on read)\nand ``member_count``. A ``tenant_filter`` naming a *different* tenant is\n403 ``cross_tenant_requires_platform_admin`` unless the caller holds\n``platform_admin``.",
+        "operationId": "list_dashboards_api_v1_checks_dashboards_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Create Dashboard",
+        "description": "Create one Dashboard under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set to a\n*different* tenant the create is cross-tenant and requires\n``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent\nsensor id is 422 ``sensor_not_found``; a duplicate name is 409.",
+        "operationId": "create_dashboard_api_v1_checks_dashboards_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/dashboards/{dashboard_id}": {
+      "get": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Get Dashboard",
+        "description": "Return one Dashboard's rollup + per-member breakdown by id.\n\nA cross-tenant / absent id returns 404 ``dashboard_not_found`` -- never\n403 -- so the existence of a Dashboard is not leaked across the tenant\nboundary.",
+        "operationId": "get_dashboard_api_v1_checks_dashboards__dashboard_id__get",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Delete Dashboard",
+        "description": "Hard-delete one Dashboard by id (memberships go with it).\n\n``tenant_admin`` only. A cross-tenant / absent id returns 404\n``dashboard_not_found`` -- never 403 -- so existence is not leaked.",
+        "operationId": "delete_dashboard_api_v1_checks_dashboards__dashboard_id__delete",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
             }
           },
           {
@@ -16431,6 +16718,72 @@
         }
       }
     },
+    "/ui/checks": {
+      "get": {
+        "tags": [
+          "ui-checks"
+        ],
+        "summary": "Ui Checks List",
+        "description": "Serve ``GET /ui/checks``. See module docstring for the contract.",
+        "operationId": "ui_checks_list_ui_checks_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/checks/{dashboard_id}": {
+      "get": {
+        "tags": [
+          "ui-checks"
+        ],
+        "summary": "Checks Detail",
+        "description": "Render the per-Dashboard detail page (rollup badge + member table).",
+        "operationId": "checks_detail_ui_checks__dashboard_id__get",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/operations/search": {
       "get": {
         "tags": [
@@ -22781,6 +23134,331 @@
         "title": "DailyUsageBucket",
         "description": "One ``(date, surface)`` row of the usage report.\n\nFrozen so callers (CLI table renderer, ``--json`` consumers,\nMarkdown report generators) can pass instances around without\naccidental mutation. ``action_conversion_pct`` is rounded to two\ndecimals at construction time so JSON serialisation is stable\nacross runs."
       },
+      "DashboardCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Description"
+          },
+          "sensor_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "title": "Sensor Ids"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "DashboardCreate",
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``."
+      },
+      "DashboardDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Description"
+          },
+          "member_count": {
+            "type": "integer",
+            "title": "Member Count"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "State"
+          },
+          "last_rollup_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "nullable": true,
+            "title": "Last Rollup State"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardMemberView"
+            },
+            "type": "array",
+            "title": "Members"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "description",
+          "member_count",
+          "state",
+          "last_rollup_state",
+          "created_by_sub",
+          "created_at",
+          "updated_at",
+          "members"
+        ],
+        "title": "DashboardDetail",
+        "description": "Response shape for ``GET /api/v1/checks/dashboards/{id}``.\n\nExtends :class:`DashboardRead` with the per-member breakdown the console\ndetail page + the REST detail expose."
+      },
+      "DashboardListResponse": {
+        "properties": {
+          "dashboards": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardRead"
+            },
+            "type": "array",
+            "title": "Dashboards"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dashboards"
+        ],
+        "title": "DashboardListResponse",
+        "description": "Response envelope for ``GET /api/v1/checks/dashboards``.\n\nWrapped in ``{\"dashboards\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape the Sensor list adopts."
+      },
+      "DashboardMemberView": {
+        "properties": {
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "raw_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Raw State"
+          },
+          "effective_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Effective State"
+          },
+          "pending": {
+            "type": "boolean",
+            "title": "Pending"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity"
+          },
+          "for_seconds": {
+            "type": "integer",
+            "title": "For Seconds"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SensorStatus"
+          },
+          "state_since": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "State Since"
+          },
+          "last_value": {
+            "title": "Last Value"
+          },
+          "last_evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Last Evidence"
+          },
+          "last_evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Evaluated At"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Fire At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensor_id",
+          "name",
+          "connector_id",
+          "op_id",
+          "raw_state",
+          "effective_state",
+          "pending",
+          "severity",
+          "for_seconds",
+          "status",
+          "state_since",
+          "last_value",
+          "last_evidence",
+          "last_evaluated_at",
+          "next_fire_at"
+        ],
+        "title": "DashboardMemberView",
+        "description": "One member Sensor as rendered on a Dashboard detail read.\n\nCarries the raw + rolled-up per-member states (``raw_state`` /\n``effective_state`` / ``pending`` from\n:mod:`meho_backplane.checks.rollup`) plus the Sensor context an operator\nneeds to act -- the op identity, the severity cap, the ``for:`` window,\nthe hysteresis clock (``state_since``), and the last observed value /\nevidence."
+      },
+      "DashboardRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Description"
+          },
+          "member_count": {
+            "type": "integer",
+            "title": "Member Count"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "State"
+          },
+          "last_rollup_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "nullable": true,
+            "title": "Last Rollup State"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "description",
+          "member_count",
+          "state",
+          "last_rollup_state",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DashboardRead",
+        "description": "Response shape for one Dashboard row on the list surface.\n\nCarries the rolled-up ``state`` (evaluated on read) and the\n``member_count`` so the list answers \"is everything OK?\" per Dashboard\nwithout a detail fetch. ``last_rollup_state`` is the memo column (always\nNULL until #2507 writes it). ``frozen=True`` so a handler cannot mutate\nthe row after returning it."
+      },
       "DbStatus": {
         "properties": {
           "migrated": {
@@ -28229,6 +28907,10 @@
             "type": "string",
             "title": "Name"
           },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
           "properties": {
             "additionalProperties": true,
             "type": "object",
@@ -28242,6 +28924,18 @@
             "type": "string",
             "nullable": true,
             "title": "Via Edge Kind"
+          },
+          "parent_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Node Id"
+          },
+          "via_edge_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Via Edge Id"
           }
         },
         "type": "object",
@@ -28249,11 +28943,12 @@
           "id",
           "kind",
           "name",
+          "source",
           "depth",
           "via_edge_kind"
         ],
         "title": "TopologyNode",
-        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge)."
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid."
       },
       "TopologyPath": {
         "properties": {

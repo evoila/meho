@@ -90,6 +90,15 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — configmap-roll pod annotation (#2586)
+
+- The backplane `Deployment` pod template now carries a `checksum/config`
+  annotation hashed from the rendered `configmap.yaml`. A `helm upgrade` that
+  changes only ConfigMap-rendered `config.*` (or `memory.*` / `topology.*` /
+  derived MCP/backplane) values now rolls the pod automatically instead of
+  requiring a manual `kubectl rollout restart`; an unchanged render keeps the
+  checksum stable, so there is no spurious pod churn.
+
 ## [0.24.0] - 2026-07-17
 
 This release **completes Broadcast v2 (Initiative #2543)** — the final

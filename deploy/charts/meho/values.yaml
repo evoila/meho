@@ -108,8 +108,30 @@ netdiag:
   #   * Enabling it only widens who may open unprivileged ICMP *datagram*
   #     sockets in this pod; it does NOT grant `CAP_NET_RAW` or
   #     packet-crafting. `net.ping` remains allowlist-gated
-  #     (`MEHO_NETDIAG_PROBE_ALLOWLIST`) regardless.
+  #     (`netdiag.probeAllowlist`, below) regardless.
   pingGroupRange: ""
+  # -- Probe-destination allowlist for the `net.*` diagnostics connector
+  # (Initiative #2405). Unlike `config.targetSsrfAllowlist` (a scoped
+  # opt-OUT of a default-deny-non-public guard), this is an *inverted,
+  # allow-only-what-is-listed* floor: the parsed set is the WHOLE
+  # permitted probe space, so an empty value means **deny every probe**
+  # — the connector is inert until an operator opts a range in. It
+  # renders into the `MEHO_NETDIAG_PROBE_ALLOWLIST` env var the connector
+  # reads per probe (`backend/src/meho_backplane/connectors/net/allowlist.py`,
+  # `PROBE_ALLOWLIST_ENV`), NOT via settings.py. Comma-separated entries:
+  # CIDR ranges (`10.0.0.0/8`), bare IPs (`192.168.7.10`), and/or
+  # hostname literals (`vcenter.lab.internal`, matched verbatim — never
+  # resolved-then-matched, to stay TOCTOU-free); whitespace around commas
+  # is ignored.
+  #
+  # Default `""` keeps the connector inert (fail-closed) — a genuine
+  # no-op render that changes nothing on existing installs. Because
+  # `net.*` ops are agent-auto-runnable (`safety_level="safe"`), this
+  # allowlist is the sole floor on a network-vantage recon primitive:
+  # scope it to exactly the ranges/hosts operators must probe, never a
+  # global off-switch. A malformed CIDR fails loudly at runtime naming
+  # the offending token. See `docs/codebase/connectors-net-diagnostics.md`.
+  probeAllowlist: ""
 
 service:
   type: ClusterIP

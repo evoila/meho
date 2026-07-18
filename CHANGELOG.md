@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — GSM secret-ref registration guard (#2585)
+
+- Target registration on a `config.credentialBackend: gsm` deploy no
+  longer rejects valid `gsm:<project>/<secret>[#field]` secret_refs with
+  a Vault-worded `422 secret_ref_outside_tenant_scope`. The registration-
+  time tenant-scope gate (`POST`/`PATCH /api/v1/targets`) now only applies
+  to refs that resolve through the Vault credential backend — decided by
+  the same `split_credential_ref` resolver dispatch uses — so a GSM
+  install registers `gsm:` refs out of the box with **zero** `extraEnv`
+  overrides (`deploy/values-examples/values-gsm-example.yaml`). Vault
+  deploys are unchanged; a per-target `gsm:` override ref is likewise
+  passed through on a Vault-default deploy.
+
 ## [0.24.0] - 2026-07-17
 
 This release **completes Broadcast v2 (Initiative #2543)** — the final

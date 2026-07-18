@@ -102,6 +102,11 @@ connector-related release-notes line.
   overrides (`deploy/values-examples/values-gsm-example.yaml`). Vault
   deploys are unchanged; a per-target `gsm:` override ref is likewise
   passed through on a Vault-default deploy.
+### Changed — retire CodeRabbit from the development flow
+
+- Remove the CodeRabbit review step from the contribution flow; the
+  in-house Claude review pass is the review of record on every PR
+  (#2601)
 
 ## [0.24.0] - 2026-07-17
 

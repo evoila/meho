@@ -90,6 +90,12 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — retire CodeRabbit from the development flow
+
+- Remove the CodeRabbit review step from the contribution flow; the
+  in-house Claude review pass is the review of record on every PR
+  (#2601)
+
 ## [0.24.0] - 2026-07-17
 
 This release **completes Broadcast v2 (Initiative #2543)** — the final

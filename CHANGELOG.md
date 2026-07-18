@@ -110,6 +110,47 @@ connector-related release-notes line.
   `config.targetSsrfAllowlist` treatment so both fail-closed allowlists
   share one configuration shape. Chart-only — the allowlist parser is
   untouched. (#2518)
+### Fixed — explicit http scheme on HttpConnector targets (#2587)
+
+- Every `HttpConnector`-based connector hardcoded `https` when building
+  the request URL, so a target against a plain-HTTP management API — e.g.
+  RabbitMQ's Management API on `15672`, HTTP unless the mgmt TLS listener
+  is enabled on `15671` — was unreachable (it probed
+  `WRONG_VERSION_NUMBER`). The transport scheme is now read from an opt-in
+  `scheme` key in `Target.extras` (`{"http", "https"}`, default `https`),
+  with scheme-correct default-port elision (`443`/`80`). Absent the key,
+  behaviour is byte-identical (https, `:443` elided). An invalid value is
+  refused with a clear error at dispatch rather than silently coerced, and
+  the scheme is never derived from `verify_tls` (certificate trust and
+  transport selection stay orthogonal). Same-origin redirect following
+  keys on the effective scheme, so an http target's benign trailing-slash
+  canonicalisation is still followed while an http→https hop is refused
+  as cross-origin.
+### Fixed — configmap-roll pod annotation (#2586)
+
+- The backplane `Deployment` pod template now carries a `checksum/config`
+  annotation hashed from the rendered `configmap.yaml`. A `helm upgrade` that
+  changes only ConfigMap-rendered `config.*` (or `memory.*` / `topology.*` /
+  derived MCP/backplane) values now rolls the pod automatically instead of
+  requiring a manual `kubectl rollout restart`; an unchanged render keeps the
+  checksum stable, so there is no spurious pod churn.
+### Fixed — GSM secret-ref registration guard (#2585)
+
+- Target registration on a `config.credentialBackend: gsm` deploy no
+  longer rejects valid `gsm:<project>/<secret>[#field]` secret_refs with
+  a Vault-worded `422 secret_ref_outside_tenant_scope`. The registration-
+  time tenant-scope gate (`POST`/`PATCH /api/v1/targets`) now only applies
+  to refs that resolve through the Vault credential backend — decided by
+  the same `split_credential_ref` resolver dispatch uses — so a GSM
+  install registers `gsm:` refs out of the box with **zero** `extraEnv`
+  overrides (`deploy/values-examples/values-gsm-example.yaml`). Vault
+  deploys are unchanged; a per-target `gsm:` override ref is likewise
+  passed through on a Vault-default deploy.
+### Changed — retire CodeRabbit from the development flow
+
+- Remove the CodeRabbit review step from the contribution flow; the
+  in-house Claude review pass is the review of record on every PR
+  (#2601)
 
 ## [0.24.0] - 2026-07-17
 

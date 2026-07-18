@@ -120,6 +120,32 @@ spec:
                   name: {{ include "meho.keycloakAdminSecretName" . | quote }}
                   key: {{ .Values.keycloakAdmin.clientSecret.secretKey | quote }}
             {{- end }}
+            {{- if .Values.uiConsole.enabled }}
+            # #2594 (Goal #336) — operator-console browser BFF confidential
+            # credentials. Wired only when `uiConsole.enabled: true`. Both
+            # are confidential and use `secretKeyRef` (never plaintext) —
+            # `UI_KEYCLOAK_CLIENT_SECRET` is the `meho-web` client secret
+            # carried on the server-side token-endpoint POST;
+            # `UI_SESSION_ENCRYPTION_KEY` is the Fernet key the BFF
+            # encrypts the session cookie with. The public `client_id`
+            # (`UI_KEYCLOAK_CLIENT_ID`) is plain config from the ConfigMap.
+            # The schema requires `uiConsole.secretName` under
+            # `enabled: true`, so the referenced Secret name is never
+            # empty here. Unset → `GET /ui/auth/login` returns
+            # `503 ui_oauth_not_configured`
+            # (`meho_backplane.features._ui_surface_block`), no effect on
+            # `/api/*` or the CLI.
+            - name: UI_KEYCLOAK_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.uiConsole.secretName | quote }}
+                  key: {{ .Values.uiConsole.clientSecretKey | quote }}
+            - name: UI_SESSION_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.uiConsole.secretName | quote }}
+                  key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             # Operator-supplied extra env vars (full EnvVar shape — accepts
             # `value` or `valueFrom`). Most common use: pointing

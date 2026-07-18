@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — operator-console OAuth chart values (#2594)
+
+- The Helm chart now renders the operator-console (`/ui/*`) browser
+  BFF OAuth settings from first-class values, so a chart-only deploy
+  can enable the console without hand-rolling Secrets and `extraEnv`
+  `valueFrom`. Set `config.uiKeycloakClientId` (plain, rendered as
+  `UI_KEYCLOAK_CLIENT_ID`) and `uiConsole.enabled: true` +
+  `uiConsole.secretName` (a Secret holding the `meho-web` client
+  secret and the session encryption key, wired into
+  `UI_KEYCLOAK_CLIENT_SECRET` / `UI_SESSION_ENCRYPTION_KEY` via
+  `secretKeyRef`). Previously these three env vars had no chart values,
+  so a browser-console deploy hit `503 ui_oauth_not_configured` with no
+  chart-level way to configure it. Enabling the console is
+  all-or-nothing (the schema requires the client_id + secret name under
+  `uiConsole.enabled: true`); leaving it disabled is the default and
+  keeps the console cleanly dark with no effect on `/api/*` or the
+  `meho login` CLI. The GSM/no-Vault enablement recipe (confidential
+  web client + session key + the two secrets) is documented in
+  `deploy/values-examples/README.md` and the realm-side
+  `docs/cross-repo/keycloak-web-client.md` (#2594).
+
 ## [0.24.0] - 2026-07-17
 
 This release **completes Broadcast v2 (Initiative #2543)** — the final

@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — netdiag.probeAllowlist chart value (#2518)
+
+- **The `net.*` diagnostics probe allowlist is now a typed Helm chart
+  value** (#2518). v0.22.0 shipped the `net.*` diagnostics connector
+  (#2405) governed by `MEHO_NETDIAG_PROBE_ALLOWLIST` — an inverted,
+  fail-closed allowlist whose empty default keeps the connector **inert**
+  (every probe denied) — but the chart exposed no typed key for it: the
+  only way to set the env var was the untyped `extraEnv` passthrough,
+  which `values.schema.json` does not validate and `helm show values`
+  does not surface. A new `netdiag.probeAllowlist` value (schema-typed
+  optional string, default `""`) now renders into
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` on the backplane ConfigMap — injected
+  into the container via the existing `envFrom.configMapRef` — so a
+  scoped probe allowlist (e.g. `"10.0.0.0/8,vcenter.lab.internal"`) is a
+  first-class, `helm show values`-discoverable setting. The default `""`
+  is a genuine no-op that keeps the connector inert (fail-closed), so
+  existing installs are unchanged. This mirrors #2240's typed
+  `config.targetSsrfAllowlist` treatment so both fail-closed allowlists
+  share one configuration shape. Chart-only — the allowlist parser is
+  untouched. (#2518)
 ### Fixed — explicit http scheme on HttpConnector targets (#2587)
 
 - Every `HttpConnector`-based connector hardcoded `https` when building

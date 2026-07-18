@@ -112,6 +112,7 @@ class _StubTarget:
     secret_ref: str | None = "rdc-hetzner-dc/keycloak/admin"
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     extras: dict[str, Any] = field(default_factory=dict)
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642/#1672).
     id: UUID = field(default_factory=uuid4)
     tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
@@ -871,3 +872,29 @@ def test_read_ops_handler_attrs_resolve_to_bound_methods() -> None:
         assert "read-only" in op.tags
         # Every grouped op has a curated when_to_use (registration asserts this).
         assert op.group_key is not None and op.group_key in WHEN_TO_USE_BY_GROUP
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on the admin token grant (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mint_admin_token_threads_sni_extension() -> None:
+    """#2398: the admin token grant POST carries the target's SNI override."""
+    connector = _make_connector()
+    target = _StubTarget(
+        name="keycloak-sni",
+        host="keycloak-sni.test.invalid",
+        tls_server_name="keycloak.corp.example",
+    )
+
+    async with respx.mock(base_url="https://keycloak-sni.test.invalid") as mock:
+        route = mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": _ADMIN_TOKEN, "expires_in": 60, "token_type": "Bearer"}
+        )
+        await connector._mint_admin_token(target, _make_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "keycloak.corp.example"
+    await connector.aclose()

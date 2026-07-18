@@ -266,6 +266,14 @@ class VmwareRestConnector(HttpConnector):
         # for the rationale and source citations. Keyed on the same
         # tenant-unique tuple as ``_session_tokens``.
         self._session_paths: dict[tuple[str, str], str] = {}
+        # Per-target httpx ``extensions`` (the ``tls_server_name`` SNI /
+        # cert-verify override, evoila/meho#2398) captured at establish
+        # time, keyed on the same tenant-unique tuple. :meth:`aclose`
+        # replays it on the best-effort session-revoke DELETE, which has
+        # no ``Target`` in scope (it iterates cached tokens by key), so a
+        # by-IP appliance that pins its cert to an FQDN is revoked over
+        # the same SNI-corrected handshake the establish call used.
+        self._session_extensions: dict[tuple[str, str], dict[str, Any]] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -454,13 +462,14 @@ class VmwareRestConnector(HttpConnector):
                 "{'username': str, 'password': str}"
             ) from exc
         auth = (username, password)
-        resp = await client.post(SESSION_PATH_MODERN, auth=auth)
+        extensions = self._request_extensions(target)
+        resp = await client.post(SESSION_PATH_MODERN, auth=auth, extensions=extensions)
         established_path = SESSION_PATH_MODERN
         if resp.status_code == 404:
             # Modern endpoint not served (vcsim, very old vCenter,
             # or a reverse-proxy that hasn't been updated). Try the
             # legacy path before declaring failure.
-            resp = await client.post(SESSION_PATH_LEGACY, auth=auth)
+            resp = await client.post(SESSION_PATH_LEGACY, auth=auth, extensions=extensions)
             established_path = SESSION_PATH_LEGACY
         try:
             resp.raise_for_status()
@@ -489,6 +498,7 @@ class VmwareRestConnector(HttpConnector):
         token = _extract_session_token(resp.json(), target.name)
         self._session_tokens[cache_key] = token
         self._session_paths[cache_key] = established_path
+        self._session_extensions[cache_key] = extensions
         _log.info(
             "vsphere_session_established",
             target=target.name,
@@ -528,6 +538,7 @@ class VmwareRestConnector(HttpConnector):
         async with self._session_lock:
             self._session_tokens.pop(cache_key, None)
             self._session_paths.pop(cache_key, None)
+            self._session_extensions.pop(cache_key, None)
 
     async def fingerprint(
         self,
@@ -871,8 +882,10 @@ class VmwareRestConnector(HttpConnector):
         async with self._session_lock:
             tokens = dict(self._session_tokens)
             paths = dict(self._session_paths)
+            extensions_by_key = dict(self._session_extensions)
             self._session_tokens.clear()
             self._session_paths.clear()
+            self._session_extensions.clear()
         for cache_key, token in tokens.items():
             # ``_session_tokens`` is keyed on the tenant-unique
             # ``(tenant_id, target.id)`` tuple, while the shared
@@ -906,6 +919,7 @@ class VmwareRestConnector(HttpConnector):
                     "DELETE",
                     revoke_path,
                     headers={_SESSION_HEADER: token},
+                    extensions=extensions_by_key.get(cache_key, {}),
                 )
                 # Log non-2xx but don't raise — shutdown proceeds.
                 if resp.status_code >= 400:

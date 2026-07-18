@@ -127,6 +127,17 @@ data:
   # literals. See `deploy/charts/meho/values.yaml`
   # (`config.targetSsrfAllowlist`) and `docs/codebase/target-ssrf-guard.md`.
   MEHO_TARGET_SSRF_ALLOWLIST: {{ .Values.config.targetSsrfAllowlist | quote }}
+  # Initiative #2405 net.* diagnostics probe allowlist — the INVERTED
+  # sibling of the SSRF guard above: allow-only-what-is-listed, so the
+  # default `""` denies every probe (the connector is inert until an
+  # operator opts a range in). Read per probe from the environment by
+  # `backend/src/meho_backplane/connectors/net/allowlist.py`
+  # (`PROBE_ALLOWLIST_ENV`) — NOT via settings.py. Rendered
+  # unconditionally: the default `""` keeps the connector fail-closed.
+  # Comma-separated CIDRs / bare IPs / hostname literals. See
+  # `deploy/charts/meho/values.yaml` (`netdiag.probeAllowlist`) and
+  # `docs/codebase/connectors-net-diagnostics.md`.
+  MEHO_NETDIAG_PROBE_ALLOWLIST: {{ .Values.netdiag.probeAllowlist | quote }}
   # Async ingest-job watchdog budget (#2318, hardens #2275). #2275
   # time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)`
   # so a wedged pipeline can't sit at `status=running` until a pod restart;

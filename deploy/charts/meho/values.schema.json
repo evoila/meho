@@ -85,6 +85,10 @@
         "pingGroupRange": {
           "type": "string",
           "description": "Optional '<low> <high>' GID range for the net.ipv4.ping_group_range pod sysctl enabling unprivileged ICMP-echo ping (net.ping). Empty (default) renders no sysctl and no pod-security change. Set only after a security review; see values.yaml for the safe-vs-unsafe sysctl and GID caveats."
+        },
+        "probeAllowlist": {
+          "type": "string",
+          "description": "Probe-destination allowlist for the net.* diagnostics connector (Initiative #2405), rendered into the MEHO_NETDIAG_PROBE_ALLOWLIST env var the connector reads per probe (backend/src/meho_backplane/connectors/net/allowlist.py, PROBE_ALLOWLIST_ENV; NOT via settings.py). Inverted, allow-only-what-is-listed semantics — the sibling of config.targetSsrfAllowlist but with the opposite default: the parsed set IS the whole permitted probe space, so an empty value denies every probe and the connector is inert until a range is opted in. Comma-separated CIDR ranges (10.0.0.0/8), bare IPs (192.168.7.10), and/or hostname literals (vcenter.lab.internal, matched verbatim); whitespace around commas is ignored. Default \"\" keeps the connector fail-closed — deliberately carrying no minLength so the empty default validates on every install. Because net.* ops are agent-auto-runnable (safety_level=\"safe\"), this is the sole floor on a network-vantage recon primitive: a scoped opt-in, never a global off-switch. A malformed CIDR fails loudly at runtime naming the offending token. See docs/codebase/connectors-net-diagnostics.md."
         }
       }
     },

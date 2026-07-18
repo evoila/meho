@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — credential_read response scrub + reveal_secret opt-in (#2467)
+
+- `credential_read`-classified dispatch responses (`vault.kv.read` and
+  its `_CREDENTIAL_READ_OPS` siblings) are now key-name scrubbed before
+  they reach the `call_operation` caller: secret-named values in the
+  transport response are replaced with `[REDACTED:param_name]` while
+  non-secret siblings (`username`, `version`) survive. This closes the
+  gap where the connector-boundary redaction engine — which matches only
+  labelled secret shapes inside string leaves — passed a
+  `{"password": "<value>"}` dict through verbatim into an agent caller's
+  model-API transcript. A caller that must pipe the raw value onward
+  passes a reserved `params.reveal_secret=true`, which returns the raw
+  value and is stamped queryably on the audit row
+  (`payload['reveal_secret']`). The audit `raw_payload` keeps the raw
+  result in both cases — only the transport response is scrubbed
+  (mirrors the #2172 secret-handler posture). The scrub keys on the op
+  class, not the caller kind. Approved human flows keep working by
+  opting in: the `/ui` Vault console read (reveal-on-click) and CLI
+  `meho secret read` (pipe-only) both pass `reveal_secret=true`;
+  `secret.move` stays the recommended no-transit path. The reserved
+  `reveal_secret` flag is stripped before op-schema validation and
+  `params_hash`, so a scrubbed read and its reveal share one hash.
+
 ### Added — operator-console OAuth chart values (#2594)
 
 - The Helm chart now renders the operator-console (`/ui/*`) browser

@@ -110,6 +110,15 @@ This is the step that keeps getting skipped. Do it in the
 Open the PR (CHANGELOG roll + any release-only edits), get it reviewed,
 merge to `main`.
 
+- [ ] **Upgrade-notes discipline.** When the release carries an
+      upgrade-relevant change (a chart field operators may have hand-patched,
+      a new default-on guard, a schema-breaking value, a forward-only
+      migration with an operator caveat), append a row to the
+      version-specific upgrade-notes table in
+      [`deploying.md`](deploying.md) in this same PR. This is the discipline
+      that #2393's `startupProbe` (the Helm-4 SSA field-conflict caveat)
+      would have triggered.
+
 Before merging, run the **release-body path-freshness gate**. The same
 recurring class of defect that motivated #928 at PR time (snapshot
 drifts from the route table) shows up at release time as paths cited
@@ -414,7 +423,8 @@ and whenever the migration Job or the `db` probe changes:
        [Unreleased] rolled to [X.Y.Z] (post-tag work left behind)
 [ ] 3. Release-body path-freshness gate green
        (scripts/release/check_release_body_paths.py — sister to #928);
-       release-cutting PR merged to main
+       upgrade-relevant change → deploying.md version-specific notes row
+       appended; release-cutting PR merged to main
 [ ] 4. Tagged vX.Y.Z + pushed
 [ ] 5. GH Release notes correct (not [Unreleased] fallback); image, chart,
        CLI tarballs all published

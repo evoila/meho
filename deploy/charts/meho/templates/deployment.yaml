@@ -11,10 +11,20 @@ spec:
       {{- include "meho.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        # Roll the pod whenever the ConfigMap the backplane reads via
+        # `envFrom` (below) changes. Helm updates the ConfigMap object on a
+        # `config.*`-only upgrade, but the pod template is otherwise
+        # byte-identical, so without this the new environment never reaches
+        # the running pod until a manual `kubectl rollout restart` (#2586).
+        # Hashing the fully rendered configmap.yaml (the Helm howto pattern)
+        # means any change to what the pod consumes — config.*, memory.*,
+        # topology.*, or the derived MCP/backplane values — forces a rollout,
+        # while an unchanged render leaves the checksum stable (no churn).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
       labels:
         {{- include "meho.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}

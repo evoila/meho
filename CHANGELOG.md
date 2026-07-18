@@ -90,6 +90,14 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — configmap-roll pod annotation (#2586)
+
+- The backplane `Deployment` pod template now carries a `checksum/config`
+  annotation hashed from the rendered `configmap.yaml`. A `helm upgrade` that
+  changes only ConfigMap-rendered `config.*` (or `memory.*` / `topology.*` /
+  derived MCP/backplane) values now rolls the pod automatically instead of
+  requiring a manual `kubectl rollout restart`; an unchanged render keeps the
+  checksum stable, so there is no spurious pod churn.
 ### Fixed — GSM secret-ref registration guard (#2585)
 
 - Target registration on a `config.credentialBackend: gsm` deploy no

@@ -215,6 +215,39 @@ _MAX_SAME_ORIGIN_REDIRECTS = 5
 
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
+_ALLOWED_SCHEMES = frozenset(_DEFAULT_PORTS)
+
+
+def _effective_scheme(target: Target) -> str:
+    """Return the transport scheme for *target* — ``https`` unless opted out.
+
+    Reads an optional ``scheme`` key from :attr:`Target.extras`. Absent (the
+    default for every existing target — ``extras`` is ``{}`` by default) →
+    ``https``, so behaviour stays byte-identical to before. Present → must be
+    exactly ``http`` or ``https``; anything else raises :exc:`ValueError` at
+    dispatch rather than being silently coerced, so a typo like ``htp`` fails
+    loud instead of falling back to https and masking the misconfiguration.
+
+    Honouring an explicit ``http`` is what lets an :class:`HttpConnector`
+    reach a plain-HTTP management API — RabbitMQ's Management API is HTTP on
+    ``15672`` (HTTPS only on ``15671`` when the mgmt TLS listener is enabled)
+    (evoila/meho#2587). The scheme is deliberately opt-in and is **never**
+    derived from ``verify_tls``: certificate trust and transport selection
+    are orthogonal, and deriving one from the other would silently change the
+    transport of every existing ``verify_tls=false`` target.
+    """
+    extras = getattr(target, "extras", None)
+    if not isinstance(extras, dict):
+        return "https"
+    scheme = extras.get("scheme", "https")
+    if scheme not in _ALLOWED_SCHEMES:
+        raise ValueError(
+            f"target {getattr(target, 'name', '?')!r} has an invalid "
+            f"extras.scheme {scheme!r}; expected one of {sorted(_ALLOWED_SCHEMES)}"
+        )
+    # Membership above guarantees a literal "http"/"https"; str() narrows the
+    # ``Any`` that flows in from the free-form ``extras`` dict for the typer.
+    return str(scheme)
 
 
 def _effective_port(url: httpx.URL) -> int | None:
@@ -496,8 +529,9 @@ class HttpConnector(Connector):
         return path
 
     def _base_url(self, target: Target) -> str:
-        scheme = "https"
-        port = f":{target.port}" if target.port and target.port != 443 else ""
+        scheme = _effective_scheme(target)
+        default_port = _DEFAULT_PORTS[scheme]
+        port = f":{target.port}" if target.port and target.port != default_port else ""
         return f"{scheme}://{target.host}{port}"
 
     def _request_extensions(self, target: Target) -> dict[str, Any]:

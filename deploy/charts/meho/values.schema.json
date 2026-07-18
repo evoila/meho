@@ -286,6 +286,10 @@
           "type": "string",
           "pattern": "^(|[0-9]+(\\.[0-9]+)?)$",
           "description": "Async ingest-job watchdog budget override, in seconds, rendered into the `INGEST_JOB_TIMEOUT_SECONDS` env var the backplane reads once at import (`_load_ingest_job_timeout_seconds`, `backend/src/meho_backplane/operations/ingest/jobs.py`; #2318, hardens #2275) — NOT via settings.py. Optional override for the #2275 async-ingest watchdog that time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)` so a wedged pipeline can't sit at `status=running` until a pod restart: raise it for a slow shared executor / very large spec fleet. Value is an empty string or a decimal number of seconds. Default `\"\"` — deliberately absent from `config.required` and carrying no `minLength` so the empty default validates on every install — omits the env (the ConfigMap guards the render with `{{ if }}`) so the backend's own 30-min default applies silently; an always-rendered empty string would hit `float(\"\")` and log a spurious `ingest_job_timeout_env_invalid` warning on every boot, the trap the sibling `targetSsrfAllowlist` sidesteps only because its empty value is a valid no-op. A non-finite (`inf`/`nan`), non-positive, or malformed value that slips the pattern is rejected at the backend, which warns and falls back to 30 min — a misconfigured budget can never disable the watchdog. See `docs/codebase/spec-ingestion.md`."
+        },
+        "uiKeycloakClientId": {
+          "type": "string",
+          "description": "Public `client_id` of the confidential `meho-web` client the operator-console (`/ui/*`) browser BFF login runs its OAuth 2.1 authorization-code grant against (#2594, Goal #336), rendered unconditionally as the `UI_KEYCLOAK_CLIENT_ID` env var. NOT a secret (the confidential `client_secret` + session key are wired via `secretKeyRef` from `uiConsole.secretName`). Default `\"\"` — deliberately absent from `config.required` and carrying no `minLength` so a chassis-only / API-only install validates with the browser console left dark; the console gate (`meho_backplane.features._ui_surface_block`) needs this AND the two `uiConsole` secrets non-empty, so an empty value here keeps `/ui/auth/login` at `503 ui_oauth_not_configured` without touching `/api/*` or the `meho login` CLI. When `uiConsole.enabled: true` the root-level `allOf` requires this non-empty — the console is all-or-nothing. See `docs/cross-repo/keycloak-web-client.md`."
         }
       }
     },
@@ -444,6 +448,43 @@
                 "pattern": "^https?://"
               },
               "clientId": { "type": "string", "minLength": 1 }
+            }
+          }
+        }
+      ]
+    },
+    "uiConsole": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Operator-console (`/ui/*`) browser BFF confidential credentials (#2594, Goal #336). When `enabled: true`, the chart wires `UI_KEYCLOAK_CLIENT_SECRET` (the confidential `meho-web` client secret) and `UI_SESSION_ENCRYPTION_KEY` (the BFF session-cookie Fernet key) into the backplane Deployment via `secretKeyRef` — never plaintext — both sourced from the single `secretName` Secret under the `clientSecretKey` / `sessionEncryptionKey` keys, mirroring the `postgres.credentialsSecret` by-name reference. The public `client_id` is the plain `config.uiKeycloakClientId` env. The schema enforces a non-empty `secretName` under `enabled: true`, and the root-level `allOf` additionally requires a non-empty `config.uiKeycloakClientId` — so a half-configured console fails at `helm install` rather than 503-ing at first browser login. `meho_backplane.features._ui_surface_block` enforces the same `all-three-non-empty` posture at app startup. When `enabled: false` (the default), no env is rendered and `GET /ui/auth/login` returns `503 ui_oauth_not_configured` with no effect on `/api/*` or the `meho login` CLI — same posture as a chart that doesn't ship this block.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "secretName": {
+          "type": "string",
+          "description": "Name of the Kubernetes Secret holding BOTH the confidential web client secret (under `clientSecretKey`) and the session encryption key (under `sessionEncryptionKey`). Referenced by name only — provisioning is the consumer's responsibility (a GSM-synced ExternalSecret, a sealed-secret, or a directly-applied Secret for a no-Vault deploy). Empty when `uiConsole.enabled: true` fails the schema."
+        },
+        "clientSecretKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key within `secretName` whose value is the confidential `meho-web` client secret, wired into `UI_KEYCLOAK_CLIENT_SECRET`. Defaults to `client_secret`."
+        },
+        "sessionEncryptionKey": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Key within `secretName` whose value is the url-safe base64 32-byte Fernet session-cookie encryption key, wired into `UI_SESSION_ENCRYPTION_KEY`. Defaults to `session_encryption_key`."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["secretName"],
+            "properties": {
+              "secretName": { "type": "string", "minLength": 1 }
             }
           }
         }
@@ -930,6 +971,29 @@
           }
         },
         "required": ["gsm"]
+      }
+    },
+    {
+      "description": "When the operator console is enabled (`uiConsole.enabled: true`), the browser BFF login needs a non-empty public `client_id` as well as the confidential secret — so `config.uiKeycloakClientId` must be non-empty. This makes enabling the console all-or-nothing: a half-configured console (secret wired, client_id blank) fails at `helm install` rather than 503-ing at first login (#2594).",
+      "if": {
+        "properties": {
+          "uiConsole": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          }
+        },
+        "required": ["uiConsole"]
+      },
+      "then": {
+        "properties": {
+          "config": {
+            "required": ["uiKeycloakClientId"],
+            "properties": {
+              "uiKeycloakClientId": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "required": ["config"]
       }
     }
   ],

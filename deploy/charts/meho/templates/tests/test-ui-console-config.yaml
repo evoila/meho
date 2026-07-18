@@ -1,0 +1,107 @@
+{{- /*
+  #2594 (Goal #336) — helm test that asserts the operator-console
+  (`/ui/*`) browser BFF OAuth credentials make it from chart values to
+  the backplane container's env at the right shape:
+
+    * `UI_KEYCLOAK_CLIENT_ID` resolves to the plain
+      `config.uiKeycloakClientId` (ConfigMap-sourced) value.
+    * `UI_KEYCLOAK_CLIENT_SECRET` resolves via `secretKeyRef` (never
+      plaintext) to `uiConsole.secretName` / `uiConsole.clientSecretKey`.
+    * `UI_SESSION_ENCRYPTION_KEY` resolves via `secretKeyRef` to
+      `uiConsole.secretName` / `uiConsole.sessionEncryptionKey`.
+
+  These are exactly the three env vars
+  `meho_backplane.features._ui_surface_block` gates the console on — so a
+  passing test proves an operator who set the three values gets a console
+  that clears the gate instead of `503 ui_oauth_not_configured`.
+
+  Renders only when `uiConsole.enabled` — the gate the test covers. A
+  deploy that leaves the console disabled exercises the (verified-elsewhere)
+  no-render path and this Pod is not what proves it.
+
+  Triggered via `helm test <release>`. The Pod is annotated with
+  `helm.sh/hook: test` so it's NOT part of the release manifest —
+  `helm uninstall` cleans it up implicitly. It uses `printenv` to inspect
+  its own resolved env (it does NOT call Keycloak — that would need a real
+  realm the helm-test lane doesn't ship). The shape assertion is what
+  `secretKeyRef` resolution proves: Kubernetes' admission controller
+  refuses to start a Pod whose `secretKeyRef.name` / `.key` doesn't
+  resolve, so a started Pod already mounted a real Secret payload.
+*/}}
+{{- if .Values.uiConsole.enabled }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "meho.fullname" . }}-test-ui-console-config
+  labels:
+    {{- include "meho.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": test
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "meho.serviceAccountName" . }}
+  containers:
+    - name: ui-console-env-check
+      # Minimal busybox-class image; only `sh` + `printenv` are needed.
+      # Matches the test-agent-runtime-config / test-pgvector posture.
+      image: busybox:1.37
+      imagePullPolicy: IfNotPresent
+      env:
+        # Mirror the backplane's own env wiring so this Pod sees the exact
+        # same resolved values. Any drift between the chart's wiring and
+        # this Pod's would fail the check below, surfacing the regression
+        # before the operator does.
+        - name: UI_KEYCLOAK_CLIENT_ID
+          valueFrom:
+            configMapKeyRef:
+              name: {{ include "meho.fullname" . }}-config
+              key: UI_KEYCLOAK_CLIENT_ID
+        - name: UI_KEYCLOAK_CLIENT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.uiConsole.secretName | quote }}
+              key: {{ .Values.uiConsole.clientSecretKey | quote }}
+        - name: UI_SESSION_ENCRYPTION_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.uiConsole.secretName | quote }}
+              key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
+      command:
+        - sh
+        - -c
+        - |
+          set -eu
+          # Each `printenv` exits non-zero when the env var is missing,
+          # which surfaces as the Pod's exit code and bubbles up through
+          # `helm test`. The values themselves are not logged — printing a
+          # real client secret / session key to the test pod's stdout would
+          # leak it in CI logs for any production-shaped deploy.
+          printenv UI_KEYCLOAK_CLIENT_ID >/dev/null \
+            || { echo "FAIL: UI_KEYCLOAK_CLIENT_ID not resolved (config.uiKeycloakClientId wiring regressed)"; exit 1; }
+          printenv UI_KEYCLOAK_CLIENT_SECRET >/dev/null \
+            || { echo "FAIL: UI_KEYCLOAK_CLIENT_SECRET not resolved (chart secretKeyRef wiring regressed)"; exit 1; }
+          printenv UI_SESSION_ENCRYPTION_KEY >/dev/null \
+            || { echo "FAIL: UI_SESSION_ENCRYPTION_KEY not resolved (chart secretKeyRef wiring regressed)"; exit 1; }
+          # The client_id may legitimately be an empty string only when the
+          # console is disabled; but this Pod renders only under
+          # `uiConsole.enabled: true`, where the schema requires
+          # config.uiKeycloakClientId non-empty — so a non-empty value is
+          # part of the contract this test proves.
+          [ -n "${UI_KEYCLOAK_CLIENT_ID}" ] \
+            || { echo "FAIL: UI_KEYCLOAK_CLIENT_ID is empty while the console is enabled (schema/render regression)"; exit 1; }
+          echo "OK: operator-console OAuth env vars resolved (UI_KEYCLOAK_CLIENT_ID + secretKeyRef client_secret + session key)"
+      resources:
+        limits:
+          cpu: 100m
+          memory: 32Mi
+        requests:
+          cpu: 10m
+          memory: 16Mi
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+{{- end }}

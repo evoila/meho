@@ -221,6 +221,81 @@ chart with both opt-ins on and greps for the `secretKeyRef` shape so
 a regression flipping `ANTHROPIC_API_KEY` to plaintext is rejected
 before merge.
 
+## Operator-console (browser BFF) OAuth wiring (#2594)
+
+The operator console (`/ui/*`, Goal #336) serves a Backend-for-Frontend
+login at `/ui/auth/*` that runs OAuth 2.1 authorization-code + PKCE
+against a **confidential** Keycloak client (`meho-web`). This is
+independent of the `/api/*` chassis JWT chain and the `meho login`
+device-code CLI — both of those work without any of the values below,
+so a chassis-only or API-only deploy leaves the console dark on
+purpose. The console is gated on three env vars, all non-empty
+(`meho_backplane.features._ui_surface_block`):
+
+| Env var | Chart value | Kind | Rendered by |
+| --- | --- | --- | --- |
+| `UI_KEYCLOAK_CLIENT_ID` | `config.uiKeycloakClientId` | plain | ConfigMap (always) |
+| `UI_KEYCLOAK_CLIENT_SECRET` | `uiConsole.secretName` @ `uiConsole.clientSecretKey` | `secretKeyRef` | Deployment (when `uiConsole.enabled`) |
+| `UI_SESSION_ENCRYPTION_KEY` | `uiConsole.secretName` @ `uiConsole.sessionEncryptionKey` | `secretKeyRef` | Deployment (when `uiConsole.enabled`) |
+
+Until all three are set, `GET /ui/auth/login` returns
+`503 ui_oauth_not_configured` and no console login is possible — with
+**no** effect on `/api/*` or the CLI. Enabling the console is
+all-or-nothing: with `uiConsole.enabled: true` the schema requires
+both `uiConsole.secretName` and `config.uiKeycloakClientId` non-empty,
+so a half-configured console fails at `helm install` rather than
+503-ing at first browser login.
+
+### Enablement recipe (GSM / no-Vault deploy)
+
+The realm-side steps (create the confidential `meho-web` client, pin
+PKCE, copy the client secret) live in
+[`docs/cross-repo/keycloak-web-client.md`](../../docs/cross-repo/keycloak-web-client.md).
+That doc's Step 3 writes the secret to a Vault path; a GSM/no-Vault
+deploy skips Vault and provisions a plain Kubernetes Secret instead —
+both the `client_secret` and the session encryption key go in **one**
+Secret under two keys:
+
+1. **Generate the session encryption key** (a url-safe base64 32-byte
+   Fernet key the BFF encrypts the session cookie with):
+
+   ```bash
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+2. **Create the Secret** holding both confidential values. On GSM this
+   is typically a GSM-synced ExternalSecret; for a directly-applied
+   Secret:
+
+   ```bash
+   kubectl create secret generic meho-ui-oauth \
+     --from-literal=client_secret='<meho-web client secret from Keycloak>' \
+     --from-literal=session_encryption_key='<Fernet key from step 1>'
+   ```
+
+3. **Point the chart at it** (add to your values file):
+
+   ```yaml
+   config:
+     # public client_id of the confidential meho-web client
+     uiKeycloakClientId: meho-web
+   uiConsole:
+     enabled: true
+     secretName: meho-ui-oauth        # the Secret from step 2
+     clientSecretKey: client_secret   # key holding UI_KEYCLOAK_CLIENT_SECRET
+     sessionEncryptionKey: session_encryption_key  # key holding UI_SESSION_ENCRYPTION_KEY
+   ```
+
+`values-gsm-example.yaml` carries this block commented out — uncomment
+it once the Secret and realm-side client exist. Rotate the client
+secret by regenerating it on Keycloak, updating the Secret, and
+restarting the backplane pod (env is read at startup).
+
+The `helm test <release>` Pod
+(`templates/tests/test-ui-console-config.yaml`) asserts the three env
+vars resolve — the two `secretKeyRef` values and the plain client_id —
+when `uiConsole.enabled: true`.
+
 ## Internal-CA trust bundle (`extraVolumes` / `extraEnv`)
 
 The backplane connects to **Vault**, **Keycloak**, and **PostgreSQL**

@@ -347,12 +347,18 @@ async def _operation_count_by_connector(
     """Aggregate :class:`EndpointDescriptor` rows by connector triple.
 
     Returns a dict keyed on ``(tenant_id, product, version,
-    impl_id)`` whose values are ``{total, enabled}`` op counts.
-    ``enabled`` counts the rows whose per-op ``is_enabled`` flag is
-    set -- the dispatchable subset -- via the same portable ``CASE
+    impl_id)`` whose values are ``{total, enabled, code_shipped}`` op
+    counts. ``enabled`` counts the rows whose per-op ``is_enabled`` flag
+    is set -- the dispatchable subset -- via the same portable ``CASE
     WHEN`` SUM technique as :func:`_aggregate_groups_by_connector`,
     so an operator can tell how many of a connector's ops are
     actually callable vs ingested-but-disabled (G0.23-T5 / #1636).
+    ``code_shipped`` counts the rows whose ``source_kind`` is
+    ``"typed"`` / ``"composite"`` -- image-shipped ops with a real
+    dispatch path. It feeds :func:`resolve_authoring_kind`'s
+    class-less-typed reading (#2496): a ``net.*`` / ``secret.*`` row
+    has code-shipped ops but no backing connector class, so the resolver
+    misses even though the op dispatches fine.
 
     Counts every ``source_kind`` -- ``"ingested"`` (G0.7 spec-driven),
     ``"typed"`` (G3.x hand-coded via :func:`register_typed_operation`),
@@ -375,6 +381,12 @@ async def _operation_count_by_connector(
     enabled_case = func.sum(
         case((EndpointDescriptor.is_enabled.is_(True), 1), else_=0),
     ).label("enabled")
+    code_shipped_case = func.sum(
+        case(
+            (EndpointDescriptor.source_kind.in_(("typed", "composite")), 1),
+            else_=0,
+        ),
+    ).label("code_shipped")
     total = func.count(EndpointDescriptor.id).label("total")
 
     stmt = (
@@ -385,6 +397,7 @@ async def _operation_count_by_connector(
             EndpointDescriptor.impl_id,
             total,
             enabled_case,
+            code_shipped_case,
         )
         .where(
             (EndpointDescriptor.tenant_id.is_(None))
@@ -400,10 +413,11 @@ async def _operation_count_by_connector(
     result = await session.execute(stmt)
     counts: dict[tuple[UUID | None, str, str, str], dict[str, int]] = {}
     for row in result.all():
-        tenant_uuid, product, version, impl_id, total_v, enabled_v = row
+        tenant_uuid, product, version, impl_id, total_v, enabled_v, code_shipped_v = row
         counts[(tenant_uuid, product, version, impl_id)] = {
             "total": int(total_v or 0),
             "enabled": int(enabled_v or 0),
+            "code_shipped": int(code_shipped_v or 0),
         }
     return counts
 
@@ -491,7 +505,41 @@ async def list_ingested_connectors(
             catalog=_load_catalog_or_none(),
         ),
     )
-    return items
+    return _mark_shadowed_builtin_rows(items)
+
+
+def _mark_shadowed_builtin_rows(
+    items: list[ConnectorListItem],
+) -> list[ConnectorListItem]:
+    """Stamp ``shadowed_by_tenant_scope=True`` on shadowed built-in rows.
+
+    ``connector_id`` encodes only ``(impl_id, version)``, so a connector
+    ingested once built-in (``tenant_id IS NULL``) and once tenant-scoped
+    — the #2085 re-ingest trap — renders the same ``connector_id`` under
+    two ``scope`` values. Dispatch is deterministic: a tenant-scoped
+    descriptor wins over the built-in one
+    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`). This
+    post-pass mirrors that precedence on the listing so a consumer knows
+    which twin ``call_operation`` resolves: a ``scope="builtin"`` row
+    whose ``connector_id`` also appears on a ``scope="tenant"`` row in
+    the same response is flagged shadowed.
+
+    Runs over the full response (DB-backed + class-side rows) so the
+    marker reflects exactly what the caller sees. Built on
+    :meth:`~pydantic.BaseModel.model_copy` because
+    :class:`ConnectorListItem` is frozen; only the built-in members of a
+    twin pair are rewritten, so single-scope responses are returned
+    untouched.
+    """
+    tenant_scoped_ids = {item.connector_id for item in items if item.scope == "tenant"}
+    if not tenant_scoped_ids:
+        return items
+    return [
+        item.model_copy(update={"shadowed_by_tenant_scope": True})
+        if item.scope == "builtin" and item.connector_id in tenant_scoped_ids
+        else item
+        for item in items
+    ]
 
 
 async def _emit_db_backed_rows(
@@ -538,6 +586,7 @@ async def _emit_db_backed_rows(
             product=product,
             version=version,
             enabled_operation_count=enabled_op_count,
+            has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
         )
         items.append(
             ConnectorListItem(
@@ -555,6 +604,7 @@ async def _emit_db_backed_rows(
                 state="ingested",
                 kind=kind,
                 dispatchable=dispatchable,
+                scope="tenant" if tenant_uuid is not None else "builtin",
             ),
         )
     return items
@@ -717,6 +767,7 @@ def _maybe_build_class_only_item(
         state="registered",
         kind=kind,
         dispatchable=False,
+        scope="builtin",
         next_step=_next_step_for_registered(
             # Lookup against the registry triple (the catalog's native
             # key) rather than the parsed one — for SDDC the registry

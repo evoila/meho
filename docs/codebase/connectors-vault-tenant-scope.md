@@ -283,6 +283,15 @@ boundary, and the empty-prefix opt-out makes the gate a no-op. Only an
 *explicit* ref is checked — the derived per-tenant default (#1723) and
 an explicit-null clear pass untouched.
 
+The gate only fires for refs that resolve through the **Vault** backend
+(#2585). Applicability is decided by `split_credential_ref` with the
+deploy default (`credential_backend`), the same resolver dispatch uses
+at read time — so a `gsm:<project>/<secret>` ref, or any ref on a
+`CREDENTIAL_BACKEND=gsm` deploy, has no Vault subtree to enforce and is
+stored verbatim. This is what lets a GSM install register `gsm:` refs
+without the `VAULT_KV_TENANT_SCOPE_PREFIX=""` `extraEnv` workaround
+(`deploy/values-examples/values-gsm-example.yaml`).
+
 A target that predates the gate (or a genuine Vault-policy drift) still
 surfaces at dispatch as the structured `connector_vault_forbidden`
 error (`result_connector_vault_forbidden` in `operations/_errors.py`,
@@ -318,6 +327,7 @@ no Vault login) and allows an in-namespace path unchanged.
 The #2091 write-time gate is covered in
 [`backend/tests/test_api_v1_targets.py`](../../backend/tests/test_api_v1_targets.py)
 (the "#2091 — secret_ref tenant-scope fail-fast" cluster: POST/PATCH
-reject, segment boundary, derived-default pass, guard-disabled no-op);
+reject, segment boundary, derived-default pass, guard-disabled no-op,
+plus the #2585 GSM-backend / `gsm:`-scheme pass-through cases);
 the dispatch-time `connector_vault_forbidden` mapping in
 [`backend/tests/test_operations_connector_vault_forbidden.py`](../../backend/tests/test_operations_connector_vault_forbidden.py).

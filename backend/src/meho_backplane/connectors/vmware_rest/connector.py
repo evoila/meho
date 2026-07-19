@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing >600-line connector (session
+# lifecycle + per-op mount hooks + 6 typed-op delegators accreted across
+# #2257/#2258/#2300/#2329/#2396/#2398); this change only adds the VI-JSON
+# vmomi transport seam (#2466). Splitting the module by responsibility is
+# separate refactor work, out of scope for a mount-path bug fix.
 
 """VmwareRestConnector — hand-rolled HttpConnector subclass for vSphere REST.
 
@@ -103,11 +108,14 @@ from meho_backplane.connectors.schemas import (
     ProbeResult,
 )
 from meho_backplane.connectors.vmware_rest._mount import (
+    API_MOUNT_LEGACY,
     SESSION_PATH_LEGACY,
     SESSION_PATH_MODERN,
     adapt_filter_params,
     api_mount_for_session_path,
     mounted_path,
+    vmomi_mounted_path,
+    vmomi_release_from_version,
 )
 from meho_backplane.connectors.vmware_rest.session import (
     VsphereSessionLoader,
@@ -266,6 +274,22 @@ class VmwareRestConnector(HttpConnector):
         # for the rationale and source citations. Keyed on the same
         # tenant-unique tuple as ``_session_tokens``.
         self._session_paths: dict[tuple[str, str], str] = {}
+        # Per-target httpx ``extensions`` (the ``tls_server_name`` SNI /
+        # cert-verify override, evoila/meho#2398) captured at establish
+        # time, keyed on the same tenant-unique tuple. :meth:`aclose`
+        # replays it on the best-effort session-revoke DELETE, which has
+        # no ``Target`` in scope (it iterates cached tokens by key), so a
+        # by-IP appliance that pins its cert to an FQDN is revoked over
+        # the same SNI-corrected handshake the establish call used.
+        self._session_extensions: dict[tuple[str, str], dict[str, Any]] = {}
+        # Per-target ``about.version`` (``GET /api/about``), resolved once
+        # and cached so the VI-JSON ``{release}`` segment
+        # (:meth:`_post_vmomi_json`) costs one probe per target rather than
+        # one per vmomi read. Keyed on the same tenant-unique tuple as
+        # ``_session_tokens``. ``None`` records "probe failed / no version"
+        # so the vmomi path falls back to the ``/api`` mount without
+        # re-probing on every call.
+        self._about_versions: dict[tuple[str, str], str | None] = {}
         self._session_lock = asyncio.Lock()
         self._session_loader: VsphereSessionLoader = (
             session_loader if session_loader is not None else load_session_credentials_from_vault
@@ -364,6 +388,103 @@ class VmwareRestConnector(HttpConnector):
         session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
         return adapt_filter_params(api_mount_for_session_path(session_path), query)
 
+    async def _post_vmomi_json(
+        self,
+        target: VsphereTargetLike,
+        vmomi_path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """POST a typed vmomi (VI-JSON) method on the documented ``/sdk/vim25`` base.
+
+        The vmomi method paths (``/{MoType}/{moId}/{method}`` —
+        ``RetrievePropertiesEx``, ``VsanQueryVcClusterHealthSummary``,
+        ``QueryEvents``, ``QueryPerf`` …) are served by vCenter under the
+        release-versioned VI-JSON base ``/sdk/vim25/{release}`` (Broadcom
+        Web Services SDK guide, "Building JSON Request URLs"), **not** the
+        vSphere Automation ``/api`` mount that :meth:`mount_op_path`
+        resolves for ``/vcenter/*`` paths. Mounting a vmomi method on
+        ``/api`` 404s on vCenter 8.0.x — the ``/api``-served form works
+        only on the 9.0.2 fleet as an undocumented accommodation, so it is
+        kept solely as a single fallback (#2466).
+
+        Resolution, off the target's established session:
+
+        * **legacy / vcsim** (session minted at ``/rest/...``): VI-JSON is
+          not served, so the vmomi method mounts on the legacy ``/rest``
+          form via :func:`._mount.mounted_path` — the pre-#2466 behaviour,
+          unchanged, so the vcsim integration lane stays green.
+        * **modern** (session minted at ``/api/session``): derive
+          ``{release}`` from ``GET /api/about`` (:meth:`_about_version`)
+          and POST ``/sdk/vim25/{release}{vmomi_path}``. On HTTP 404 there
+          (a deployment that does not serve VI-JSON at the derived
+          release), fall back **once** to the ``/api``-mounted form. When
+          the release can't be derived, skip straight to the ``/api`` form.
+
+        When both mounts 404, raises :exc:`RuntimeError` naming both
+        attempted URLs and the vCenter version, so a best-effort caller's
+        ``read_note`` is self-explanatory (``vi-json unavailable: POST
+        /sdk/vim25/8.0.3.0/... and /api/... both 404 on vCenter 8.0.3``)
+        rather than a bare 404. Non-404 failures (401 / 403 / 5xx /
+        transport) propagate unchanged — those are not "this mount isn't
+        served".
+        """
+        await self._session_token(target, operator)
+        session_path = self._session_paths.get(target_cache_key(target), SESSION_PATH_MODERN)
+        if api_mount_for_session_path(session_path) == API_MOUNT_LEGACY:
+            legacy_path = mounted_path(session_path, vmomi_path)
+            return await self._post_json(target, legacy_path, operator=operator, json=json)
+
+        api_path = mounted_path(session_path, vmomi_path)
+        version = await self._about_version(target, operator)
+        release = vmomi_release_from_version(version)
+        if release is None:
+            return await self._post_json(target, api_path, operator=operator, json=json)
+
+        vijson_path = vmomi_mounted_path(release, vmomi_path)
+        try:
+            return await self._post_json(target, vijson_path, operator=operator, json=json)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+        # Single fallback to the /api-mounted vmomi form (the observed 9.x
+        # accommodation); if that also 404s, surface both attempts.
+        try:
+            return await self._post_json(target, api_path, operator=operator, json=json)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise RuntimeError(
+                    f"vi-json unavailable: POST {vijson_path} and {api_path} both 404 "
+                    f"on vCenter {version}"
+                ) from exc
+            raise
+
+    async def _about_version(self, target: VsphereTargetLike, operator: Operator) -> str | None:
+        """Return *target*'s ``about.version`` string, resolved once and cached.
+
+        Reads ``GET /api/about`` (the same probe :meth:`fingerprint` uses)
+        to obtain the ``version`` field that drives the VI-JSON
+        ``{release}`` segment in :meth:`_post_vmomi_json`. Cached per
+        tenant-unique ``target_cache_key`` so repeated vmomi reads share
+        one probe. Any transport / status / shape failure caches and
+        returns ``None`` — the vmomi caller then falls back to the ``/api``
+        mount rather than failing, and the failed probe is not retried on
+        every subsequent read.
+        """
+        cache_key = target_cache_key(target)
+        if cache_key in self._about_versions:
+            return self._about_versions[cache_key]
+        try:
+            payload = await self._get_json(target, "/api/about", operator=operator)
+        except (httpx.HTTPError, OSError, RuntimeError):
+            self._about_versions[cache_key] = None
+            return None
+        version = payload.get("version") if isinstance(payload, dict) else None
+        resolved = version if isinstance(version, str) and version else None
+        self._about_versions[cache_key] = resolved
+        return resolved
+
     async def _session_token(self, target: VsphereTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, establishing one on first use.
 
@@ -454,13 +575,14 @@ class VmwareRestConnector(HttpConnector):
                 "{'username': str, 'password': str}"
             ) from exc
         auth = (username, password)
-        resp = await client.post(SESSION_PATH_MODERN, auth=auth)
+        extensions = self._request_extensions(target)
+        resp = await client.post(SESSION_PATH_MODERN, auth=auth, extensions=extensions)
         established_path = SESSION_PATH_MODERN
         if resp.status_code == 404:
             # Modern endpoint not served (vcsim, very old vCenter,
             # or a reverse-proxy that hasn't been updated). Try the
             # legacy path before declaring failure.
-            resp = await client.post(SESSION_PATH_LEGACY, auth=auth)
+            resp = await client.post(SESSION_PATH_LEGACY, auth=auth, extensions=extensions)
             established_path = SESSION_PATH_LEGACY
         try:
             resp.raise_for_status()
@@ -489,6 +611,7 @@ class VmwareRestConnector(HttpConnector):
         token = _extract_session_token(resp.json(), target.name)
         self._session_tokens[cache_key] = token
         self._session_paths[cache_key] = established_path
+        self._session_extensions[cache_key] = extensions
         _log.info(
             "vsphere_session_established",
             target=target.name,
@@ -528,6 +651,11 @@ class VmwareRestConnector(HttpConnector):
         async with self._session_lock:
             self._session_tokens.pop(cache_key, None)
             self._session_paths.pop(cache_key, None)
+            self._session_extensions.pop(cache_key, None)
+            # Drop the cached about-version too so an auth-recovery cycle
+            # re-probes ``GET /api/about`` — this also un-poisons a slot
+            # where an earlier probe cached ``None`` transiently.
+            self._about_versions.pop(cache_key, None)
 
     async def fingerprint(
         self,
@@ -871,8 +999,11 @@ class VmwareRestConnector(HttpConnector):
         async with self._session_lock:
             tokens = dict(self._session_tokens)
             paths = dict(self._session_paths)
+            extensions_by_key = dict(self._session_extensions)
             self._session_tokens.clear()
             self._session_paths.clear()
+            self._session_extensions.clear()
+            self._about_versions.clear()
         for cache_key, token in tokens.items():
             # ``_session_tokens`` is keyed on the tenant-unique
             # ``(tenant_id, target.id)`` tuple, while the shared
@@ -906,6 +1037,7 @@ class VmwareRestConnector(HttpConnector):
                     "DELETE",
                     revoke_path,
                     headers={_SESSION_HEADER: token},
+                    extensions=extensions_by_key.get(cache_key, {}),
                 )
                 # Log non-2xx but don't raise — shutdown proceeds.
                 if resp.status_code >= 400:

@@ -374,6 +374,42 @@ def test_list_kind_filter_narrows_table_but_banner_reflects_operational() -> Non
     assert 'data-dropped-slug="op-low"' in body
 
 
+def test_row_carries_visible_identity_link_and_view_button() -> None:
+    """Each convention row offers the converged detail-nav pair (#2463).
+
+    The slug cell links to the detail page with the visible
+    ``link link-primary`` styling (not the invisible ``link link-hover``),
+    and a trailing actions column carries a ``View`` button to the same
+    ``/ui/conventions/<slug>`` URL -- the page-nav list convention.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_convention(
+        tenant_id=_TENANT_A,
+        slug="confirm-first",
+        title="Confirm before applying",
+        body="Always confirm before applying a destructive change.",
+        kind=ConventionKind.OPERATIONAL,
+        priority=10,
+    )
+    _, jwks = _make_keypair_and_jwks()
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token="unused", operator_sub=_OP_A)
+    client, mock = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/conventions")
+    finally:
+        mock.stop()
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Visible identity link (never the hover-only styling).
+    assert 'class="link link-primary"' in body
+    assert "link link-hover" not in body
+    assert 'href="/ui/conventions/confirm-first"' in body
+    # Trailing View button to the same detail URL + its header cell.
+    assert 'class="btn btn-ghost btn-xs"' in body
+    assert 'aria-label="View convention confirm-first"' in body
+    assert 'class="sr-only">Actions</th>' in body
+
+
 def test_list_invalid_kind_returns_422() -> None:
     """A typoed kind query value 422s rather than collapsing to 'all'."""
     _seed_tenant(_TENANT_A, "tenant-a")

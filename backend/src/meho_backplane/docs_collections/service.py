@@ -58,7 +58,10 @@ from meho_backplane.docs_search.backends.registry import all_backends
 __all__ = [
     "DocCollectionBackendTypeError",
     "DocCollectionConflictError",
+    "DocCollectionGlobalError",
+    "DocCollectionNotDisabledError",
     "create_doc_collection",
+    "delete_doc_collection",
     "probe_collection",
     "set_collection_enabled",
 ]
@@ -70,6 +73,12 @@ _log = structlog.get_logger(__name__)
 #: ``op_id="meho.docs.*"`` catches the registration transport-independently
 #: (G4.5-T8 #1549). ``op_class="write"`` — create mutates the registry.
 _CREATE_OP_ID = "meho.docs.collections.create"
+
+#: Canonical audit op_id for the delete (#2487). Same ``meho.docs.*``
+#: family as create / list / the lifecycle verbs, so a deregistration is
+#: caught by the same ``op_id="meho.docs.*"`` who-touched filter.
+#: ``op_class="write"`` — a delete mutates the registry.
+_DELETE_OP_ID = "meho.docs.collections.delete"
 
 
 class DocCollectionBackendTypeError(Exception):
@@ -211,6 +220,130 @@ async def create_doc_collection(
         status=row.status,
     )
     return row
+
+
+class DocCollectionGlobalError(Exception):
+    """A tenant admin cannot delete a global (platform-owned) collection row.
+
+    A row with ``tenant_id IS NULL`` is a shared platform-catalogue entry
+    every tenant sees; removing it is an ops/platform action, out of the
+    tenant API (#2487). Carries a structured ``detail`` the fronts map to a
+    typed refusal (REST 403 / MCP ``-32602``) so the caller sees *why* the
+    delete was refused, not an opaque conflict. The tenant-owned row that
+    *shadows* a global key is deletable — deleting it simply un-shadows the
+    global row (the resolver is tenant-first).
+    """
+
+    def __init__(self, collection_key: str) -> None:
+        self.collection_key = collection_key
+        self.detail: dict[str, object] = {
+            "error": "global_collection",
+            "collection_key": collection_key,
+            "message": (
+                f"doc collection {collection_key!r} is a global "
+                f"(platform-owned) row; a tenant admin cannot delete it. "
+                f"Only tenant-owned collections are deletable via this API."
+            ),
+        }
+        super().__init__(self.detail["message"])
+
+
+class DocCollectionNotDisabledError(Exception):
+    """Only a disabled collection can be deleted — disable it first (#2487).
+
+    The delete is a two-step (``disable`` → ``delete``): disabling first
+    keeps the existing typed ``collection_disabled`` search rejection as the
+    operator-visible warning window before the key 404s. Carries a
+    structured ``detail`` (including the current ``status``) the fronts map
+    to a typed refusal (REST 409 / MCP ``-32602``).
+    """
+
+    def __init__(self, collection_key: str, status: str) -> None:
+        self.collection_key = collection_key
+        self.status = status
+        self.detail: dict[str, object] = {
+            "error": "collection_not_disabled",
+            "collection_key": collection_key,
+            "status": status,
+            "message": (
+                f"doc collection {collection_key!r} is {status!r}, not "
+                f"'disabled'; disable it first, then delete. The disable → "
+                f"delete two-step gives searchers a terminal "
+                f"'collection_disabled' warning window before the key 404s."
+            ),
+        }
+        super().__init__(self.detail["message"])
+
+
+async def delete_doc_collection(
+    session: AsyncSession,
+    operator: Operator,
+    collection: DocCollectionORM,
+) -> None:
+    """Deregister a disabled, tenant-owned collection, freeing its key (#2487).
+
+    The delete half of the registry, the counterpart to
+    :func:`create_doc_collection`. Hard-deletes the resolved row (nothing
+    FK-references ``doc_collections``, so there is no cascade to reason
+    about) which frees its ``collection_key`` for a re-``create`` under the
+    same key — the recovery loop that motivated the issue (a collection
+    mis-registered under the wrong ``backend.type`` / ``ref`` could never be
+    fixed under its own key while ``disable`` only flipped ``status``).
+
+    Two guards, checked in order:
+
+    1. **Tenant-owned only.** A global row (``tenant_id IS NULL``) is a
+       shared platform-catalogue entry; a tenant admin removing it would
+       delete a row every tenant sees. Refused with
+       :class:`DocCollectionGlobalError` (REST 403 / MCP ``-32602``). This
+       is checked first: a tenant admin must never be told "disable it
+       first" for a global row they cannot delete at all.
+    2. **Disabled-first.** A collection that is not ``disabled`` is refused
+       with :class:`DocCollectionNotDisabledError` (REST 409 / MCP
+       ``-32602``). The disable → delete two-step keeps the typed
+       ``collection_disabled`` search rejection as the warning window before
+       the key 404s.
+
+    The caller owns the transaction boundary (the route's ``get_session``
+    ``session.begin()``); this function flushes the delete but does not
+    commit, so a downstream failure rolls it back.
+
+    Args:
+        session: Active async session inside the front's open transaction.
+        operator: The verified operator (tenant scope already applied by the
+            resolver that produced *collection*); bound for audit
+            attribution.
+        collection: The resolved ORM row to deregister.
+
+    Raises:
+        DocCollectionGlobalError: *collection* is a global row; the front
+            maps it to 403 / ``-32602``.
+        DocCollectionNotDisabledError: *collection* is not ``disabled``;
+            the front maps it to 409 / ``-32602``.
+    """
+    # Bind the canonical op_id up-front so the persisted audit row is
+    # filterable by ``op_id="meho.docs.*"`` even when a guard refuses below
+    # (the create binds identically). ``op_class="write"`` — a delete
+    # mutates the registry.
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_DELETE_OP_ID,
+        audit_op_class="write",
+    )
+
+    if collection.tenant_id is None:
+        raise DocCollectionGlobalError(collection.collection_key)
+    if collection.status != STATUS_DISABLED:
+        raise DocCollectionNotDisabledError(collection.collection_key, collection.status)
+
+    await session.delete(collection)
+    await session.flush()
+
+    _log.info(
+        "doc_collection_deleted",
+        collection_key=collection.collection_key,
+        tenant_scope="tenant",
+        status=collection.status,
+    )
 
 
 async def probe_collection(

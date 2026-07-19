@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — structured proposed_effect rendering on /ui/approvals (#2447)
+
+- The `/ui/approvals` detail modal now renders the parked
+  `proposed_effect` envelope **structurally** instead of as one opaque
+  JSON blob: a `safety_level` badge + `op_class` chip in the header, a
+  warning banner when the connector identity may lack write permission
+  (`write_capability_warning`), an error banner when the preview builder
+  failed (`preview_unavailable` + `preview_error` — "blast radius
+  unknown"), a reason-keyed notice when no preview was populated
+  (deliberately-redacted credential write vs. connector-did-not-populate),
+  and a key-value table of the operation-specific fields (the bespoke
+  `preview`, else the generic redaction-safe `params_echo`). The full raw
+  envelope stays available behind a default-closed "Show raw JSON"
+  expander. Reviewers see the policy gate, the possible post-approval
+  denial, and the redaction posture at a glance. Template-only — the
+  render is generic (no per-`op_id` branching); op semantics already live
+  in the server-side preview builders (#2447).
+
 ### Fixed — dot-containing-slug preview selectors on /ui/kb (#2451)
 
 - The `/ui/kb` search result cards built the hover-preview `hx-target` and the

@@ -50,6 +50,22 @@
     error_message         -- str | None: a failed-decision human detail
 -#}
 {% from "_icons.html" import icon %}
+{#- Mirror of the ops-launcher ``safety_badge`` mold (``operations/_results.html``):
+    ``safety_level`` is the closed ``safe`` / ``caution`` / ``dangerous`` enum
+    stamped on every parked envelope (#1855). Colour-by-severity so a reviewer
+    scanning the modal reads the policy gate before the label -- error for
+    dangerous, warning for caution, ghost for safe. Kept local (not imported)
+    so the modal stays self-contained and StrictUndefined-safe -- the launcher
+    partial references launcher-only context at its top level. -#}
+{%- macro proposed_effect_safety_badge(level) -%}
+  {%- if level == "dangerous" -%}
+    <span class="badge badge-error badge-sm" title="Dangerous — irreversible or high-impact">{{ level }}</span>
+  {%- elif level == "caution" -%}
+    <span class="badge badge-warning badge-sm" title="Caution — state-changing">{{ level }}</span>
+  {%- else -%}
+    <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ level }}</span>
+  {%- endif -%}
+{%- endmacro -%}
 <dialog id="meho-approvals-modal" class="modal" aria-label="Review approval request">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
@@ -133,9 +149,116 @@
       {% endif %}
     </dl>
 
+    {#- Structured render of the ``proposed_effect`` envelope (#2447). The
+        dispatcher stamps reviewer-oriented keys onto every parked op
+        (``operations/dispatcher.py:_build_proposed_effect``): ``safety_level``
+        (#1855), ``op_class`` + bespoke ``preview`` or generic redaction-safe
+        ``params_echo`` (#1856), ``preview_populated`` + ``preview_reason``
+        (#2332), ``preview_unavailable`` + ``preview_error`` (#1628), and a
+        top-level ``write_capability_warning`` when a permission preflight
+        says the write may be denied (#2331). Render each distinctly instead
+        of one opaque JSON blob; the full envelope stays available behind the
+        raw-JSON expander at the bottom. All keys are read via ``.get`` on the
+        real dict (StrictUndefined-safe: a missing key is a real ``None``,
+        never an ``Undefined``). No per-``op_id`` branching -- op semantics
+        already live in the server-side preview builders. -#}
+    {% set effect = request.proposed_effect or {} %}
     <div class="mt-3">
-      <p class="text-base-content/55 text-sm">Proposed effect</p>
-      <pre class="mt-1 max-h-48 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs [overflow-wrap:anywhere] whitespace-pre-wrap" aria-label="Proposed effect">{{ request.proposed_effect | tojson(indent=2) }}</pre>
+      <div class="flex items-center justify-between gap-3">
+        <p class="text-base-content/55 text-sm">Proposed effect</p>
+        <div class="flex items-center gap-2">
+          {% if effect.get("safety_level") %}
+            {{ proposed_effect_safety_badge(effect.get("safety_level")) }}
+          {% endif %}
+          {% if effect.get("op_class") %}
+            <span class="badge badge-ghost badge-sm font-mono" title="Operation class">{{ effect.get("op_class") }}</span>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if effect.get("write_capability_warning") %}
+        {#- #2331: the permission preflight found the connector identity likely
+            lacks write capability. A warning, not a gate -- the approver may
+            know the policy is landing alongside. -#}
+        <div class="alert alert-warning mt-2" role="alert">
+          <div>
+            <h4 class="font-semibold text-sm">Write may be denied</h4>
+            <p class="text-xs opacity-90">
+              The connector identity may lack write permission — the approved
+              write may still be denied when it runs.
+            </p>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if effect.get("preview_unavailable") %}
+        {#- #1628: the preview builder ran but faulted, so the blast radius
+            could not be resolved. Error-styled -- this is not a small action. -#}
+        <div class="alert alert-error mt-2" role="alert">
+          <div>
+            <h4 class="font-semibold text-sm">Blast radius unknown</h4>
+            <p class="text-xs opacity-90">
+              The preview builder failed, so the effect of this write is
+              unknown{% if effect.get("preview_error") %}:
+              <span class="font-mono">{{ effect.get("preview_error") }}</span>{% endif %}.
+            </p>
+          </div>
+        </div>
+      {% elif effect.get("preview_populated") is sameas false %}
+        {#- #2332: the envelope collapsed to the op-identity-only default. Name
+            WHY so a deliberately-redacted credential write reads distinctly
+            from a connector that simply never populated a preview. -#}
+        {% if effect.get("preview_reason") == "credential_write_redacted" %}
+          <div class="alert alert-warning mt-2" role="note">
+            <div>
+              <h4 class="font-semibold text-sm">Values deliberately redacted</h4>
+              <p class="text-xs opacity-90">
+                This is a credential-class write; its values are intentionally
+                withheld from the approval record. Treat as elevated risk.
+              </p>
+            </div>
+          </div>
+        {% elif effect.get("preview_reason") == "connector_did_not_populate" %}
+          <div class="alert mt-2" role="note">
+            <div>
+              <p class="text-xs opacity-90">
+                No preview was populated by the connector for this operation.
+              </p>
+            </div>
+          </div>
+        {% endif %}
+      {% endif %}
+
+      {#- The operation-specific fields: a bespoke ``preview`` when a builder
+          computed one, else the generic redaction-safe ``params_echo``. Render
+          the fields WITHIN that sub-dict as a table -- scalars inline, nested
+          values pretty-printed per row. -#}
+      {% set fields = effect.get("params_echo") or effect.get("preview") %}
+      {% if fields is mapping and fields %}
+        <div class="mt-2 overflow-auto rounded-box border border-base-300">
+          <table class="table table-xs" aria-label="Proposed effect fields">
+            <tbody>
+              {% for key, value in fields | dictsort %}
+                <tr>
+                  <th class="align-top font-mono font-normal text-base-content/55">{{ key }}</th>
+                  <td class="font-mono [overflow-wrap:anywhere]">
+                    {% if value is mapping or (value is sequence and value is not string) %}
+                      <pre class="whitespace-pre-wrap text-xs">{{ value | tojson(indent=2) }}</pre>
+                    {% else %}
+                      {{ value }}
+                    {% endif %}
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+
+      <details class="mt-2">
+        <summary class="cursor-pointer text-xs text-base-content/55">Show raw JSON</summary>
+        <pre class="mt-1 max-h-48 overflow-auto rounded-box bg-base-200 p-3 font-mono text-xs [overflow-wrap:anywhere] whitespace-pre-wrap" aria-label="Proposed effect raw JSON">{{ request.proposed_effect | tojson(indent=2) }}</pre>
+      </details>
     </div>
 
     {% if request.status == "pending" and self_approval_blocked %}

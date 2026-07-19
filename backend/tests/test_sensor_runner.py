@@ -39,11 +39,14 @@ import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 import structlog
 
+import meho_backplane.operations._audit as audit_module
 from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.checks.assertions import AssertionSpec
 from meho_backplane.checks.repository import (
     advance_sensor_next_fire,
@@ -57,9 +60,13 @@ from meho_backplane.checks.runner import (
     start_sensor_runner,
     stop_sensor_runner,
 )
-from meho_backplane.connectors.schemas import OperationResult
+from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.registry import clear_registry, register_connector_v2
+from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorStatus, Tenant
+from meho_backplane.db.models import Target as TargetORM
+from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.scheduler.cron import next_fire_after
 from meho_backplane.scheduler.loop import _SCHEDULER_ADVISORY_LOCK_KEY
 from meho_backplane.settings import get_settings
@@ -770,3 +777,293 @@ async def test_stop_cancels_outstanding_evaluations(
 
     assert evaluation.done()
     assert not _IN_FLIGHT
+
+
+# --------------------------------------------------------------------------- #
+# Real resolve -> dispatch path (#2595): dispatch is NOT stubbed
+# --------------------------------------------------------------------------- #
+#
+# The blind spot #2595 closes: every test above monkeypatches
+# ``checks.runner.dispatch``, so the runner's target-resolution + connector-
+# resolution path never ran. Before #2595 the runner forwarded the sensor's
+# raw stored ``target`` dict straight to ``dispatch``; the connector resolver
+# reads ``product`` / ``version`` off a resolved ``Target`` row (not off a bare
+# ``{"name": ...}`` dict), so every target-bound sensor failed ``no_connector``
+# while ``POST /api/v1/operations/call`` with the same triple succeeded. These
+# tests register a real k8s-mould connector (a ``(product, "", "")`` wildcard
+# sibling, the shape that makes a fresh typed target resolve) and drive a real
+# runner tick through the actual resolve -> dispatch seam.
+
+_K8S_MOULD_PRODUCT = "k8smould"
+_K8S_MOULD_CONNECTOR_ID = f"{_K8S_MOULD_PRODUCT}-1.x"
+_K8S_MOULD_OP = f"{_K8S_MOULD_PRODUCT}.pod.count"
+
+
+async def _k8s_count_handler(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Module-level typed handler returning a payload the evaluator reads.
+
+    ``{"count": 3}`` against ``_OK_ASSERTION`` (``$.count > 10`` critical)
+    evaluates ``ok`` -- so a green tick through the real path lands
+    ``last_state == "ok"``, not ``unknown``.
+    """
+    return {"count": 3}
+
+
+class _K8sMouldConnector(Connector):
+    """Connector class the resolver picks for the k8s-mould target."""
+
+    product = _K8S_MOULD_PRODUCT
+    version = "1.x"
+    impl_id = _K8S_MOULD_PRODUCT
+
+    async def fingerprint(self, target: Any, operator: Any = None) -> FingerprintResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def probe(self, target: Any) -> ProbeResult:  # type: ignore[override]
+        raise NotImplementedError
+
+    async def execute(  # type: ignore[override]
+        self,
+        target: Any,
+        op_id: str,
+        params: dict[str, Any],
+    ) -> OperationResult:
+        raise NotImplementedError
+
+
+@pytest.fixture
+def _reset_registry() -> Iterator[None]:
+    """Clear the process-global connector registry + dispatcher caches.
+
+    The real-dispatch tests register a connector + typed op; scrub both around
+    each so no registration leaks into a sibling test (mirrors
+    ``test_operations_dispatcher``'s autouse ``_reset_module_state``).
+    """
+    reset_dispatcher_caches()
+    clear_registry()
+    yield
+    reset_dispatcher_caches()
+    clear_registry()
+
+
+@pytest.fixture
+def _embedding_stub() -> AsyncMock:
+    """Deterministic embedding stub so ``register_typed_operation`` skips ONNX."""
+    service = AsyncMock()
+    service.encode_one.return_value = [0.1] * 384
+    service.encode.return_value = [[0.1] * 384]
+    service.dimension = 384
+    return service
+
+
+@pytest.fixture
+def _captured_broadcast(monkeypatch: pytest.MonkeyPatch) -> list[BroadcastEvent]:
+    """Record broadcast events a real dispatch emits instead of hitting the bus."""
+    events: list[BroadcastEvent] = []
+
+    async def _capture(event: BroadcastEvent) -> None:
+        events.append(event)
+
+    monkeypatch.setattr(audit_module, "publish_event", _capture)
+    return events
+
+
+async def _register_k8s_mould(embedding_service: AsyncMock) -> None:
+    register_connector_v2(
+        product=_K8S_MOULD_PRODUCT,
+        version="",
+        impl_id="",
+        cls=_K8sMouldConnector,
+    )
+    await register_typed_operation(
+        product=_K8S_MOULD_PRODUCT,
+        version="1.x",
+        impl_id=_K8S_MOULD_PRODUCT,
+        op_id=_K8S_MOULD_OP,
+        handler=_k8s_count_handler,
+        summary="Count pods on the cluster.",
+        description="Return the pod count for the resolved cluster target.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=embedding_service,
+    )
+
+
+async def _seed_target(
+    *,
+    name: str,
+    aliases: list[str] | None = None,
+    product: str = _K8S_MOULD_PRODUCT,
+    version: str = "1.x",
+    tenant_id: uuid.UUID = _TENANT,
+) -> uuid.UUID:
+    await _seed_tenant(tenant_id)
+    target_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s, s.begin():
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=tenant_id,
+                name=name,
+                aliases=aliases or [],
+                product=product,
+                version=version,
+                host="k8s.test",
+                port=6443,
+                fqdn=None,
+                secret_ref=None,
+                auth_model="shared_service_account",
+                vpn_required=False,
+                extras={},
+                notes=None,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+            )
+        )
+    return target_id
+
+
+async def _create_target_bound_sensor(
+    *,
+    target: dict[str, Any] | None,
+    connector_id: str = _K8S_MOULD_CONNECTOR_ID,
+    op_id: str = _K8S_MOULD_OP,
+    tenant_id: uuid.UUID = _TENANT,
+) -> uuid.UUID:
+    await _seed_tenant(tenant_id)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await create_sensor(
+            session,
+            tenant_id=tenant_id,
+            name=f"sensor-{uuid.uuid4().hex[:8]}",
+            connector_id=connector_id,
+            op_id=op_id,
+            target=target,
+            params={},
+            assertion=_OK_ASSERTION,
+            cadence_kind=SensorCadenceKind.INTERVAL,
+            interval_seconds=300,
+            cron_expr=None,
+            timezone="UTC",
+            severity="critical",
+            for_seconds=0,
+            identity_sub="__sensor__",
+            created_by_sub="op-admin",
+        )
+        await session.commit()
+        return row.id
+
+
+@pytest.mark.asyncio
+async def test_target_bound_sensor_resolves_and_dispatches_real_ok(
+    _reset_registry: None,
+    _embedding_stub: AsyncMock,
+    _captured_broadcast: list[BroadcastEvent],
+) -> None:
+    """A target-bound sensor evaluates end-to-end through the real resolve->dispatch.
+
+    Regression for #2595 (and the ``test_sensor_runner.py`` stubbed-dispatch
+    blind spot): ``dispatch`` is **not** stubbed. Registering a target for the
+    typed wildcard-version connector and running a tick lands ``ok``/``3`` --
+    parity with ``POST /api/v1/operations/call`` for the same triple.
+    """
+    await _register_k8s_mould(_embedding_stub)
+    await _seed_target(name="k8s-prod")
+
+    sensor_id = await _create_target_bound_sensor(target={"name": "k8s-prod"})
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "ok", row.last_evidence
+    assert row.last_state != "unknown"
+    assert row.last_value == 3
+    assert row.last_evidence is not None
+    assert row.last_evidence["observed"] == 3
+
+
+@pytest.mark.asyncio
+async def test_inline_target_object_resolves_by_name_real_ok(
+    _reset_registry: None,
+    _embedding_stub: AsyncMock,
+    _captured_broadcast: list[BroadcastEvent],
+) -> None:
+    """A full inline ``{"name": ...}`` target object resolves by name and dispatches ok.
+
+    Resolve-by-name is the primary contract: the stored object is normalised to
+    its ``name`` and resolved to the registered row, same as a bare string.
+    """
+    await _register_k8s_mould(_embedding_stub)
+    await _seed_target(name="k8s-prod", aliases=["prod-cluster"])
+
+    # Resolve via an alias carried on the inline object's ``name``.
+    sensor_id = await _create_target_bound_sensor(target={"name": "prod-cluster"})
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "ok", row.last_evidence
+    assert row.last_value == 3
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_target_name_yields_no_target_evidence(
+    _reset_registry: None,
+    _embedding_stub: AsyncMock,
+    _captured_broadcast: list[BroadcastEvent],
+) -> None:
+    """A target name matching no live target reads ``no_target`` -- not ``no_connector``.
+
+    The #2595 legibility fix: resolution failure rides the #136/#2110 target
+    vocabulary in the evidence ``reason`` instead of the misleading
+    ``no_connector`` the raw-dict dispatch used to yield.
+    """
+    await _register_k8s_mould(_embedding_stub)
+    # No target seeded under this name.
+
+    sensor_id = await _create_target_bound_sensor(target={"name": "ghost-cluster"})
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert row.last_evidence is not None
+    assert row.last_evidence["reason"] == "no_target"
+    assert "no_connector" not in str(row.last_evidence)
+
+
+@pytest.mark.asyncio
+async def test_alias_collision_yields_ambiguous_target_evidence(
+    _reset_registry: None,
+    _embedding_stub: AsyncMock,
+    _captured_broadcast: list[BroadcastEvent],
+) -> None:
+    """A target name that collides across two aliases reads ``ambiguous_target``."""
+    await _register_k8s_mould(_embedding_stub)
+    # Two distinct targets sharing one alias -> the resolver's alias step
+    # returns >1 row -> AmbiguousTargetError.
+    await _seed_target(name="k8s-a", aliases=["k8s-shared"])
+    await _seed_target(name="k8s-b", aliases=["k8s-shared"])
+
+    sensor_id = await _create_target_bound_sensor(target={"name": "k8s-shared"})
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert row.last_evidence is not None
+    assert row.last_evidence["reason"] == "ambiguous_target"

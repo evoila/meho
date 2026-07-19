@@ -775,3 +775,53 @@ def test_account_row_renders_both_bell_badge_targets(ui_env: Environment) -> Non
     html = ui_env.get_template("base.html").render(ready=True)
     assert 'id="mobile-approvals-badge"' in html
     assert 'id="sidebar-approvals-badge"' in html
+def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:
+    """The ``/ui/kb/<slug>`` detail page themes code blocks for DaisyUI 5 (#2452).
+
+    Regression guard for the dead-variable bug: the code-block ``<style>``
+    block must (a) carry both a default/dark-scoped ``.kb-code`` pygments
+    rule set AND a ``[data-theme="meho-light"]``-scoped override so token
+    colours follow the active theme, (b) pin the surface background to the
+    live ``var(--color-base-200)`` token, and (c) contain none of the dead
+    DaisyUI 4 ``--b2`` / ``--wa`` variables that forced a light background
+    (and dropped the query-term highlight) in both themes.
+    """
+    import datetime
+    import re
+    import types
+
+    from meho_backplane.ui.routes.kb.render import pygments_css, render_markdown
+
+    entry = types.SimpleNamespace(
+        slug="theme-demo",
+        metadata={},
+        updated_at=datetime.datetime(2026, 7, 19, 12, 0, 0),
+    )
+    body = "```python\nx = 1\n```\n\nunlabeled fence:\n\n```\nplain text\n```\n"
+    html = ui_env.get_template("kb/detail.html").render(
+        ready=True,
+        entry=entry,
+        rendered_body=render_markdown(body),
+        code_css=pygments_css(),
+        source_path=None,
+        body_hash=None,
+    )
+
+    match = re.search(r"<style>.*?</style>", html, re.S)
+    assert match is not None, "kb/detail.html rendered no inline <style> block"
+    style_block = match.group(0)
+
+    # (a) both theme scopes present in the pygments token rules.
+    assert re.search(r"(?m)^\.kb-code \.\w", style_block), (
+        "default/dark-scoped .kb-code pygments rule set missing"
+    )
+    assert '[data-theme="meho-light"] .kb-code .' in style_block, (
+        "light-theme-scoped .kb-code pygments rule set missing"
+    )
+
+    # (b) surface background follows the active theme via a live token.
+    assert "background: var(--color-base-200)" in style_block
+
+    # (c) no dead DaisyUI 4 variables survive.
+    assert "var(--b2" not in style_block
+    assert "var(--wa" not in style_block

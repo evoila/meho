@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — unclip sidebar approvals badge (#2445)
+
+- The desktop sidebar's approvals-bell pending-count badge is no longer
+  clipped at the drawer edge. The badge is an absolute overlay on the bell
+  button (correct); the clip came from the account row overflowing the
+  `w-64` nav's content width — DaisyUI 5's `.btn { flex-shrink: 0 }` kept the
+  operator chip (avatar + mono `sub` label + chevron) at full width, so the
+  chip plus the fixed theme/bell buttons pushed the bell's right edge past
+  `:where(.drawer-side) { overflow-x: hidden }`. The operator chip now
+  absorbs the deficit: its flex wrapper and button carry `min-w-0` and the
+  button carries `shrink` (overriding the `.btn` rule) while the mono label
+  keeps `min-w-0 truncate` (ellipsis) and the avatar + chevron stay pinned
+  with `shrink-0`. A full-width Keycloak-`sub` operator label now truncates
+  instead of shoving the badge off-canvas, so the count is fully readable at
+  every `lg+` viewport width.
 ### Added — in-flight spinners on console Run buttons (#2459)
 
 - The long-running action buttons on `/ui/retrieval` (Diagnostics Run, Run

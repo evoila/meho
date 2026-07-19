@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — doc-collection delete across REST/MCP/CLI (#2487)
+
+- A disabled, tenant-owned documentation collection can now be
+  deregistered — freeing its `collection_key` for re-registration — via
+  MCP `delete_doc_collections` (tenant_admin, `op_class=write`), REST
+  `DELETE /api/v1/doc_collections/{collection_key}` → 204, and CLI
+  `meho docs collections delete <key>`, all fronting one service primitive
+  `docs_collections.service.delete_doc_collection`. Closes the recovery gap
+  where `disable` only flipped `status` — the row and its occupied key
+  persisted, so a collection mis-registered under the wrong `backend` could
+  never be fixed under its own key (#1739 deferred DELETE to a follow-up).
+  Two guards: a global (`tenant_id IS NULL`) platform-catalogue row is
+  refused with 403 `global_collection` (a tenant admin cannot remove a row
+  every tenant sees; deleting a tenant row that shadows a global key
+  un-shadows the global row), and a non-`disabled` collection is refused
+  with 409 `collection_not_disabled` naming the current status (the
+  disable → delete two-step keeps the terminal `collection_disabled` search
+  rejection as a warning window before the key 404s). One `audit_log` row
+  per call under `op_id="meho.docs.collections.delete"`.
 ### Fixed — resolve_authoring_kind for class-less typed connectors (#2496)
 
 - The connector listing (`GET /api/v1/connectors`) and

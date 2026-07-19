@@ -7878,6 +7878,11 @@ type CreateDocCollectionEndpointApiV1DocCollectionsPostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
+// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams defines parameters for DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete.
+type DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams defines parameters for DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost.
 type DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams struct {
 	Authorization *string `json:"authorization,omitempty"`
@@ -10719,6 +10724,9 @@ type ClientInterface interface {
 
 	CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete request
+	DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -12840,6 +12848,18 @@ func (c *Client) CreateDocCollectionEndpointApiV1DocCollectionsPostWithBody(ctx 
 
 func (c *Client) CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest(c.Server, collectionKey, params)
 	if err != nil {
 		return nil, err
 	}
@@ -21735,6 +21755,55 @@ func NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequestWithBody(server
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest generates requests for DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete
+func NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest(server string, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -37275,6 +37344,9 @@ type ClientWithResponsesInterface interface {
 
 	CreateDocCollectionEndpointApiV1DocCollectionsPostWithResponse(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDocCollectionEndpointApiV1DocCollectionsPostResponse, error)
 
+	// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse request
+	DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error)
 
@@ -39819,6 +39891,28 @@ func (r CreateDocCollectionEndpointApiV1DocCollectionsPostResponse) Status() str
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateDocCollectionEndpointApiV1DocCollectionsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -46658,6 +46752,15 @@ func (c *ClientWithResponses) CreateDocCollectionEndpointApiV1DocCollectionsPost
 	return ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp)
 }
 
+// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse request returning *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse
+func (c *ClientWithResponses) DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse, error) {
+	rsp, err := c.DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx, collectionKey, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse(rsp)
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request returning *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse
 func (c *ClientWithResponses) DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
 	rsp, err := c.DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx, collectionKey, params, reqEditors...)
@@ -52279,6 +52382,32 @@ func ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp *http.R
 			return nil, err
 		}
 		response.JSON201 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse parses an HTTP response from a DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse call
+func ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse(rsp *http.Response) (*DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
 
 	}
 

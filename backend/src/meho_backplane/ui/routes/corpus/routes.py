@@ -497,7 +497,9 @@ def _cited_chunks(chunks: list[DocsChunk]) -> list[dict[str, object]]:
     return [
         {
             "chunk": chunk,
-            "link": resolve_citation_link(chunk.source_url, document_id=chunk.document_id),
+            "link": resolve_citation_link(
+                chunk.source_url, title=chunk.title, document_id=chunk.document_id
+            ),
         }
         for chunk in chunks
     ]

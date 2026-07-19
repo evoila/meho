@@ -3697,6 +3697,13 @@ type DocCollectionSummary struct {
 // optional owning-document id (“None“ when the corpus has no document
 // concept for a chunk) and is only read as a citation-label fallback.
 //
+// “title“ is the **optional** human-legible chunk title (#2475), passed
+// through from the corpus (“CorpusChunk.title“). It is the *preferred*
+// citation label — every citation face (“ask_docs“, “/ui/corpus“)
+// feeds it to the “title -> document_id -> filename -> URL“ label chain
+// — and is “None“ until the upstream corpus supplies one, so today's
+// corpus (which sends no title) sees no behaviour change.
+//
 // “source_url“ is the **backend-agnostic** citation reference (#132): a
 // canonical public URL where one is derivable, else an opaque
 // “meho://docs/<collection>/<chunk_id>“ ref. It is **never** the corpus's
@@ -3711,6 +3718,7 @@ type DocsChunk struct {
 	DocumentId *string  `json:"document_id"`
 	Score      *float32 `json:"score"`
 	SourceUrl  *string  `json:"source_url"`
+	Title      *string  `json:"title"`
 }
 
 // DraftTemplateRequest Request body for “meho.runbook.draft_template“ -- create a new draft.

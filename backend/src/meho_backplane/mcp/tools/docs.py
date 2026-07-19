@@ -654,6 +654,7 @@ def _citation_payload(chunk: DocsChunk) -> dict[str, Any]:
     payload = chunk.model_dump(mode="json")
     payload["link"] = citation_link_payload(
         chunk.source_url,
+        title=chunk.title,
         document_id=chunk.document_id,
     )
     return payload

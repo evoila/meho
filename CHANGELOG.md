@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — meho dashboard CLI verbs (#2590)
+
+- `meho dashboard list | show | create | delete` wrap the four existing
+  `/api/v1/checks/dashboards` routes (Initiative #2416), closing the raw-curl
+  composition gap: the `/ui/checks` empty state previously instructed operators
+  to hand-roll `POST /api/v1/checks/dashboards`. `list` renders the per-dashboard
+  rolled-up state + member_count; `show <id>` renders the five-state rollup plus
+  every member's raw/effective state (the CLI twin of `/ui/checks/{id}`);
+  `create` takes `--name`, `--description`, and a repeatable `--sensor-id`
+  (an empty member set is legal and rolls up `unknown`); `delete <id>` removes
+  one dashboard. Read verbs are operator-level, write verbs require
+  tenant_admin; `--tenant` targets another tenant for platform_admin callers.
+  There is no `edit`/`update` verb by design — "edit" is delete + recreate
+  (the trigger-immutability posture). Every verb drives the generated typed Go
+  client directly (`api.DashboardListResponse` / `api.DashboardDetail` /
+  `api.DashboardCreate`), so a backend wire-shape change fails `go build` rather
+  than silently drifting; the test doubles serve the real generated envelopes.
+  The `/ui/checks` empty state now names `meho dashboard create`.
+
 ### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
 
 - `meho targets import` failed against every v0.21.0+ backplane — `--dry-run`

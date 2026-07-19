@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — arm-then-confirm gate on /ui/approvals Approve/Deny (#2446)
+
+- The `/ui/approvals` decision modal now confirm-gates both Approve and
+  Deny. A pending row carries a consequence banner
+  (`data-approval-gate="confirm"`) whose severity follows the parked
+  envelope's `safety_level` (#1855) — error for `dangerous`, warning
+  otherwise — stating plainly that Approve dispatches the parked write
+  immediately (no un-approve) and Deny is terminal (the requester must
+  re-file). Each decision is two-phase: the first click on Approve/Deny
+  is a `type="button"` armer (Alpine local state only) that swaps in a
+  `Cancel` + `Confirm approve`/`Confirm deny` pair; only the Confirm
+  button posts, carrying the same CSRF header echo, shared-reason
+  `hx-include`, and double-fire guard as before. No new routes, no
+  modal-in-modal. The self-approval invariant (#1401) survives: a blocked
+  Approve never arms and has no reachable confirm state. Template-only —
+  it reuses the structured envelope render from #2447 and mirrors the
+  runbook lifecycle confirm mold (#1881/#1957) (#2446).
+
 ### Added — structured proposed_effect rendering on /ui/approvals (#2447)
 
 - The `/ui/approvals` detail modal now renders the parked

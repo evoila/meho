@@ -98,8 +98,8 @@ from pydantic import (
     SecretStr,
     ValidationError,
 )
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from meho_backplane.agent.invocation import (
     AgentDisabledError,
@@ -335,45 +335,155 @@ async def _process_transition(
 ) -> None:
     """Recompute affected Dashboards, maintain the memo, spawn investigations.
 
-    For every Dashboard containing *sensor_id*: fold its members through #2506's
-    pure rollup against *now*, compare the result to the persisted
-    ``last_rollup_state`` (NULL treated as ``ok``), and write the memo when it
-    changed. A **worsening** transition into ``degraded`` / ``critical`` with at
-    least one actively-failing member schedules a background investigation.
+    For every Dashboard containing *sensor_id*, :func:`_claim_dashboard_transition`
+    atomically coalesces concurrent transitions per ``(tenant, dashboard)``: it
+    folds the members through #2506's pure rollup against *now*, compares against
+    the persisted ``last_rollup_state`` (NULL treated as ``ok``), and
+    compare-and-swaps the memo. A **worsening** transition into ``degraded`` /
+    ``critical`` with at least one actively-failing member schedules a background
+    investigation -- but only for the caller that *won* the swap, so two Sensor
+    outcomes landing together on one Dashboard fire exactly one investigation.
     """
     now = now or datetime.now(UTC)
     sessionmaker = get_sessionmaker()
-    pending: list[tuple[_DashboardSnapshot, list[_MemberSnapshot]]] = []
     async with sessionmaker() as session:
         dashboards = await _dashboards_for_sensor(session, tenant_id=tenant_id, sensor_id=sensor_id)
-        if not dashboards:
-            return
-        grouped = await members_by_dashboard(session, dashboard_ids=[d.id for d in dashboards])
-        for dashboard in dashboards:
-            members = grouped.get(dashboard.id, [])
-            evaluations = [(s, evaluate_member(_member_state(s), now)) for s in members]
-            current = fold([e for _, e in evaluations])
-            previous = dashboard.last_rollup_state or "ok"
-            if dashboard.last_rollup_state != current:
-                # Memo compare-and-set: the memo tracks the freshly computed
-                # state so a still-non-green Dashboard fires exactly once (on
-                # the edge), not every tick.
-                dashboard.last_rollup_state = current
-            if _is_worsening(previous, current):
-                non_green = [
-                    _member_snapshot(s, ev)
-                    for s, ev in evaluations
-                    if ev.effective_state not in ("ok", "skip")
-                ]
-                if non_green:
-                    pending.append((_dashboard_snapshot(dashboard, previous, current), non_green))
-        await session.commit()
+    dashboard_ids = [dashboard.id for dashboard in dashboards]
+    if not dashboard_ids:
+        return
 
-    # Memo writes committed; spawn the expensive work off the persist path.
+    pending: list[tuple[_DashboardSnapshot, list[_MemberSnapshot]]] = []
+    for dashboard_id in dashboard_ids:
+        claimed = await _claim_dashboard_transition(
+            sessionmaker, tenant_id=tenant_id, dashboard_id=dashboard_id, now=now
+        )
+        if claimed is not None:
+            pending.append(claimed)
+
+    # Claims committed under the per-(tenant, dashboard) lock; spawn the
+    # expensive work off the runner's persist path.
     for dashboard_snapshot, non_green in pending:
         _schedule_investigation(
             tenant_id=tenant_id, dashboard=dashboard_snapshot, members=non_green
         )
+
+
+async def _claim_dashboard_transition(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    dashboard_id: uuid.UUID,
+    now: datetime,
+) -> tuple[_DashboardSnapshot, list[_MemberSnapshot]] | None:
+    """Atomically claim one Dashboard's worsening transition; ``None`` if not owned.
+
+    Serialises concurrent evaluations of the same ``(tenant, dashboard)`` behind a
+    transaction-scoped Postgres advisory lock (auto-released at commit; a no-op on
+    the single-writer SQLite path), reads the member set **under the lock** so the
+    fold sees a settled, committed view, then compare-and-swaps the
+    ``last_rollup_state`` memo in a single conditional ``UPDATE``. Only the caller
+    whose swap actually moved the memo (:func:`_claim_rollup_transition` returns
+    ``True``) owns the transition and returns the briefing snapshot; a concurrent
+    caller that lost the swap returns ``None``. So exactly one investigation is
+    scheduled per green->non-green edge, correlated over the full membership --
+    both the duplicate-run and partial-correlation races the memo-then-check
+    sequence used to admit (#2575).
+
+    The snapshots are detached while the ORM rows are live (before commit) because
+    the backgrounded investigation opens its own sessions.
+    """
+    async with sessionmaker() as session:
+        await _lock_dashboard_transition(
+            session, _dashboard_transition_lock_key(tenant_id, dashboard_id)
+        )
+        dashboard = await session.get(CheckDashboard, dashboard_id)
+        if dashboard is None or dashboard.tenant_id != tenant_id:
+            return None
+        members = (await members_by_dashboard(session, dashboard_ids=[dashboard_id])).get(
+            dashboard_id, []
+        )
+        evaluations = [(s, evaluate_member(_member_state(s), now)) for s in members]
+        current = fold([e for _, e in evaluations])
+        previous_memo = dashboard.last_rollup_state
+        previous = previous_memo or "ok"
+        worsening = _is_worsening(previous, current)
+        dashboard_snapshot = _dashboard_snapshot(dashboard, previous, current)
+        non_green = [
+            _member_snapshot(s, ev)
+            for s, ev in evaluations
+            if ev.effective_state not in ("ok", "skip")
+        ]
+        claimed = False
+        if current != previous_memo:
+            # Compare-and-swap: the memo tracks the freshly computed state so a
+            # still-non-green Dashboard fires exactly once (on the edge), and the
+            # rowcount is the atomic claim token that coalesces concurrent callers.
+            claimed = await _claim_rollup_transition(
+                session, dashboard_id, expected=previous_memo, new=current
+            )
+        await session.commit()
+
+    if worsening and claimed and non_green:
+        return dashboard_snapshot, non_green
+    return None
+
+
+def _dashboard_transition_lock_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID) -> int:
+    """Map a ``(tenant, dashboard)`` pair to a stable signed-63-bit advisory-lock key.
+
+    ``pg_advisory_xact_lock`` takes a ``bigint`` (signed 64-bit). A blake2b digest
+    of the two UUIDs is deterministic and well-distributed; masking to 63 bits
+    keeps it non-negative so it round-trips through asyncpg's ``bigint`` binding
+    without tripping the sign bit. Mirrors
+    :func:`meho_backplane.topology.scheduler._advisory_lock_key`.
+    """
+    digest = hashlib.blake2b(tenant_id.bytes + dashboard_id.bytes, digest_size=8).digest()
+    return int.from_bytes(digest, "big") & 0x7FFF_FFFF_FFFF_FFFF
+
+
+async def _lock_dashboard_transition(session: AsyncSession, key: int) -> None:
+    """Take the transaction-scoped per-(tenant, dashboard) advisory lock on PG.
+
+    Blocks until granted, then holds the lock until the caller's transaction
+    commits / rolls back -- ``pg_advisory_xact_lock`` cannot be released manually,
+    so a crash mid-claim never strands it (unlike the session-level
+    ``pg_advisory_unlock`` pair the check-runner uses). A no-op on non-PostgreSQL
+    dialects: the SQLite test path is single-writer, and the conditional-UPDATE
+    compare-and-swap in :func:`_claim_rollup_transition` is what keeps the claim
+    atomic there.
+    """
+    conn = await session.connection()
+    if conn.dialect.name != "postgresql":
+        return
+    await session.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+
+
+async def _claim_rollup_transition(
+    session: AsyncSession,
+    dashboard_id: uuid.UUID,
+    *,
+    expected: str | None,
+    new: str,
+) -> bool:
+    """Compare-and-swap the ``last_rollup_state`` memo; ``True`` iff this caller won.
+
+    A single conditional ``UPDATE`` guarded on the memo still equalling the value
+    the caller observed (``IS NOT DISTINCT FROM`` so a ``NULL`` memo compares
+    cleanly). ``rowcount == 1`` means this caller moved the memo into *new* and
+    owns the transition; ``rowcount == 0`` means a concurrent caller already moved
+    it, so this caller must not fire. Atomic at the database independent of the
+    advisory lock -- this is what makes the single-fire guarantee hold on the
+    lockless SQLite path and replica-safe on Postgres.
+    """
+    result = await session.execute(
+        update(CheckDashboard)
+        .where(
+            CheckDashboard.id == dashboard_id,
+            CheckDashboard.last_rollup_state.is_not_distinct_from(expected),
+        )
+        .values(last_rollup_state=new)
+    )
+    return (result.rowcount or 0) == 1  # type: ignore[attr-defined]
 
 
 async def _dashboards_for_sensor(

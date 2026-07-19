@@ -434,6 +434,56 @@ def test_kb_search_returns_empty_state_for_no_hits() -> None:
     assert "nonexistent" in response.text
 
 
+def test_kb_search_dot_slug_uses_attribute_selectors() -> None:
+    """Dot-containing slugs render CSS attribute-selectors, not ``#id`` selectors.
+
+    A KB slug may contain dots (``SLUG_PATTERN`` allows ``.``). Interpolated
+    into a ``#kb-preview-<slug>`` selector, the dot parses as a CSS class
+    delimiter, so the hover-preview ``hx-target`` cannot resolve and the Alpine
+    ``after-swap`` handler throws a ``SyntaxError`` on every htmx swap (issue
+    #2451). Both selector sites must use the ``[id="..."]`` attribute-selector
+    form, which is a valid selector for every legal slug.
+    """
+    import html as _html
+
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    dot_slug = "meho-0.2-deployment"
+    mock_hits = [_make_search_hit(dot_slug)]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with patch(
+            "meho_backplane.ui.routes.kb.routes.KbService.search_entries",
+            new_callable=AsyncMock,
+            return_value=mock_hits,
+        ):
+            response = client.post(
+                "/ui/kb/search",
+                data={"q": "meho"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # AC #1: no raw ``#id`` selector survives at either site.
+    assert "querySelector('#kb-preview" not in body
+    assert 'hx-target="#kb-preview' not in body
+    # AC #2 (hx-target): attribute-selector form with literal quotes. The HTML
+    # attribute is single-quoted so the selector's own double quotes render raw.
+    assert f"hx-target='[id=\"kb-preview-{dot_slug}\"]'" in body
+    # AC #2 (Alpine after-swap handler): the selector lives inside a
+    # double-quoted HTML attribute, so its CSS-value quotes are HTML-escaped on
+    # the wire; a browser (and ``html.unescape``) decodes them to the same
+    # attribute-selector form the ``hx-target`` uses.
+    decoded = _html.unescape(body)
+    assert f"querySelector('[id=\"kb-preview-{dot_slug}\"]')" in decoded
+    # The dotted preview div id itself stays a valid HTML id (unchanged).
+    assert f'id="kb-preview-{dot_slug}"' in body
+
+
 # ---------------------------------------------------------------------------
 # GET /ui/kb/<slug> -- entry detail
 # ---------------------------------------------------------------------------

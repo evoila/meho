@@ -956,11 +956,13 @@ type AgentRunStatus string
 
 // AgentRunStatusResponse Poll response for “GET /agents/runs/{handle}“.
 type AgentRunStatusResponse struct {
-	Error    *string                 `json:"error"`
-	Model    *string                 `json:"model"`
-	Output   *map[string]interface{} `json:"output"`
-	Provider *string                 `json:"provider"`
-	RunId    openapi_types.UUID      `json:"run_id"`
+	AgentDefinitionId *openapi_types.UUID     `json:"agent_definition_id"`
+	AgentName         *string                 `json:"agent_name"`
+	Error             *string                 `json:"error"`
+	Model             *string                 `json:"model"`
+	Output            *map[string]interface{} `json:"output"`
+	Provider          *string                 `json:"provider"`
+	RunId             openapi_types.UUID      `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -1008,13 +1010,15 @@ type AgentRunStatusResponse struct {
 // “output“ blob is omitted — a caller wanting a run's result polls
 // “GET /agents/runs/{handle}“.
 type AgentRunSummaryResponse struct {
-	CreatedAt time.Time          `json:"created_at"`
-	EndedAt   *time.Time         `json:"ended_at"`
-	Model     *string            `json:"model"`
-	ModelTier string             `json:"model_tier"`
-	Provider  *string            `json:"provider"`
-	RunId     openapi_types.UUID `json:"run_id"`
-	StartedAt *time.Time         `json:"started_at"`
+	AgentDefinitionId *openapi_types.UUID `json:"agent_definition_id"`
+	AgentName         *string             `json:"agent_name"`
+	CreatedAt         time.Time           `json:"created_at"`
+	EndedAt           *time.Time          `json:"ended_at"`
+	Model             *string             `json:"model"`
+	ModelTier         string              `json:"model_tier"`
+	Provider          *string             `json:"provider"`
+	RunId             openapi_types.UUID  `json:"run_id"`
+	StartedAt         *time.Time          `json:"started_at"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -7581,6 +7585,9 @@ type ListRunsApiV1AgentsRunsGetParams struct {
 
 	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
 	Status *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
+
+	// AgentName Filter by agent definition name (exact match) — the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter.
+	AgentName *string `form:"agent_name,omitempty" json:"agent_name,omitempty"`
 
 	// Limit Max runs per page (1..500, default 100).
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
@@ -18662,6 +18669,22 @@ func NewListRunsApiV1AgentsRunsGetRequest(server string, params *ListRunsApiV1Ag
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AgentName != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_name", runtime.ParamLocationQuery, *params.AgentName); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err

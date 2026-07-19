@@ -105,6 +105,28 @@ connector-related release-notes line.
   signal) at a field they never wrote are fixed to name the property
   they did write.
 
+### Added — agent_name/agent_definition_id on run projections (#2472)
+
+- The shared agent-run read projections (`AgentRunSummary` /
+  `AgentRunStatusView`) now carry `agent_definition_id` (the run row's
+  soft-FK) and `agent_name` (resolved read-time from that id,
+  tenant-scoped) — so every read face answers "which agent produced this
+  run". The fields surface on all four: the `meho.agents.list_runs` rows
+  and `meho.agents.run_status` body, the REST `AgentRunSummaryResponse` /
+  `AgentRunStatusResponse` (`GET /api/v1/agents/runs` and
+  `.../runs/{handle}`), the `/ui/agents/runs` list (new **Agent** column)
+  and run detail, and the CLI `meho agent run-list` (new **AGENT**
+  column, via the regenerated OpenAPI client). `agent_name` is `null` for
+  an ad-hoc run (no definition) and for a dangling soft-FK (the definition
+  was deleted after the run) — the projections never 500 on either.
+- The run-list surfaces accept an optional exact-match `agent_name`
+  filter — `meho.agents.list_runs(agent_name=…)`,
+  `GET /api/v1/agents/runs?agent_name=…`, and `meho agent run-list
+  --agent-name`. The name is resolved to a definition id tenant-scoped;
+  an unknown name returns an empty list rather than an error
+  (`-32602` / 4xx), so the filter cannot probe definition existence
+  beyond what the run list already reveals. No DB migration — the name is
+  a read-time lookup, not a denormalized column (#2472).
 ### Fixed — connector_not_found -32602 across MCP handlers (#2481)
 
 - **All seven `meho.connector.*` tools that take a `connector_id` now

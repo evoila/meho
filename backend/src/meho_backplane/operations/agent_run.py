@@ -62,6 +62,7 @@ for the cancellation) inside one transaction.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final, cast
@@ -72,6 +73,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.models import (
+    AgentDefinition,
     AgentRun,
     AgentRunStatus,
     AgentRunTrigger,
@@ -368,6 +370,7 @@ async def list_runs(
     tenant_id: uuid.UUID,
     work_ref: str | None = None,
     status: AgentRunStatus | None = None,
+    agent_definition_id: uuid.UUID | None = None,
     limit: int = _LIST_RUNS_DEFAULT_LIMIT,
     offset: int = 0,
 ) -> list[AgentRun]:
@@ -391,6 +394,12 @@ async def list_runs(
             argument is not ``None``.
         status: When supplied, narrows to runs in this lifecycle state.
             ``None`` returns every state.
+        agent_definition_id: When supplied, narrows to runs produced by
+            this agent definition (matched against the run row's soft-FK
+            ``agent_definition_id``). ``None`` applies no agent filter.
+            The name-to-id resolution lives at the caller
+            (:meth:`AgentInvoker.list_runs`); this operation filters on
+            the resolved id so an unknown name never reaches the DB.
         limit: Max rows per page. Clamped to ``[1, 500]``.
         offset: Rows to skip (paging). Negative offsets are clamped to 0.
 
@@ -404,9 +413,64 @@ async def list_runs(
         stmt = stmt.where(AgentRun.work_ref == work_ref)
     if status is not None:
         stmt = stmt.where(AgentRun.status == status.value)
+    if agent_definition_id is not None:
+        stmt = stmt.where(AgentRun.agent_definition_id == agent_definition_id)
     stmt = stmt.order_by(AgentRun.created_at.desc()).limit(bounded_limit).offset(bounded_offset)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def resolve_agent_definition_id(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    name: str,
+) -> uuid.UUID | None:
+    """Resolve an agent definition name to its id within *tenant_id*.
+
+    Backs the ``agent_name`` filter on the run-list surfaces: the caller
+    resolves the name to an id here, then passes the id to
+    :func:`list_runs`. Returns ``None`` when no definition in the tenant
+    carries *name* (an unknown name), so the filter yields an empty run
+    list rather than an error and cannot probe definition existence
+    beyond what the run list already reveals. The ``(tenant_id, name)``
+    lookup rides the unique ``agent_definition_tenant_name_idx``.
+    """
+    result = await session.execute(
+        select(AgentDefinition.id).where(
+            AgentDefinition.tenant_id == tenant_id,
+            AgentDefinition.name == name,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def resolve_agent_names(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    definition_ids: Collection[uuid.UUID],
+) -> dict[uuid.UUID, str]:
+    """Batch-resolve agent definition ids to their names within *tenant_id*.
+
+    The read-time back-fill for the run projections: a run row carries only
+    the soft-FK ``agent_definition_id`` (no denormalized name), so the list
+    and status surfaces resolve names here in one query rather than per-row.
+    Ids that match no live definition (an ad-hoc run's ``None`` is filtered
+    by the caller before it gets here; a dangling soft-FK after the
+    definition was deleted) are simply absent from the returned mapping, so
+    the projection renders ``agent_name=None`` for them.
+    """
+    ids = set(definition_ids)
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(AgentDefinition.id, AgentDefinition.name).where(
+            AgentDefinition.tenant_id == tenant_id,
+            AgentDefinition.id.in_(ids),
+        )
+    )
+    return dict(result.tuples().all())
 
 
 async def transition(

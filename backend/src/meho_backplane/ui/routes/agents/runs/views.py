@@ -120,15 +120,22 @@ def project_run_to_view(summary: AgentRunSummary) -> dict[str, object]:
     The summary deliberately omits the run's ``output`` blob (the list is a
     scannable index); the detail poll carries it. The ``trigger`` field is
     surfaced as the run's provenance label (``direct`` / ``scheduled`` /
-    ``event`` / ``agent-invoked``) -- the summary carries no per-run agent
-    name (no ``agent_definition_id`` back-link on the wire model), so the
-    provenance is the closest scannable "what kicked this off" column.
+    ``event`` / ``agent-invoked``). The summary now carries the per-run
+    agent back-link -- ``agent_name`` (resolved read-time from the row's
+    ``agent_definition_id`` soft-FK, #2472) and ``agent_definition_id``
+    itself -- so the list renders which agent produced each run;
+    ``agent_name`` is ``None`` for an ad-hoc run or a definition deleted
+    after the run.
     """
     return {
         "run_id": str(summary.run_id),
         "status": summary.status.value,
         "status_badge": status_badge_class(summary.status.value),
         "trigger": summary.trigger,
+        "agent_name": summary.agent_name,
+        "agent_definition_id": (
+            str(summary.agent_definition_id) if summary.agent_definition_id is not None else None
+        ),
         "model_tier": summary.model_tier,
         "provider": summary.provider,
         "model": summary.model,
@@ -157,6 +164,10 @@ def project_detail_to_view(view: AgentRunStatusView) -> dict[str, object]:
         "model": view.model,
         "output": view.output,
         "error": view.error,
+        "agent_name": view.agent_name,
+        "agent_definition_id": (
+            str(view.agent_definition_id) if view.agent_definition_id is not None else None
+        ),
         "is_terminal": is_terminal_status(view.status.value),
         "is_awaiting_approval": view.status == AgentRunStatus.AWAITING_APPROVAL,
     }

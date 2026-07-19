@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — in-flight spinners on console Run buttons (#2459)
+
+- The long-running action buttons on `/ui/retrieval` (Diagnostics Run, Run
+  eval, Run checklist) and `/ui/corpus` (Search Go) now show progress while a
+  request is in flight: the form declares `hx-indicator` targeting a
+  DaisyUI `htmx-indicator loading loading-spinner` span next to the button and
+  `hx-disabled-elt="find button[type=submit]"` so the button disables until the
+  fragment lands, following the existing kb-upload spinner precedent. An
+  `hx-disinherit="hx-disabled-elt hx-indicator"` guard keeps both attributes
+  from leaking onto descendant htmx requests in the swapped results region
+  (#2340). Operators no longer face a dead button with no feedback on
+  multi-second eval / checklist / ask runs.
 ### Changed — /ui/corpus card titles from chunk title (#2461)
 
 - `/ui/corpus` result and citation cards now headline the chunk's

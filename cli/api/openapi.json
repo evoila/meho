@@ -23918,6 +23918,11 @@
             "nullable": true,
             "title": "Document Id"
           },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "title": "Title"
+          },
           "content": {
             "type": "string",
             "title": "Content"
@@ -23944,7 +23949,7 @@
           "content"
         ],
         "title": "DocsChunk",
-        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire."
+        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``title`` is the **optional** human-legible chunk title (#2475), passed\nthrough from the corpus (``CorpusChunk.title``). It is the *preferred*\ncitation label \u2014 every citation face (``ask_docs``, ``/ui/corpus``)\nfeeds it to the ``title -> document_id -> filename -> URL`` label chain\n\u2014 and is ``None`` until the upstream corpus supplies one, so today's\ncorpus (which sends no title) sees no behaviour change.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire."
       },
       "DraftTemplateRequest": {
         "properties": {

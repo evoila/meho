@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — optional chunk title pass-through (#2475)
+
+- `search_docs` hits and `ask_docs` citations can now carry a
+  human-legible `title`. An optional `title` field is threaded from the
+  external corpus through `CorpusChunk` → `DocsChunk` → the citation
+  labels: a title arrives top-level (`title`) or nested under a chunk's
+  `metadata` (`metadata["title"]`), with the top-level key winning and
+  blank-after-strip normalising to `None`. The #1919 label chain
+  (`title → document_id → humanised filename → URL`) already prefers a
+  title but was starved because none survived the corpus projection;
+  the `ask_docs` and `/ui/corpus` citation seams now feed `chunk.title`
+  into it, so a hit renders by its title instead of a raw
+  `document_id` / numeric filename. Fully additive and null-safe:
+  MEHO has no doc-ingest path (federation-only, #1864 → #2049), so a
+  title can only originate upstream — consumers see `title: null` until
+  the corpus supplies one, and today's corpus (which sends none) is
+  unchanged. The REST `SearchDocsResponse` embeds `DocsChunk`, so the
+  OpenAPI snapshot + generated CLI client gain a nullable `title`
+  property.
+
 ### Added — scope-twin connector row disambiguation (#2474)
 
 - **`GET /api/v1/connectors` and `meho.connector.list` now name each

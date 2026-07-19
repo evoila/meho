@@ -90,6 +90,85 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — topology delete_node guarded hard-delete (#2485)
+
+- A manually-seeded `graph_node` can now be removed via MCP
+  `meho.topology.delete_node` (tenant_admin, `op_class=write`) and REST
+  `DELETE /api/v1/topology/nodes/{node_id}` → 204, both fronting one
+  service primitive `topology.nodes` `delete_node`. Closes the gap where
+  a mis-seeded or probe-residue manual node persisted indefinitely
+  (refresh reconciliation only touches nodes adopted onto the refreshed
+  target, and soft-deleted nodes stay reachable in traversals). The
+  delete writes a `removed` `graph_node_history` tombstone so the change
+  stays visible in `query_topology kind=timeline`; the node's prior
+  history rows survive with `node_id` NULL via the `ON DELETE SET NULL`
+  FK. The guard is schema-grounded: only `source='curated'`,
+  target-unbound seeds are deletable — a probe-owned node (`source='auto'`
+  or `target_id IS NOT NULL`) is refused with 409 `probe_owned_node`
+  (would resurrect on the next probe), and a node with live edges is
+  refused with 409 `node_has_edges` listing the blocking edge ids
+  (unannotate them first; no implicit cascade that would drop curated
+  edges without their history tombstones). Agent-principal calls park as
+  approval requests; human tenant_admin calls execute immediately —
+  mirroring `meho.topology.create_node`.
+
+### Tested — search_memory service-account round-trip (#2484)
+
+- Closed the #2494 re-probe of the v0.21.0 field finding that
+  `search_memory` returned 0 hits for the backplane service-account
+  (`client_credentials`) JWT while the row was visible via the REST list
+  verb. A new Docker-gated integration suite
+  (`backend/tests/integration/test_memory_service_account_roundtrip_e2e.py`)
+  reproduces the finding's exact path against a real pgvector cluster
+  under a single, consistent `client_credentials` principal: mint a
+  `principal_kind=service` operator, `add_to_memory scope=user` over the
+  MCP tool surface, then `search_memory` for a token in the just-written
+  body (scope-omitted, `scope=user`, and stopword-only shapes). The
+  round-trip is **clean** — the service account retrieves its own write,
+  and the REST list rule (`MemoryService.list_memories`) returns the same
+  row. The finding did **not** reproduce for one consistent principal:
+  `principal_kind` is never consulted on the memory/retrieval path (there
+  is no principal-type filter), and the only per-principal predicate is
+  `metadata ->> 'user_sub' = :principal_sub` string equality, which the
+  write stamps and the search matches identically. The reported 0-hits
+  was a surface/principal-mixing artefact of the probe (a search `sub`
+  differing from the write `sub`), exactly as the triage predicted. No
+  behaviour change; interactive-OIDC principals are scoped by the same
+  `sub` equality and are unaffected.
+
+### Added — reject grants for non-agent principals (#2489)
+
+- `meho.agents.grant.create` / `.elevate` (and the REST + `/ui` grant
+  surfaces they share) now reject a `principal_sub` that names no
+  registered, non-revoked agent principal in the caller's tenant, with a
+  structured error (MCP `-32602` / REST 422) naming the enforcement
+  scope. Agent permission grants are only ever consulted for tokens
+  carrying the `principal_kind=agent` claim (the deliberate G11.2-T3
+  principal-kind carve-out — a grant on a human/service sub is never
+  evaluated), so a grant on a sub that can never be an agent was silently
+  unenforceable. The create surface now matches `principal_sub` against
+  the agent principal's `agent:<name>` handle (mirroring the
+  `identity_ref` write-boundary check) and refuses the inert grant up
+  front. The `grant.create` / `.elevate` tool descriptions and
+  `docs/codebase/agent-permission-model.md` now state the
+  `principal_kind=agent`-only enforcement scope explicitly. No change to
+  the enforcement model itself.
+
+### Fixed — canonical arg names in MCP error labels (#2480)
+
+- **`meho.broadcast.recent` and `meho.connector.ingest_status` `-32602`
+  validation messages now name the canonical inputSchema property the
+  caller passed** (#2480). A malformed cursor on `broadcast.recent`
+  labelled the field `since:` (the deprecated alias / internal arg
+  name) rather than the canonical `cursor:` (#1358); the message is now
+  `cursor:`-labelled whichever alias the caller sent. A malformed job id
+  on `connector.ingest_status` said `handle must be a valid job id`,
+  naming a "handle" concept absent from the tool's inputSchema; it now
+  says `job_id must be a valid UUID`. Wire-facing labels that point
+  callers (and LLM agents, for whom the error text is a corrective
+  signal) at a field they never wrote are fixed to name the property
+  they did write.
+
 ### Added — agent_name/agent_definition_id on run projections (#2472)
 
 - The shared agent-run read projections (`AgentRunSummary` /

@@ -247,7 +247,12 @@ register_mcp_tool(
             "expires_at (ISO-8601 UTC) makes the grant time-bounded. "
             "Omit expires_at for a permanent grant. The created row "
             "carries `grant_id` (accepted verbatim by "
-            "meho.agents.grant.show / .revoke) alongside the native `id`."
+            "meho.agents.grant.show / .revoke) alongside the native `id`. "
+            "Enforcement scope: grants gate ONLY tokens carrying the "
+            "principal_kind=agent claim (registered agent principals); "
+            "human/service tokens are never gated by grants. principal_sub "
+            "must name a registered, non-revoked agent principal "
+            "(its agent:<name> handle) or creation is rejected."
         ),
         inputSchema={
             "type": "object",
@@ -319,7 +324,12 @@ register_mcp_tool(
             "expires_at is required. The grant-expiry sweeper reverts the "
             "agent to baseline automatically after the window ends. The "
             "created row carries `grant_id` (accepted verbatim by "
-            "meho.agents.grant.show / .revoke) alongside the native `id`."
+            "meho.agents.grant.show / .revoke) alongside the native `id`. "
+            "Enforcement scope: elevations gate ONLY tokens carrying the "
+            "principal_kind=agent claim (registered agent principals); "
+            "human/service tokens are never gated. principal_sub must name a "
+            "registered, non-revoked agent principal (its agent:<name> "
+            "handle) or creation is rejected."
         ),
         inputSchema={
             "type": "object",

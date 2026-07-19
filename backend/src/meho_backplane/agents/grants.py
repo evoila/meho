@@ -60,12 +60,33 @@ This service does **not** enforce roles — callers own the
 ``require_role(TenantRole.TENANT_ADMIN)`` gate. The design mirrors
 :class:`~meho_backplane.agents.service.AgentDefinitionService`.
 
+Enforcement-scope contract
+--------------------------
+
+The per-(principal, op, target) verdict a grant carries is only ever
+consulted for tokens whose ``principal_kind`` claim is ``agent``
+(G11.2-T3, ``operations/_validate.py`` — non-agent principals
+short-circuit to the default-allow / needs-approval branch before any
+``agent_permission`` row is loaded, by deliberate design). A grant
+whose ``principal_sub`` does not name a registered, non-revoked agent
+principal in the tenant is therefore *unenforceable*: no token will
+ever authenticate under that sub with ``principal_kind=agent``, so the
+row would sit inert forever. :meth:`AgentGrantService.grant` rejects
+such a grant at create/elevate time (mirroring the write-boundary
+hygiene of :func:`meho_backplane.agents.identity_ref.validate_identity_ref`)
+rather than silently accepting it. ``principal_sub`` is matched exactly
+against :attr:`~meho_backplane.db.models.AgentPrincipal.keycloak_client_id`
+(the ``agent:<name>`` handle the register verb assigns) inside a
+tenant-scoped query.
+
 Error contract
 --------------
 
-* :exc:`GrantValidationError` — ``expires_at`` is in the past, or
+* :exc:`GrantValidationError` — ``expires_at`` is in the past;
   ``target_scope`` is neither ``None``, ``"*"``, nor a valid UUID
-  string. The boundary maps this to 422.
+  string; the grant duplicates an existing one; or ``principal_sub``
+  names no registered, non-revoked agent principal in the tenant. The
+  boundary maps this to 422 (MCP ``-32602``).
 * ``None`` / ``False`` signals absence on get / revoke so the boundary
   renders 404 without revealing cross-tenant existence.
 """
@@ -78,10 +99,11 @@ from datetime import UTC, datetime
 import structlog
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agents.grant_schemas import AgentGrantCreate, AgentGrantRead
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentPermission
+from meho_backplane.db.models import AgentPermission, AgentPrincipal
 
 __all__ = ["AgentGrantService", "GrantValidationError"]
 
@@ -94,17 +116,73 @@ DEFAULT_LIST_LIMIT: int = 100
 class GrantValidationError(Exception):
     """Raised for semantic validation failures on grant creation.
 
-    Covers two cases:
+    Covers:
     * ``expires_at`` is in the past.
     * ``target_scope`` is neither ``None``, ``"*"``, nor a valid UUID.
+    * ``op_pattern`` is empty.
+    * the grant duplicates an existing ``(tenant, principal, op_pattern,
+      target_scope)`` row.
+    * ``principal_sub`` names no registered, non-revoked agent principal
+      in the tenant (the grant would be unenforceable — see the module
+      "Enforcement-scope contract").
 
     The REST route maps this to HTTP 422; the MCP tool maps it to
-    ``McpInvalidParamsError``.
+    ``McpInvalidParamsError`` (JSON-RPC ``-32602``).
     """
 
     def __init__(self, message: str) -> None:
         self.message = message
         super().__init__(message)
+
+
+async def _validate_principal_registered(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    principal_sub: str,
+) -> None:
+    """Reject a grant whose *principal_sub* names no live agent principal.
+
+    A grant is only ever consulted for tokens carrying
+    ``principal_kind=agent`` (G11.2-T3); those tokens belong exclusively
+    to principals registered via ``meho agent-principal register``, whose
+    handle is :attr:`~meho_backplane.db.models.AgentPrincipal.keycloak_client_id`
+    (``agent:<name>``). A *principal_sub* that matches no such row — or a
+    row whose kill switch has been pulled (``revoked=true``) — can never
+    authenticate as an agent, so the grant would sit inert. Reject it at
+    write time rather than accept a silently-unenforceable row.
+
+    Matches exactly against ``keycloak_client_id`` inside a tenant-scoped
+    ``WHERE`` — same shape as
+    :func:`meho_backplane.agents.identity_ref.validate_identity_ref`, so a
+    cross-tenant probe is invisible to the query. The check runs inside
+    the caller's session so validate + insert share one transaction
+    (a revoke landing in between is visible under READ COMMITTED — the
+    enforcement-time gate is authoritative; this is write-boundary
+    hygiene).
+    """
+    result = await session.execute(
+        select(AgentPrincipal.revoked).where(
+            AgentPrincipal.tenant_id == tenant_id,
+            AgentPrincipal.keycloak_client_id == principal_sub,
+        )
+    )
+    revoked = result.scalar_one_or_none()
+    if revoked is None or revoked:
+        reason = "unknown" if revoked is None else "revoked"
+        _log.warning(
+            "agent_grant_principal_unregistered",
+            tenant_id=str(tenant_id),
+            principal_sub=principal_sub,
+            reason=reason,
+        )
+        raise GrantValidationError(
+            f"principal_sub {principal_sub!r} does not name a registered, "
+            f"non-revoked agent principal in this tenant (reason={reason}); "
+            "grants are enforced only for tokens carrying principal_kind=agent "
+            "(a registered agent principal), so a grant for this sub would "
+            "never be evaluated. Register it first with "
+            "`meho agent-principal register`."
+        )
 
 
 def _validate_target_scope(target_scope: str | None) -> None:
@@ -192,7 +270,10 @@ class AgentGrantService:
         Raises
         ------
         GrantValidationError
-            When semantic validation fails (past expiry, bad UUID scope).
+            When semantic validation fails (past expiry, bad UUID scope,
+            empty op_pattern, duplicate grant), or when ``principal_sub``
+            names no registered, non-revoked agent principal in the
+            tenant (the grant would be unenforceable).
         """
         _validate_op_pattern(payload.op_pattern)
         _validate_target_scope(payload.target_scope)
@@ -209,6 +290,7 @@ class AgentGrantService:
         )
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            await _validate_principal_registered(session, tenant_id, payload.principal_sub)
             session.add(row)
             try:
                 await session.flush()

@@ -99,6 +99,16 @@ connector-related release-notes line.
   `/ui/retrieval` Diagnostics (#1888), which renders a strictly richer per-signal
   score/rank breakdown. No toggle, no bucketed label (both would add a tunable
   the substrate-minimalism rule rejects).
+### Added — labelled click-through provenance on result cards (#2457)
+
+- The `/ui/retrieval` diagnostics hit cards now carry visible `Source` /
+  `Kind` / `Source id` captions on the provenance row, so an operator reads
+  the three badges as labelled provenance instead of guessing at anonymous
+  tags whose meaning lived only in hover `title` text. A hit whose source is
+  `kb` renders its `source_id` (which is the KB slug) as a same-tab link to
+  `/ui/kb/<slug>`, matching the KB surface; hits from sources without a
+  resolvable UI route keep the id as plain, selectable monospace text — never
+  a dead link.
 
 ### Changed — clamp result-card bodies with expand-on-click (#2456)
 

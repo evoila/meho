@@ -38,6 +38,38 @@ Locked decisions:
   (BFF) with `HttpOnly; Secure; SameSite=Strict` session cookie;
   tokens stay server-side.
 
+## List-surface detail-navigation convention (#2463)
+
+Every `/ui/*` **page-nav list surface** (a table or card grid whose rows
+navigate to a full-page detail view) offers the same detail-nav
+affordance pair, so an operator never has to guess whether a cell is
+clickable:
+
+- **Visible identity link.** Where the row has a natural identity cell
+  (slug / name / key / run_id), that cell is an `<a>` to the detail page
+  styled `link link-primary` — visibly coloured, **not** `link
+  link-hover` (which renders as plain text until hover, hiding the
+  affordance). Conforming exemplars: `kb/_results.html`,
+  `runbooks/_list.html`.
+- **View button.** A trailing actions column carries an
+  `<a class="btn btn-ghost btn-xs" aria-label="View …">View</a>` to the
+  same detail URL — in `card-actions` for card grids (e.g.
+  `memory/_cards.html`), rendered for **all** roles, never inside a
+  `can_write` guard.
+
+Sanctioned exceptions:
+
+- **Button-only, no identity column.** `/ui/scheduler` and
+  `/ui/agents/grants` carry no natural identity cell (the id lives only
+  in `data-*` attributes and the View href); their View button alone
+  satisfies the convention. Do **not** add a synthetic UUID column.
+- **Drawer lists.** Surfaces whose row detail opens an in-page drawer
+  rather than a full page (topology, audit, approvals history,
+  operations, connector registry Review, keycloak clients) converge on
+  an explicit button and are out of this convention's scope.
+- **Broadcast wall.** `broadcast/_event_row.html`'s whole-row click is a
+  deliberate wall-monitor idiom and stays.
+
 ## Key types
 
 | Module | Purpose |

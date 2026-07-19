@@ -262,6 +262,25 @@ def test_list_renders_run_row_for_operator() -> None:
     assert "toolset" not in body
 
 
+def test_list_run_id_cell_is_visible_identity_link() -> None:
+    """The run_id cell is a visible link to the run detail (#2463).
+
+    The identity cell (previously plain text) now links to the same run
+    URL as the trailing View button, styled ``link link-primary`` so the
+    cell is visibly clickable -- the page-nav list-surface convention.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_run(tenant_id=_TENANT_A, status_value=AgentRunStatus.SUCCEEDED.value)
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Visible identity link on the run_id cell.
+    assert 'class="link link-primary"' in body
+    # Two hrefs per row point at the same run URL: the identity link + View.
+    assert body.count(f'href="/ui/agents/runs/{rid}"') == 2
+
+
 def test_list_renders_agent_name_column() -> None:
     """A run with a live definition shows the agent name in its row (#2472)."""
     _seed_tenant(_TENANT_A, "tenant-a")

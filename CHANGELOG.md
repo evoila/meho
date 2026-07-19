@@ -108,6 +108,43 @@ connector-related release-notes line.
   missing capability). It renders the cited chunk's identity + provenance (its
   stable reference + a link to the collection); the retrieved chunk body is
   already on the card and the backend has no fetch-by-id seam to re-load it.
+### Changed — converge list-surface detail navigation (#2463)
+
+- Every `/ui/*` page-nav list surface now offers the same detail-nav
+  affordance pair — a visibly-styled identity link (`link link-primary`)
+  where the row has an identity cell, plus a trailing `View` button —
+  so an operator never has to guess whether a cell is clickable. Corpus
+  Collections and Conventions gained a `View` button and actions column;
+  the Agents card grid gained a `View` link in `card-actions` rendered
+  for all roles (previously the card-actions held only a `can_write`-gated
+  toggle); the Agent-runs `run_id` cell is now a link to the run detail.
+- Identity-cell links that rendered as plain text until hover
+  (`link link-hover`) are normalised to the visible `link link-primary`
+  styling across Connectors, Memory (active + recently-expired cards),
+  Agents cards, Corpus Collections, and Conventions. Scheduler and
+  agent-grants rows keep their button-only affordance (no natural
+  identity column exists); drawer surfaces and the broadcast wall-monitor
+  row-click idiom are unchanged. The convention is recorded in
+  `docs/codebase/ui.md`.
+### Removed — raw retrieval score pills from search cards (#2453)
+
+- `/ui/kb` search result cards no longer render the raw retrieval score pills
+  (`fused` / `bm25` / `cos`). The near-zero RRF fused values read as "bad" to a
+  non-expert operator even for a top hit, and the score tuple is beta plumbing
+  on an end-user surface. Per-signal score inspection is unaffected — it lives on
+  `/ui/retrieval` Diagnostics (#1888), which renders a strictly richer per-signal
+  score/rank breakdown. No toggle, no bucketed label (both would add a tunable
+  the substrate-minimalism rule rejects).
+### Added — labelled click-through provenance on result cards (#2457)
+
+- The `/ui/retrieval` diagnostics hit cards now carry visible `Source` /
+  `Kind` / `Source id` captions on the provenance row, so an operator reads
+  the three badges as labelled provenance instead of guessing at anonymous
+  tags whose meaning lived only in hover `title` text. A hit whose source is
+  `kb` renders its `source_id` (which is the KB slug) as a same-tab link to
+  `/ui/kb/<slug>`, matching the KB surface; hits from sources without a
+  resolvable UI route keep the id as plain, selectable monospace text — never
+  a dead link.
 
 ### Changed — clamp result-card bodies with expand-on-click (#2456)
 

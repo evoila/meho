@@ -60,10 +60,15 @@
       <li class="card bg-base-100 border-base-300 border shadow-sm">
         <div class="card-body py-3 space-y-2">
           <div class="flex flex-wrap items-start justify-between gap-2">
-            {# Title as link text -> the resolved canonical URL (#1919). A raw
-               gs:// source_url is resolved to a navigable web link or, when no
-               canonical link exists, a non-clickable label -- never a broken
-               gs:// anchor. #}
+            {# Title as link text -> a consistent view-source affordance (#2462).
+               A public-URL source (#1919) resolves to a clickable outbound
+               anchor (opens the doc in a new tab -- by design, #1919 AC 2). A
+               source with no public URL normalizes to an opaque meho:// ref
+               (#132): rather than a dead end, its title click-throughs to the
+               internal cited-source detail view (``entry.view_href``) so the
+               operator can always inspect the cited chunk. A genuine no-source
+               citation stays plain text. Retrieve and Ask render the identical
+               affordance -- both flow through ``_cited_chunks``. #}
             <div class="min-w-0">
               <h3 class="card-title text-sm font-semibold">
                 {% if link.clickable %}
@@ -73,6 +78,12 @@
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label="Open source document for this chunk"
+                  >{{ link.label }}</a>
+                {% elif entry.view_href | default(none, true) %}
+                  <a
+                    href="{{ entry.view_href }}"
+                    class="link link-primary"
+                    aria-label="View cited source detail"
                   >{{ link.label }}</a>
                 {% else %}
                   {{ link.label }}

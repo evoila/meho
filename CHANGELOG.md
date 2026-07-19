@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — view-source affordance on /ui/corpus Ask citations (#2462)
+
+- Every `/ui/corpus` citation is now openable. A citation whose source has no
+  public URL normalizes to an opaque `meho://docs/<collection>/<chunk_id>`
+  reference (#132) and was previously plain, non-clickable text — a dead end
+  for an operator reading a grounded Ask answer who wanted to inspect a cited
+  source. Its title now click-throughs to a new internal cited-source detail
+  view `GET /ui/corpus/chunks/{collection_key}/{chunk_id}`, while a citation
+  with a canonical public URL keeps its outbound link unchanged (#1919 AC 2).
+- The affordance is derived in the single `_cited_chunks` seam the Retrieve
+  path, the Ask-answer path, and the Ask fail-open path all flow through, so
+  Retrieve and Ask render the identical view-source control for the identical
+  doc. The detail route is read-only, resolves the collection tenant-first
+  (404 on an unknown / cross-tenant key), and entitlement-gates on the same
+  `meho-docs:<key>` capability the search path enforces (403 naming the
+  missing capability). It renders the cited chunk's identity + provenance (its
+  stable reference + a link to the collection); the retrieved chunk body is
+  already on the card and the backend has no fetch-by-id seam to re-load it.
+
 ### Changed — clamp result-card bodies with expand-on-click (#2456)
 
 - `/ui/retrieval` diagnostics hit cards and `/ui/corpus` cited-chunk cards now

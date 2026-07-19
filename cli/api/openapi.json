@@ -15112,6 +15112,58 @@
         }
       }
     },
+    "/ui/corpus/chunks/{collection_key}/{chunk_id}": {
+      "get": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Chunk Detail",
+        "description": "``GET /ui/corpus/chunks/{collection_key}/{chunk_id}`` \u2014 cited-source view.",
+        "operationId": "ui_corpus_chunk_detail_ui_corpus_chunks__collection_key___chunk_id__get",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "chunk_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chunk Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/corpus": {
       "get": {
         "tags": [

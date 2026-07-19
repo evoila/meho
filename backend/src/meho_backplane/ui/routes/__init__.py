@@ -105,6 +105,7 @@ from meho_backplane.ui.routes.memory import build_memory_router
 from meho_backplane.ui.routes.operations import build_operations_router
 from meho_backplane.ui.routes.retrieval import build_retrieval_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
+from meho_backplane.ui.routes.runners import build_runners_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
@@ -133,6 +134,7 @@ __all__ = [
     "build_retrieval_router",
     "build_router",
     "build_runbooks_router",
+    "build_runners_router",
     "build_runs_router",
     "build_scheduler_router",
     "build_stubs_router",
@@ -230,6 +232,12 @@ def build_router() -> APIRouter:
     # so a first-match-wins lookup never shadows the list path; included before
     # the stubs aggregate so its concrete paths win against ``/ui/{slug}``.
     router.include_router(build_checks_router())
+    # Runners fleet (I2415-T2589): read-only ``/ui/runners`` satellite-runner
+    # fleet with per-runner liveness (``last_seen_at``) + dead-man state
+    # (``runner_assignments.stale_at`` -> UNKNOWN). One literal route, no
+    # ``{param}`` sub-path, so no first-match-wins shadowing concern; included
+    # before the stubs aggregate so its concrete path wins against ``/ui/{slug}``.
+    router.include_router(build_runners_router())
     # Operations launcher (G10.9-T1 #1879): ``/ui/operations`` +
     # ``/ui/operations/search`` + ``/ui/operations/descriptor/{id}``. The
     # only ``{param}`` route sits under the distinct

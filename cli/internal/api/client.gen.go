@@ -5630,6 +5630,7 @@ type RunnerPrincipalRead struct {
 	Id                 openapi_types.UUID `json:"id"`
 	KeycloakClientId   string             `json:"keycloak_client_id"`
 	KeycloakInternalId string             `json:"keycloak_internal_id"`
+	LastSeenAt         *time.Time         `json:"last_seen_at"`
 	Name               string             `json:"name"`
 	OwnerSub           string             `json:"owner_sub"`
 	Revoked            bool               `json:"revoked"`
@@ -11723,6 +11724,9 @@ type ClientInterface interface {
 
 	RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBody(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiRunnersListUiRunnersGet request
+	UiRunnersListUiRunnersGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiSchedulerListUiSchedulerGetWithBody request with any body
 	UiSchedulerListUiSchedulerGetWithBody(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -17399,6 +17403,18 @@ func (c *Client) RunbooksPublishUiRunbooksSlugPublishPostWithBody(ctx context.Co
 
 func (c *Client) RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBody(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewRunbooksPublishUiRunbooksSlugPublishPostRequestWithFormdataBody(c.Server, slug, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiRunnersListUiRunnersGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiRunnersListUiRunnersGetRequest(c.Server)
 	if err != nil {
 		return nil, err
 	}
@@ -35404,6 +35420,33 @@ func NewRunbooksPublishUiRunbooksSlugPublishPostRequestWithBody(server string, s
 	return req, nil
 }
 
+// NewUiRunnersListUiRunnersGetRequest generates requests for UiRunnersListUiRunnersGet
+func NewUiRunnersListUiRunnersGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runners")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiSchedulerListUiSchedulerGetRequest calls the generic UiSchedulerListUiSchedulerGet builder with application/json body
 func NewUiSchedulerListUiSchedulerGetRequest(server string, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -38398,6 +38441,9 @@ type ClientWithResponsesInterface interface {
 	RunbooksPublishUiRunbooksSlugPublishPostWithBodyWithResponse(ctx context.Context, slug string, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*RunbooksPublishUiRunbooksSlugPublishPostResponse, error)
 
 	RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksPublishUiRunbooksSlugPublishPostResponse, error)
+
+	// UiRunnersListUiRunnersGetWithResponse request
+	UiRunnersListUiRunnersGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiRunnersListUiRunnersGetResponse, error)
 
 	// UiSchedulerListUiSchedulerGetWithBodyWithResponse request with any body
 	UiSchedulerListUiSchedulerGetWithBodyWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error)
@@ -45414,6 +45460,27 @@ func (r RunbooksPublishUiRunbooksSlugPublishPostResponse) StatusCode() int {
 	return 0
 }
 
+type UiRunnersListUiRunnersGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiRunnersListUiRunnersGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiRunnersListUiRunnersGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiSchedulerListUiSchedulerGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -50104,6 +50171,15 @@ func (c *ClientWithResponses) RunbooksPublishUiRunbooksSlugPublishPostWithFormda
 		return nil, err
 	}
 	return ParseRunbooksPublishUiRunbooksSlugPublishPostResponse(rsp)
+}
+
+// UiRunnersListUiRunnersGetWithResponse request returning *UiRunnersListUiRunnersGetResponse
+func (c *ClientWithResponses) UiRunnersListUiRunnersGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiRunnersListUiRunnersGetResponse, error) {
+	rsp, err := c.UiRunnersListUiRunnersGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiRunnersListUiRunnersGetResponse(rsp)
 }
 
 // UiSchedulerListUiSchedulerGetWithBodyWithResponse request with arbitrary body returning *UiSchedulerListUiSchedulerGetResponse
@@ -59186,6 +59262,22 @@ func ParseRunbooksPublishUiRunbooksSlugPublishPostResponse(rsp *http.Response) (
 		}
 		response.JSON422 = &dest
 
+	}
+
+	return response, nil
+}
+
+// ParseUiRunnersListUiRunnersGetResponse parses an HTTP response from a UiRunnersListUiRunnersGetWithResponse call
+func ParseUiRunnersListUiRunnersGetResponse(rsp *http.Response) (*UiRunnersListUiRunnersGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiRunnersListUiRunnersGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
 	}
 
 	return response, nil

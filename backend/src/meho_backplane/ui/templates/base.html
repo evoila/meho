@@ -279,12 +279,21 @@
                 </div>
               </div>
 
-              {# Account row: user menu (opens upward) + theme toggle #}
-              <div class="flex items-center justify-between">
-                <div class="relative" x-on:click.outside="userMenuOpen = false">
+              {# Account row: user menu (opens upward) + theme toggle.
+                 The operator chip absorbs any width deficit so the
+                 theme/bell buttons stay full-size and the approvals
+                 badge overlay is never pushed past the drawer's
+                 ``overflow-x: hidden`` clip (#2445): ``min-w-0`` on the
+                 flex wrapper lets it shrink below its content size, and
+                 ``shrink min-w-0 overflow-hidden`` on the chip button
+                 overrides DaisyUI 5's ``.btn { flex-shrink: 0 }`` so the
+                 chip — whose mono ``sub`` label already ``truncate``s —
+                 gives up space first. #}
+              <div class="flex items-center justify-between gap-1">
+                <div class="relative min-w-0" x-on:click.outside="userMenuOpen = false">
                   <button
                     type="button"
-                    class="btn btn-ghost h-auto min-h-0 gap-2 px-1.5 py-1.5"
+                    class="btn btn-ghost h-auto min-h-0 shrink gap-2 overflow-hidden px-1.5 py-1.5 min-w-0"
                     aria-haspopup="menu"
                     x-bind:aria-expanded="userMenuOpen.toString()"
                     x-on:click="userMenuOpen = !userMenuOpen"
@@ -297,9 +306,9 @@
                         session context is bound. The live role lives on
                         ``/ui/account`` (a fresh JWT verify) -- the chip
                         does not pay a per-page token verify to label it. -#}
-                    <span class="grid size-7 place-items-center rounded-full bg-base-content/8 font-mono text-[0.62rem] font-medium text-base-content/70 ring-1 ring-base-content/15">{% if session_operator_sub is not none %}{{ session_operator_sub[:2] | upper }}{% else %}OP{% endif %}</span>
-                    <span class="max-w-[7.5rem] truncate font-mono text-xs font-medium text-base-content/70" title="{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}">{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}</span>
-                    {{ icon("chevron-down", class="size-3 rotate-180 text-base-content/40") }}
+                    <span class="grid size-7 shrink-0 place-items-center rounded-full bg-base-content/8 font-mono text-[0.62rem] font-medium text-base-content/70 ring-1 ring-base-content/15">{% if session_operator_sub is not none %}{{ session_operator_sub[:2] | upper }}{% else %}OP{% endif %}</span>
+                    <span class="min-w-0 max-w-[7.5rem] truncate font-mono text-xs font-medium text-base-content/70" title="{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}">{% if session_operator_sub is not none %}{{ session_operator_sub }}{% else %}Operator{% endif %}</span>
+                    {{ icon("chevron-down", class="size-3 shrink-0 rotate-180 text-base-content/40") }}
                   </button>
                   <ul
                     class="menu menu-sm absolute bottom-full left-0 z-50 mb-2 w-48 rounded-box border border-base-content/10 bg-base-100 p-2 shadow-xl"

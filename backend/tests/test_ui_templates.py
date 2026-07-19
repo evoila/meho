@@ -672,3 +672,106 @@ def test_forms_with_find_disabled_elt_disinherit_it() -> None:
         "the find selector leaks into the descendant request and htmx logs "
         f"'... returned no matches!': {sorted(set(offenders))}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Sidebar account-row overflow / approvals-badge clip (#2445)
+#
+# The approvals bell renders its pending-count badge as an absolute overlay
+# on the bell button (``approvals/_badge.html``); that overlay pattern is
+# correct. The bug was the sidebar *account row* overflowing horizontally:
+# DaisyUI 5's ``.btn`` sets ``flex-shrink: 0``, so the operator chip (avatar +
+# mono ``sub`` label + chevron) plus the two fixed theme/bell ``btn-square``
+# buttons exceeded the ``w-64`` nav's ~216px content width. The row overflowed
+# rightward, and the drawer-side's ``:where(.drawer-side){ overflow-x: hidden }``
+# clipped the bell's right portion and the entire badge at the sidebar edge --
+# identically at every ``lg+`` viewport because the sidebar is a fixed width.
+#
+# The fix lets the operator chip absorb the deficit instead of pushing the bell
+# off-canvas: the flex wrapper and the chip button carry ``min-w-0`` and the
+# button carries ``shrink`` (overriding ``.btn { flex-shrink: 0 }``), while the
+# mono label keeps ``min-w-0 truncate`` so it ellipsises and the avatar +
+# chevron stay pinned with ``shrink-0``. The theme/bell buttons are untouched,
+# so the badge overlay stays fully inside the visible sidebar.
+#
+# The console has no browser harness, so these server-side assertions pin the
+# load-bearing class contract on the raw ``base.html`` source (Jinja comments
+# stripped) so a future restyle cannot silently reintroduce the overflow.
+# ---------------------------------------------------------------------------
+
+#: The account-row operator-chip button is uniquely identified by its
+#: ``aria-haspopup="menu"`` (the only popup-menu trigger in ``base.html``).
+_OPERATOR_CHIP_BUTTON_RE = re.compile(
+    r'<button\b[^>]*aria-haspopup="menu"[^>]*>', re.IGNORECASE | re.DOTALL
+)
+
+
+def _base_html_source() -> str:
+    return _JINJA_COMMENT_RE.sub("", (templates_dir() / "base.html").read_text(encoding="utf-8"))
+
+
+def test_operator_chip_button_shrinks_below_its_content(ui_env: Environment) -> None:
+    """The account-row operator chip carries ``shrink`` + ``min-w-0`` (#2445).
+
+    DaisyUI 5's ``.btn`` sets ``flex-shrink: 0``; without an explicit
+    override the chip cannot give up space, so the account row overflows the
+    ``w-64`` nav and the drawer-side's ``overflow-x: hidden`` clips the
+    approvals-bell badge. The chip button must carry ``shrink`` (to beat the
+    ``.btn`` rule) and ``min-w-0`` (so it can shrink below its min-content).
+    """
+    source = _base_html_source()
+    m = _OPERATOR_CHIP_BUTTON_RE.search(source)
+    assert m is not None, "operator-chip user-menu button (aria-haspopup=menu) not found"
+    class_m = re.search(r'class="([^"]*)"', m.group(0))
+    assert class_m is not None, f"operator-chip button has no class attribute: {m.group(0)!r}"
+    chip_classes = class_m.group(1).split()
+    assert "shrink" in chip_classes, (
+        "operator-chip button must carry `shrink` to override DaisyUI 5's "
+        f"`.btn {{ flex-shrink: 0 }}`; classes: {chip_classes}"
+    )
+    assert "min-w-0" in chip_classes, (
+        "operator-chip button must carry `min-w-0` so it can shrink below its "
+        f"min-content instead of clipping the approvals badge; classes: {chip_classes}"
+    )
+
+
+def test_operator_chip_wrapper_and_label_allow_truncation() -> None:
+    """The chip's flex wrapper + mono label let the label truncate (#2445).
+
+    The chip button's flex wrapper (``div.relative``) needs ``min-w-0`` so it
+    can shrink within the account row, and the mono ``sub`` label needs
+    ``min-w-0 truncate`` so it ellipsises (its ``max-w-[7.5rem]`` cap alone
+    sets a flex min-width floor that would keep the row over-wide). This is
+    what makes the chip -- not the bell -- absorb the width deficit.
+    """
+    source = _base_html_source()
+    # The user-menu wrapper is the relative-positioned div that owns the
+    # click-outside close handler; it must be shrinkable.
+    assert re.search(
+        r'<div\b[^>]*class="[^"]*\bmin-w-0\b[^"]*"[^>]*x-on:click\.outside="userMenuOpen',
+        source,
+    ), "user-menu wrapper div must carry min-w-0 so the chip can shrink in the row"
+    # The mono sub label carries both min-w-0 and truncate on the same element.
+    labels_with_truncate = [
+        tag
+        for tag in re.findall(r"<span\b[^>]*>", source)
+        if "truncate" in tag and "font-mono" in tag and "max-w-[7.5rem]" in tag
+    ]
+    assert labels_with_truncate, "operator-sub mono label (truncate + max-w-[7.5rem]) not found"
+    for tag in labels_with_truncate:
+        assert "min-w-0" in tag, (
+            "the operator-sub label must carry min-w-0 alongside truncate so its "
+            f"ellipsis engages when the chip shrinks; tag: {tag!r}"
+        )
+
+
+def test_account_row_renders_both_bell_badge_targets(ui_env: Environment) -> None:
+    """Both bell instances still render their badge swap targets (#2445 AC #4).
+
+    The fix touches only the sidebar account row; the mobile top-bar bell must
+    render unchanged. Both bells expose their prefixed badge target so the
+    ``load`` / ``meho:approval-bump`` swap still lands the count.
+    """
+    html = ui_env.get_template("base.html").render(ready=True)
+    assert 'id="mobile-approvals-badge"' in html
+    assert 'id="sidebar-approvals-badge"' in html

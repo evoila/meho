@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — canonical arg names in MCP error labels (#2480)
+
+- **`meho.broadcast.recent` and `meho.connector.ingest_status` `-32602`
+  validation messages now name the canonical inputSchema property the
+  caller passed** (#2480). A malformed cursor on `broadcast.recent`
+  labelled the field `since:` (the deprecated alias / internal arg
+  name) rather than the canonical `cursor:` (#1358); the message is now
+  `cursor:`-labelled whichever alias the caller sent. A malformed job id
+  on `connector.ingest_status` said `handle must be a valid job id`,
+  naming a "handle" concept absent from the tool's inputSchema; it now
+  says `job_id must be a valid UUID`. Wire-facing labels that point
+  callers (and LLM agents, for whom the error text is a corrective
+  signal) at a field they never wrote are fixed to name the property
+  they did write.
+
 ### Added — agent_name/agent_definition_id on run projections (#2472)
 
 - The shared agent-run read projections (`AgentRunSummary` /

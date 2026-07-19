@@ -242,8 +242,13 @@ def _iso8601_to_min_cursor(raw: str) -> str:
     try:
         parsed = datetime.fromisoformat(iso_normalised)
     except ValueError as exc:
+        # The wire-facing label names ``cursor`` -- the canonical MCP
+        # forward-cursor parameter (#1358) -- not the internal ``since``
+        # arg name, so the -32602 the sole wire consumer (the MCP
+        # ``broadcast.recent`` handler) re-raises points callers at the
+        # inputSchema property they actually passed.
         raise InvalidSinceError(
-            f"since: not a valid ISO-8601 timestamp or Valkey stream cursor: {raw!r}",
+            f"cursor: not a valid ISO-8601 timestamp or Valkey stream cursor: {raw!r}",
         ) from exc
     if parsed.tzinfo is None:
         # Treat a naive timestamp as UTC explicitly; otherwise

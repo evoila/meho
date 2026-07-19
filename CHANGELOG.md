@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — restyle Register Collection modal to kb form language (#2464)
+
+- The `/ui/corpus` **Register Collection** modal now speaks the same
+  form language as the `/ui/kb` "New entry" editor: a padding-less
+  box with a bordered header + close-circle button, the three fields
+  grouped into **Identity / Metadata / Backend** sections split by
+  dividers, `label py-0` label rows with a right-aligned hint, and a
+  bordered footer whose actions stay pinned while a long body scrolls.
+  The field set, submit contract, CSRF wiring, and per-field error
+  echo are unchanged — template-only. (#2464)
+
 ### Fixed — DaisyUI 5 code-block theming on /ui/kb (#2452)
 
 - KB entry code blocks (`/ui/kb/<slug>`) are now legible in both console

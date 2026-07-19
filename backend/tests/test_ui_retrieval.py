@@ -637,6 +637,78 @@ def test_diagnostics_renders_absent_marker_for_none_rank() -> None:
     assert "#1" in body
 
 
+def test_diagnostics_labels_provenance_and_links_kb_source_id() -> None:
+    """Provenance is labelled visibly and a kb hit's source_id links to its entry (#2457).
+
+    Acceptance criteria: the provenance row carries a visible ``Source id``
+    caption (not only a ``title=`` attribute), and a ``source == "kb"`` hit
+    renders its ``source_id`` as an anchor to ``/ui/kb/<source_id>`` (kb
+    documents persist ``source_id=slug``, so the id is the KB slug).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    hits = [_hit(source="kb", kind="kb-entry", source_id="quiesce-snapshots")]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RETRIEVE, new_callable=AsyncMock, return_value=hits),
+        ):
+            response = client.post(
+                "/ui/retrieval/diagnostics",
+                data={"query": "snapshot", "limit": 10},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Provenance labels are rendered as visible captions, not hover-only.
+    assert ">Source</span>" in body
+    assert ">Kind</span>" in body
+    assert ">Source id</span>" in body
+    # A kb hit's source_id is a same-tab anchor to its KB entry detail page.
+    assert 'href="/ui/kb/quiesce-snapshots"' in body
+    assert ">quiesce-snapshots</a>" in body
+
+
+def test_diagnostics_non_kb_source_id_is_plain_text_never_a_dead_link() -> None:
+    """A non-kb hit keeps its source_id as plain text with no anchor (#2457).
+
+    Acceptance criterion: a memory hit (no resolvable ``/ui/kb`` route) must
+    not wrap its source_id in an anchor, and must never emit an ``href`` that
+    would 404 against the KB detail route.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    hits = [_hit(source="memory", kind="note", source_id="mem-scope-slug")]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RETRIEVE, new_callable=AsyncMock, return_value=hits),
+        ):
+            response = client.post(
+                "/ui/retrieval/diagnostics",
+                data={"query": "recall", "limit": 10},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The id is still shown, but as plain selectable text -- never a dead link.
+    assert "mem-scope-slug" in body
+    assert ">mem-scope-slug</a>" not in body
+    assert 'href="/ui/kb/mem-scope-slug"' not in body
+
+
 def test_diagnostics_empty_results_renders_no_matches_state() -> None:
     """A run returning zero hits renders the no-matches state, not an error."""
     _seed_tenant(_TENANT_A, "tenant-a")

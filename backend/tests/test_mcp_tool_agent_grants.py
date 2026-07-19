@@ -127,3 +127,37 @@ def test_operator_tools_call_grant_is_rejected_with_forbidden(
     assert "error" in body, body
     assert body["error"]["code"] == INVALID_PARAMS
     assert "forbidden" in body["error"]["message"].lower(), body
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+@pytest.mark.parametrize("tool_name", ["meho.agents.grant.create", "meho.agents.grant.elevate"])
+def test_admin_grant_for_unregistered_principal_is_rejected(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    tool_name: str,
+) -> None:
+    """A tenant-admin grant for an unregistered principal → -32602 naming the scope (#2489).
+
+    Past the RBAC gate, ``AgentGrantService.grant`` rejects a
+    ``principal_sub`` that names no non-revoked agent principal in the
+    tenant. The MCP boundary maps that :exc:`GrantValidationError` to
+    JSON-RPC ``-32602`` ``INVALID_PARAMS``; the message names the
+    ``principal_kind=agent`` enforcement scope so the caller learns why a
+    grant on a non-agent sub can never fire.
+    """
+    client, _op = client_with_operator
+    arguments: dict[str, Any] = {
+        "principal_sub": "never-registered-agent",
+        "op_pattern": "*",
+        "verdict": "needs-approval",
+    }
+    if tool_name.endswith("elevate"):
+        arguments["expires_at"] = "2099-01-01T00:00:00+00:00"
+    resp = post_mcp(client, _tools_call(tool_name, arguments))
+    body = resp.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == INVALID_PARAMS
+    assert "principal_kind=agent" in body["error"]["message"], body

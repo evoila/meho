@@ -6280,7 +6280,7 @@
           "agents"
         ],
         "summary": "List Runs",
-        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state. Returns ``created_at DESC``.",
+        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state; ``?agent_name=triage`` narrows to runs produced by\nthat agent definition (an unknown name yields an empty list). Returns\n``created_at DESC``.",
         "operationId": "list_runs_api_v1_agents_runs_get",
         "parameters": [
           {
@@ -6306,6 +6306,18 @@
               "title": "Status"
             },
             "description": "Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state."
+          },
+          {
+            "name": "agent_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by agent definition name (exact match) \u2014 the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter.",
+              "title": "Agent Name"
+            },
+            "description": "Filter by agent definition name (exact match) \u2014 the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter."
           },
           {
             "name": "limit",
@@ -19543,6 +19555,17 @@
             "type": "string",
             "nullable": true,
             "title": "Error"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Definition Id"
+          },
+          "agent_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent Name"
           }
         },
         "type": "object",
@@ -19553,7 +19576,9 @@
           "provider",
           "model",
           "output",
-          "error"
+          "error",
+          "agent_definition_id",
+          "agent_name"
         ],
         "title": "AgentRunStatusResponse",
         "description": "Poll response for ``GET /agents/runs/{handle}``."
@@ -19595,6 +19620,17 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Definition Id"
+          },
+          "agent_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent Name"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -19623,6 +19659,8 @@
           "model",
           "turns",
           "work_ref",
+          "agent_definition_id",
+          "agent_name",
           "created_at",
           "started_at",
           "ended_at"

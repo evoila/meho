@@ -1135,6 +1135,80 @@ async def test_review_payload_surfaces_authoring_kind(
 
 
 @pytest.mark.asyncio
+async def test_list_surfaces_classless_typed_as_dispatchable(
+    client: TestClient,
+) -> None:
+    """The class-less typed mold reads ``typed`` / ``dispatchable=True`` (#2496).
+
+    ``net-probe-1.x`` / ``secret-broker-1.x`` register their ops as
+    module-level ``source_kind='typed'`` handlers and deliberately back
+    them with **no** connector class, so the resolver-replay in
+    :func:`resolve_authoring_kind` misses. The regression: that miss was
+    projected as ``kind='ingested-shim'`` / ``dispatchable=False``, so a
+    live operator concluded a working, code-shipped connector was dead
+    (#2468 finding 3a). The row carries code-shipped ops the dispatcher
+    routes with ``connector_instance=None``, so it must read as the typed
+    surface it is. Seeded as built-ins (``tenant_id IS NULL``) with no
+    class registered, mirroring the real image-time registration.
+    """
+    for product, version, impl_id in (
+        ("net", "1.x", "net-probe"),
+        ("secret", "1.x", "secret-broker"),
+    ):
+        await _seed_connector(
+            tenant_id=None,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            review_status="enabled",
+            op_is_enabled=True,
+            source_kind="typed",
+        )
+
+    key, token = _operator_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    items = {c["connector_id"]: c for c in response.json()["items"]}
+    for connector_id in ("net-probe-1.x", "secret-broker-1.x"):
+        item = items[connector_id]
+        assert item["state"] == "ingested"
+        assert item["kind"] == "typed", connector_id
+        assert item["dispatchable"] is True, connector_id
+
+
+@pytest.mark.asyncio
+async def test_review_payload_surfaces_classless_typed_as_dispatchable(
+    client: TestClient,
+) -> None:
+    """``GET /{id}/review`` reports the class-less typed mold as dispatchable typed (#2496).
+
+    The ``meho.connector.review`` surface (MCP) and this REST review
+    route share :func:`resolve_authoring_kind` via
+    :func:`_authoring_kind_for_payload`, so the projection fix must hold
+    on the review path too, not only the listing.
+    """
+    await _seed_connector(
+        tenant_id=None,
+        product="net",
+        version="1.x",
+        impl_id="net-probe",
+        review_status="enabled",
+        op_is_enabled=True,
+        source_kind="typed",
+    )
+    key, token = _operator_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors/net-probe-1.x/review", headers=_authed(token))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "typed"
+    assert body["dispatchable"] is True
+
+
+@pytest.mark.asyncio
 async def test_list_class_only_entries_excluded_under_status_narrowing(
     client: TestClient,
     _registered_class_only_connectors: None,

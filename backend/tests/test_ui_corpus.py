@@ -39,6 +39,7 @@ Suite shape:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
@@ -79,7 +80,8 @@ from meho_backplane.ui.csrf import (
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
-from meho_backplane.ui.templating import reset_templating_for_testing
+from meho_backplane.ui.routes.corpus.routes import _cited_chunks
+from meho_backplane.ui.templating import get_templates, reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
 # ---------------------------------------------------------------------------
@@ -330,6 +332,13 @@ def test_corpus_index_renders_page_and_collections() -> None:
     assert CSRF_COOKIE_NAME in response.cookies
     assert "X-CSRF-Token" in body
     assert 'hx-post="/ui/corpus/search"' in body
+    # In-flight feedback on the Go button (#2459): spinner indicator + submit
+    # disable, with the disinherit guard so neither leaks to a child request.
+    assert 'hx-indicator="#corpus-search-spinner"' in body
+    assert 'hx-disabled-elt="find button[type=submit]"' in body
+    assert 'hx-disinherit="hx-disabled-elt hx-indicator"' in body
+    assert 'id="corpus-search-spinner"' in body
+    assert "htmx-indicator loading loading-spinner" in body
 
 
 def test_corpus_index_default_selects_sole_collection() -> None:
@@ -561,6 +570,94 @@ def test_corpus_search_card_header_prefers_upstream_title() -> None:
     # The human title is the link text; the raw document_id is not the header.
     assert "Quiescing VM Snapshots" in body
     assert ">vsphere-snapshots<" not in body
+
+
+def _render_results(**context: object) -> str:
+    """Render the ``corpus/_results.html`` partial directly with *context*.
+
+    Drives the shared ``chunk_cards`` macro without the HTTP / JWT harness so a
+    card-rendering contract can be asserted straight at the Jinja partial.
+    """
+    template = get_templates().env.get_template("corpus/_results.html")
+    return template.render(**context)
+
+
+def _retrieve_context(cited: list[dict[str, object]]) -> dict[str, object]:
+    """The retrieve branch: a plain cited-chunk list (``cited`` only)."""
+    return {"cited": cited, "query": "host maintenance", "searched": True}
+
+
+def _ask_context(cited: list[dict[str, object]]) -> dict[str, object]:
+    """The ask branch: a grounded ``answer`` followed by the same cited cards."""
+    return {
+        "cited": cited,
+        "answer": "Enter maintenance mode before host patching.",
+        "query": "host maintenance",
+    }
+
+
+@pytest.mark.parametrize("context_for", [_retrieve_context, _ask_context])
+def test_card_title_headlines_and_demotes_document_id_to_badge(
+    context_for: object,
+) -> None:
+    """An upstream title heads the card; the document id is demoted to a badge.
+
+    Both render branches share the ``chunk_cards`` macro, so one parametrized
+    contract covers the retrieve path (``cited`` only) and the ask path
+    (``answer`` + ``cited``): the human title is the clickable ``<h3>`` anchor
+    text and the opaque numeric id (``393092``) moves into the metadata badge
+    row rather than remaining the headline (#2461).
+    """
+    chunk = _chunk(
+        chunk_id="c-1",
+        document_id="393092",
+        title="vSphere host maintenance mode",
+        content="Enter maintenance mode before host patching.",
+        source_url="https://docs.vmware.test/maintenance",
+        score=0.91,
+    )
+    cited = _cited_chunks([chunk])
+
+    html = _render_results(**context_for(cited))  # type: ignore[operator]
+
+    # The human title is the clickable heading anchor text.
+    assert ">vSphere host maintenance mode</a>" in html
+    # The numeric id is demoted into a "Document id" metadata badge, not the
+    # heading -- assert it sits inside the badge span, not the <h3> anchor.
+    assert re.search(
+        r'title="Document id"[^>]*>\s*393092\s*</span>',
+        html,
+    ), html
+    assert ">393092</a>" not in html
+
+
+@pytest.mark.parametrize("context_for", [_retrieve_context, _ask_context])
+def test_card_title_absent_falls_back_to_document_id_heading(
+    context_for: object,
+) -> None:
+    """With no upstream title the id remains the heading (no regression, #2461).
+
+    When the corpus supplies no title, the label chain falls back to the
+    document id, so it stays the heading -- and it must NOT be duplicated into
+    the demotion badge (which only fires when a title displaced it).
+    """
+    chunk = _chunk(
+        chunk_id="c-1",
+        document_id="393092",
+        title=None,
+        content="Enter maintenance mode before host patching.",
+        source_url="https://docs.vmware.test/maintenance",
+        score=0.91,
+    )
+    cited = _cited_chunks([chunk])
+
+    html = _render_results(**context_for(cited))  # type: ignore[operator]
+
+    # The id is the heading anchor text (existing fallback behaviour).
+    assert ">393092</a>" in html
+    # No demotion badge -- the id is not repeated as metadata when it is the
+    # heading.
+    assert 'title="Document id"' not in html
 
 
 def test_corpus_search_resolves_gs_kb_source_to_canonical_link() -> None:

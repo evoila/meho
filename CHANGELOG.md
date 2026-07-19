@@ -105,6 +105,29 @@ connector-related release-notes line.
   with `shrink-0`. A full-width Keycloak-`sub` operator label now truncates
   instead of shoving the badge off-canvas, so the count is fully readable at
   every `lg+` viewport width.
+### Added — in-flight spinners on console Run buttons (#2459)
+
+- The long-running action buttons on `/ui/retrieval` (Diagnostics Run, Run
+  eval, Run checklist) and `/ui/corpus` (Search Go) now show progress while a
+  request is in flight: the form declares `hx-indicator` targeting a
+  DaisyUI `htmx-indicator loading loading-spinner` span next to the button and
+  `hx-disabled-elt="find button[type=submit]"` so the button disables until the
+  fragment lands, following the existing kb-upload spinner precedent. An
+  `hx-disinherit="hx-disabled-elt hx-indicator"` guard keeps both attributes
+  from leaking onto descendant htmx requests in the swapped results region
+  (#2340). Operators no longer face a dead button with no feedback on
+  multi-second eval / checklist / ask runs.
+### Changed — /ui/corpus card titles from chunk title (#2461)
+
+- `/ui/corpus` result and citation cards now headline the chunk's
+  human-legible `title` (threaded through in #2475) instead of a raw
+  numeric/opaque document id. The `_cited_chunks` seam already feeds the
+  title into the `title → document_id → filename → URL` citation-label
+  chain, so the shared `chunk_cards` macro renders it as the card heading;
+  when a title displaces the id, the id is demoted into the metadata badge
+  row (alongside collection/score) so provenance stays visible without
+  being the headline. When the corpus supplies no title the id remains the
+  heading exactly as before — no regression, and no duplicate badge.
 
 ### Fixed — DaisyUI 5 code-block theming on /ui/kb (#2452)
 

@@ -300,6 +300,39 @@ def test_table_lists_unentitled_rows() -> None:
     assert 'hx-get="/ui/corpus/collections/register"' in body
 
 
+def test_row_carries_visible_identity_link_and_view_button() -> None:
+    """Each collection row offers the converged detail-nav pair (#2463).
+
+    The identity cell links to the detail page with the visible
+    ``link link-primary`` styling (not the invisible ``link link-hover``),
+    and the trailing actions column carries a ``View`` button to the same
+    URL -- the page-nav list-surface convention.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", tenant_id=_TENANT_A)
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/corpus/collections")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Visible identity link (never the hover-only styling).
+    assert 'class="link link-primary"' in body
+    assert "link link-hover" not in body
+    assert 'href="/ui/corpus/collections/vmware"' in body
+    # Trailing View button to the same detail URL + its header cell.
+    assert 'class="btn btn-ghost btn-xs"' in body
+    assert 'aria-label="View collection vmware"' in body
+    assert "View" in body
+    assert 'class="sr-only">Actions</th>' in body
+
+
 def test_table_renders_status_pill_for_each_lifecycle_state() -> None:
     """The status column renders a pill for each lifecycle state."""
     _seed_tenant(_TENANT_A, "tenant-a")

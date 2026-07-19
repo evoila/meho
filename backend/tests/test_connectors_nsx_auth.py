@@ -84,6 +84,7 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642). Distinct ``id`` per
     # instance so two stub targets never collapse onto one cache entry.
     id: UUID = field(default_factory=uuid4)
@@ -832,4 +833,30 @@ async def test_fingerprint_without_operator_falls_back_to_system_operator() -> N
 
     assert len(captured) == 1
     assert captured[0].sub == SYSTEM_OPERATOR_SUB
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on session establish (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_session_create_threads_sni_extension() -> None:
+    """#2398: the form-encoded /api/session/create login carries the SNI override."""
+    connector = _make_connector()
+    target = _StubTarget(
+        name="nsx-sni",
+        host="nsx-sni.test.invalid",
+        port=443,
+        secret_ref="nsx/nsx-sni",
+        tls_server_name="nsx.corp.example",
+    )
+
+    async with respx.mock(base_url="https://nsx-sni.test.invalid") as mock:
+        route = mock.post("/api/session/create").respond(200, headers={"X-XSRF-TOKEN": "xsrf"})
+        await connector.auth_headers(target, operator=_make_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "nsx.corp.example"
     await connector.aclose()

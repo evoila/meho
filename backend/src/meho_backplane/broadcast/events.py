@@ -72,6 +72,7 @@ __all__ = [
     "classify_op",
     "redact_payload",
     "scrub_broadcast_params",
+    "scrub_secret_named_values",
 ]
 
 
@@ -731,6 +732,32 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
             found = found or child_found
         return items, found
     return node, False
+
+
+def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
+    """Key-name-aware secret scrub for a caller-bound dispatch response.
+
+    Public entry to :func:`_scrub_secret_named_keys` (the same walk the
+    broadcast params scrub uses). Returns ``(scrubbed, secret_detected)``:
+    every mapping entry whose key is secret-shaped (``password``,
+    ``client_secret``, ``sessionToken``, ...) has its value subtree
+    replaced with :data:`_REDACTED_PARAM`.
+
+    The connector-boundary redaction engine (``dispatcher.py`` step 7a)
+    matches only *labelled* secret shapes inside string leaves, so a
+    ``credential_read`` response like ``{"data": {"password": "..."}}``
+    passes through it verbatim. The dispatcher runs this scrub on the
+    caller-bound response of a ``credential_read``-classified op by
+    default (#2467) so the raw value never reaches the ``call_operation``
+    caller / agent transcript; ``params.reveal_secret=true`` opts out.
+    The audit row keeps the raw result regardless (the raw payload is
+    captured before this scrub runs), mirroring the #2172 secret-handler
+    posture. Unlike :func:`scrub_broadcast_params` this does **not** run
+    the Tier-1 engine pass -- the boundary middleware already applied it
+    to the response, so this layer is only the structured-dict
+    key-name complement.
+    """
+    return _scrub_secret_named_keys(node)
 
 
 def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:

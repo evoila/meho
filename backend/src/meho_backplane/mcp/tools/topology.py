@@ -1463,6 +1463,7 @@ _TOPOLOGY_WRITE_INVALID_PARAM_EXCEPTIONS: Final[frozenset[str]] = frozenset(
     {
         "AmbiguousNodeError",
         "AutoEdgeDeletionError",
+        "BulkImportValidationError",
         "InvalidEdgeKindError",
         "InvalidNodeKindError",
         "NodeNotFoundError",
@@ -1594,14 +1595,15 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "curated-only kind: `authenticates-via`, `depends-on`, "
     "`replicates-to`, `backed-up-by`, `routes-via`, `policy-binds`.\n\n"
     "Returns `{edge_id, from: {id, kind, name}, to: {id, kind, name}, "
-    'kind, source: "curated", conflicts: [<edge-id>...]}`. `conflicts` '
-    "lists edges of an incompatible kind over the same endpoint pair — "
-    "a diagnostic; the recovery flow is to `meho.topology.unannotate` "
-    "this edge. (Auto edges displaced by this annotation are stamped "
-    "`properties.superseded_by` on the database row and recorded in the "
-    "audit/broadcast payload, but are not surfaced on the tool's return "
-    "shape — inspect them with `query_topology {kind: edges}` if needed.)"
-    "\n\n"
+    'kind, source: "curated", conflicts: [<edge-id>...], superseded: '
+    "[<edge-id>...]}`. `conflicts` lists edges of an incompatible kind "
+    "over the same endpoint pair — a diagnostic; the recovery flow is to "
+    "`meho.topology.unannotate` this edge. `superseded` lists the "
+    "`source='auto'` edges this annotation displaced (same kind, "
+    "different endpoint): each is stamped `properties.superseded_by` on "
+    "its database row and drops out of traversal until this curated edge "
+    "is removed. Both lists match the audit/broadcast payload exactly "
+    "and are empty on a pair no probe covers.\n\n"
     "AGENT PRINCIPALS: the write does not execute immediately — it "
     "parks as a durable approval request and the tool returns "
     "`{status: awaiting_approval, approval_request_id, ...}`. A human "

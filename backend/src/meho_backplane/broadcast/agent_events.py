@@ -125,7 +125,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from typing import Annotated, Final, Literal, get_args
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -304,6 +304,19 @@ class AgentAnnouncementEvent(BaseModel):
     #: both forms.
     kind: Literal["agent_announcement"] = "agent_announcement"
     event_kind: Literal["agent_announcement"] = "agent_announcement"
+    #: The real per-announcement UUID (#2479 / #2547). Minted at publish
+    #: (``default_factory=uuid4``) and written both to the durable
+    #: :class:`~meho_backplane.db.models.AgentAnnouncement` row (as its
+    #: PK) and onto the stream entry's JSON, so a reader correlating the
+    #: stream and the archive sees one stable identity. This is what the
+    #: announce return echoes back as ``event_id`` -- now genuinely
+    #: distinct from ``cursor`` (the Valkey stream entry id), which #2479
+    #: documents were historically the same mislabelled value. TRUSTED
+    #: UUID, served unwrapped. A pre-#2547 stream entry that predates this
+    #: field parses with a fresh random UUID (those entries age out via
+    #: the publisher's ``MAXLEN ~`` trim); every new entry carries the
+    #: minted value verbatim on the wire.
+    event_id: UUID = Field(default_factory=uuid4)
     tenant_id: UUID
     principal_sub: str
     activity: str = Field(min_length=1, max_length=ACTIVITY_MAX_CHARS)

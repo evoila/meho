@@ -326,6 +326,7 @@ class VcfOperationsConnector(HttpConnector):
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                 },
+                request_extensions=self._request_extensions(target),
             )
             self._session_tokens[cache_key] = token
             _log.info(

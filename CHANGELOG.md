@@ -117,6 +117,269 @@ connector-related release-notes line.
   model-native `slug`, equal values (#2476) — no payload change.
 
 ### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
+### Added — credential_read response scrub + reveal_secret opt-in (#2467)
+
+- `credential_read`-classified dispatch responses (`vault.kv.read` and
+  its `_CREDENTIAL_READ_OPS` siblings) are now key-name scrubbed before
+  they reach the `call_operation` caller: secret-named values in the
+  transport response are replaced with `[REDACTED:param_name]` while
+  non-secret siblings (`username`, `version`) survive. This closes the
+  gap where the connector-boundary redaction engine — which matches only
+  labelled secret shapes inside string leaves — passed a
+  `{"password": "<value>"}` dict through verbatim into an agent caller's
+  model-API transcript. A caller that must pipe the raw value onward
+  passes a reserved `params.reveal_secret=true`, which returns the raw
+  value and is stamped queryably on the audit row
+  (`payload['reveal_secret']`). The audit `raw_payload` keeps the raw
+  result in both cases — only the transport response is scrubbed
+  (mirrors the #2172 secret-handler posture). The scrub keys on the op
+  class, not the caller kind. Approved human flows keep working by
+  opting in: the `/ui` Vault console read (reveal-on-click) and CLI
+  `meho secret read` (pipe-only) both pass `reveal_secret=true`;
+  `secret.move` stays the recommended no-transit path. The reserved
+  `reveal_secret` flag is stripped before op-schema validation and
+  `params_hash`, so a scrubbed read and its reveal share one hash.
+### Fixed — SNI on session-establish (#2398)
+
+- Every connector session-establish request now threads the target's
+  `tls_server_name` TLS SNI / certificate-verify name, matching the
+  dispatch path. Previously only the shared dispatch seams
+  (`_request_json` / `_post_json`) carried the SNI override from #2002,
+  so the hand-rolled login/token requests bypassed it: httpcore fell
+  back to `server_hostname = origin.host` and verified an appliance's
+  FQDN-SAN certificate against the registered IP, failing
+  `CERTIFICATE_VERIFY_FAILED` *before* auth. This blocked secure
+  (`verify_tls=true` + `tls_ca_pin`) registration of any by-IP endpoint
+  whose certificate pins an FQDN. The fix covers all six hand-rolled
+  session families — vmware `/api/session` (modern + legacy fallback +
+  shutdown revoke), `vcf_session_login` (vROps token/acquire, vRLI
+  sessions, SDDC `/v1/tokens`), NSX `/api/session/create`, VCFA
+  provider + tenant logins, proxmox ticket mint, keycloak admin token
+  grant — plus the profiled-connector logins (basic / form / json) and
+  the unauthenticated fingerprint probe. Behaviour is byte-identical
+  when `tls_server_name` is unset (empty extensions dict). (#2398)
+### Added — docs/deploying.md consolidated deploy guide (#2468)
+
+- **A single operator-facing deployment & upgrade guide** now lives at
+  `docs/deploying.md`, consolidating knowledge previously scattered
+  across the chart values, the acceptance contracts, and several
+  deep-dive docs (or missing entirely). It covers: a cold-install
+  prerequisites checklist (pgvector superuser `CREATE EXTENSION`, the
+  asyncpg `DATABASE_URL` Secret shape, Keycloak realm + MCP-audience
+  resolvability, internal-CA trust bundle, pinned `image.tag`,
+  first-boot `startupProbe` budget); the two credential-backend install
+  paths side by side (Vault vs GSM/Vault-free, `config.credentialBackend`);
+  the Helm-4 server-side-apply field-conflict upgrade caveat (the
+  v0.22.0 `startupProbe` example, pre-flight `--show-managed-fields`,
+  remedy `helm upgrade --force-conflicts`); a version-specific
+  upgrade-notes table (v0.15.0 Vault tenant-scope guard, v0.22.0 SSA
+  conflict); and operational chart knobs. The guide **links into** the
+  existing deep-dives rather than restating them. Cross-linked from
+  `README.md`, `docs/codebase/devops.md`, and
+  `deploy/values-examples/README.md`; `docs/RELEASING.md` now carries a
+  checklist line obliging the release-cutting PR to append a
+  version-specific upgrade-notes row when a release carries an
+  upgrade-relevant change. Docs-only; resurrects #559 with post-v0.21.0
+  motivation (#2468).
+
+### Added — operator-console OAuth chart values (#2594)
+
+- The Helm chart now renders the operator-console (`/ui/*`) browser
+  BFF OAuth settings from first-class values, so a chart-only deploy
+  can enable the console without hand-rolling Secrets and `extraEnv`
+  `valueFrom`. Set `config.uiKeycloakClientId` (plain, rendered as
+  `UI_KEYCLOAK_CLIENT_ID`) and `uiConsole.enabled: true` +
+  `uiConsole.secretName` (a Secret holding the `meho-web` client
+  secret and the session encryption key, wired into
+  `UI_KEYCLOAK_CLIENT_SECRET` / `UI_SESSION_ENCRYPTION_KEY` via
+  `secretKeyRef`). Previously these three env vars had no chart values,
+  so a browser-console deploy hit `503 ui_oauth_not_configured` with no
+  chart-level way to configure it. Enabling the console is
+  all-or-nothing (the schema requires the client_id + secret name under
+  `uiConsole.enabled: true`); leaving it disabled is the default and
+  keeps the console cleanly dark with no effect on `/api/*` or the
+  `meho login` CLI. The GSM/no-Vault enablement recipe (confidential
+  web client + session key + the two secrets) is documented in
+  `deploy/values-examples/README.md` and the realm-side
+  `docs/cross-repo/keycloak-web-client.md` (#2594).
+### Changed — netdiag.probeAllowlist chart value (#2518)
+
+- **The `net.*` diagnostics probe allowlist is now a typed Helm chart
+  value** (#2518). v0.22.0 shipped the `net.*` diagnostics connector
+  (#2405) governed by `MEHO_NETDIAG_PROBE_ALLOWLIST` — an inverted,
+  fail-closed allowlist whose empty default keeps the connector **inert**
+  (every probe denied) — but the chart exposed no typed key for it: the
+  only way to set the env var was the untyped `extraEnv` passthrough,
+  which `values.schema.json` does not validate and `helm show values`
+  does not surface. A new `netdiag.probeAllowlist` value (schema-typed
+  optional string, default `""`) now renders into
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` on the backplane ConfigMap — injected
+  into the container via the existing `envFrom.configMapRef` — so a
+  scoped probe allowlist (e.g. `"10.0.0.0/8,vcenter.lab.internal"`) is a
+  first-class, `helm show values`-discoverable setting. The default `""`
+  is a genuine no-op that keeps the connector inert (fail-closed), so
+  existing installs are unchanged. This mirrors #2240's typed
+  `config.targetSsrfAllowlist` treatment so both fail-closed allowlists
+  share one configuration shape. Chart-only — the allowlist parser is
+  untouched. (#2518)
+### Fixed — explicit http scheme on HttpConnector targets (#2587)
+
+- Every `HttpConnector`-based connector hardcoded `https` when building
+  the request URL, so a target against a plain-HTTP management API — e.g.
+  RabbitMQ's Management API on `15672`, HTTP unless the mgmt TLS listener
+  is enabled on `15671` — was unreachable (it probed
+  `WRONG_VERSION_NUMBER`). The transport scheme is now read from an opt-in
+  `scheme` key in `Target.extras` (`{"http", "https"}`, default `https`),
+  with scheme-correct default-port elision (`443`/`80`). Absent the key,
+  behaviour is byte-identical (https, `:443` elided). An invalid value is
+  refused with a clear error at dispatch rather than silently coerced, and
+  the scheme is never derived from `verify_tls` (certificate trust and
+  transport selection stay orthogonal). Same-origin redirect following
+  keys on the effective scheme, so an http target's benign trailing-slash
+  canonicalisation is still followed while an http→https hop is refused
+  as cross-origin.
+### Fixed — configmap-roll pod annotation (#2586)
+
+- The backplane `Deployment` pod template now carries a `checksum/config`
+  annotation hashed from the rendered `configmap.yaml`. A `helm upgrade` that
+  changes only ConfigMap-rendered `config.*` (or `memory.*` / `topology.*` /
+  derived MCP/backplane) values now rolls the pod automatically instead of
+  requiring a manual `kubectl rollout restart`; an unchanged render keeps the
+  checksum stable, so there is no spurious pod churn.
+### Fixed — GSM secret-ref registration guard (#2585)
+
+- Target registration on a `config.credentialBackend: gsm` deploy no
+  longer rejects valid `gsm:<project>/<secret>[#field]` secret_refs with
+  a Vault-worded `422 secret_ref_outside_tenant_scope`. The registration-
+  time tenant-scope gate (`POST`/`PATCH /api/v1/targets`) now only applies
+  to refs that resolve through the Vault credential backend — decided by
+  the same `split_credential_ref` resolver dispatch uses — so a GSM
+  install registers `gsm:` refs out of the box with **zero** `extraEnv`
+  overrides (`deploy/values-examples/values-gsm-example.yaml`). Vault
+  deploys are unchanged; a per-target `gsm:` override ref is likewise
+  passed through on a Vault-default deploy.
+### Changed — retire CodeRabbit from the development flow
+
+- Remove the CodeRabbit review step from the contribution flow; the
+  in-house Claude review pass is the review of record on every PR
+  (#2601)
+
+## [0.24.0] - 2026-07-17
+
+This release **completes Broadcast v2 (Initiative #2543)** — the final
+three of seven tasks land the durable half of the agent coordination
+channel: announcements now survive a Valkey restart, humans see them on
+every read surface, and write-class dispatches carry a target-activity
+advisory so a caller learns another principal is already active.
+
+### Added — durable agent announcements: table, retention prune, recent DB backfill, real event UUIDs (#2547 / #2565)
+
+- Announcements previously lived only on the count-trimmed per-tenant
+  Valkey stream (`BROADCAST_MAXLEN=10000`), which the broadcast subchart
+  runs with persistence disabled — a restart wiped the whole coordination
+  window. This lands the durable half of Broadcast v2 (Initiative #2543,
+  T2).
+- New append-only `agent_announcement` table (Alembic migration `0067`,
+  down_revision `0066`) persisting the typed claim fields (#2544) plus
+  lineage: `id` UUID PK, `tenant_id`, `principal_sub`, `activity`,
+  `target`, `scope`, `targets`, `phase`, `planned_op_class`,
+  `ttl_minutes`, `work_ref`, `run_id`, `created_at`; indexes on
+  `(tenant_id, created_at DESC)` and `(tenant_id, work_ref)`.
+  `AgentAnnouncementEvent.event_id` is now a real per-announcement UUID
+  minted at publish — written to the row PK, the stream entry, and the
+  announce ack — genuinely distinct from `cursor` (the stream entry id),
+  closing the #2479 misnomer. The durable row is written before the
+  `XADD`; both legs fail loud so the agent knows if the announcement did
+  not land.
+- `meho.broadcast.recent` backfills from the table when the requested
+  window predates the stream's oldest surviving entry (or the stream is
+  empty after a restart), deduped by `event_id` and bounded by the page
+  limit; best-effort, so an archive-read failure degrades to stream-only
+  results (`watch` is deliberately not backfilled — a forward live tail
+  has no archive dimension). A weekly retention-prune sweep deletes rows
+  older than `BROADCAST_ANNOUNCEMENT_RETENTION_DAYS` (default 90, `0` =
+  keep-forever), emitting one INTERNAL audit row per non-no-op tick and
+  gated by `BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED`. Three new
+  `BROADCAST_ANNOUNCEMENT_*` knobs are surfaced across settings + Helm
+  values/schema/configmap.
+
+### Added — humans see agent announcements: SSE union validation + console history/stream + CLI (#2549 / #2564)
+
+- The intent stream was write-only for humans: the SSE pipeline validated
+  every entry as `BroadcastEvent`, so announcement JSON failed validation
+  and was skipped as malformed, and the console history pane hard-dropped
+  announcements. Announcements now surface on every human-facing read
+  (Broadcast v2, Initiative #2543, T5).
+- `_process_entries` (`api/v1/feed.py`) union-validates on the wire `kind`
+  discriminator (`select_event_model`, shared by the XREAD and XRANGE
+  paths), so both `BroadcastEvent` and `AgentAnnouncementEvent` flow to
+  SSE consumers as first-class frames on `/api/v1/feed` and
+  `/ui/broadcast/stream`; genuinely malformed entries still skip. The
+  console history renders both kinds through the shared `_event_row.html`
+  partial (announcements show a principal badge, phase chip, escaped
+  quoted activity, and the #2544 claim fields), and the former hard drop
+  became a user-facing `?kind=` filter (All / Operations / Announcements).
+- The human-facing read path serialises via `_dump_event_plain` (escaping
+  at render), so the LLM untrusted-text envelope (`dump_event_wire`, kept
+  for the MCP `recent`/`watch`/`tenant_feed` LLM-facing paths) is not
+  applied to the pane. `meho status --watch` (Go CLI) tolerates and
+  renders the new frame kind; the OpenAPI snapshot + generated client are
+  regenerated for the new `?kind=` history query parameter.
+
+### Added — dispatch-time target-activity advisory on write ops (#2550 / #2567)
+
+- A write-class dispatch on a target with recent peer activity now carries
+  `extras["target_activity_advisory"]` on its `OperationResult` success
+  response, so a caller doing a write learns another principal is already
+  active there (Broadcast v2, Initiative #2543, T7). This is **post-op
+  awareness — not a lock or a block**; pre-op checking stays the
+  discipline's `meho.broadcast.recent` read step.
+- The advisory projects up to five most-recent peer entries to structured
+  fields only (`principal_sub`, `actor_sub`, `kind`, `op_id`/`phase`,
+  `ts`) — announcement free text never enters the response. The caller's
+  own activity (principal + actor) is excluded; a sibling agent under the
+  same human surfaces as a peer. Read-class dispatches short-circuit
+  before any Valkey call, so the hot read path pays nothing; the lookup is
+  fail-open and bounded (a single newest-first `XREVRANGE` capped at 100),
+  gated by `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default 30, `0` =
+  off). Sampling newest-first via `XREVRANGE` (not the oldest-first
+  history helper) fixes the busy-target inversion where a tenant emitting
+  >100 events inside the window would have sampled window-*start* activity
+  instead of the newest peer.
+
+### Added — `meho.topology.bulk_import` MCP tool + `superseded` on annotate return (#2539 / #2582)
+
+- Give the agent surface the propose→plan→apply loop humans already have
+  on the REST/CLI/console bulk-import fronts. The new
+  `meho.topology.bulk_import` MCP tool (`tenant_admin`) defaults
+  `dry_run=true` — read-shaped, never parks, surfaces every row's
+  diagnostic on the `-32602` `error.data` (the REST 422 `invalid_bulk`
+  analogue). `dry_run=false` dispatches an apply-only targetless typed op
+  through the exact #2537 substrate the single writes use: an AGENT
+  principal parks the whole batch as one `ApprovalRequest`, a human
+  `tenant_admin` applies immediately, and approve-time re-dispatch applies
+  all rows atomically — no second approval queue, no new endpoints. The
+  1000-row cap is enforced at the tool boundary; the plan returns inline
+  under the cap.
+- `meho.topology.annotate`'s return shape gains a `superseded` list — the
+  ids of the auto edges an assertion displaced (already present on the
+  shared audit/broadcast payload, so this is an additive return-shape
+  change via the plan-returning `annotate_edge_with_plan`, leaving the
+  wide `annotate_edge` caller base untouched).
+
+### Changed — retire the expired RDC image-push `repository_dispatch` notify (#2578)
+
+- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
+  `.github/workflows/image.yml` (and its now-dead job-level
+  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
+  renewed, so the step — gated on the secret being present, not valid — failed
+  loud on every `main`/tag push with a `401` while the image build / sign /
+  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
+  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
+  the GitHub Releases feed. The cross-repo handshake docs are marked retired
+  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
+
+### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577 / #2581)
 
 - `meho targets import` failed against every v0.21.0+ backplane — `--dry-run`
   included — with `decode list response: json: cannot unmarshal object into Go
@@ -135,19 +398,7 @@ connector-related release-notes line.
   which is why the suite stayed green while the shipped verb was broken; they
   now serve the same envelope the backplane emits.
 
-### Changed — retire the expired RDC image-push `repository_dispatch` notify
-
-- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
-  `.github/workflows/image.yml` (and its now-dead job-level
-  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
-  renewed, so the step — gated on the secret being present, not valid — failed
-  loud on every `main`/tag push with a `401` while the image build / sign /
-  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
-  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
-  the GitHub Releases feed. The cross-repo handshake docs are marked retired
-  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
-
-### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507)
+### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507 / #2574)
 
 - **Check-runner never-raises hardening (#2505):** a non-`TimeoutError` exception
   from `dispatch()` now maps to an `unknown` outcome (`reason=dispatch_error`)
@@ -162,6 +413,25 @@ connector-related release-notes line.
   dashboard id / a digest of the `(kind, name)` identity, so causes and dashboards
   whose names slugify to the same string no longer share a suppression key or an
   in-flight work-ref.
+
+### Documentation — retire obsolete MVP-era planning docs; rehome the locked-decisions ADR (#2579, #2580)
+
+- Retire the frozen MVP-era planning docs (#2579): `mvp-roadmap.md` mapped
+  MVP1–9 onto v0.2–v0.11 and had been stale since 2026-06-05 (12 releases
+  behind), and its companion `release-plan.md` addressed a long-resolved
+  v0.2–v0.5-era divergence. The CHANGELOG + GitHub Releases are the live
+  record; the one inbound reference (from `api-shape-conventions.md`) is
+  dropped, leaving no dangling links.
+- Rehome the locked-decisions ADR out of its v0.2 wrapper (#2580): move
+  `docs/planning/v0.2-decisions.md` → `docs/decisions/locked-decisions.md`
+  (retiring `docs/planning/` entirely), retitle to "MEHO locked
+  architecture decisions", and strip 36 lines of dead v0.2 planning
+  scaffolding. The register's content is live — 12 load-bearing decisions
+  cited by ~84 places across source, migrations, tests, and docs; the `#N`
+  numbering is documented as never renumbered. All 87 references re-pointed
+  and verified (0 broken); migration docstring edits are comment-only (no
+  DDL, single head at `0066`).
+
 ## [0.23.0] - 2026-07-17
 
 ### Added — topology open node/edge kind vocabularies (#2555)

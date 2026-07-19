@@ -30,6 +30,7 @@ handling.
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Any, Literal
 
 import httpx
@@ -1476,7 +1477,11 @@ def result_connector_tls_verify_failed(
 
 
 def wrap_ok_result(
-    op_id: str, payload: Any, duration_ms: float, handle: ResultHandle | None
+    op_id: str,
+    payload: Any,
+    duration_ms: float,
+    handle: ResultHandle | None,
+    extras: Mapping[str, Any] | None = None,
 ) -> OperationResult:
     """Build a successful :class:`OperationResult` from a reducer's output.
 
@@ -1486,6 +1491,11 @@ def wrap_ok_result(
     :class:`ResultHandle` (when non-None) lands on the dedicated
     :attr:`OperationResult.handle` field — T6 (#397) promoted it from
     the ``extras`` stash T5 used to surface it.
+
+    *extras* carries envelope-extension fields the dispatcher computes on
+    the success path -- currently the dispatch-time target-activity
+    advisory (#2550). ``None`` leaves the frozen model's ``{}`` default
+    intact.
     """
     if payload is None or isinstance(payload, (dict, list)):
         result_value: dict[str, Any] | list[Any] | None = payload
@@ -1497,6 +1507,7 @@ def wrap_ok_result(
         result=result_value,
         duration_ms=duration_ms,
         handle=handle,
+        extras=extras if extras is not None else {},
     )
 
 

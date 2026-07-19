@@ -546,6 +546,7 @@ async def vcf_session_login(
     payload_builder: SessionPayloadBuilder | None = None,
     token_extractor: SessionTokenExtractor,
     request_headers: dict[str, str] | None = None,
+    request_extensions: dict[str, Any] | None = None,
 ) -> str:
     """POST credentials to *path* and return the extracted session token.
 
@@ -572,6 +573,14 @@ async def vcf_session_login(
     * ``request_headers`` — optional headers to set on the POST (e.g.
       ``Content-Type: application/json``, ``Accept: application/json``).
       The client's default headers are not modified.
+    * ``request_extensions`` — optional per-request httpx ``extensions``
+      (evoila/meho#2398). Consumers pass
+      ``HttpConnector._request_extensions(target)`` so the session-login
+      handshake honours a target's ``tls_server_name`` SNI / cert-verify
+      override, exactly as the dispatch seams
+      (``_request_json`` / ``_post_json``) already do. ``None`` (the
+      default) normalises to an empty dict, so the login is dispatched
+      byte-identically when no override is set.
 
     Raises:
 
@@ -594,7 +603,9 @@ async def vcf_session_login(
     else:
         body = {"username": username, "password": password}
     try:
-        resp = await client.post(path, json=body, headers=request_headers)
+        resp = await client.post(
+            path, json=body, headers=request_headers, extensions=request_extensions or {}
+        )
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
         message = (

@@ -135,6 +135,7 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642/#1672). Distinct ``id`` per
     # instance so two stub targets never collapse onto one cache entry.
     id: UUID = field(default_factory=uuid4)
@@ -891,3 +892,72 @@ async def test_aclose_with_no_cached_sessions_is_a_noop() -> None:
     await connector.aclose()
     assert connector._clients == {}
     assert connector._session_tokens == {}
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on session establish + revoke (#2398)
+# ---------------------------------------------------------------------------
+
+
+_TARGET_SNI = _StubTarget(
+    name="vcenter-sni",
+    host="vcenter-sni.test.invalid",
+    port=443,
+    secret_ref="vsphere/vcenter-sni",
+    tls_server_name="vcenter.corp.example",
+)
+
+
+@pytest.mark.asyncio
+async def test_establish_and_revoke_thread_sni_extension_modern_path() -> None:
+    """#2398: the modern establish POST and the revoke DELETE carry the SNI override.
+
+    A by-IP appliance whose cert pins an FQDN must offer ``tls_server_name``
+    as the TLS SNI / cert-verify name on the login POST (before this fix the
+    login bypassed the ``_request_extensions`` seam and failed
+    ``CERTIFICATE_VERIFY_FAILED`` under ``verify_tls=true``) and on the
+    best-effort shutdown revoke DELETE, which has no ``Target`` in scope.
+    """
+    connector = _make_connector()
+
+    async with respx.mock(base_url="https://vcenter-sni.test.invalid") as mock:
+        post_route = mock.post("/api/session").respond(200, json="sni-token")
+        delete_route = mock.delete("/api/session").respond(204)
+        await connector.auth_headers(_TARGET_SNI, _make_operator())
+        await connector.aclose()
+
+    assert post_route.called
+    assert post_route.calls[0].request.extensions["sni_hostname"] == "vcenter.corp.example"
+    assert delete_route.called
+    assert delete_route.calls[0].request.extensions["sni_hostname"] == "vcenter.corp.example"
+
+
+@pytest.mark.asyncio
+async def test_establish_threads_sni_extension_on_legacy_fallback() -> None:
+    """#2398: the legacy-fallback establish POST also carries the SNI override."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-sni.test.invalid") as mock:
+        mock.post("/api/session").respond(404)
+        legacy_route = mock.post("/rest/com/vmware/cis/session").respond(200, json="legacy-sni")
+        await connector.auth_headers(_TARGET_SNI, _make_operator())
+
+    assert legacy_route.called
+    assert legacy_route.calls[0].request.extensions["sni_hostname"] == "vcenter.corp.example"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_establish_omits_sni_extension_when_unset() -> None:
+    """#2398 existing-behaviour: a target with no override dispatches with empty extensions."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-a.test.invalid") as mock:
+        post_route = mock.post("/api/session").respond(200, json="plain-token")
+        await connector.auth_headers(_TARGET_A, _make_operator())
+
+    assert post_route.called
+    assert "sni_hostname" not in post_route.calls[0].request.extensions
+    await connector.aclose()

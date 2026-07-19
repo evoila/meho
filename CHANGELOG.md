@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — SNI on session-establish (#2398)
+
+- Every connector session-establish request now threads the target's
+  `tls_server_name` TLS SNI / certificate-verify name, matching the
+  dispatch path. Previously only the shared dispatch seams
+  (`_request_json` / `_post_json`) carried the SNI override from #2002,
+  so the hand-rolled login/token requests bypassed it: httpcore fell
+  back to `server_hostname = origin.host` and verified an appliance's
+  FQDN-SAN certificate against the registered IP, failing
+  `CERTIFICATE_VERIFY_FAILED` *before* auth. This blocked secure
+  (`verify_tls=true` + `tls_ca_pin`) registration of any by-IP endpoint
+  whose certificate pins an FQDN. The fix covers all six hand-rolled
+  session families — vmware `/api/session` (modern + legacy fallback +
+  shutdown revoke), `vcf_session_login` (vROps token/acquire, vRLI
+  sessions, SDDC `/v1/tokens`), NSX `/api/session/create`, VCFA
+  provider + tenant logins, proxmox ticket mint, keycloak admin token
+  grant — plus the profiled-connector logins (basic / form / json) and
+  the unauthenticated fingerprint probe. Behaviour is byte-identical
+  when `tls_server_name` is unset (empty extensions dict). (#2398)
 ### Added — docs/deploying.md consolidated deploy guide (#2468)
 
 - **A single operator-facing deployment & upgrade guide** now lives at

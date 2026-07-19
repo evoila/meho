@@ -64,6 +64,7 @@ class _StubTarget:
     port: int | None = 443
     secret_ref: str | None = "p/secret"
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     id: UUID = field(default_factory=uuid4)
     tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
 
@@ -1056,3 +1057,85 @@ def test_class_attribute_profile_is_used_when_not_injected() -> None:
     assert instance.profile is _StampedProfiled.profile
     assert instance.profile is not None
     assert instance.profile.auth.scheme == "basic"
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on profiled logins + fingerprint probe (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_login_attempt_json_variant_threads_sni_extension() -> None:
+    """#2398: the JSON-body login variant (session_login) carries the SNI override."""
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid", tls_server_name="vrli.corp.example")
+
+    async with respx.mock(base_url="https://vrli.invalid") as mock:
+        route = mock.post("/api/v2/sessions").respond(200, json={"sessionId": "s", "ttl": 1800})
+        await connector.auth_headers(target, operator=_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "vrli.corp.example"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_login_attempt_basic_variant_threads_sni_extension() -> None:
+    """#2398: the HTTP-Basic login variant (session_login_basic) carries the SNI override."""
+    connector = _connector("session_login_basic", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vc", host="vc.invalid", tls_server_name="vcenter.corp.example")
+
+    async with respx.mock(base_url="https://vc.invalid") as mock:
+        route = mock.post("/api/session").respond(200, json="sess-token")
+        await connector.auth_headers(target, operator=_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "vcenter.corp.example"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_login_attempt_form_variant_threads_sni_extension() -> None:
+    """#2398: the form-encoded login variant (oauth2_mint) carries the SNI override."""
+    connector = _connector("oauth2_mint", {"client_id": "cid", "client_secret": "csec"})
+    target = _StubTarget(name="kc", host="kc.invalid", tls_server_name="keycloak.corp.example")
+
+    async with respx.mock(base_url="https://kc.invalid") as mock:
+        route = mock.post("/realms/master/protocol/openid-connect/token").respond(
+            200, json={"access_token": "tok-kc", "expires_in": 300}
+        )
+        await connector.auth_headers(target, operator=_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "keycloak.corp.example"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unauthenticated_fingerprint_probe_threads_sni_extension() -> None:
+    """#2398: the unauthenticated fingerprint GET carries the SNI override."""
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="probe", host="probe.invalid", tls_server_name="probe.corp.example")
+
+    async with respx.mock(base_url="https://probe.invalid") as mock:
+        route = mock.get("/api/version").respond(200, json={"version": "1.0"})
+        await connector._get_unauthenticated_json(target, "/api/version")
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "probe.corp.example"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_login_attempt_omits_sni_extension_when_unset() -> None:
+    """#2398 existing-behaviour: a profiled login with no override dispatches empty extensions."""
+    connector = _connector("session_login", {"username": "svc", "password": "pw"})
+    target = _StubTarget(name="vrli", host="vrli.invalid")  # tls_server_name=None
+
+    async with respx.mock(base_url="https://vrli.invalid") as mock:
+        route = mock.post("/api/v2/sessions").respond(200, json={"sessionId": "s", "ttl": 1800})
+        await connector.auth_headers(target, operator=_operator())
+
+    assert route.called
+    assert "sni_hostname" not in route.calls[0].request.extensions
+    await connector.aclose()

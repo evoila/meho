@@ -695,7 +695,13 @@ The renderer singleton lives in `meho_backplane.ui.routes.kb.render`.
 A module-level `threading.Lock` guards the shared `MarkdownIt` instance
 (not thread-safe for concurrent `render()` calls). The pygments CSS is
 generated once at module load and injected as an inline `<style>` block
-in the entry-detail template.
+in the entry-detail template. It is emitted **theme-scoped** (#2452): a
+default/dark token set under `.kb-code` (pygments `github-dark`) plus a
+`[data-theme="meho-light"] .kb-code` override (pygments `default`), with
+pygments' own opaque container background stripped so the block sits on
+the live `var(--color-base-200)` surface the template pins — code blocks
+stay legible in both `meho-dark` and `meho-light` instead of forcing a
+light background via the dead DaisyUI 4 `--b2` variable.
 
 ## KB editor modal + mobile reflow (G10.2-T3 #872)
 

@@ -107,6 +107,83 @@ connector-related release-notes line.
   Approve never arms and has no reachable confirm state. Template-only —
   it reuses the structured envelope render from #2447 and mirrors the
   runbook lifecycle confirm mold (#1881/#1957) (#2446).
+### Changed — restyle Register Collection modal to kb form language (#2464)
+
+- The `/ui/corpus` **Register Collection** modal now speaks the same
+  form language as the `/ui/kb` "New entry" editor: a padding-less
+  box with a bordered header + close-circle button, the three fields
+  grouped into **Identity / Metadata / Backend** sections split by
+  dividers, `label py-0` label rows with a right-aligned hint, and a
+  bordered footer whose actions stay pinned while a long body scrolls.
+  The field set, submit contract, CSRF wiring, and per-field error
+  echo are unchanged — template-only. (#2464)
+### Fixed — badge-ghost+badge-outline contrast in alert banners (#2460)
+
+- The `/ui/retrieval` honesty-gap banners (Usage + Retire Checklist tabs)
+  render the counted `/mcp` search-surface labels
+  (`mcp:search_knowledge` / `_memory` / `_operations`) as badges that were
+  unreadable inside the coloured alert — near-black-on-near-black in
+  `meho-dark`, near-white-on-near-white in `meho-light`. The DaisyUI 5
+  `badge-ghost` + `badge-outline` combo resolves its text colour through
+  `badge-outline`'s `color: var(--badge-color)`; with no `badge-<color>`
+  modifier that variable is unset, so `color` falls back to inheritance and
+  inside the alert picks up the alert's `*-content` token on badge-ghost's
+  `base-200` surface. An unlayered `.alert .badge-ghost.badge-outline` rule
+  in `styles.css` now pins `base-content` on `base-200`, winning over the
+  layered DaisyUI declarations regardless of emission order; it is scoped to
+  `.alert` so the on-card badge usages are unaffected. CSS only. (#2460)
+### Fixed — unclip sidebar approvals badge (#2445)
+
+- The desktop sidebar's approvals-bell pending-count badge is no longer
+  clipped at the drawer edge. The badge is an absolute overlay on the bell
+  button (correct); the clip came from the account row overflowing the
+  `w-64` nav's content width — DaisyUI 5's `.btn { flex-shrink: 0 }` kept the
+  operator chip (avatar + mono `sub` label + chevron) at full width, so the
+  chip plus the fixed theme/bell buttons pushed the bell's right edge past
+  `:where(.drawer-side) { overflow-x: hidden }`. The operator chip now
+  absorbs the deficit: its flex wrapper and button carry `min-w-0` and the
+  button carries `shrink` (overriding the `.btn` rule) while the mono label
+  keeps `min-w-0 truncate` (ellipsis) and the avatar + chevron stay pinned
+  with `shrink-0`. A full-width Keycloak-`sub` operator label now truncates
+  instead of shoving the badge off-canvas, so the count is fully readable at
+  every `lg+` viewport width.
+### Added — in-flight spinners on console Run buttons (#2459)
+
+- The long-running action buttons on `/ui/retrieval` (Diagnostics Run, Run
+  eval, Run checklist) and `/ui/corpus` (Search Go) now show progress while a
+  request is in flight: the form declares `hx-indicator` targeting a
+  DaisyUI `htmx-indicator loading loading-spinner` span next to the button and
+  `hx-disabled-elt="find button[type=submit]"` so the button disables until the
+  fragment lands, following the existing kb-upload spinner precedent. An
+  `hx-disinherit="hx-disabled-elt hx-indicator"` guard keeps both attributes
+  from leaking onto descendant htmx requests in the swapped results region
+  (#2340). Operators no longer face a dead button with no feedback on
+  multi-second eval / checklist / ask runs.
+### Changed — /ui/corpus card titles from chunk title (#2461)
+
+- `/ui/corpus` result and citation cards now headline the chunk's
+  human-legible `title` (threaded through in #2475) instead of a raw
+  numeric/opaque document id. The `_cited_chunks` seam already feeds the
+  title into the `title → document_id → filename → URL` citation-label
+  chain, so the shared `chunk_cards` macro renders it as the card heading;
+  when a title displaces the id, the id is demoted into the metadata badge
+  row (alongside collection/score) so provenance stays visible without
+  being the headline. When the corpus supplies no title the id remains the
+  heading exactly as before — no regression, and no duplicate badge.
+
+### Fixed — DaisyUI 5 code-block theming on /ui/kb (#2452)
+
+- KB entry code blocks (`/ui/kb/<slug>`) are now legible in both console
+  themes. The detail and editor-preview templates pinned the code-block
+  background to the dead DaisyUI 4 `--b2` variable, so a near-white light
+  fallback applied in `meho-dark` too while text inherited the theme's
+  near-white `base-content` — unreadable. Backgrounds now derive from the
+  live `var(--color-base-200)` token, the query-term highlight uses
+  `color-mix(... var(--color-warning) ...)` instead of the dead `--wa`,
+  and `pygments_css()` emits theme-scoped token colours (dark `github-dark`
+  under `.kb-code`, light `default` under `[data-theme="meho-light"]`). The
+  same fix reaches the KB and runbooks editor live previews (shared
+  renderer). Template/CSS only. (#2452)
 
 ### Added — structured proposed_effect rendering on /ui/approvals (#2447)
 

@@ -53,6 +53,10 @@
     {% for entry in cited %}
       {% set chunk = entry.chunk %}
       {% set link = entry.link %}
+      {#- The chunk's human title (#2461/#2475). ``default(none, true)`` reads it
+          defensively under StrictUndefined and coerces a blank title to none, so
+          the demotion below keys on a genuine title only. -#}
+      {% set chunk_title = chunk.title | default(none, true) %}
       <li class="card bg-base-100 border-base-300 border shadow-sm">
         <div class="card-body py-3 space-y-2">
           <div class="flex flex-wrap items-start justify-between gap-2">
@@ -84,6 +88,16 @@
               {% endif %}
             </div>
             <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Chunk metadata">
+              {# When a human title heads the card (#2461), the resolver put that
+                 title in ``link.label`` and demoted the opaque/numeric document
+                 id out of the heading -- surface it here so provenance stays
+                 visible as metadata. When no title was supplied the id remains
+                 the heading (``link.label``), so it is not repeated as a badge. #}
+              {% if chunk_title and chunk.document_id %}
+                <span class="badge badge-ghost badge-outline font-mono" title="Document id">
+                  {{ chunk.document_id }}
+                </span>
+              {% endif %}
               {% if chunk.collection %}
                 <span class="badge badge-ghost badge-outline" title="Source collection">
                   {{ chunk.collection }}

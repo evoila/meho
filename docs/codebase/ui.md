@@ -695,7 +695,13 @@ The renderer singleton lives in `meho_backplane.ui.routes.kb.render`.
 A module-level `threading.Lock` guards the shared `MarkdownIt` instance
 (not thread-safe for concurrent `render()` calls). The pygments CSS is
 generated once at module load and injected as an inline `<style>` block
-in the entry-detail template.
+in the entry-detail template. It is emitted **theme-scoped** (#2452): a
+default/dark token set under `.kb-code` (pygments `github-dark`) plus a
+`[data-theme="meho-light"] .kb-code` override (pygments `default`), with
+pygments' own opaque container background stripped so the block sits on
+the live `var(--color-base-200)` surface the template pins — code blocks
+stay legible in both `meho-dark` and `meho-light` instead of forcing a
+light background via the dead DaisyUI 4 `--b2` variable.
 
 ## KB editor modal + mobile reflow (G10.2-T3 #872)
 
@@ -3012,6 +3018,24 @@ is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
   reuse without rotation, 401 propagation on a dead session), and the route
   ordering (retrieval include before stubs; literal diagnostics before any param
   route) + dashboard tile.
+
+### Honesty-gap badge contrast (#2460)
+
+The T2 Usage + T3 Retire fragments render the counted `/mcp` search-surface
+labels (`mcp:search_knowledge` / `_memory` / `_operations`) as
+`badge badge-ghost badge-outline` spans **inside** the `.alert.alert-info`
+honesty-gap banner. In the DaisyUI 5 bundle `.badge-outline` and `.badge-ghost`
+are mutually-exclusive style variants emitted in the same cascade layer:
+`.badge-outline { color: var(--badge-color) }` wins by emission order, and with
+no `badge-<color>` modifier `--badge-color` is unset, so `color` falls back to
+inheritance. On a plain card that inherits `base-content` (readable), but inside
+a coloured alert it inherits the alert's `*-content` token — near-black on
+badge-ghost's `base-200` surface in `meho-dark`, near-white on `base-200` in
+`meho-light` — so the badges vanished in both themes. `styles.css` carries an
+unlayered `.alert .badge-ghost.badge-outline` rule (in the "Chrome + component
+voice" block) that beats the layered DaisyUI declarations regardless of emission
+order, pinning `base-content` on `base-200` so the labels read in both themes;
+it is scoped to `.alert` so the ~15 on-card usages keep their inherited colour.
 
 ## Vault console — confirm-gated writes (G10.18-T2 #1957)
 

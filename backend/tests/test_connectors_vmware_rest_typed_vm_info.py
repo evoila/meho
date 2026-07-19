@@ -109,7 +109,7 @@ class _FakeConnector:
         self.get_calls.append((path, params))
         return self._listing
 
-    async def _post_json(
+    async def _post_vmomi_json(
         self,
         target: Any,
         path: str,
@@ -117,6 +117,9 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> Any:
+        # vmomi RetrievePropertiesEx read via the vmomi seam; the handler
+        # passes the spec-relative path (the /sdk/vim25 mount is the
+        # connector's job, #2466).
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
@@ -186,10 +189,11 @@ async def test_vm_info_by_moid_skips_listing_and_reads_props() -> None:
 
     # Addressed by moid: no name->moid listing GET was issued.
     assert conn.get_calls == []
-    # Exactly one mounted PropertyCollector read.
-    assert conn.mount_calls == ["/PropertyCollector/propertyCollector/RetrievePropertiesEx"]
+    # Exactly one vmomi PropertyCollector read via the vmomi seam (not
+    # mount_op_path), addressed by the spec-relative path (#2466).
+    assert conn.mount_calls == []
     assert len(conn.post_calls) == 1
-    assert conn.post_calls[0][0] == "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    assert conn.post_calls[0][0] == "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
 
     assert out["vm"] == "vm-42"
     assert out["name"] == "hung-appliance"

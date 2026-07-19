@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — /ui/corpus card titles from chunk title (#2461)
+
+- `/ui/corpus` result and citation cards now headline the chunk's
+  human-legible `title` (threaded through in #2475) instead of a raw
+  numeric/opaque document id. The `_cited_chunks` seam already feeds the
+  title into the `title → document_id → filename → URL` citation-label
+  chain, so the shared `chunk_cards` macro renders it as the card heading;
+  when a title displaces the id, the id is demoted into the metadata badge
+  row (alongside collection/score) so provenance stays visible without
+  being the headline. When the corpus supplies no title the id remains the
+  heading exactly as before — no regression, and no duplicate badge.
+
 ### Fixed — DaisyUI 5 code-block theming on /ui/kb (#2452)
 
 - KB entry code blocks (`/ui/kb/<slug>`) are now legible in both console

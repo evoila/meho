@@ -105,6 +105,72 @@ connector-related release-notes line.
   surface rather than renaming anything. `docs/codebase/mcp.md` records
   the split alongside the naming grammar.
 
+### Added — optional chunk title pass-through (#2475)
+
+- `search_docs` hits and `ask_docs` citations can now carry a
+  human-legible `title`. An optional `title` field is threaded from the
+  external corpus through `CorpusChunk` → `DocsChunk` → the citation
+  labels: a title arrives top-level (`title`) or nested under a chunk's
+  `metadata` (`metadata["title"]`), with the top-level key winning and
+  blank-after-strip normalising to `None`. The #1919 label chain
+  (`title → document_id → humanised filename → URL`) already prefers a
+  title but was starved because none survived the corpus projection;
+  the `ask_docs` and `/ui/corpus` citation seams now feed `chunk.title`
+  into it, so a hit renders by its title instead of a raw
+  `document_id` / numeric filename. Fully additive and null-safe:
+  MEHO has no doc-ingest path (federation-only, #1864 → #2049), so a
+  title can only originate upstream — consumers see `title: null` until
+  the corpus supplies one, and today's corpus (which sends none) is
+  unchanged. The REST `SearchDocsResponse` embeds `DocsChunk`, so the
+  OpenAPI snapshot + generated CLI client gain a nullable `title`
+  property.
+
+### Added — scope-twin connector row disambiguation (#2474)
+
+- **`GET /api/v1/connectors` and `meho.connector.list` now name each
+  row's scope and mark shadowed built-in twins** (#2474). A connector
+  ingested once built-in (`tenant_id IS NULL`) and once tenant-scoped —
+  the #2085 re-ingest trap, whose default was fixed in v0.20.0 (#2204)
+  but whose legacy rows persist on live deploys — used to render the
+  *same* `connector_id` twice with no way to tell the copies apart,
+  because `connector_id` encodes only `(impl_id, version)`. Each row now
+  carries an additive `scope` field (`"builtin"` / `"tenant"`), and a
+  built-in row whose `connector_id` also appears on a tenant-scoped twin
+  carries `shadowed_by_tenant_scope: true` — mirroring the tenant-wins
+  dispatch precedence, so an agent knows exactly which copy
+  `call_operation` resolves and can count unique connectors. Both twins
+  are kept (each holds real, scope-specific review state); no row is
+  hidden. `meho connector list` renders a shadowed built-in as
+  `(shadowed)` in the tenant column, and both fields ride `--json`.
+  Purely additive: single-scope responses are unchanged bar the new
+  `scope` field.
+### Changed — MCP identifier round-trips (#2471)
+
+- Unify list-row identifiers with the sibling verbs that consume them across
+  four MCP families, so the obvious round-trip
+  (`run_status(run_id=row.run_id)`, `grant.show(grant_id=row.id)`,
+  `scheduler.cancel(trigger_id=row.id)`, `list_runs(status=row.state)`) no
+  longer fails with `-32602`. Folds dogfood reports #2476 / #2477 / #2478 /
+  #2482.
+- **`meho.agents.run_status` now takes `run_id`** (the key `meho.agents.run`
+  and `meho.agents.list_runs` rows already return). The pre-#2471 `handle`
+  arg survives as a **deprecated alias** for one cycle — marked
+  `deprecated: true` in `tools/list`, guarded by the same `anyOf` +
+  handler-level XOR the approvals tools use; supplying both `run_id` and
+  `handle` rejects with `-32602` naming both. **Migration:** switch
+  `run_status` callers from `handle` to `run_id`; `handle` keeps working
+  until the alias is dropped.
+- Three additive response mirrors at the MCP wire boundary (REST surface and
+  shared Pydantic models untouched, native keys retained):
+  `meho.agents.grant.{list,show,create,elevate}` rows now carry `grant_id`
+  (== native `id`); `meho.scheduler.list` rows carry `trigger_id` (== native
+  `id`); `meho.runbook.list_runs` summaries carry `status` (== native
+  `state`). The runbook `status` list-filter is unchanged (§14.6).
+- Clarify the `template_slug` inputSchema description on the runbook template
+  verbs to state that responses carry both `template_slug` (mirror) and the
+  model-native `slug`, equal values (#2476) — no payload change.
+
+### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
 ### Added — credential_read response scrub + reveal_secret opt-in (#2467)
 
 - `credential_read`-classified dispatch responses (`vault.kv.read` and

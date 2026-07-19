@@ -90,6 +90,30 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Tested — search_memory service-account round-trip (#2484)
+
+- Closed the #2494 re-probe of the v0.21.0 field finding that
+  `search_memory` returned 0 hits for the backplane service-account
+  (`client_credentials`) JWT while the row was visible via the REST list
+  verb. A new Docker-gated integration suite
+  (`backend/tests/integration/test_memory_service_account_roundtrip_e2e.py`)
+  reproduces the finding's exact path against a real pgvector cluster
+  under a single, consistent `client_credentials` principal: mint a
+  `principal_kind=service` operator, `add_to_memory scope=user` over the
+  MCP tool surface, then `search_memory` for a token in the just-written
+  body (scope-omitted, `scope=user`, and stopword-only shapes). The
+  round-trip is **clean** — the service account retrieves its own write,
+  and the REST list rule (`MemoryService.list_memories`) returns the same
+  row. The finding did **not** reproduce for one consistent principal:
+  `principal_kind` is never consulted on the memory/retrieval path (there
+  is no principal-type filter), and the only per-principal predicate is
+  `metadata ->> 'user_sub' = :principal_sub` string equality, which the
+  write stamps and the search matches identically. The reported 0-hits
+  was a surface/principal-mixing artefact of the probe (a search `sub`
+  differing from the write `sub`), exactly as the triage predicted. No
+  behaviour change; interactive-OIDC principals are scoped by the same
+  `sub` equality and are unaffected.
+
 ### Documentation — kb tool description cross-refs (#2486)
 
 - The `search_knowledge` and `add_to_knowledge` MCP tool descriptions now

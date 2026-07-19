@@ -1513,6 +1513,158 @@ def test_modal_caution_safety_level_is_a_warning_badge() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Detail modal -- confirm-gate: consequence banner + arm-then-confirm (#2446)
+# ---------------------------------------------------------------------------
+
+
+def _render_pending_modal(
+    *,
+    effect: dict[str, object] | None = None,
+    self_approval: bool = False,
+) -> tuple[str, uuid.UUID]:
+    """Render the pending decision modal; return (html, request_id).
+
+    ``self_approval`` makes the reviewer the requester so the Approve button
+    renders in its #1401 blocked state.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    principal = _REVIEWER_SUB if self_approval else _REQUESTER_SUB
+    rid = _seed_request(tenant_id=_TENANT_A, principal_sub=principal, proposed_effect=effect)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, operator_sub=_REVIEWER_SUB)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    return response.text, rid
+
+
+def _opening_tag(html: str, marker: str) -> str:
+    """Return the ``<tag ...>`` opening tag whose attributes contain *marker*."""
+    pos = html.index(marker)
+    start = html.rfind("<", 0, pos)
+    end = html.index(">", pos)
+    return html[start : end + 1]
+
+
+def test_modal_pending_shows_consequence_banner_naming_safety_level() -> None:
+    """AC1: a pending modal carries a ``data-approval-gate="confirm"`` banner
+    whose text names the envelope ``safety_level`` value."""
+    body, _ = _render_pending_modal(
+        effect={
+            "op_id": "vsphere.vm.delete",
+            "connector_id": "vsphere-1.x",
+            "safety_level": "dangerous",
+        }
+    )
+    assert 'data-approval-gate="confirm"' in body
+    banner = body.split('data-approval-gate="confirm"')[1].split("</div>\n    </div>")[0]
+    # The banner's text includes the safety_level value.
+    assert "dangerous" in banner
+    # A dangerous level escalates the banner styling to error.
+    assert "alert-error" in _opening_tag(body, 'data-approval-gate="confirm"')
+    # It states each consequence plainly.
+    assert "no un-approve" in banner
+    assert "re-file" in banner
+
+
+def test_modal_consequence_banner_is_generic_warning_when_safety_absent() -> None:
+    """AC1 (absent case): with no ``safety_level`` the banner is generic warning."""
+    body, _ = _render_pending_modal(effect={"op_id": "some.op", "connector_id": "generic-1.x"})
+    assert 'data-approval-gate="confirm"' in body
+    tag = _opening_tag(body, 'data-approval-gate="confirm"')
+    assert "alert-warning" in tag
+    # No safety level to name -> the attribute is empty, not a stray "None".
+    assert 'data-safety-level=""' in tag
+    assert "None" not in body.split('data-approval-gate="confirm"')[1].split("</div>")[0]
+
+
+def test_modal_decisions_are_two_phase_armers_not_direct_posts() -> None:
+    """AC2: the ``data-action`` elements are ``type="button"`` armers, and the
+    ``hx-post`` submits sit behind the armed confirm state (unreachable at rest)."""
+    body, rid = _render_pending_modal()
+
+    # The Approve / Deny elements are armers: type=button, Alpine state only,
+    # and they carry NO hx-post of their own.
+    approve_armer = _opening_tag(body, 'data-action="approve"')
+    reject_armer = _opening_tag(body, 'data-action="reject"')
+    for armer, state in ((approve_armer, "approve"), (reject_armer, "reject")):
+        assert 'type="button"' in armer
+        assert f"armed = '{state}'" in armer
+        assert "hx-post" not in armer
+
+    # The decision POSTs live inside the armed confirm containers: the
+    # ``x-show="armed === '...'"`` gate opens BEFORE the hx-post form, and the
+    # confirm block is x-cloak'd so it is display:none until armed.
+    for state in ("approve", "reject"):
+        gate = f"x-show=\"armed === '{state}'\""
+        post = f'hx-post="/ui/approvals/{rid}/{state}"'
+        assert gate in body
+        assert post in body
+        assert body.index(gate) < body.index(post), state
+        # The gated block is cloaked (hidden until Alpine arms it).
+        assert "x-cloak" in body.split(gate)[1].split("</div>")[0]
+
+
+def test_modal_confirm_posts_to_existing_routes_no_new_endpoints() -> None:
+    """AC3: the armed confirm buttons post to the existing approve/reject routes;
+    the ``/ui/approvals`` route inventory gains no new endpoint."""
+    body, rid = _render_pending_modal()
+    assert f'hx-post="/ui/approvals/{rid}/approve"' in body
+    assert f'hx-post="/ui/approvals/{rid}/reject"' in body
+
+    # Route-inventory guard: the approvals surface exposes exactly the known
+    # path set -- the confirm gate is template-only and adds no endpoint.
+    from meho_backplane.ui.routes.approvals.routes import build_approvals_router
+
+    router = build_approvals_router()
+    approval_routes = {
+        (route.path, frozenset(route.methods))
+        for route in router.routes
+        if getattr(route, "path", "").startswith("/ui/approvals")
+    }
+    assert approval_routes == {
+        ("/ui/approvals/badge", frozenset({"GET"})),
+        ("/ui/approvals/list", frozenset({"GET"})),
+        ("/ui/approvals", frozenset({"GET"})),
+        ("/ui/approvals/{request_id}", frozenset({"GET"})),
+        ("/ui/approvals/{request_id}/approve", frozenset({"POST"})),
+        ("/ui/approvals/{request_id}/reject", frozenset({"POST"})),
+    }
+
+
+def test_modal_self_approval_blocks_approve_armer_and_confirm_state() -> None:
+    """AC4: a blocked self-approval keeps the Approve armer disabled with the
+    #1401 aria-label and renders NO approve confirm state; Deny still arms."""
+    body, _ = _render_pending_modal(self_approval=True)
+
+    approve_armer = _opening_tag(body, 'data-action="approve"')
+    assert "disabled" in approve_armer
+    assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_armer
+    # A blocked Approve never arms: no click-to-arm handler on it, and the
+    # approve confirm state is not rendered at all.
+    assert "armed = 'approve'" not in body
+    assert "x-show=\"armed === 'approve'\"" not in body
+    # Deny still arms (withdrawing your own request is not an escalation).
+    reject_armer = _opening_tag(body, 'data-action="reject"')
+    assert "disabled" not in reject_armer
+    assert "armed = 'reject'" in reject_armer
+    assert "x-show=\"armed === 'reject'\"" in body
+
+
+def test_modal_armed_deny_state_states_denial_is_terminal_and_refile() -> None:
+    """AC5: the armed Deny confirm copy states the denial is terminal / re-file."""
+    body, _ = _render_pending_modal()
+    assert 'data-approval-confirm="reject"' in body
+    deny_confirm = body.split('data-approval-confirm="reject"')[1].split("</p>")[0]
+    assert "terminal" in deny_confirm
+    assert "re-file" in deny_confirm
+
+
+# ---------------------------------------------------------------------------
 # params / params_hash never leak (#1827 -- a hard requirement)
 # ---------------------------------------------------------------------------
 

@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — scope-twin connector row disambiguation (#2474)
+
+- **`GET /api/v1/connectors` and `meho.connector.list` now name each
+  row's scope and mark shadowed built-in twins** (#2474). A connector
+  ingested once built-in (`tenant_id IS NULL`) and once tenant-scoped —
+  the #2085 re-ingest trap, whose default was fixed in v0.20.0 (#2204)
+  but whose legacy rows persist on live deploys — used to render the
+  *same* `connector_id` twice with no way to tell the copies apart,
+  because `connector_id` encodes only `(impl_id, version)`. Each row now
+  carries an additive `scope` field (`"builtin"` / `"tenant"`), and a
+  built-in row whose `connector_id` also appears on a tenant-scoped twin
+  carries `shadowed_by_tenant_scope: true` — mirroring the tenant-wins
+  dispatch precedence, so an agent knows exactly which copy
+  `call_operation` resolves and can count unique connectors. Both twins
+  are kept (each holds real, scope-specific review state); no row is
+  hidden. `meho connector list` renders a shadowed built-in as
+  `(shadowed)` in the tenant column, and both fields ride `--json`.
+  Purely additive: single-scope responses are unchanged bar the new
+  `scope` field.
+
 ### Added — operator-console OAuth chart values (#2594)
 
 - The Helm chart now renders the operator-console (`/ui/*`) browser

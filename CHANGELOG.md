@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Documentation — kb tool description cross-refs (#2486)
+
+- The `search_knowledge` and `add_to_knowledge` MCP tool descriptions now
+  cross-reference the substrate's `kb` REST/CLI surface: every non-MCP
+  surface names this substrate `kb` (REST `/api/v1/kb`, CLI `meho kb`,
+  console `/ui/kb`), there is no `/api/v1/knowledge` route, and entry
+  deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}` or
+  `meho kb delete` — no MCP delete tool). This closes the discoverability
+  trap a live v0.21.0 probe hit: an agent that wrote via
+  `add_to_knowledge` and then reached for `/api/v1/knowledge/{slug}` to
+  clean up got a 404. The MCP↔REST name split is a recorded design
+  decision (#417 / #331), not drift, so the fix points agents at the real
+  surface rather than renaming anything. `docs/codebase/mcp.md` records
+  the split alongside the naming grammar.
+
 ### Added — credential_read response scrub + reveal_secret opt-in (#2467)
 
 - `credential_read`-classified dispatch responses (`vault.kv.read` and

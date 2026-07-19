@@ -151,6 +151,10 @@ def test_tool_descriptions_satisfy_ai_engineering_anchor(
     assert "BEFORE writing" in search_desc or "before writing" in search_desc.lower()
     # Pointer to the companion resource for the full body.
     assert "meho://kb/" in search_desc
+    # #2486: cross-reference the kb REST/CLI surface so a caller that
+    # hits the non-existent `/api/v1/knowledge` learns the real path.
+    assert "/api/v1/kb" in search_desc
+    assert "meho kb delete" in search_desc
 
     add_desc = tools_by_name["add_to_knowledge"]["description"]
     # When to use: capturing generalisable knowledge.
@@ -159,6 +163,10 @@ def test_tool_descriptions_satisfy_ai_engineering_anchor(
     assert "memory" in add_desc.lower()
     # Slug-first discipline: search first.
     assert "search_knowledge" in add_desc
+    # #2486: same cross-reference on the write tool — the write→cleanup
+    # 404 trap is exactly the path the live probe failed to find.
+    assert "/api/v1/kb" in add_desc
+    assert "meho kb delete" in add_desc
 
 
 @pytest.mark.parametrize(

@@ -104,6 +104,35 @@ connector-related release-notes line.
   same fix reaches the KB and runbooks editor live previews (shared
   renderer). Template/CSS only. (#2452)
 
+### Added — structured proposed_effect rendering on /ui/approvals (#2447)
+
+- The `/ui/approvals` detail modal now renders the parked
+  `proposed_effect` envelope **structurally** instead of as one opaque
+  JSON blob: a `safety_level` badge + `op_class` chip in the header, a
+  warning banner when the connector identity may lack write permission
+  (`write_capability_warning`), an error banner when the preview builder
+  failed (`preview_unavailable` + `preview_error` — "blast radius
+  unknown"), a reason-keyed notice when no preview was populated
+  (deliberately-redacted credential write vs. connector-did-not-populate),
+  and a key-value table of the operation-specific fields (the bespoke
+  `preview`, else the generic redaction-safe `params_echo`). The full raw
+  envelope stays available behind a default-closed "Show raw JSON"
+  expander. Reviewers see the policy gate, the possible post-approval
+  denial, and the redaction posture at a glance. Template-only — the
+  render is generic (no per-`op_id` branching); op semantics already live
+  in the server-side preview builders (#2447).
+
+### Fixed — dot-containing-slug preview selectors on /ui/kb (#2451)
+
+- The `/ui/kb` search result cards built the hover-preview `hx-target` and the
+  Alpine `after-swap` handler from `#kb-preview-<slug>` CSS selectors. KB slugs
+  may contain dots (`SLUG_PATTERN` allows `.`), and `.` is the class delimiter
+  in CSS selector syntax, so a dotted slug (e.g. `meho-0.2-deployment`) made the
+  `hx-target` unresolvable and threw a `SyntaxError` in the document-wide
+  `after-swap` handler on every htmx swap — breaking the preview affordance for
+  every dot-slug card. Both sites now use the attribute-selector form
+  `[id="kb-preview-<slug>"]`, which is a valid selector for every legal slug;
+  the dotted element ids themselves are unchanged.
 ### Added — doc-collection delete across REST/MCP/CLI (#2487)
 
 - A disabled, tenant-owned documentation collection can now be

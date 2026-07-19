@@ -143,7 +143,9 @@ from meho_backplane.retrieval.retire import (
 )
 from meho_backplane.retrieval.retriever import (
     CANDIDATE_LIMIT,
+    RetrievalFacets,
     RetrievalHit,
+    list_retrieval_facets,
     retrieve,
 )
 from meho_backplane.retrieval.usage import (
@@ -243,30 +245,58 @@ async def _resolve_operator(session: UISessionContext) -> Operator:
     return operator
 
 
-async def _resolve_platform_admin_softly(session: UISessionContext) -> bool:
-    """Return ``operator.platform_admin`` for the page render, failing **soft**.
+async def _resolve_operator_softly(session: UISessionContext) -> Operator | None:
+    """Reconstruct the operator for the read-only page render, failing **soft**.
 
-    The retire tab renders the cross-tenant ``tenant_filter`` selector only for a
-    platform admin. Deciding that requires reconstructing the operator on the
-    read-only ``GET /ui/retrieval`` render, but the page must keep rendering even
-    when the JWT round-trip can't complete (a transient JWKS outage, a session
+    Two page-render concerns need the operator on the ``GET /ui/retrieval``
+    render: the retire tab's cross-tenant ``tenant_filter`` selector (shown only
+    to a platform admin) and the diagnostics Source / Kind datalists (#2458,
+    enumerated own-tenant + own-principal). Both must keep rendering even when
+    the JWT round-trip can't complete (a transient JWKS outage, a session
     revoked in the gap since the middleware check). So any failure projects to
-    ``False`` -- the selector is hidden -- mirroring the soft-hide posture
+    ``None`` -- the selector hides and the datalists render empty -- mirroring
+    the soft-hide posture
     :func:`~meho_backplane.ui.routes.connectors.operator.resolve_role_probe`
-    uses. The hide is only a UX hint: the ``POST`` handler reconstructs the
-    operator for real and :func:`~meho_backplane.auth.rbac.authorize_tenant_scope`
-    stays the server-side authority on every cross-tenant claim.
+    uses. The hide is only a UX hint: every ``POST`` handler reconstructs the
+    operator for real and the server-side authorities
+    (:func:`~meho_backplane.auth.rbac.authorize_tenant_scope`, the substrate's
+    own tenant + per-principal predicates) stay authoritative.
     """
     try:
-        operator = await _resolve_operator(session)
+        return await _resolve_operator(session)
     except Exception as exc:
         log.info(
-            "ui_retrieval_platform_admin_probe_unavailable",
+            "ui_retrieval_operator_probe_unavailable",
             session_id=str(session.session_id),
             reason=type(exc).__name__,
         )
-        return False
-    return operator.platform_admin
+        return None
+
+
+async def _load_retrieval_facets(operator: Operator | None) -> RetrievalFacets:
+    """Enumerate the tenant's distinct Source / Kind values for the datalists.
+
+    Fails **soft** to empty facets: a datalist is a discovery aid, not a gate,
+    so a DB hiccup (or an unresolved operator) must never 500 the read-only page
+    render. Delegates to
+    :func:`~meho_backplane.retrieval.retriever.list_retrieval_facets`, own-tenant
+    + own-principal scoped, so no cross-tenant source/kind leaks into the
+    suggestions and a user-scoped memory kind another principal owns is excluded
+    -- the values offered are exactly the ones the diagnostics ``retrieve`` call
+    can actually match.
+    """
+    if operator is None:
+        return RetrievalFacets(sources=(), kinds=())
+    try:
+        return await list_retrieval_facets(operator.tenant_id, principal_sub=operator.sub)
+    except Exception as exc:
+        log.info(
+            "ui_retrieval_facets_unavailable",
+            operator_sub=operator.sub,
+            tenant_id=str(operator.tenant_id),
+            reason=type(exc).__name__,
+        )
+        return RetrievalFacets(sources=(), kinds=())
 
 
 def _compute_query_hash(query: str) -> str:
@@ -445,7 +475,9 @@ async def _render_retrieval_index(
     re-checks server-side via ``authorize_tenant_scope``).
     """
     csrf_token = mint_csrf_token(str(session.session_id))
-    platform_admin = await _resolve_platform_admin_softly(session)
+    operator = await _resolve_operator_softly(session)
+    platform_admin = operator.platform_admin if operator is not None else False
+    facets = await _load_retrieval_facets(operator)
     context: dict[str, object] = {
         **_diagnostics_form_context(
             query="",
@@ -454,6 +486,13 @@ async def _render_retrieval_index(
             limit=_DEFAULT_LIMIT,
             csrf_token=csrf_token,
         ),
+        # Source / Kind diagnostics datalists (#2458): the distinct
+        # retrieval-visible values so an operator picks a filter the substrate
+        # holds instead of guessing. Page-render only -- the POST diagnostics
+        # fragment re-renders only the results region, not the form, so these
+        # are not threaded through ``_diagnostics_form_context``.
+        "source_options": facets.sources,
+        "kind_options": facets.kinds,
         "hits": [],
         "searched": False,
         "candidate_limit": CANDIDATE_LIMIT,

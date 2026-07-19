@@ -325,6 +325,40 @@ def test_retrieval_index_renders_diagnostics_tab_active_and_empty_results() -> N
     assert 'hx-post="/ui/retrieval/diagnostics"' in body
 
 
+def test_run_buttons_carry_in_flight_spinner_and_disable_attrs() -> None:
+    """Each multi-second Run form wires hx-indicator + hx-disabled-elt (#2459).
+
+    The Diagnostics / Eval / Retire forms declare ``hx-indicator`` (pointing at
+    an ``htmx-indicator`` spinner span) and ``hx-disabled-elt`` targeting their
+    own submit button, plus an ``hx-disinherit`` guard so neither attribute
+    leaks onto a descendant htmx request in the swapped results region (#2340).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    # Each Run form: indicator target + submit-button disable + disinherit guard.
+    for spinner_id in (
+        "retrieval-diagnostics-spinner",
+        "retrieval-eval-spinner",
+        "retrieval-retire-spinner",
+    ):
+        assert f'hx-indicator="#{spinner_id}"' in body
+        # The spinner span exists and carries the htmx-indicator class.
+        assert f'id="{spinner_id}"' in body
+    assert body.count('hx-disabled-elt="find button[type=submit]"') >= 3
+    assert body.count('hx-disinherit="hx-disabled-elt hx-indicator"') >= 3
+    assert body.count("htmx-indicator loading loading-spinner") >= 3
+
+
 # ---------------------------------------------------------------------------
 # POST /ui/retrieval/diagnostics -- successful fragment + per-signal breakdown
 # ---------------------------------------------------------------------------

@@ -491,7 +491,41 @@ async def list_ingested_connectors(
             catalog=_load_catalog_or_none(),
         ),
     )
-    return items
+    return _mark_shadowed_builtin_rows(items)
+
+
+def _mark_shadowed_builtin_rows(
+    items: list[ConnectorListItem],
+) -> list[ConnectorListItem]:
+    """Stamp ``shadowed_by_tenant_scope=True`` on shadowed built-in rows.
+
+    ``connector_id`` encodes only ``(impl_id, version)``, so a connector
+    ingested once built-in (``tenant_id IS NULL``) and once tenant-scoped
+    — the #2085 re-ingest trap — renders the same ``connector_id`` under
+    two ``scope`` values. Dispatch is deterministic: a tenant-scoped
+    descriptor wins over the built-in one
+    (:func:`~meho_backplane.operations._lookup.lookup_descriptor`). This
+    post-pass mirrors that precedence on the listing so a consumer knows
+    which twin ``call_operation`` resolves: a ``scope="builtin"`` row
+    whose ``connector_id`` also appears on a ``scope="tenant"`` row in
+    the same response is flagged shadowed.
+
+    Runs over the full response (DB-backed + class-side rows) so the
+    marker reflects exactly what the caller sees. Built on
+    :meth:`~pydantic.BaseModel.model_copy` because
+    :class:`ConnectorListItem` is frozen; only the built-in members of a
+    twin pair are rewritten, so single-scope responses are returned
+    untouched.
+    """
+    tenant_scoped_ids = {item.connector_id for item in items if item.scope == "tenant"}
+    if not tenant_scoped_ids:
+        return items
+    return [
+        item.model_copy(update={"shadowed_by_tenant_scope": True})
+        if item.scope == "builtin" and item.connector_id in tenant_scoped_ids
+        else item
+        for item in items
+    ]
 
 
 async def _emit_db_backed_rows(
@@ -555,6 +589,7 @@ async def _emit_db_backed_rows(
                 state="ingested",
                 kind=kind,
                 dispatchable=dispatchable,
+                scope="tenant" if tenant_uuid is not None else "builtin",
             ),
         )
     return items
@@ -717,6 +752,7 @@ def _maybe_build_class_only_item(
         state="registered",
         kind=kind,
         dispatchable=False,
+        scope="builtin",
         next_step=_next_step_for_registered(
             # Lookup against the registry triple (the catalog's native
             # key) rather than the parsed one — for SDDC the registry

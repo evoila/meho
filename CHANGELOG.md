@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — Source/Kind datalists on /ui/retrieval (#2458)
+
+- The `/ui/retrieval` diagnostics Source and Kind filter inputs are now backed
+  by `<datalist>` suggestions enumerated from a tenant-scoped
+  `SELECT DISTINCT source, kind` over the operator's retrieval-visible
+  `documents` rows. An operator no longer has to guess valid filter values and
+  hit a silent zero-result — the offered values are exactly the ones the
+  in-process `retrieve` call can match. The inputs stay free-typing (kinds are
+  free-form by design), and the query carries the same tenant + per-principal
+  visibility predicate `retrieve` enforces, so no cross-tenant value and no
+  other principal's user-scoped memory kind leaks into the suggestions.
+- The Source field's help text now steers docs-corpus collection lookups to
+  `/ui/corpus`: those collections live on a different substrate that `retrieve`
+  never queries, so a collection name (e.g. `vmware`) can never be a retrieval
+  Source. That mismatch was the root of the "Source=`vmware` → 0 hits"
+  confusion.
+
 ### Changed — restyle Register Collection modal to kb form language (#2464)
 
 - The `/ui/corpus` **Register Collection** modal now speaks the same

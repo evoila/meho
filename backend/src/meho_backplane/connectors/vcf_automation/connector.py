@@ -312,7 +312,9 @@ class VcfAutomationConnector(HttpConnector):
                 self._credentials_loader, target, operator, override_ref
             )
             client = await self._http_client(target)
-            jwt = await vcfa_provider_login(client, creds, target)
+            jwt = await vcfa_provider_login(
+                client, creds, target, request_extensions=self._request_extensions(target)
+            )
             self._provider_tokens[cache_key] = jwt
             return jwt
 
@@ -361,7 +363,9 @@ class VcfAutomationConnector(HttpConnector):
                 self._credentials_loader, target, operator, None
             )
             client = await self._http_client(target)
-            token = await tenant_login(client, creds, target)
+            token = await tenant_login(
+                client, creds, target, request_extensions=self._request_extensions(target)
+            )
             self._tenant_tokens[cache_key] = token
             return token
 

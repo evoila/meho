@@ -110,6 +110,7 @@ class _StubTarget:
     domain: str | None = None
     provider_username: str | None = None
     provider_secret_ref: str | None = None
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642/#1672).
     id: UUID = field(default_factory=uuid4)
     tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
@@ -1060,3 +1061,52 @@ async def test_aclose_with_no_cached_sessions_is_a_noop() -> None:
     assert connector._clients == {}
     assert connector._provider_tokens == {}
     assert connector._tenant_tokens == {}
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on both plane logins (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_provider_login_threads_sni_extension() -> None:
+    """#2398: the provider-plane login POST carries the target's SNI override."""
+    connector = _make_connector()
+    target = _StubTarget(
+        name="vcfa-sni",
+        host="vcfa-sni.test.invalid",
+        port=443,
+        secret_ref="vcfa/vcfa-sni",
+        tls_server_name="vcfa.corp.example",
+    )
+
+    async with respx.mock(base_url="https://vcfa-sni.test.invalid") as mock:
+        login = mock.post("/cloudapi/1.0.0/sessions/provider").respond(
+            200, headers={"X-VMWARE-VCLOUD-ACCESS-TOKEN": "p-jwt"}
+        )
+        await connector.auth_headers(target, operator=_make_operator(), path="/cloudapi/1.0.0/orgs")
+
+    assert login.called
+    assert login.calls[0].request.extensions["sni_hostname"] == "vcfa.corp.example"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tenant_login_threads_sni_extension() -> None:
+    """#2398: the tenant-plane login POST carries the target's SNI override."""
+    connector = _make_connector()
+    target = _StubTarget(
+        name="vcfa-sni-t",
+        host="vcfa-sni-t.test.invalid",
+        port=443,
+        secret_ref="vcfa/vcfa-sni-t",
+        tls_server_name="vcfa-tenant.corp.example",
+    )
+
+    async with respx.mock(base_url="https://vcfa-sni-t.test.invalid") as mock:
+        login = mock.post("/iaas/api/login").respond(200, json={"token": "t-tok"})
+        await connector.auth_headers(target, operator=_make_operator(), path="/iaas/api/projects")
+
+    assert login.called
+    assert login.calls[0].request.extensions["sni_hostname"] == "vcfa-tenant.corp.example"
+    await connector.aclose()

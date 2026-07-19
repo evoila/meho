@@ -109,6 +109,97 @@ connector-related release-notes line.
   `(shadowed)` in the tenant column, and both fields ride `--json`.
   Purely additive: single-scope responses are unchanged bar the new
   `scope` field.
+### Changed — MCP identifier round-trips (#2471)
+
+- Unify list-row identifiers with the sibling verbs that consume them across
+  four MCP families, so the obvious round-trip
+  (`run_status(run_id=row.run_id)`, `grant.show(grant_id=row.id)`,
+  `scheduler.cancel(trigger_id=row.id)`, `list_runs(status=row.state)`) no
+  longer fails with `-32602`. Folds dogfood reports #2476 / #2477 / #2478 /
+  #2482.
+- **`meho.agents.run_status` now takes `run_id`** (the key `meho.agents.run`
+  and `meho.agents.list_runs` rows already return). The pre-#2471 `handle`
+  arg survives as a **deprecated alias** for one cycle — marked
+  `deprecated: true` in `tools/list`, guarded by the same `anyOf` +
+  handler-level XOR the approvals tools use; supplying both `run_id` and
+  `handle` rejects with `-32602` naming both. **Migration:** switch
+  `run_status` callers from `handle` to `run_id`; `handle` keeps working
+  until the alias is dropped.
+- Three additive response mirrors at the MCP wire boundary (REST surface and
+  shared Pydantic models untouched, native keys retained):
+  `meho.agents.grant.{list,show,create,elevate}` rows now carry `grant_id`
+  (== native `id`); `meho.scheduler.list` rows carry `trigger_id` (== native
+  `id`); `meho.runbook.list_runs` summaries carry `status` (== native
+  `state`). The runbook `status` list-filter is unchanged (§14.6).
+- Clarify the `template_slug` inputSchema description on the runbook template
+  verbs to state that responses carry both `template_slug` (mirror) and the
+  model-native `slug`, equal values (#2476) — no payload change.
+
+### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
+### Added — credential_read response scrub + reveal_secret opt-in (#2467)
+
+- `credential_read`-classified dispatch responses (`vault.kv.read` and
+  its `_CREDENTIAL_READ_OPS` siblings) are now key-name scrubbed before
+  they reach the `call_operation` caller: secret-named values in the
+  transport response are replaced with `[REDACTED:param_name]` while
+  non-secret siblings (`username`, `version`) survive. This closes the
+  gap where the connector-boundary redaction engine — which matches only
+  labelled secret shapes inside string leaves — passed a
+  `{"password": "<value>"}` dict through verbatim into an agent caller's
+  model-API transcript. A caller that must pipe the raw value onward
+  passes a reserved `params.reveal_secret=true`, which returns the raw
+  value and is stamped queryably on the audit row
+  (`payload['reveal_secret']`). The audit `raw_payload` keeps the raw
+  result in both cases — only the transport response is scrubbed
+  (mirrors the #2172 secret-handler posture). The scrub keys on the op
+  class, not the caller kind. Approved human flows keep working by
+  opting in: the `/ui` Vault console read (reveal-on-click) and CLI
+  `meho secret read` (pipe-only) both pass `reveal_secret=true`;
+  `secret.move` stays the recommended no-transit path. The reserved
+  `reveal_secret` flag is stripped before op-schema validation and
+  `params_hash`, so a scrubbed read and its reveal share one hash.
+### Fixed — SNI on session-establish (#2398)
+
+- Every connector session-establish request now threads the target's
+  `tls_server_name` TLS SNI / certificate-verify name, matching the
+  dispatch path. Previously only the shared dispatch seams
+  (`_request_json` / `_post_json`) carried the SNI override from #2002,
+  so the hand-rolled login/token requests bypassed it: httpcore fell
+  back to `server_hostname = origin.host` and verified an appliance's
+  FQDN-SAN certificate against the registered IP, failing
+  `CERTIFICATE_VERIFY_FAILED` *before* auth. This blocked secure
+  (`verify_tls=true` + `tls_ca_pin`) registration of any by-IP endpoint
+  whose certificate pins an FQDN. The fix covers all six hand-rolled
+  session families — vmware `/api/session` (modern + legacy fallback +
+  shutdown revoke), `vcf_session_login` (vROps token/acquire, vRLI
+  sessions, SDDC `/v1/tokens`), NSX `/api/session/create`, VCFA
+  provider + tenant logins, proxmox ticket mint, keycloak admin token
+  grant — plus the profiled-connector logins (basic / form / json) and
+  the unauthenticated fingerprint probe. Behaviour is byte-identical
+  when `tls_server_name` is unset (empty extensions dict). (#2398)
+### Added — docs/deploying.md consolidated deploy guide (#2468)
+
+- **A single operator-facing deployment & upgrade guide** now lives at
+  `docs/deploying.md`, consolidating knowledge previously scattered
+  across the chart values, the acceptance contracts, and several
+  deep-dive docs (or missing entirely). It covers: a cold-install
+  prerequisites checklist (pgvector superuser `CREATE EXTENSION`, the
+  asyncpg `DATABASE_URL` Secret shape, Keycloak realm + MCP-audience
+  resolvability, internal-CA trust bundle, pinned `image.tag`,
+  first-boot `startupProbe` budget); the two credential-backend install
+  paths side by side (Vault vs GSM/Vault-free, `config.credentialBackend`);
+  the Helm-4 server-side-apply field-conflict upgrade caveat (the
+  v0.22.0 `startupProbe` example, pre-flight `--show-managed-fields`,
+  remedy `helm upgrade --force-conflicts`); a version-specific
+  upgrade-notes table (v0.15.0 Vault tenant-scope guard, v0.22.0 SSA
+  conflict); and operational chart knobs. The guide **links into** the
+  existing deep-dives rather than restating them. Cross-linked from
+  `README.md`, `docs/codebase/devops.md`, and
+  `deploy/values-examples/README.md`; `docs/RELEASING.md` now carries a
+  checklist line obliging the release-cutting PR to append a
+  version-specific upgrade-notes row when a release carries an
+  upgrade-relevant change. Docs-only; resurrects #559 with post-v0.21.0
+  motivation (#2468).
 
 ### Added — operator-console OAuth chart values (#2594)
 

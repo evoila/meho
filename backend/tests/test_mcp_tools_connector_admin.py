@@ -461,6 +461,84 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
     [TenantRole.OPERATOR],
     indirect=True,
 )
+def test_call_meho_connector_list_surfaces_scope_twin_fields(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``meho.connector.list`` passes ``scope`` + ``shadowed_by_tenant_scope`` through.
+
+    #2474: the tool serialises each row via ``model_dump(mode="json")``,
+    so the two additive scope-twin fields ride the MCP surface identically
+    to REST. Seeds a built-in + tenant twin pair (same ``connector_id``)
+    where the built-in copy is shadowed by the tenant-scoped one that
+    dispatch resolves first.
+    """
+    client, op = client_with_operator
+
+    async def _fake_twins(**_kwargs: Any) -> list[ConnectorListItem]:
+        return [
+            ConnectorListItem(
+                connector_id="vmware-rest-9.0",
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                tenant_id=None,
+                group_count=3,
+                staged_group_count=3,
+                enabled_group_count=0,
+                disabled_group_count=0,
+                operation_count=42,
+                enabled_operation_count=0,
+                scope="builtin",
+                shadowed_by_tenant_scope=True,
+            ),
+            ConnectorListItem(
+                connector_id="vmware-rest-9.0",
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                tenant_id=op.tenant_id,
+                group_count=3,
+                staged_group_count=0,
+                enabled_group_count=3,
+                disabled_group_count=0,
+                operation_count=42,
+                enabled_operation_count=7,
+                scope="tenant",
+            ),
+        ]
+
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    monkeypatch.setattr(ca_mod, "list_ingested_connectors", _fake_twins)
+
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "meho.connector.list", "arguments": {}},
+        },
+    )
+    assert response.status_code == 200
+    connectors = _unwrap_text_content(response.json())["connectors"]
+
+    by_scope = {c["scope"]: c for c in connectors}
+    assert set(by_scope) == {"builtin", "tenant"}
+    assert by_scope["builtin"]["shadowed_by_tenant_scope"] is True
+    assert by_scope["tenant"]["shadowed_by_tenant_scope"] is False
+    # Both twins keep the same connector_id but stay distinguishable by scope.
+    assert by_scope["builtin"]["connector_id"] == by_scope["tenant"]["connector_id"]
+    pairs = [(c["connector_id"], c["scope"]) for c in connectors]
+    assert len(pairs) == len(set(pairs))
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
 def test_call_meho_connector_review_dispatches_to_review_service(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stubbed_services: dict[str, Any],

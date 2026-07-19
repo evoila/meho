@@ -85,6 +85,12 @@ const (
 	ConnectorListItemKindTyped                 ConnectorListItemKind = "typed"
 )
 
+// Defines values for ConnectorListItemScope.
+const (
+	ConnectorListItemScopeBuiltin ConnectorListItemScope = "builtin"
+	ConnectorListItemScopeTenant  ConnectorListItemScope = "tenant"
+)
+
 // Defines values for ConnectorListItemState.
 const (
 	ConnectorListItemStateIngested   ConnectorListItemState = "ingested"
@@ -2781,6 +2787,27 @@ type ConfirmVerifyResponseAnswer string
 // existing construction call sites (tests, MCP fakes) keep working;
 // the listing always sets them explicitly. See
 // :data:`ConnectorAuthoringKind`.
+//
+// “scope“ (#2474) is the named projection of “tenant_id“ —
+// “"builtin"“ for “tenant_id IS NULL“ rows, “"tenant"“ for
+// tenant-curated ones. It is additive and fully derivable from
+// “tenant_id“, but surfacing it directly lets a consumer key on it
+// without re-deriving. “shadowed_by_tenant_scope“ is the precedence
+// marker: within a single response, a “"builtin"“ row carries
+// “True“ when a “"tenant"“ row shares its “connector_id“ — i.e.
+// the built-in copy is *shadowed* by a tenant-scoped twin that
+// :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
+// first (tenant-wins dispatch precedence). The two fields exist because
+// “connector_id“ encodes only “(impl_id, version)“, so scope twins
+// from the #2085 re-ingest trap render the same id twice; the marker
+// tells an agent exactly which row “call_operation“ dispatches to and
+// lets it count unique connectors. Both default to the built-in,
+// unshadowed reading (“scope="builtin"“, “shadowed_by_tenant_scope
+// =False“) so existing construction call sites (tests, MCP fakes)
+// keep working; the listing sets “scope“ explicitly per row and
+// stamps “shadowed_by_tenant_scope“ in a post-pass over the full
+// response. Invariant: within one response no two rows share
+// “(connector_id, scope)“. See :data:`ConnectorScope`.
 type ConnectorListItem struct {
 	ConnectorId           string                 `json:"connector_id"`
 	DisabledGroupCount    int                    `json:"disabled_group_count"`
@@ -2814,17 +2841,22 @@ type ConnectorListItem struct {
 	// Frozen for the same reason every wire shape in this module is frozen:
 	// responses are read-only and any in-place mutation should surface as a
 	// Pydantic error rather than a silently-modified payload.
-	NextStep         *NextStep               `json:"next_step,omitempty"`
-	OperationCount   int                     `json:"operation_count"`
-	Product          string                  `json:"product"`
-	StagedGroupCount int                     `json:"staged_group_count"`
-	State            *ConnectorListItemState `json:"state,omitempty"`
-	TenantId         *openapi_types.UUID     `json:"tenant_id"`
-	Version          string                  `json:"version"`
+	NextStep              *NextStep               `json:"next_step,omitempty"`
+	OperationCount        int                     `json:"operation_count"`
+	Product               string                  `json:"product"`
+	Scope                 *ConnectorListItemScope `json:"scope,omitempty"`
+	ShadowedByTenantScope *bool                   `json:"shadowed_by_tenant_scope,omitempty"`
+	StagedGroupCount      int                     `json:"staged_group_count"`
+	State                 *ConnectorListItemState `json:"state,omitempty"`
+	TenantId              *openapi_types.UUID     `json:"tenant_id"`
+	Version               string                  `json:"version"`
 }
 
 // ConnectorListItemKind defines model for ConnectorListItem.Kind.
 type ConnectorListItemKind string
+
+// ConnectorListItemScope defines model for ConnectorListItem.Scope.
+type ConnectorListItemScope string
 
 // ConnectorListItemState defines model for ConnectorListItem.State.
 type ConnectorListItemState string
@@ -3697,6 +3729,13 @@ type DocCollectionSummary struct {
 // optional owning-document id (“None“ when the corpus has no document
 // concept for a chunk) and is only read as a citation-label fallback.
 //
+// “title“ is the **optional** human-legible chunk title (#2475), passed
+// through from the corpus (“CorpusChunk.title“). It is the *preferred*
+// citation label — every citation face (“ask_docs“, “/ui/corpus“)
+// feeds it to the “title -> document_id -> filename -> URL“ label chain
+// — and is “None“ until the upstream corpus supplies one, so today's
+// corpus (which sends no title) sees no behaviour change.
+//
 // “source_url“ is the **backend-agnostic** citation reference (#132): a
 // canonical public URL where one is derivable, else an opaque
 // “meho://docs/<collection>/<chunk_id>“ ref. It is **never** the corpus's
@@ -3711,6 +3750,7 @@ type DocsChunk struct {
 	DocumentId *string  `json:"document_id"`
 	Score      *float32 `json:"score"`
 	SourceUrl  *string  `json:"source_url"`
+	Title      *string  `json:"title"`
 }
 
 // DraftTemplateRequest Request body for “meho.runbook.draft_template“ -- create a new draft.

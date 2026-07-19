@@ -523,6 +523,7 @@ meho expects a `2xx` JSON body with a **top-level `results`** array, ranked
     {
       "chunk_id": "c-001",
       "document_id": "d-042",
+      "title": "vSphere 9.0 Configuration Maximums",
       "text": "The supported maximum is …",
       "source_uri": "https://docs.example/vmware/9.0/maximums#c-001",
       "score": 0.87,
@@ -537,6 +538,7 @@ meho expects a `2xx` JSON body with a **top-level `results`** array, ranked
 | `results` | `[chunk]` | **yes** (top-level key) | The ordered hit list. Accepted under `results` **or** the legacy alias `chunks`; speak `results`. **Not** `hits` / `data`. |
 | `chunk_id` | `str` | **yes** | Per-chunk id. |
 | `document_id` | `str` | optional (#2004) | Owning document id; read only as a citation-label fallback. A blank `""` or an omitted key normalises to `None` — it is **not** a grounding key, so absence does not fail parse. |
+| `title` | `str` | optional (#2475) | Human-legible chunk title. Read as the **preferred** citation label (`title → document_id → filename → URL`) so a hit renders by its title instead of a raw id. Accepted top-level (`title`) or nested under `metadata` (`metadata["title"]`); the top-level key wins. Blank `""` or an omitted key normalises to `None` — no title fails parse, and meho's own corpus emits none today (the label falls through unchanged until a corpus supplies one). Emitting a per-chunk title is the upstream (MEHO.Knowledge) side of this contract. |
 | `text` | `str` | **yes** | The chunk text. Accepted under `text` **or** the legacy alias `content`; speak `text`. **Not** `body` / `snippet`. |
 | `source_uri` | `str` | optional | Citation URL. Accepted under `source_uri` **or** the legacy alias `source_url`; speak `source_uri`. **Not** `url`. |
 | `score` | `float` | optional | Rank score (meho keeps corpus order regardless). |

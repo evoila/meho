@@ -16997,6 +16997,62 @@
         }
       }
     },
+    "/ui/sensors": {
+      "get": {
+        "tags": [
+          "ui-sensors"
+        ],
+        "summary": "Ui Sensors List",
+        "description": "Serve ``GET /ui/sensors[?status=&cadence_kind=]``. See module docstring.",
+        "operationId": "ui_sensors_list_ui_sensors_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "cadence_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Cadence Kind"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/operations/search": {
       "get": {
         "tags": [

@@ -33,18 +33,27 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
 
 ## Control flow
 
-1. **Transition detection** (in-band, `investigate_on_transition`). For each
-   Dashboard containing the just-evaluated Sensor, fold its members through
-   #2506's pure rollup against `now`, compare to the persisted
-   `check_dashboards.last_rollup_state` memo (NULL treated as `ok`), and write
-   the memo when it changed. #2506 shipped that memo column **unwritten** and
-   reserved for this hook — this is its only writer. Only a *worsening*
-   transition (`ok`/`skip` → `degraded`/`critical`, or `degraded` →
-   `critical`) with at least one actively-failing member schedules an
-   investigation; improving/unchanged/`unknown`/`skip` states just maintain
-   the memo. Every evaluation is processed (not only state changes) because a
-   `for:` hold expiring flips a Dashboard non-green with no sensor-state
-   change; the memo-equality check is the cheap exit.
+1. **Transition detection** (in-band, `investigate_on_transition` →
+   `_claim_dashboard_transition`). For each Dashboard containing the
+   just-evaluated Sensor, the claim runs one atomic, per-`(tenant, dashboard)`
+   transaction: take a transaction-scoped Postgres advisory lock
+   (`pg_advisory_xact_lock`, auto-released at commit; a no-op on the SQLite test
+   path), read the members **under the lock**, fold them through #2506's pure
+   rollup against `now`, and **compare-and-swap** the persisted
+   `check_dashboards.last_rollup_state` memo (NULL treated as `ok`) in a single
+   conditional `UPDATE` guarded on the memo still equalling the observed value.
+   #2506 shipped that memo column **unwritten** and reserved for this hook —
+   this is its only writer. Only a *worsening* transition (`ok`/`skip` →
+   `degraded`/`critical`, or `degraded` → `critical`) with at least one
+   actively-failing member schedules an investigation, **and only for the caller
+   whose swap won** (`rowcount == 1`); improving/unchanged/`unknown`/`skip`
+   states just maintain the memo. The compare-and-swap is the atomic claim that
+   coalesces two Sensor outcomes landing together on one Dashboard into exactly
+   one investigation over the settled member set (#2575) — replica-safe because
+   the claim is DB-enforced, not a per-process guard. Every evaluation is
+   processed (not only state changes) because a `for:` hold expiring flips a
+   Dashboard non-green with no sensor-state change; the memo-equality check is
+   the cheap exit.
 2. **Correlation** (`_correlate`). Each non-green member maps to its topology
    anchor via its registered target's name (`kind="target"`), and
    `topology.query.find_dependencies` returns the forward closure. Members
@@ -156,10 +165,17 @@ principal, so no execution path inherits the role.
   discover topology. Anchor resolution is exact-name only (no alias
   resolution) — an alias-referencing target does not correlate.
 - **Concurrency.** Two members of one Dashboard evaluated near-simultaneously
-  can both detect a transition before either commits the memo; the memo
-  compare-and-set + the in-flight `work_ref` dedupe + the noise-suppression
-  memory layer make duplicate investigations rare and harmless (all
-  diagnose-only), but perfect single-fire under concurrency is not guaranteed.
+  are coalesced into a single investigation over the settled member set: each
+  transition is claimed under a transaction-scoped per-`(tenant, dashboard)`
+  advisory lock, and the memo transition is an atomic compare-and-swap whose
+  `rowcount` is the claim token, so exactly one caller fires even across
+  replicas (#2575). The in-flight `work_ref` dedupe (`_has_in_flight_run`) and
+  the noise-suppression memory layer remain as the cross-edge / cross-tick
+  backstops. The residual timing gap is intrinsic to the persist-hook seam: a
+  member that has not yet committed when the winning claim reads the membership
+  is not in that investigation's correlated set — it re-escalates on its own
+  next worsening edge (all runs are diagnose-only, so a follow-up run is
+  harmless).
 - **Trigger seam.** The runner-persist hook is the v1 seam because event
   triggers are refused until the #826 matcher lands (#2325) and #2506's rollup
   is read-path-only. Migrating to an event trigger when the matcher exists is

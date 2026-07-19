@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — atomic per-(tenant,dashboard) investigation claim (#2575)
+
+- Concurrent check-Dashboard investigations for the same `(tenant, dashboard)`
+  now coalesce onto exactly one investigator run instead of racing into
+  duplicate runs or partial correlation. The check-layer transition hook
+  (`checks/investigate.py`) claims each green→non-green edge under a
+  transaction-scoped Postgres advisory lock (`pg_advisory_xact_lock`, keyed on
+  `(tenant, dashboard)`) and finalises the `check_dashboards.last_rollup_state`
+  memo with an atomic compare-and-swap whose row count is the claim token. Only
+  the caller that wins the swap schedules the investigation, and it correlates
+  over the settled member set read under the lock. The guarantee is
+  DB-enforced, so it holds across replicas, not just within one event loop. No
+  schema migration — reuses #2506's memo column and the existing
+  `(tenant_id, work_ref)` in-flight index. Deferred #2507 review follow-up.
 ### Added — meho dashboard CLI verbs (#2590)
 
 - `meho dashboard list | show | create | delete` wrap the four existing

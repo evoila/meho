@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — /ui/runners satellite-runner fleet page (#2589)
+
+- New read-only `/ui/runners` operator-console page: the satellite-runner
+  fleet (Initiative #2415's push-only runner gateway) with per-runner
+  liveness and dead-man state. Each row shows the runner name, a derived
+  liveness badge (`live` / dead-man `unknown` / `revoked`), a relative
+  `last_seen_at`, whether the principal is revoked, and its creation time;
+  the table auto-refreshes every 30s so a runner going dark surfaces
+  without a manual reload. It closes the console-visibility gap #2415 left —
+  previously the fleet was reachable only from `meho runner-principal list`
+  and the Bearer `GET /api/v1/runner-principals` route, neither of which
+  exposed liveness.
+- The dead-man `unknown` badge is driven by the central sweeper's
+  `runner_assignments.stale_at` marker (#2501) and reuses the Checks
+  five-state `unknown` vocabulary (#2506) — no new state vocabulary and no
+  client-side staleness recomputation. The page is tenant-scoped and
+  read-only; register / revoke stay on `meho runner-principal` (#2502).
+- `RunnerPrincipalRead` gained an additive `last_seen_at` field, so the
+  `GET /api/v1/runner-principals` list/get/register responses and the CLI
+  `meho runner-principal list` now carry the central-clock liveness marker
+  (existing fields unchanged).
 ### Fixed — vmomi typed reads on VI-JSON base for vCenter 8.0.x (#2466)
 
 - The vmware typed reads that issue a vmomi (VI-JSON) method —

@@ -256,6 +256,15 @@ async def _read_sub_op(
     vi-json POST method-argument object (moid excluded -- it rides the
     path).
 
+    ``GET`` legs are vSphere Automation ``/vcenter/*`` paths, mounted on
+    ``/api`` / ``/rest`` via :meth:`VmwareRestConnector.mount_op_path`.
+    ``POST`` legs are vmomi (VI-JSON) methods (``QueryEvents`` /
+    ``QueryAvailablePerfMetric`` / ``QueryPerf``); they route through
+    :meth:`VmwareRestConnector._post_vmomi_json`, which mounts them on the
+    documented VI-JSON base ``/sdk/vim25/{release}`` (single ``/api``
+    fallback) so they resolve on vCenter 8.0.x instead of 404ing (#2466) —
+    no vmomi path reaches the bare ``/api`` mount.
+
     Returns the raw parsed JSON (``value``-envelope handling stays with
     the caller's :func:`_unwrap_value`). Transport / status failures raise
     :exc:`httpx.HTTPError`; load-bearing callers let it propagate (the
@@ -265,11 +274,11 @@ async def _read_sub_op(
     """
     method, _, path_template = op_id.partition(":")
     path = path_template.format(**path_params) if path_params else path_template
-    mounted = await connector.mount_op_path(target, path, operator)
     if method == "GET":
+        mounted = await connector.mount_op_path(target, path, operator)
         params = await connector.adapt_op_query(target, query, operator)
         return await connector._get_json(target, mounted, operator=operator, params=params)
-    return await connector._post_json(target, mounted, operator=operator, json=body)
+    return await connector._post_vmomi_json(target, path, operator=operator, json=body)
 
 
 async def cluster_drs_recommendations_composite(

@@ -116,7 +116,7 @@ class _FakeConnector:
         self.get_calls.append((path, params))
         return self._listing
 
-    async def _post_json(
+    async def _post_vmomi_json(
         self,
         target: Any,
         path: str,
@@ -124,6 +124,9 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> Any:
+        # The vmomi RetrievePropertiesEx read routes through the vmomi seam
+        # with the spec-relative path; the /sdk/vim25 mount is the
+        # connector's job (#2466).
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
@@ -208,13 +211,13 @@ async def test_lists_then_reads_props_per_host_mounted() -> None:
 
     out = await host_network_uplinks_impl(conn, _make_operator(), _Target(), {})
 
-    # Both the host listing and the PropertyCollector path were mounted.
-    assert conn.mount_calls[0] == "/vcenter/host"
-    assert "/PropertyCollector/propertyCollector/RetrievePropertiesEx" in conn.mount_calls
+    # The host listing was mounted (Automation /vcenter path); the per-host
+    # vmomi read routes through _post_vmomi_json with the spec-relative path.
+    assert conn.mount_calls == ["/vcenter/host"]
     assert conn.get_calls[0][0] == "/api/vcenter/host"
     assert len(conn.post_calls) == 2
     assert all(
-        path == "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        path == "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
         for path, _ in conn.post_calls
     )
     # The per-host property read requests the two host-network config paths.
@@ -262,18 +265,21 @@ async def test_lists_then_reads_props_per_host_mounted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resolves_mount_once_not_per_host() -> None:
-    """The RetrievePropertiesEx path is host-independent -- mount it once."""
+async def test_mounts_only_the_listing_via_mount_op_path() -> None:
+    """Only /vcenter/host is mounted via mount_op_path.
+
+    The per-host RetrievePropertiesEx read routes through the vmomi seam
+    (:meth:`_post_vmomi_json`) -- one POST per host -- so mount_op_path is
+    called exactly once (the listing), not per host (#2466).
+    """
     listing = [{"host": f"host-{i}", "name": f"esx-{i}"} for i in range(3)]
     props = {f"host-{i}": _retrieve_result(f"host-{i}", [], []) for i in range(3)}
     conn = _FakeConnector(listing=listing, props_by_host=props)
 
     await host_network_uplinks_impl(conn, _make_operator(), _Target(), {})
 
-    assert conn.mount_calls == [
-        "/vcenter/host",
-        "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
-    ]
+    assert conn.mount_calls == ["/vcenter/host"]
+    assert len(conn.post_calls) == 3
 
 
 @pytest.mark.asyncio

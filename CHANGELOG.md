@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — vmomi typed reads on VI-JSON base for vCenter 8.0.x (#2466)
+
+- The vmware typed reads that issue a vmomi (VI-JSON) method —
+  `RetrievePropertiesEx` (behind `vmware.host.usage`,
+  `vmware.host.network_uplinks`, `vmware.vm.info`, `vmware.object.collect`,
+  `vmware.tasks.recent`), `VsanQueryVcClusterHealthSummary` (behind
+  `vmware.host.vsan_health`), and the composite `QueryEvents` /
+  `QueryAvailablePerfMetric` / `QueryPerf` sub-ops — were mounted on the
+  vSphere Automation API (`/api`), so they returned HTTP 404 on vCenter
+  8.0.x (observed on a live 8.0.3 host in the v0.21.0 dogfood). They now
+  mount on the documented VI-JSON base `/sdk/vim25/{release}` — the
+  release-versioned endpoint vCenter serves since 8.0U1 — with `{release}`
+  derived per target from `GET /api/about` (e.g. `8.0.3` → `8.0.3.0`),
+  resolved once and cached. On a 404 there the read falls back once to the
+  `/api`-mounted form (the undocumented accommodation the 9.0.2 fleet
+  serves); when both 404 the degradation note names both attempted mounts
+  and the vCenter version instead of a bare 404. Legacy/vcsim targets
+  (session on `/rest`) are unchanged — no VI-JSON attempt (#2466).
+
 ### Added — view-source affordance on /ui/corpus Ask citations (#2462)
 
 - Every `/ui/corpus` citation is now openable. A citation whose source has no

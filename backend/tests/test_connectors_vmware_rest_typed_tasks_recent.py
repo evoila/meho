@@ -71,7 +71,7 @@ class _FakeConnector:
         self.mount_calls.append(path)
         return f"{self._mount_prefix}{path}"
 
-    async def _post_json(
+    async def _post_vmomi_json(
         self,
         target: Any,
         path: str,
@@ -79,6 +79,9 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> Any:
+        # Both RetrievePropertiesEx reads route through the vmomi seam with
+        # the spec-relative path (the /sdk/vim25 mount is the connector's
+        # job, #2466).
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
@@ -163,9 +166,13 @@ async def test_tasks_recent_reads_recent_then_info() -> None:
 
     out = await tasks_recent_impl(conn, _make_operator(), _Target(), {})
 
-    # Both reads mounted, path resolved once (reused across the two POSTs).
-    assert conn.mount_calls == ["/PropertyCollector/propertyCollector/RetrievePropertiesEx"]
+    # Both reads route through the vmomi seam (not mount_op_path), each
+    # addressed by the spec-relative RetrievePropertiesEx path (#2466).
+    assert conn.mount_calls == []
     assert len(conn.post_calls) == 2
+    assert {p for p, _ in conn.post_calls} == {
+        "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+    }
 
     tasks = out["tasks"]
     assert [t["task"] for t in tasks] == ["task-1", "task-2"]

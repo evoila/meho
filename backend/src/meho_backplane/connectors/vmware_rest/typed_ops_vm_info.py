@@ -267,15 +267,18 @@ async def vm_info_impl(
        resolve the name to a moid. Skipped when the caller supplies ``vm``
        directly.
     2. ``POST .../PropertyCollector/propertyCollector/RetrievePropertiesEx``
-       (mounted) reading the VirtualMachine's runtime power state, guest
+       reading the VirtualMachine's runtime power state, guest
        IP / hostname / Tools status, heartbeat, and per-datastore usage.
        Load-bearing: a failure here raises and the dispatcher records it
        as a ``connector_error`` -- unlike the per-host best-effort reads,
        this single-object read *is* the op.
 
-    Both calls route through :meth:`VmwareRestConnector.mount_op_path`, so
-    the op lands on the ``/api`` (modern) or ``/rest`` (legacy / vcsim)
-    mount the target's session selected.
+    The name-resolution listing GET routes through
+    :meth:`VmwareRestConnector.mount_op_path` (``/api`` modern / ``/rest``
+    legacy). The vmomi ``RetrievePropertiesEx`` read routes through
+    :meth:`VmwareRestConnector._post_vmomi_json`, which mounts it on the
+    documented VI-JSON base ``/sdk/vim25/{release}`` (single ``/api``
+    fallback) so it resolves on vCenter 8.0.x instead of 404ing (#2466).
 
     Returns a single flat row (see :data:`VMWARE_VM_INFO_OP`'s response
     schema).
@@ -284,10 +287,9 @@ async def vm_info_impl(
     if not isinstance(vm_moid, str):
         vm_moid = await _resolve_vm_moid_by_name(connector, operator, target, params["name"])
 
-    props_path = await connector.mount_op_path(target, _RETRIEVE_PROPERTIES_PATH, operator)
-    props_result = await connector._post_json(
+    props_result = await connector._post_vmomi_json(
         target,
-        props_path,
+        _RETRIEVE_PROPERTIES_PATH,
         operator=operator,
         json=build_vm_info_retrieve_params(vm_moid),
     )

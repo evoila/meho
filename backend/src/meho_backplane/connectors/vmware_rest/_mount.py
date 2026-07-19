@@ -38,6 +38,18 @@ API_MOUNT_MODERN = "/api"
 API_MOUNT_LEGACY = "/rest"
 _KNOWN_API_MOUNT_PREFIXES = (f"{API_MOUNT_MODERN}/", f"{API_MOUNT_LEGACY}/")
 
+# Broadcom documents the VI-JSON (vmomi-over-JSON) wire base as
+# ``/sdk/vim25/{release}/{MoType}/{moId}/{method}`` — release-versioned,
+# available since vCenter 8.0U1 and unchanged on 9.x (vSphere Web
+# Services SDK programming guide, "Building JSON Request URLs"). This is
+# a *different* base from the vSphere Automation API mounts above: the
+# typed vmomi reads (``RetrievePropertiesEx``,
+# ``VsanQueryVcClusterHealthSummary``, ``QueryEvents``, ``QueryPerf`` …)
+# are served here, **not** under ``/api`` — an ``/api``-mounted vmomi
+# method 404s on vCenter 8.0.x (the ``/api`` form is an undocumented 9.x
+# accommodation, kept only as a fallback). See :func:`vmomi_mounted_path`.
+VI_JSON_MOUNT_PREFIX = "/sdk/vim25"
+
 # vSphere's list FilterSpec query params carry a ``filter.`` prefix on the
 # legacy ``/rest`` mount (``filter.datastores``, ``filter.hosts``, ...) but
 # are addressed by their bare name on the modern ``/api`` mount
@@ -49,9 +61,12 @@ __all__ = [
     "API_MOUNT_MODERN",
     "SESSION_PATH_LEGACY",
     "SESSION_PATH_MODERN",
+    "VI_JSON_MOUNT_PREFIX",
     "adapt_filter_params",
     "api_mount_for_session_path",
     "mounted_path",
+    "vmomi_mounted_path",
+    "vmomi_release_from_version",
 ]
 
 
@@ -115,3 +130,47 @@ def mounted_path(session_path: str, descriptor_path: str) -> str:
     mount = api_mount_for_session_path(session_path)
     normalised = descriptor_path if descriptor_path.startswith("/") else f"/{descriptor_path}"
     return f"{mount}{normalised}"
+
+
+def vmomi_release_from_version(version: str | None) -> str | None:
+    """Normalise a vCenter ``about.version`` to the VI-JSON ``{release}`` segment.
+
+    Broadcom's ``/sdk/vim25/{release}/...`` base takes a four-part
+    dotted-decimal release (``8.0.2.0``, ``9.0.0.0``); ``GET /api/about``
+    reports the three-part ``version`` (``8.0.3``). Pad the leading
+    numeric components to four with ``.0`` so ``8.0.3`` → ``8.0.3.0`` (an
+    already-four-part value passes through, a longer one is truncated).
+
+    Returns ``None`` when *version* is empty or has no leading numeric
+    component, so the caller falls back to the ``/api``-mounted vmomi form
+    rather than emitting a malformed ``/sdk/vim25//...`` path.
+    """
+    if not version:
+        return None
+    numeric: list[str] = []
+    for part in version.strip().split("."):
+        if part.isdigit():
+            numeric.append(part)
+        else:
+            break
+    if not numeric:
+        return None
+    while len(numeric) < 4:
+        numeric.append("0")
+    return ".".join(numeric[:4])
+
+
+def vmomi_mounted_path(release: str, descriptor_path: str) -> str:
+    """Mount a spec-relative vmomi method *descriptor_path* on the VI-JSON base.
+
+    Prefixes ``/{MoType}/{moId}/{method}`` with
+    ``/sdk/vim25/{release}`` — the documented VI-JSON wire base
+    (:data:`VI_JSON_MOUNT_PREFIX`) — so a typed vmomi read reaches the
+    endpoint vCenter 8.0.x actually serves instead of 404ing on the
+    Automation ``/api`` mount. *release* is the four-part segment from
+    :func:`vmomi_release_from_version`; *descriptor_path* is normalised to
+    a leading slash the same way :func:`mounted_path` normalises the
+    Automation form.
+    """
+    normalised = descriptor_path if descriptor_path.startswith("/") else f"/{descriptor_path}"
+    return f"{VI_JSON_MOUNT_PREFIX}/{release}{normalised}"

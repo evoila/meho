@@ -856,6 +856,61 @@
         }
       }
     },
+    "/api/v1/doc_collections/{collection_key}": {
+      "delete": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Delete Collection Endpoint",
+        "description": "Deregister a disabled, tenant-owned collection, freeing its key (#2487).\n\nThe delete half of the registry \u2014 the REST counterpart to\n``POST /api/v1/doc_collections``. Resolves the collection tenant-first\n(an unknown key \u2192 404 with the typed ``known_keys`` hint), then\nhard-deletes it behind two guards owned by the service:\n\n* **Tenant-owned only** \u2014 a global row (``tenant_id IS NULL``) is\n  refused with a structured 403 ``detail.error='global_collection'``;\n  removing a platform-catalogue row every tenant sees is an ops action,\n  out of the tenant API.\n* **Disabled-first** \u2014 a collection whose ``status`` is not\n  ``disabled`` is refused with a structured 409\n  ``detail.error='collection_not_disabled'`` naming the current status.\n\nOn success the row is gone and its ``collection_key`` is freed: a\nre-``POST`` of the same key then succeeds 201 (the recovery loop that\nmotivated the issue). Deleting a tenant row that shadowed a global key\nun-shadows the global row (the resolver is tenant-first). One\n``audit_log`` row per call, bound ``op_id=\"meho.docs.collections.delete\"``.",
+        "operationId": "delete_collection_endpoint_api_v1_doc_collections__collection_key__delete",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row \u2014 a tenant admin cannot delete it (structured ``detail.error='global_collection'``)."
+          },
+          "404": {
+            "description": "No collection with this key is visible to the tenant."
+          },
+          "409": {
+            "description": "The collection is not ``disabled`` \u2014 disable it first (structured ``detail.error='collection_not_disabled'`` + the current ``status``)."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [

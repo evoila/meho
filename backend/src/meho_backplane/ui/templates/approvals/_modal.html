@@ -36,6 +36,17 @@
     (it was closed by timeout, not a decision), so the "at T" falls back to
     ``expires_at`` for that branch.
 
+  Confirm gate (#2446)
+    A pending row carries a consequence banner (``data-approval-gate="confirm"``)
+    whose severity follows the envelope ``safety_level`` (#1855) -- error for
+    ``dangerous``, warning otherwise -- naming what each decision does: Approve
+    dispatches the parked write immediately (no un-approve), Deny is terminal
+    (re-file). Both decisions are two-phase: the first click on an armer
+    (``type="button"``, Alpine local ``armed`` state) only swaps in a Confirm
+    pair; only the Confirm button posts. This mirrors the runbook lifecycle
+    confirm mold (``runbooks/_detail_actions.html``) and the ops Run gate
+    (#1881). A blocked self-approval Approve (#1401) never arms.
+
   Context:
     request               -- dict: id / op_id / connector_id / principal_sub /
                              principal_act / proposed_effect / status /
@@ -272,10 +283,52 @@
 
     {% if request.status == "pending" %}
     {# Decision forms only for a pending row -- a decided row is read-only. #}
-    <div class="modal-action mt-5 items-end gap-2">
-      <label class="form-control mr-auto w-full max-w-xs">
+
+    {#- Consequence banner (#2446). Deciding is the one console step where the
+        gated write actually executes, so surface what each decision does BEFORE
+        the operator acts -- mirroring the ops Run modal's ``data-run-gate``
+        alert (#1881) and the vault confirm gate (#1957). ``safety_level`` is the
+        closed ``safe``/``caution``/``dangerous`` enum already stamped on every
+        parked envelope (#1855) and rendered structurally above (#2447); reuse it
+        as the banner's severity source (error for dangerous, warning otherwise,
+        including when it is absent). No server change -- the value already rides
+        ``proposed_effect``. -#}
+    {% set safety = effect.get("safety_level") %}
+    <div
+      role="alert"
+      class="alert {{ 'alert-error' if safety == 'dangerous' else 'alert-warning' }} mt-5 items-start"
+      data-approval-gate="confirm"
+      data-safety-level="{{ safety if safety else '' }}"
+    >
+      {{ icon("shield-check", class="size-5 shrink-0") }}
+      <div>
+        <h4 class="text-sm font-semibold">Deciding runs the parked write</h4>
+        <p class="text-xs [overflow-wrap:anywhere]">
+          Approving dispatches <span class="font-mono">{{ request.op_id }}</span>
+          via <span class="font-mono">{{ request.connector_id }}</span>
+          immediately &mdash; there is no un-approve. Denying is terminal; the
+          requester must re-file.
+        </p>
+        {% if safety %}
+          <div class="mt-2 flex flex-wrap items-center gap-2">
+            {{ proposed_effect_safety_badge(safety) }}
+            <span class="text-xs opacity-80">safety level: <span class="font-semibold">{{ safety }}</span></span>
+          </div>
+        {% endif %}
+      </div>
+    </div>
+
+    {#- Two-phase arm-then-confirm (#2446), mirroring the runbook lifecycle
+        confirm mold (``runbooks/_detail_actions.html``): the first click only
+        ARMS a decision via Alpine local state (the app shell already ships
+        Alpine 3); only the second, explicit Confirm button posts. No new routes,
+        no modal-in-modal. The Confirm form carries the CSRF header echo, pulls
+        the shared reason via ``hx-include``, and disables itself during dispatch
+        exactly as the single-click form did before (#1693 / #1754). -#}
+    <div class="modal-action mt-4 flex-col items-stretch gap-3" x-data="{ armed: '' }">
+      <label class="form-control w-full max-w-xs self-start">
         <span class="label-text text-xs">Reason <span class="opacity-60">(optional)</span></span>
-        {# Single shared reason input; each decision form pulls it via
+        {# Single shared reason input; each confirm form pulls it via
            hx-include so the operator types it once. #}
         <input
           type="text"
@@ -288,41 +341,86 @@
         />
       </label>
 
-      {# Deny -- always enabled. Its own form carries the CSRF header echo. #}
-      <form
-        hx-post="/ui/approvals/{{ request.id }}/reject"
-        hx-target="#meho-approvals-modal-container"
-        hx-swap="innerHTML"
-        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
-        hx-include="#meho-approval-reason"
-        hx-disabled-elt="find button"
-      >
-        <button type="submit" class="btn btn-sm btn-error btn-outline gap-1" data-action="reject">
+      {# Phase 1 -- resting armers. ``type="button"``: the first click only sets
+         the Alpine ``armed`` flag; it never posts. A blocked self-approval
+         (#1401) Approve stays disabled and carries no armer, so it can never
+         reach an approve confirm state. #}
+      <div class="flex items-end justify-end gap-2" x-show="armed === ''">
+        <button
+          type="button"
+          class="btn btn-sm btn-error btn-outline gap-1"
+          data-action="reject"
+          x-on:click="armed = 'reject'"
+        >
           {{ icon("ban", class="size-4") }}
           Deny
         </button>
-      </form>
-
-      {# Approve -- disabled on a self-approval (#1401). Its own form
-         carries the CSRF header echo. #}
-      <form
-        hx-post="/ui/approvals/{{ request.id }}/approve"
-        hx-target="#meho-approvals-modal-container"
-        hx-swap="innerHTML"
-        hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
-        hx-include="#meho-approval-reason"
-        hx-disabled-elt="find button"
-      >
         <button
-          type="submit"
+          type="button"
           class="btn btn-sm btn-primary gap-1"
           data-action="approve"
-          {% if self_approval_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: you cannot approve your own request unless APPROVAL_ALLOW_SELF_APPROVAL is enabled"{% endif %}
+          {% if self_approval_blocked %}disabled aria-disabled="true" aria-label="Approve disabled: you cannot approve your own request unless APPROVAL_ALLOW_SELF_APPROVAL is enabled"{% else %}x-on:click="armed = 'approve'"{% endif %}
         >
           {{ icon("check", class="size-4") }}
           Approve
         </button>
-      </form>
+      </div>
+
+      {# Phase 2 -- armed Deny confirm. Only the Confirm button posts; it carries
+         the CSRF header echo, the shared reason, and the double-fire guard,
+         exactly as the single-click form did before. #}
+      <div x-show="armed === 'reject'" x-cloak class="flex flex-col items-stretch gap-2">
+        <p class="text-xs text-base-content/70 [overflow-wrap:anywhere]" data-approval-confirm="reject">
+          This denial is terminal &mdash; the requester must re-file to try again.
+          Denying does not run the write.
+        </p>
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" class="btn btn-ghost btn-sm" x-on:click="armed = ''">Cancel</button>
+          <form
+            hx-post="/ui/approvals/{{ request.id }}/reject"
+            hx-target="#meho-approvals-modal-container"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            hx-include="#meho-approval-reason"
+            hx-disabled-elt="find button"
+          >
+            <button type="submit" class="btn btn-sm btn-error gap-1" data-confirm="reject">
+              {{ icon("ban", class="size-4") }}
+              Confirm deny
+            </button>
+          </form>
+        </div>
+      </div>
+
+      {# Phase 2 -- armed Approve confirm. NOT rendered on a blocked self-approval
+         (#1401): with no approve armer above and no confirm block here, there is
+         no reachable approve confirm state at all. #}
+      {% if not self_approval_blocked %}
+      <div x-show="armed === 'approve'" x-cloak class="flex flex-col items-stretch gap-2">
+        <p class="text-xs text-base-content/70 [overflow-wrap:anywhere]" data-approval-confirm="approve">
+          Approving dispatches <span class="font-mono">{{ request.op_id }}</span>
+          via <span class="font-mono">{{ request.connector_id }}</span> immediately{% if safety %}
+          at safety level <span class="font-semibold">{{ safety }}</span>{% endif %}.
+          There is no un-approve.
+        </p>
+        <div class="flex items-center justify-end gap-2">
+          <button type="button" class="btn btn-ghost btn-sm" x-on:click="armed = ''">Cancel</button>
+          <form
+            hx-post="/ui/approvals/{{ request.id }}/approve"
+            hx-target="#meho-approvals-modal-container"
+            hx-swap="innerHTML"
+            hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+            hx-include="#meho-approval-reason"
+            hx-disabled-elt="find button"
+          >
+            <button type="submit" class="btn btn-sm btn-primary gap-1" data-confirm="approve">
+              {{ icon("check", class="size-4") }}
+              Confirm approve
+            </button>
+          </form>
+        </div>
+      </div>
+      {% endif %}
     </div>
     {% endif %}
   </div>

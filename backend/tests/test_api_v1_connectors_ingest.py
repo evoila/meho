@@ -647,6 +647,70 @@ async def test_list_returns_operator_tenant_and_builtins(
 
 
 @pytest.mark.asyncio
+async def test_list_scope_twin_rows_are_disambiguated(
+    client: TestClient,
+) -> None:
+    """Scope twins stay distinct rows carrying ``scope`` + shadow marker.
+
+    The #2085 re-ingest trap can leave the same ``(product, version,
+    impl_id)`` seeded once built-in (``tenant_id IS NULL``) and once
+    tenant-scoped. ``connector_id`` encodes only ``(impl_id, version)``,
+    so both render the same id. #2474 keeps both rows but makes them
+    self-describing: an additive ``scope`` field on every row and a
+    ``shadowed_by_tenant_scope`` marker on the built-in copy, mirroring
+    the tenant-wins dispatch precedence.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=None, product="vmware", impl_id="vmware-rest")
+    await _seed_connector(tenant_id=tenant_a, product="vmware", impl_id="vmware-rest")
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    connectors = response.json()["items"]
+
+    # Both scope copies survive -- no DISTINCT collapse (each carries
+    # real, scope-specific review state).
+    twins = [c for c in connectors if c["connector_id"] == "vmware-rest-9.0"]
+    assert len(twins) == 2
+    by_scope = {c["scope"]: c for c in twins}
+    assert set(by_scope) == {"builtin", "tenant"}
+    # Every row carries the additive scope field.
+    assert all("scope" in c for c in connectors)
+    # The built-in copy is shadowed by the tenant-scoped twin that
+    # ``lookup_descriptor`` resolves first; the tenant copy is not.
+    assert by_scope["builtin"]["shadowed_by_tenant_scope"] is True
+    assert by_scope["tenant"]["shadowed_by_tenant_scope"] is False
+    assert by_scope["builtin"]["tenant_id"] is None
+    assert by_scope["tenant"]["tenant_id"] == str(tenant_a)
+    # Invariant: within one response no two rows share (connector_id, scope).
+    pairs = [(c["connector_id"], c["scope"]) for c in connectors]
+    assert len(pairs) == len(set(pairs))
+
+
+@pytest.mark.asyncio
+async def test_list_single_scope_row_carries_scope_but_no_shadow(
+    client: TestClient,
+) -> None:
+    """A connector present in a single scope is unchanged bar the additive ``scope``."""
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=None, product="nsx", impl_id="nsx")
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    connectors = response.json()["items"]
+    nsx = [c for c in connectors if c["connector_id"] == "nsx-9.0"]
+    assert len(nsx) == 1
+    assert nsx[0]["scope"] == "builtin"
+    assert nsx[0]["shadowed_by_tenant_scope"] is False
+
+
+@pytest.mark.asyncio
 async def test_list_status_staged_filters_by_aggregate_state(
     client: TestClient,
 ) -> None:

@@ -11410,6 +11410,9 @@ type ClientInterface interface {
 	// CorpusIndexUiCorpusGet request
 	CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet request
+	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -15956,6 +15959,18 @@ func (c *Client) UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Con
 
 func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(c.Server, collectionKey, chunkId)
 	if err != nil {
 		return nil, err
 	}
@@ -32005,6 +32020,47 @@ func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
 	return req, nil
 }
 
+// NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest generates requests for UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet
+func NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(server string, collectionKey string, chunkId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "chunk_id", runtime.ParamLocationPath, chunkId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/chunks/%s/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiCorpusCollectionsTableUiCorpusCollectionsGetRequest calls the generic UiCorpusCollectionsTableUiCorpusCollectionsGet builder with application/json body
 func NewUiCorpusCollectionsTableUiCorpusCollectionsGetRequest(server string, body UiCorpusCollectionsTableUiCorpusCollectionsGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -38030,6 +38086,9 @@ type ClientWithResponsesInterface interface {
 	// CorpusIndexUiCorpusGetWithResponse request
 	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
 
+	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request
+	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error)
+
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionsTableUiCorpusCollectionsGetResponse, error)
 
@@ -43755,6 +43814,28 @@ func (r CorpusIndexUiCorpusGetResponse) StatusCode() int {
 	return 0
 }
 
+type UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiCorpusCollectionsTableUiCorpusCollectionsGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -48990,6 +49071,15 @@ func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Con
 		return nil, err
 	}
 	return ParseCorpusIndexUiCorpusGetResponse(rsp)
+}
+
+// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request returning *UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse
+func (c *ClientWithResponses) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error) {
+	rsp, err := c.UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx, collectionKey, chunkId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp)
 }
 
 // UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionsTableUiCorpusCollectionsGetResponse
@@ -57258,6 +57348,32 @@ func ParseCorpusIndexUiCorpusGetResponse(rsp *http.Response) (*CorpusIndexUiCorp
 	response := &CorpusIndexUiCorpusGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse parses an HTTP response from a UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse call
+func ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp *http.Response) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil

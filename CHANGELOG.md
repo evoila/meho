@@ -112,6 +112,59 @@ connector-related release-notes line.
   (`-32602` / 4xx), so the filter cannot probe definition existence
   beyond what the run list already reveals. No DB migration — the name is
   a read-time lookup, not a denormalized column (#2472).
+### Fixed — connector_not_found -32602 across MCP handlers (#2481)
+
+- **All seven `meho.connector.*` tools that take a `connector_id` now
+  return `-32602 connector_not_found` for an unknown or cross-tenant
+  connector** (#2481) — `review` / `edit_group` / `edit_op` / `enable` /
+  `enable_reads` / `disable` / `delete`. Previously only the
+  ambiguous-scope case (#1910) had a handler `except` arm; a genuine
+  not-found fell through the dispatcher's generic catch to a bare
+  `-32603 "internal error: ConnectorNotFoundError"` — the wrong JSON-RPC
+  class (`-32603` signals a server-side bug, so callers retry or
+  escalate a request that is actually a well-formed call against a
+  nonexistent name) and a leak of the Python exception class name into
+  the stable wire contract. The mapping now matches the family-wide
+  `-32602 <thing>_not_found` convention (`agent_not_found`,
+  `approval_request_not_found`, `ingest_job_not_found`); existence is not
+  leaked, so an absent label and a cross-tenant label return the
+  identical bare code, mirroring the REST 404. Closes the last MCP↔REST
+  not-found asymmetry for the connector-admin surface.
+### Documentation — kb tool description cross-refs (#2486)
+
+- The `search_knowledge` and `add_to_knowledge` MCP tool descriptions now
+  cross-reference the substrate's `kb` REST/CLI surface: every non-MCP
+  surface names this substrate `kb` (REST `/api/v1/kb`, CLI `meho kb`,
+  console `/ui/kb`), there is no `/api/v1/knowledge` route, and entry
+  deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}` or
+  `meho kb delete` — no MCP delete tool). This closes the discoverability
+  trap a live v0.21.0 probe hit: an agent that wrote via
+  `add_to_knowledge` and then reached for `/api/v1/knowledge/{slug}` to
+  clean up got a 404. The MCP↔REST name split is a recorded design
+  decision (#417 / #331), not drift, so the fix points agents at the real
+  surface rather than renaming anything. `docs/codebase/mcp.md` records
+  the split alongside the naming grammar.
+
+### Added — optional chunk title pass-through (#2475)
+
+- `search_docs` hits and `ask_docs` citations can now carry a
+  human-legible `title`. An optional `title` field is threaded from the
+  external corpus through `CorpusChunk` → `DocsChunk` → the citation
+  labels: a title arrives top-level (`title`) or nested under a chunk's
+  `metadata` (`metadata["title"]`), with the top-level key winning and
+  blank-after-strip normalising to `None`. The #1919 label chain
+  (`title → document_id → humanised filename → URL`) already prefers a
+  title but was starved because none survived the corpus projection;
+  the `ask_docs` and `/ui/corpus` citation seams now feed `chunk.title`
+  into it, so a hit renders by its title instead of a raw
+  `document_id` / numeric filename. Fully additive and null-safe:
+  MEHO has no doc-ingest path (federation-only, #1864 → #2049), so a
+  title can only originate upstream — consumers see `title: null` until
+  the corpus supplies one, and today's corpus (which sends none) is
+  unchanged. The REST `SearchDocsResponse` embeds `DocsChunk`, so the
+  OpenAPI snapshot + generated CLI client gain a nullable `title`
+  property.
+
 ### Added — scope-twin connector row disambiguation (#2474)
 
 - **`GET /api/v1/connectors` and `meho.connector.list` now name each

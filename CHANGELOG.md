@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — agent_name/agent_definition_id on run projections (#2472)
+
+- The shared agent-run read projections (`AgentRunSummary` /
+  `AgentRunStatusView`) now carry `agent_definition_id` (the run row's
+  soft-FK) and `agent_name` (resolved read-time from that id,
+  tenant-scoped) — so every read face answers "which agent produced this
+  run". The fields surface on all four: the `meho.agents.list_runs` rows
+  and `meho.agents.run_status` body, the REST `AgentRunSummaryResponse` /
+  `AgentRunStatusResponse` (`GET /api/v1/agents/runs` and
+  `.../runs/{handle}`), the `/ui/agents/runs` list (new **Agent** column)
+  and run detail, and the CLI `meho agent run-list` (new **AGENT**
+  column, via the regenerated OpenAPI client). `agent_name` is `null` for
+  an ad-hoc run (no definition) and for a dangling soft-FK (the definition
+  was deleted after the run) — the projections never 500 on either.
+- The run-list surfaces accept an optional exact-match `agent_name`
+  filter — `meho.agents.list_runs(agent_name=…)`,
+  `GET /api/v1/agents/runs?agent_name=…`, and `meho agent run-list
+  --agent-name`. The name is resolved to a definition id tenant-scoped;
+  an unknown name returns an empty list rather than an error
+  (`-32602` / 4xx), so the filter cannot probe definition existence
+  beyond what the run list already reveals. No DB migration — the name is
+  a read-time lookup, not a denormalized column (#2472).
+
 ### Added — operator-console OAuth chart values (#2594)
 
 - The Helm chart now renders the operator-console (`/ui/*`) browser

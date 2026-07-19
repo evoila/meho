@@ -90,6 +90,21 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — badge-ghost+badge-outline contrast in alert banners (#2460)
+
+- The `/ui/retrieval` honesty-gap banners (Usage + Retire Checklist tabs)
+  render the counted `/mcp` search-surface labels
+  (`mcp:search_knowledge` / `_memory` / `_operations`) as badges that were
+  unreadable inside the coloured alert — near-black-on-near-black in
+  `meho-dark`, near-white-on-near-white in `meho-light`. The DaisyUI 5
+  `badge-ghost` + `badge-outline` combo resolves its text colour through
+  `badge-outline`'s `color: var(--badge-color)`; with no `badge-<color>`
+  modifier that variable is unset, so `color` falls back to inheritance and
+  inside the alert picks up the alert's `*-content` token on badge-ghost's
+  `base-200` surface. An unlayered `.alert .badge-ghost.badge-outline` rule
+  in `styles.css` now pins `base-content` on `base-200`, winning over the
+  layered DaisyUI declarations regardless of emission order; it is scoped to
+  `.alert` so the on-card badge usages are unaffected. CSS only. (#2460)
 ### Fixed — unclip sidebar approvals badge (#2445)
 
 - The desktop sidebar's approvals-bell pending-count badge is no longer

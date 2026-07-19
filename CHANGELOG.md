@@ -109,6 +109,21 @@ connector-related release-notes line.
   disable → delete two-step keeps the terminal `collection_disabled` search
   rejection as a warning window before the key 404s). One `audit_log` row
   per call under `op_id="meho.docs.collections.delete"`.
+### Fixed — resolve_authoring_kind for class-less typed connectors (#2496)
+
+- The connector listing (`GET /api/v1/connectors`) and
+  `meho.connector.review` now report `net-probe-1.x` and
+  `secret-broker-1.x` as `kind="typed"` / `dispatchable=true` instead of
+  `ingested-shim` / `dispatchable=false`. These synthetic `net.*` /
+  `secret.*` connectors register module-level `source_kind='typed'`
+  handlers with no backing connector class, so
+  `resolve_authoring_kind`'s resolver replay missed and mislabeled them
+  as a catalog dead end even though the dispatcher routes them fine with
+  `connector_instance=None`. The projection now keys on the row's own
+  `source_kind` (ground truth from the descriptor rows) to recognize the
+  class-less typed mold, so a live operator no longer reads a working,
+  code-shipped connector as dead (#2468 finding 3a). Read-surface fix
+  only — no change to dispatch semantics.
 
 ### Added — topology delete_node guarded hard-delete (#2485)
 

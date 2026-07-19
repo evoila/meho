@@ -1324,6 +1324,195 @@ def test_detail_modal_pending_row_still_offers_decisions() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Detail modal -- structured proposed_effect envelope (#2447)
+# ---------------------------------------------------------------------------
+
+
+def _render_modal(effect: dict[str, object]) -> str:
+    """Seed a pending request with *effect* and return the rendered modal HTML."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_request(tenant_id=_TENANT_A, proposed_effect=effect)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub=_REVIEWER_SUB)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get(f"/ui/approvals/{rid}")
+
+    assert response.status_code == 200, response.text
+    return response.text
+
+
+def test_modal_bespoke_preview_renders_as_a_field_table() -> None:
+    """A populated bespoke ``preview`` (k8s.apply-style) renders as a table, not raw JSON."""
+    body = _render_modal(
+        {
+            "op_id": "k8s.apply",
+            "connector_id": "kubernetes-1.x",
+            "op_class": "config_write",
+            "preview": {
+                "kind": "Deployment",
+                "name": "web",
+                "namespace": "prod",
+                "resourceVersion": "421",
+            },
+            "preview_populated": True,
+            "safety_level": "caution",
+        }
+    )
+    # The preview fields land in a structured table, not one opaque blob.
+    assert 'aria-label="Proposed effect fields"' in body
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert "resourceVersion" in table
+    assert "web" in table
+    # The op_class chip is present.
+    assert ">config_write<" in body
+    # The raw envelope stays available but collapsed (no ``open`` attribute).
+    assert "Show raw JSON" in body
+    assert "<details open" not in body
+    assert 'aria-label="Proposed effect raw JSON"' in body
+
+
+def test_modal_generic_params_echo_renders_as_a_field_table() -> None:
+    """A generic ``params_echo`` (no bespoke builder) renders as a table too."""
+    body = _render_modal(
+        {
+            "op_id": "some.write.op",
+            "connector_id": "generic-1.x",
+            "op_class": "generic_write",
+            "params_echo": {"name": "widget", "replicas": 3},
+            "preview_populated": True,
+            "safety_level": "caution",
+        }
+    )
+    assert 'aria-label="Proposed effect fields"' in body
+    table = body.split('aria-label="Proposed effect fields"')[1].split("</table>")[0]
+    assert "widget" in table
+    assert "replicas" in table
+    assert "<details open" not in body
+
+
+def test_modal_credential_redacted_shows_elevated_risk_notice_and_no_table() -> None:
+    """An identifier-only credential-class envelope surfaces the redaction notice.
+
+    Synthetic envelope: since #2332 landed the bespoke vault KV builder,
+    live ``vault.kv.*`` no longer collapses to this shape -- but a
+    credential-class op *without* a bespoke builder still does, and the
+    reviewer surface must style the blind case as elevated risk.
+    """
+    body = _render_modal(
+        {
+            "op_id": "vault.kv.put",
+            "connector_id": "vault-1.x",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_reason": "credential_write_redacted",
+        }
+    )
+    assert "Values deliberately redacted" in body
+    assert "elevated risk" in body
+    assert 'role="note"' in body
+    # No field table -- there is neither a preview nor a params_echo.
+    assert 'aria-label="Proposed effect fields"' not in body
+    # Raw envelope still available, collapsed.
+    assert "Show raw JSON" in body
+    assert "<details open" not in body
+
+
+def test_modal_connector_did_not_populate_shows_a_plain_notice() -> None:
+    """A non-credential op with no populated preview shows the neutral notice."""
+    body = _render_modal(
+        {
+            "op_id": "some.op",
+            "connector_id": "generic-1.x",
+            "safety_level": "caution",
+            "preview_populated": False,
+            "preview_reason": "connector_did_not_populate",
+        }
+    )
+    assert "No preview was populated by the connector" in body
+    assert "elevated risk" not in body
+    assert 'aria-label="Proposed effect fields"' not in body
+
+
+def test_modal_write_capability_warning_renders_a_denial_alert() -> None:
+    """A ``write_capability_warning`` envelope renders a role=alert denial banner."""
+    body = _render_modal(
+        {
+            "op_id": "keycloak.user.create",
+            "connector_id": "keycloak-1.x",
+            "op_class": "config_write",
+            "preview": {"username": "alice"},
+            "preview_populated": True,
+            "safety_level": "caution",
+            "permission_preflight": {"will_be_denied": True, "missing": ["manage-users"]},
+            "write_capability_warning": "connector_identity_may_lack_write",
+        }
+    )
+    assert 'role="alert"' in body
+    warning = body.split("Write may be denied")[1].split("</div>")[0]
+    assert "may still be denied" in warning
+
+
+def test_modal_preview_unavailable_renders_blast_radius_unknown() -> None:
+    """A ``preview_unavailable`` envelope renders the error string + unknown copy."""
+    body = _render_modal(
+        {
+            "op_id": "argocd.app.sync",
+            "connector_id": "argocd-1.x",
+            "op_class": "config_write",
+            "preview_unavailable": True,
+            "preview_error": "connector timed out",
+            "preview_populated": False,
+            "safety_level": "caution",
+        }
+    )
+    assert "Blast radius unknown" in body
+    assert "connector timed out" in body
+    assert "the effect of this write is" in body
+    assert 'role="alert"' in body
+    # The failed-preview marker wins over the sparse-preview reason notice.
+    assert "No preview was populated" not in body
+
+
+def test_modal_dangerous_safety_level_is_an_error_badge() -> None:
+    """A ``dangerous`` ``safety_level`` renders a ``badge-error`` modifier.
+
+    Consistent with the ops-launcher ``safety_badge`` mold
+    (``operations/_results.html``).
+    """
+    body = _render_modal(
+        {
+            "op_id": "d.op",
+            "connector_id": "c-1.x",
+            "safety_level": "dangerous",
+            "preview_populated": False,
+            "preview_reason": "connector_did_not_populate",
+        }
+    )
+    badge = body.split("Proposed effect")[1].split("</div>")[0]
+    assert "badge-error" in badge
+    assert ">dangerous<" in badge
+
+
+def test_modal_caution_safety_level_is_a_warning_badge() -> None:
+    """A ``caution`` ``safety_level`` renders a ``badge-warning`` modifier."""
+    body = _render_modal(
+        {
+            "op_id": "c.op",
+            "connector_id": "c-1.x",
+            "safety_level": "caution",
+            "preview_populated": False,
+            "preview_reason": "connector_did_not_populate",
+        }
+    )
+    badge = body.split("Proposed effect")[1].split("</div>")[0]
+    assert "badge-warning" in badge
+    assert ">caution<" in badge
+
+
+# ---------------------------------------------------------------------------
 # params / params_hash never leak (#1827 -- a hard requirement)
 # ---------------------------------------------------------------------------
 

@@ -624,9 +624,29 @@ async def run_investigation(
     (topology forward-closure + union-find) collapses members sharing a common
     cause into one group; each group is investigated at most once (suppression +
     in-flight dedupe gate the actual agent fire).
+
+    The cause-group loop is **serial by design, not by omission** (#2576). Each
+    :func:`_investigate_group` runs the pre-fire budget gate + kill switch inside
+    ``run_scheduled`` *before* firing, and that gate reads **already-recorded**
+    consumption (``operations.budget_enforcement`` charges tokens / cost against
+    committed state, with no ex-ante reservation -- a reservation protocol is
+    explicitly deferred there). Awaiting each group to a terminal outcome before
+    the next fires is therefore what makes the cap correct: group *N*+1's gate
+    observes group *N*'s spend already recorded. Fanning the groups out
+    concurrently would open a check-then-fire race in which several groups read
+    the same pre-spend state, all pass the gate, and **over-fire beyond budget**.
+    The resulting tail latency (group *N* waits on groups 1..*N*-1) is bounded
+    and cheap here: this whole coroutine already runs off the runner's
+    persist path as a fire-and-forget task (:func:`_schedule_investigation`), so
+    it delays only *later* cause-groups' diagnosis on the *same* Dashboard --
+    never the runner cadence and never another Dashboard. Trading that bounded
+    diagnosis latency for budget-safety would require building the deferred
+    atomic-reservation seam; see ``docs/codebase/checks-investigator.md``.
     """
     operator = _investigator_operator(tenant_id)
     groups = await _correlate(operator, members)
+    # Serial by design (#2576) -- see the docstring: the pre-fire budget gate is
+    # only correct because group N+1 observes group N's recorded spend.
     for group in groups:
         await _investigate_group(operator, tenant_id, dashboard, group)
 

@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — DaisyUI 5 code-block theming on /ui/kb (#2452)
+
+- KB entry code blocks (`/ui/kb/<slug>`) are now legible in both console
+  themes. The detail and editor-preview templates pinned the code-block
+  background to the dead DaisyUI 4 `--b2` variable, so a near-white light
+  fallback applied in `meho-dark` too while text inherited the theme's
+  near-white `base-content` — unreadable. Backgrounds now derive from the
+  live `var(--color-base-200)` token, the query-term highlight uses
+  `color-mix(... var(--color-warning) ...)` instead of the dead `--wa`,
+  and `pygments_css()` emits theme-scoped token colours (dark `github-dark`
+  under `.kb-code`, light `default` under `[data-theme="meho-light"]`). The
+  same fix reaches the KB and runbooks editor live previews (shared
+  renderer). Template/CSS only. (#2452)
+
 ### Added — structured proposed_effect rendering on /ui/approvals (#2447)
 
 - The `/ui/approvals` detail modal now renders the parked

@@ -107,6 +107,7 @@ from meho_backplane.ui.routes.retrieval import build_retrieval_router
 from meho_backplane.ui.routes.runbooks import build_runbooks_router
 from meho_backplane.ui.routes.runners import build_runners_router
 from meho_backplane.ui.routes.scheduler import build_scheduler_router
+from meho_backplane.ui.routes.sensors import build_sensors_router
 from meho_backplane.ui.routes.stubs import build_stubs_router
 from meho_backplane.ui.routes.topology import build_router as build_topology_router
 from meho_backplane.ui.routes.vault import (
@@ -137,6 +138,7 @@ __all__ = [
     "build_runners_router",
     "build_runs_router",
     "build_scheduler_router",
+    "build_sensors_router",
     "build_stubs_router",
     "build_topology_router",
     "build_vault_router",
@@ -238,6 +240,16 @@ def build_router() -> APIRouter:
     # ``{param}`` sub-path, so no first-match-wins shadowing concern; included
     # before the stubs aggregate so its concrete path wins against ``/ui/{slug}``.
     router.include_router(build_runners_router())
+    # Sensor registry (I2416-T2591): read-only ``/ui/sensors`` -- the check-
+    # layer Sensor registry with each Sensor's latest-result projection
+    # (``last_state`` badge / ``last_value`` / ``last_evaluated_at`` /
+    # ``state_since``) + ``status`` / ``cadence_kind`` filters. Closes the
+    # #2416 gap where a registered-but-uncomposed Sensor was invisible (only
+    # ``/ui/checks`` Dashboard members rendered). One literal route, no
+    # ``{param}`` sub-path (there is no REST GET-by-id, by design), so no
+    # first-match-wins shadowing concern; included before the stubs aggregate
+    # so its concrete path wins against ``/ui/{slug}``.
+    router.include_router(build_sensors_router())
     # Operations launcher (G10.9-T1 #1879): ``/ui/operations`` +
     # ``/ui/operations/search`` + ``/ui/operations/descriptor/{id}``. The
     # only ``{param}`` route sits under the distinct

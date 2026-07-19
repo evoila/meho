@@ -1,0 +1,116 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the Sensor registry (Initiative #2416, Task #2591).
+  Extends ``base.html`` so the chrome matches the rest of the console. One
+  glance answers "which sensors exist / which are failing / which did I
+  register but never compose?": each row shows a Sensor's name, its
+  connector_id / op_id, its cadence, the five-state ``last_state`` badge, the
+  latest observed value, and the relative ``last_evaluated_at`` / ``state_since``.
+
+  Filters: two DaisyUI ``<select>``s (status + cadence_kind) form a search bar
+  that ``hx-get``s ``GET /ui/sensors`` and outerHTML-swaps only the table body
+  (the ``HX-Request`` branch returns the ``_table_rows.html`` fragment). The
+  selected values round-trip via ``status`` / ``cadence_kind`` query params
+  (``hx-push-url``) so the filtered view is a shareable URL.
+
+  Auto-refresh: the table arms an ``hx-trigger="every 30s"`` poll carrying the
+  active filters via ``hx-include`` so the latest-result projection stays live
+  without dropping the operator's filter. Read-only -- create / delete stay on
+  ``meho sensor`` (#2503).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Sensors &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Sensors</h1>
+      <p class="text-sm opacity-70">
+        The check-layer registry: every registered Sensor and its latest
+        result, including ones on no
+        <a href="/ui/checks" class="link link-hover">Dashboard</a> yet. Create
+        / delete stay on <code>meho sensor</code>.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Filter bar ---------- #}
+  <form
+    class="card bg-base-100 border-base-300 border shadow-sm"
+    hx-get="/ui/sensors"
+    hx-target="#sensors-table-body"
+    hx-swap="outerHTML"
+    hx-trigger="change from:find select"
+    hx-include="[name=status], [name=cadence_kind]"
+    hx-push-url="true"
+    role="search"
+    aria-label="Filter sensors"
+    onsubmit="return false;"
+  >
+    <div class="card-body grid gap-3 md:grid-cols-2">
+      {# ---------- status ---------- #}
+      <label class="form-control">
+        <span class="label-text">Status</span>
+        <select
+          name="status"
+          class="select select-bordered select-sm"
+          aria-label="Filter sensors by status"
+        >
+          <option value="" {% if not status_filter %}selected{% endif %}>All statuses</option>
+          {% for option in status_options %}
+            <option value="{{ option }}" {% if option == status_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+
+      {# ---------- cadence_kind ---------- #}
+      <label class="form-control">
+        <span class="label-text">Cadence</span>
+        <select
+          name="cadence_kind"
+          class="select select-bordered select-sm"
+          aria-label="Filter sensors by cadence kind"
+        >
+          <option value="" {% if not cadence_filter %}selected{% endif %}>All cadences</option>
+          {% for option in cadence_options %}
+            <option value="{{ option }}" {% if option == cadence_filter %}selected{% endif %}>
+              {{ option }}
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+  </form>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table
+      class="table table-sm"
+      hx-get="/ui/sensors"
+      hx-trigger="every 30s"
+      hx-target="#sensors-table-body"
+      hx-swap="outerHTML"
+      hx-include="[name=status], [name=cadence_kind]"
+    >
+      <thead>
+        <tr>
+          <th>Sensor</th>
+          <th>Operation</th>
+          <th>Cadence</th>
+          <th>Last state</th>
+          <th>Last value</th>
+          <th>Evaluated</th>
+          <th>State since</th>
+        </tr>
+      </thead>
+      {% include "sensors/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

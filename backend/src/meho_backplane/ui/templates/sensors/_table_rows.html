@@ -1,0 +1,81 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Sensor registry table-rows fragment (Task #2591).
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``list.html`` on the initial
+      full-page render.
+    * As the standalone fragment ``GET /ui/sensors`` returns when the
+      ``HX-Request`` header is set (a filter change or the 30s auto-refresh
+      poll). HTMX outerHTML-swaps it into the existing ``#sensors-table-body``
+      element.
+
+  The ``Evaluated`` / ``State since`` columns render a relative string
+  ("3 h ago") with a tooltip carrying the full ISO timestamp. Pure server-side
+  via the ``_rel`` macro; no JS, no client date library. ``last_state`` reuses
+  the checks five-state badge vocabulary -- server-derived, never recomputed
+  here. Fields are read defensively (``StrictUndefined``): a never-evaluated
+  Sensor has ``last_state == "unknown"`` and null timestamps, both of which
+  render the em-dash placeholder rather than raising.
+-#}
+{% macro _rel(ts) -%}
+  {%- set ago = (now_utc - ts).total_seconds() | int -%}
+  {%- if ago < 60 -%}just now
+  {%- elif ago < 3600 -%}{{ (ago // 60) }} min ago
+  {%- elif ago < 86400 -%}{{ (ago // 3600) }} h ago
+  {%- elif ago < 604800 -%}{{ (ago // 86400) }} d ago
+  {%- else -%}{{ ts.strftime("%Y-%m-%d") }}
+  {%- endif -%}
+{%- endmacro %}
+<tbody id="sensors-table-body">
+  {% if rows %}
+    {% for row in rows %}
+      <tr data-sensor-name="{{ row.name }}">
+        <td class="font-medium">
+          {{ row.name }}
+          {% if row.status != "active" %}
+            <span class="badge badge-outline badge-sm ml-1">{{ row.status }}</span>
+          {% endif %}
+        </td>
+        <td class="text-xs">
+          <span class="font-mono">{{ row.connector_id }}</span>
+          <span class="opacity-60">/ {{ row.op_id }}</span>
+        </td>
+        <td class="text-xs">{{ row.cadence_label }}</td>
+        <td>
+          <span class="badge {{ row.last_state_badge }} badge-sm">{{ row.last_state }}</span>
+        </td>
+        <td class="text-xs">
+          {% if row.last_value is not none %}
+            <span class="font-mono">{{ row.last_value }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.last_evaluated_at %}
+            <span class="text-xs" title="{{ row.last_evaluated_at.isoformat() }}">{{ _rel(row.last_evaluated_at) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.state_since %}
+            <span class="text-xs" title="{{ row.state_since.isoformat() }}">{{ _rel(row.state_since) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="7" class="text-center text-sm opacity-60 py-6">
+        No sensors match. Register one via
+        <code>meho sensor create &lt;name&gt;</code>.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

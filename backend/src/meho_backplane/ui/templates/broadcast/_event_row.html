@@ -34,9 +34,21 @@
       missing ``params`` (the same signal T1 used) so the marker tracks
       the publisher's redaction exactly.
 
-  Bound fields on ``ev`` (a parsed ``BroadcastEvent``):
-    ev.event_id, ev.audit_id, ev.ts, ev.principal_sub, ev.principal_name,
-    ev.op_id, ev.op_class, ev.result_status, ev.target_name, ev.payload.
+  Bound fields on ``ev`` — two kinds share the stream (#2549):
+    * audit-driven ``BroadcastEvent`` (``ev.kind !== 'agent_announcement'``):
+      ev.event_id, ev.audit_id, ev.ts, ev.principal_sub, ev.principal_name,
+      ev.op_id, ev.op_class, ev.result_status, ev.target_name, ev.payload.
+    * agent-authored ``AgentAnnouncementEvent``
+      (``ev.kind === 'agent_announcement'``): ev.ts, ev.principal_sub,
+      ev.phase, ev.activity (agent-authored, UNTRUSTED — rendered escaped
+      via ``x-text``, never innerHTML), ev.target/ev.targets, ev.work_ref,
+      ev.planned_op_class, ev.ttl_minutes. Announcements carry no audit_id,
+      so a click does not open the audit drawer (``openDrawer`` no-ops).
+
+  The row branches on ``isAnnouncement(ev)``: one ``<li>`` grid container
+  holds either the audit-columns branch or the announcement branch (each
+  wrapped in a ``display:contents`` div so its cells participate in the
+  same 12-col grid).
 
   ``wall`` (default ``false``): when the row renders inside the
   wall-monitor feed (``broadcast/wall.html`` includes ``_feed.html`` with
@@ -46,78 +58,150 @@
 -#}
 {% set wall = wall | default(false) %}
 <li
-  class="grid grid-cols-12 items-center gap-2 cursor-pointer hover:bg-base-200 focus:bg-base-200 focus:outline-none {% if wall %}px-4 py-4 text-base{% else %}px-3 py-2 text-sm{% endif %}"
-  role="button"
-  tabindex="0"
-  :data-event-id="ev.event_id"
-  :aria-label="'Inspect event ' + ev.op_id"
+  class="grid grid-cols-12 items-center gap-2 hover:bg-base-200 focus:bg-base-200 focus:outline-none {% if wall %}px-4 py-4 text-base{% else %}px-3 py-2 text-sm{% endif %}"
+  :class="isAnnouncement(ev) ? 'border-l-2 border-l-secondary' : 'cursor-pointer'"
+  :role="isAnnouncement(ev) ? 'listitem' : 'button'"
+  :tabindex="isAnnouncement(ev) ? '-1' : '0'"
+  :data-event-id="rowKey(ev)"
+  :aria-label="rowAriaLabel(ev)"
   x-on:click="openDrawer(ev)"
   x-on:keydown.enter="openDrawer(ev)"
   x-on:keydown.space.prevent="openDrawer(ev)"
 >
-  {# ---------- timestamp ---------- #}
-  <span class="col-span-2 font-mono text-xs opacity-70">
-    <time :datetime="ev.ts" x-text="formatTs(ev.ts)"></time>
-  </span>
-
-  {# ---------- principal ---------- #}
-  <span class="col-span-2 truncate">
-    <span class="badge badge-outline badge-sm" x-text="ev.principal_name || ev.principal_sub"></span>
-  </span>
-
-  {# ---------- op_id ---------- #}
-  <span class="col-span-3 truncate font-mono text-xs" x-text="ev.op_id" :title="ev.op_id"></span>
-
-  {# ---------- op_class (colour-coded) ---------- #}
-  <span class="col-span-1">
-    <span class="badge badge-sm" :class="badgeClass(ev.op_class)" x-text="ev.op_class"></span>
-  </span>
-
-  {# ---------- result_status icon ---------- #}
-  <span class="col-span-1" :title="ev.result_status">
-    <span
-      x-show="ev.result_status === 'ok'"
-      class="text-success"
-      aria-label="ok"
-    >&#x2714;</span>
-    <span
-      x-show="ev.result_status === 'error'"
-      class="text-error"
-      aria-label="error"
-    >&#x2716;</span>
-    <span
-      x-show="ev.result_status === 'denied'"
-      class="text-warning"
-      aria-label="denied"
-    >&#x26D4;</span>
-    <span
-      x-show="!['ok','error','denied'].includes(ev.result_status)"
-      class="opacity-50"
-      :aria-label="ev.result_status"
-      x-text="ev.result_status"
-    ></span>
-  </span>
-
-  {# ---------- target ---------- #}
-  <span class="col-span-1 truncate text-xs opacity-80">
-    <span x-text="ev.target_name || '—'"></span>
-  </span>
-
-  {# ---------- payload summary / PII marker (work item #7) ----------
-     Aggregate-only events render the 🔒 lock + the placeholder copy; all
-     other events render the one-line param summary. -#}
-  <span class="col-span-2 truncate text-xs">
-    <template x-if="isAggregateOnly(ev)">
-      <span
-        class="flex items-center gap-1 text-warning"
-        title="Credential read — details are not broadcast (decision #3)"
-      >
-        <span aria-hidden="true">&#x1F512;</span>
-        <span class="truncate">(aggregate-only — credential read; details not broadcast)</span>
+  {# ========== audit-driven operation row ========== #}
+  <template x-if="!isAnnouncement(ev)">
+    <div class="contents">
+      {# ---------- timestamp ---------- #}
+      <span class="col-span-2 font-mono text-xs opacity-70">
+        <time :datetime="ev.ts" x-text="formatTs(ev.ts)"></time>
       </span>
-    </template>
-    <template x-if="!isAggregateOnly(ev)">
-      <span class="opacity-60" :title="payloadSummary(ev)" x-text="payloadSummary(ev)"></span>
-    </template>
-  </span>
+
+      {# ---------- principal ---------- #}
+      <span class="col-span-2 truncate">
+        <span class="badge badge-outline badge-sm" x-text="ev.principal_name || ev.principal_sub"></span>
+      </span>
+
+      {# ---------- op_id ---------- #}
+      <span class="col-span-3 truncate font-mono text-xs" x-text="ev.op_id" :title="ev.op_id"></span>
+
+      {# ---------- op_class (colour-coded) ---------- #}
+      <span class="col-span-1">
+        <span class="badge badge-sm" :class="badgeClass(ev.op_class)" x-text="ev.op_class"></span>
+      </span>
+
+      {# ---------- result_status icon ---------- #}
+      <span class="col-span-1" :title="ev.result_status">
+        <span
+          x-show="ev.result_status === 'ok'"
+          class="text-success"
+          aria-label="ok"
+        >&#x2714;</span>
+        <span
+          x-show="ev.result_status === 'error'"
+          class="text-error"
+          aria-label="error"
+        >&#x2716;</span>
+        <span
+          x-show="ev.result_status === 'denied'"
+          class="text-warning"
+          aria-label="denied"
+        >&#x26D4;</span>
+        <span
+          x-show="!['ok','error','denied'].includes(ev.result_status)"
+          class="opacity-50"
+          :aria-label="ev.result_status"
+          x-text="ev.result_status"
+        ></span>
+      </span>
+
+      {# ---------- target ---------- #}
+      <span class="col-span-1 truncate text-xs opacity-80">
+        <span x-text="ev.target_name || '—'"></span>
+      </span>
+
+      {# ---------- payload summary / PII marker (work item #7) ----------
+         Aggregate-only events render the 🔒 lock + the placeholder copy; all
+         other events render the one-line param summary. -#}
+      <span class="col-span-2 truncate text-xs">
+        <template x-if="isAggregateOnly(ev)">
+          <span
+            class="flex items-center gap-1 text-warning"
+            title="Credential read — details are not broadcast (decision #3)"
+          >
+            <span aria-hidden="true">&#x1F512;</span>
+            <span class="truncate">(aggregate-only — credential read; details not broadcast)</span>
+          </span>
+        </template>
+        <template x-if="!isAggregateOnly(ev)">
+          <span class="opacity-60" :title="payloadSummary(ev)" x-text="payloadSummary(ev)"></span>
+        </template>
+      </span>
+    </div>
+  </template>
+
+  {# ========== agent-authored announcement row (#2549) ==========
+     Every agent-authored field (``activity`` / ``target`` / ``targets`` /
+     ``work_ref``) is bound via ``x-text``, which sets ``textContent`` — the
+     browser escapes it, so an announcement whose ``activity`` contains
+     ``<script>`` / quotes / markup renders as inert quoted prose and is
+     never interpreted (the trust boundary on ``AgentAnnouncementEvent``).
+     Trusted structured fields (``phase`` / ``planned_op_class`` /
+     ``ttl_minutes``) render as chips. -#}
+  <template x-if="isAnnouncement(ev)">
+    <div class="contents">
+      {# ---------- timestamp ---------- #}
+      <span class="col-span-2 font-mono text-xs opacity-70">
+        <time :datetime="ev.ts" x-text="formatTs(ev.ts)"></time>
+      </span>
+
+      {# ---------- principal (marked agent-authored) ---------- #}
+      <span class="col-span-2 truncate">
+        <span
+          class="badge badge-secondary badge-sm gap-1"
+          :title="'Agent-authored announcement — ' + (ev.principal_sub || '')"
+        >
+          <span aria-hidden="true">&#x1F4E3;</span>
+          <span class="truncate" x-text="ev.principal_name || ev.principal_sub"></span>
+        </span>
+      </span>
+
+      {# ---------- activity (agent-authored, UNTRUSTED → quoted + escaped) ----------
+         Sits under the "Operation" column (col-span-3); rendered as a
+         blockquote-styled span to visually mark it as agent prose
+         "displayed as plain quoted text — never interpreted". -#}
+      <span class="col-span-3 truncate">
+        <span
+          class="border-l-2 border-base-300 pl-2 italic opacity-90"
+          :title="ev.activity"
+          x-text="ev.activity"
+        ></span>
+      </span>
+
+      {# ---------- phase chip (under the "Class" column) ---------- #}
+      <span class="col-span-1">
+        <span
+          class="badge badge-sm"
+          :class="phaseBadgeClass(ev.phase)"
+          x-text="ev.phase || 'update'"
+        ></span>
+      </span>
+
+      {# ---------- status column: announcements carry no result_status ---------- #}
+      <span class="col-span-1 text-xs opacity-40" aria-hidden="true">&#x2014;</span>
+
+      {# ---------- target(s) ---------- #}
+      <span class="col-span-1 truncate text-xs opacity-80">
+        <span :title="announcementTargets(ev)" x-text="announcementTargets(ev) || '—'"></span>
+      </span>
+
+      {# ---------- claim metadata: planned_op_class · TTL · work_ref ---------- #}
+      <span class="col-span-2 truncate text-xs">
+        <span
+          class="opacity-60"
+          :title="announcementMeta(ev)"
+          x-text="announcementMeta(ev) || '—'"
+        ></span>
+      </span>
+    </div>
+  </template>
 </li>

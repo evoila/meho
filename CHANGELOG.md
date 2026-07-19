@@ -101,8 +101,525 @@ connector-related release-notes line.
   every dot-slug card. Both sites now use the attribute-selector form
   `[id="kb-preview-<slug>"]`, which is a valid selector for every legal slug;
   the dotted element ids themselves are unchanged.
+### Added — doc-collection delete across REST/MCP/CLI (#2487)
+
+- A disabled, tenant-owned documentation collection can now be
+  deregistered — freeing its `collection_key` for re-registration — via
+  MCP `delete_doc_collections` (tenant_admin, `op_class=write`), REST
+  `DELETE /api/v1/doc_collections/{collection_key}` → 204, and CLI
+  `meho docs collections delete <key>`, all fronting one service primitive
+  `docs_collections.service.delete_doc_collection`. Closes the recovery gap
+  where `disable` only flipped `status` — the row and its occupied key
+  persisted, so a collection mis-registered under the wrong `backend` could
+  never be fixed under its own key (#1739 deferred DELETE to a follow-up).
+  Two guards: a global (`tenant_id IS NULL`) platform-catalogue row is
+  refused with 403 `global_collection` (a tenant admin cannot remove a row
+  every tenant sees; deleting a tenant row that shadows a global key
+  un-shadows the global row), and a non-`disabled` collection is refused
+  with 409 `collection_not_disabled` naming the current status (the
+  disable → delete two-step keeps the terminal `collection_disabled` search
+  rejection as a warning window before the key 404s). One `audit_log` row
+  per call under `op_id="meho.docs.collections.delete"`.
+### Fixed — resolve_authoring_kind for class-less typed connectors (#2496)
+
+- The connector listing (`GET /api/v1/connectors`) and
+  `meho.connector.review` now report `net-probe-1.x` and
+  `secret-broker-1.x` as `kind="typed"` / `dispatchable=true` instead of
+  `ingested-shim` / `dispatchable=false`. These synthetic `net.*` /
+  `secret.*` connectors register module-level `source_kind='typed'`
+  handlers with no backing connector class, so
+  `resolve_authoring_kind`'s resolver replay missed and mislabeled them
+  as a catalog dead end even though the dispatcher routes them fine with
+  `connector_instance=None`. The projection now keys on the row's own
+  `source_kind` (ground truth from the descriptor rows) to recognize the
+  class-less typed mold, so a live operator no longer reads a working,
+  code-shipped connector as dead (#2468 finding 3a). Read-surface fix
+  only — no change to dispatch semantics.
+
+### Added — topology delete_node guarded hard-delete (#2485)
+
+- A manually-seeded `graph_node` can now be removed via MCP
+  `meho.topology.delete_node` (tenant_admin, `op_class=write`) and REST
+  `DELETE /api/v1/topology/nodes/{node_id}` → 204, both fronting one
+  service primitive `topology.nodes` `delete_node`. Closes the gap where
+  a mis-seeded or probe-residue manual node persisted indefinitely
+  (refresh reconciliation only touches nodes adopted onto the refreshed
+  target, and soft-deleted nodes stay reachable in traversals). The
+  delete writes a `removed` `graph_node_history` tombstone so the change
+  stays visible in `query_topology kind=timeline`; the node's prior
+  history rows survive with `node_id` NULL via the `ON DELETE SET NULL`
+  FK. The guard is schema-grounded: only `source='curated'`,
+  target-unbound seeds are deletable — a probe-owned node (`source='auto'`
+  or `target_id IS NOT NULL`) is refused with 409 `probe_owned_node`
+  (would resurrect on the next probe), and a node with live edges is
+  refused with 409 `node_has_edges` listing the blocking edge ids
+  (unannotate them first; no implicit cascade that would drop curated
+  edges without their history tombstones). Agent-principal calls park as
+  approval requests; human tenant_admin calls execute immediately —
+  mirroring `meho.topology.create_node`.
+
+### Tested — search_memory service-account round-trip (#2484)
+
+- Closed the #2494 re-probe of the v0.21.0 field finding that
+  `search_memory` returned 0 hits for the backplane service-account
+  (`client_credentials`) JWT while the row was visible via the REST list
+  verb. A new Docker-gated integration suite
+  (`backend/tests/integration/test_memory_service_account_roundtrip_e2e.py`)
+  reproduces the finding's exact path against a real pgvector cluster
+  under a single, consistent `client_credentials` principal: mint a
+  `principal_kind=service` operator, `add_to_memory scope=user` over the
+  MCP tool surface, then `search_memory` for a token in the just-written
+  body (scope-omitted, `scope=user`, and stopword-only shapes). The
+  round-trip is **clean** — the service account retrieves its own write,
+  and the REST list rule (`MemoryService.list_memories`) returns the same
+  row. The finding did **not** reproduce for one consistent principal:
+  `principal_kind` is never consulted on the memory/retrieval path (there
+  is no principal-type filter), and the only per-principal predicate is
+  `metadata ->> 'user_sub' = :principal_sub` string equality, which the
+  write stamps and the search matches identically. The reported 0-hits
+  was a surface/principal-mixing artefact of the probe (a search `sub`
+  differing from the write `sub`), exactly as the triage predicted. No
+  behaviour change; interactive-OIDC principals are scoped by the same
+  `sub` equality and are unaffected.
+
+### Added — reject grants for non-agent principals (#2489)
+
+- `meho.agents.grant.create` / `.elevate` (and the REST + `/ui` grant
+  surfaces they share) now reject a `principal_sub` that names no
+  registered, non-revoked agent principal in the caller's tenant, with a
+  structured error (MCP `-32602` / REST 422) naming the enforcement
+  scope. Agent permission grants are only ever consulted for tokens
+  carrying the `principal_kind=agent` claim (the deliberate G11.2-T3
+  principal-kind carve-out — a grant on a human/service sub is never
+  evaluated), so a grant on a sub that can never be an agent was silently
+  unenforceable. The create surface now matches `principal_sub` against
+  the agent principal's `agent:<name>` handle (mirroring the
+  `identity_ref` write-boundary check) and refuses the inert grant up
+  front. The `grant.create` / `.elevate` tool descriptions and
+  `docs/codebase/agent-permission-model.md` now state the
+  `principal_kind=agent`-only enforcement scope explicitly. No change to
+  the enforcement model itself.
+
+### Fixed — canonical arg names in MCP error labels (#2480)
+
+- **`meho.broadcast.recent` and `meho.connector.ingest_status` `-32602`
+  validation messages now name the canonical inputSchema property the
+  caller passed** (#2480). A malformed cursor on `broadcast.recent`
+  labelled the field `since:` (the deprecated alias / internal arg
+  name) rather than the canonical `cursor:` (#1358); the message is now
+  `cursor:`-labelled whichever alias the caller sent. A malformed job id
+  on `connector.ingest_status` said `handle must be a valid job id`,
+  naming a "handle" concept absent from the tool's inputSchema; it now
+  says `job_id must be a valid UUID`. Wire-facing labels that point
+  callers (and LLM agents, for whom the error text is a corrective
+  signal) at a field they never wrote are fixed to name the property
+  they did write.
+
+### Added — agent_name/agent_definition_id on run projections (#2472)
+
+- The shared agent-run read projections (`AgentRunSummary` /
+  `AgentRunStatusView`) now carry `agent_definition_id` (the run row's
+  soft-FK) and `agent_name` (resolved read-time from that id,
+  tenant-scoped) — so every read face answers "which agent produced this
+  run". The fields surface on all four: the `meho.agents.list_runs` rows
+  and `meho.agents.run_status` body, the REST `AgentRunSummaryResponse` /
+  `AgentRunStatusResponse` (`GET /api/v1/agents/runs` and
+  `.../runs/{handle}`), the `/ui/agents/runs` list (new **Agent** column)
+  and run detail, and the CLI `meho agent run-list` (new **AGENT**
+  column, via the regenerated OpenAPI client). `agent_name` is `null` for
+  an ad-hoc run (no definition) and for a dangling soft-FK (the definition
+  was deleted after the run) — the projections never 500 on either.
+- The run-list surfaces accept an optional exact-match `agent_name`
+  filter — `meho.agents.list_runs(agent_name=…)`,
+  `GET /api/v1/agents/runs?agent_name=…`, and `meho agent run-list
+  --agent-name`. The name is resolved to a definition id tenant-scoped;
+  an unknown name returns an empty list rather than an error
+  (`-32602` / 4xx), so the filter cannot probe definition existence
+  beyond what the run list already reveals. No DB migration — the name is
+  a read-time lookup, not a denormalized column (#2472).
+### Fixed — connector_not_found -32602 across MCP handlers (#2481)
+
+- **All seven `meho.connector.*` tools that take a `connector_id` now
+  return `-32602 connector_not_found` for an unknown or cross-tenant
+  connector** (#2481) — `review` / `edit_group` / `edit_op` / `enable` /
+  `enable_reads` / `disable` / `delete`. Previously only the
+  ambiguous-scope case (#1910) had a handler `except` arm; a genuine
+  not-found fell through the dispatcher's generic catch to a bare
+  `-32603 "internal error: ConnectorNotFoundError"` — the wrong JSON-RPC
+  class (`-32603` signals a server-side bug, so callers retry or
+  escalate a request that is actually a well-formed call against a
+  nonexistent name) and a leak of the Python exception class name into
+  the stable wire contract. The mapping now matches the family-wide
+  `-32602 <thing>_not_found` convention (`agent_not_found`,
+  `approval_request_not_found`, `ingest_job_not_found`); existence is not
+  leaked, so an absent label and a cross-tenant label return the
+  identical bare code, mirroring the REST 404. Closes the last MCP↔REST
+  not-found asymmetry for the connector-admin surface.
+### Fixed — edit_op/edit_group null clears + -32602 mapping (#2488)
+
+- **`meho.connector.edit_op` / `edit_group` now map a caller-input
+  `ValueError` to `-32602`** carrying the service message (which fields
+  are editable) instead of leaking `-32603 "internal error: ValueError"`
+  (#2488). A no-editable-field call — or an out-of-enum `safety_level` —
+  is a well-formed request the caller can fix, so it belongs on the
+  structured `-32602` channel, matching the REST 400 the sibling routes
+  already return. No Python class name reaches the wire.
+- **An explicit `custom_description: null` now clears the column to SQL
+  NULL** on `edit_op`, alone or alongside another field. The
+  `[string, null]` inputSchema always advertised this, but a service-layer
+  `None`-means-"leave unchanged" flattening dropped the null: passed alone
+  it tripped the no-op `ValueError`, and passed with another field it was
+  silently swallowed. A module-level `_UNSET` sentinel now distinguishes
+  "omitted" (leave unchanged) from an explicit `None` (clear to NULL), so
+  an operator can drop a `custom_description` override back to the
+  ingested value — recorded in the audit row's `fields_updated` like any
+  other edit. REST semantics are unchanged: its `EditOpBody` stays
+  `min_length=1` (cannot request a clear) and it forwards the field only
+  when the operator supplied one.
+### Documentation — kb tool description cross-refs (#2486)
+
+- The `search_knowledge` and `add_to_knowledge` MCP tool descriptions now
+  cross-reference the substrate's `kb` REST/CLI surface: every non-MCP
+  surface names this substrate `kb` (REST `/api/v1/kb`, CLI `meho kb`,
+  console `/ui/kb`), there is no `/api/v1/knowledge` route, and entry
+  deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}` or
+  `meho kb delete` — no MCP delete tool). This closes the discoverability
+  trap a live v0.21.0 probe hit: an agent that wrote via
+  `add_to_knowledge` and then reached for `/api/v1/knowledge/{slug}` to
+  clean up got a 404. The MCP↔REST name split is a recorded design
+  decision (#417 / #331), not drift, so the fix points agents at the real
+  surface rather than renaming anything. `docs/codebase/mcp.md` records
+  the split alongside the naming grammar.
+
+### Added — optional chunk title pass-through (#2475)
+
+- `search_docs` hits and `ask_docs` citations can now carry a
+  human-legible `title`. An optional `title` field is threaded from the
+  external corpus through `CorpusChunk` → `DocsChunk` → the citation
+  labels: a title arrives top-level (`title`) or nested under a chunk's
+  `metadata` (`metadata["title"]`), with the top-level key winning and
+  blank-after-strip normalising to `None`. The #1919 label chain
+  (`title → document_id → humanised filename → URL`) already prefers a
+  title but was starved because none survived the corpus projection;
+  the `ask_docs` and `/ui/corpus` citation seams now feed `chunk.title`
+  into it, so a hit renders by its title instead of a raw
+  `document_id` / numeric filename. Fully additive and null-safe:
+  MEHO has no doc-ingest path (federation-only, #1864 → #2049), so a
+  title can only originate upstream — consumers see `title: null` until
+  the corpus supplies one, and today's corpus (which sends none) is
+  unchanged. The REST `SearchDocsResponse` embeds `DocsChunk`, so the
+  OpenAPI snapshot + generated CLI client gain a nullable `title`
+  property.
+
+### Added — scope-twin connector row disambiguation (#2474)
+
+- **`GET /api/v1/connectors` and `meho.connector.list` now name each
+  row's scope and mark shadowed built-in twins** (#2474). A connector
+  ingested once built-in (`tenant_id IS NULL`) and once tenant-scoped —
+  the #2085 re-ingest trap, whose default was fixed in v0.20.0 (#2204)
+  but whose legacy rows persist on live deploys — used to render the
+  *same* `connector_id` twice with no way to tell the copies apart,
+  because `connector_id` encodes only `(impl_id, version)`. Each row now
+  carries an additive `scope` field (`"builtin"` / `"tenant"`), and a
+  built-in row whose `connector_id` also appears on a tenant-scoped twin
+  carries `shadowed_by_tenant_scope: true` — mirroring the tenant-wins
+  dispatch precedence, so an agent knows exactly which copy
+  `call_operation` resolves and can count unique connectors. Both twins
+  are kept (each holds real, scope-specific review state); no row is
+  hidden. `meho connector list` renders a shadowed built-in as
+  `(shadowed)` in the tenant column, and both fields ride `--json`.
+  Purely additive: single-scope responses are unchanged bar the new
+  `scope` field.
+### Changed — MCP identifier round-trips (#2471)
+
+- Unify list-row identifiers with the sibling verbs that consume them across
+  four MCP families, so the obvious round-trip
+  (`run_status(run_id=row.run_id)`, `grant.show(grant_id=row.id)`,
+  `scheduler.cancel(trigger_id=row.id)`, `list_runs(status=row.state)`) no
+  longer fails with `-32602`. Folds dogfood reports #2476 / #2477 / #2478 /
+  #2482.
+- **`meho.agents.run_status` now takes `run_id`** (the key `meho.agents.run`
+  and `meho.agents.list_runs` rows already return). The pre-#2471 `handle`
+  arg survives as a **deprecated alias** for one cycle — marked
+  `deprecated: true` in `tools/list`, guarded by the same `anyOf` +
+  handler-level XOR the approvals tools use; supplying both `run_id` and
+  `handle` rejects with `-32602` naming both. **Migration:** switch
+  `run_status` callers from `handle` to `run_id`; `handle` keeps working
+  until the alias is dropped.
+- Three additive response mirrors at the MCP wire boundary (REST surface and
+  shared Pydantic models untouched, native keys retained):
+  `meho.agents.grant.{list,show,create,elevate}` rows now carry `grant_id`
+  (== native `id`); `meho.scheduler.list` rows carry `trigger_id` (== native
+  `id`); `meho.runbook.list_runs` summaries carry `status` (== native
+  `state`). The runbook `status` list-filter is unchanged (§14.6).
+- Clarify the `template_slug` inputSchema description on the runbook template
+  verbs to state that responses carry both `template_slug` (mirror) and the
+  model-native `slug`, equal values (#2476) — no payload change.
 
 ### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577)
+### Added — credential_read response scrub + reveal_secret opt-in (#2467)
+
+- `credential_read`-classified dispatch responses (`vault.kv.read` and
+  its `_CREDENTIAL_READ_OPS` siblings) are now key-name scrubbed before
+  they reach the `call_operation` caller: secret-named values in the
+  transport response are replaced with `[REDACTED:param_name]` while
+  non-secret siblings (`username`, `version`) survive. This closes the
+  gap where the connector-boundary redaction engine — which matches only
+  labelled secret shapes inside string leaves — passed a
+  `{"password": "<value>"}` dict through verbatim into an agent caller's
+  model-API transcript. A caller that must pipe the raw value onward
+  passes a reserved `params.reveal_secret=true`, which returns the raw
+  value and is stamped queryably on the audit row
+  (`payload['reveal_secret']`). The audit `raw_payload` keeps the raw
+  result in both cases — only the transport response is scrubbed
+  (mirrors the #2172 secret-handler posture). The scrub keys on the op
+  class, not the caller kind. Approved human flows keep working by
+  opting in: the `/ui` Vault console read (reveal-on-click) and CLI
+  `meho secret read` (pipe-only) both pass `reveal_secret=true`;
+  `secret.move` stays the recommended no-transit path. The reserved
+  `reveal_secret` flag is stripped before op-schema validation and
+  `params_hash`, so a scrubbed read and its reveal share one hash.
+### Fixed — SNI on session-establish (#2398)
+
+- Every connector session-establish request now threads the target's
+  `tls_server_name` TLS SNI / certificate-verify name, matching the
+  dispatch path. Previously only the shared dispatch seams
+  (`_request_json` / `_post_json`) carried the SNI override from #2002,
+  so the hand-rolled login/token requests bypassed it: httpcore fell
+  back to `server_hostname = origin.host` and verified an appliance's
+  FQDN-SAN certificate against the registered IP, failing
+  `CERTIFICATE_VERIFY_FAILED` *before* auth. This blocked secure
+  (`verify_tls=true` + `tls_ca_pin`) registration of any by-IP endpoint
+  whose certificate pins an FQDN. The fix covers all six hand-rolled
+  session families — vmware `/api/session` (modern + legacy fallback +
+  shutdown revoke), `vcf_session_login` (vROps token/acquire, vRLI
+  sessions, SDDC `/v1/tokens`), NSX `/api/session/create`, VCFA
+  provider + tenant logins, proxmox ticket mint, keycloak admin token
+  grant — plus the profiled-connector logins (basic / form / json) and
+  the unauthenticated fingerprint probe. Behaviour is byte-identical
+  when `tls_server_name` is unset (empty extensions dict). (#2398)
+### Added — docs/deploying.md consolidated deploy guide (#2468)
+
+- **A single operator-facing deployment & upgrade guide** now lives at
+  `docs/deploying.md`, consolidating knowledge previously scattered
+  across the chart values, the acceptance contracts, and several
+  deep-dive docs (or missing entirely). It covers: a cold-install
+  prerequisites checklist (pgvector superuser `CREATE EXTENSION`, the
+  asyncpg `DATABASE_URL` Secret shape, Keycloak realm + MCP-audience
+  resolvability, internal-CA trust bundle, pinned `image.tag`,
+  first-boot `startupProbe` budget); the two credential-backend install
+  paths side by side (Vault vs GSM/Vault-free, `config.credentialBackend`);
+  the Helm-4 server-side-apply field-conflict upgrade caveat (the
+  v0.22.0 `startupProbe` example, pre-flight `--show-managed-fields`,
+  remedy `helm upgrade --force-conflicts`); a version-specific
+  upgrade-notes table (v0.15.0 Vault tenant-scope guard, v0.22.0 SSA
+  conflict); and operational chart knobs. The guide **links into** the
+  existing deep-dives rather than restating them. Cross-linked from
+  `README.md`, `docs/codebase/devops.md`, and
+  `deploy/values-examples/README.md`; `docs/RELEASING.md` now carries a
+  checklist line obliging the release-cutting PR to append a
+  version-specific upgrade-notes row when a release carries an
+  upgrade-relevant change. Docs-only; resurrects #559 with post-v0.21.0
+  motivation (#2468).
+
+### Added — operator-console OAuth chart values (#2594)
+
+- The Helm chart now renders the operator-console (`/ui/*`) browser
+  BFF OAuth settings from first-class values, so a chart-only deploy
+  can enable the console without hand-rolling Secrets and `extraEnv`
+  `valueFrom`. Set `config.uiKeycloakClientId` (plain, rendered as
+  `UI_KEYCLOAK_CLIENT_ID`) and `uiConsole.enabled: true` +
+  `uiConsole.secretName` (a Secret holding the `meho-web` client
+  secret and the session encryption key, wired into
+  `UI_KEYCLOAK_CLIENT_SECRET` / `UI_SESSION_ENCRYPTION_KEY` via
+  `secretKeyRef`). Previously these three env vars had no chart values,
+  so a browser-console deploy hit `503 ui_oauth_not_configured` with no
+  chart-level way to configure it. Enabling the console is
+  all-or-nothing (the schema requires the client_id + secret name under
+  `uiConsole.enabled: true`); leaving it disabled is the default and
+  keeps the console cleanly dark with no effect on `/api/*` or the
+  `meho login` CLI. The GSM/no-Vault enablement recipe (confidential
+  web client + session key + the two secrets) is documented in
+  `deploy/values-examples/README.md` and the realm-side
+  `docs/cross-repo/keycloak-web-client.md` (#2594).
+### Changed — netdiag.probeAllowlist chart value (#2518)
+
+- **The `net.*` diagnostics probe allowlist is now a typed Helm chart
+  value** (#2518). v0.22.0 shipped the `net.*` diagnostics connector
+  (#2405) governed by `MEHO_NETDIAG_PROBE_ALLOWLIST` — an inverted,
+  fail-closed allowlist whose empty default keeps the connector **inert**
+  (every probe denied) — but the chart exposed no typed key for it: the
+  only way to set the env var was the untyped `extraEnv` passthrough,
+  which `values.schema.json` does not validate and `helm show values`
+  does not surface. A new `netdiag.probeAllowlist` value (schema-typed
+  optional string, default `""`) now renders into
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` on the backplane ConfigMap — injected
+  into the container via the existing `envFrom.configMapRef` — so a
+  scoped probe allowlist (e.g. `"10.0.0.0/8,vcenter.lab.internal"`) is a
+  first-class, `helm show values`-discoverable setting. The default `""`
+  is a genuine no-op that keeps the connector inert (fail-closed), so
+  existing installs are unchanged. This mirrors #2240's typed
+  `config.targetSsrfAllowlist` treatment so both fail-closed allowlists
+  share one configuration shape. Chart-only — the allowlist parser is
+  untouched. (#2518)
+### Fixed — explicit http scheme on HttpConnector targets (#2587)
+
+- Every `HttpConnector`-based connector hardcoded `https` when building
+  the request URL, so a target against a plain-HTTP management API — e.g.
+  RabbitMQ's Management API on `15672`, HTTP unless the mgmt TLS listener
+  is enabled on `15671` — was unreachable (it probed
+  `WRONG_VERSION_NUMBER`). The transport scheme is now read from an opt-in
+  `scheme` key in `Target.extras` (`{"http", "https"}`, default `https`),
+  with scheme-correct default-port elision (`443`/`80`). Absent the key,
+  behaviour is byte-identical (https, `:443` elided). An invalid value is
+  refused with a clear error at dispatch rather than silently coerced, and
+  the scheme is never derived from `verify_tls` (certificate trust and
+  transport selection stay orthogonal). Same-origin redirect following
+  keys on the effective scheme, so an http target's benign trailing-slash
+  canonicalisation is still followed while an http→https hop is refused
+  as cross-origin.
+### Fixed — configmap-roll pod annotation (#2586)
+
+- The backplane `Deployment` pod template now carries a `checksum/config`
+  annotation hashed from the rendered `configmap.yaml`. A `helm upgrade` that
+  changes only ConfigMap-rendered `config.*` (or `memory.*` / `topology.*` /
+  derived MCP/backplane) values now rolls the pod automatically instead of
+  requiring a manual `kubectl rollout restart`; an unchanged render keeps the
+  checksum stable, so there is no spurious pod churn.
+### Fixed — GSM secret-ref registration guard (#2585)
+
+- Target registration on a `config.credentialBackend: gsm` deploy no
+  longer rejects valid `gsm:<project>/<secret>[#field]` secret_refs with
+  a Vault-worded `422 secret_ref_outside_tenant_scope`. The registration-
+  time tenant-scope gate (`POST`/`PATCH /api/v1/targets`) now only applies
+  to refs that resolve through the Vault credential backend — decided by
+  the same `split_credential_ref` resolver dispatch uses — so a GSM
+  install registers `gsm:` refs out of the box with **zero** `extraEnv`
+  overrides (`deploy/values-examples/values-gsm-example.yaml`). Vault
+  deploys are unchanged; a per-target `gsm:` override ref is likewise
+  passed through on a Vault-default deploy.
+### Changed — retire CodeRabbit from the development flow
+
+- Remove the CodeRabbit review step from the contribution flow; the
+  in-house Claude review pass is the review of record on every PR
+  (#2601)
+
+## [0.24.0] - 2026-07-17
+
+This release **completes Broadcast v2 (Initiative #2543)** — the final
+three of seven tasks land the durable half of the agent coordination
+channel: announcements now survive a Valkey restart, humans see them on
+every read surface, and write-class dispatches carry a target-activity
+advisory so a caller learns another principal is already active.
+
+### Added — durable agent announcements: table, retention prune, recent DB backfill, real event UUIDs (#2547 / #2565)
+
+- Announcements previously lived only on the count-trimmed per-tenant
+  Valkey stream (`BROADCAST_MAXLEN=10000`), which the broadcast subchart
+  runs with persistence disabled — a restart wiped the whole coordination
+  window. This lands the durable half of Broadcast v2 (Initiative #2543,
+  T2).
+- New append-only `agent_announcement` table (Alembic migration `0067`,
+  down_revision `0066`) persisting the typed claim fields (#2544) plus
+  lineage: `id` UUID PK, `tenant_id`, `principal_sub`, `activity`,
+  `target`, `scope`, `targets`, `phase`, `planned_op_class`,
+  `ttl_minutes`, `work_ref`, `run_id`, `created_at`; indexes on
+  `(tenant_id, created_at DESC)` and `(tenant_id, work_ref)`.
+  `AgentAnnouncementEvent.event_id` is now a real per-announcement UUID
+  minted at publish — written to the row PK, the stream entry, and the
+  announce ack — genuinely distinct from `cursor` (the stream entry id),
+  closing the #2479 misnomer. The durable row is written before the
+  `XADD`; both legs fail loud so the agent knows if the announcement did
+  not land.
+- `meho.broadcast.recent` backfills from the table when the requested
+  window predates the stream's oldest surviving entry (or the stream is
+  empty after a restart), deduped by `event_id` and bounded by the page
+  limit; best-effort, so an archive-read failure degrades to stream-only
+  results (`watch` is deliberately not backfilled — a forward live tail
+  has no archive dimension). A weekly retention-prune sweep deletes rows
+  older than `BROADCAST_ANNOUNCEMENT_RETENTION_DAYS` (default 90, `0` =
+  keep-forever), emitting one INTERNAL audit row per non-no-op tick and
+  gated by `BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED`. Three new
+  `BROADCAST_ANNOUNCEMENT_*` knobs are surfaced across settings + Helm
+  values/schema/configmap.
+
+### Added — humans see agent announcements: SSE union validation + console history/stream + CLI (#2549 / #2564)
+
+- The intent stream was write-only for humans: the SSE pipeline validated
+  every entry as `BroadcastEvent`, so announcement JSON failed validation
+  and was skipped as malformed, and the console history pane hard-dropped
+  announcements. Announcements now surface on every human-facing read
+  (Broadcast v2, Initiative #2543, T5).
+- `_process_entries` (`api/v1/feed.py`) union-validates on the wire `kind`
+  discriminator (`select_event_model`, shared by the XREAD and XRANGE
+  paths), so both `BroadcastEvent` and `AgentAnnouncementEvent` flow to
+  SSE consumers as first-class frames on `/api/v1/feed` and
+  `/ui/broadcast/stream`; genuinely malformed entries still skip. The
+  console history renders both kinds through the shared `_event_row.html`
+  partial (announcements show a principal badge, phase chip, escaped
+  quoted activity, and the #2544 claim fields), and the former hard drop
+  became a user-facing `?kind=` filter (All / Operations / Announcements).
+- The human-facing read path serialises via `_dump_event_plain` (escaping
+  at render), so the LLM untrusted-text envelope (`dump_event_wire`, kept
+  for the MCP `recent`/`watch`/`tenant_feed` LLM-facing paths) is not
+  applied to the pane. `meho status --watch` (Go CLI) tolerates and
+  renders the new frame kind; the OpenAPI snapshot + generated client are
+  regenerated for the new `?kind=` history query parameter.
+
+### Added — dispatch-time target-activity advisory on write ops (#2550 / #2567)
+
+- A write-class dispatch on a target with recent peer activity now carries
+  `extras["target_activity_advisory"]` on its `OperationResult` success
+  response, so a caller doing a write learns another principal is already
+  active there (Broadcast v2, Initiative #2543, T7). This is **post-op
+  awareness — not a lock or a block**; pre-op checking stays the
+  discipline's `meho.broadcast.recent` read step.
+- The advisory projects up to five most-recent peer entries to structured
+  fields only (`principal_sub`, `actor_sub`, `kind`, `op_id`/`phase`,
+  `ts`) — announcement free text never enters the response. The caller's
+  own activity (principal + actor) is excluded; a sibling agent under the
+  same human surfaces as a peer. Read-class dispatches short-circuit
+  before any Valkey call, so the hot read path pays nothing; the lookup is
+  fail-open and bounded (a single newest-first `XREVRANGE` capped at 100),
+  gated by `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default 30, `0` =
+  off). Sampling newest-first via `XREVRANGE` (not the oldest-first
+  history helper) fixes the busy-target inversion where a tenant emitting
+  >100 events inside the window would have sampled window-*start* activity
+  instead of the newest peer.
+
+### Added — `meho.topology.bulk_import` MCP tool + `superseded` on annotate return (#2539 / #2582)
+
+- Give the agent surface the propose→plan→apply loop humans already have
+  on the REST/CLI/console bulk-import fronts. The new
+  `meho.topology.bulk_import` MCP tool (`tenant_admin`) defaults
+  `dry_run=true` — read-shaped, never parks, surfaces every row's
+  diagnostic on the `-32602` `error.data` (the REST 422 `invalid_bulk`
+  analogue). `dry_run=false` dispatches an apply-only targetless typed op
+  through the exact #2537 substrate the single writes use: an AGENT
+  principal parks the whole batch as one `ApprovalRequest`, a human
+  `tenant_admin` applies immediately, and approve-time re-dispatch applies
+  all rows atomically — no second approval queue, no new endpoints. The
+  1000-row cap is enforced at the tool boundary; the plan returns inline
+  under the cap.
+- `meho.topology.annotate`'s return shape gains a `superseded` list — the
+  ids of the auto edges an assertion displaced (already present on the
+  shared audit/broadcast payload, so this is an additive return-shape
+  change via the plan-returning `annotate_edge_with_plan`, leaving the
+  wide `annotate_edge` caller base untouched).
+
+### Changed — retire the expired RDC image-push `repository_dispatch` notify (#2578)
+
+- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
+  `.github/workflows/image.yml` (and its now-dead job-level
+  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
+  renewed, so the step — gated on the secret being present, not valid — failed
+  loud on every `main`/tag push with a `401` while the image build / sign /
+  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
+  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
+  the GitHub Releases feed. The cross-repo handshake docs are marked retired
+  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
+
+### Fixed — `targets import` reads the `{items, next_cursor}` list envelope (#2577 / #2581)
 
 - `meho targets import` failed against every v0.21.0+ backplane — `--dry-run`
   included — with `decode list response: json: cannot unmarshal object into Go
@@ -121,19 +638,7 @@ connector-related release-notes line.
   which is why the suite stayed green while the shipped verb was broken; they
   now serve the same envelope the backplane emits.
 
-### Changed — retire the expired RDC image-push `repository_dispatch` notify
-
-- Remove the `Notify claude-rdc-hetzner-dc (repository_dispatch)` step from
-  `.github/workflows/image.yml` (and its now-dead job-level
-  `RDC_DISPATCH_TOKEN` env). The `RDC_DISPATCH_TOKEN` PAT is no longer being
-  renewed, so the step — gated on the secret being present, not valid — failed
-  loud on every `main`/tag push with a `401` while the image build / sign /
-  attest / scan / push all succeeded. MEHO no longer emits a `meho-image-pushed`
-  event; the consumer rolls forward by tracking new `ghcr.io/evoila/meho` tags /
-  the GitHub Releases feed. The cross-repo handshake docs are marked retired
-  (`docs/cross-repo/rke2-infra-coordination.md` §3, `docs/codebase/backend.md`).
-
-### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507)
+### Fixed — Sensors & Dashboards v1 review fast-follow (#2505, #2507 / #2574)
 
 - **Check-runner never-raises hardening (#2505):** a non-`TimeoutError` exception
   from `dispatch()` now maps to an `unknown` outcome (`reason=dispatch_error`)
@@ -148,6 +653,25 @@ connector-related release-notes line.
   dashboard id / a digest of the `(kind, name)` identity, so causes and dashboards
   whose names slugify to the same string no longer share a suppression key or an
   in-flight work-ref.
+
+### Documentation — retire obsolete MVP-era planning docs; rehome the locked-decisions ADR (#2579, #2580)
+
+- Retire the frozen MVP-era planning docs (#2579): `mvp-roadmap.md` mapped
+  MVP1–9 onto v0.2–v0.11 and had been stale since 2026-06-05 (12 releases
+  behind), and its companion `release-plan.md` addressed a long-resolved
+  v0.2–v0.5-era divergence. The CHANGELOG + GitHub Releases are the live
+  record; the one inbound reference (from `api-shape-conventions.md`) is
+  dropped, leaving no dangling links.
+- Rehome the locked-decisions ADR out of its v0.2 wrapper (#2580): move
+  `docs/planning/v0.2-decisions.md` → `docs/decisions/locked-decisions.md`
+  (retiring `docs/planning/` entirely), retitle to "MEHO locked
+  architecture decisions", and strip 36 lines of dead v0.2 planning
+  scaffolding. The register's content is live — 12 load-bearing decisions
+  cited by ~84 places across source, migrations, tests, and docs; the `#N`
+  numbering is documented as never renumbered. All 87 references re-pointed
+  and verified (0 broken); migration docstring edits are comment-only (no
+  DDL, single head at `0066`).
+
 ## [0.23.0] - 2026-07-17
 
 ### Added — topology open node/edge kind vocabularies (#2555)

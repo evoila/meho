@@ -70,6 +70,19 @@ document.addEventListener("alpine:init", () => {
       } catch {
         return;
       }
+      // #2549: the shared ``/ui/broadcast/stream`` now also carries
+      // agent-authored announcements. This tray is an operations-activity
+      // glance surface whose row shape is the audit ``BroadcastEvent``
+      // (ts / principal_sub / op_id / result_status); an announcement
+      // carries none of the op fields, so drop it here and let it render
+      // on the broadcast feed / history (its first-class home) rather than
+      // as a blank operation row.
+      if (
+        frame &&
+        (frame.kind === "agent_announcement" || frame.event_kind === "agent_announcement")
+      ) {
+        return;
+      }
       this.events.unshift(frame);
       if (this.events.length > this.cap) {
         this.events.length = this.cap;

@@ -242,10 +242,20 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	case http.StatusForbidden:
-		if isDisabledCollection(bodyStr) {
+		if detailErrorMarker(bodyStr) == "collection_disabled" {
 			return output.RenderError(cmd.ErrOrStderr(),
 				output.Unexpected(fmt.Sprintf(
 					"the doc collection is disabled: %s",
+					decodeDetailString(bodyStr),
+				)),
+				jsonOut,
+			)
+		}
+		if detailErrorMarker(bodyStr) == "global_collection" {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"the doc collection is global (platform-owned) and cannot be "+
+						"deleted by a tenant admin: %s",
 					decodeDetailString(bodyStr),
 				)),
 				jsonOut,
@@ -261,6 +271,16 @@ func renderHTTPStatus(
 			jsonOut,
 		)
 	case http.StatusConflict:
+		if detailErrorMarker(bodyStr) == "collection_not_disabled" {
+			return output.RenderError(cmd.ErrOrStderr(),
+				output.Unexpected(fmt.Sprintf(
+					"the doc collection is not disabled; disable it before "+
+						"deleting: %s",
+					decodeDetailString(bodyStr),
+				)),
+				jsonOut,
+			)
+		}
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
 				"the doc collection is not ready: %s",
@@ -306,24 +326,28 @@ func decodeDetailString(body string) string {
 	return strings.TrimSpace(body)
 }
 
-// isDisabledCollection reports whether a 403 body carries the structured
-// `detail.error == "collection_disabled"` marker the search route attaches
-// when an operator has disabled the collection. A disabled collection is a
-// terminal readiness rejection (not an entitlement/role miss), so the 403
-// renderer surfaces it distinctly rather than as `insufficient_role`. The
-// entitlement-miss 403 carries a plain-string `detail`, so it never matches.
-func isDisabledCollection(body string) bool {
+// detailErrorMarker returns the structured `detail.error` marker a docs
+// route attaches to a typed rejection (e.g. `collection_disabled` on a
+// disabled-collection search 403, `global_collection` on a delete of a
+// platform-owned row, `collection_not_disabled` on a delete of a
+// still-enabled collection), or "" when the body carries no such marker.
+// It lets the shared HTTP-status renderer surface each typed rejection
+// distinctly rather than as a generic `insufficient_role` / not-ready
+// message. A plain-string `detail` (the entitlement-miss 403, a FastAPI
+// validation list) never matches, so the caller falls through to the
+// default rendering.
+func detailErrorMarker(body string) string {
 	var outer detailEnvelope
 	if err := json.Unmarshal([]byte(body), &outer); err != nil {
-		return false
+		return ""
 	}
 	var inner struct {
 		Error string `json:"error"`
 	}
 	if err := json.Unmarshal(outer.Detail, &inner); err != nil {
-		return false
+		return ""
 	}
-	return inner.Error == "collection_disabled"
+	return inner.Error
 }
 
 // truncate cuts s to maxLen runes, appending an ellipsis when

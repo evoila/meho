@@ -80,23 +80,30 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final, cast
 
 import structlog
 from pydantic import ValidationError
 from redis.exceptions import RedisError
+from sqlalchemy import select
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.agent_events import AgentAnnouncementEvent
 from meho_backplane.broadcast.client import get_broadcast_client
-from meho_backplane.broadcast.events import BroadcastEvent
+from meho_backplane.broadcast.events import BroadcastEvent, classify_op
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AgentAnnouncement
+from meho_backplane.settings import get_settings
 from meho_backplane.untrusted_text import wrap_untrusted_text
 
 __all__ = [
     "DEFAULT_WINDOW_MINUTES",
     "OP_CLASS_ENUM",
     "InvalidSinceError",
+    "build_target_activity_advisory",
     "default_since_ms",
     "dump_event_wire",
     "event_matches",
@@ -104,6 +111,7 @@ __all__ = [
     "list_recent_events_strict",
     "parse_entry",
     "parse_since",
+    "select_event_model",
     "stream_key",
 ]
 
@@ -234,8 +242,13 @@ def _iso8601_to_min_cursor(raw: str) -> str:
     try:
         parsed = datetime.fromisoformat(iso_normalised)
     except ValueError as exc:
+        # The wire-facing label names ``cursor`` -- the canonical MCP
+        # forward-cursor parameter (#1358) -- not the internal ``since``
+        # arg name, so the -32602 the sole wire consumer (the MCP
+        # ``broadcast.recent`` handler) re-raises points callers at the
+        # inputSchema property they actually passed.
         raise InvalidSinceError(
-            f"since: not a valid ISO-8601 timestamp or Valkey stream cursor: {raw!r}",
+            f"cursor: not a valid ISO-8601 timestamp or Valkey stream cursor: {raw!r}",
         ) from exc
     if parsed.tzinfo is None:
         # Treat a naive timestamp as UTC explicitly; otherwise
@@ -359,6 +372,42 @@ def event_matches(
     return not (active_only and _is_expired_claim(event, now or datetime.now(UTC)))
 
 
+def select_event_model(
+    raw_event_json: str,
+) -> type[BroadcastEvent] | type[AgentAnnouncementEvent] | None:
+    """Peek the wire discriminator; pick the model class to validate against.
+
+    Reads only the top-level ``kind`` field (falling back to the historical
+    ``event_kind`` alias) via a cheap :func:`json.loads` pass, then returns
+    the concrete model class the caller should full-validate the same JSON
+    against:
+
+    * ``"agent_announcement"`` → :class:`AgentAnnouncementEvent`.
+    * anything else (including a missing discriminator on a pre-migration
+      entry) → :class:`BroadcastEvent`, the audit-driven default.
+
+    Returns ``None`` when *raw_event_json* is not decodable JSON, so each
+    caller can emit its own surface-specific skip log
+    (``broadcast_history_skipped_malformed_event`` here,
+    ``feed_skipped_malformed_event`` on the SSE edge) rather than sharing
+    one log name across two surfaces.
+
+    Single-sources the discriminator rule so the XRANGE read path
+    (:func:`parse_entry`) and the XREAD SSE path
+    (:func:`meho_backplane.api.v1.feed._process_entries`) dispatch on the
+    same field with the same fallback. BroadcastEvent's ``kind`` is an open
+    ``str`` (not a :class:`typing.Literal`) and pre-migration entries omit
+    it, so a pydantic tagged discriminated union is not usable; this manual
+    peek is the in-tree mold both callers share.
+    """
+    try:
+        peek = json.loads(raw_event_json)
+    except json.JSONDecodeError:
+        return None
+    discriminator = peek.get("kind") or peek.get("event_kind") if isinstance(peek, dict) else None
+    return AgentAnnouncementEvent if discriminator == "agent_announcement" else BroadcastEvent
+
+
 def parse_entry(
     entry_id: str,
     fields: dict[str, str],
@@ -411,27 +460,20 @@ def parse_entry(
             fields=list(fields.keys()),
         )
         return None
-    try:
-        # Cheap discriminator peek -- json.loads on a short string is
-        # microseconds; an XRANGE page of ``limit <= 1000`` events
-        # incurs at most one extra parse pass per entry. The full
-        # pydantic validation runs on the chosen model class below.
-        peek = json.loads(raw_event_json)
-    except json.JSONDecodeError:
+    # G0.16-T6 Finding F (#1312). :func:`select_event_model` peeks the new
+    # top-level ``kind`` discriminator, falling back to the historical
+    # ``event_kind`` field for v0.8.0 in-flight stream entries that haven't
+    # aged out via the publisher's ``MAXLEN ~`` trim yet. It returns ``None``
+    # on undecodable JSON; the full pydantic validation runs on the chosen
+    # model class below.
+    model_cls = select_event_model(raw_event_json)
+    if model_cls is None:
         _log.warning(
             "broadcast_history_skipped_malformed_event",
             stream_key=stream_key,
             entry_id=entry_id,
         )
         return None
-    # G0.16-T6 Finding F (#1312). Prefer the new top-level ``kind``
-    # discriminator; fall back to the historical ``event_kind`` field
-    # for v0.8.0 in-flight stream entries that haven't aged out via
-    # the publisher's ``MAXLEN ~`` trim yet.
-    discriminator = peek.get("kind") or peek.get("event_kind") if isinstance(peek, dict) else None
-    model_cls: type[BroadcastEvent] | type[AgentAnnouncementEvent] = (
-        AgentAnnouncementEvent if discriminator == "agent_announcement" else BroadcastEvent
-    )
     try:
         return model_cls.model_validate_json(raw_event_json)
     except ValidationError:
@@ -480,16 +522,19 @@ def dump_event_wire(
     than as bare context it might absorb as instructions. Audit-driven
     :class:`BroadcastEvent` dumps pass through unchanged.
 
-    Every surface that re-serves stream events to a model goes through
+    Every surface that re-serves stream events **to a model** goes through
     this helper — ``meho.broadcast.recent`` (via
-    :func:`_list_recent_events_core`), ``meho.broadcast.watch``
+    :func:`list_recent_events_strict`), ``meho.broadcast.watch``
     (:func:`meho_backplane.mcp.tools.broadcast._filter_xread_items`)
     and the ``meho://tenant/{tenant_id}/feed`` resource
     (:mod:`meho_backplane.mcp.resources.tenant_feed`). The UI history
     pane is *not* such a surface: it consumes
-    :func:`list_recent_events_fail_soft` but drops announcement-kind
-    events before rendering (``_is_audit_event``), and its HTML sink
-    escapes content separately.
+    :func:`list_recent_events_fail_soft`, which serialises via
+    :func:`_dump_event_plain` (no wrap) because the browser sink escapes
+    every field separately (Alpine ``x-text`` sets ``textContent``), and
+    the multi-line LLM guard envelope would be human-visible noise on a
+    feed row. #2549 renders announcements on that pane; the free text is
+    rendered as escaped quoted prose, not fed to a model.
 
     Filtering (:func:`event_matches`) runs on the *model*, before this
     dump, so ``target`` equality matching is unaffected by the wrap.
@@ -509,6 +554,207 @@ def dump_event_wire(
     return data
 
 
+def _backfill_window_start(since: str | None) -> datetime | None:
+    """Resolve the window-start instant a DB archive backfill would cover.
+
+    Broadcast v2 T2 (#2547). ``meho.broadcast.recent`` backfills durable
+    :class:`~meho_backplane.db.models.AgentAnnouncement` rows when the
+    caller's requested window reaches back before the stream's oldest
+    surviving entry. That only makes sense for a wall-clock window:
+
+    * ``None`` -- the default :data:`DEFAULT_WINDOW_MINUTES`-minute
+      look-back; the archive may hold announcements the stream has since
+      trimmed. Returns ``now - DEFAULT_WINDOW_MINUTES``.
+    * An ISO-8601 timestamp -- the caller named an explicit wall-clock
+      start; returns that instant (UTC-normalised).
+    * A Valkey stream cursor -- the caller is paginating forward from a
+      known point in the *stream*; archive backfill would break the
+      cursor contract, so returns ``None`` (no backfill).
+
+    A malformed timestamp returns ``None`` -- the stream read path's
+    :func:`parse_since` surfaces the same input as an
+    :class:`InvalidSinceError`, so backfill silently declining here never
+    masks that error.
+    """
+    if since is None:
+        return datetime.now(UTC) - timedelta(minutes=DEFAULT_WINDOW_MINUTES)
+    if _looks_like_stream_cursor(since):
+        return None
+    iso_normalised = since.replace("Z", "+00:00") if since.endswith("Z") else since
+    try:
+        parsed = datetime.fromisoformat(iso_normalised)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+def _stream_oldest_dt(raw_entries: list[tuple[str, dict[str, str]]]) -> datetime | None:
+    """Return the wall-clock instant of the oldest fetched stream entry.
+
+    ``XRANGE`` from the window's lower bound returns entries ascending by
+    id, so ``raw_entries[0]`` is the oldest entry at or after the window
+    start. Its ``<ms>-<seq>`` id gives the millisecond timestamp; the
+    backfill covers the archive strictly *before* it. ``None`` when the
+    page is empty (the whole window is a candidate for the archive).
+    """
+    if not raw_entries:
+        return None
+    ms_part, _, _ = raw_entries[0][0].partition("-")
+    if not ms_part.isdigit():
+        return None
+    return datetime.fromtimestamp(int(ms_part) / 1000, UTC)
+
+
+def _row_to_announcement(row: AgentAnnouncement) -> AgentAnnouncementEvent:
+    """Reconstruct an :class:`AgentAnnouncementEvent` from a durable row.
+
+    Uses :meth:`pydantic.BaseModel.model_validate` (not the typed
+    constructor) so the ``phase`` / ``planned_op_class`` strings coming
+    off the DB validate against the model's ``Literal`` unions without a
+    typed-cast dance. ``created_at`` is UTC-normalised because the SQLite
+    dev/test driver returns naive datetimes; a naive ``ts`` would raise
+    when :func:`_is_expired_claim` compares ``expires_at`` against the
+    timezone-aware ``now``.
+    """
+    created_at = row.created_at
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    return AgentAnnouncementEvent.model_validate(
+        {
+            "event_id": row.id,
+            "tenant_id": row.tenant_id,
+            "principal_sub": row.principal_sub,
+            "activity": row.activity,
+            "target": row.target,
+            "targets": list(row.targets or []),
+            "scope": row.scope,
+            "planned_op_class": row.planned_op_class,
+            "ttl_minutes": row.ttl_minutes,
+            "work_ref": row.work_ref,
+            "run_id": row.run_id,
+            "phase": row.phase,
+            "ts": created_at,
+        }
+    )
+
+
+async def _backfill_recent_from_db(
+    operator: Operator,
+    *,
+    since: str | None,
+    oldest_stream_dt: datetime | None,
+    principal: str | None,
+    target: str | None,
+    op_class: str | None,
+    actor_sub: str | None,
+    work_ref: str | None,
+    active_only: bool,
+    seen_event_ids: set[str],
+    budget: int,
+    now: datetime,
+    serialize: Callable[[BroadcastEvent | AgentAnnouncementEvent], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Read durable announcements older than the stream's oldest entry.
+
+    Broadcast v2 T2 (#2547). The stream is the hot path; this table is the
+    archive. When the window reaches before the stream's oldest surviving
+    entry (or the stream is empty after a Valkey restart), the
+    announcements that lived in that gap are read back from
+    :class:`~meho_backplane.db.models.AgentAnnouncement` so a restart or
+    the ``MAXLEN ~`` trim never erases the coordination window.
+
+    Returns per-surface-serialised dicts (oldest-first, so they slot in
+    *before* the stream rows). Only announcements live here, so an
+    ``op_class`` / ``actor_sub`` filter short-circuits to ``[]``. Rows
+    already on the stream page are skipped by ``event_id`` (no
+    double-count). Best-effort: any DB error degrades to stream-only
+    results (logged) -- the archive augments the stream, never gates it.
+    """
+    window_start = _backfill_window_start(since)
+    if window_start is None or budget <= 0:
+        return []
+    # Announcements never carry an op-class or an RFC 8693 actor, so a
+    # query narrowed to either can never match an archived row.
+    if op_class is not None or actor_sub is not None:
+        return []
+    try:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session:
+            stmt = (
+                select(AgentAnnouncement)
+                .where(
+                    AgentAnnouncement.tenant_id == operator.tenant_id,
+                    AgentAnnouncement.created_at >= window_start,
+                )
+                .order_by(AgentAnnouncement.created_at.desc())
+                .limit(budget)
+            )
+            if oldest_stream_dt is not None:
+                # Strictly before the stream's oldest entry -- the stream
+                # owns everything from that point on.
+                stmt = stmt.where(AgentAnnouncement.created_at < oldest_stream_dt)
+            if principal is not None:
+                stmt = stmt.where(AgentAnnouncement.principal_sub == principal)
+            if work_ref is not None:
+                stmt = stmt.where(AgentAnnouncement.work_ref == work_ref)
+            rows = list((await session.execute(stmt)).scalars().all())
+    except Exception as exc:
+        # Best-effort: ANY failure reaching the archive (query
+        # SQLAlchemyError, or engine/session setup e.g. get_sessionmaker ->
+        # get_engine -> get_settings without full config) degrades to
+        # stream-only results. The guard is deliberately broad; the try
+        # body is scoped to DB access only, so it never gates the read.
+        _log.warning(
+            "broadcast_recent_backfill_failed",
+            error_class=type(exc).__name__,
+            tenant_id=str(operator.tenant_id),
+        )
+        return []
+
+    backfilled: list[dict[str, Any]] = []
+    # Query is newest-first (for the budget cap); present oldest-first so
+    # the rows precede the stream page in ascending order.
+    for row in reversed(rows):
+        if str(row.id) in seen_event_ids:
+            continue
+        event = _row_to_announcement(row)
+        if not event_matches(
+            event,
+            op_class=op_class,
+            principal=principal,
+            target=target,
+            actor_sub=actor_sub,
+            work_ref=work_ref,
+            active_only=active_only,
+            now=now,
+        ):
+            continue
+        # No Valkey stream id for a DB-sourced row; ``cursor`` / ``id`` are
+        # null (the durable ``event_id`` UUID is the stable identity). The
+        # caller's per-surface ``serialize`` (wrap for LLM reads, plain for
+        # the UI pane) is applied so archive rows honour the same
+        # untrusted-text contract as stream rows.
+        backfilled.append({"id": None, "cursor": None, **serialize(event)})
+    return backfilled
+
+
+def _dump_event_plain(
+    event: BroadcastEvent | AgentAnnouncementEvent,
+) -> dict[str, Any]:
+    """Serialise *event* for a non-LLM surface — no untrusted-text wrap.
+
+    The UI history pane (:func:`list_recent_events_fail_soft`) renders
+    every field through an HTML sink that escapes it (Alpine ``x-text``
+    sets ``textContent``), so the stored-prompt-injection guard envelope
+    :func:`dump_event_wire` applies for model-facing surfaces is neither
+    needed nor wanted here — it would surface the multi-line guard block
+    as literal row text. The counterpart split to :func:`dump_event_wire`:
+    LLM-facing reads wrap agent prose, human-facing reads escape it at the
+    sink and show the raw value.
+    """
+    return event.model_dump(mode="json")
+
+
 async def _list_recent_events_core(
     operator: Operator,
     *,
@@ -520,36 +766,34 @@ async def _list_recent_events_core(
     work_ref: str | None,
     active_only: bool,
     limit: int,
+    serialize: Callable[[BroadcastEvent | AgentAnnouncementEvent], dict[str, Any]],
 ) -> dict[str, Any]:
     """Read recent events for *operator*'s tenant; the shared core body.
 
     Internal -- callers pick :func:`list_recent_events_strict` or
     :func:`list_recent_events_fail_soft` so the failure-shape choice
-    lives in the function name rather than a flag argument.
+    lives in the function name rather than a flag argument. Issues one
+    ``XRANGE`` (capped at ``limit``) over ``meho:feed:{operator.tenant_id}``
+    from the resolved ``since`` lower bound to ``"+"``, filters +
+    serialises it in-process (:func:`_match_and_serialize_entries`), then
+    archive-backfills from the DB (:func:`_backfill_recent_from_db`, T2
+    #2547).
 
-    Issues a single ``XRANGE`` over ``meho:feed:{operator.tenant_id}``
-    from the resolved ``since`` lower bound to ``"+"`` (latest),
-    capped at ``limit``. Filters the result in-process (the filter
-    surface area is small; per-event server-side filtering would
-    require a Lua script and isn't worth the complexity for ``limit
-    <= 1000``).
-
-    Returns ``{"events": [<event dict with id + cursor>, ...],
-    "next_cursor": <str or None>}``. Each event dict carries the
-    entry's Valkey stream id twice: as ``cursor`` (self-labelled to
-    match the tool-input arg it round-trips through, #2479) and as
-    ``id`` (the historical alias). ``next_cursor`` is the **stream
-    entry id of the last fetched entry** (NOT the last *matched* one)
-    -- the caller
-    can pass it back as ``since`` to walk forward without overlap or
-    gaps even when the filter dropped every entry in this page. The
-    cursor is ``None`` when the stream returned fewer entries than
-    ``limit`` (caller has reached the live tail).
+    *serialize* is each wrapper's per-surface serialiser, applied to both
+    stream and backfill rows: :func:`dump_event_wire` (strict / LLM reads,
+    wraps agent prose in the stored-prompt-injection guard) or
+    :func:`_dump_event_plain` (fail-soft / UI pane, whose HTML sink escapes
+    separately). Returns ``{"events": [...], "next_cursor": <str|None>}``;
+    stream rows carry the entry id as both ``cursor`` (round-trips as the
+    tool's ``cursor`` arg, #2479) and ``id``, backfill rows carry both as
+    ``None``. ``next_cursor`` is the last *fetched* stream entry id (not
+    the last matched -- a filter-heavy page still advances), ``None`` at
+    the live tail; it stays stream-anchored (deep DB-only pagination is
+    out of scope).
 
     Raises :class:`InvalidSinceError` on a malformed ``since`` and
-    propagates :class:`redis.exceptions.RedisError` on Valkey teardown.
-    The two wrappers around this core decide which subset of those to
-    re-raise.
+    propagates :class:`redis.exceptions.RedisError` on Valkey teardown;
+    the two wrappers decide which to re-raise.
     """
     client = get_broadcast_client()
     key = stream_key(operator.tenant_id)
@@ -564,12 +808,82 @@ async def _list_recent_events_core(
         ),
     )
 
-    # Pin one ``now`` for the whole page so a slow XRANGE parse can't
-    # let an ``active_only`` claim flip expiry-state mid-page.
+    matched = _match_and_serialize_entries(
+        raw_entries,
+        stream_key=key,
+        op_class=op_class,
+        principal=principal,
+        target=target,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
+        active_only=active_only,
+        serialize=serialize,
+    )
+
+    # Archive backfill (T2 #2547): when the window reaches before the
+    # stream's oldest surviving entry (or the stream is empty after a
+    # Valkey restart), read the announcements that lived in that gap from
+    # the durable table so the coordination window survives the trim /
+    # restart. Bounded by the remaining page budget, deduped against the
+    # stream page by ``event_id``, older-first (they precede stream rows).
+    seen_event_ids = {str(row["event_id"]) for row in matched if row.get("event_id") is not None}
+    backfilled = await _backfill_recent_from_db(
+        operator,
+        since=since,
+        oldest_stream_dt=_stream_oldest_dt(raw_entries),
+        principal=principal,
+        target=target,
+        op_class=op_class,
+        actor_sub=actor_sub,
+        work_ref=work_ref,
+        active_only=active_only,
+        seen_event_ids=seen_event_ids,
+        budget=limit - len(matched),
+        now=datetime.now(UTC),
+        serialize=serialize,
+    )
+    events = backfilled + matched
+
+    # next_cursor pages forward from the LAST FETCHED entry (not the last
+    # matched) so a fully-filtered page still advances; ``None`` at the
+    # live tail. Stream-anchored -- backfill rows carry no stream cursor.
+    next_cursor: str | None = raw_entries[-1][0] if len(raw_entries) == limit else None
+    return {"events": events, "next_cursor": next_cursor}
+
+
+def _match_and_serialize_entries(
+    raw_entries: list[tuple[str, dict[str, str]]],
+    *,
+    stream_key: str,
+    op_class: str | None,
+    principal: str | None,
+    target: str | None,
+    actor_sub: str | None,
+    work_ref: str | None,
+    active_only: bool,
+    serialize: Callable[[BroadcastEvent | AgentAnnouncementEvent], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Parse, filter, and serialise one ``XRANGE`` page into event dicts.
+
+    Extracted from :func:`_list_recent_events_core` so the core stays
+    under the code-quality function-size ceiling. Pins one ``now`` for the
+    whole page so a slow parse can't let an ``active_only`` claim flip
+    expiry-state mid-page. Each surviving entry becomes
+    ``{"id", "cursor", **serialize(event)}``:
+
+    * ``cursor`` is the Valkey stream entry id, self-labelled to match the
+      ``cursor`` input arg it round-trips through (#2479); ``id`` is the
+      historical alias of the same value.
+    * ``serialize`` is the caller's per-surface serialiser:
+      :func:`dump_event_wire` (LLM-facing MCP reads, wraps announcement
+      free-text in the untrusted-content envelope) or
+      :func:`_dump_event_plain` (the UI pane, which escapes at its HTML
+      sink).
+    """
     now = datetime.now(UTC)
     matched: list[dict[str, Any]] = []
     for entry_id, fields in raw_entries:
-        event = parse_entry(entry_id, fields, stream_key=key)
+        event = parse_entry(entry_id, fields, stream_key=stream_key)
         if event is None:
             continue
         if not event_matches(
@@ -583,28 +897,8 @@ async def _list_recent_events_core(
             now=now,
         ):
             continue
-        # ``cursor`` is the Valkey stream entry id, self-labelled to
-        # match the ``cursor`` input arg it round-trips through
-        # (#2479); ``id`` is the historical alias of the same value —
-        # kept because every other MCP surface uses ``id`` for the
-        # row's domain UUID and broadcast rows predate that
-        # convention. The remaining fields come from the event model
-        # (including ``event_id`` as the durable UUID for BroadcastEvent
-        # or the announcement-id equivalent for AgentAnnouncementEvent).
-        # All coexist so the caller can correlate a stream-cursor walk
-        # with the canonical audit row via ``event_id`` / ``audit_id``.
-        # ``dump_event_wire`` wraps announcement free-text in the
-        # untrusted-content envelope (stored-prompt-injection guard).
-        matched.append({"id": entry_id, "cursor": entry_id, **dump_event_wire(event)})
-
-    # next_cursor pages forward from the LAST FETCHED entry, not the
-    # last matched one -- a page where every entry was filtered out
-    # still produces a non-null cursor so the caller can keep walking.
-    # When fewer entries came back than the limit, the caller has
-    # reached the live tail; ``None`` signals "no more pages right now"
-    # without precluding a later call.
-    next_cursor: str | None = raw_entries[-1][0] if len(raw_entries) == limit else None
-    return {"events": matched, "next_cursor": next_cursor}
+        matched.append({"id": entry_id, "cursor": entry_id, **serialize(event)})
+    return matched
 
 
 async def list_recent_events_strict(
@@ -640,6 +934,10 @@ async def list_recent_events_strict(
     Mirrors the fail-loud contract on
     :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
     (its write-side counterpart).
+
+    Serialises through :func:`dump_event_wire`: this is an LLM-facing MCP
+    read, so agent-authored announcement prose is wrapped in the
+    stored-prompt-injection guard envelope.
     """
     return await _list_recent_events_core(
         operator,
@@ -651,6 +949,7 @@ async def list_recent_events_strict(
         work_ref=work_ref,
         active_only=active_only,
         limit=limit,
+        serialize=dump_event_wire,
     )
 
 
@@ -685,6 +984,11 @@ async def list_recent_events_fail_soft(
     Mirrors the fail-open contract on
     :func:`~meho_backplane.broadcast.publisher.publish_event` (its
     write-side counterpart for non-load-bearing publishes).
+
+    Serialises through :func:`_dump_event_plain` (no untrusted-text wrap):
+    the sole caller is the human UI history pane, whose HTML sink escapes
+    every field separately, so the LLM guard envelope would only add
+    human-visible noise to a feed row (#2549).
     """
     try:
         return await _list_recent_events_core(
@@ -697,6 +1001,7 @@ async def list_recent_events_fail_soft(
             work_ref=work_ref,
             active_only=active_only,
             limit=limit,
+            serialize=_dump_event_plain,
         )
     except RedisError as exc:
         _log.warning(
@@ -705,3 +1010,179 @@ async def list_recent_events_fail_soft(
             stream_key=stream_key(operator.tenant_id),
         )
         return {"events": [], "next_cursor": None}
+
+
+#: op_class values that carry the dispatch-time target-activity advisory
+#: (#2550). Only mutating classes qualify -- a write is where crossfire
+#: matters. Read-class dispatches (``read`` / ``credential_read`` /
+#: ``audit_query`` / ``other`` / ``approval``) skip the stream read
+#: entirely, keeping the hot read path free of the lookup.
+_ADVISORY_WRITE_OP_CLASSES: Final[frozenset[str]] = frozenset(
+    {"write", "credential_write", "credential_mint"}
+)
+
+#: Maximum advisory entries surfaced on a single dispatch response. The
+#: advisory is an awareness nudge, not an audit -- the caller who needs
+#: the full picture queries ``meho.broadcast.recent``.
+_ADVISORY_MAX_ENTRIES: Final[int] = 5
+
+#: Bounded scan cap for the advisory stream read. The window (settings
+#: knob) already bounds the range in time; this caps the entry count so
+#: a burst inside the window can't turn one dispatch into an unbounded
+#: read. The read is newest-first (``XREVRANGE``), so this cap keeps the
+#: NEWEST entries in the window -- the ones the advisory cares about --
+#: rather than clipping them off the tail (the busy-target crossfire case
+#: an oldest-first ``XRANGE`` + ``COUNT`` would silently invert).
+_ADVISORY_SCAN_LIMIT: Final[int] = 100
+
+#: The ``extras`` key the advisory rides on the :class:`OperationResult`.
+ADVISORY_EXTRAS_KEY: Final[str] = "target_activity_advisory"
+
+
+def _advisory_entry(event: BroadcastEvent | AgentAnnouncementEvent) -> dict[str, Any]:
+    """Project one parsed stream event onto the compact advisory shape.
+
+    Structured, server-derived fields ONLY -- ``principal_sub`` /
+    ``actor_sub`` (lineage), ``kind``, the operation's ``op_id`` or the
+    announcement's ``phase``, and ``ts`` (ISO-8601). Read straight off the
+    parsed model, so agent-authored free text (``activity`` / ``scope`` /
+    ``target`` / ``targets``) is never even touched: the untrusted-prose
+    envelope cannot enter an op response (Initiative #2543, review finding
+    27). An :class:`AgentAnnouncementEvent` is labelled ``announcement``;
+    a :class:`BroadcastEvent` is an ``operation``.
+    """
+    if isinstance(event, AgentAnnouncementEvent):
+        return {
+            "principal_sub": event.principal_sub,
+            "kind": "announcement",
+            "phase": event.phase,
+            "ts": event.ts.isoformat(),
+        }
+    entry: dict[str, Any] = {
+        "principal_sub": event.principal_sub,
+        "kind": "operation",
+        "op_id": event.op_id,
+        "ts": event.ts.isoformat(),
+    }
+    if event.actor_sub is not None:
+        entry["actor_sub"] = event.actor_sub
+    return entry
+
+
+async def _recent_target_events_newest_first(
+    operator: Operator,
+    *,
+    target_name: str,
+    window_minutes: int,
+    limit: int,
+) -> list[BroadcastEvent | AgentAnnouncementEvent]:
+    """Read active, target-matched events in the window, newest first.
+
+    A single ``XREVRANGE meho:feed:{tenant} + <since-ms>`` capped at
+    *limit*: reverse order means the ``COUNT`` cap keeps the NEWEST
+    entries in the window, so the advisory samples the tail (recent
+    crossfire) rather than the head. Target and ``active_only`` filtering
+    run in-process on the parsed model -- the same
+    :func:`event_matches` narrowing every other reader uses, before any
+    prose wrap. Propagates :class:`redis.exceptions.RedisError` to the
+    caller's fail-open guard.
+    """
+    client = get_broadcast_client()
+    key = stream_key(operator.tenant_id)
+    since_ms = max(
+        int((datetime.now(UTC) - timedelta(minutes=window_minutes)).timestamp() * 1000), 0
+    )
+    raw_entries = cast(
+        "list[tuple[str, dict[str, str]]]",
+        await client.xrevrange(key, max=_XRANGE_END, min=str(since_ms), count=limit),
+    )
+    now = datetime.now(UTC)
+    events: list[BroadcastEvent | AgentAnnouncementEvent] = []
+    for entry_id, fields in raw_entries:
+        event = parse_entry(entry_id, fields, stream_key=key)
+        if event is None:
+            continue
+        if event_matches(
+            event, op_class=None, principal=None, target=target_name, active_only=True, now=now
+        ):
+            events.append(event)
+    return events
+
+
+async def build_target_activity_advisory(
+    operator: Operator,
+    *,
+    op_id: str,
+    target_name: str | None,
+) -> dict[str, Any]:
+    """Build the ``extras`` fragment advising of recent peer activity.
+
+    Post-op awareness for a write-class dispatch (#2550): when the op
+    mutates a target that another principal has touched recently -- an
+    operation or an active announcement claim -- the response carries a
+    compact advisory so the caller learns about the overlap at the moment
+    it matters. This is NOT a lock or a block; pre-op checking remains the
+    discipline's ``meho.broadcast.recent`` read step.
+
+    Returns ``{"target_activity_advisory": [...]}`` with up to
+    :data:`_ADVISORY_MAX_ENTRIES` most-recent peer entries in chronological
+    order, or an empty dict (no key added) when the advisory does not
+    apply. The empty-dict short-circuits, in order:
+
+    * the feature is disabled (``dispatch_activity_advisory_window_minutes
+      == 0``);
+    * the op is not write-class (read-class dispatches perform no stream
+      read -- the frozenset check returns before any Valkey call);
+    * the dispatch has no target;
+    * no peer activity was found in the window.
+
+    Fail-open and bounded: the success path awaits a single, count-capped
+    ``XREVRANGE`` (a small, bounded cost -- not free), and a broad guard
+    swallows any error (a Valkey teardown included) so the advisory lookup
+    never converts a successful op into a failure. Because the read is
+    newest-first, the ``COUNT`` cap keeps the newest window entries, so
+    ``[-_ADVISORY_MAX_ENTRIES:]`` after re-chronologising is the genuinely
+    most-recent peer activity even on a target emitting more than
+    :data:`_ADVISORY_SCAN_LIMIT` events in the window.
+    """
+    window_minutes = get_settings().dispatch_activity_advisory_window_minutes
+    if window_minutes <= 0:
+        return {}
+    if classify_op(op_id) not in _ADVISORY_WRITE_OP_CLASSES:
+        return {}
+    if not target_name:
+        return {}
+
+    caller_principal = operator.sub
+    caller_actor = resolve_actor_sub()
+    try:
+        events = await _recent_target_events_newest_first(
+            operator,
+            target_name=target_name,
+            window_minutes=window_minutes,
+            limit=_ADVISORY_SCAN_LIMIT,
+        )
+    except Exception:
+        # Advisory is best-effort awareness; any failure (a Valkey
+        # teardown, a parse bug) must never convert a successful dispatch
+        # into a failure.
+        _log.warning(
+            "target_activity_advisory_failed",
+            stream_key=stream_key(operator.tenant_id),
+        )
+        return {}
+
+    # ``events`` is newest-first; drop the caller's own activity, keep the
+    # newest _ADVISORY_MAX_ENTRIES, then restore chronological order.
+    peers = [
+        event
+        for event in events
+        if not (
+            event.principal_sub == caller_principal
+            and getattr(event, "actor_sub", None) == caller_actor
+        )
+    ]
+    if not peers:
+        return {}
+    newest = peers[:_ADVISORY_MAX_ENTRIES]
+    return {ADVISORY_EXTRAS_KEY: [_advisory_entry(event) for event in reversed(newest)]}

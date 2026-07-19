@@ -1006,7 +1006,9 @@ async def test_ingest_status_malformed_handle_is_invalid_params() -> None:
     op = build_operator(TenantRole.TENANT_ADMIN)
     with pytest.raises(McpInvalidParamsError) as caught:
         await ci_mod._ingest_status_handler(op, {"job_id": "not-a-uuid"})
-    assert "valid job id" in str(caught.value).lower()
+    # The label names the canonical ``job_id`` inputSchema arg (#2480),
+    # not the internal "handle" concept.
+    assert "job_id" in str(caught.value)
 
 
 async def test_ingest_status_cross_tenant_is_not_found(

@@ -34,12 +34,14 @@ import (
 func newCollectionsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "collections",
-		Short: "List, create, and probe / toggle doc collections",
+		Short: "List, create, delete, and probe / toggle doc collections",
 		Long: "collections operates the doc-collection catalogue. `list` " +
 			"(operator) shows the collections you are entitled to search — " +
 			"the keys `meho docs search --collection` accepts. `create` " +
 			"(tenant_admin) registers a new collection so search can route " +
-			"to it — the audited alternative to a raw database INSERT. The " +
+			"to it — the audited alternative to a raw database INSERT; " +
+			"`delete` (tenant_admin) deregisters a disabled, tenant-owned " +
+			"collection and frees its key for re-creation. The " +
 			"lifecycle verbs (tenant_admin) operate readiness: `probe` refreshes a " +
 			"collection's cached liveness (doc count, last ingest, " +
 			"readiness) from its backend and transitions its status; " +
@@ -55,6 +57,7 @@ func newCollectionsCmd() *cobra.Command {
 	cmd.AddCommand(newCollectionsProbeCmd())
 	cmd.AddCommand(newCollectionsEnableCmd())
 	cmd.AddCommand(newCollectionsDisableCmd())
+	cmd.AddCommand(newCollectionsDeleteCmd())
 	return cmd
 }
 

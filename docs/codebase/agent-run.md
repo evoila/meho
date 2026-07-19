@@ -188,13 +188,25 @@ one transaction):
 - `get_run(session, run_id) -> AgentRun | None` — read side; returns
   `None` for a missing id (the caller shapes the 404).
 - `list_runs(session, *, tenant_id, work_ref=None, status=None,
-  limit=100, offset=0) -> list[AgentRun]` — the agent-run list read
-  substrate (work_ref I3-T2 #1662), newest-first, tenant-isolated.
-  `work_ref` narrows to one exact change ticket (composite
-  `(tenant_id, work_ref)` index); `status` narrows to one lifecycle
-  state; the page size is clamped server-side to `[1, 500]`. Surfaced as
+  agent_definition_id=None, limit=100, offset=0) -> list[AgentRun]` — the
+  agent-run list read substrate (work_ref I3-T2 #1662), newest-first,
+  tenant-isolated. `work_ref` narrows to one exact change ticket
+  (composite `(tenant_id, work_ref)` index); `status` narrows to one
+  lifecycle state; `agent_definition_id` narrows to runs produced by one
+  agent definition (the name→id resolution lives at the caller — #2472);
+  the page size is clamped server-side to `[1, 500]`. Surfaced as
   `GET /api/v1/agents/runs`, the `meho.agents.list_runs` MCP tool, and
-  `meho agent run-list --work-ref`.
+  `meho agent run-list --work-ref` / `--agent-name`.
+- `resolve_agent_definition_id(session, *, tenant_id, name) -> UUID | None`
+  — resolves an agent definition name to its id within the tenant, backing
+  the `agent_name` run-list filter (#2472). An unknown name returns `None`,
+  so the caller yields an empty list rather than an error.
+- `resolve_agent_names(session, *, tenant_id, definition_ids) ->
+  dict[UUID, str]` — batch-resolves definition ids to names within the
+  tenant. The read-time back-fill for the run projections' `agent_name`
+  (a run row carries only the `agent_definition_id` soft-FK, no
+  denormalized name); ids matching no live definition (a dangling soft-FK)
+  are simply absent, so the projection renders `agent_name=None` (#2472).
 - `transition(session, row, to_status) -> AgentRun` — the single
   status-mutation point. Stamps `started_at` on the first entry into
   `running` (the `awaiting_approval` -> `running` resume does not reset

@@ -115,8 +115,10 @@ string that names the `create → probe → ready` flow while the row is
 `provisioning` (see
 [The `create → probe → ready` flow](#the-create--probe--ready-flow-1756)).
 `next_step` lives on the create-response model only, never on the shared
-`DocCollection` read shape. There is still no `Update` schema — PATCH /
-DELETE are a later follow-up.
+`DocCollection` read shape. There is still no `Update` schema — PATCH is a
+later follow-up — but DELETE shipped in #2487 as a bodyless route (no
+request schema): `DELETE /api/v1/doc_collections/{collection_key}`
+deregisters a disabled, tenant-owned row and frees its `collection_key`.
 
 ### `project_doc_collection_to_summary(...)` (`meho_backplane.docs_collections.schemas`)
 
@@ -410,11 +412,57 @@ read shape (the collection-scoped search path, the `list_doc_collections`
 catalogue, the MCP docs tools) is unchanged. The route's `201` OpenAPI
 `description` names the same flow.
 
-Out of scope (a later follow-up): PATCH / DELETE, cross-tenant sharing,
+DELETE shipped in #2487 (deregister a disabled, tenant-owned collection;
+see [Delete / deregister a collection](#delete--deregister-a-collection-2487)).
+Out of scope (a later follow-up): PATCH, cross-tenant sharing,
 and bulk import beyond the single-collection `--from-file` on-ramp.
 Auto-promotion / self-probe on create stays out of scope (#1756) — it is a
 behaviour change with ingest-cost implications; #1756 is discoverability
 only.
+
+## Delete / deregister a collection (#2487)
+
+The write counterpart to create. `disable` only flips `status` — the
+registry row and its occupied `collection_key` persist — so a collection
+mis-registered under the wrong `backend.type` / `ref` could never be fixed
+under its own key. Delete closes that recovery loop: it **hard-deletes** the
+row (nothing FK-references `doc_collections`, so there is no cascade) which
+frees the key for a re-`create` under the same name.
+
+Shipped across the three fronts, tenant_admin-gated, the create precedent:
+
+- **Service** — `delete_doc_collection(session, operator, collection)`
+  (`meho_backplane.docs_collections.service`), audited `op_id="meho.docs.collections.delete"`
+  (the `meho.docs.*` who-touched family), one `audit_log` row per call.
+- **REST** — `DELETE /api/v1/doc_collections/{collection_key}` → 204,
+  resolved tenant-first via `resolve_doc_collection` (unknown key → the
+  existing 404 + `known_keys` hint).
+- **MCP** — `delete_doc_collections` (tenant_admin, `op_class="write"`,
+  the same `meho-docs` capability the create tool declares).
+- **CLI** — `meho docs collections delete <collection_key>`.
+
+Two guards, checked in order (both owned by the service, so the three
+fronts share one policy):
+
+1. **Tenant-owned only.** A global row (`tenant_id IS NULL`) is a shared
+   platform-catalogue entry every tenant sees; a tenant admin removing it is
+   refused with a structured 403 `{"error": "global_collection"}` (MCP
+   `-32602`). Checked first — a tenant admin must never be told "disable it
+   first" for a row they cannot delete at all. Deleting a **tenant** row
+   that shadows a global key un-shadows the global row (the resolver is
+   tenant-first, so this falls out naturally).
+2. **Disabled-first.** A collection whose `status` is not `disabled` is
+   refused with a structured 409 `{"error": "collection_not_disabled",
+   "status": <current>}` (MCP `-32602`). The disable → delete two-step keeps
+   the typed `collection_disabled` search rejection as the operator-visible
+   warning window before the key 404s.
+
+> Note the reporter's original framing — "refuse deletion while active
+> capability grants exist, listing them" — was **refuted** (#2494): a
+> collection grant is the `meho-docs:<collection_key>` capability in the
+> operator's JWT (resolved via Keycloak / corpus), not a backplane row, so
+> the backplane has no table of grant holders to enumerate. The
+> disabled-first + global-vs-tenant guards are the implementable stand-in.
 
 ## Global-row manifest seed (#1920)
 
@@ -485,10 +533,13 @@ explicitly out of scope per #1920).
   terminal `disabled` (403 / `-32602`) from the transient `provisioning` /
   `rebuilding` (409 / `-32603`). There is no second `ensure_collection_searchable`
   duplicate.
-- **Create is the write half; update / delete / sharing are not.** A
+- **Create and delete are the write halves; update / sharing are not.** A
   tenant_admin registers a collection through the create surface (#1739,
-  see [Create / register a collection](#create--register-a-collection-1739));
-  there is still no PATCH / DELETE and no cross-tenant sharing API — those
+  see [Create / register a collection](#create--register-a-collection-1739))
+  and deregisters a disabled, tenant-owned one through the delete surface
+  (#2487, see
+  [Delete / deregister a collection](#delete--deregister-a-collection-2487));
+  there is still no PATCH and no cross-tenant sharing API — those
   are a later follow-up (out of scope per #1739). A shared/global row
   (`tenant_id IS NULL`) is still seeded out-of-band, since the create
   always scopes to the caller's tenant. A **data migration** is the

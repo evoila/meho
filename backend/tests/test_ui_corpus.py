@@ -251,6 +251,7 @@ def _chunk(
     *,
     chunk_id: str = "c-1",
     document_id: str = "vsphere-guide",
+    title: str | None = None,
     content: str = "Snapshots quiesce the guest before capture.",
     source_url: str | None = "https://docs.vmware.test/snapshots",
     score: float | None = 0.87,
@@ -260,6 +261,7 @@ def _chunk(
     return DocsChunk(
         chunk_id=chunk_id,
         document_id=document_id,
+        title=title,
         content=content,
         source_url=source_url,
         score=score,
@@ -507,6 +509,58 @@ def test_corpus_search_renders_cited_chunks() -> None:
     assert "0.873" in body
     # 2 cited chunks heading.
     assert "2 cited chunks" in body
+    # #2475: with no upstream title, the card header falls back to the
+    # document_id (today's behaviour, unchanged).
+    assert "vsphere-snapshots" in body
+
+
+def test_corpus_search_card_header_prefers_upstream_title() -> None:
+    """An upstream chunk title becomes the card header, not the raw id (#2475).
+
+    The ``/ui/corpus`` card header renders the resolved ``link.label``; once a
+    title flows through the projection the existing title-first label chain
+    prefers it, so the header reads human-legibly instead of by numeric
+    document_id / filename (the #2461 symptom).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
+    )
+    result = DocsSearchResult(
+        chunks=[
+            _chunk(
+                chunk_id="c-1",
+                document_id="vsphere-snapshots",
+                title="Quiescing VM Snapshots",
+                content="Snapshots quiesce the guest before capture.",
+                source_url="https://docs.vmware.test/snapshots",
+                score=0.873,
+            ),
+        ]
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_SEARCH_DOCS, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "snapshot quiesce"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The human title is the link text; the raw document_id is not the header.
+    assert "Quiescing VM Snapshots" in body
+    assert ">vsphere-snapshots<" not in body
 
 
 def test_corpus_search_resolves_gs_kb_source_to_canonical_link() -> None:

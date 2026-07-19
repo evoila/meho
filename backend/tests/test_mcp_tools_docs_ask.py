@@ -500,6 +500,9 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # source passes through as the clickable href.
     assert citation["link"]["clickable"] is True
     assert citation["link"]["href"] == "https://docs.example.com/nsx/9.0/maximums"
+    # #2475: with no upstream title, the label falls back to the document_id
+    # (today's behaviour, unchanged).
+    assert citation["link"]["label"] == "nsx-9.0-config-maximums"
 
     # The optional refinements reached the backend and the operator identity
     # was forwarded.
@@ -509,6 +512,53 @@ def test_tools_call_ask_docs_returns_grounded_cited_answer(
     # The retrieved evidence was framed into the synthesis prompt.
     assert "nsx-9.0-maximums-0007" in stub.captured["user_prompt"]
     assert "10,000 logical switches" in stub.captured["user_prompt"]
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_ask_docs_citation_label_prefers_upstream_title(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """An upstream chunk title becomes the citation ``link.label`` (#2475).
+
+    The ``_citation_payload`` seam now feeds ``chunk.title`` into the
+    title-first label chain, so a titled retrieved chunk cites human-legibly
+    instead of by its raw ``document_id``.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    titled = CorpusChunk(
+        chunk_id="nsx-9.0-maximums-0007",
+        document_id="nsx-9.0-config-maximums",
+        title="NSX 9.0 Configuration Maximums",
+        content="NSX 9.0 supports up to 10,000 logical switches per manager.",
+        source_url="https://docs.example.com/nsx/9.0/maximums",
+        score=0.91,
+    )
+    corpus = _fake_corpus(titled)
+    stub = _StubLlmClient(
+        json.dumps(
+            {
+                "answer": "NSX 9.0 supports up to 10,000 logical switches per manager.",
+                "cited_chunk_ids": ["nsx-9.0-maximums-0007"],
+            }
+        )
+    )
+    with (
+        patch(_CORPUS_SEAM, new=corpus),
+        patch(_BUILD_LLM_CLIENT, return_value=stub),
+    ):
+        response = post_mcp(
+            client,
+            _ask_call(
+                {"query": "How many logical switches?", "collection": "vmware"},
+                call_id=6,
+            ),
+        )
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    citation = payload["citations"][0]
+    assert citation["title"] == "NSX 9.0 Configuration Maximums"
+    assert citation["link"]["label"] == "NSX 9.0 Configuration Maximums"
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)

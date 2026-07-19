@@ -856,6 +856,61 @@
         }
       }
     },
+    "/api/v1/doc_collections/{collection_key}": {
+      "delete": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Delete Collection Endpoint",
+        "description": "Deregister a disabled, tenant-owned collection, freeing its key (#2487).\n\nThe delete half of the registry \u2014 the REST counterpart to\n``POST /api/v1/doc_collections``. Resolves the collection tenant-first\n(an unknown key \u2192 404 with the typed ``known_keys`` hint), then\nhard-deletes it behind two guards owned by the service:\n\n* **Tenant-owned only** \u2014 a global row (``tenant_id IS NULL``) is\n  refused with a structured 403 ``detail.error='global_collection'``;\n  removing a platform-catalogue row every tenant sees is an ops action,\n  out of the tenant API.\n* **Disabled-first** \u2014 a collection whose ``status`` is not\n  ``disabled`` is refused with a structured 409\n  ``detail.error='collection_not_disabled'`` naming the current status.\n\nOn success the row is gone and its ``collection_key`` is freed: a\nre-``POST`` of the same key then succeeds 201 (the recovery loop that\nmotivated the issue). Deleting a tenant row that shadowed a global key\nun-shadows the global row (the resolver is tenant-first). One\n``audit_log`` row per call, bound ``op_id=\"meho.docs.collections.delete\"``.",
+        "operationId": "delete_collection_endpoint_api_v1_doc_collections__collection_key__delete",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row \u2014 a tenant admin cannot delete it (structured ``detail.error='global_collection'``)."
+          },
+          "404": {
+            "description": "No collection with this key is visible to the tenant."
+          },
+          "409": {
+            "description": "The collection is not ``disabled`` \u2014 disable it first (structured ``detail.error='collection_not_disabled'`` + the current ``status``)."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -2140,6 +2195,53 @@
               "type": "string",
               "format": "uuid",
               "title": "Edge Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/topology/nodes/{node_id}": {
+      "delete": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Delete Node Route",
+        "description": "Hard-delete a manually-seeded ``graph_node`` by id.\n\nWraps :func:`~meho_backplane.topology.node_delete.delete_node`\n(#2485). Returns 204 on success, writing a ``removed``\n``graph_node_history`` tombstone in the same transaction. Requires\n:class:`TenantRole.TENANT_ADMIN` \u2014 the same gate the curated-edge\n``DELETE /edges/{edge_id}`` route sits behind.\n\nError mapping (mirrors the \u00a73 auto-edge discipline\n:func:`unannotate_edge_route` enforces):\n\n* **409 ``probe_owned_node``** when the row is probe-derived\n  (``source='auto'``) or bound to a registered target\n  (``target_id IS NOT NULL``). Refresh reconciliation owns those and\n  they resurrect on the next probe, so a manual delete is\n  meaningless \u2014 only ``source='curated'``, target-unbound seeds are\n  deletable.\n* **409 ``node_has_edges``** with the blocking ``edge_ids`` when a\n  live ``graph_edge`` references the node. The caller unannotates\n  those first; the service refuses rather than letting the DB\n  ``ON DELETE CASCADE`` drop them without their history tombstones.\n* **404** when no node with that id exists in the caller's tenant\n  (cross-tenant ids and missing ids are indistinguishable \u2014 the\n  tenant boundary is opaque to the caller).",
+        "operationId": "delete_node_route_api_v1_topology_nodes__node_id__delete",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
             }
           },
           {
@@ -6233,7 +6335,7 @@
           "agents"
         ],
         "summary": "List Runs",
-        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state. Returns ``created_at DESC``.",
+        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state; ``?agent_name=triage`` narrows to runs produced by\nthat agent definition (an unknown name yields an empty list). Returns\n``created_at DESC``.",
         "operationId": "list_runs_api_v1_agents_runs_get",
         "parameters": [
           {
@@ -6259,6 +6361,18 @@
               "title": "Status"
             },
             "description": "Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state."
+          },
+          {
+            "name": "agent_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by agent definition name (exact match) \u2014 the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter.",
+              "title": "Agent Name"
+            },
+            "description": "Filter by agent definition name (exact match) \u2014 the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter."
           },
           {
             "name": "limit",
@@ -9368,8 +9482,23 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.",
+        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds.",
+              "title": "Kind"
+            },
+            "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds."
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -9377,6 +9506,16 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -19471,6 +19610,17 @@
             "type": "string",
             "nullable": true,
             "title": "Error"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Definition Id"
+          },
+          "agent_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent Name"
           }
         },
         "type": "object",
@@ -19481,7 +19631,9 @@
           "provider",
           "model",
           "output",
-          "error"
+          "error",
+          "agent_definition_id",
+          "agent_name"
         ],
         "title": "AgentRunStatusResponse",
         "description": "Poll response for ``GET /agents/runs/{handle}``."
@@ -19523,6 +19675,17 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Definition Id"
+          },
+          "agent_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent Name"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -19551,6 +19714,8 @@
           "model",
           "turns",
           "work_ref",
+          "agent_definition_id",
+          "agent_name",
           "created_at",
           "started_at",
           "ended_at"
@@ -22373,6 +22538,20 @@
             "type": "boolean",
             "title": "Dispatchable",
             "default": false
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "builtin",
+              "tenant"
+            ],
+            "title": "Scope",
+            "default": "builtin"
+          },
+          "shadowed_by_tenant_scope": {
+            "type": "boolean",
+            "title": "Shadowed By Tenant Scope",
+            "default": false
           }
         },
         "type": "object",
@@ -22390,7 +22569,7 @@
           "enabled_operation_count"
         ],
         "title": "ConnectorListItem",
-        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho.connector.list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`."
+        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho.connector.list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`.\n\n``scope`` (#2474) is the named projection of ``tenant_id`` \u2014\n``\"builtin\"`` for ``tenant_id IS NULL`` rows, ``\"tenant\"`` for\ntenant-curated ones. It is additive and fully derivable from\n``tenant_id``, but surfacing it directly lets a consumer key on it\nwithout re-deriving. ``shadowed_by_tenant_scope`` is the precedence\nmarker: within a single response, a ``\"builtin\"`` row carries\n``True`` when a ``\"tenant\"`` row shares its ``connector_id`` \u2014 i.e.\nthe built-in copy is *shadowed* by a tenant-scoped twin that\n:func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves\nfirst (tenant-wins dispatch precedence). The two fields exist because\n``connector_id`` encodes only ``(impl_id, version)``, so scope twins\nfrom the #2085 re-ingest trap render the same id twice; the marker\ntells an agent exactly which row ``call_operation`` dispatches to and\nlets it count unique connectors. Both default to the built-in,\nunshadowed reading (``scope=\"builtin\"``, ``shadowed_by_tenant_scope\n=False``) so existing construction call sites (tests, MCP fakes)\nkeep working; the listing sets ``scope`` explicitly per row and\nstamps ``shadowed_by_tenant_scope`` in a post-pass over the full\nresponse. Invariant: within one response no two rows share\n``(connector_id, scope)``. See :data:`ConnectorScope`."
       },
       "ConnectorListResponse": {
         "properties": {
@@ -23879,6 +24058,11 @@
             "nullable": true,
             "title": "Document Id"
           },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "title": "Title"
+          },
           "content": {
             "type": "string",
             "title": "Content"
@@ -23905,7 +24089,7 @@
           "content"
         ],
         "title": "DocsChunk",
-        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire."
+        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``title`` is the **optional** human-legible chunk title (#2475), passed\nthrough from the corpus (``CorpusChunk.title``). It is the *preferred*\ncitation label \u2014 every citation face (``ask_docs``, ``/ui/corpus``)\nfeeds it to the ``title -> document_id -> filename -> URL`` label chain\n\u2014 and is ``None`` until the upstream corpus supplies one, so today's\ncorpus (which sends no title) sees no behaviour change.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire."
       },
       "DraftTemplateRequest": {
         "properties": {

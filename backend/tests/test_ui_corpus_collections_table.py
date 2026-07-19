@@ -300,6 +300,39 @@ def test_table_lists_unentitled_rows() -> None:
     assert 'hx-get="/ui/corpus/collections/register"' in body
 
 
+def test_row_carries_visible_identity_link_and_view_button() -> None:
+    """Each collection row offers the converged detail-nav pair (#2463).
+
+    The identity cell links to the detail page with the visible
+    ``link link-primary`` styling (not the invisible ``link link-hover``),
+    and the trailing actions column carries a ``View`` button to the same
+    URL -- the page-nav list-surface convention.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware", tenant_id=_TENANT_A)
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/corpus/collections")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Visible identity link (never the hover-only styling).
+    assert 'class="link link-primary"' in body
+    assert "link link-hover" not in body
+    assert 'href="/ui/corpus/collections/vmware"' in body
+    # Trailing View button to the same detail URL + its header cell.
+    assert 'class="btn btn-ghost btn-xs"' in body
+    assert 'aria-label="View collection vmware"' in body
+    assert "View" in body
+    assert 'class="sr-only">Actions</th>' in body
+
+
 def test_table_renders_status_pill_for_each_lifecycle_state() -> None:
     """The status column renders a pill for each lifecycle state."""
     _seed_tenant(_TENANT_A, "tenant-a")
@@ -550,6 +583,51 @@ def test_register_modal_renders_for_tenant_admin() -> None:
     assert 'name="backend_ref"' in body
     # The CSRF cookie is set so the double-submit pair lines up.
     assert CSRF_COOKIE_NAME in response.cookies
+
+
+def test_register_modal_matches_kb_editor_form_language() -> None:
+    """The modal adopts the /ui/kb editor's form language (#2464).
+
+    Asserts the structural markers the kb ``_editor_modal.html`` uses so the
+    register modal reads as the same write surface: a padding-less box with a
+    bordered header + close-circle button, ``label py-0`` label rows with a
+    right-aligned ``label-text-alt`` hint, section dividers, and a bordered
+    footer. Purely cosmetic -- the field set and submit contract are covered
+    by the neighbouring render/create tests.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/corpus/collections/register")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Box: padding managed by sections, scroll-contained (kb editor line 68).
+    assert 'class="modal-box w-11/12 max-w-3xl p-0' in body
+    # Bordered header with a close-circle button (kb editor lines 70-77).
+    assert "border-b border-base-300" in body
+    assert "btn btn-ghost btn-sm btn-circle" in body
+    # kb-style label rows: label py-0 + font-medium label-text + alt hint.
+    assert 'class="label py-0"' in body
+    assert 'class="label-text font-medium"' in body
+    assert 'class="label-text-alt opacity-60"' in body
+    # Section grouping into Identity / Metadata / Backend, kb column-header style.
+    assert "text-xs font-medium opacity-60 uppercase tracking-wide" in body
+    for section in ("Identity", "Metadata", "Backend"):
+        assert f">{section}</div>" in body
+    # Bordered footer holding the actions (kb editor line 181).
+    assert "border-t border-base-300" in body
+    # No behaviour change: submit contract + field set are intact.
+    assert 'hx-post="/ui/corpus/collections/register"' in body
+    assert 'data-action="register-submit"' in body
+    for field in ("collection_key", "vendor", "products", "backend_type", "backend_ref"):
+        assert f'name="{field}"' in body
 
 
 def test_register_modal_rejects_operator_role_with_403() -> None:

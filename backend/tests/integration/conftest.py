@@ -430,7 +430,7 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         #   listed here or PG rejects the per-test TRUNCATE.
         await conn.execute(
             text(
-                "TRUNCATE TABLE approval_request, agent_permission, "
+                "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
                 "agent_principal, runner_principal, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor, "
@@ -497,7 +497,7 @@ async def pg_engine_empty_tenant(
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
             text(
-                "TRUNCATE TABLE approval_request, agent_permission, "
+                "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
                 "agent_principal, runner_principal, "
                 "runner_assignments, runner_check_results, "
                 "scheduled_trigger, sensor, "

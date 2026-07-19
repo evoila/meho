@@ -72,10 +72,29 @@
       <li class="card bg-base-100 border-base-300 border shadow-sm">
         <div class="card-body py-3 space-y-2">
           <div class="flex flex-wrap items-start justify-between gap-2">
+            {#- Provenance row: each badge carries a visible caption label so
+                its meaning is legible without hovering the ``title``. A kb hit
+                persists ``source_id=slug`` (kb/service.py), so its id badge
+                links to the KB entry detail page (same-tab, matching
+                kb/_results.html); sources without a resolvable UI route keep
+                the id as plain, selectable monospace text -- never a dead
+                link (#2457). -#}
             <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Hit provenance">
+              <span class="opacity-60">Source</span>
               <span class="badge badge-ghost badge-outline" title="Source namespace">{{ hit.source }}</span>
+              <span class="opacity-60">Kind</span>
               <span class="badge badge-ghost badge-outline" title="Document kind">{{ hit.kind }}</span>
-              <span class="badge badge-ghost badge-outline font-mono" title="Source id">{{ hit.source_id }}</span>
+              <span class="opacity-60">Source id</span>
+              {% if hit.source == "kb" %}
+                <a
+                  href="/ui/kb/{{ hit.source_id }}"
+                  class="badge badge-ghost badge-outline font-mono link link-primary"
+                  title="Open KB entry"
+                  aria-label="Open KB entry {{ hit.source_id }}"
+                >{{ hit.source_id }}</a>
+              {% else %}
+                <span class="badge badge-ghost badge-outline font-mono" title="Source id">{{ hit.source_id }}</span>
+              {% endif %}
             </div>
             <span
               class="badge badge-primary badge-outline"
@@ -85,7 +104,32 @@
               fused {{ "%.6f" | format(hit.fused_score) }}
             </span>
           </div>
-          <p class="text-sm whitespace-pre-wrap">{{ hit.body }}</p>
+          {#- Body snippet: clamp to a few lines so ten ranked hits stay
+              comparable on one screen; the toggle expands the full body on
+              click (#2456). Alpine scope is per hit card; the static
+              ``line-clamp-3`` clamps with JS disabled (no layout shift), and
+              the ``expanded`` binding removes it on expand. The toggle hides
+              itself when the body does not overflow the clamp. -#}
+          <div x-data="{ expanded: false, clamped: false }" class="flex flex-col gap-1">
+            <p
+              x-ref="body"
+              class="text-sm whitespace-pre-wrap line-clamp-3"
+              x-bind:class="{ 'line-clamp-3': !expanded }"
+              x-init="$nextTick(() => { clamped = $refs.body.scrollHeight > $refs.body.clientHeight })"
+            >{{ hit.body }}</p>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs self-start px-1"
+              x-show="clamped || expanded"
+              x-cloak
+              x-on:click="expanded = !expanded"
+              x-bind:aria-expanded="expanded.toString()"
+              aria-label="Toggle full result body"
+            >
+              <span x-show="!expanded">Show more</span>
+              <span x-show="expanded" x-cloak>Show less</span>
+            </button>
+          </div>
           {# Per-signal RRF score/rank breakdown -- a None rank renders the
              explicit absent marker, not a blank. #}
           <div class="overflow-x-auto">

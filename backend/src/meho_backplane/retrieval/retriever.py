@@ -103,14 +103,21 @@ from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Document
 from meho_backplane.retrieval.embedding import get_embedding_service
 
-__all__ = ["CANDIDATE_LIMIT", "RRF_K", "RetrievalHit", "retrieve"]
+__all__ = [
+    "CANDIDATE_LIMIT",
+    "RRF_K",
+    "RetrievalFacets",
+    "RetrievalHit",
+    "list_retrieval_facets",
+    "retrieve",
+]
 
 
 #: The ``documents.source`` value memory rows carry. Mirrors
@@ -757,3 +764,97 @@ def _coerce_uuid(value: Any) -> uuid.UUID:
     if isinstance(value, uuid.UUID):
         return value
     return uuid.UUID(str(value))
+
+
+class RetrievalFacets(BaseModel):
+    """The distinct ``source`` / ``kind`` values retrievable in a tenant.
+
+    Populates the ``/ui/retrieval`` diagnostics Source / Kind datalists (#2458)
+    so an operator selects a filter value the substrate actually holds instead
+    of guessing one that fails silently. The values are enumerated from the
+    same ``documents`` rows :func:`retrieve` reads, gated by the same
+    per-principal visibility predicate -- so a docs-corpus collection name (a
+    different substrate that ``retrieve`` never queries) can never appear, and a
+    user-scoped ``source='memory'`` ``kind`` another principal owns is excluded.
+
+    Both lists are sorted and de-duplicated. Frozen pydantic v2 model -- the
+    caller renders the values verbatim into ``<datalist>`` options.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sources: tuple[str, ...]
+    kinds: tuple[str, ...]
+
+
+async def list_retrieval_facets(
+    tenant_id: uuid.UUID,
+    *,
+    principal_sub: str | None = None,
+    session: AsyncSession | None = None,
+) -> RetrievalFacets:
+    """Enumerate the distinct retrieval-visible ``source`` / ``kind`` values.
+
+    Runs one ``SELECT DISTINCT source, kind FROM documents`` scoped to
+    *tenant_id* -- no cross-tenant row can contribute, mirroring the mandatory
+    tenant predicate every candidate query carries. When *principal_sub* is set
+    the same per-principal predicate the candidate queries enforce
+    (:data:`_PRINCIPAL_PREDICATE_SQL`) is applied, so a user-scoped
+    ``source='memory'`` row contributes its ``kind`` only to the principal that
+    wrote it; passing ``None`` (the opt-out the in-process callers use) admits
+    every row in the tenant.
+
+    Parameters
+    ----------
+    tenant_id
+        The querying tenant's UUID. Required -- there is no cross-tenant
+        enumeration surface, exactly as with :func:`retrieve`.
+    principal_sub
+        The authenticated caller's OIDC ``sub``. When set, user-scoped memory
+        kinds owned by a different principal are excluded from the result.
+    session
+        Optional caller-owned :class:`AsyncSession`. When ``None`` the helper
+        opens its own and closes on exit (the query is read-only, no commit).
+
+    Returns
+    -------
+    RetrievalFacets
+        Sorted, de-duplicated ``sources`` and ``kinds`` tuples. Empty tuples
+        when the tenant has no visible documents.
+    """
+    if session is None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as owned_session:
+            return await _select_facets(owned_session, tenant_id, principal_sub)
+    return await _select_facets(session, tenant_id, principal_sub)
+
+
+async def _select_facets(
+    session: AsyncSession,
+    tenant_id: uuid.UUID,
+    principal_sub: str | None,
+) -> RetrievalFacets:
+    """Execute the tenant-scoped, per-principal-gated DISTINCT facet query.
+
+    The per-principal ``OR`` chain is the ``:principal_sub IS NOT NULL`` arm of
+    :data:`_PRINCIPAL_PREDICATE_SQL` expressed through the ORM so the query
+    stays portable across the PG production engine and the SQLite test engine
+    (the raw ``metadata ->> 'user_sub'`` text extraction the candidate queries
+    inline is PG-only). ``doc_metadata['user_sub'].as_string()`` yields
+    ``JSON_EXTRACT`` on SQLite and ``->>`` on PostgreSQL; a missing ``user_sub``
+    resolves to NULL, so ``NULL == :principal_sub`` excludes the row -- matching
+    the candidate queries' deny-on-missing-``user_sub`` posture.
+    """
+    stmt = select(Document.source, Document.kind).where(Document.tenant_id == tenant_id).distinct()
+    if principal_sub is not None:
+        stmt = stmt.where(
+            or_(
+                Document.source != _MEMORY_SOURCE,
+                Document.kind.notin_(_USER_SCOPED_MEMORY_KINDS),
+                Document.doc_metadata["user_sub"].as_string() == principal_sub,
+            )
+        )
+    rows = (await session.execute(stmt)).all()
+    sources = sorted({source for source, _ in rows})
+    kinds = sorted({kind for _, kind in rows})
+    return RetrievalFacets(sources=tuple(sources), kinds=tuple(kinds))

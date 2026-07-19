@@ -526,6 +526,29 @@ def test_list_full_page_renders_seeded_targets() -> None:
     assert CSRF_COOKIE_NAME in response.cookies
 
 
+def test_list_row_identity_cell_is_visible_link() -> None:
+    """The target-name cell links to the detail with visible styling (#2463).
+
+    The identity cell uses ``link link-primary`` (not the hover-only
+    ``link link-hover`` that rendered as plain text), matching the trailing
+    View button's target -- the page-nav list-surface convention.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_target(tenant_id=_TENANT_A, name="vmware-prod", product="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        response = client.get("/ui/connectors")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Visible identity link on the target-name cell (the row's identity
+    # cell no longer uses the hover-only style; the sort-header controls
+    # keep link-hover and are out of scope).
+    assert 'class="link link-primary font-mono"' in body
+    # Both the identity link and the trailing View button hit the detail URL.
+    assert body.count('href="/ui/connectors/vmware-prod"') == 2
+
+
 def test_list_handles_empty_inventory() -> None:
     """An empty tenant renders the "no targets" empty-state row."""
     _seed_tenant(_TENANT_A, "tenant-a")

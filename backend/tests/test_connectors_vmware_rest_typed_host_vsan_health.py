@@ -40,9 +40,7 @@ from meho_backplane.connectors.vmware_rest.typed_ops_host_vsan_health import (
     host_vsan_health_impl,
 )
 
-_VSAN_PATH = (
-    "/api/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
-)
+_VSAN_PATH = "/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
 
 # ---------------------------------------------------------------------------
 # Fixtures / doubles
@@ -95,7 +93,7 @@ class _FakeConnector:
         self.mount_calls.append(path)
         return f"{self._mount_prefix}{path}"
 
-    async def _post_json(
+    async def _post_vmomi_json(
         self,
         target: Any,
         path: str,
@@ -103,6 +101,9 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> Any:
+        # vmomi VsanQueryVcClusterHealthSummary read via the vmomi seam;
+        # the handler passes the spec-relative path (the /sdk/vim25 mount
+        # is the connector's job, #2466).
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
@@ -162,10 +163,10 @@ async def test_queries_health_summary_for_cluster_mounted() -> None:
 
     out = await host_vsan_health_impl(conn, _make_operator(), _Target(), {"cluster": "domain-c123"})
 
-    # The singleton moId rides the mounted path; the cluster MoRef is the body arg.
-    assert conn.mount_calls == [
-        "/VsanVcClusterHealthSystem/vsan-cluster-health-system/VsanQueryVcClusterHealthSummary"
-    ]
+    # The vmomi read routes through _post_vmomi_json (not mount_op_path);
+    # the singleton moId rides the spec-relative path, the cluster MoRef is
+    # the body arg (#2466).
+    assert conn.mount_calls == []
     assert len(conn.post_calls) == 1
     path, body = conn.post_calls[0]
     assert path == _VSAN_PATH

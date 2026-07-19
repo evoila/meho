@@ -1063,9 +1063,12 @@ wrap the targets registry routes from G0.3-T3 (#254), the G0.3-T1.5
 verb. The verbs are the operator-side surface for the per-tenant
 `targets` table — a fingerprinted catalog of vendor systems the
 operator manages (vCenter hosts, Vault instances, k8s clusters, …)
-that the G0.6 dispatcher resolves at `call` time. Write verbs
-(`create` / `update` / `delete`) are deferred; bulk import lands
-under G0.3-T6 (#257).
+that the G0.6 dispatcher resolves at `call` time. Registration and
+updates flow through `meho targets import` (POST for new rows, PATCH
+under `--update`); a standalone `create` verb was explicitly ruled out
+in favour of file-based import (#1574 / #1559). No standalone `delete`
+verb is surfaced yet, though the API supports `DELETE
+/api/v1/targets/{name}` (`tenant_admin`).
 
 ### Subcommands
 
@@ -1154,10 +1157,11 @@ the comment block on `httpDoer` for the rationale.
 
 ### Out of scope (v0.2)
 
-- Write verbs (`create` / `update` / `delete`). The API supports them
-  (require `tenant_admin`); the CLI surfaces them in a follow-up
-  task when operators ask. Bulk import via T6 (#257) lands in a
-  sibling PR.
+- Standalone `delete` verb. The API supports `DELETE
+  /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it in a
+  follow-up task when operators ask. Create and update are already
+  covered by `meho targets import` (POST for new rows, PATCH under
+  `--update`), so no separate `create` / `update` verb is planned.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the

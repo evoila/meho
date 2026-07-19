@@ -463,13 +463,42 @@ def test_resolve_authoring_kind_handcoded_is_typed() -> None:
 
 
 def test_resolve_authoring_kind_resolver_miss_reads_as_shim() -> None:
-    """No connector class resolves for the line → the dead-end ``ingested-shim`` reading."""
+    """No connector class + no code-shipped op → the dead-end ``ingested-shim`` reading."""
     from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
 
+    # A genuinely ingested catalog row: every op is a raw ``source_kind=
+    # 'ingested'`` primitive, so ``has_code_shipped_op`` is False.
     kind, dispatchable = resolve_authoring_kind(
-        product="ghost", version="9.9", enabled_operation_count=3
+        product="ghost", version="9.9", enabled_operation_count=3, has_code_shipped_op=False
     )
     assert (kind, dispatchable) == ("ingested-shim", False)
+
+
+def test_resolve_authoring_kind_classless_typed_is_dispatchable() -> None:
+    """A class-less typed line (net.*/secret.* mold) reads ``typed`` / dispatchable (#2496).
+
+    The resolver misses (no ``register_connector_v2`` class backs the
+    synthetic ``net`` / ``secret`` products), but the row carries
+    code-shipped ``source_kind='typed'`` ops the dispatcher routes with
+    ``connector_instance=None``. The projection must recognize that mold
+    and not collapse it into the ingested-shim dead end.
+    """
+    from meho_backplane.operations.ingest.connector_registration import resolve_authoring_kind
+
+    # No connector class is registered for "net" (clear_registry ran in the
+    # fixture), so resolve_connector raises NoMatchingConnector — yet the
+    # code-shipped-op signal flips the reading to the dispatchable surface.
+    kind, dispatchable = resolve_authoring_kind(
+        product="net", version="1.x", enabled_operation_count=1, has_code_shipped_op=True
+    )
+    assert (kind, dispatchable) == ("typed", True)
+
+    # The signal only matters on the resolver-miss path; the enabled count
+    # is irrelevant to the class-less typed reading.
+    kind, dispatchable = resolve_authoring_kind(
+        product="secret", version="1.x", enabled_operation_count=0, has_code_shipped_op=True
+    )
+    assert (kind, dispatchable) == ("typed", True)
 
 
 def test_enable_time_warnings_empty_for_no_connector() -> None:

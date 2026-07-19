@@ -389,17 +389,46 @@ func renderEvent(w io.Writer, eventType, data string, jsonOut bool) {
 	fmt.Fprintln(w, line)
 }
 
-// broadcastEvent is the subset of the backplane's BroadcastEvent
-// shape the CLI renders. The full Pydantic model is wider; we only
-// decode the fields the human formatter needs and pass everything
-// else through verbatim on the --json path.
+// broadcastEvent is the subset of the backplane feed's wire shapes the
+// CLI renders. Two event kinds ride the same “event: broadcast“ frame
+// (the SSE frame type is the transport, not the event kind): audit-driven
+// “BroadcastEvent“ operations and agent-authored
+// “AgentAnnouncementEvent“ announcements (#2549). We decode only the
+// fields the human formatter needs across both kinds and pass everything
+// else through verbatim on the --json path. Unknown fields are ignored and
+// missing fields decode to their zero value, so a new frame kind never
+// fails the decode — the announcement fields are simply absent on an
+// operation frame and vice versa.
 type broadcastEvent struct {
+	// Kind / EventKind are the top-level discriminator (``kind``, with the
+	// historical ``event_kind`` alias). Absent on pre-discriminator audit
+	// frames, which are treated as operations.
+	Kind      string `json:"kind"`
+	EventKind string `json:"event_kind"`
+
 	TS           time.Time `json:"ts"`
 	PrincipalSub string    `json:"principal_sub"`
-	TargetName   *string   `json:"target_name"`
-	OpID         string    `json:"op_id"`
-	OpClass      string    `json:"op_class"`
-	ResultStatus string    `json:"result_status"`
+
+	// Audit-driven ``BroadcastEvent`` fields.
+	TargetName   *string `json:"target_name"`
+	OpID         string  `json:"op_id"`
+	OpClass      string  `json:"op_class"`
+	ResultStatus string  `json:"result_status"`
+
+	// Agent-authored ``AgentAnnouncementEvent`` fields (kind ==
+	// "agent_announcement"). ``Activity`` is agent-authored text; the CLI
+	// renders it verbatim to a terminal (it does not interpret it and, as a
+	// non-LLM sink, does not need the untrusted-text envelope).
+	Phase    string   `json:"phase"`
+	Activity string   `json:"activity"`
+	Target   *string  `json:"target"`
+	Targets  []string `json:"targets"`
+}
+
+// isAnnouncement reports whether the frame is an agent-authored
+// announcement rather than an audit-driven operation.
+func (ev broadcastEvent) isAnnouncement() bool {
+	return ev.Kind == "agent_announcement" || ev.EventKind == "agent_announcement"
 }
 
 // humanLine formats one broadcastEvent as a single line:
@@ -423,6 +452,9 @@ func humanLine(data string) (string, error) {
 	if err := json.Unmarshal([]byte(data), &ev); err != nil {
 		return "", fmt.Errorf("decode event: %w", err)
 	}
+	if ev.isAnnouncement() {
+		return announcementLine(ev), nil
+	}
 	return fmt.Sprintf("%s  %-22s  %-18s  %-6s  %s",
 		ev.TS.UTC().Format(time.RFC3339),
 		ev.PrincipalSub,
@@ -430,6 +462,62 @@ func humanLine(data string) (string, error) {
 		ev.ResultStatus,
 		summariseEvent(ev),
 	), nil
+}
+
+// announcementLine formats one agent-authored announcement as a single
+// line, reusing the operation line's column layout so a mixed feed stays
+// visually aligned:
+//
+//	<RFC3339 ts>  <principal>  announce  <phase>  <activity [target=…]>
+//
+// The “op_id“ column is the literal "announce" (an announcement is not
+// an operation), the “result_status“ column carries the announcement
+// “phase“ (start / update / completion), and the summary column carries
+// the agent's activity text plus any target attribution. The activity is
+// rendered verbatim — the operator reads it as prose, and the CLI never
+// treats it as input.
+func announcementLine(ev broadcastEvent) string {
+	phase := ev.Phase
+	if phase == "" {
+		phase = "update"
+	}
+	return fmt.Sprintf("%s  %-22s  %-18s  %-6s  %s",
+		ev.TS.UTC().Format(time.RFC3339),
+		ev.PrincipalSub,
+		"announce",
+		phase,
+		summariseAnnouncement(ev),
+	)
+}
+
+// summariseAnnouncement builds the summary column for an announcement:
+// the activity text, with a “[target=…]“ suffix when the announcement
+// names one or more targets.
+func summariseAnnouncement(ev broadcastEvent) string {
+	targets := announcementTargets(ev)
+	if targets == "" {
+		return ev.Activity
+	}
+	if ev.Activity == "" {
+		return "target=" + targets
+	}
+	return ev.Activity + "  [target=" + targets + "]"
+}
+
+// announcementTargets joins the single “target“ and the “targets[]“
+// list into one comma-separated attribution string; empty when the
+// announcement is target-less.
+func announcementTargets(ev broadcastEvent) string {
+	out := make([]string, 0, len(ev.Targets)+1)
+	if ev.Target != nil && *ev.Target != "" {
+		out = append(out, *ev.Target)
+	}
+	for _, t := range ev.Targets {
+		if t != "" {
+			out = append(out, t)
+		}
+	}
+	return strings.Join(out, ", ")
 }
 
 // summariseEvent picks the payload-summary column value for the

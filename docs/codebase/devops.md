@@ -520,6 +520,11 @@ wait-for-Secret → `helm install`) are in
 
 ## Install / upgrade
 
+> For the operator-facing deployment & upgrade guide (cold-install
+> prerequisites, Helm-4 SSA upgrade caveats, credential-backend variants),
+> see [`../deploying.md`](../deploying.md). This section covers the chart
+> mechanics.
+
 The recommended flow uses the example values file rather than long
 `--set` strings:
 

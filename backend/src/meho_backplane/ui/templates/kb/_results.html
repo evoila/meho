@@ -21,8 +21,10 @@
 
   Layout:
     * Non-empty query: DaisyUI card-grid of result cards, each showing
-      slug, score pills (fused / BM25 / cosine), preview snippet, and
-      hover-preview trigger + detail link.
+      slug, preview snippet, and hover-preview trigger + detail link.
+      Raw retrieval score pills (fused / BM25 / cosine) were removed
+      (#2453) -- per-signal score inspection lives on /ui/retrieval
+      Diagnostics (_diagnostics_results.html, #1888), not the KB surface.
     * Empty query: table of slug + kind + indexed_at for browsing.
     * Empty state: friendly empty-state card.
 -#}
@@ -56,34 +58,6 @@
                     aria-label="View entry {{ hit.slug }}"
                   >{{ hit.slug }}</a>
                 </h3>
-                {# Score pills #}
-                <div class="flex flex-wrap gap-1 text-xs" aria-label="Relevance scores">
-                  <span
-                    class="badge badge-primary badge-outline"
-                    title="Fused RRF score"
-                    aria-label="Fused score {{ '%.3f' | format(hit.fused_score) }}"
-                  >
-                    fused {{ "%.3f" | format(hit.fused_score) }}
-                  </span>
-                  {% if hit.bm25_score is not none %}
-                    <span
-                      class="badge badge-ghost badge-outline"
-                      title="BM25 lexical score"
-                      aria-label="BM25 score {{ '%.3f' | format(hit.bm25_score) }}"
-                    >
-                      bm25 {{ "%.3f" | format(hit.bm25_score) }}
-                    </span>
-                  {% endif %}
-                  {% if hit.cosine_score is not none %}
-                    <span
-                      class="badge badge-ghost badge-outline"
-                      title="Cosine semantic score"
-                      aria-label="Cosine score {{ '%.4f' | format(hit.cosine_score) }}"
-                    >
-                      cos {{ "%.4f" | format(hit.cosine_score) }}
-                    </span>
-                  {% endif %}
-                </div>
               </div>
               {# Snippet preview #}
               <p class="text-sm opacity-70 line-clamp-2">{{ hit.snippet }}</p>
@@ -93,12 +67,12 @@
                   type="button"
                   class="btn btn-ghost btn-xs"
                   hx-get="/ui/kb/{{ hit.slug }}/preview?q={{ query | urlencode }}"
-                  hx-target="#kb-preview-{{ hit.slug }}"
+                  hx-target='[id="kb-preview-{{ hit.slug }}"]'
                   hx-swap="innerHTML"
                   hx-trigger="mouseenter delay:200ms"
                   aria-label="Preview {{ hit.slug }}"
                   x-data="{}"
-                  x-on:htmx:after-swap.document="$el.closest('.card').querySelector('#kb-preview-{{ hit.slug }}').classList.remove('hidden')"
+                  x-on:htmx:after-swap.document="$el.closest('.card').querySelector('[id=&quot;kb-preview-{{ hit.slug }}&quot;]').classList.remove('hidden')"
                 >
                   Preview
                 </button>

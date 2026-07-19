@@ -76,6 +76,35 @@ models that G9.1-T1 (#448, migration `0007`) created.
   path for **curated inner-graph nodes the probes cannot derive**
   (vault-role, keycloak-realm, externally-managed principals).
 
+**Manual node delete — entry point (async, write half, #2485):**
+
+- `delete_node(session, operator, *, node_id) -> DeleteNodeResult`
+  (`topology/node_delete.py`) — guarded hard-delete of a
+  manually-seeded node. Resolves `node_id` tenant-scoped, then applies
+  three guards in order: `NodeNotFoundForDeleteError` (404) when the id
+  does not resolve in the tenant (cross-tenant ids indistinguishable
+  from missing); `NodeNotDeletableError` (409 `probe_owned_node`) when
+  the row is probe-owned — `source != 'curated'` (probe-derived,
+  including auto-discovered inner-graph nodes refresh reconciliation
+  owns) **or** `target_id IS NOT NULL` (adopted onto a target; would
+  resurrect on the next probe); `NodeHasLiveEdgesError` (409
+  `node_has_edges`, echoing the blocking `edge_ids`) when any live
+  `graph_edge` (`last_seen IS NOT NULL`) references the node. Only
+  `source='curated'` **and** `target_id IS NULL` seeds are deletable —
+  the delete-half mirror of the §3 auto-edge rule
+  `unannotate_edge` enforces. On the happy path it writes one `removed`
+  `graph_node_history` tombstone (`before=snapshot` / `after=None`) +
+  one audit row (`op_id="topology.delete_node"`, `op_class="write"`,
+  `method="DELETE_NODE"`), hard-deletes the row, and publishes one
+  broadcast event (fail-open after commit). The DB `ON DELETE CASCADE`
+  on `graph_edge` stays a backstop only (tenant purges + test cleanup):
+  a bare cascade would drop referencing edges without their
+  `graph_edge_history` tombstones, which is exactly why the service
+  refuses instead. The node's prior `graph_node_history` rows (and the
+  fresh tombstone) survive the hard-delete with `node_id` NULL via the
+  `graph_node_history.node_id` `ON DELETE SET NULL` FK, so the timeline
+  facet stays renderable.
+
 Both service functions own a `session.begin()` block internally and
 publish broadcast events after commit (fail-open per the refresh
 pattern). The REST routes (T5), CLI verbs (T6), and MCP tools (T7)
@@ -149,12 +178,21 @@ admin meta-tool `meho.topology.create_node` in
 `mcp/tools/topology.py` from accreting further past the 600-line
 guidance; the registry auto-discovers either way) that closes the
 empty-tenant bootstrap gap — same `tenant_admin` / `write` shape as
-the annotate pair.
+the annotate pair. #2539 added a fourth admin meta-tool
+`meho.topology.bulk_import` (own module `mcp/tools/topology_bulk_import.py`,
+same separate-module reason) — batch curated-edge authoring for the
+agent surface, closing the MCP half of the propose→plan→apply loop the
+REST / CLI / console bulk-import fronts already had. #2485 added a fifth
+admin meta-tool `meho.topology.delete_node` (own module
+`mcp/tools/topology_delete_node.py`, same separate-module reason) — the
+guarded hard-delete counterpart to `create_node` that removes a
+manually-seeded node by id (same `tenant_admin` / `write` shape).
 
-Since #2537 the three MCP write handlers no longer call the service
+Since #2537 the MCP write handlers no longer call the service
 primitives directly: they route through `operations.dispatch()` with
 the targetless typed ops `topology.annotate` / `topology.create_node`
-/ `topology.unannotate` registered by
+/ `topology.delete_node` / `topology.unannotate` / `topology.bulk_import`
+registered by
 `connectors/topology/ops.py` under the synthetic connector id
 `topology-graph-1.x` (the `secret.move` mold — module-level handlers,
 `target=None`, `parse_connector_id`-compatible identity). The
@@ -165,13 +203,36 @@ returns a `{status: awaiting_approval, approval_request_id, ...}`
 envelope; the write executes with the stored params when a human
 approves from any approvals surface), while a human tenant_admin rides
 the default-allow branch and executes immediately — same UX as before.
-The typed-op handlers unwrap params and call `annotate_edge` /
-`create_or_get_node` / `unannotate_edge` unchanged; domain errors come
+The typed-op handlers unwrap params and call `annotate_edge_with_plan` /
+`create_or_get_node` / `unannotate_edge` / `bulk_import_edges` unchanged;
+domain errors come
 back as `connector_error` results whose `exception_class` the MCP shim
 (`dispatch_topology_write` in `mcp/tools/topology.py`) maps back to
 JSON-RPC `-32602`. Each gated MCP write therefore produces one extra
 audit row (`method="DISPATCH"`, `path=<op_id>`, with
-`policy_decision`) alongside the service-level row. The REST + UI
+`policy_decision`) alongside the service-level row.
+
+`meho.topology.bulk_import` (#2539) is the one two-behaviour tool. Its
+`dry_run` param splits the path: `dry_run=true` (the default,
+read-shaped) calls `bulk_import_edges(dry_run=True)` **directly** — no
+dispatch, no gate — so an agent's harmless plan preview never parks; a
+`BulkImportValidationError` becomes a -32602 whose `error.data` carries
+every row's diagnostic (the REST `422 invalid_bulk` analogue).
+`dry_run=false` dispatches the apply-only typed op `topology.bulk_import`
+(registered with `rows` alone — no `dry_run`, so the parked
+`ApprovalRequest` holds exactly the batch to apply) through the same
+gate: an AGENT parks the whole batch as one request, a human applies
+immediately, and approve-time re-dispatch applies all rows in the
+service's all-or-nothing transaction. The 1000-row cap is enforced at
+the tool boundary via the `inputSchema` `maxItems` (mirroring the REST
+`_BULK_IMPORT_MAX_EDGES` guard); like `query_topology`'s inline edge
+list, the plan is returned inline under a hard row cap rather than a
+JSONFlux handle. `meho.topology.annotate`'s return shape gained a
+`superseded` list (#2539): the ids of the auto edges the assertion
+displaced — already stamped on the shared audit / broadcast payload, so
+surfacing them on the return is a shape change, not a new query (the
+handler reads `plan.audit_payload["superseded"]` from
+`annotate_edge_with_plan`, the plan-returning sibling of `annotate_edge`). The REST + UI
 write fronts are human-only surfaces and keep calling the service
 primitives directly. The three write ops are also discoverable /
 dispatchable through the generic agent meta-tools (`search_operations`
@@ -1094,7 +1155,7 @@ Surfaces:
 ## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861 + G9.3-T4 #860 + G9.3-T3 #859)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Twelve routes total — eleven on the topology
+the read + write halves. Thirteen routes total — twelve on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -1105,6 +1166,7 @@ router, one on the targets router:
 | `POST /api/v1/topology/refresh/{target_name}` | `refresh_target_topology` | `topology.refresh` | operator |
 | `POST /api/v1/topology/edges` | `annotate_edge` (T3 #595) | `topology.annotate` | **tenant_admin** |
 | `DELETE /api/v1/topology/edges/{edge_id}` | `unannotate_edge` (T3 #595) | `topology.unannotate` | **tenant_admin** |
+| `DELETE /api/v1/topology/nodes/{node_id}` | `delete_node` (#2485) | `topology.delete_node` | **tenant_admin** |
 | `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
 | `POST /api/v1/topology/edges/bulk` | `bulk_import_edges` (T8 #600) | `topology.bulk_import` | **tenant_admin** |
 | `GET /api/v1/topology/timeline` | `query_timeline` (G9.3-T5 #861) | `topology.timeline` | operator |

@@ -647,6 +647,70 @@ async def test_list_returns_operator_tenant_and_builtins(
 
 
 @pytest.mark.asyncio
+async def test_list_scope_twin_rows_are_disambiguated(
+    client: TestClient,
+) -> None:
+    """Scope twins stay distinct rows carrying ``scope`` + shadow marker.
+
+    The #2085 re-ingest trap can leave the same ``(product, version,
+    impl_id)`` seeded once built-in (``tenant_id IS NULL``) and once
+    tenant-scoped. ``connector_id`` encodes only ``(impl_id, version)``,
+    so both render the same id. #2474 keeps both rows but makes them
+    self-describing: an additive ``scope`` field on every row and a
+    ``shadowed_by_tenant_scope`` marker on the built-in copy, mirroring
+    the tenant-wins dispatch precedence.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=None, product="vmware", impl_id="vmware-rest")
+    await _seed_connector(tenant_id=tenant_a, product="vmware", impl_id="vmware-rest")
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    connectors = response.json()["items"]
+
+    # Both scope copies survive -- no DISTINCT collapse (each carries
+    # real, scope-specific review state).
+    twins = [c for c in connectors if c["connector_id"] == "vmware-rest-9.0"]
+    assert len(twins) == 2
+    by_scope = {c["scope"]: c for c in twins}
+    assert set(by_scope) == {"builtin", "tenant"}
+    # Every row carries the additive scope field.
+    assert all("scope" in c for c in connectors)
+    # The built-in copy is shadowed by the tenant-scoped twin that
+    # ``lookup_descriptor`` resolves first; the tenant copy is not.
+    assert by_scope["builtin"]["shadowed_by_tenant_scope"] is True
+    assert by_scope["tenant"]["shadowed_by_tenant_scope"] is False
+    assert by_scope["builtin"]["tenant_id"] is None
+    assert by_scope["tenant"]["tenant_id"] == str(tenant_a)
+    # Invariant: within one response no two rows share (connector_id, scope).
+    pairs = [(c["connector_id"], c["scope"]) for c in connectors]
+    assert len(pairs) == len(set(pairs))
+
+
+@pytest.mark.asyncio
+async def test_list_single_scope_row_carries_scope_but_no_shadow(
+    client: TestClient,
+) -> None:
+    """A connector present in a single scope is unchanged bar the additive ``scope``."""
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=None, product="nsx", impl_id="nsx")
+
+    key, token = _operator_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    connectors = response.json()["items"]
+    nsx = [c for c in connectors if c["connector_id"] == "nsx-9.0"]
+    assert len(nsx) == 1
+    assert nsx[0]["scope"] == "builtin"
+    assert nsx[0]["shadowed_by_tenant_scope"] is False
+
+
+@pytest.mark.asyncio
 async def test_list_status_staged_filters_by_aggregate_state(
     client: TestClient,
 ) -> None:
@@ -1067,6 +1131,80 @@ async def test_review_payload_surfaces_authoring_kind(
     assert response.status_code == 200
     body = response.json()
     assert body["kind"] == "profiled"
+    assert body["dispatchable"] is True
+
+
+@pytest.mark.asyncio
+async def test_list_surfaces_classless_typed_as_dispatchable(
+    client: TestClient,
+) -> None:
+    """The class-less typed mold reads ``typed`` / ``dispatchable=True`` (#2496).
+
+    ``net-probe-1.x`` / ``secret-broker-1.x`` register their ops as
+    module-level ``source_kind='typed'`` handlers and deliberately back
+    them with **no** connector class, so the resolver-replay in
+    :func:`resolve_authoring_kind` misses. The regression: that miss was
+    projected as ``kind='ingested-shim'`` / ``dispatchable=False``, so a
+    live operator concluded a working, code-shipped connector was dead
+    (#2468 finding 3a). The row carries code-shipped ops the dispatcher
+    routes with ``connector_instance=None``, so it must read as the typed
+    surface it is. Seeded as built-ins (``tenant_id IS NULL``) with no
+    class registered, mirroring the real image-time registration.
+    """
+    for product, version, impl_id in (
+        ("net", "1.x", "net-probe"),
+        ("secret", "1.x", "secret-broker"),
+    ):
+        await _seed_connector(
+            tenant_id=None,
+            product=product,
+            version=version,
+            impl_id=impl_id,
+            review_status="enabled",
+            op_is_enabled=True,
+            source_kind="typed",
+        )
+
+    key, token = _operator_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors", headers=_authed(token))
+    assert response.status_code == 200
+    items = {c["connector_id"]: c for c in response.json()["items"]}
+    for connector_id in ("net-probe-1.x", "secret-broker-1.x"):
+        item = items[connector_id]
+        assert item["state"] == "ingested"
+        assert item["kind"] == "typed", connector_id
+        assert item["dispatchable"] is True, connector_id
+
+
+@pytest.mark.asyncio
+async def test_review_payload_surfaces_classless_typed_as_dispatchable(
+    client: TestClient,
+) -> None:
+    """``GET /{id}/review`` reports the class-less typed mold as dispatchable typed (#2496).
+
+    The ``meho.connector.review`` surface (MCP) and this REST review
+    route share :func:`resolve_authoring_kind` via
+    :func:`_authoring_kind_for_payload`, so the projection fix must hold
+    on the review path too, not only the listing.
+    """
+    await _seed_connector(
+        tenant_id=None,
+        product="net",
+        version="1.x",
+        impl_id="net-probe",
+        review_status="enabled",
+        op_is_enabled=True,
+        source_kind="typed",
+    )
+    key, token = _operator_token(tenant_id=uuid.uuid4())
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get("/api/v1/connectors/net-probe-1.x/review", headers=_authed(token))
+    assert response.status_code == 200
+    body = response.json()
+    assert body["kind"] == "typed"
     assert body["dispatchable"] is True
 
 
@@ -1907,6 +2045,48 @@ async def test_edit_op_updates_safety_level_and_writes_audit_row(
     assert response.json() == {"warnings": []}
     audit_count = await _audit_row_count(op_id="meho.connector.edit_op")
     assert audit_count == 1
+
+
+@pytest.mark.asyncio
+async def test_edit_op_omitted_custom_description_preserves_existing_value(
+    client: TestClient,
+) -> None:
+    """PATCH omitting ``custom_description`` leaves an existing value intact (#2488).
+
+    The service now reads an explicit ``None`` as a clear-to-NULL; the
+    REST route forwards ``custom_description`` only when the body supplied
+    a value, so an unrelated edit (here ``safety_level`` only) must not
+    clobber a previously-set description. Guards the route's conditional
+    forwarding against the sentinel default.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_a)
+    op_path = "GET:/api/v1/group-0/0"
+    key, token = _admin_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        first = client.patch(
+            f"/api/v1/connectors/vmware-rest-9.0/operations/{op_path}",
+            json={"custom_description": "Operator-authored summary."},
+            headers=_authed(token),
+        )
+        assert first.status_code == 200
+        second = client.patch(
+            f"/api/v1/connectors/vmware-rest-9.0/operations/{op_path}",
+            json={"safety_level": "caution"},
+            headers=_authed(token),
+        )
+    assert second.status_code == 200
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id == tenant_a,
+            EndpointDescriptor.op_id == op_path,
+        )
+        op_row = (await session.execute(stmt)).scalar_one()
+        assert op_row.custom_description == "Operator-authored summary."
+        assert op_row.safety_level == "caution"
 
 
 @pytest.mark.asyncio

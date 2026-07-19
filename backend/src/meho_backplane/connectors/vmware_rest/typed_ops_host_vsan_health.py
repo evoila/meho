@@ -138,21 +138,23 @@ async def host_vsan_health_impl(
        ``read_note`` recording why, rather than propagating the transport
        error.
 
-    The call routes through :meth:`VmwareRestConnector.mount_op_path`, so
-    the op lands on the ``/api`` (modern) or ``/rest`` (legacy / vcsim)
-    mount the target's session selected.
+    The call routes through
+    :meth:`VmwareRestConnector._post_vmomi_json`, which mounts the vmomi
+    method on the documented VI-JSON base ``/sdk/vim25/{release}`` (with a
+    single ``/api`` fallback) so ``VsanQueryVcClusterHealthSummary``
+    resolves on vCenter 8.0.x instead of 404ing (#2466); on legacy /
+    vcsim targets it stays on the ``/rest`` mount.
 
     Returns ``{"cluster": <moid>, "overall_health": <colour|null>,
     "groups": [...]}``.
     """
     cluster_moid = params["cluster"]
-    health_path = await connector.mount_op_path(target, _VSAN_QUERY_HEALTH_PATH, operator)
 
     out: dict[str, Any] = {"cluster": cluster_moid}
     try:
-        health_result = await connector._post_json(
+        health_result = await connector._post_vmomi_json(
             target,
-            health_path,
+            _VSAN_QUERY_HEALTH_PATH,
             operator=operator,
             json=build_vsan_query_health_params(cluster_moid),
         )

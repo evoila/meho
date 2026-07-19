@@ -56,6 +56,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.connectors.topology.ops import (
     TOPOLOGY_ANNOTATE_OP_ID,
+    TOPOLOGY_BULK_IMPORT_OP_ID,
     TOPOLOGY_CREATE_NODE_OP_ID,
     TOPOLOGY_GRAPH_CONNECTOR_ID,
     TOPOLOGY_UNANNOTATE_OP_ID,
@@ -72,6 +73,7 @@ from meho_backplane.db.models import (
 )
 from meho_backplane.main import app
 from meho_backplane.mcp.tools.topology import _annotate_handler
+from meho_backplane.mcp.tools.topology_bulk_import import _bulk_import_handler
 from meho_backplane.mcp.tools.topology_create_node import _create_node_handler
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.settings import get_settings
@@ -418,7 +420,15 @@ async def test_mcp_front_human_immediate_agent_parked(
     await _seed_node(kind="database", name="db-payments")
 
     executed = await _annotate_handler(human, dict(_ANNOTATE_PARAMS))
-    assert set(executed) == {"edge_id", "from", "to", "kind", "source", "conflicts"}
+    assert set(executed) == {
+        "edge_id",
+        "from",
+        "to",
+        "kind",
+        "source",
+        "conflicts",
+        "superseded",
+    }
     assert executed["source"] == "curated"
     assert await _fetch_approval_rows() == []
 
@@ -434,6 +444,118 @@ async def test_mcp_front_human_immediate_agent_parked(
     assert uuid.UUID(parked["approval_request_id"]) == rows[0].id
     edges = await _fetch_edges()
     assert [e.kind for e in edges] == ["depends-on"], "agent park must not write"
+
+
+# ---------------------------------------------------------------------------
+# Bulk import (#2539) — dry-run never parks; apply rides the same gate
+# ---------------------------------------------------------------------------
+
+_BULK_ROWS: list[dict[str, Any]] = [
+    {"from_name": "svc-payments", "kind": "depends-on", "to_name": "db-payments"},
+]
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_agent_dry_run_returns_plan_no_park(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """An AGENT dry-run returns the per-row plan immediately with no park.
+
+    The free dry-run is read-shaped: the MCP front calls the service
+    directly (no dispatch, no policy gate), so an agent's harmless
+    preview never creates an ApprovalRequest row and never writes.
+    """
+    await _seed_edge_endpoints()
+    agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
+
+    plan = await _bulk_import_handler(agent, {"dry_run": True, "rows": list(_BULK_ROWS)})
+
+    assert plan["dry_run"] is True
+    assert plan["created"] == 1
+    assert plan["rows"][0]["action"] == "create"
+    assert plan["rows"][0]["edge_id"] is None
+    assert await _fetch_approval_rows() == []
+    assert await _fetch_edges() == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_agent_apply_parks_one_request_and_writes_nothing(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """An AGENT ``dry_run=false`` parks the whole batch as ONE pending request.
+
+    The apply dispatches the ``topology.bulk_import`` typed op through
+    the #2537 gate; the caution floor parks the agent. The single
+    tenant-wide (``target_id`` NULL) pending row stores the exact batch
+    params for the by-id resume, and no edge is written.
+    """
+    await _seed_edge_endpoints()
+    agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
+
+    parked = await _bulk_import_handler(agent, {"dry_run": False, "rows": list(_BULK_ROWS)})
+
+    assert parked["status"] == "awaiting_approval"
+    assert parked["op_id"] == TOPOLOGY_BULK_IMPORT_OP_ID
+    rows = await _fetch_approval_rows()
+    assert len(rows) == 1
+    assert rows[0].status == ApprovalRequestStatus.PENDING.value
+    assert rows[0].op_id == TOPOLOGY_BULK_IMPORT_OP_ID
+    assert rows[0].target_id is None
+    # The parked params are exactly the batch — no dry_run smuggled in.
+    assert rows[0].params == {"rows": _BULK_ROWS}
+    assert await _fetch_edges() == []
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_decide_executes_parked_batch_atomically(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """A four-eyes ``/decide`` applies the parked batch; all rows land once."""
+    await _seed_edge_endpoints()
+    await _seed_node(kind="database", name="db-analytics")
+    agent = _make_operator("agent:proposer", principal_kind=PrincipalKind.AGENT)
+    batch = {
+        "dry_run": False,
+        "rows": [
+            {"from_name": "svc-payments", "kind": "depends-on", "to_name": "db-payments"},
+            {"from_name": "svc-payments", "kind": "depends-on", "to_name": "db-analytics"},
+        ],
+    }
+    parked = await _bulk_import_handler(agent, batch)
+    assert parked["status"] == "awaiting_approval"
+    assert await _fetch_edges() == []
+
+    response = _decide(
+        uuid.UUID(parked["approval_request_id"]),
+        decider_sub="operator:decider",
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["dispatch_status"] == "ok"
+
+    edges = await _fetch_edges()
+    assert len(edges) == 2
+    assert all(e.source == "curated" for e in edges)
+
+
+@pytest.mark.asyncio
+async def test_bulk_import_human_apply_immediate_no_approval_row(
+    _registered_topology_ops: None,
+    _seeded_tenant: None,
+) -> None:
+    """A human ``dry_run=false`` applies immediately: edge written, zero approval rows."""
+    await _seed_edge_endpoints()
+    human = _make_operator("operator:human")
+
+    applied = await _bulk_import_handler(human, {"dry_run": False, "rows": list(_BULK_ROWS)})
+
+    assert applied["dry_run"] is False
+    assert applied["created"] == 1
+    assert uuid.UUID(applied["rows"][0]["edge_id"])
+    assert len(await _fetch_edges()) == 1
+    assert await _fetch_approval_rows() == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — pre-existing >1600-line single-surface
+# topology REST router (G9.1 read/refresh + G9.2 curated-edge + G9.3
+# temporal facets); #2485 only adds the DELETE /nodes/{node_id} route.
+# Splitting the router into per-facet modules is its own refactor, out of
+# scope for a delete-verb task.
+
 """``/api/v1/topology*`` — REST front for the G9.1 + G9.2 topology graph.
 
 G9.1-T5 (#453) of Initiative #363 mounted the four read/refresh routes
@@ -130,6 +136,12 @@ from meho_backplane.topology.bulk_import import (
     BulkImportValidationError,
     bulk_import_edges,
 )
+from meho_backplane.topology.node_delete import (
+    NodeHasLiveEdgesError,
+    NodeNotDeletableError,
+    NodeNotFoundForDeleteError,
+    delete_node,
+)
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
     find_dependencies,
@@ -180,6 +192,7 @@ _OP_PATH = "topology.path"
 _OP_REFRESH = "topology.refresh"
 _OP_ANNOTATE = "topology.annotate"
 _OP_UNANNOTATE = "topology.unannotate"
+_OP_DELETE_NODE = "topology.delete_node"
 _OP_LIST_EDGES = "topology.list_edges"
 _OP_BULK_IMPORT = "topology.bulk_import"
 _OP_TIMELINE = "topology.timeline"
@@ -944,6 +957,78 @@ async def unannotate_edge_route(
             detail={
                 "error": "edge_not_found",
                 "edge_id": str(edge_id),
+                "message": str(exc),
+            },
+        ) from exc
+
+
+@router.delete(
+    "/nodes/{node_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_node_route(
+    node_id: uuid.UUID,
+    operator: Operator = _require_admin,
+    session: AsyncSession = Depends(get_raw_session),
+) -> None:
+    """Hard-delete a manually-seeded ``graph_node`` by id.
+
+    Wraps :func:`~meho_backplane.topology.node_delete.delete_node`
+    (#2485). Returns 204 on success, writing a ``removed``
+    ``graph_node_history`` tombstone in the same transaction. Requires
+    :class:`TenantRole.TENANT_ADMIN` — the same gate the curated-edge
+    ``DELETE /edges/{edge_id}`` route sits behind.
+
+    Error mapping (mirrors the §3 auto-edge discipline
+    :func:`unannotate_edge_route` enforces):
+
+    * **409 ``probe_owned_node``** when the row is probe-derived
+      (``source='auto'``) or bound to a registered target
+      (``target_id IS NOT NULL``). Refresh reconciliation owns those and
+      they resurrect on the next probe, so a manual delete is
+      meaningless — only ``source='curated'``, target-unbound seeds are
+      deletable.
+    * **409 ``node_has_edges``** with the blocking ``edge_ids`` when a
+      live ``graph_edge`` references the node. The caller unannotates
+      those first; the service refuses rather than letting the DB
+      ``ON DELETE CASCADE`` drop them without their history tombstones.
+    * **404** when no node with that id exists in the caller's tenant
+      (cross-tenant ids and missing ids are indistinguishable — the
+      tenant boundary is opaque to the caller).
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_DELETE_NODE,
+        audit_op_class="write",
+    )
+    try:
+        await delete_node(session, operator, node_id=node_id)
+    except NodeNotDeletableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "probe_owned_node",
+                "node_id": str(exc.node_id),
+                "source": exc.source,
+                "target_id": str(exc.target_id) if exc.target_id is not None else None,
+                "message": str(exc),
+            },
+        ) from exc
+    except NodeHasLiveEdgesError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "node_has_edges",
+                "node_id": str(exc.node_id),
+                "edge_ids": [str(e) for e in exc.edge_ids],
+                "message": str(exc),
+            },
+        ) from exc
+    except NodeNotFoundForDeleteError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "node_not_found",
+                "node_id": str(node_id),
                 "message": str(exc),
             },
         ) from exc

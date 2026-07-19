@@ -30,6 +30,7 @@ from uuid import UUID
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
+    ConnectorNotFoundError,
     InvalidSchemaError,
     InvalidSpecError,
     LlmOutputInvalid,
@@ -258,3 +259,66 @@ def raise_invalid_params_for_ambiguous_scope(
         str(exc),
         data=build_connector_scope_ambiguous_detail(exc),
     ) from exc
+
+
+def raise_invalid_params_for_edit_value_error(exc: ValueError) -> NoReturn:
+    """Map an ``edit_op`` / ``edit_group`` caller-input ``ValueError`` onto -32602.
+
+    Both edit tools raise a plain :class:`ValueError` for well-formed
+    requests that ask for nothing editable (no PATCH field supplied) or
+    name a bad ``safety_level`` enum — mistakes the REST siblings already
+    render as a structured ``400`` (``connectors_ingest`` edit_op /
+    edit_group routes). Without a handler-level ``except`` arm the same
+    ValueError falls through the dispatcher's generic ``except Exception``
+    and surfaces as ``-32603 "internal error: ValueError"`` — the wrong
+    JSON-RPC class (``-32603`` signals a server-side bug, not a caller
+    mistake) *and* a leak of the Python class name into the stable wire
+    contract (#2488), the same genus #2481 closed for
+    :class:`ConnectorNotFoundError`.
+
+    A caller-input mistake maps onto MCP's only structured
+    handler-error channel — ``-32602`` / :class:`McpInvalidParamsError`.
+    Unlike the ``connector_not_found`` code, the service's message is
+    load-bearing here (it names which fields the operator may set), so it
+    is forwarded verbatim as the error message; it never contains the
+    class name, so the ``ValueError`` string does not reach the wire. No
+    ``data`` envelope is attached — the message alone is the contract,
+    matching the REST route's bare 400 ``detail``.
+    """
+    raise McpInvalidParamsError(str(exc)) from exc
+
+
+def raise_invalid_params_for_connector_not_found(
+    exc: ConnectorNotFoundError,
+) -> NoReturn:
+    """Map :class:`ConnectorNotFoundError` onto :class:`McpInvalidParamsError`.
+
+    Every ``meho.connector.*`` tool that takes a ``connector_id``
+    (``review`` / ``edit_group`` / ``edit_op`` / ``enable`` /
+    ``enable_reads`` / ``disable`` / ``delete``) resolves the label to a
+    row-scope before acting; an unknown or cross-tenant label raises
+    :class:`ConnectorNotFoundError` from the shared resolver. Without a
+    handler-level ``except`` arm it falls through the dispatcher's
+    generic ``except Exception`` and surfaces as a bare
+    ``-32603 "internal error: ConnectorNotFoundError"`` — the wrong
+    JSON-RPC class (``-32603`` signals a server-side bug, not a
+    well-formed request against a nonexistent name) *and* a leak of the
+    Python exception class name into the stable wire contract (#2481).
+
+    "Not found" is a caller-input problem, so it maps onto the only
+    structured handler-error channel MCP offers — ``-32602`` /
+    :class:`McpInvalidParamsError` — carrying the domain string
+    ``connector_not_found``. That matches the family-wide
+    ``-32602 <thing>_not_found`` convention the sibling tools already
+    follow (``agent_not_found``, ``approval_request_not_found``,
+    ``ingest_job_not_found``): a stable domain code, never the Python
+    class name. Existence is deliberately not leaked beyond the code, so
+    no ``data`` envelope is attached — a cross-tenant label and an
+    entirely absent one return the identical error, mirroring the REST
+    404 which renders the same three failure modes indistinguishably.
+
+    Shared here (rather than inline in ``connector_admin``) so all seven
+    handlers — and the ``edit_op`` / ``edit_group`` not-found paths
+    #2488 builds on — map through one grep-friendly home.
+    """
+    raise McpInvalidParamsError("connector_not_found") from exc

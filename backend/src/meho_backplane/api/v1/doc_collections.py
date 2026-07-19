@@ -74,8 +74,11 @@ from meho_backplane.docs_collections import (
     DocCollectionConflictError,
     DocCollectionCreate,
     DocCollectionCreateResponse,
+    DocCollectionGlobalError,
+    DocCollectionNotDisabledError,
     DocCollectionSummary,
     create_doc_collection,
+    delete_doc_collection,
     probe_collection,
     project_doc_collection_create_response,
     project_doc_collection_to_summary,
@@ -371,4 +374,68 @@ async def disable_collection_endpoint(
     """
     collection = await resolve_doc_collection(session, collection_key, operator.tenant_id)
     await set_collection_enabled(session, collection, enabled=False)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.delete(
+    "/{collection_key}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    response_class=Response,
+    responses={
+        403: {
+            "description": (
+                "The resolved collection is a global (``tenant_id IS "
+                "NULL``) platform-catalogue row — a tenant admin cannot "
+                "delete it (structured ``detail.error='global_collection'``)."
+            ),
+        },
+        404: {"description": "No collection with this key is visible to the tenant."},
+        409: {
+            "description": (
+                "The collection is not ``disabled`` — disable it first "
+                "(structured ``detail.error='collection_not_disabled'`` + "
+                "the current ``status``)."
+            ),
+        },
+    },
+)
+async def delete_collection_endpoint(
+    collection_key: str,
+    operator: Operator = _require_admin,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Deregister a disabled, tenant-owned collection, freeing its key (#2487).
+
+    The delete half of the registry — the REST counterpart to
+    ``POST /api/v1/doc_collections``. Resolves the collection tenant-first
+    (an unknown key → 404 with the typed ``known_keys`` hint), then
+    hard-deletes it behind two guards owned by the service:
+
+    * **Tenant-owned only** — a global row (``tenant_id IS NULL``) is
+      refused with a structured 403 ``detail.error='global_collection'``;
+      removing a platform-catalogue row every tenant sees is an ops action,
+      out of the tenant API.
+    * **Disabled-first** — a collection whose ``status`` is not
+      ``disabled`` is refused with a structured 409
+      ``detail.error='collection_not_disabled'`` naming the current status.
+
+    On success the row is gone and its ``collection_key`` is freed: a
+    re-``POST`` of the same key then succeeds 201 (the recovery loop that
+    motivated the issue). Deleting a tenant row that shadowed a global key
+    un-shadows the global row (the resolver is tenant-first). One
+    ``audit_log`` row per call, bound ``op_id="meho.docs.collections.delete"``.
+    """
+    collection = await resolve_doc_collection(session, collection_key, operator.tenant_id)
+    try:
+        await delete_doc_collection(session, operator, collection)
+    except DocCollectionGlobalError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+        ) from exc
+    except DocCollectionNotDisabledError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.detail,
+        ) from exc
     return Response(status_code=status.HTTP_204_NO_CONTENT)

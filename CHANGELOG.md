@@ -114,6 +114,79 @@ connector-related release-notes line.
   behaviour change; interactive-OIDC principals are scoped by the same
   `sub` equality and are unaffected.
 
+### Added — reject grants for non-agent principals (#2489)
+
+- `meho.agents.grant.create` / `.elevate` (and the REST + `/ui` grant
+  surfaces they share) now reject a `principal_sub` that names no
+  registered, non-revoked agent principal in the caller's tenant, with a
+  structured error (MCP `-32602` / REST 422) naming the enforcement
+  scope. Agent permission grants are only ever consulted for tokens
+  carrying the `principal_kind=agent` claim (the deliberate G11.2-T3
+  principal-kind carve-out — a grant on a human/service sub is never
+  evaluated), so a grant on a sub that can never be an agent was silently
+  unenforceable. The create surface now matches `principal_sub` against
+  the agent principal's `agent:<name>` handle (mirroring the
+  `identity_ref` write-boundary check) and refuses the inert grant up
+  front. The `grant.create` / `.elevate` tool descriptions and
+  `docs/codebase/agent-permission-model.md` now state the
+  `principal_kind=agent`-only enforcement scope explicitly. No change to
+  the enforcement model itself.
+
+### Fixed — canonical arg names in MCP error labels (#2480)
+
+- **`meho.broadcast.recent` and `meho.connector.ingest_status` `-32602`
+  validation messages now name the canonical inputSchema property the
+  caller passed** (#2480). A malformed cursor on `broadcast.recent`
+  labelled the field `since:` (the deprecated alias / internal arg
+  name) rather than the canonical `cursor:` (#1358); the message is now
+  `cursor:`-labelled whichever alias the caller sent. A malformed job id
+  on `connector.ingest_status` said `handle must be a valid job id`,
+  naming a "handle" concept absent from the tool's inputSchema; it now
+  says `job_id must be a valid UUID`. Wire-facing labels that point
+  callers (and LLM agents, for whom the error text is a corrective
+  signal) at a field they never wrote are fixed to name the property
+  they did write.
+
+### Added — agent_name/agent_definition_id on run projections (#2472)
+
+- The shared agent-run read projections (`AgentRunSummary` /
+  `AgentRunStatusView`) now carry `agent_definition_id` (the run row's
+  soft-FK) and `agent_name` (resolved read-time from that id,
+  tenant-scoped) — so every read face answers "which agent produced this
+  run". The fields surface on all four: the `meho.agents.list_runs` rows
+  and `meho.agents.run_status` body, the REST `AgentRunSummaryResponse` /
+  `AgentRunStatusResponse` (`GET /api/v1/agents/runs` and
+  `.../runs/{handle}`), the `/ui/agents/runs` list (new **Agent** column)
+  and run detail, and the CLI `meho agent run-list` (new **AGENT**
+  column, via the regenerated OpenAPI client). `agent_name` is `null` for
+  an ad-hoc run (no definition) and for a dangling soft-FK (the definition
+  was deleted after the run) — the projections never 500 on either.
+- The run-list surfaces accept an optional exact-match `agent_name`
+  filter — `meho.agents.list_runs(agent_name=…)`,
+  `GET /api/v1/agents/runs?agent_name=…`, and `meho agent run-list
+  --agent-name`. The name is resolved to a definition id tenant-scoped;
+  an unknown name returns an empty list rather than an error
+  (`-32602` / 4xx), so the filter cannot probe definition existence
+  beyond what the run list already reveals. No DB migration — the name is
+  a read-time lookup, not a denormalized column (#2472).
+### Fixed — connector_not_found -32602 across MCP handlers (#2481)
+
+- **All seven `meho.connector.*` tools that take a `connector_id` now
+  return `-32602 connector_not_found` for an unknown or cross-tenant
+  connector** (#2481) — `review` / `edit_group` / `edit_op` / `enable` /
+  `enable_reads` / `disable` / `delete`. Previously only the
+  ambiguous-scope case (#1910) had a handler `except` arm; a genuine
+  not-found fell through the dispatcher's generic catch to a bare
+  `-32603 "internal error: ConnectorNotFoundError"` — the wrong JSON-RPC
+  class (`-32603` signals a server-side bug, so callers retry or
+  escalate a request that is actually a well-formed call against a
+  nonexistent name) and a leak of the Python exception class name into
+  the stable wire contract. The mapping now matches the family-wide
+  `-32602 <thing>_not_found` convention (`agent_not_found`,
+  `approval_request_not_found`, `ingest_job_not_found`); existence is not
+  leaked, so an absent label and a cross-tenant label return the
+  identical bare code, mirroring the REST 404. Closes the last MCP↔REST
+  not-found asymmetry for the connector-admin surface.
 ### Documentation — kb tool description cross-refs (#2486)
 
 - The `search_knowledge` and `add_to_knowledge` MCP tool descriptions now

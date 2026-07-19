@@ -50,6 +50,7 @@ from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
     ConnectorListItem,
+    ConnectorNotFoundError,
     ConnectorReviewGroup,
     ConnectorReviewPayload,
     ConnectorScopeCandidate,
@@ -109,6 +110,14 @@ class _FakeReviewService:
     #: ``None`` keeps the clean path.
     raise_on_resolve: ClassVar[AmbiguousConnectorScopeError | None] = None
 
+    #: When set, every ``connector_id``-taking method raises this instead
+    #: of returning — class attribute for the same lazy-construction
+    #: reason as ``raise_on_resolve``, so the not-found mapping (#2481)
+    #: can be exercised through every real handler (all seven route the
+    #: label through the shared resolver, which raises this). Default
+    #: ``None`` keeps the clean path.
+    raise_not_found: ClassVar[ConnectorNotFoundError | None] = None
+
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
@@ -128,6 +137,8 @@ class _FakeReviewService:
     ) -> ConnectorReviewPayload:
         self.review_calls.append((connector_id, tenant_id))
         self.review_kwargs.append(kwargs)
+        if self.raise_not_found is not None:
+            raise self.raise_not_found
         if self.raise_on_resolve is not None:
             raise self.raise_on_resolve
         return ConnectorReviewPayload(
@@ -158,6 +169,8 @@ class _FakeReviewService:
         self.edit_group_calls.append(
             {"connector_id": connector_id, "group_key": group_key, **kwargs},
         )
+        if self.raise_not_found is not None:
+            raise self.raise_not_found
 
     async def edit_op(
         self,
@@ -168,19 +181,27 @@ class _FakeReviewService:
         self.edit_op_calls.append(
             {"connector_id": connector_id, "op_id": op_id, **kwargs},
         )
+        if self.raise_not_found is not None:
+            raise self.raise_not_found
         return list(self.edit_op_warnings)
 
     async def enable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.enable_calls.append(connector_id)
+        if self.raise_not_found is not None:
+            raise self.raise_not_found
 
     async def enable_reads(self, connector_id: str, **kwargs: Any) -> int:
         self.enable_reads_calls.append({"connector_id": connector_id, **kwargs})
+        if self.raise_not_found is not None:
+            raise self.raise_not_found
         if self.raise_on_resolve is not None:
             raise self.raise_on_resolve
         return self.enable_reads_count
 
     async def disable_connector(self, connector_id: str, **_kwargs: Any) -> None:
         self.disable_calls.append(connector_id)
+        if self.raise_not_found is not None:
+            raise self.raise_not_found
 
     async def delete_connector(
         self,
@@ -188,6 +209,8 @@ class _FakeReviewService:
         **kwargs: Any,
     ) -> DeleteConnectorResult:
         self.delete_calls.append({"connector_id": connector_id, **kwargs})
+        if self.raise_not_found is not None:
+            raise self.raise_not_found
         return self.delete_result
 
 
@@ -1332,3 +1355,183 @@ def test_call_enable_reads_ambiguous_scope_returns_invalid_params_over_the_wire(
     assert "error" in body, body
     assert body["error"]["code"] == -32602
     _assert_ambiguous_scope_envelope(body["error"].get("data"))
+
+
+# ---------------------------------------------------------------------------
+# ConnectorNotFoundError → structured -32602 connector_not_found (#2481)
+#
+# An unknown or cross-tenant connector_id resolves to no visible row, so
+# the shared ReviewService resolver raises ConnectorNotFoundError. Every
+# one of the seven meho.connector.* connector_id-taking tools (review /
+# edit_group / edit_op / enable / enable_reads / disable / delete) must
+# surface it as a JSON-RPC -32602 carrying the bare domain message
+# "connector_not_found" — NOT the dispatcher's generic
+# -32603 "internal error: ConnectorNotFoundError", which is both the
+# wrong class (a well-formed request against a nonexistent name is a
+# caller-input problem, not a server bug) and a leak of the Python
+# exception class name into the wire contract. Matches the family-wide
+# -32602 <thing>_not_found convention (agent_not_found /
+# approval_request_not_found / ingest_job_not_found). No data envelope:
+# existence is not leaked.
+# ---------------------------------------------------------------------------
+
+
+def _connector_not_found_error() -> ConnectorNotFoundError:
+    """Build the not-found error the shared resolver raises for a ghost label."""
+    return ConnectorNotFoundError(connector_id="ghost-rest-9.9", tenant_id=None)
+
+
+#: ``(handler-name, minimal-valid-arguments, required-role)`` for each of
+#: the seven ``connector_id``-taking handlers. The role matches the
+#: tool's ``required_role`` for realism, though calling the handler
+#: directly bypasses the registry gate (enforced at dispatch, not in the
+#: handler body).
+_NOT_FOUND_HANDLER_CASES: list[tuple[str, dict[str, Any], TenantRole]] = [
+    ("_review_handler", {"connector_id": "ghost-rest-9.9"}, TenantRole.OPERATOR),
+    (
+        "_edit_group_handler",
+        {"connector_id": "ghost-rest-9.9", "group_key": "g", "when_to_use": "x"},
+        TenantRole.TENANT_ADMIN,
+    ),
+    (
+        "_edit_op_handler",
+        {"connector_id": "ghost-rest-9.9", "op_id": "GET:/x", "is_enabled": True},
+        TenantRole.TENANT_ADMIN,
+    ),
+    ("_enable_handler", {"connector_id": "ghost-rest-9.9"}, TenantRole.TENANT_ADMIN),
+    (
+        "_enable_reads_handler",
+        {"connector_id": "ghost-rest-9.9"},
+        TenantRole.TENANT_ADMIN,
+    ),
+    ("_disable_handler", {"connector_id": "ghost-rest-9.9"}, TenantRole.TENANT_ADMIN),
+    ("_delete_handler", {"connector_id": "ghost-rest-9.9"}, TenantRole.TENANT_ADMIN),
+]
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "arguments", "role"),
+    _NOT_FOUND_HANDLER_CASES,
+    ids=[case[0] for case in _NOT_FOUND_HANDLER_CASES],
+)
+async def test_connector_handler_maps_not_found_to_invalid_params(
+    handler_name: str,
+    arguments: dict[str, Any],
+    role: TenantRole,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every connector_id-taking handler raises -32602 connector_not_found.
+
+    Proves the bare domain message (no Python class-name leak) and the
+    absence of a ``data`` envelope on all seven handlers — the shared
+    :func:`raise_invalid_params_for_connector_not_found` mapping.
+    """
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_not_found",
+        _connector_not_found_error(),
+    )
+    monkeypatch.setattr(ca_mod, "ReviewService", _FakeReviewService)
+    handler = getattr(ca_mod, handler_name)
+    op = build_operator(role)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await handler(op, arguments)
+
+    # Bare domain code, exactly — neither the "ConnectorNotFoundError"
+    # class name nor the rendered "connector 'x' not found (...)" prose
+    # leaks into the wire message.
+    assert str(caught.value) == "connector_not_found"
+    assert "ConnectorNotFoundError" not in str(caught.value)
+    # Existence is not leaked, so no structured envelope is attached.
+    assert caught.value.data is None
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_call_review_not_found_returns_invalid_params_over_the_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: ``tools/call meho.connector.review`` on a ghost label.
+
+    The wire response is a JSON-RPC ``-32602 connector_not_found`` (not
+    the bare ``-32603 "internal error: ConnectorNotFoundError"`` the
+    dispatcher catch-all would emit) — proving the #2481 gap is closed at
+    the MCP boundary, not just at the handler, with no class-name leak
+    anywhere in the envelope.
+    """
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_not_found",
+        _connector_not_found_error(),
+    )
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.review",
+                "arguments": {"connector_id": "ghost-rest-9.9"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == -32602
+    assert body["error"]["message"] == "connector_not_found"
+    assert body["error"].get("data") is None
+    # No Python class name leaks anywhere in the wire response.
+    assert "ConnectorNotFoundError" not in json.dumps(body)
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_delete_not_found_returns_invalid_params_over_the_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: ``tools/call meho.connector.delete`` on a ghost label.
+
+    Covers a write-class handler over the wire (the read path is proven
+    by the review case above), closing the mutator half of the #2481 gap.
+    """
+    monkeypatch.setattr(
+        _FakeReviewService,
+        "raise_not_found",
+        _connector_not_found_error(),
+    )
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.delete",
+                "arguments": {"connector_id": "ghost-rest-9.9"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == -32602
+    assert body["error"]["message"] == "connector_not_found"
+    assert body["error"].get("data") is None
+    assert "ConnectorNotFoundError" not in json.dumps(body)

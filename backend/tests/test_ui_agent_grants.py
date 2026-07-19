@@ -40,7 +40,7 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import AgentPermission, Tenant
+from meho_backplane.db.models import AgentPermission, AgentPrincipal, Tenant
 from meho_backplane.settings import get_settings
 from meho_backplane.ui.auth import SESSION_COOKIE_NAME, UISessionMiddleware
 from meho_backplane.ui.auth import build_router as build_ui_auth_router
@@ -131,6 +131,31 @@ def _seed_tenant(tenant_id: uuid.UUID, slug: str) -> None:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session, session.begin():
             session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
+
+    asyncio.run(_do())
+
+
+def _register_principal(tenant_id: uuid.UUID, client_id: str) -> None:
+    """Register an agent principal so a create/elevate for it is enforceable.
+
+    The BFF create/elevate routes go through ``AgentGrantService.grant``,
+    which rejects a ``principal_sub`` naming no non-revoked agent principal
+    in the tenant (#2489); a clean-create test must register it first.
+    """
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                AgentPrincipal(
+                    tenant_id=tenant_id,
+                    name=f"seed-{uuid.uuid4().hex[:12]}",
+                    keycloak_client_id=client_id,
+                    keycloak_internal_id=str(uuid.uuid4()),
+                    owner_sub=_OP_A,
+                    created_by_sub=_OP_A,
+                )
+            )
 
     asyncio.run(_do())
 
@@ -491,6 +516,7 @@ def test_detail_cross_tenant_is_404() -> None:
 def test_create_success_redirects() -> None:
     """A clean create persists the grant and HX-Redirects to the table."""
     _seed_tenant(_TENANT_A, "tenant-a")
+    _register_principal(_TENANT_A, "agent-new")
     keypair, jwks = _make_keypair_and_jwks()
     token = _admin_token(keypair)
     session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
@@ -647,6 +673,7 @@ def test_elevate_past_expiry_renders_inline_422() -> None:
 def test_elevate_success_redirects() -> None:
     """A clean elevation with a future expiry persists + HX-Redirects."""
     _seed_tenant(_TENANT_A, "tenant-a")
+    _register_principal(_TENANT_A, "agent-new")
     keypair, jwks = _make_keypair_and_jwks()
     token = _admin_token(keypair)
     session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)

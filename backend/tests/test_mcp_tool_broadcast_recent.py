@@ -305,7 +305,8 @@ def test_since_invalid_iso_rejects_with_domain_error() -> None:
     :class:`McpInvalidParamsError` (the MCP handler maps the domain
     error to ``-32602`` upstream). The end-to-end MCP wire test for the
     same condition lives at
-    :func:`test_invalid_since_iso_returns_invalid_params_at_wire` below.
+    :func:`test_invalid_cursor_returns_invalid_params_labelled_cursor`
+    below.
     """
     with pytest.raises(InvalidSinceError, match="not a valid ISO-8601"):
         parse_since("not-a-real-timestamp")
@@ -316,26 +317,40 @@ def test_since_invalid_iso_rejects_with_domain_error() -> None:
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_invalid_since_iso_returns_invalid_params_at_wire(
+def test_invalid_cursor_returns_invalid_params_labelled_cursor(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A garbled ``since`` from a wire client surfaces as JSON-RPC -32602.
+    """A garbled cursor surfaces as -32602 labelled with the canonical arg.
 
     The shared helper raises :class:`InvalidSinceError`; the MCP handler
     catches that domain error and re-raises it as
     :class:`McpInvalidParamsError`, which the dispatcher renders as
-    ``-32602``. Locks the contract: the helper's split from MCP error
-    vocabulary doesn't leak Pyhton exception names to wire clients.
+    ``-32602``. Locks two contracts: the helper's split from MCP error
+    vocabulary doesn't leak Python exception names to wire clients, and
+    the wire label names the canonical ``cursor`` inputSchema property
+    (#1358, #2480) -- not the internal ``since`` arg -- whichever alias
+    the caller passed. A bare UUID is neither a Valkey stream id nor an
+    ISO-8601 timestamp, so it exercises the parse-failure branch.
     """
     client, _op = client_with_operator
-    resp = post_mcp(
-        client,
-        _tools_call("meho.broadcast.recent", {"since": "garbled"}),
-    )
-    body = resp.json()
-    assert "error" in body
-    assert body["error"]["code"] == INVALID_PARAMS
-    assert "since" in body["error"]["message"].lower()
+    bad = "550e8400-e29b-41d4-a716-446655440000"
+
+    def message_for(arg: str) -> str:
+        resp = post_mcp(
+            client,
+            _tools_call("meho.broadcast.recent", {arg: bad}),
+        )
+        body = resp.json()
+        assert "error" in body
+        assert body["error"]["code"] == INVALID_PARAMS
+        return str(body["error"]["message"])
+
+    canonical = message_for("cursor")
+    assert canonical.lower().startswith("cursor:")
+
+    # The deprecated ``since`` alias normalises to the same value and so
+    # yields the identical ``cursor:``-labelled message.
+    assert message_for("since") == canonical
 
 
 def test_parse_since_default_is_now_minus_30m() -> None:

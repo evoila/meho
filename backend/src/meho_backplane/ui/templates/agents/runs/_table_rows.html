@@ -53,6 +53,15 @@
             <a href="/ui/approvals" class="link link-primary text-xs ml-1" aria-label="Review pending approval">review &rarr;</a>
           {% endif %}
         </td>
+        <td class="text-xs">
+          {% if row.agent_name %}
+            <span class="font-medium">{{ row.agent_name }}</span>
+          {% else %}
+            {# Ad-hoc run, or the producing definition was deleted after the
+               run: no agent back-link to render (#2472). #}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
         <td><span class="badge badge-ghost badge-sm">{{ row.trigger }}</span></td>
         <td class="text-xs">
           {% if row.model %}
@@ -97,7 +106,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="9" class="text-center text-sm opacity-60 py-6">
+      <td colspan="10" class="text-center text-sm opacity-60 py-6">
         No agent runs match the current filter.
       </td>
     </tr>

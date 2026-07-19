@@ -348,6 +348,7 @@ func TestRunEvents403SingleErrorLine(t *testing.T) {
 
 func TestRunListHappyPathRendersTable(t *testing.T) {
 	workRef := "gh:evoila/meho#11"
+	agentName := "triage-bot"
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -359,6 +360,7 @@ func TestRunListHappyPathRendersTable(t *testing.T) {
 				ModelTier: "standard",
 				Turns:     2,
 				WorkRef:   &workRef,
+				AgentName: &agentName,
 			},
 		})
 	})
@@ -370,10 +372,38 @@ func TestRunListHappyPathRendersTable(t *testing.T) {
 	if err := runRunList(cmd, runListOptions{BackplaneOverride: srv.URL}); err != nil {
 		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
 	}
-	for _, want := range []string{"succeeded", "direct", workRef} {
+	for _, want := range []string{"succeeded", "direct", workRef, agentName, "AGENT"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Errorf("stdout missing %q in %q", want, stdout.String())
 		}
+	}
+}
+
+func TestRunListRendersDashForAdHocRun(t *testing.T) {
+	// A run with no agent_definition_id (ad-hoc) or a dangling soft-FK
+	// leaves AgentName nil; the table renders "-" rather than crashing.
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/agents/runs", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode([]api.AgentRunSummaryResponse{
+			{
+				RunId:     uuid.MustParse("22222222-2222-2222-2222-222222222222"),
+				Status:    api.AgentRunStatusRunning,
+				Trigger:   "direct",
+				ModelTier: "standard",
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	seedXDGAndToken(t, srv.URL)
+
+	cmd, stdout, stderr := newTestCmd(t)
+	if err := runRunList(cmd, runListOptions{BackplaneOverride: srv.URL}); err != nil {
+		t.Fatalf("runRunList: %v; stderr=%s", err, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "running") {
+		t.Errorf("stdout missing run row in %q", stdout.String())
 	}
 }
 
@@ -393,6 +423,7 @@ func TestRunListPassesWorkRefFilter(t *testing.T) {
 	err := runRunList(cmd, runListOptions{
 		WorkRef:           "gh:evoila/meho#11",
 		Status:            "succeeded",
+		AgentName:         "triage-bot",
 		Limit:             25,
 		Offset:            50,
 		BackplaneOverride: srv.URL,
@@ -410,6 +441,9 @@ func TestRunListPassesWorkRefFilter(t *testing.T) {
 	if got := q.Get("status"); got != "succeeded" {
 		t.Errorf("status filter: got %q, want %q", got, "succeeded")
 	}
+	if got := q.Get("agent_name"); got != "triage-bot" {
+		t.Errorf("agent_name filter: got %q, want %q", got, "triage-bot")
+	}
 	if got := q.Get("limit"); got != "25" {
 		t.Errorf("limit filter: got %q, want %q", got, "25")
 	}
@@ -423,7 +457,8 @@ func TestRunListPassesWorkRefFilter(t *testing.T) {
 
 func TestListRunsParamsOmitsEmptyFilters(t *testing.T) {
 	params := listRunsParams(runListOptions{})
-	if params.WorkRef != nil || params.Status != nil || params.Limit != nil || params.Offset != nil {
+	if params.WorkRef != nil || params.Status != nil || params.AgentName != nil ||
+		params.Limit != nil || params.Offset != nil {
 		t.Errorf("empty options must leave filters nil; got %+v", params)
 	}
 }

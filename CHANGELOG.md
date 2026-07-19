@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — reject grants for non-agent principals (#2489)
+
+- `meho.agents.grant.create` / `.elevate` (and the REST + `/ui` grant
+  surfaces they share) now reject a `principal_sub` that names no
+  registered, non-revoked agent principal in the caller's tenant, with a
+  structured error (MCP `-32602` / REST 422) naming the enforcement
+  scope. Agent permission grants are only ever consulted for tokens
+  carrying the `principal_kind=agent` claim (the deliberate G11.2-T3
+  principal-kind carve-out — a grant on a human/service sub is never
+  evaluated), so a grant on a sub that can never be an agent was silently
+  unenforceable. The create surface now matches `principal_sub` against
+  the agent principal's `agent:<name>` handle (mirroring the
+  `identity_ref` write-boundary check) and refuses the inert grant up
+  front. The `grant.create` / `.elevate` tool descriptions and
+  `docs/codebase/agent-permission-model.md` now state the
+  `principal_kind=agent`-only enforcement scope explicitly. No change to
+  the enforcement model itself.
+
 ### Added — credential_read response scrub + reveal_secret opt-in (#2467)
 
 - `credential_read`-classified dispatch responses (`vault.kv.read` and

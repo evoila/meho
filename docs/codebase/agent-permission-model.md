@@ -64,15 +64,28 @@ One row = one permission grant for a principal.
 `policy_gate` (`_validate.py`) branches on `operator.principal_kind` (from
 G11.2-T1):
 
-- **`user` / `service`** — the v0.2 contract: `requires_approval=True` →
-  `deny`; otherwise `auto-execute`. The per-agent resolver is **not** consulted,
-  so an op a human operator has always been able to run does not silently start
-  pending/denying. (G11.2-T4 routes only agent runs to the pending path; humans
-  keep the hard-deny.)
+- **`user` / `service`** — `requires_approval=True` → `needs-approval` (routed
+  to the approval queue, **not** hard-denied, since G11.7-T1 #1401 — ops-team
+  operators authenticate as `user` principals, so the old hard-deny returned
+  `denied` to the very people meant to run the op); otherwise `auto-execute`.
+  **The per-agent resolver is never consulted for a non-agent token: no
+  `agent_permission` row is loaded on this branch, so a grant has zero effect
+  on a `user`/`service`-kind dispatch.** This is deliberate (G11.2-T3) — an op a
+  human operator has always been able to run must not silently start
+  pending/denying because someone wrote a grant.
 - **`agent`** — the full per-(principal, op, target) resolver below. After
   resolution, `requires_approval=True` folds the verdict up to at least
   `needs-approval`, so a connector-flagged op is never auto-executed by an agent
   regardless of its `safety_level`.
+
+Because a grant is consulted **only** on the `agent` branch, a grant whose
+`principal_sub` names no registered, non-revoked agent principal can never be
+evaluated — no token will authenticate under that sub with
+`principal_kind=agent`. `AgentGrantService.grant` rejects such a grant at
+create/elevate time (matching `principal_sub` against
+`AgentPrincipal.keycloak_client_id`, tenant-scoped) so an unenforceable row is
+never written; the grant tool/REST/UI surfaces surface this as a validation
+error naming the `principal_kind=agent` enforcement scope.
 
 ### Resolution algorithm (`auth/permissions.py::resolve_verdict`)
 
@@ -161,14 +174,24 @@ agree on the same `audit_id` rather than collapsing the 202 (a 2xx) to `ok`.
 - **Approval queue stub.** `needs-approval` writes an audit row and returns HTTP
   202 today; the durable approval-queue mechanics (G11.2-T4, #817) add the real
   pending row + resume path.
-- **Soft FK to principal.** `principal_sub` has no FK to the agent-principal
-  table (`agent_principal`, G11.2-T1); a tightening migration can add it later.
+- **Soft FK to principal.** `principal_sub` has no database FK to the
+  agent-principal table (`agent_principal`, G11.2-T1); a tightening migration
+  can add it later. `AgentGrantService.grant` now enforces the reference at the
+  write boundary (rejecting a `principal_sub` that matches no non-revoked
+  `AgentPrincipal.keycloak_client_id` in the tenant), so a typo'd or
+  never-registered sub cannot land — but a `revoke` of the principal *after*
+  the grant lands leaves the (now inert) row in place until the grant is
+  revoked, the same TOCTOU posture as `validate_identity_ref`.
 
 ## References
 
-- Task #820 (G11.2-T3), Initiative #803
+- Task #820 (G11.2-T3), Initiative #803; Task #2489 (create-time principal check)
 - `backend/src/meho_backplane/auth/permissions.py`
 - `backend/src/meho_backplane/operations/_validate.py`
+- `backend/src/meho_backplane/agents/grants.py` — `AgentGrantService.grant`
+  create-time principal check (#2489)
+- `backend/src/meho_backplane/agents/identity_ref.py` — the sibling
+  write-boundary validator this check mirrors
 - `backend/src/meho_backplane/db/models.py` — `AgentPermission`, `PermissionVerdict`
 - `backend/alembic/versions/0022_create_agent_permission.py`
 - `backend/tests/test_permission_resolver.py`,

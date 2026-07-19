@@ -227,7 +227,12 @@ register_mcp_tool(
             "Grant a permission to an agent principal (G11.2-T6). "
             "verdict: auto-execute | needs-approval | deny. "
             "expires_at (ISO-8601 UTC) makes the grant time-bounded. "
-            "Omit expires_at for a permanent grant."
+            "Omit expires_at for a permanent grant. "
+            "Enforcement scope: grants gate ONLY tokens carrying the "
+            "principal_kind=agent claim (registered agent principals); "
+            "human/service tokens are never gated by grants. principal_sub "
+            "must name a registered, non-revoked agent principal "
+            "(its agent:<name> handle) or creation is rejected."
         ),
         inputSchema={
             "type": "object",
@@ -297,7 +302,12 @@ register_mcp_tool(
         description=(
             "Grant a time-bounded elevation to an agent principal (G11.2-T6). "
             "expires_at is required. The grant-expiry sweeper reverts the "
-            "agent to baseline automatically after the window ends."
+            "agent to baseline automatically after the window ends. "
+            "Enforcement scope: elevations gate ONLY tokens carrying the "
+            "principal_kind=agent claim (registered agent principals); "
+            "human/service tokens are never gated. principal_sub must name a "
+            "registered, non-revoked agent principal (its agent:<name> "
+            "handle) or creation is rejected."
         ),
         inputSchema={
             "type": "object",

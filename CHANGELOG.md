@@ -90,6 +90,15 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — clamp result-card bodies with expand-on-click (#2456)
+
+- `/ui/retrieval` diagnostics hit cards and `/ui/corpus` cited-chunk cards now
+  clamp each body to a short snippet (`line-clamp-3`) with a per-card
+  expand-on-click toggle, so ten ranked hits fit one screen and can be compared
+  at a glance instead of stacking full documents. The clamp is a static class
+  (it holds with JavaScript disabled, no layout shift); an Alpine toggle removes
+  it on click and hides itself when the body does not overflow the snippet.
+
 ### Added — Source/Kind datalists on /ui/retrieval (#2458)
 
 - The `/ui/retrieval` diagnostics Source and Kind filter inputs are now backed

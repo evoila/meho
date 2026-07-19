@@ -660,6 +660,51 @@ def test_card_title_absent_falls_back_to_document_id_heading(
     assert 'title="Document id"' not in html
 
 
+def test_corpus_search_clamps_chunk_content_with_expand_toggle() -> None:
+    """Each cited chunk's content is clamped to a snippet with an expand toggle (#2456).
+
+    Acceptance criterion: cited chunks render as comparable snippet cards so ten
+    hits fit one screen; each card exposes an expand-on-click affordance
+    revealing the full content. The clamp is a static ``line-clamp-3`` that the
+    ``expanded`` binding removes on click.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
+    )
+    result = DocsSearchResult(
+        chunks=[_chunk(chunk_id=f"c-{i}", content=f"Chunk body {i}.") for i in range(10)]
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_SEARCH_DOCS, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "snapshot quiesce"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # One clamped snippet + one expand toggle per cited chunk (all ten).
+    assert body.count("whitespace-pre-wrap line-clamp-3") == 10
+    assert body.count('x-data="{ expanded: false, clamped: false }"') == 10
+    assert body.count("expanded = !expanded") == 10
+    # The clamp is removed on expand, and the toggle labels both directions.
+    assert "{ 'line-clamp-3': !expanded }" in body
+    assert "Show more" in body
+    assert "Show less" in body
+
+
 def test_corpus_search_resolves_gs_kb_source_to_canonical_link() -> None:
     """A KB ``gs://`` chunk renders a clickable Broadcom KB link (#1919).
 

@@ -562,6 +562,45 @@ def test_diagnostics_renders_fused_score_and_per_signal_breakdown() -> None:
     assert "1 hit" in body
 
 
+def test_diagnostics_clamps_hit_body_with_expand_toggle() -> None:
+    """Each hit body is clamped to a snippet with an Alpine expand-on-click toggle (#2456).
+
+    Acceptance criterion: ranked hits render as comparable snippet cards so ten
+    hits fit one screen; each card exposes an expand affordance revealing the
+    full body. The clamp is a static ``line-clamp-3`` (so it holds with JS
+    disabled) that the ``expanded`` binding removes on click.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    hits = [_hit(source_id=f"kb-entry-{i}") for i in range(10)]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RETRIEVE, new_callable=AsyncMock, return_value=hits),
+        ):
+            response = client.post(
+                "/ui/retrieval/diagnostics",
+                data={"query": "snapshot quiesce", "limit": 10},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # One clamped snippet + one expand toggle per hit (all ten).
+    assert body.count("whitespace-pre-wrap line-clamp-3") == 10
+    assert body.count('x-data="{ expanded: false, clamped: false }"') == 10
+    assert body.count("expanded = !expanded") == 10
+    # The clamp is removed on expand, and the toggle labels both directions.
+    assert "{ 'line-clamp-3': !expanded }" in body
+    assert "Show more" in body
+    assert "Show less" in body
+
+
 def test_diagnostics_renders_absent_marker_for_none_rank() -> None:
     """A hit absent from a signal's top-N renders an explicit 'absent' marker, not a blank.
 

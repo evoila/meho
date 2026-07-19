@@ -532,7 +532,8 @@ async def _render_diagnostics(
 
     Swaps ``retrieval/_diagnostics_results.html`` into
     ``#retrieval-diagnostics-results``. A successful run renders one card per
-    hit (body excerpt + ``source`` / ``source_id`` / ``kind``, the
+    hit (body clamped to a snippet with expand-on-click so ranked hits stay
+    comparable at a glance, plus ``source`` / ``source_id`` / ``kind``, the
     ``fused_score``, and a per-signal breakdown where a ``None`` rank renders
     an explicit "absent from this signal's top-N" marker); an empty hit list
     renders a "no matches" state.

@@ -330,6 +330,13 @@ def test_corpus_index_renders_page_and_collections() -> None:
     assert CSRF_COOKIE_NAME in response.cookies
     assert "X-CSRF-Token" in body
     assert 'hx-post="/ui/corpus/search"' in body
+    # In-flight feedback on the Go button (#2459): spinner indicator + submit
+    # disable, with the disinherit guard so neither leaks to a child request.
+    assert 'hx-indicator="#corpus-search-spinner"' in body
+    assert 'hx-disabled-elt="find button[type=submit]"' in body
+    assert 'hx-disinherit="hx-disabled-elt hx-indicator"' in body
+    assert 'id="corpus-search-spinner"' in body
+    assert "htmx-indicator loading loading-spinner" in body
 
 
 def test_corpus_index_default_selects_sole_collection() -> None:

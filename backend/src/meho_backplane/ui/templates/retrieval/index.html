@@ -116,6 +116,9 @@
           hx-target="#retrieval-diagnostics-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-diagnostics-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="space-y-3"
           role="search"
           aria-label="Run a retrieval diagnostics query"
@@ -184,6 +187,15 @@
               {{ icon("search") }}
               Run
             </button>
+            {#- In-flight feedback (#2459): the form's hx-indicator toggles this
+                spinner's visibility while the request is in flight and
+                hx-disabled-elt disables the submit button; hx-disinherit keeps
+                both off any descendant htmx request in the results region. -#}
+            <span
+              id="retrieval-diagnostics-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+              aria-label="Running the diagnostics query"
+            ></span>
           </div>
         </form>
       </div>
@@ -255,6 +267,9 @@
           hx-target="#retrieval-eval-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-eval-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="flex flex-wrap items-center justify-between gap-3"
           aria-label="Run the retrieval eval corpus"
         >
@@ -267,6 +282,13 @@
             {{ icon("gauge") }}
             Run eval
           </button>
+          {#- In-flight feedback (#2459): eval runs are multi-second; the spinner
+              shows progress and the submit button disables while in flight. -#}
+          <span
+            id="retrieval-eval-spinner"
+            class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+            aria-label="Running the eval corpus"
+          ></span>
         </form>
       </div>
     </div>
@@ -294,6 +316,9 @@
           hx-target="#retrieval-retire-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-retire-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"
           aria-label="Run the retire-decision checklist"
         >
@@ -328,6 +353,13 @@
               {{ icon("shield-check") }}
               Run checklist
             </button>
+            {#- In-flight feedback (#2459): checklist runs scan every surface; the
+                spinner shows progress and the submit button disables in flight. -#}
+            <span
+              id="retrieval-retire-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+              aria-label="Running the retire checklist"
+            ></span>
           </div>
         </form>
       </div>

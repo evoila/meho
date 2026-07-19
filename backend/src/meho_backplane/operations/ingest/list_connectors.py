@@ -347,12 +347,18 @@ async def _operation_count_by_connector(
     """Aggregate :class:`EndpointDescriptor` rows by connector triple.
 
     Returns a dict keyed on ``(tenant_id, product, version,
-    impl_id)`` whose values are ``{total, enabled}`` op counts.
-    ``enabled`` counts the rows whose per-op ``is_enabled`` flag is
-    set -- the dispatchable subset -- via the same portable ``CASE
+    impl_id)`` whose values are ``{total, enabled, code_shipped}`` op
+    counts. ``enabled`` counts the rows whose per-op ``is_enabled`` flag
+    is set -- the dispatchable subset -- via the same portable ``CASE
     WHEN`` SUM technique as :func:`_aggregate_groups_by_connector`,
     so an operator can tell how many of a connector's ops are
     actually callable vs ingested-but-disabled (G0.23-T5 / #1636).
+    ``code_shipped`` counts the rows whose ``source_kind`` is
+    ``"typed"`` / ``"composite"`` -- image-shipped ops with a real
+    dispatch path. It feeds :func:`resolve_authoring_kind`'s
+    class-less-typed reading (#2496): a ``net.*`` / ``secret.*`` row
+    has code-shipped ops but no backing connector class, so the resolver
+    misses even though the op dispatches fine.
 
     Counts every ``source_kind`` -- ``"ingested"`` (G0.7 spec-driven),
     ``"typed"`` (G3.x hand-coded via :func:`register_typed_operation`),
@@ -375,6 +381,12 @@ async def _operation_count_by_connector(
     enabled_case = func.sum(
         case((EndpointDescriptor.is_enabled.is_(True), 1), else_=0),
     ).label("enabled")
+    code_shipped_case = func.sum(
+        case(
+            (EndpointDescriptor.source_kind.in_(("typed", "composite")), 1),
+            else_=0,
+        ),
+    ).label("code_shipped")
     total = func.count(EndpointDescriptor.id).label("total")
 
     stmt = (
@@ -385,6 +397,7 @@ async def _operation_count_by_connector(
             EndpointDescriptor.impl_id,
             total,
             enabled_case,
+            code_shipped_case,
         )
         .where(
             (EndpointDescriptor.tenant_id.is_(None))
@@ -400,10 +413,11 @@ async def _operation_count_by_connector(
     result = await session.execute(stmt)
     counts: dict[tuple[UUID | None, str, str, str], dict[str, int]] = {}
     for row in result.all():
-        tenant_uuid, product, version, impl_id, total_v, enabled_v = row
+        tenant_uuid, product, version, impl_id, total_v, enabled_v, code_shipped_v = row
         counts[(tenant_uuid, product, version, impl_id)] = {
             "total": int(total_v or 0),
             "enabled": int(enabled_v or 0),
+            "code_shipped": int(code_shipped_v or 0),
         }
     return counts
 
@@ -572,6 +586,7 @@ async def _emit_db_backed_rows(
             product=product,
             version=version,
             enabled_operation_count=enabled_op_count,
+            has_code_shipped_op=op_counts.get("code_shipped", 0) > 0,
         )
         items.append(
             ConnectorListItem(

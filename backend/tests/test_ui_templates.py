@@ -775,6 +775,8 @@ def test_account_row_renders_both_bell_badge_targets(ui_env: Environment) -> Non
     html = ui_env.get_template("base.html").render(ready=True)
     assert 'id="mobile-approvals-badge"' in html
     assert 'id="sidebar-approvals-badge"' in html
+
+
 def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:
     """The ``/ui/kb/<slug>`` detail page themes code blocks for DaisyUI 5 (#2452).
 

@@ -70,7 +70,7 @@ class _FakeConnector:
         self.mount_calls.append(path)
         return f"{self._mount_prefix}{path}"
 
-    async def _post_json(
+    async def _post_vmomi_json(
         self,
         target: Any,
         path: str,
@@ -78,6 +78,9 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> Any:
+        # vmomi RetrievePropertiesEx read via the vmomi seam; the handler
+        # passes the spec-relative path (the /sdk/vim25 mount is the
+        # connector's job, #2466).
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
@@ -137,7 +140,10 @@ async def test_object_collect_reads_datastore_properties() -> None:
         {"type": "Datastore", "moid": "datastore-5", "properties": ["summary.freeSpace"]},
     )
 
-    assert conn.mount_calls == ["/PropertyCollector/propertyCollector/RetrievePropertiesEx"]
+    # The vmomi read routes through _post_vmomi_json (not mount_op_path);
+    # the handler addresses it by the spec-relative path (#2466).
+    assert conn.mount_calls == []
+    assert conn.post_calls[0][0] == "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
     assert out["type"] == "Datastore"
     assert out["moid"] == "datastore-5"
     assert out["properties"]["summary.freeSpace"] == 1073741824

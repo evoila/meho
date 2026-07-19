@@ -140,9 +140,12 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   (CPU/memory load, MHz/MB), `summary.hardware` (capacity totals:
   `cpu_mhz` per core, core/package/thread counts, `memory_size_bytes`),
   and `runtime.inMaintenanceMode` through a direct PropertyCollector
-  `RetrievePropertiesEx` on the connector session. Both calls are routed
-  through `mount_op_path` so they land on `/api` (modern) or `/rest`
-  (legacy/vcsim). The per-host property read is best-effort (a failed
+  `RetrievePropertiesEx` on the connector session. The host listing is
+  routed through `mount_op_path` (`/api` modern / `/rest` legacy); the
+  vmomi `RetrievePropertiesEx` read is routed through `_post_vmomi_json`,
+  which mounts it on the documented VI-JSON base `/sdk/vim25/{release}`
+  (see the VI-JSON mount section below) so it resolves on vCenter 8.0.x
+  instead of 404ing (`#2466`). The per-host property read is best-effort (a failed
   read nulls the detail with a `read_note`, mirroring
   `host_network_uplinks_composite`); the host listing is load-bearing.
   This op is why the plain REST host summary (liveness only) is not
@@ -605,6 +608,29 @@ they never park.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
+- **VI-JSON mount for vmomi reads — `/sdk/vim25/{release}` (#2466)** —
+  vmomi (VI-JSON) methods (`RetrievePropertiesEx`,
+  `VsanQueryVcClusterHealthSummary`, `QueryEvents`,
+  `QueryAvailablePerfMetric`, `QueryPerf`) are served under the
+  documented release-versioned base
+  `/sdk/vim25/{release}/{MoType}/{moId}/{method}` (Broadcom Web Services
+  SDK guide, "Building JSON Request URLs"; available since vCenter 8.0U1,
+  same scheme on 9.x) — **not** the vSphere Automation `/api` mount that
+  `mount_op_path` resolves for `/vcenter/*` paths. Mounting a vmomi
+  method on `/api` 404s on vCenter 8.0.x (observed on a live 8.0.3 host).
+  `VmwareRestConnector._post_vmomi_json` owns this seam: for a
+  modern-session target it derives `{release}` from `GET /api/about`'s
+  `version` (`8.0.3` → `8.0.3.0`, resolved once and cached in
+  `_about_versions`), POSTs `/sdk/vim25/{release}{path}`, and on a 404
+  falls back **once** to the `/api`-mounted form (the undocumented
+  accommodation the 9.0.2 fleet serves); when both 404 the raised
+  `RuntimeError` names both attempted URLs + the vCenter version so a
+  best-effort caller's `read_note` is self-explanatory. Legacy/vcsim
+  targets (session on `/rest`) skip VI-JSON entirely and mount the vmomi
+  method on `/rest` (the pre-#2466 behaviour, so the vcsim integration
+  lane is unchanged). Every typed vmomi read and the composite vmomi
+  POST sub-ops route through `_post_vmomi_json`; only the vSphere
+  Automation `GET /vcenter/*` legs still use `mount_op_path`.
 - **All hand-authored composites shipped** — T5 (#508) ships 5 read;
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6

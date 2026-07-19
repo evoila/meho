@@ -266,7 +266,6 @@ async def _read_host_usage_row(
     connector: VmwareRestConnector,
     operator: Operator,
     target: VsphereTargetLike,
-    props_path: str,
     host_moid: str,
     host_name: Any,
 ) -> dict[str, Any]:
@@ -282,9 +281,9 @@ async def _read_host_usage_row(
     """
     row: dict[str, Any] = {"id": host_moid, "name": host_name}
     try:
-        props_result = await connector._post_json(
+        props_result = await connector._post_vmomi_json(
             target,
-            props_path,
+            _RETRIEVE_PROPERTIES_PATH,
             operator=operator,
             json=build_host_usage_retrieve_params(host_moid),
         )
@@ -320,14 +319,16 @@ async def host_usage_impl(
        failure here raises and the dispatcher records it as a
        ``connector_error`` for the whole op.
     2. Per host: ``POST .../PropertyCollector/propertyCollector/RetrievePropertiesEx``
-       (mounted) reading ``summary.quickStats`` (CPU+memory load),
+       reading ``summary.quickStats`` (CPU+memory load),
        ``summary.hardware`` (capacity totals), and
        ``runtime.inMaintenanceMode``. Best-effort per host.
 
-    Both calls route through :meth:`VmwareRestConnector.mount_op_path`, so
-    the op lands on the ``/api`` (modern) or ``/rest`` (legacy / vcsim)
-    mount the target's session selected -- the same modern->legacy 404
-    fallback the session establish discovered.
+    The listing GET routes through
+    :meth:`VmwareRestConnector.mount_op_path` (``/api`` modern / ``/rest``
+    legacy). The vmomi ``RetrievePropertiesEx`` read routes through
+    :meth:`VmwareRestConnector._post_vmomi_json`, which mounts it on the
+    documented VI-JSON base ``/sdk/vim25/{release}`` (with a single ``/api``
+    fallback) so it resolves on vCenter 8.0.x instead of 404ing (#2466).
 
     Returns ``{"hosts": [{"id", "name", "quick_stats", "hardware",
     "in_maintenance_mode"}, ...]}``.
@@ -346,10 +347,6 @@ async def host_usage_impl(
             f"{_LIST_HOSTS_PATH!r}, got {type(entries).__name__}"
         )
 
-    # Resolve the mounted RetrievePropertiesEx path once -- host-independent
-    # and idempotent (the session establish it triggers is cached).
-    props_path = await connector.mount_op_path(target, _RETRIEVE_PROPERTIES_PATH, operator)
-
     hosts: list[dict[str, Any]] = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -360,9 +357,7 @@ async def host_usage_impl(
             # upstream malformation -- skip rather than abort.
             continue
         hosts.append(
-            await _read_host_usage_row(
-                connector, operator, target, props_path, host_moid, entry.get("name")
-            )
+            await _read_host_usage_row(connector, operator, target, host_moid, entry.get("name"))
         )
     _log.info("vmware_host_usage_read", target=target.name, host_count=len(hosts))
     return {"hosts": hosts}

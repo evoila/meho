@@ -112,6 +112,48 @@ connector-related release-notes line.
   `secret.move` stays the recommended no-transit path. The reserved
   `reveal_secret` flag is stripped before op-schema validation and
   `params_hash`, so a scrubbed read and its reveal share one hash.
+### Fixed — SNI on session-establish (#2398)
+
+- Every connector session-establish request now threads the target's
+  `tls_server_name` TLS SNI / certificate-verify name, matching the
+  dispatch path. Previously only the shared dispatch seams
+  (`_request_json` / `_post_json`) carried the SNI override from #2002,
+  so the hand-rolled login/token requests bypassed it: httpcore fell
+  back to `server_hostname = origin.host` and verified an appliance's
+  FQDN-SAN certificate against the registered IP, failing
+  `CERTIFICATE_VERIFY_FAILED` *before* auth. This blocked secure
+  (`verify_tls=true` + `tls_ca_pin`) registration of any by-IP endpoint
+  whose certificate pins an FQDN. The fix covers all six hand-rolled
+  session families — vmware `/api/session` (modern + legacy fallback +
+  shutdown revoke), `vcf_session_login` (vROps token/acquire, vRLI
+  sessions, SDDC `/v1/tokens`), NSX `/api/session/create`, VCFA
+  provider + tenant logins, proxmox ticket mint, keycloak admin token
+  grant — plus the profiled-connector logins (basic / form / json) and
+  the unauthenticated fingerprint probe. Behaviour is byte-identical
+  when `tls_server_name` is unset (empty extensions dict). (#2398)
+### Added — docs/deploying.md consolidated deploy guide (#2468)
+
+- **A single operator-facing deployment & upgrade guide** now lives at
+  `docs/deploying.md`, consolidating knowledge previously scattered
+  across the chart values, the acceptance contracts, and several
+  deep-dive docs (or missing entirely). It covers: a cold-install
+  prerequisites checklist (pgvector superuser `CREATE EXTENSION`, the
+  asyncpg `DATABASE_URL` Secret shape, Keycloak realm + MCP-audience
+  resolvability, internal-CA trust bundle, pinned `image.tag`,
+  first-boot `startupProbe` budget); the two credential-backend install
+  paths side by side (Vault vs GSM/Vault-free, `config.credentialBackend`);
+  the Helm-4 server-side-apply field-conflict upgrade caveat (the
+  v0.22.0 `startupProbe` example, pre-flight `--show-managed-fields`,
+  remedy `helm upgrade --force-conflicts`); a version-specific
+  upgrade-notes table (v0.15.0 Vault tenant-scope guard, v0.22.0 SSA
+  conflict); and operational chart knobs. The guide **links into** the
+  existing deep-dives rather than restating them. Cross-linked from
+  `README.md`, `docs/codebase/devops.md`, and
+  `deploy/values-examples/README.md`; `docs/RELEASING.md` now carries a
+  checklist line obliging the release-cutting PR to append a
+  version-specific upgrade-notes row when a release carries an
+  upgrade-relevant change. Docs-only; resurrects #559 with post-v0.21.0
+  motivation (#2468).
 
 ### Added — operator-console OAuth chart values (#2594)
 

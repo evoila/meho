@@ -120,6 +120,7 @@ class _StubTarget:
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     auth_source: str | None = None
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642). Distinct ``id`` per
     # instance so two stub targets never collapse onto one cache entry.
     id: UUID = field(default_factory=uuid4)
@@ -744,3 +745,33 @@ def test_stub_target_satisfies_protocol_at_runtime() -> None:
     """
     assert isinstance(_TARGET_A, VcfOperationsTargetLike)
     assert isinstance(_TARGET_WITH_AUTH_SOURCE, VcfOperationsTargetLike)
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on the vROps token/acquire login (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_acquire_threads_sni_extension() -> None:
+    """#2398: the vROps token/acquire login POST carries the SNI override.
+
+    Proves the ``vcf_session_login`` consumer threads
+    ``self._request_extensions(target)`` through to the establish request.
+    """
+    connector = _make_connector()
+    target = _StubTarget(
+        name="vrops-sni",
+        host="vrops-sni.test.invalid",
+        port=443,
+        secret_ref="vrops/vrops-sni",
+        tls_server_name="vrops.corp.example",
+    )
+
+    async with respx.mock(base_url="https://vrops-sni.test.invalid") as mock:
+        route = mock.post(_ACQUIRE_PATH).respond(200, json=_acquire_response())
+        await connector.auth_headers(target, operator=_make_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "vrops.corp.example"
+    await connector.aclose()

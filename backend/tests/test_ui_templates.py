@@ -724,3 +724,55 @@ def test_kb_detail_code_block_is_theme_scoped(ui_env: Environment) -> None:
     # (c) no dead DaisyUI 4 variables survive.
     assert "var(--b2" not in style_block
     assert "var(--wa" not in style_block
+
+
+def test_alert_ghost_outline_badges_have_readable_contrast() -> None:
+    """styles.css pins readable contrast for badge-ghost+badge-outline in alerts (#2460).
+
+    DaisyUI 5 emits ``.badge-outline { color: var(--badge-color) }`` after
+    ``.badge-ghost { color: var(--color-base-content) }`` in the same cascade
+    layer, so on the combined class the outline ``color`` wins by emission
+    order. With no ``badge-<color>`` modifier ``--badge-color`` is unset, the
+    declaration is invalid at computed-value time, and ``color`` falls back to
+    inheritance. Inside a coloured ``.alert`` that inherited value is the
+    alert's ``*-content`` token (near-black on badge-ghost's base-200 in
+    meho-dark, near-white on base-200 in meho-light) -> unreadable. An
+    unlayered author rule must pin an explicit themed foreground + surface
+    pair that beats the layered DaisyUI declarations in both themes.
+    """
+    source = (static_src_dir() / "styles.css").read_text(encoding="utf-8")
+    # Collapse whitespace so the assertion is insensitive to formatting.
+    normalized = re.sub(r"\s+", " ", source)
+
+    rule_match = re.search(r"\.alert \.badge-ghost\.badge-outline \{([^}]*)\}", normalized)
+    assert rule_match is not None, (
+        "missing the unlayered .alert .badge-ghost.badge-outline contrast rule"
+    )
+    body = rule_match.group(1)
+    # Explicit themed foreground + surface so the badge stops inheriting the
+    # alert's *-content colour; base-content on base-200 contrasts in both themes.
+    assert "color: var(--color-base-content)" in body
+    assert "background-color: var(--color-base-200)" in body
+
+
+@pytest.mark.parametrize(
+    "partial",
+    ["_retire_results.html", "_usage_results.html"],
+)
+def test_retrieval_honesty_gap_badges_sit_inside_alert(partial: str) -> None:
+    """The honesty-gap ``mcp:*`` badges sit inside ``.alert`` so #2460's rule targets them.
+
+    Both retrieval partials render the counted-surface labels as
+    ``badge badge-ghost badge-outline`` spans inside the ``.alert.alert-info``
+    honesty-gap banner. The contrast fix lives in styles.css and is scoped to
+    ``.alert``; guard that these partials keep the combo inside the alert so
+    the rule keeps matching (a move onto a plain card would silently escape it).
+    """
+    source = (templates_dir() / "retrieval" / partial).read_text(encoding="utf-8")
+    alert_at = source.find("alert alert-info")
+    badge_at = source.find("badge badge-ghost badge-outline")
+    assert alert_at != -1, f"{partial}: expected an .alert.alert-info banner"
+    assert badge_at != -1, f"{partial}: expected the honesty-gap badge combo"
+    assert badge_at > alert_at, (
+        f"{partial}: honesty-gap badge combo must sit inside the alert banner"
+    )

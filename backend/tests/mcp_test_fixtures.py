@@ -212,6 +212,7 @@ def isolated_registry() -> Iterator[None]:
         topology,
         topology_bulk_import,
         topology_create_node,
+        topology_delete_node,
     )
     from meho_backplane.mcp.tools import broadcast as broadcast_tools
     from meho_backplane.mcp.tools import (
@@ -272,6 +273,12 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(doc_collections_create_tool)
     importlib.reload(topology)
     importlib.reload(topology_create_node)
+    # #2485: the guarded node hard-delete tool
+    # (``meho.topology.delete_node``) lives in its own module (mirroring
+    # topology_create_node) so ``mcp.tools.topology`` does not grow past
+    # the 600-line guidance; it joins the reload list for the same reason
+    # every other tool module does.
+    importlib.reload(topology_delete_node)
     # #2539: the batch curated-edge authoring tool
     # (``meho.topology.bulk_import``) lives in its own module (mirroring
     # topology_create_node) so ``mcp.tools.topology`` does not grow past

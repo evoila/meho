@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — pre-existing >1700-line MCP topology
+# family module (the query_topology facets + list_targets + the shared
+# dispatch_topology_write shim); #2485 only adds two exception-class names
+# to the invalid-params frozenset. Splitting the facet family is its own
+# refactor, out of scope for a delete-verb task.
+
 """``query_topology`` + ``list_targets`` + admin annotate/unannotate — the G9 MCP family.
 
 Tasks #455 (G9.1-T7) and #598 (G9.2-T7). Two daily-surface meta-tools
@@ -1466,7 +1472,10 @@ _TOPOLOGY_WRITE_INVALID_PARAM_EXCEPTIONS: Final[frozenset[str]] = frozenset(
         "BulkImportValidationError",
         "InvalidEdgeKindError",
         "InvalidNodeKindError",
+        "NodeHasLiveEdgesError",
+        "NodeNotDeletableError",
         "NodeNotFoundError",
+        "NodeNotFoundForDeleteError",
         "UnannotateSelectorError",
         "ValueError",
     }

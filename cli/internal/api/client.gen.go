@@ -8346,6 +8346,11 @@ type HistoryRouteApiV1TopologyHistoryNameGetParams struct {
 	Authorization *string    `json:"authorization,omitempty"`
 }
 
+// DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams defines parameters for DeleteNodeRouteApiV1TopologyNodesNodeIdDelete.
+type DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // PathApiV1TopologyPathGetParams defines parameters for PathApiV1TopologyPathGet.
 type PathApiV1TopologyPathGetParams struct {
 	From     string  `form:"from" json:"from"`
@@ -10962,6 +10967,9 @@ type ClientInterface interface {
 
 	// HistoryRouteApiV1TopologyHistoryNameGet request
 	HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// DeleteNodeRouteApiV1TopologyNodesNodeIdDelete request
+	DeleteNodeRouteApiV1TopologyNodesNodeIdDelete(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// PathApiV1TopologyPathGet request
 	PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13936,6 +13944,18 @@ func (c *Client) UnannotateEdgeRouteApiV1TopologyEdgesEdgeIdDelete(ctx context.C
 
 func (c *Client) HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewHistoryRouteApiV1TopologyHistoryNameGetRequest(c.Server, name, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteNodeRouteApiV1TopologyNodesNodeIdDelete(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteRequest(c.Server, nodeId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -26565,6 +26585,55 @@ func NewHistoryRouteApiV1TopologyHistoryNameGetRequest(server string, name strin
 	return req, nil
 }
 
+// NewDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteRequest generates requests for DeleteNodeRouteApiV1TopologyNodesNodeIdDelete
+func NewDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteRequest(server string, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "node_id", runtime.ParamLocationPath, nodeId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/nodes/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPathApiV1TopologyPathGetRequest generates requests for PathApiV1TopologyPathGet
 func NewPathApiV1TopologyPathGetRequest(server string, params *PathApiV1TopologyPathGetParams) (*http.Request, error) {
 	var err error
@@ -37455,6 +37524,9 @@ type ClientWithResponsesInterface interface {
 	// HistoryRouteApiV1TopologyHistoryNameGetWithResponse request
 	HistoryRouteApiV1TopologyHistoryNameGetWithResponse(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error)
 
+	// DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse request
+	DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse, error)
+
 	// PathApiV1TopologyPathGetWithResponse request
 	PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error)
 
@@ -41323,6 +41395,28 @@ func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -47363,6 +47457,15 @@ func (c *ClientWithResponses) HistoryRouteApiV1TopologyHistoryNameGetWithRespons
 		return nil, err
 	}
 	return ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp)
+}
+
+// DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse request returning *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse
+func (c *ClientWithResponses) DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse, error) {
+	rsp, err := c.DeleteNodeRouteApiV1TopologyNodesNodeIdDelete(ctx, nodeId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse(rsp)
 }
 
 // PathApiV1TopologyPathGetWithResponse request returning *PathApiV1TopologyPathGetResponse
@@ -54389,6 +54492,32 @@ func ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp *http.Response) (*
 		}
 		response.JSON409 = &dest
 
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse parses an HTTP response from a DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse call
+func ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse(rsp *http.Response) (*DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

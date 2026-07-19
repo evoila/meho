@@ -33,6 +33,8 @@ __all__ = [
     "BULK_IMPORT_TOOL_INPUT_SCHEMA",
     "CREATE_NODE_PARAMETER_SCHEMA",
     "CREATE_NODE_RESPONSE_SCHEMA",
+    "DELETE_NODE_PARAMETER_SCHEMA",
+    "DELETE_NODE_RESPONSE_SCHEMA",
     "UNANNOTATE_PARAMETER_SCHEMA",
     "UNANNOTATE_RESPONSE_SCHEMA",
 ]
@@ -493,4 +495,34 @@ BULK_IMPORT_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["dry_run", "created", "updated", "conflicts", "rows"],
+}
+
+DELETE_NODE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "node_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "description": (
+                "UUID of the `graph_node` to hard-delete. Resolved "
+                "against the operator's tenant (cross-tenant is "
+                "structurally impossible — no `tenant_id` argument). "
+                "Get the id from `query_topology` or the "
+                "`meho.topology.create_node` response."
+            ),
+        },
+    },
+    "required": ["node_id"],
+    "additionalProperties": False,
+}
+
+DELETE_NODE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "node_id": {"type": "string"},
+        "kind": {"type": "string"},
+        "name": {"type": "string"},
+    },
+    "required": ["node_id", "kind", "name"],
 }

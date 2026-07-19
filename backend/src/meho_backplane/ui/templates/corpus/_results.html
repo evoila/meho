@@ -114,7 +114,32 @@
               {% endif %}
             </div>
           </div>
-          <p class="text-sm whitespace-pre-wrap">{{ chunk.content }}</p>
+          {#- Body snippet: clamp to a few lines so ranked cited chunks stay
+              comparable on one screen; the toggle expands the full content on
+              click (#2456). Alpine scope is per chunk card; the static
+              ``line-clamp-3`` clamps with JS disabled (no layout shift), and
+              the ``expanded`` binding removes it on expand. The toggle hides
+              itself when the content does not overflow the clamp. -#}
+          <div x-data="{ expanded: false, clamped: false }" class="flex flex-col gap-1">
+            <p
+              x-ref="body"
+              class="text-sm whitespace-pre-wrap line-clamp-3"
+              x-bind:class="{ 'line-clamp-3': !expanded }"
+              x-init="$nextTick(() => { clamped = $refs.body.scrollHeight > $refs.body.clientHeight })"
+            >{{ chunk.content }}</p>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs self-start px-1"
+              x-show="clamped || expanded"
+              x-cloak
+              x-on:click="expanded = !expanded"
+              x-bind:aria-expanded="expanded.toString()"
+              aria-label="Toggle full chunk content"
+            >
+              <span x-show="!expanded">Show more</span>
+              <span x-show="expanded" x-cloak>Show less</span>
+            </button>
+          </div>
         </div>
       </li>
     {% endfor %}

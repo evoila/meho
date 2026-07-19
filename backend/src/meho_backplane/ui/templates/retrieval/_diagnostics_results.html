@@ -85,7 +85,32 @@
               fused {{ "%.6f" | format(hit.fused_score) }}
             </span>
           </div>
-          <p class="text-sm whitespace-pre-wrap">{{ hit.body }}</p>
+          {#- Body snippet: clamp to a few lines so ten ranked hits stay
+              comparable on one screen; the toggle expands the full body on
+              click (#2456). Alpine scope is per hit card; the static
+              ``line-clamp-3`` clamps with JS disabled (no layout shift), and
+              the ``expanded`` binding removes it on expand. The toggle hides
+              itself when the body does not overflow the clamp. -#}
+          <div x-data="{ expanded: false, clamped: false }" class="flex flex-col gap-1">
+            <p
+              x-ref="body"
+              class="text-sm whitespace-pre-wrap line-clamp-3"
+              x-bind:class="{ 'line-clamp-3': !expanded }"
+              x-init="$nextTick(() => { clamped = $refs.body.scrollHeight > $refs.body.clientHeight })"
+            >{{ hit.body }}</p>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs self-start px-1"
+              x-show="clamped || expanded"
+              x-cloak
+              x-on:click="expanded = !expanded"
+              x-bind:aria-expanded="expanded.toString()"
+              aria-label="Toggle full result body"
+            >
+              <span x-show="!expanded">Show more</span>
+              <span x-show="expanded" x-cloak>Show less</span>
+            </button>
+          </div>
           {# Per-signal RRF score/rank breakdown -- a None rank renders the
              explicit absent marker, not a blank. #}
           <div class="overflow-x-auto">

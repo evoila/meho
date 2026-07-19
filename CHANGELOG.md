@@ -90,6 +90,16 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Removed — raw retrieval score pills from search cards (#2453)
+
+- `/ui/kb` search result cards no longer render the raw retrieval score pills
+  (`fused` / `bm25` / `cos`). The near-zero RRF fused values read as "bad" to a
+  non-expert operator even for a top hit, and the score tuple is beta plumbing
+  on an end-user surface. Per-signal score inspection is unaffected — it lives on
+  `/ui/retrieval` Diagnostics (#1888), which renders a strictly richer per-signal
+  score/rank breakdown. No toggle, no bucketed label (both would add a tunable
+  the substrate-minimalism rule rejects).
+
 ### Changed — clamp result-card bodies with expand-on-click (#2456)
 
 - `/ui/retrieval` diagnostics hit cards and `/ui/corpus` cited-chunk cards now

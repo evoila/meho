@@ -352,7 +352,13 @@ def test_kb_index_htmx_returns_fragment_only() -> None:
 
 
 def test_kb_search_post_returns_hits() -> None:
-    """``POST /ui/kb/search`` with a query returns ranked result cards."""
+    """``POST /ui/kb/search`` with a query returns ranked result cards.
+
+    The raw retrieval score pills (fused / BM25 / cosine) were removed
+    from the KB search cards (#2453) -- per-signal score inspection lives
+    on /ui/retrieval Diagnostics, not the end-user KB surface. The cards
+    still render (slug + snippet); the score tuple no longer appears.
+    """
     _seed_tenant(_TENANT_A, "tenant-a")
     session_id = _seed_session_sync(tenant_id=_TENANT_A)
     csrf = _csrf_token(session_id)
@@ -377,16 +383,16 @@ def test_kb_search_post_returns_hits() -> None:
 
     assert response.status_code == 200, response.text
     body = response.text
-    # Both hits rendered.
+    # Both hits rendered as cards.
     assert "vcenter-snapshots" in body
     assert "linux-perf" in body
-    # Score pills.
-    assert "fused" in body
-    assert "0.900" in body
-    # BM25 pill present for first hit only.
-    assert "bm25" in body
-    # Cosine pill present.
-    assert "cos" in body
+    # Score pills are gone: neither the container, the per-signal labels,
+    # nor the formatted score values appear on the KB search cards.
+    assert 'aria-label="Relevance scores"' not in body
+    assert "Fused score" not in body
+    assert "BM25 score" not in body
+    assert "Cosine score" not in body
+    assert "0.900" not in body
 
 
 def test_kb_search_post_empty_query_returns_list() -> None:

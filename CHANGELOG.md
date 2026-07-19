@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — check-runner target resolution (#2595)
+
+- The in-process sensor check-runner
+  (`backend/src/meho_backplane/checks/runner.py`) now resolves each sensor's
+  stored `target` through the same `call_operation` seam every other dispatch
+  caller runs before dispatch, instead of forwarding the raw stored `{"name":
+  …}` dict straight to `dispatch`. The connector resolver reads `product` /
+  `version` off a resolved `Target` row, not off a bare dict, so before this fix
+  **every target-bound Sensor failed `no_connector`** while `POST
+  /api/v1/operations/call` with the identical `(connector_id, op_id, target)`
+  succeeded — dashboards rendered but every target-bound member sat
+  `unknown`/`degraded`. Resolution failures now surface in the #136/#2110 target
+  vocabulary (`no_target` / `ambiguous_target`) in the sensor evidence rather
+  than the misleading `no_connector`. The regression test drives a real runner
+  tick through the actual resolve→dispatch path with `dispatch` **not** stubbed
+  (closing the long-standing `test_sensor_runner.py` blind spot).
+
 ### Documented — investigator fan-out vs budget-gating (#2576)
 
 - Recorded the decision to keep the check-layer investigator's cause-group

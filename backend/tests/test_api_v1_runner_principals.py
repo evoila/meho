@@ -203,12 +203,16 @@ async def test_full_lifecycle_round_trip(client: TestClient) -> None:
         assert body["keycloak_internal_id"] == _KC_INTERNAL_ID
         assert body["revoked"] is False
         assert body["created_by_sub"] == "op-admin"
+        # last_seen_at is additive (#2589): the central-clock liveness marker
+        # rides every accessor response, populated by the ORM server-default.
+        assert body["last_seen_at"] is not None
 
         listed = client.get("/api/v1/runner-principals", headers=headers)
         assert listed.status_code == 200
         principals = listed.json()["principals"]
         assert len(principals) == 1
         assert principals[0]["name"] == "edge-runner"
+        assert principals[0]["last_seen_at"] is not None
 
         shown = client.get("/api/v1/runner-principals/edge-runner", headers=headers)
         assert shown.status_code == 200

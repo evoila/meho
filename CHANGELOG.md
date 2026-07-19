@@ -108,6 +108,45 @@ connector-related release-notes line.
   deferred atomic budget-reservation seam, not a naive cap. No behaviour change
   (#2576, follow-up from #2507 review).
 
+### Added — meho dashboard CLI verbs (#2590)
+
+- `meho dashboard list | show | create | delete` wrap the four existing
+  `/api/v1/checks/dashboards` routes (Initiative #2416), closing the raw-curl
+  composition gap: the `/ui/checks` empty state previously instructed operators
+  to hand-roll `POST /api/v1/checks/dashboards`. `list` renders the per-dashboard
+  rolled-up state + member_count; `show <id>` renders the five-state rollup plus
+  every member's raw/effective state (the CLI twin of `/ui/checks/{id}`);
+  `create` takes `--name`, `--description`, and a repeatable `--sensor-id`
+  (an empty member set is legal and rolls up `unknown`); `delete <id>` removes
+  one dashboard. Read verbs are operator-level, write verbs require
+  tenant_admin; `--tenant` targets another tenant for platform_admin callers.
+  There is no `edit`/`update` verb by design — "edit" is delete + recreate
+  (the trigger-immutability posture). Every verb drives the generated typed Go
+  client directly (`api.DashboardListResponse` / `api.DashboardDetail` /
+  `api.DashboardCreate`), so a backend wire-shape change fails `go build` rather
+  than silently drifting; the test doubles serve the real generated envelopes.
+  The `/ui/checks` empty state now names `meho dashboard create`.
+### Added — /ui/runners satellite-runner fleet page (#2589)
+
+- New read-only `/ui/runners` operator-console page: the satellite-runner
+  fleet (Initiative #2415's push-only runner gateway) with per-runner
+  liveness and dead-man state. Each row shows the runner name, a derived
+  liveness badge (`live` / dead-man `unknown` / `revoked`), a relative
+  `last_seen_at`, whether the principal is revoked, and its creation time;
+  the table auto-refreshes every 30s so a runner going dark surfaces
+  without a manual reload. It closes the console-visibility gap #2415 left —
+  previously the fleet was reachable only from `meho runner-principal list`
+  and the Bearer `GET /api/v1/runner-principals` route, neither of which
+  exposed liveness.
+- The dead-man `unknown` badge is driven by the central sweeper's
+  `runner_assignments.stale_at` marker (#2501) and reuses the Checks
+  five-state `unknown` vocabulary (#2506) — no new state vocabulary and no
+  client-side staleness recomputation. The page is tenant-scoped and
+  read-only; register / revoke stay on `meho runner-principal` (#2502).
+- `RunnerPrincipalRead` gained an additive `last_seen_at` field, so the
+  `GET /api/v1/runner-principals` list/get/register responses and the CLI
+  `meho runner-principal list` now carry the central-clock liveness marker
+  (existing fields unchanged).
 ### Fixed — vmomi typed reads on VI-JSON base for vCenter 8.0.x (#2466)
 
 - The vmware typed reads that issue a vmomi (VI-JSON) method —

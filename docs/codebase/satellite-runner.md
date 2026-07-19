@@ -182,10 +182,25 @@ request re-stamps `last_seen_at`.
 
 **Surfacing contract (#2416 / #2506).** `stale_at IS NOT NULL` maps to
 the `UNKNOWN` state for every check assigned to that runner in the
-five-state rollup #2506 defines (`UNKNOWN → degraded`). This task lands
-the marker + audit trail only; it builds no UI and no rollup — until
-#2416 lands, the flip is observable on the `runner_assignments` row and
-in the `gateway.runner.stale` audit path.
+five-state rollup #2506 defines (`UNKNOWN → degraded`). #2501 landed the
+marker + audit trail only; the flip is observable on the
+`runner_assignments` row and in the `gateway.runner.stale` audit path.
+
+**Console fleet page (`/ui/runners`, #2589).** The read-only operator
+console surface for the fleet: one row per registered runner principal
+(`include_revoked=True` so a decommissioned runner still shows), with a
+derived liveness badge — `revoked` (neutral), dead-man `unknown` (the
+`runner_assignments.stale_at` marker, reusing #2506's five-state `unknown`
+badge vocabulary), or `live` — plus a relative `last_seen_at`. It reads
+the same in-process `RunnerPrincipalService.list_` the Bearer
+`GET /api/v1/runner-principals` route uses, joined to the per-runner
+`stale_at` via `gateway/repository.py::get_stale_markers`; liveness is
+rendered from persisted state, never recomputed client-side. To carry the
+liveness signal off the row, `RunnerPrincipalRead` gained an additive
+`last_seen_at` field (#2589) — every accessor already projects it from the
+ORM row via `from_attributes`, so the CLI `runner-principal list` /
+`GET /api/v1/runner-principals` responses carry it too. Read-only: register
+/ revoke stay on `meho runner-principal` (#2502).
 
 **Settings.** `GATEWAY_DEADMAN_ENABLED` (default `true` — that is what
 "mandatory" means: a runner cannot opt out of heartbeating because the

@@ -16975,6 +16975,28 @@
         }
       }
     },
+    "/ui/runners": {
+      "get": {
+        "tags": [
+          "ui-runners"
+        ],
+        "summary": "Ui Runners List",
+        "description": "Serve ``GET /ui/runners``. See module docstring for the contract.",
+        "operationId": "ui_runners_list_ui_runners_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/operations/search": {
       "get": {
         "tags": [
@@ -27057,6 +27079,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen At"
           }
         },
         "type": "object",
@@ -27070,7 +27098,8 @@
           "revoked",
           "created_by_sub",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "last_seen_at"
         ],
         "title": "RunnerPrincipalRead",
         "description": "Row representation returned by every accessor."

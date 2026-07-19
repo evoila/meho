@@ -1,0 +1,59 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Full-page render of the satellite-runner fleet (Initiative #2415,
+  Task #2589). Extends ``base.html`` so the chrome matches the rest of the
+  console. One glance answers "which runners are alive?": each row shows a
+  runner's name, its liveness badge (revoked / dead-man UNKNOWN / live), the
+  relative ``last_seen_at``, whether it is revoked, and when it was created.
+
+  Auto-refresh: the table arms an ``hx-trigger="every 30s"`` poll that
+  re-fetches ``GET /ui/runners`` (the ``HX-Request`` branch returns the
+  ``_table_rows.html`` fragment) and outerHTML-swaps only ``#runners-table-body``,
+  so a runner going dark surfaces without a manual refresh. Read-only --
+  register / revoke stay on ``meho runner-principal`` (#2502).
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Runners &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  <header class="flex flex-wrap items-center justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold">Runners</h1>
+      <p class="text-sm opacity-70">
+        Satellite runners execute governed read-only operations inside
+        networks the central backplane cannot dial, reporting back over a
+        push-only channel. A runner is flagged
+        <span class="badge badge-ghost badge-sm">unknown</span> when the
+        central dead-man sweeper has not heard from it for more than
+        {{ stale_threshold_seconds }}s.
+      </p>
+    </div>
+  </header>
+
+  {# ---------- Table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table
+      class="table table-sm"
+      hx-get="/ui/runners"
+      hx-trigger="every 30s"
+      hx-target="#runners-table-body"
+      hx-swap="outerHTML"
+    >
+      <thead>
+        <tr>
+          <th>Runner</th>
+          <th>Liveness</th>
+          <th>Last seen</th>
+          <th>Revoked</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      {% include "runners/_table_rows.html" %}
+    </table>
+  </div>
+</section>
+{% endblock %}

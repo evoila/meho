@@ -2170,6 +2170,53 @@
         }
       }
     },
+    "/api/v1/topology/nodes/{node_id}": {
+      "delete": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Delete Node Route",
+        "description": "Hard-delete a manually-seeded ``graph_node`` by id.\n\nWraps :func:`~meho_backplane.topology.node_delete.delete_node`\n(#2485). Returns 204 on success, writing a ``removed``\n``graph_node_history`` tombstone in the same transaction. Requires\n:class:`TenantRole.TENANT_ADMIN` \u2014 the same gate the curated-edge\n``DELETE /edges/{edge_id}`` route sits behind.\n\nError mapping (mirrors the \u00a73 auto-edge discipline\n:func:`unannotate_edge_route` enforces):\n\n* **409 ``probe_owned_node``** when the row is probe-derived\n  (``source='auto'``) or bound to a registered target\n  (``target_id IS NOT NULL``). Refresh reconciliation owns those and\n  they resurrect on the next probe, so a manual delete is\n  meaningless \u2014 only ``source='curated'``, target-unbound seeds are\n  deletable.\n* **409 ``node_has_edges``** with the blocking ``edge_ids`` when a\n  live ``graph_edge`` references the node. The caller unannotates\n  those first; the service refuses rather than letting the DB\n  ``ON DELETE CASCADE`` drop them without their history tombstones.\n* **404** when no node with that id exists in the caller's tenant\n  (cross-tenant ids and missing ids are indistinguishable \u2014 the\n  tenant boundary is opaque to the caller).",
+        "operationId": "delete_node_route_api_v1_topology_nodes__node_id__delete",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/topology/edges/bulk": {
       "post": {
         "tags": [

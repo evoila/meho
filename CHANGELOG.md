@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — topology delete_node guarded hard-delete (#2485)
+
+- A manually-seeded `graph_node` can now be removed via MCP
+  `meho.topology.delete_node` (tenant_admin, `op_class=write`) and REST
+  `DELETE /api/v1/topology/nodes/{node_id}` → 204, both fronting one
+  service primitive `topology.nodes` `delete_node`. Closes the gap where
+  a mis-seeded or probe-residue manual node persisted indefinitely
+  (refresh reconciliation only touches nodes adopted onto the refreshed
+  target, and soft-deleted nodes stay reachable in traversals). The
+  delete writes a `removed` `graph_node_history` tombstone so the change
+  stays visible in `query_topology kind=timeline`; the node's prior
+  history rows survive with `node_id` NULL via the `ON DELETE SET NULL`
+  FK. The guard is schema-grounded: only `source='curated'`,
+  target-unbound seeds are deletable — a probe-owned node (`source='auto'`
+  or `target_id IS NOT NULL`) is refused with 409 `probe_owned_node`
+  (would resurrect on the next probe), and a node with live edges is
+  refused with 409 `node_has_edges` listing the blocking edge ids
+  (unannotate them first; no implicit cascade that would drop curated
+  edges without their history tombstones). Agent-principal calls park as
+  approval requests; human tenant_admin calls execute immediately —
+  mirroring `meho.topology.create_node`.
+
 ### Documentation — kb tool description cross-refs (#2486)
 
 - The `search_knowledge` and `add_to_knowledge` MCP tool descriptions now

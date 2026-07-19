@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — dot-containing-slug preview selectors on /ui/kb (#2451)
+
+- The `/ui/kb` search result cards built the hover-preview `hx-target` and the
+  Alpine `after-swap` handler from `#kb-preview-<slug>` CSS selectors. KB slugs
+  may contain dots (`SLUG_PATTERN` allows `.`), and `.` is the class delimiter
+  in CSS selector syntax, so a dotted slug (e.g. `meho-0.2-deployment`) made the
+  `hx-target` unresolvable and threw a `SyntaxError` in the document-wide
+  `after-swap` handler on every htmx swap — breaking the preview affordance for
+  every dot-slug card. Both sites now use the attribute-selector form
+  `[id="kb-preview-<slug>"]`, which is a valid selector for every legal slug;
+  the dotted element ids themselves are unchanged.
 ### Added — doc-collection delete across REST/MCP/CLI (#2487)
 
 - A disabled, tenant-owned documentation collection can now be

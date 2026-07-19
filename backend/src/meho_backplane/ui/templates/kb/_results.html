@@ -93,12 +93,12 @@
                   type="button"
                   class="btn btn-ghost btn-xs"
                   hx-get="/ui/kb/{{ hit.slug }}/preview?q={{ query | urlencode }}"
-                  hx-target="#kb-preview-{{ hit.slug }}"
+                  hx-target='[id="kb-preview-{{ hit.slug }}"]'
                   hx-swap="innerHTML"
                   hx-trigger="mouseenter delay:200ms"
                   aria-label="Preview {{ hit.slug }}"
                   x-data="{}"
-                  x-on:htmx:after-swap.document="$el.closest('.card').querySelector('#kb-preview-{{ hit.slug }}').classList.remove('hidden')"
+                  x-on:htmx:after-swap.document="$el.closest('.card').querySelector('[id=&quot;kb-preview-{{ hit.slug }}&quot;]').classList.remove('hidden')"
                 >
                   Preview
                 </button>

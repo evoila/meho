@@ -109,6 +109,29 @@ connector-related release-notes line.
   grant — plus the profiled-connector logins (basic / form / json) and
   the unauthenticated fingerprint probe. Behaviour is byte-identical
   when `tls_server_name` is unset (empty extensions dict). (#2398)
+### Added — docs/deploying.md consolidated deploy guide (#2468)
+
+- **A single operator-facing deployment & upgrade guide** now lives at
+  `docs/deploying.md`, consolidating knowledge previously scattered
+  across the chart values, the acceptance contracts, and several
+  deep-dive docs (or missing entirely). It covers: a cold-install
+  prerequisites checklist (pgvector superuser `CREATE EXTENSION`, the
+  asyncpg `DATABASE_URL` Secret shape, Keycloak realm + MCP-audience
+  resolvability, internal-CA trust bundle, pinned `image.tag`,
+  first-boot `startupProbe` budget); the two credential-backend install
+  paths side by side (Vault vs GSM/Vault-free, `config.credentialBackend`);
+  the Helm-4 server-side-apply field-conflict upgrade caveat (the
+  v0.22.0 `startupProbe` example, pre-flight `--show-managed-fields`,
+  remedy `helm upgrade --force-conflicts`); a version-specific
+  upgrade-notes table (v0.15.0 Vault tenant-scope guard, v0.22.0 SSA
+  conflict); and operational chart knobs. The guide **links into** the
+  existing deep-dives rather than restating them. Cross-linked from
+  `README.md`, `docs/codebase/devops.md`, and
+  `deploy/values-examples/README.md`; `docs/RELEASING.md` now carries a
+  checklist line obliging the release-cutting PR to append a
+  version-specific upgrade-notes row when a release carries an
+  upgrade-relevant change. Docs-only; resurrects #559 with post-v0.21.0
+  motivation (#2468).
 
 ### Added — operator-console OAuth chart values (#2594)
 

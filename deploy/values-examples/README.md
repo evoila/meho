@@ -11,6 +11,12 @@ specific deployment shape (today: the RDC Hetzner dogfooding lab) and is
 designed to be copied into a private deploy repo, the placeholders
 substituted, and applied via `helm install` / `helm upgrade`.
 
+For the consolidated deployment & upgrade guide (cold-install
+prerequisites, Helm-4 SSA upgrade caveats, and the Vault vs GSM
+credential-backend variants), see
+[`../../docs/deploying.md`](../../docs/deploying.md); this README is the
+values-level deep-dive it links into.
+
 The files here ship **no real secrets, no real CIDRs**. Every
 site-specific field uses a `<REPLACE: ...>` placeholder that fails
 `values.schema.json` validation at install time, so an operator who

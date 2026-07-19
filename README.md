@@ -225,6 +225,11 @@ contract — operators bring their own MCP client.
 
 ## Deploy
 
+For a consolidated, production-shaped deployment & upgrade guide
+(cold-install prerequisites, Helm-4 server-side-apply upgrade caveats, and
+the Vault vs GSM credential-backend variants), see
+[`docs/deploying.md`](docs/deploying.md).
+
 ### Local (kind, ~5 min)
 
 A fully local dev loop. Useful for iterating on chart plumbing, the

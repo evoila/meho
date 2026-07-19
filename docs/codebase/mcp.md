@@ -144,6 +144,19 @@ can predict the rest. (A handful of single-purpose reference tools
 predating the grammar — `search_docs`, `add_to_memory`,
 `call_operation`, … — remain flat.)
 
+One flat pair carries a deliberate cross-surface name split: the kb
+meta-tools are `search_knowledge` / `add_to_knowledge` on MCP, but every
+other surface names the substrate `kb` — REST `/api/v1/kb`, CLI
+`meho kb`, console `/ui/kb`. The names were pinned to the consumer
+agent-prompt contract (#417 / #331, "CLAUDE.md naming aligned") and the
+alias machinery a rename would need was removed in #1625, so the split is
+intentional and not a rename candidate. Because `/api/v1/knowledge` does
+not exist, an agent that writes via `add_to_knowledge` and then reaches
+for a REST cleanup path 404s unless it knows the substrate is `kb`; the
+two tool descriptions therefore cross-reference the `kb` REST/CLI surface
+and note that entry deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}`
+or `meho kb delete` — there is no MCP delete tool).
+
 ### Runbook family canonicalisation (#1612)
 
 The 11 runbook tools were the last flat multi-verb family

@@ -74,8 +74,23 @@ _GRANT_OP_IDS: Final[dict[str, str]] = {
 }
 
 
+def _mirror_grant_id(payload: dict[str, Any]) -> dict[str, Any]:
+    """Mirror the native ``id`` response key as ``grant_id``.
+
+    The row model :class:`AgentGrantRead` is shared with the REST route
+    ``GET /api/v1/agents/grants`` (#1612 kept shared models out of a
+    rename's scope), so the MCP handlers mirror the id at the wire
+    boundary instead: every grant row carries ``grant_id`` — the field
+    ``meho.agents.grant.show`` / ``meho.agents.grant.revoke`` accept
+    verbatim — alongside the model's native ``id``.
+    """
+    if "id" in payload:
+        payload["grant_id"] = payload["id"]
+    return payload
+
+
 def _row_to_dict(entry: AgentGrantRead) -> dict[str, Any]:
-    return entry.model_dump(mode="json")
+    return _mirror_grant_id(entry.model_dump(mode="json"))
 
 
 def _require_str(arguments: dict[str, Any], key: str) -> str:
@@ -122,7 +137,9 @@ register_mcp_tool(
         name="meho.agents.grant.list",
         description=(
             "List agent permission grants for the operator's tenant "
-            "(G11.2-T6). Returns {grants: [...]}. "
+            "(G11.2-T6). Returns {grants: [...]}; each row carries "
+            "`grant_id` (accepted verbatim by meho.agents.grant.show / "
+            ".revoke) alongside the model-native `id`. "
             "Optional principal_sub filters to one agent. "
             "include_expired=true includes past elevations."
         ),
@@ -174,7 +191,8 @@ register_mcp_tool(
         name="meho.agents.grant.show",
         description=(
             "Fetch one agent permission grant by id (G11.2-T6). "
-            "Returns the grant row or raises not-found."
+            "Returns the grant row (carrying both `grant_id` and the "
+            "model-native `id`) or raises not-found."
         ),
         inputSchema={
             "type": "object",
@@ -227,7 +245,9 @@ register_mcp_tool(
             "Grant a permission to an agent principal (G11.2-T6). "
             "verdict: auto-execute | needs-approval | deny. "
             "expires_at (ISO-8601 UTC) makes the grant time-bounded. "
-            "Omit expires_at for a permanent grant."
+            "Omit expires_at for a permanent grant. The created row "
+            "carries `grant_id` (accepted verbatim by "
+            "meho.agents.grant.show / .revoke) alongside the native `id`."
         ),
         inputSchema={
             "type": "object",
@@ -297,7 +317,9 @@ register_mcp_tool(
         description=(
             "Grant a time-bounded elevation to an agent principal (G11.2-T6). "
             "expires_at is required. The grant-expiry sweeper reverts the "
-            "agent to baseline automatically after the window ends."
+            "agent to baseline automatically after the window ends. The "
+            "created row carries `grant_id` (accepted verbatim by "
+            "meho.agents.grant.show / .revoke) alongside the native `id`."
         ),
         inputSchema={
             "type": "object",

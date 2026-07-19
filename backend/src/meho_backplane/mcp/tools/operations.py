@@ -476,7 +476,17 @@ register_mcp_tool(
                         "Operation-specific parameters. The dispatcher "
                         "validates against the operation's parameter_schema "
                         "before invoking the handler; unknown fields are "
-                        "rejected at the schema layer."
+                        "rejected at the schema layer. One reserved key is "
+                        "handled by the dispatcher itself and never reaches "
+                        "the op schema: `reveal_secret` (bool). A "
+                        "credential_read op (e.g. `vault.kv.read`) returns a "
+                        "key-name-scrubbed response by default -- secret "
+                        "values are replaced so they never enter this agent "
+                        "transcript. Pass `reveal_secret: true` ONLY when you "
+                        "must pipe the raw value onward; the raw value is "
+                        "then returned AND the reveal is stamped on the audit "
+                        "row. Prefer `secret.move` to relocate a credential "
+                        "without it transiting your context."
                     ),
                 },
                 "work_ref": {

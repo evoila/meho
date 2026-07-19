@@ -526,6 +526,12 @@ class ProfiledRestConnector(HttpConnector):
         """
         client = await self._http_client(target)
         request_headers = dict(spec.request_headers)
+        # #2398: thread the target's ``tls_server_name`` SNI / cert-verify
+        # override onto the login round-trip so a by-IP appliance whose
+        # cert pins an FQDN establishes its session under ``verify_tls=true``
+        # -- the same handling the dispatch seams already apply. Empty dict
+        # (the default when no override is set) is byte-identical to today.
+        extensions = self._request_extensions(target)
         if spec.login_credentials == "basic":
             basic_auth = spec.build_login_auth(auth, secret)
             if basic_auth is None:
@@ -535,10 +541,16 @@ class ProfiledRestConnector(HttpConnector):
                     f"{auth.scheme!r} declares login_credentials='basic' but its "
                     f"build_login_auth produced no credential pair"
                 )
-            return await client.post(path, headers=request_headers, auth=basic_auth)
+            return await client.post(
+                path, headers=request_headers, auth=basic_auth, extensions=extensions
+            )
         if spec.encoding == "form":
-            return await client.post(path, data=dict(body), headers=request_headers)
-        return await client.post(path, json=dict(body), headers=request_headers)
+            return await client.post(
+                path, data=dict(body), headers=request_headers, extensions=extensions
+            )
+        return await client.post(
+            path, json=dict(body), headers=request_headers, extensions=extensions
+        )
 
     @staticmethod
     def _session_spec(scheme: str) -> SessionSchemeSpec:
@@ -700,7 +712,10 @@ class ProfiledRestConnector(HttpConnector):
         through the pooled, TLS-trust-aware client without an auth header.
         """
         client = await self._http_client(target)
-        resp = await client.request("GET", path)
+        # #2398: honour the target's ``tls_server_name`` SNI / cert-verify
+        # override on the unauthenticated fingerprint probe too (empty dict
+        # when unset -- byte-identical to today).
+        resp = await client.request("GET", path, extensions=self._request_extensions(target))
         resp.raise_for_status()
         return resp.json()  # type: ignore[no-any-return]
 

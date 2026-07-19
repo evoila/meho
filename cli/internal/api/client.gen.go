@@ -8649,6 +8649,12 @@ type UiSchedulerListUiSchedulerGetParams struct {
 	WorkRef *string            `form:"work_ref,omitempty" json:"work_ref,omitempty"`
 }
 
+// UiSensorsListUiSensorsGetParams defines parameters for UiSensorsListUiSensorsGet.
+type UiSensorsListUiSensorsGetParams struct {
+	Status      *string `form:"status,omitempty" json:"status,omitempty"`
+	CadenceKind *string `form:"cadence_kind,omitempty" json:"cadence_kind,omitempty"`
+}
+
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
 type UiTopologyTableUiTopologyGetParams struct {
 	Sort *MehoBackplaneUiRoutesTopologyTableSortColumn `form:"sort,omitempty" json:"sort,omitempty"`
@@ -11761,6 +11767,9 @@ type ClientInterface interface {
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSensorsListUiSensorsGet request
+	UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -17583,6 +17592,18 @@ func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody(c
 
 func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequest(c.Server, triggerId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSensorsListUiSensorsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -35802,6 +35823,71 @@ func NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequestWithBody(ser
 	return req, nil
 }
 
+// NewUiSensorsListUiSensorsGetRequest generates requests for UiSensorsListUiSensorsGet
+func NewUiSensorsListUiSensorsGetRequest(server string, params *UiSensorsListUiSensorsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/sensors")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.CadenceKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cadence_kind", runtime.ParamLocationQuery, *params.CadenceKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiTopologyTableUiTopologyGetRequest generates requests for UiTopologyTableUiTopologyGet
 func NewUiTopologyTableUiTopologyGetRequest(server string, params *UiTopologyTableUiTopologyGetParams) (*http.Request, error) {
 	var err error
@@ -38479,6 +38565,9 @@ type ClientWithResponsesInterface interface {
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error)
 
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithResponse(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error)
+
+	// UiSensorsListUiSensorsGetWithResponse request
+	UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -45635,6 +45724,28 @@ func (r UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse) StatusCod
 	return 0
 }
 
+type UiSensorsListUiSensorsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSensorsListUiSensorsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSensorsListUiSensorsGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiTopologyTableUiTopologyGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -50299,6 +50410,15 @@ func (c *ClientWithResponses) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelP
 		return nil, err
 	}
 	return ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse(rsp)
+}
+
+// UiSensorsListUiSensorsGetWithResponse request returning *UiSensorsListUiSensorsGetResponse
+func (c *ClientWithResponses) UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error) {
+	rsp, err := c.UiSensorsListUiSensorsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSensorsListUiSensorsGetResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -59448,6 +59568,32 @@ func ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse(rsp *htt
 	}
 
 	response := &UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSensorsListUiSensorsGetResponse parses an HTTP response from a UiSensorsListUiSensorsGetWithResponse call
+func ParseUiSensorsListUiSensorsGetResponse(rsp *http.Response) (*UiSensorsListUiSensorsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSensorsListUiSensorsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

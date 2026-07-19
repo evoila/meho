@@ -107,6 +107,23 @@ connector-related release-notes line.
   `docs/codebase/checks-investigator.md`; a future revisit would need the
   deferred atomic budget-reservation seam, not a naive cap. No behaviour change
   (#2576, follow-up from #2507 review).
+### Added — /ui/sensors registry page (#2591)
+
+- New read-only `/ui/sensors` operator-console page listing the check-layer
+  Sensor registry (Initiative #2416), each Sensor with its latest-result
+  projection (`last_state` five-state badge / `last_value` / `last_evaluated_at`
+  / `state_since`) and its connector/op identity + cadence. Closes the #2416
+  visibility gap where a registered-but-uncomposed Sensor was invisible — the
+  console only rendered Sensors that some `/ui/checks` Dashboard composed.
+  `status` (active / paused) and `cadence_kind` (interval / cron) filters drive
+  an HTMX partial swap and round-trip via query params so the filtered view is a
+  shareable URL; the table auto-refreshes every 30s carrying the active filters.
+  Reads the in-process `SensorAdminService.list_` (the same accessor the Bearer
+  `GET /api/v1/sensors` route uses), tenant-scoped from the session; the
+  `last_state` badge reuses the existing five-state vocabulary with no new CSS.
+  Read-only — create / delete stay on `meho sensor` (#2503). Reachable from the
+  `/ui/checks` header and a new `Sensors` sidebar entry. Regenerated the OpenAPI
+  snapshot + typed Go client for the new `/ui/sensors` route.
 
 ### Added — atomic per-(tenant,dashboard) investigation claim (#2575)
 

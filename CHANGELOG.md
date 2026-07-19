@@ -99,6 +99,80 @@ connector-related release-notes line.
   (it holds with JavaScript disabled, no layout shift); an Alpine toggle removes
   it on click and hides itself when the body does not overflow the snippet.
 
+### Added — Source/Kind datalists on /ui/retrieval (#2458)
+
+- The `/ui/retrieval` diagnostics Source and Kind filter inputs are now backed
+  by `<datalist>` suggestions enumerated from a tenant-scoped
+  `SELECT DISTINCT source, kind` over the operator's retrieval-visible
+  `documents` rows. An operator no longer has to guess valid filter values and
+  hit a silent zero-result — the offered values are exactly the ones the
+  in-process `retrieve` call can match. The inputs stay free-typing (kinds are
+  free-form by design), and the query carries the same tenant + per-principal
+  visibility predicate `retrieve` enforces, so no cross-tenant value and no
+  other principal's user-scoped memory kind leaks into the suggestions.
+- The Source field's help text now steers docs-corpus collection lookups to
+  `/ui/corpus`: those collections live on a different substrate that `retrieve`
+  never queries, so a collection name (e.g. `vmware`) can never be a retrieval
+  Source. That mismatch was the root of the "Source=`vmware` → 0 hits"
+  confusion.
+
+### Added — arm-then-confirm gate on /ui/approvals Approve/Deny (#2446)
+
+- The `/ui/approvals` decision modal now confirm-gates both Approve and
+  Deny. A pending row carries a consequence banner
+  (`data-approval-gate="confirm"`) whose severity follows the parked
+  envelope's `safety_level` (#1855) — error for `dangerous`, warning
+  otherwise — stating plainly that Approve dispatches the parked write
+  immediately (no un-approve) and Deny is terminal (the requester must
+  re-file). Each decision is two-phase: the first click on Approve/Deny
+  is a `type="button"` armer (Alpine local state only) that swaps in a
+  `Cancel` + `Confirm approve`/`Confirm deny` pair; only the Confirm
+  button posts, carrying the same CSRF header echo, shared-reason
+  `hx-include`, and double-fire guard as before. No new routes, no
+  modal-in-modal. The self-approval invariant (#1401) survives: a blocked
+  Approve never arms and has no reachable confirm state. Template-only —
+  it reuses the structured envelope render from #2447 and mirrors the
+  runbook lifecycle confirm mold (#1881/#1957) (#2446).
+### Changed — restyle Register Collection modal to kb form language (#2464)
+
+- The `/ui/corpus` **Register Collection** modal now speaks the same
+  form language as the `/ui/kb` "New entry" editor: a padding-less
+  box with a bordered header + close-circle button, the three fields
+  grouped into **Identity / Metadata / Backend** sections split by
+  dividers, `label py-0` label rows with a right-aligned hint, and a
+  bordered footer whose actions stay pinned while a long body scrolls.
+  The field set, submit contract, CSRF wiring, and per-field error
+  echo are unchanged — template-only. (#2464)
+### Fixed — badge-ghost+badge-outline contrast in alert banners (#2460)
+
+- The `/ui/retrieval` honesty-gap banners (Usage + Retire Checklist tabs)
+  render the counted `/mcp` search-surface labels
+  (`mcp:search_knowledge` / `_memory` / `_operations`) as badges that were
+  unreadable inside the coloured alert — near-black-on-near-black in
+  `meho-dark`, near-white-on-near-white in `meho-light`. The DaisyUI 5
+  `badge-ghost` + `badge-outline` combo resolves its text colour through
+  `badge-outline`'s `color: var(--badge-color)`; with no `badge-<color>`
+  modifier that variable is unset, so `color` falls back to inheritance and
+  inside the alert picks up the alert's `*-content` token on badge-ghost's
+  `base-200` surface. An unlayered `.alert .badge-ghost.badge-outline` rule
+  in `styles.css` now pins `base-content` on `base-200`, winning over the
+  layered DaisyUI declarations regardless of emission order; it is scoped to
+  `.alert` so the on-card badge usages are unaffected. CSS only. (#2460)
+### Fixed — unclip sidebar approvals badge (#2445)
+
+- The desktop sidebar's approvals-bell pending-count badge is no longer
+  clipped at the drawer edge. The badge is an absolute overlay on the bell
+  button (correct); the clip came from the account row overflowing the
+  `w-64` nav's content width — DaisyUI 5's `.btn { flex-shrink: 0 }` kept the
+  operator chip (avatar + mono `sub` label + chevron) at full width, so the
+  chip plus the fixed theme/bell buttons pushed the bell's right edge past
+  `:where(.drawer-side) { overflow-x: hidden }`. The operator chip now
+  absorbs the deficit: its flex wrapper and button carry `min-w-0` and the
+  button carries `shrink` (overriding the `.btn` rule) while the mono label
+  keeps `min-w-0 truncate` (ellipsis) and the avatar + chevron stay pinned
+  with `shrink-0`. A full-width Keycloak-`sub` operator label now truncates
+  instead of shoving the badge off-canvas, so the count is fully readable at
+  every `lg+` viewport width.
 ### Added — in-flight spinners on console Run buttons (#2459)
 
 - The long-running action buttons on `/ui/retrieval` (Diagnostics Run, Run

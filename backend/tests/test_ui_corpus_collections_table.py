@@ -552,6 +552,51 @@ def test_register_modal_renders_for_tenant_admin() -> None:
     assert CSRF_COOKIE_NAME in response.cookies
 
 
+def test_register_modal_matches_kb_editor_form_language() -> None:
+    """The modal adopts the /ui/kb editor's form language (#2464).
+
+    Asserts the structural markers the kb ``_editor_modal.html`` uses so the
+    register modal reads as the same write surface: a padding-less box with a
+    bordered header + close-circle button, ``label py-0`` label rows with a
+    right-aligned ``label-text-alt`` hint, section dividers, and a bordered
+    footer. Purely cosmetic -- the field set and submit contract are covered
+    by the neighbouring render/create tests.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_ADMIN,
+        role=TenantRole.TENANT_ADMIN,
+    )
+    try:
+        response = client.get("/ui/corpus/collections/register")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Box: padding managed by sections, scroll-contained (kb editor line 68).
+    assert 'class="modal-box w-11/12 max-w-3xl p-0' in body
+    # Bordered header with a close-circle button (kb editor lines 70-77).
+    assert "border-b border-base-300" in body
+    assert "btn btn-ghost btn-sm btn-circle" in body
+    # kb-style label rows: label py-0 + font-medium label-text + alt hint.
+    assert 'class="label py-0"' in body
+    assert 'class="label-text font-medium"' in body
+    assert 'class="label-text-alt opacity-60"' in body
+    # Section grouping into Identity / Metadata / Backend, kb column-header style.
+    assert "text-xs font-medium opacity-60 uppercase tracking-wide" in body
+    for section in ("Identity", "Metadata", "Backend"):
+        assert f">{section}</div>" in body
+    # Bordered footer holding the actions (kb editor line 181).
+    assert "border-t border-base-300" in body
+    # No behaviour change: submit contract + field set are intact.
+    assert 'hx-post="/ui/corpus/collections/register"' in body
+    assert 'data-action="register-submit"' in body
+    for field in ("collection_key", "vendor", "products", "backend_type", "backend_ref"):
+        assert f'name="{field}"' in body
+
+
 def test_register_modal_rejects_operator_role_with_403() -> None:
     """An operator (non-admin) GET on the register modal is 403'd server-side."""
     _seed_tenant(_TENANT_A, "tenant-a")

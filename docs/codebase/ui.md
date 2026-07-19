@@ -3019,6 +3019,24 @@ is bound from `operator.sub` (`principal_sub=`) — there is no `tenant_filter`
   ordering (retrieval include before stubs; literal diagnostics before any param
   route) + dashboard tile.
 
+### Honesty-gap badge contrast (#2460)
+
+The T2 Usage + T3 Retire fragments render the counted `/mcp` search-surface
+labels (`mcp:search_knowledge` / `_memory` / `_operations`) as
+`badge badge-ghost badge-outline` spans **inside** the `.alert.alert-info`
+honesty-gap banner. In the DaisyUI 5 bundle `.badge-outline` and `.badge-ghost`
+are mutually-exclusive style variants emitted in the same cascade layer:
+`.badge-outline { color: var(--badge-color) }` wins by emission order, and with
+no `badge-<color>` modifier `--badge-color` is unset, so `color` falls back to
+inheritance. On a plain card that inherits `base-content` (readable), but inside
+a coloured alert it inherits the alert's `*-content` token — near-black on
+badge-ghost's `base-200` surface in `meho-dark`, near-white on `base-200` in
+`meho-light` — so the badges vanished in both themes. `styles.css` carries an
+unlayered `.alert .badge-ghost.badge-outline` rule (in the "Chrome + component
+voice" block) that beats the layered DaisyUI declarations regardless of emission
+order, pinning `base-content` on `base-200` so the labels read in both themes;
+it is scoped to `.alert` so the ~15 on-card usages keep their inherited colour.
+
 ## Vault console — confirm-gated writes (G10.18-T2 #1957)
 
 The mutating verbs over the T1 (#1956) read-only KV browser:

@@ -139,13 +139,31 @@ async def test_run_then_poll_round_trip(
     body = _result_dict(run)
     assert body["status"] == "succeeded"
     assert body["output"] == {"text": "triaged via mcp"}
-    handle = body["run_id"]
+    run_id = body["run_id"]
 
-    status = _call(client, "meho.agents.run_status", {"handle": handle}, rpc_id=2)
+    # Canonical: poll with the `run_id` the run row returned (#2471) —
+    # exercises the anyOf schema gate through the real dispatcher.
+    status = _call(client, "meho.agents.run_status", {"run_id": run_id}, rpc_id=2)
     status_body = _result_dict(status)
-    assert status_body["run_id"] == handle
+    assert status_body["run_id"] == run_id
     assert status_body["status"] == "succeeded"
     assert status_body["output"] == {"text": "triaged via mcp"}
+
+    # Deprecated alias: `handle` still resolves for pre-#2471 callers.
+    via_alias = _call(client, "meho.agents.run_status", {"handle": run_id}, rpc_id=3)
+    assert _result_dict(via_alias)["run_id"] == run_id
+
+    # Both aliases supplied -> -32602 naming both.
+    both = _call(
+        client,
+        "meho.agents.run_status",
+        {"run_id": run_id, "handle": run_id},
+        rpc_id=4,
+    )
+    both_body = both.json()
+    assert "error" in both_body
+    assert "run_id" in both_body["error"]["message"]
+    assert "handle" in both_body["error"]["message"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

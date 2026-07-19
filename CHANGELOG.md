@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Documented — investigator fan-out vs budget-gating (#2576)
+
+- Recorded the decision to keep the check-layer investigator's cause-group
+  fan-out **serial** (`run_investigation` in
+  `backend/src/meho_backplane/checks/investigate.py`), rather than parallelising
+  it under a concurrency cap. The serial loop awaits each cause group to a
+  terminal outcome before the next fires, which is what keeps the pre-fire
+  budget gate + kill switch correct: that gate reads already-recorded
+  consumption (no ex-ante reservation), so group *N*+1 must observe group *N*'s
+  recorded spend — concurrent fan-out would let several groups pass the gate off
+  the same pre-spend state and over-fire beyond budget. The tail latency is
+  bounded and off the runner's persist path (the investigation runs as a
+  fire-and-forget task, delaying only later cause-groups' diagnosis on the same
+  Dashboard). The intentional serialization is now documented in code and in
+  `docs/codebase/checks-investigator.md`; a future revisit would need the
+  deferred atomic budget-reservation seam, not a naive cap. No behaviour change
+  (#2576, follow-up from #2507 review).
+
 ### Fixed — vmomi typed reads on VI-JSON base for vCenter 8.0.x (#2466)
 
 - The vmware typed reads that issue a vmomi (VI-JSON) method —

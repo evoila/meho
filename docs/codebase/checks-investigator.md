@@ -160,6 +160,40 @@ principal, so no execution path inherits the role.
   compare-and-set + the in-flight `work_ref` dedupe + the noise-suppression
   memory layer make duplicate investigations rare and harmless (all
   diagnose-only), but perfect single-fire under concurrency is not guaranteed.
+- **Serial cause-group fan-out (intentional, #2576).** `run_investigation`
+  investigates a Dashboard's cause groups **serially** — `for group in groups:
+  await _investigate_group(...)` — awaiting each to a terminal outcome before
+  the next fires. This is a deliberate design choice weighed against the tail
+  latency it causes (group *N* waits on the runtime/timeout of groups
+  1..*N*-1), **not** an un-optimised loop.
+  - *Why serial is load-bearing.* `_investigate_group` runs the pre-fire budget
+    gate + kill switch (inside `run_scheduled`) before firing its agent run. That
+    gate reads **already-recorded** consumption
+    (`operations/budget_enforcement.py`): tokens/cost are charged against
+    committed state *after* a run finishes, and a reservation ("reserve this
+    run's cost before it starts") is explicitly deferred there. Awaiting each
+    group to completion is what makes the cap correct — group *N*+1's gate
+    observes group *N*'s spend already recorded. Fanning the groups out under a
+    concurrency cap would open a check-then-fire race where several groups read
+    the same pre-spend state, all pass the gate, and **over-fire beyond budget**.
+  - *Why the latency cost is acceptable.* The whole investigation coroutine runs
+    off the runner's persist path as a fire-and-forget task
+    (`_schedule_investigation` → `asyncio.create_task`). The serialization
+    therefore delays only *later* cause-groups' **diagnosis on the same
+    Dashboard** — never the runner cadence and never another Dashboard's
+    investigation (each transitioning Dashboard gets its own task). Topology
+    correlation already collapses a shared cause into one group, so a Dashboard
+    typically resolves to few groups. The 600 s per-group ceiling
+    (`checks_investigation_poll_timeout_seconds`) is only reached when an
+    investigation genuinely never terminates; the common case terminates far
+    sooner.
+  - *When to revisit.* If real deployments show the multi-independent-cause tail
+    latency is an operational problem, the correct fix is **not** a naive
+    concurrency cap but an **atomic budget reserve/decrement** seam so a group
+    reserves budget before firing (replica-safe if the budget is shared across
+    processes) — i.e. the reservation protocol `budget_enforcement.py` defers.
+    That is a separate, larger change; until it exists, serial-to-completion is
+    the only fan-out shape that keeps the cap honest.
 - **Trigger seam.** The runner-persist hook is the v1 seam because event
   triggers are refused until the #826 matcher lands (#2325) and #2506's rollup
   is read-path-only. Migrating to an event trigger when the matcher exists is
@@ -171,7 +205,8 @@ principal, so no execution path inherits the role.
 
 - Initiative #2416 (binding design), Task #2507, parent goal #221. Builds on
   Sensor #2503, assertion evaluator #2504, runner #2505, dashboard/rollup
-  #2506.
+  #2506. Serial-fan-out-vs-budget-gating decision: #2576 (follow-up from the
+  #2507 review).
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`
   (definition payload), `permissions.json` (`*.write` needs-approval).

@@ -102,6 +102,49 @@ connector-related release-notes line.
   from leaking onto descendant htmx requests in the swapped results region
   (#2340). Operators no longer face a dead button with no feedback on
   multi-second eval / checklist / ask runs.
+### Changed — /ui/corpus card titles from chunk title (#2461)
+
+- `/ui/corpus` result and citation cards now headline the chunk's
+  human-legible `title` (threaded through in #2475) instead of a raw
+  numeric/opaque document id. The `_cited_chunks` seam already feeds the
+  title into the `title → document_id → filename → URL` citation-label
+  chain, so the shared `chunk_cards` macro renders it as the card heading;
+  when a title displaces the id, the id is demoted into the metadata badge
+  row (alongside collection/score) so provenance stays visible without
+  being the headline. When the corpus supplies no title the id remains the
+  heading exactly as before — no regression, and no duplicate badge.
+
+### Fixed — DaisyUI 5 code-block theming on /ui/kb (#2452)
+
+- KB entry code blocks (`/ui/kb/<slug>`) are now legible in both console
+  themes. The detail and editor-preview templates pinned the code-block
+  background to the dead DaisyUI 4 `--b2` variable, so a near-white light
+  fallback applied in `meho-dark` too while text inherited the theme's
+  near-white `base-content` — unreadable. Backgrounds now derive from the
+  live `var(--color-base-200)` token, the query-term highlight uses
+  `color-mix(... var(--color-warning) ...)` instead of the dead `--wa`,
+  and `pygments_css()` emits theme-scoped token colours (dark `github-dark`
+  under `.kb-code`, light `default` under `[data-theme="meho-light"]`). The
+  same fix reaches the KB and runbooks editor live previews (shared
+  renderer). Template/CSS only. (#2452)
+
+### Added — structured proposed_effect rendering on /ui/approvals (#2447)
+
+- The `/ui/approvals` detail modal now renders the parked
+  `proposed_effect` envelope **structurally** instead of as one opaque
+  JSON blob: a `safety_level` badge + `op_class` chip in the header, a
+  warning banner when the connector identity may lack write permission
+  (`write_capability_warning`), an error banner when the preview builder
+  failed (`preview_unavailable` + `preview_error` — "blast radius
+  unknown"), a reason-keyed notice when no preview was populated
+  (deliberately-redacted credential write vs. connector-did-not-populate),
+  and a key-value table of the operation-specific fields (the bespoke
+  `preview`, else the generic redaction-safe `params_echo`). The full raw
+  envelope stays available behind a default-closed "Show raw JSON"
+  expander. Reviewers see the policy gate, the possible post-approval
+  denial, and the redaction posture at a glance. Template-only — the
+  render is generic (no per-`op_id` branching); op semantics already live
+  in the server-side preview builders (#2447).
 
 ### Fixed — dot-containing-slug preview selectors on /ui/kb (#2451)
 

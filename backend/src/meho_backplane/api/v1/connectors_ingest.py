@@ -172,7 +172,7 @@ from __future__ import annotations
 import asyncio
 from functools import partial
 from json import JSONDecodeError
-from typing import Annotated, Literal, NoReturn
+from typing import Annotated, Any, Literal, NoReturn
 from uuid import UUID
 
 import httpx
@@ -1454,15 +1454,25 @@ async def edit_op_endpoint(
     URL-encoding the colon-prefixed path segment.
     """
     service = ReviewService(operator)
+    # Forward custom_description only when the operator supplied one. The
+    # REST body cannot express a null-clear (EditOpBody.custom_description
+    # is min_length=1, #2488 out-of-scope), so an absent value must fall
+    # through to the service's _UNSET "leave unchanged" default rather
+    # than a bare None — which the service now reads as an explicit
+    # clear-to-NULL (the MCP tool's null-clear path).
+    edit_op_overrides: dict[str, Any] = {
+        "safety_level": body.safety_level,
+        "requires_approval": body.requires_approval,
+        "is_enabled": body.is_enabled,
+    }
+    if body.custom_description is not None:
+        edit_op_overrides["custom_description"] = body.custom_description
     try:
         warnings = await service.edit_op(
             connector_id,
             op_id,
             tenant_id=operator.tenant_id,
-            custom_description=body.custom_description,
-            safety_level=body.safety_level,
-            requires_approval=body.requires_approval,
-            is_enabled=body.is_enabled,
+            **edit_op_overrides,
         )
     except ConnectorNotFoundError as exc:
         raise HTTPException(

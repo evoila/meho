@@ -118,6 +118,15 @@ class _FakeReviewService:
     #: ``None`` keeps the clean path.
     raise_not_found: ClassVar[ConnectorNotFoundError | None] = None
 
+    #: When set, :meth:`edit_op` / :meth:`edit_group` raise this instead
+    #: of returning — class attribute for the same lazy-construction reason
+    #: as ``raise_not_found``, so the edit ValueError → -32602 mapping
+    #: (#2488) can be exercised through the real handlers. The real service
+    #: raises a plain ``ValueError`` for a no-editable-field call or a bad
+    #: ``safety_level`` enum; the fake stands in with a canned one. Default
+    #: ``None`` keeps the clean path.
+    raise_value_error: ClassVar[ValueError | None] = None
+
     def __init__(self, operator: Operator) -> None:
         self.operator = operator
         self.review_calls: list[tuple[str, Any]] = []
@@ -171,6 +180,8 @@ class _FakeReviewService:
         )
         if self.raise_not_found is not None:
             raise self.raise_not_found
+        if self.raise_value_error is not None:
+            raise self.raise_value_error
 
     async def edit_op(
         self,
@@ -183,6 +194,8 @@ class _FakeReviewService:
         )
         if self.raise_not_found is not None:
             raise self.raise_not_found
+        if self.raise_value_error is not None:
+            raise self.raise_value_error
         return list(self.edit_op_warnings)
 
     async def enable_connector(self, connector_id: str, **_kwargs: Any) -> None:
@@ -1535,3 +1548,156 @@ def test_call_delete_not_found_returns_invalid_params_over_the_wire(
     assert body["error"]["message"] == "connector_not_found"
     assert body["error"].get("data") is None
     assert "ConnectorNotFoundError" not in json.dumps(body)
+
+
+# ---------------------------------------------------------------------------
+# edit_op / edit_group ValueError → structured -32602 (#2488)
+#
+# A no-editable-field edit_op/edit_group call (or a bad safety_level enum)
+# raises a plain ValueError in the service layer. The MCP handlers map it
+# to a JSON-RPC -32602 carrying the service message — REST-400 parity —
+# instead of falling through the dispatcher's catch-all as a bare
+# -32603 "internal error: ValueError" that leaks the Python class name.
+# The REST siblings already return 400 for the identical ValueError.
+# ---------------------------------------------------------------------------
+
+
+_EDIT_VALUE_ERROR_HANDLER_CASES: list[tuple[str, dict[str, Any], str]] = [
+    (
+        "_edit_op_handler",
+        {"connector_id": "vmware-rest-9.0", "op_id": "GET:/x"},
+        "edit_op requires at least one of custom_description, safety_level, "
+        "requires_approval, is_enabled, llm_instructions",
+    ),
+    (
+        "_edit_op_handler",
+        {
+            "connector_id": "vmware-rest-9.0",
+            "op_id": "GET:/x",
+            "safety_level": "nuclear",
+        },
+        "safety_level 'nuclear' not in ['caution', 'dangerous', 'safe']",
+    ),
+    (
+        "_edit_group_handler",
+        {"connector_id": "vmware-rest-9.0", "group_key": "g"},
+        "edit_group requires at least one of when_to_use or name",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "arguments", "message"),
+    _EDIT_VALUE_ERROR_HANDLER_CASES,
+    ids=["edit_op_no_field", "edit_op_bad_safety_level", "edit_group_no_field"],
+)
+async def test_edit_handler_maps_value_error_to_invalid_params(
+    handler_name: str,
+    arguments: dict[str, Any],
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``edit_op`` / ``edit_group`` map a caller-input ValueError to -32602.
+
+    Proves the service message is forwarded verbatim (it names the
+    editable fields, so it is load-bearing) with no ``data`` envelope and
+    no ``"ValueError"`` class-name leak — the shared
+    :func:`raise_invalid_params_for_edit_value_error` mapping.
+    """
+    import meho_backplane.mcp.tools.connector_admin as ca_mod
+
+    monkeypatch.setattr(_FakeReviewService, "raise_value_error", ValueError(message))
+    monkeypatch.setattr(ca_mod, "ReviewService", _FakeReviewService)
+    handler = getattr(ca_mod, handler_name)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    with pytest.raises(McpInvalidParamsError) as caught:
+        await handler(op, arguments)
+
+    assert str(caught.value) == message
+    assert "ValueError" not in str(caught.value)
+    assert caught.value.data is None
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_edit_op_no_field_returns_invalid_params_over_the_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: ``tools/call meho.connector.edit_op`` with no editable field.
+
+    The wire response is a JSON-RPC ``-32602`` whose message names the
+    editable fields (not the dispatcher's bare ``-32603 "internal error:
+    ValueError"``) — the #2488 gap closed at the MCP boundary, with no
+    class-name leak anywhere in the envelope.
+    """
+    message = (
+        "edit_op requires at least one of custom_description, safety_level, "
+        "requires_approval, is_enabled, llm_instructions"
+    )
+    monkeypatch.setattr(_FakeReviewService, "raise_value_error", ValueError(message))
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.edit_op",
+                "arguments": {"connector_id": "vmware-rest-9.0", "op_id": "GET:/x"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == -32602
+    assert "requires at least one" in body["error"]["message"]
+    assert body["error"].get("data") is None
+    assert "ValueError" not in json.dumps(body)
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_call_edit_group_no_field_returns_invalid_params_over_the_wire(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    stubbed_services: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: ``tools/call meho.connector.edit_group`` with no editable field.
+
+    Covers the edit_group half of the #2488 gap over the wire — the same
+    -32602 mapping, closing the no-fields leak the task calls out as
+    shared between the two edit tools.
+    """
+    message = "edit_group requires at least one of when_to_use or name"
+    monkeypatch.setattr(_FakeReviewService, "raise_value_error", ValueError(message))
+    client, _op = client_with_operator
+    response = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "meho.connector.edit_group",
+                "arguments": {"connector_id": "vmware-rest-9.0", "group_key": "g"},
+            },
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == -32602
+    assert "requires at least one" in body["error"]["message"]
+    assert body["error"].get("data") is None
+    assert "ValueError" not in json.dumps(body)

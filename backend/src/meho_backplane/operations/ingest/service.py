@@ -82,6 +82,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest._internals import (
+    _UNSET,
     OP_DELETE_CONNECTOR,
     OP_DISABLE_CONNECTOR,
     OP_EDIT_GROUP,
@@ -90,6 +91,7 @@ from meho_backplane.operations.ingest._internals import (
     OP_ENABLE_GROUP,
     OP_ENABLE_READS,
     ConnectorScope,
+    _UnsetType,
     apply_op_overrides,
     audit_profile_stamp,
     bulk_enable_read_ops,
@@ -602,7 +604,7 @@ class ReviewService:
         op_id: str,
         *,
         tenant_id: UUID | None,
-        custom_description: str | None = None,
+        custom_description: str | None | _UnsetType = _UNSET,
         safety_level: Literal["safe", "caution", "dangerous"] | None = None,
         requires_approval: bool | None = None,
         is_enabled: bool | None = None,
@@ -612,6 +614,11 @@ class ReviewService:
 
         Passing none of the five fields raises :class:`ValueError`.
         Out-of-enum ``safety_level`` raises :class:`ValueError`.
+
+        ``custom_description`` also honours a clear (#2488): the
+        :data:`_UNSET` default leaves it untouched, an explicit ``None``
+        writes SQL NULL (the MCP tool's ``null`` arg), a string sets it.
+        REST forwards it only when supplied (``EditOpBody`` min_length=1).
 
         Returns :class:`EditOpWarning` advisories — empty on the
         common path. ``is_enabled=True`` runs the enable-time

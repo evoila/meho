@@ -1974,6 +1974,48 @@ async def test_edit_op_updates_safety_level_and_writes_audit_row(
 
 
 @pytest.mark.asyncio
+async def test_edit_op_omitted_custom_description_preserves_existing_value(
+    client: TestClient,
+) -> None:
+    """PATCH omitting ``custom_description`` leaves an existing value intact (#2488).
+
+    The service now reads an explicit ``None`` as a clear-to-NULL; the
+    REST route forwards ``custom_description`` only when the body supplied
+    a value, so an unrelated edit (here ``safety_level`` only) must not
+    clobber a previously-set description. Guards the route's conditional
+    forwarding against the sentinel default.
+    """
+    tenant_a = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_a)
+    op_path = "GET:/api/v1/group-0/0"
+    key, token = _admin_token(tenant_id=tenant_a)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        first = client.patch(
+            f"/api/v1/connectors/vmware-rest-9.0/operations/{op_path}",
+            json={"custom_description": "Operator-authored summary."},
+            headers=_authed(token),
+        )
+        assert first.status_code == 200
+        second = client.patch(
+            f"/api/v1/connectors/vmware-rest-9.0/operations/{op_path}",
+            json={"safety_level": "caution"},
+            headers=_authed(token),
+        )
+    assert second.status_code == 200
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id == tenant_a,
+            EndpointDescriptor.op_id == op_path,
+        )
+        op_row = (await session.execute(stmt)).scalar_one()
+        assert op_row.custom_description == "Operator-authored summary."
+        assert op_row.safety_level == "caution"
+
+
+@pytest.mark.asyncio
 async def test_edit_op_enable_on_auto_shim_connector_returns_structured_warning(
     client: TestClient,
 ) -> None:

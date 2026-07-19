@@ -21,6 +21,7 @@ module. v0.2.next refactors are free to reshape the helpers.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -112,6 +113,31 @@ READ_HTTP_METHODS: Final[frozenset[str]] = frozenset({"GET", "HEAD"})
 VALID_SAFETY_LEVELS: Final[frozenset[str]] = frozenset(
     {"safe", "caution", "dangerous"},
 )
+
+
+class _UnsetType(enum.Enum):
+    """Sentinel enum whose singleton member marks an omitted PATCH field.
+
+    ``custom_description`` on :meth:`ReviewService.edit_op` has three
+    caller intents that ``None`` alone cannot encode: leave the column
+    unchanged (field omitted), clear it to SQL NULL (explicit ``null``),
+    or set it to a string. ``None`` is a legitimate write value here — the
+    clear — so it cannot double as "not supplied". The singleton
+    :data:`_UNSET` carries the "not supplied" intent instead, keeping the
+    omitted-vs-null distinction the MCP handler resolves via key-presence
+    alive all the way down to :func:`apply_op_overrides`. A single-member
+    ``Enum`` gives a true singleton, an ``is`` identity check, and clean
+    mypy narrowing (``x is _UNSET`` narrows the ``_UnsetType`` arm away).
+    """
+
+    UNSET = enum.auto()
+
+
+#: The "argument not supplied" sentinel for ``edit_op``'s
+#: ``custom_description`` (see :class:`_UnsetType`). Only that field needs
+#: it: the other overrides hold concrete non-null values, so their
+#: "omitted" state coincides with ``None`` without ambiguity.
+_UNSET: Final = _UnsetType.UNSET
 
 
 @dataclass(frozen=True, slots=True)
@@ -600,7 +626,7 @@ async def bulk_enable_read_ops(
 
 def validate_edit_op_args(
     *,
-    custom_description: str | None,
+    custom_description: str | None | _UnsetType,
     safety_level: str | None,
     requires_approval: bool | None,
     is_enabled: bool | None,
@@ -608,14 +634,18 @@ def validate_edit_op_args(
 ) -> None:
     """Reject an ``edit_op`` call that edits nothing or names a bad enum.
 
-    Raises :class:`ValueError` when every override is ``None`` (the
-    PATCH would be a silent no-op) or when ``safety_level`` falls
-    outside :data:`VALID_SAFETY_LEVELS`. Mirrors the checks the REST
-    body schema enforces, for callers that reach the service directly
-    (MCP tools, tests).
+    Raises :class:`ValueError` when the PATCH would be a silent no-op or
+    when ``safety_level`` falls outside :data:`VALID_SAFETY_LEVELS`.
+    Mirrors the checks the REST body schema enforces, for callers that
+    reach the service directly (MCP tools, tests).
+
+    ``custom_description`` counts as an edit only when it is *supplied* —
+    a string or an explicit ``None`` (clear-to-NULL). The :data:`_UNSET`
+    sentinel means "not supplied" and does not, on its own, save the call
+    from the no-op rejection.
     """
     if (
-        custom_description is None
+        custom_description is _UNSET
         and safety_level is None
         and requires_approval is None
         and is_enabled is None
@@ -634,21 +664,25 @@ def validate_edit_op_args(
 def apply_op_overrides(
     op_row: EndpointDescriptor,
     *,
-    custom_description: str | None,
+    custom_description: str | None | _UnsetType,
     safety_level: str | None,
     requires_approval: bool | None,
     is_enabled: bool | None,
     llm_instructions: dict[str, object] | None,
 ) -> list[str]:
-    """Set every non-``None`` override on *op_row*; return the field names set.
+    """Apply every supplied override on *op_row*; return the field names set.
 
-    Pure PATCH application — ``None`` means "leave unchanged" (the
-    omitted-vs-null distinction is resolved by the callers before the
-    service layer). The returned list feeds the audit payload's
-    ``fields_updated`` key verbatim.
+    Pure PATCH application. For the four concrete overrides ``None`` means
+    "leave unchanged". ``custom_description`` is the exception: it carries
+    the omitted-vs-null distinction the callers resolve before the service
+    layer, so :data:`_UNSET` (not supplied) means "leave unchanged" while
+    an explicit ``None`` writes SQL NULL — clearing an operator override
+    back to the ingested default. The returned list feeds the audit
+    payload's ``fields_updated`` key verbatim, so a null-clear is recorded
+    there like any other edit.
     """
     fields_updated: list[str] = []
-    if custom_description is not None:
+    if custom_description is not _UNSET:
         op_row.custom_description = custom_description
         fields_updated.append("custom_description")
     if safety_level is not None:

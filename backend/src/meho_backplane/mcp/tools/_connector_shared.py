@@ -261,6 +261,33 @@ def raise_invalid_params_for_ambiguous_scope(
     ) from exc
 
 
+def raise_invalid_params_for_edit_value_error(exc: ValueError) -> NoReturn:
+    """Map an ``edit_op`` / ``edit_group`` caller-input ``ValueError`` onto -32602.
+
+    Both edit tools raise a plain :class:`ValueError` for well-formed
+    requests that ask for nothing editable (no PATCH field supplied) or
+    name a bad ``safety_level`` enum — mistakes the REST siblings already
+    render as a structured ``400`` (``connectors_ingest`` edit_op /
+    edit_group routes). Without a handler-level ``except`` arm the same
+    ValueError falls through the dispatcher's generic ``except Exception``
+    and surfaces as ``-32603 "internal error: ValueError"`` — the wrong
+    JSON-RPC class (``-32603`` signals a server-side bug, not a caller
+    mistake) *and* a leak of the Python class name into the stable wire
+    contract (#2488), the same genus #2481 closed for
+    :class:`ConnectorNotFoundError`.
+
+    A caller-input mistake maps onto MCP's only structured
+    handler-error channel — ``-32602`` / :class:`McpInvalidParamsError`.
+    Unlike the ``connector_not_found`` code, the service's message is
+    load-bearing here (it names which fields the operator may set), so it
+    is forwarded verbatim as the error message; it never contains the
+    class name, so the ``ValueError`` string does not reach the wire. No
+    ``data`` envelope is attached — the message alone is the contract,
+    matching the REST route's bare 400 ``detail``.
+    """
+    raise McpInvalidParamsError(str(exc)) from exc
+
+
 def raise_invalid_params_for_connector_not_found(
     exc: ConnectorNotFoundError,
 ) -> NoReturn:

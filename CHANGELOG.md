@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — connector_not_found -32602 across MCP handlers (#2481)
+
+- **All seven `meho.connector.*` tools that take a `connector_id` now
+  return `-32602 connector_not_found` for an unknown or cross-tenant
+  connector** (#2481) — `review` / `edit_group` / `edit_op` / `enable` /
+  `enable_reads` / `disable` / `delete`. Previously only the
+  ambiguous-scope case (#1910) had a handler `except` arm; a genuine
+  not-found fell through the dispatcher's generic catch to a bare
+  `-32603 "internal error: ConnectorNotFoundError"` — the wrong JSON-RPC
+  class (`-32603` signals a server-side bug, so callers retry or
+  escalate a request that is actually a well-formed call against a
+  nonexistent name) and a leak of the Python exception class name into
+  the stable wire contract. The mapping now matches the family-wide
+  `-32602 <thing>_not_found` convention (`agent_not_found`,
+  `approval_request_not_found`, `ingest_job_not_found`); existence is not
+  leaked, so an absent label and a cross-tenant label return the
+  identical bare code, mirroring the REST 404. Closes the last MCP↔REST
+  not-found asymmetry for the connector-admin surface.
+
 ### Added — scope-twin connector row disambiguation (#2474)
 
 - **`GET /api/v1/connectors` and `meho.connector.list` now name each

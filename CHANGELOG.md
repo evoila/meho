@@ -130,6 +130,27 @@ connector-related release-notes line.
   leaked, so an absent label and a cross-tenant label return the
   identical bare code, mirroring the REST 404. Closes the last MCP↔REST
   not-found asymmetry for the connector-admin surface.
+### Fixed — edit_op/edit_group null clears + -32602 mapping (#2488)
+
+- **`meho.connector.edit_op` / `edit_group` now map a caller-input
+  `ValueError` to `-32602`** carrying the service message (which fields
+  are editable) instead of leaking `-32603 "internal error: ValueError"`
+  (#2488). A no-editable-field call — or an out-of-enum `safety_level` —
+  is a well-formed request the caller can fix, so it belongs on the
+  structured `-32602` channel, matching the REST 400 the sibling routes
+  already return. No Python class name reaches the wire.
+- **An explicit `custom_description: null` now clears the column to SQL
+  NULL** on `edit_op`, alone or alongside another field. The
+  `[string, null]` inputSchema always advertised this, but a service-layer
+  `None`-means-"leave unchanged" flattening dropped the null: passed alone
+  it tripped the no-op `ValueError`, and passed with another field it was
+  silently swallowed. A module-level `_UNSET` sentinel now distinguishes
+  "omitted" (leave unchanged) from an explicit `None` (clear to NULL), so
+  an operator can drop a `custom_description` override back to the
+  ingested value — recorded in the audit row's `fields_updated` like any
+  other edit. REST semantics are unchanged: its `EditOpBody` stays
+  `min_length=1` (cannot request a clear) and it forwards the field only
+  when the operator supplied one.
 ### Documentation — kb tool description cross-refs (#2486)
 
 - The `search_knowledge` and `add_to_knowledge` MCP tool descriptions now

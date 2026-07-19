@@ -90,6 +90,19 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-07-19
+
+This release lands the complete **v0.21/v0.22 dogfood-hardening cycle** —
+all of G0.32 (MCP wire contract, governance, connector-session and deploy
+docs; #2494) and all of G0.33 (operator-console walkthrough; #2495) — plus
+the full **G0.36 GSM-deploy hardening set** (#2592, including the
+check-runner target-resolution fix that made target-bound Sensors work),
+the check-layer follow-ups (#2575, #2576), the console/CLI visibility
+pages (`/ui/runners`, `/ui/sensors`, `meho dashboard`), the vmomi VI-JSON
+mount fix for vCenter 8.0.x (#2466), and the retirement of CodeRabbit
+from the development flow (#2601). 45 PRs; no new schema migrations (the
+Alembic chain stays at `0067`).
+
 ### Fixed — check-runner target resolution (#2595)
 
 - The in-process sensor check-runner
@@ -822,6 +835,16 @@ connector-related release-notes line.
 - Remove the CodeRabbit review step from the contribution flow; the
   in-house Claude review pass is the review of record on every PR
   (#2601)
+
+### Documentation — correct the stale `targets` write-verb framing (#2588)
+
+- `docs/codebase/cli.md` described the `create` / `update` / `delete` write
+  verbs as "deferred", implying they are still planned. In reality
+  registration and updates flow through `meho targets import` (POST for new
+  rows, PATCH under `--update`), and a standalone `create` verb was ruled out
+  in favour of file-based import (#1574 / #1559). Only `delete` has no CLI
+  surface yet. Both the overview and the "Out of scope (v0.2)" note are
+  rewritten to state this accurately.
 
 ## [0.24.0] - 2026-07-17
 

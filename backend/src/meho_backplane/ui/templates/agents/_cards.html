@@ -27,7 +27,7 @@
               <div class="flex items-start justify-between gap-2">
                 <a
                   href="/ui/agents/{{ agent.name | urlencode }}"
-                  class="link link-hover font-mono font-semibold break-all"
+                  class="link link-primary font-mono font-semibold break-all"
                 >
                   {{ agent.name }}
                 </a>
@@ -74,15 +74,18 @@
                 updated {{ agent.updated_at.isoformat() }}
               </div>
 
-              {# One-click enable / disable straight from the card, so a
-                 tenant_admin never has to open the detail view to flip an
-                 agent's state (#2347). It POSTs the flipped ``enabled`` to
-                 the same ``/ui/agents/{name}/toggle`` route the detail view
-                 uses; the 204 + ``HX-Redirect`` reloads the list with the
-                 new pill. Rendered for tenant_admins only (the top-level
-                 ``can_write``); the route re-checks the role server-side. #}
-              {% if can_write %}
-                <div class="card-actions justify-end pt-1">
+              {# Card actions. The View link drives page-nav to the per-agent
+                 detail view and is rendered for every role, matching the
+                 list-surface convention (visible identity link + View
+                 button). The one-click enable / disable toggle lets a
+                 tenant_admin flip an agent's state without opening the
+                 detail view (#2347): it POSTs the flipped ``enabled`` to the
+                 same ``/ui/agents/{name}/toggle`` route the detail view uses;
+                 the 204 + ``HX-Redirect`` reloads the list with the new pill.
+                 The toggle is gated on the top-level ``can_write`` (the route
+                 re-checks the role server-side); the View link is not. #}
+              <div class="card-actions justify-end pt-1">
+                {% if can_write %}
                   <button
                     type="button"
                     class="btn btn-xs btn-ghost"
@@ -95,8 +98,15 @@
                   >
                     {% if agent.enabled %}Disable{% else %}Enable{% endif %}
                   </button>
-                </div>
-              {% endif %}
+                {% endif %}
+                <a
+                  href="/ui/agents/{{ agent.name | urlencode }}"
+                  class="btn btn-xs btn-ghost"
+                  aria-label="View agent {{ agent.name }}"
+                >
+                  View
+                </a>
+              </div>
             </div>
           </article>
         </li>

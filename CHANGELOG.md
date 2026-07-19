@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed — converge list-surface detail navigation (#2463)
+
+- Every `/ui/*` page-nav list surface now offers the same detail-nav
+  affordance pair — a visibly-styled identity link (`link link-primary`)
+  where the row has an identity cell, plus a trailing `View` button —
+  so an operator never has to guess whether a cell is clickable. Corpus
+  Collections and Conventions gained a `View` button and actions column;
+  the Agents card grid gained a `View` link in `card-actions` rendered
+  for all roles (previously the card-actions held only a `can_write`-gated
+  toggle); the Agent-runs `run_id` cell is now a link to the run detail.
+- Identity-cell links that rendered as plain text until hover
+  (`link link-hover`) are normalised to the visible `link link-primary`
+  styling across Connectors, Memory (active + recently-expired cards),
+  Agents cards, Corpus Collections, and Conventions. Scheduler and
+  agent-grants rows keep their button-only affordance (no natural
+  identity column exists); drawer surfaces and the broadcast wall-monitor
+  row-click idiom are unchanged. The convention is recorded in
+  `docs/codebase/ui.md`.
 ### Removed — raw retrieval score pills from search cards (#2453)
 
 - `/ui/kb` search result cards no longer render the raw retrieval score pills

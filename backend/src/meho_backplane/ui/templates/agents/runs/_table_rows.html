@@ -44,7 +44,13 @@
   {% if rows %}
     {% for row in rows %}
       <tr data-run-id="{{ row.run_id }}">
-        <td class="font-mono text-xs">{{ row.run_id[:8] }}…</td>
+        <td class="font-mono text-xs">
+          <a
+            href="/ui/agents/runs/{{ row.run_id }}"
+            class="link link-primary"
+            aria-label="View run {{ row.run_id }}"
+          >{{ row.run_id[:8] }}…</a>
+        </td>
         <td>
           <span class="badge {{ row.status_badge }} badge-sm">{{ row.status }}</span>
           {% if row.is_awaiting_approval %}

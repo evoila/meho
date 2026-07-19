@@ -33,7 +33,7 @@
              readiness card + re-probe + enable/disable. #}
           <a
             href="/ui/corpus/collections/{{ row.collection_key | urlencode }}"
-            class="link link-hover"
+            class="link link-primary"
           >{{ row.collection_key }}</a>
         </td>
         <td>{{ row.vendor }}</td>
@@ -73,11 +73,20 @@
             <span class="opacity-50">never</span>
           {% endif %}
         </td>
+        <td>
+          <a
+            href="/ui/corpus/collections/{{ row.collection_key | urlencode }}"
+            class="btn btn-ghost btn-xs"
+            aria-label="View collection {{ row.collection_key }}"
+          >
+            View
+          </a>
+        </td>
       </tr>
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="6" class="text-center text-sm opacity-60 py-6">
+      <td colspan="7" class="text-center text-sm opacity-60 py-6">
         No collections registered for this tenant yet.
       </td>
     </tr>

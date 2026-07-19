@@ -271,6 +271,10 @@ async def _run_status_handler(
         "model": view.model,
         "output": view.output,
         "error": view.error,
+        "agent_definition_id": (
+            str(view.agent_definition_id) if view.agent_definition_id is not None else None
+        ),
+        "agent_name": view.agent_name,
     }
 
 
@@ -280,13 +284,15 @@ register_mcp_tool(
         description=(
             "Poll an agent run's durable status by run_id (Initiative "
             "#802). Operator-level. Returns {run_id, status, turns, "
-            "provider, model, output, error}; output/error are set once the "
-            "run reaches a terminal state. Reads the durable run record, so "
-            "it works after the call that started the run returned. Pass the "
-            "`run_id` a `meho.agents.run` / `meho.agents.list_runs` row "
-            "returned (canonical name; G0.32 #2471) or the deprecated "
-            "`handle` alias. An unknown / cross-tenant run_id returns "
-            "'agent_run_not_found'."
+            "provider, model, output, error, agent_definition_id, "
+            "agent_name}; output/error are set once the run reaches a "
+            "terminal state; agent_definition_id / agent_name are null for "
+            "an ad-hoc run or a definition deleted after the run (#2472). "
+            "Reads the durable run record, so it works after the call that "
+            "started the run returned. Pass the `run_id` a `meho.agents.run` "
+            "/ `meho.agents.list_runs` row returned (canonical name; G0.32 "
+            "#2471) or the deprecated `handle` alias. An unknown / "
+            "cross-tenant run_id returns 'agent_run_not_found'."
         ),
         inputSchema={
             "type": "object",
@@ -316,6 +322,9 @@ async def _list_runs_handler(
     work_ref = arguments.get("work_ref")
     if work_ref is not None and not isinstance(work_ref, str):
         raise McpInvalidParamsError("work_ref must be a string when supplied")
+    agent_name = arguments.get("agent_name")
+    if agent_name is not None and not isinstance(agent_name, str):
+        raise McpInvalidParamsError("agent_name must be a string when supplied")
     status_arg = arguments.get("status")
     status: AgentRunStatus | None = None
     if status_arg is not None:
@@ -340,6 +349,7 @@ async def _list_runs_handler(
         operator,
         work_ref=work_ref,
         status=status,
+        agent_name=agent_name,
         limit=limit,
         offset=offset,
     )
@@ -354,6 +364,10 @@ async def _list_runs_handler(
                 "model": s.model,
                 "turns": s.turns,
                 "work_ref": s.work_ref,
+                "agent_definition_id": (
+                    str(s.agent_definition_id) if s.agent_definition_id is not None else None
+                ),
+                "agent_name": s.agent_name,
                 "created_at": s.created_at.isoformat(),
                 "started_at": s.started_at.isoformat() if s.started_at is not None else None,
                 "ended_at": s.ended_at.isoformat() if s.ended_at is not None else None,
@@ -370,12 +384,16 @@ register_mcp_tool(
             "List the operator's tenant's agent runs, newest first "
             "(Initiative #802; work_ref I3-T2 #1662). Operator-level. "
             "Returns {runs: [{run_id, status, trigger, model_tier, "
-            "provider, model, turns, work_ref, created_at, started_at, "
-            "ended_at}]}. Filter by work_ref (exact-match external "
-            "change-ticket reference, e.g. 'gh:evoila/meho#11') and/or "
-            "status; page with limit (1..500, default 100) + offset. "
-            "Tenant-isolated server-side — only your tenant's runs are "
-            "visible."
+            "provider, model, turns, work_ref, agent_definition_id, "
+            "agent_name, created_at, started_at, ended_at}]}; "
+            "agent_definition_id / agent_name are null for an ad-hoc run "
+            "or a definition deleted after the run (#2472). Filter by "
+            "work_ref (exact-match external change-ticket reference, e.g. "
+            "'gh:evoila/meho#11'), status, and/or agent_name (exact-match "
+            "agent definition name — an unknown name returns an empty "
+            "list, not an error); page with limit (1..500, default 100) + "
+            "offset. Tenant-isolated server-side — only your tenant's runs "
+            "are visible."
         ),
         inputSchema={
             "type": "object",
@@ -385,6 +403,13 @@ register_mcp_tool(
                     "description": (
                         "Exact-match external change-ticket reference filter, "
                         "e.g. 'gh:evoila/meho#11'."
+                    ),
+                },
+                "agent_name": {
+                    "type": "string",
+                    "description": (
+                        "Exact-match agent definition name filter. An unknown "
+                        "name returns an empty list rather than an error."
                     ),
                 },
                 "status": {

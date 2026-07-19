@@ -113,9 +113,11 @@ from meho_backplane.mcp.tools._connector_shared import (
     _coerce_tenant_id,
     _model_dump_json_safe,
     raise_invalid_params_for_ambiguous_scope,
+    raise_invalid_params_for_connector_not_found,
 )
 from meho_backplane.operations.ingest import (
     AmbiguousConnectorScopeError,
+    ConnectorNotFoundError,
     ConnectorStatusFilter,
     ReviewService,
     list_ingested_connectors,
@@ -173,6 +175,10 @@ async def _review_handler(
         # the dispatcher's bare -32603. See
         # raise_invalid_params_for_ambiguous_scope.
         raise_invalid_params_for_ambiguous_scope(exc)
+    except ConnectorNotFoundError as exc:
+        # Unknown / cross-tenant label → -32602 connector_not_found
+        # (#2481), not the dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_connector_not_found(exc)
     return _model_dump_json_safe(payload)
 
 
@@ -198,12 +204,17 @@ async def _edit_group_handler(
     if "name" in arguments:
         patch["name"] = arguments["name"]
     service = ReviewService(operator)
-    await service.edit_group(
-        connector_id,
-        group_key,
-        tenant_id=tenant_id,
-        **patch,
-    )
+    try:
+        await service.edit_group(
+            connector_id,
+            group_key,
+            tenant_id=tenant_id,
+            **patch,
+        )
+    except ConnectorNotFoundError as exc:
+        # Unknown / cross-tenant label → -32602 connector_not_found
+        # (#2481), not the dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_connector_not_found(exc)
     return {"connector_id": connector_id, "group_key": group_key, "ok": True}
 
 
@@ -238,12 +249,17 @@ async def _edit_op_handler(
     if "is_enabled" in arguments:
         patch["is_enabled"] = arguments["is_enabled"]
     service = ReviewService(operator)
-    warnings = await service.edit_op(
-        connector_id,
-        op_id,
-        tenant_id=tenant_id,
-        **patch,
-    )
+    try:
+        warnings = await service.edit_op(
+            connector_id,
+            op_id,
+            tenant_id=tenant_id,
+            **patch,
+        )
+    except ConnectorNotFoundError as exc:
+        # Unknown / cross-tenant label → -32602 connector_not_found
+        # (#2481), not the dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_connector_not_found(exc)
     return {
         "connector_id": connector_id,
         "op_id": op_id,
@@ -260,7 +276,12 @@ async def _enable_handler(
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     service = ReviewService(operator)
-    await service.enable_connector(connector_id, tenant_id=tenant_id)
+    try:
+        await service.enable_connector(connector_id, tenant_id=tenant_id)
+    except ConnectorNotFoundError as exc:
+        # Unknown / cross-tenant label → -32602 connector_not_found
+        # (#2481), not the dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_connector_not_found(exc)
     return {"connector_id": connector_id, "status": "enabled", "ok": True}
 
 
@@ -294,6 +315,10 @@ async def _enable_reads_handler(
         # (#1801 / this is #1910). enable_reads shares the resolver with
         # the review read path, so it can raise the same error.
         raise_invalid_params_for_ambiguous_scope(exc)
+    except ConnectorNotFoundError as exc:
+        # Unknown / cross-tenant label → -32602 connector_not_found
+        # (#2481), not the dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_connector_not_found(exc)
     return {
         "connector_id": connector_id,
         "ops_enabled": ops_enabled,
@@ -309,7 +334,12 @@ async def _disable_handler(
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     service = ReviewService(operator)
-    await service.disable_connector(connector_id, tenant_id=tenant_id)
+    try:
+        await service.disable_connector(connector_id, tenant_id=tenant_id)
+    except ConnectorNotFoundError as exc:
+        # Unknown / cross-tenant label → -32602 connector_not_found
+        # (#2481), not the dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_connector_not_found(exc)
     return {"connector_id": connector_id, "status": "disabled", "ok": True}
 
 
@@ -333,7 +363,12 @@ async def _delete_handler(
     connector_id: str = arguments["connector_id"]
     tenant_id = _coerce_tenant_id(arguments.get("tenant_id"))
     service = ReviewService(operator)
-    result = await service.delete_connector(connector_id, tenant_id=tenant_id)
+    try:
+        result = await service.delete_connector(connector_id, tenant_id=tenant_id)
+    except ConnectorNotFoundError as exc:
+        # Unknown / cross-tenant label → -32602 connector_not_found
+        # (#2481), not the dispatcher's bare -32603 class-name leak.
+        raise_invalid_params_for_connector_not_found(exc)
     return {
         "connector_id": connector_id,
         "ok": True,

@@ -833,7 +833,7 @@ jobs:
         # supply-chain audit covers both. cache-dependency-path keys
         # the Go module cache off cli/go.sum, the only Go module in
         # the tree today.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           # Tracks `cli/go.mod`'s `go 1.25.8` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
@@ -984,7 +984,7 @@ jobs:
         # `make generate` runs the pinned oapi-codegen (installed by the
         # Makefile `tools` target) which needs Go. Same version + cache
         # shape as the go-lint-test lane.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.25'
           cache-dependency-path: cli/go.sum

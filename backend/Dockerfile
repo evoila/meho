@@ -43,7 +43,7 @@
 # `docs/codebase/backend.md`). `BUILDPLATFORM` and `TARGETPLATFORM` are
 # auto-populated by BuildKit and surfaced in the build log so CI runs
 # show which arch each layer compiled on.
-FROM python:3.12-slim@sha256:c3d81d25b3154142b0b42eb1e61300024426268edeb5b5a26dd7ddf64d9daf28 AS builder
+FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS builder
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
@@ -109,11 +109,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # used.
 #
 # The CLI compiles against the **installed wheel's** static/src tree -- the
-# wheel install above puts templates/ + static/src/ at
-# /app/.venv/lib/python3.12/site-packages/meho_backplane/ui/. We write the
-# minified output to .../static/dist/tailwind.css INSIDE the installed
-# package tree so the runtime stage's `COPY --from=builder /app/.venv` picks
-# up the artifact automatically (no extra COPY layer required).
+# wheel install above puts templates/ + static/src/ under the venv's
+# site-packages at meho_backplane/ui/. That directory is resolved at build
+# time via `sysconfig.get_paths()["purelib"]` rather than spelled out as
+# /app/.venv/lib/python3.X/site-packages: the interpreter minor version is
+# in that path, so a hardcoded one silently breaks the build on every base
+# image bump (it did exactly that on 3.12 -> 3.14). We write the minified
+# output to .../static/dist/tailwind.css INSIDE the installed package tree
+# so the runtime stage's `COPY --from=builder /app/.venv` picks up the
+# artifact automatically (no extra COPY layer required).
 #
 # `static/dist/` is .gitignore'd; only built artifacts live there. Local dev
 # runs the same CLI in --watch mode against the source tree (see
@@ -121,7 +125,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ARG TAILWIND_VER=v4.3.0
 ARG TAILWIND_SHA_AMD64=73f0e5459054e5cfaa8ab6f3b940f3fbe0f13cc7fd83bc24e7c655033c203400
 ARG TAILWIND_SHA_ARM64=8f48dcb72be3b351c10563c5329b4638ba8516820dc3b3a1609625a166e87cbd
-# python:3.12-slim ships Python but NOT curl; rather than apt-get'ing curl just
+# python:3.14-slim ships Python but NOT curl; rather than apt-get'ing curl just
 # to download one file (and re-cleaning the apt lists afterwards), we use the
 # stdlib `urllib.request` already on PATH. The `sha256sum -c -` integrity
 # check below is the load-bearing trust gate -- the transport layer is HTTPS
@@ -140,7 +144,7 @@ RUN set -eux; \
     echo "${TW_SHA}  /tmp/tailwindcss" | sha256sum -c -; \
     install -m 0755 /tmp/tailwindcss /usr/local/bin/tailwindcss; \
     rm /tmp/tailwindcss; \
-    UI_SP="/app/.venv/lib/python3.12/site-packages/meho_backplane/ui"; \
+    UI_SP="$(/app/.venv/bin/python -c 'import os, sysconfig; print(os.path.join(sysconfig.get_paths()["purelib"], "meho_backplane", "ui"))')"; \
     test -f "${UI_SP}/static/src/styles.css"; \
     mkdir -p "${UI_SP}/static/dist"; \
     tailwindcss \
@@ -150,7 +154,7 @@ RUN set -eux; \
     test -s "${UI_SP}/static/dist/tailwind.css"
 
 # ---------- Runtime ----------------------------------------------------------
-FROM python:3.12-slim@sha256:c3d81d25b3154142b0b42eb1e61300024426268edeb5b5a26dd7ddf64d9daf28 AS runtime
+FROM python:3.14-slim@sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015 AS runtime
 
 # Non-root user (uid 1001 — fixed for k8s SecurityContext alignment).
 RUN useradd --system --uid 1001 --gid 0 --no-create-home --shell /usr/sbin/nologin meho

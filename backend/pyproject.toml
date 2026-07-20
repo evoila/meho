@@ -40,7 +40,7 @@ dependencies = [
     # google-auth ADC + impersonation chain the GcloudConnector already
     # drives. The sync ``SecretManagerServiceClient.access_secret_version``
     # call is run off the event loop via ``asyncio.to_thread``.
-    "google-cloud-secret-manager>=2.20.0",
+    "google-cloud-secret-manager>=2.30.0",
     "duckdb>=1.5.4",
     "pyarrow>=25.0.0",
     "msgspec>=0.20.0",

@@ -197,9 +197,15 @@ lost — produces the *same* Vault 403 on that write, so the policy scope
 is not the only thing to check. Since evoila/meho#2652 the broker
 disambiguates the two before answering: when Vault answers the write
 with a **403** it fires `auth/token/lookup-self` on the same token
-(Vault answers that endpoint for any live token regardless of policy,
-and 403s for an invalid one) and stamps the outcome on the raised
-error. Only a 403 on the probe condemns the token — any other Vault
+(Vault answers that endpoint for a live token whose policy set grants
+`read` on it — the built-in `default` policy does, and the mint command
+below attaches it — and 403s for an invalid one) and stamps the outcome
+on the raised error. **Keep that capability reachable:** a live token
+minted with `-no-default-policy` and no explicit
+`auth/token/lookup-self` grant also 403s the probe, so it would be
+reported dead when the real fault is the policy. The `meho-scheduler`
+policy below grants it explicitly rather than relying on `default`.
+Only a 403 on the probe condemns the token — any other Vault
 status (503 sealed, 502 upstream, 500, 429 standby) says nothing about
 it, so an outage keeps the policy-scope wording rather than ordering a
 needless re-mint. A dead token then
@@ -219,6 +225,14 @@ path "secret/data/agents/*/credentials" {
   capabilities = ["create", "read", "update"]
 }
 path "secret/metadata/agents/*/credentials" {
+  capabilities = ["read"]
+}
+# The dead-token probe (evoila/meho#2652) reads lookup-self after a 403
+# on the write. The built-in `default` policy already grants this, but
+# granting it explicitly keeps the probe sound for a token minted with
+# `-no-default-policy` — without it a live token 403s the probe and gets
+# reported dead.
+path "auth/token/lookup-self" {
   capabilities = ["read"]
 }
 ```

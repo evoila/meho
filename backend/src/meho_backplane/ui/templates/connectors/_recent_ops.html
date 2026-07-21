@@ -95,7 +95,7 @@
           <time
             class="text-xs opacity-70 w-44 shrink-0"
             x-bind:datetime="ev.occurred_at"
-            x-text="ev.occurred_at"
+            x-text="formatTs(ev.occurred_at)"
           ></time>
           <span class="badge badge-outline badge-xs" x-text="ev.method"></span>
           <span class="font-mono text-xs truncate" x-text="ev.path"></span>

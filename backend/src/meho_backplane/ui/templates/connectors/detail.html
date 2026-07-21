@@ -92,12 +92,15 @@
       >
         <div class="card-body space-y-2">
           <h2 class="card-title text-base">Properties</h2>
+          {#- Human-readable labels + hidden internal id (#170): the raw
+              UUID is operator-facing noise (name carries identity), and
+              ``created_at`` / ``updated_at`` render the console-standard
+              ``%Y-%m-%d %H:%M UTC`` with the ISO value kept in the
+              ``<time datetime>`` attribute. Timestamps are tz-aware UTC. -#}
           <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
-            <dt class="opacity-60">id</dt>
-            <dd class="font-mono text-xs">{{ target.id }}</dd>
-            <dt class="opacity-60">name</dt>
+            <dt class="opacity-60">Name</dt>
             <dd class="font-mono">{{ target.name }}</dd>
-            <dt class="opacity-60">aliases</dt>
+            <dt class="opacity-60">Aliases</dt>
             <dd>
               {% if target.aliases %}
                 {{ target.aliases | join(", ") }}
@@ -105,26 +108,30 @@
                 <span class="opacity-50">—</span>
               {% endif %}
             </dd>
-            <dt class="opacity-60">product</dt>
+            <dt class="opacity-60">Product</dt>
             <dd>{{ target.product }}</dd>
-            <dt class="opacity-60">host</dt>
+            <dt class="opacity-60">Host</dt>
             <dd class="font-mono">{{ target.host }}</dd>
-            <dt class="opacity-60">port</dt>
+            <dt class="opacity-60">Port</dt>
             <dd>{{ target.port if target.port is not none else "—" }}</dd>
-            <dt class="opacity-60">fqdn</dt>
+            <dt class="opacity-60">FQDN</dt>
             <dd>{{ target.fqdn or "—" }}</dd>
-            <dt class="opacity-60">auth_model</dt>
+            <dt class="opacity-60">Auth model</dt>
             <dd><span class="badge badge-ghost badge-xs">{{ target.auth_model }}</span></dd>
-            <dt class="opacity-60">vpn_required</dt>
+            <dt class="opacity-60">VPN required</dt>
             <dd>{{ "yes" if target.vpn_required else "no" }}</dd>
-            <dt class="opacity-60">secret_ref</dt>
+            <dt class="opacity-60">Secret ref</dt>
             <dd class="font-mono text-xs">{{ target.secret_ref or "—" }}</dd>
-            <dt class="opacity-60">preferred_impl_id</dt>
+            <dt class="opacity-60">Preferred impl</dt>
             <dd class="font-mono text-xs">{{ target.preferred_impl_id or "—" }}</dd>
-            <dt class="opacity-60">created_at</dt>
-            <dd class="text-xs">{{ target.created_at.isoformat() }}</dd>
-            <dt class="opacity-60">updated_at</dt>
-            <dd class="text-xs">{{ target.updated_at.isoformat() }}</dd>
+            <dt class="opacity-60">Created</dt>
+            <dd class="text-xs">
+              <time datetime="{{ target.created_at.isoformat() }}">{{ target.created_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
+            </dd>
+            <dt class="opacity-60">Updated</dt>
+            <dd class="text-xs">
+              <time datetime="{{ target.updated_at.isoformat() }}">{{ target.updated_at.strftime("%Y-%m-%d %H:%M UTC") }}</time>
+            </dd>
           </dl>
           {% if target.extras %}
             <details class="mt-2">

@@ -10,7 +10,10 @@ time, both under the scheduler's static service token. These tests cover:
 * the raw-API-path -> ``(mount, logical_path)`` splitter;
 * the not-configured guard (no ``VAULT_SCHEDULER_TOKEN``);
 * the write happy path (payload shape + path derivation);
-* the read happy path, the not-found (``None``) path, and error mapping.
+* the read happy path, the not-found (``None``) path, and error mapping;
+* the write-failure disposition split (#2652) — a Vault 403 plus a
+  failing ``lookup-self`` means the token is dead, a Vault 403 plus a
+  succeeding ``lookup-self`` means the policy is under-scoped.
 
 The hvac client is faked via the ``_build_client`` seam — no running
 Vault. The live round-trip is covered by the integration suite.
@@ -47,6 +50,7 @@ class _FakeTokenApi:
         self.renew_raises: BaseException | None = None
         self.lookup_result: Any = None
         self.lookup_raises: BaseException | None = None
+        self.lookup_calls = 0
 
     def renew_self(self, increment: int | None = None) -> Any:
         self.renew_calls += 1
@@ -55,6 +59,7 @@ class _FakeTokenApi:
         return {"auth": {"lease_duration": 2764800}}
 
     def lookup_self(self, mount_point: str = "token") -> Any:
+        self.lookup_calls += 1
         if self.lookup_raises is not None:
             raise self.lookup_raises
         return self.lookup_result
@@ -202,8 +207,90 @@ async def test_write_unreachable_maps_to_broker_error(fake_kv: _FakeKvV2) -> Non
         raise requests.exceptions.ConnectionError("down")
 
     fake_kv.create_or_update_secret = _boom  # type: ignore[assignment]
-    with pytest.raises(vc.SchedulerVaultBrokerError):
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
         await vc.write_agent_secret("agent:reporter", "s")
+    # An unreachable Vault is already an unambiguous diagnosis; the
+    # write path must not spend a lookup-self on it (#2652).
+    assert excinfo.value.token_invalid is False
+    assert fake_kv.token_api.lookup_calls == 0
+
+
+# --- write-failure disposition: dead token vs. under-scoped policy (#2652) ---
+
+
+def _deny_write(fake_kv: _FakeKvV2) -> None:
+    """Make the KV write answer with Vault's 403 (the ambiguous case)."""
+
+    def _forbidden(**_: Any) -> None:
+        raise hvac.exceptions.Forbidden("permission denied")
+
+    fake_kv.create_or_update_secret = _forbidden  # type: ignore[assignment]
+
+
+async def test_write_denied_with_dead_token_sets_token_invalid(fake_kv: _FakeKvV2) -> None:
+    """Write 403 + lookup-self 403 -> the token itself is the fault."""
+    _deny_write(fake_kv)
+    fake_kv.token_api.lookup_raises = hvac.exceptions.Forbidden("permission denied")
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is True
+    assert fake_kv.token_api.lookup_calls == 1
+    # Fail fast: the write is diagnosed, never retried.
+    assert fake_kv.writes == []
+
+
+async def test_write_denied_with_live_token_keeps_policy_disposition(
+    fake_kv: _FakeKvV2,
+) -> None:
+    """Write 403 + lookup-self OK -> the policy scope is the fault."""
+    _deny_write(fake_kv)
+    fake_kv.token_api.lookup_result = {"data": {"ttl": 2764800, "expire_time": None}}
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is False
+    assert fake_kv.token_api.lookup_calls == 1
+
+
+async def test_write_denied_with_unreachable_lookup_stays_conservative(
+    fake_kv: _FakeKvV2,
+) -> None:
+    """A transport failure on lookup-self is not evidence of a dead token."""
+    _deny_write(fake_kv)
+    fake_kv.token_api.lookup_raises = requests.exceptions.ConnectionError("down")
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is False
+
+
+async def test_broker_error_defaults_to_token_valid() -> None:
+    """Every pre-existing raise site keeps the policy-scope disposition."""
+    assert vc.SchedulerVaultBrokerError("boom").token_invalid is False
+    assert vc.SchedulerVaultNotConfiguredError("boom").token_invalid is False
+
+
+def test_write_denied_detail_is_unchanged() -> None:
+    """The under-scoped-policy remediation is preserved verbatim (#2652)."""
+    assert vc.SCHEDULER_VAULT_WRITE_DENIED_DETAIL == (
+        "scheduler Vault write failed — VAULT_SCHEDULER_TOKEN policy must "
+        "grant create/update on the agent-credentials path"
+    )
+
+
+def test_token_invalid_detail_names_the_remint() -> None:
+    """The dead-token remediation names re-minting, not the policy."""
+    detail = vc.SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
+    assert detail.startswith("scheduler_vault_token_invalid:")
+    assert "invalid or expired" in detail
+    assert "re-mint" in detail.lower()
+    assert "VAULT_SCHEDULER_TOKEN" in detail
+    assert "docs/cross-repo/vault-provisioning.md" in detail
+    assert "policy must grant" not in detail
 
 
 # --- read -------------------------------------------------------------

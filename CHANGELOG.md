@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — scheduler Vault dead-token diagnostics (#2652)
+
+- Agent- and runner-principal registration now tells operators **which**
+  Vault fault they hit. A dead scheduler token (revoked, expired, or a
+  periodic token whose lease lapsed) and an under-scoped `meho-scheduler`
+  policy both make Vault answer the credential write with a 403, but
+  every surface named only the policy remediation — so a field report had
+  the operator verify policy, path pattern, and mount (all correct)
+  before anyone thought to `vault token lookup` the token itself. The
+  broker now fires the `auth/token/lookup-self` probe it already shipped
+  for #2328 on the write-failure path and carries the disposition on
+  `SchedulerVaultBrokerError`; a dead token surfaces as
+  `scheduler_vault_token_invalid: the scheduler Vault token is invalid or
+  expired …` with the re-mint remediation on all four surfaces (the MCP
+  `meho.agent_principals.register` `-32602` message, both REST register
+  routes' 502 detail, and the `/ui/agents/principals` register banner),
+  while a live-token-denied write keeps the existing policy-scope wording
+  unchanged. Diagnosis only — the write is not retried, and the
+  renew-on-use loop from #2328 is untouched.
+  `docs/cross-repo/vault-provisioning.md` gains the dead-token row next
+  to the under-scoped-policy row.
+
 ## [0.25.0] - 2026-07-19
 
 This release lands the complete **v0.21/v0.22 dogfood-hardening cycle** —

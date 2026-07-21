@@ -654,6 +654,42 @@ def test_register_vault_error_renders_502(monkeypatch: pytest.MonkeyPatch) -> No
     assert "scheduler_vault_write_error" in response.text
 
 
+def test_register_dead_vault_token_banner_names_the_remint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead scheduler token renders the re-mint banner, not the policy one (#2652).
+
+    Both failures are a Vault 403, so the console used to tell the
+    operator to widen a policy that was already correct. The broker's
+    ``lookup-self`` disposition rides on the exception and the banner
+    follows it.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _admin_session(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+
+    async def _raise_dead_token(self: AgentPrincipalService, **kwargs: Any) -> AgentPrincipalRead:
+        raise SchedulerVaultBrokerError("vault denied", token_invalid=True)
+
+    monkeypatch.setattr(AgentPrincipalService, "register", _raise_dead_token)
+
+    client, mock, csrf = _authenticated_client(session_id=session_id, jwks=jwks, with_csrf=True)
+    try:
+        response = client.post(
+            "/ui/agents/principals/register",
+            data={"name": "dead-token-bot"},
+            headers=_csrf_headers(csrf),
+        )
+    finally:
+        mock.stop()
+    assert response.status_code == 502, response.text
+    assert "scheduler_vault_token_invalid" in response.text
+    assert "re-mint" in response.text.lower()
+    assert "scheduler_vault_write_error" not in response.text
+    assert "policy must grant" not in response.text
+
+
 # ---------------------------------------------------------------------------
 # Revoke (kill switch) -- RBAC + type-to-confirm + happy path + errors
 # ---------------------------------------------------------------------------

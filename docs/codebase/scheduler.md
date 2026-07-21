@@ -201,6 +201,24 @@ live source per use (`_current_scheduler_token`): setting
 re-read on every read/write, so a re-mint is picked up without a pod
 restart (#2328).
 
+The same `lookup-self` primitive also disambiguates the **write**
+failure (#2652). Vault answers a dead token and a live token on an
+under-scoped policy with the same 403, but the remediations are
+opposites — re-mint vs. widen the policy — and the pre-#2652 message
+only ever named the policy, which cost operators the diagnosis on a
+deploy whose policy, path pattern, and mount were all already correct.
+`write_agent_secret` now probes `_scheduler_token_rejected` on the
+rejection arm (same hvac client, so the answer describes the identity
+that was actually denied) and stamps `token_invalid` on the raised
+`SchedulerVaultBrokerError`. All four register surfaces — the MCP tool,
+`POST /api/v1/agent-principals`, `POST /api/v1/runner-principals`, and
+the `/ui/agents/principals` register banner — read that one flag and
+choose between `SCHEDULER_VAULT_TOKEN_INVALID_DETAIL` and
+`SCHEDULER_VAULT_WRITE_DENIED_DETAIL`. The probe is diagnosis-only: the
+write is never retried, a transport failure on the probe is not treated
+as evidence of a dead token, and the unreachable-Vault arm (already an
+unambiguous diagnosis) does not probe at all.
+
 ### Precondition gate vs invoke-time failure
 
 The two fire paths follow the same lifecycle shape:

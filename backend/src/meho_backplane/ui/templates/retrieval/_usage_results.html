@@ -76,7 +76,12 @@
           {% if report.counted_surfaces %}
             <div class="mt-1 flex flex-wrap gap-1">
               {% for surface in report.counted_surfaces %}
-                <span class="badge badge-ghost badge-outline font-mono">{{ surface }}</span>
+                {#- ``badge-neutral`` (solid neutral + neutral-content text),
+                    not ``badge-ghost``: a ghost badge's text inherits the
+                    ``alert-info`` surface colour and reads as near-invisible
+                    on the teal banner. Neutral is contrast-safe in both
+                    themes (#169). -#}
+                <span class="badge badge-neutral font-mono">{{ surface }}</span>
               {% endfor %}
             </div>
           {% endif %}

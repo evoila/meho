@@ -1296,6 +1296,20 @@ class Settings(BaseModel):
     # evaluator (or the test path without a runner) can opt out.
     sensor_runner_enabled: bool = True
     sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    # #2642 (G0.37) — the in-process check-runner's own service-principal
+    # identity for background dispatch. Both empty (the default) keeps
+    # today's behaviour bit-for-bit: the runner's synthetic operator carries
+    # ``raw_jwt=""`` and a target whose credentials need an operator-context
+    # read fails closed. Set both and the runner mints a Keycloak
+    # ``client_credentials`` token for this confidential client and presents
+    # it as the synthetic operator's bearer token, so a per-operator-WIF GSM
+    # deploy has a real subject token to exchange at ``sts.googleapis.com``
+    # (and a Vault deploy has a JWT its ``meho-mcp`` role can bind, once the
+    # principal is granted one). Distinct from the #2415 *satellite*-runner
+    # principals, which authenticate an external runner **to** MEHO; this one
+    # authenticates MEHO's own background dispatch **outward**.
+    check_runner_client_id: str = Field(default="")
+    check_runner_client_secret: str = Field(default="", repr=False)
     # Initiative #2416 (#2507) — tiered-triage investigator wiring. A Dashboard
     # green→non-green transition (detected at #2505's persist seam) fires a
     # diagnose-only agent run via ``AgentInvoker.run_scheduled`` against the
@@ -1858,6 +1872,8 @@ def get_settings() -> Settings:
         sensor_runner_enabled=parse_bool_env(
             os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
         ),
+        check_runner_client_id=os.environ.get("CHECK_RUNNER_CLIENT_ID", "").strip(),
+        check_runner_client_secret=os.environ.get("CHECK_RUNNER_CLIENT_SECRET", "").strip(),
         checks_investigator_agent=os.environ.get(
             "CHECKS_INVESTIGATOR_AGENT",
             "checks-investigator",

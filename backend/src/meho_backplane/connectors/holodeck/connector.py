@@ -68,7 +68,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
@@ -288,7 +288,7 @@ class HolodeckConnector(SshConnector):
             asyncssh.Error,
             ValueError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             _log.warning(
                 "holodeck_fingerprint_unreachable",
@@ -420,7 +420,7 @@ class HolodeckConnector(SshConnector):
             return _result(False, "ssh_auth_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except (ValueError, VaultClientError, VaultCredentialsReadError):
+        except (ValueError, VaultClientError, CredentialsReadError):
             return _result(False, "ssh_auth_failed")
 
         # Photon health: ``/etc/photon-release`` must produce non-empty

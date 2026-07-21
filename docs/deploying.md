@@ -106,6 +106,52 @@ helm upgrade --install meho ./deploy/charts/meho/ \
   -f values-gsm.yaml
 ```
 
+#### Per-operator WIF and background dispatch (#2642)
+
+`gsm.workloadIdentityFederation.audience` switches credential reads onto
+the **calling operator's** identity: MEHO exchanges their Keycloak JWT at
+`sts.googleapis.com`, so GCP's own audit log names the operator rather than
+MEHO's platform SA. Leaving it empty keeps the SA-direct read above. These
+keys render into the ConfigMap as `GSM_WIF_*` — no `extraEnv` needed.
+
+Turning that on raises a question the interactive path doesn't have:
+**background dispatch has no calling operator.** Sensor evaluations
+(Initiative #2416) and health probes run on a timer with no bearer token, so
+there is nothing to federate. Decide which identity serves them:
+
+| Deployment | Ambient GCP identity | Background reads run as | Extra config |
+|---|---|---|---|
+| WIF unconfigured (Phase 1) | required | MEHO's Workload Identity SA | none |
+| GKE + per-operator WIF | yes (Workload Identity) | MEHO's Workload Identity SA (`auth_path=sa_direct_fallback`) | none |
+| On-prem / no pod identity + per-operator WIF | no | the check-runner principal, federated through WIF | `checkRunner.*` |
+| On-prem / no pod identity + per-operator WIF, no `checkRunner` | no | **nothing — credentialed Sensors read `unknown` forever** | — |
+
+The last row is the failure the third one exists to prevent. Configure it:
+
+```yaml
+checkRunner:
+  enabled: true
+  clientId: meho-check-runner # confidential Keycloak client
+  clientSecret:
+    secretName: meho-check-runner # Secret you provision; wired via secretKeyRef
+    secretKey: client_secret
+```
+
+Realm side, create a confidential client with the `client_credentials`
+grant enabled and an audience mapper matching the WIF provider's allowed
+audience (same shape as the agent/runner principal clients —
+[`cross-repo/keycloak-agent-client.md`](cross-repo/keycloak-agent-client.md)),
+and grant the federated principal `roles/secretmanager.secretAccessor` on the
+target secrets. Leaving `checkRunner.enabled: false` is safe on any
+deployment that does not use per-operator WIF, and changes nothing for
+targets whose credentials MEHO does not have to fetch per read.
+
+Diagnostics: the `gsm_secret_accessed` structlog event carries an
+`auth_path` of `wif`, `sa_direct`, or `sa_direct_fallback`, so you can see
+which identity served a given read. A read that could not resolve any
+identity fails with `connector_error: GcpSecretManagerReadError` — never a
+Vault-named error on a Vault-free deploy (#2642).
+
 ### Operator console (`/ui/*`) — optional, either backend
 
 The browser console is off by default and all-or-nothing. To light it up,

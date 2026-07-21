@@ -90,6 +90,39 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — background dispatch credential identity (#2642)
+
+- Give the in-process check-runner a **service-principal identity** so
+  scheduled Sensor evaluations can resolve target credentials (#2642). Set
+  the new `checkRunner.*` chart block (`CHECK_RUNNER_CLIENT_ID` /
+  `CHECK_RUNNER_CLIENT_SECRET`, the secret wired via `secretKeyRef` only)
+  and the runner mints a Keycloak `client_credentials` token and dispatches
+  under it. On a `credentialBackend: gsm` deploy using per-operator
+  Workload Identity Federation, that token is the subject token exchanged
+  at `sts.googleapis.com` — previously the runner dispatched with no token
+  at all, so **every** credentialed Sensor evaluated `unknown` forever
+  while the same op succeeded interactively. Opt-in: unset, behaviour is
+  unchanged.
+- Fall back to the SA-direct Secret Manager read when a background call has
+  no operator JWT and the pod has an ambient GCP identity (GKE Workload
+  Identity), instead of failing closed (#2642). Deployments with pod
+  identity need no runner principal. The fallback is logged distinctly
+  (`gsm_secret_accessed` `auth_path=sa_direct_fallback`) so an audit can
+  tell a read attributed to the operator from one attributed to MEHO.
+- Surface a **backend-neutral** credential-read error: a failed `gsm:` read
+  now reports `connector_error: GcpSecretManagerReadError` instead of
+  `VaultCredentialsReadError` on a deploy that runs no Vault (#2642). The
+  two errors share a new `CredentialsReadError` base, which connector probe
+  and fingerprint paths now catch — previously a GSM read error escaped
+  handlers meant to degrade to `auth_failed`.
+- Render the `gsm.workloadIdentityFederation.*` chart keys into the
+  backplane ConfigMap as `GSM_WIF_*` (#2642). They were declared-but-unwired
+  stubs, so a per-operator-WIF install had to configure them through
+  `extraEnv`. Adds `audience` and `subjectTokenType` alongside the existing
+  pool / provider / service-account keys.
+- Document the per-operator-WIF requirement matrix (WIF × ambient identity ×
+  runner principal) in `docs/deploying.md` § GSM / Vault-free (#2642).
+
 ## [0.25.0] - 2026-07-19
 
 This release lands the complete **v0.21/v0.22 dogfood-hardening cycle** —

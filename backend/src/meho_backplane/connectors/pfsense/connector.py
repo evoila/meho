@@ -55,7 +55,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
-    VaultCredentialsReadError,
+    CredentialsReadError,
     strip_credential_value,
 )
 from meho_backplane.connectors.adapters.ssh import SshConnector
@@ -290,7 +290,7 @@ class PfSenseConnector(SshConnector):
             asyncssh.Error,
             ValueError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             _log.warning(
                 "pfsense_fingerprint_unreachable",
@@ -387,7 +387,7 @@ class PfSenseConnector(SshConnector):
             return _result(False, "ssh_handshake_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except (ValueError, VaultClientError, VaultCredentialsReadError):
+        except (ValueError, VaultClientError, CredentialsReadError):
             return _result(False, "auth_failed")
 
         del conn  # connection is pooled; _run_command will reuse it

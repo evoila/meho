@@ -51,7 +51,7 @@ from pymongo import AsyncMongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure, PyMongoError
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.mongodb import queries
 from meho_backplane.connectors.mongodb.ops import MONGO_OPS, MONGO_WHEN_TO_USE_BY_GROUP
@@ -197,7 +197,7 @@ class MongoDbConnector(Connector):
         try:
             async with self._client(target, operator) as client:
                 identity = await queries.fetch_fingerprint(client, auth_mode=auth_mode)
-        except (OSError, PyMongoError, VaultCredentialsReadError, ValueError) as exc:
+        except (OSError, PyMongoError, CredentialsReadError, ValueError) as exc:
             _log.warning(
                 "mongodb_fingerprint_unreachable",
                 target=getattr(target, "name", None),
@@ -233,7 +233,7 @@ class MongoDbConnector(Connector):
         Distinct ``reason`` values on failure:
 
         * ``auth_failed`` -- the credential could not be resolved
-          (:class:`VaultCredentialsReadError` / :exc:`ValueError` -- a
+          (:class:`CredentialsReadError` / :exc:`ValueError` -- a
           credentialled target on an operator-less probe) or the server rejected
           it (:exc:`~pymongo.errors.OperationFailure` with an auth error code).
         * ``tcp_unreachable`` -- server selection / TCP connect failed (host
@@ -261,7 +261,7 @@ class MongoDbConnector(Connector):
         try:
             async with self._client(target, None) as client:
                 await client.get_database("admin").command("hello")
-        except (VaultCredentialsReadError, ValueError):
+        except (CredentialsReadError, ValueError):
             return _result(False, "auth_failed")
         except OperationFailure as exc:
             reason = "auth_failed" if exc.code in _AUTH_ERROR_CODES else "connect_failed"

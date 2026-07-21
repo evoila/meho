@@ -65,11 +65,29 @@ __all__ = [
     "CREDENTIAL_BACKEND_REGISTRY",
     "DEFAULT_CREDENTIAL_BACKEND",
     "CredentialBackend",
+    "CredentialsReadError",
     "UnknownCredentialBackendError",
     "register_credential_backend",
     "resolve_credential_backend",
     "split_credential_ref",
 ]
+
+
+class CredentialsReadError(Exception):
+    """Backend-neutral read-phase failure resolving a target credential.
+
+    The common base every backend's read error derives from
+    (``VaultCredentialsReadError``, ``GcpSecretManagerReadError``), so a
+    caller that wants "the credential could not be read, whatever the store
+    is" catches one class. That matters beyond tidiness: the dispatcher
+    renders a handler exception as ``connector_error: <class name>``
+    (``operations/_errors.py``), so a Vault-named class surfacing on a
+    ``credentialBackend=gsm`` deploy — which runs no Vault at all — sends the
+    operator hunting a component that isn't installed (#2642). A backend
+    raises **its own** subclass; only genuinely store-agnostic failures raise
+    this base directly.
+    """
+
 
 #: The backend kind schemeless ``secret_ref`` values resolve through when
 #: ``config.credentialBackend`` / ``CREDENTIAL_BACKEND`` is unset. ``vault``
@@ -124,6 +142,13 @@ class CredentialBackend(Protocol):
             operator-context read (Vault JWT/OIDC) forwards
             ``operator.raw_jwt``; a backend that reads under a
             deployment identity (GSM SA-direct, #2230) may ignore it.
+            **The backend owns the empty-``raw_jwt`` precondition** (#2642):
+            a store that can only read under an operator identity rejects a
+            system-initiated call itself, while one that has a deployment
+            identity to fall back on serves it. The shared loader no longer
+            pre-empts that decision, so background dispatch works on the
+            backends that can support it and still fails closed on the ones
+            that cannot.
         target_name
             Names the target in error messages — never a credential value.
         mount

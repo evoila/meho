@@ -21,9 +21,20 @@
 #   * Per-target credential secrets are stored as JSON objects and referenced
 #     from targets via `gsm:<project>/<secret>[#field]` secret_refs.
 #
-# NOTE: the SA-direct GSM backend is Phase 1 (#2230). Per-operator GCP
-# token exchange (Workload Identity Federation) is Phase 2 (#2232); the
-# gsm.workloadIdentityFederation.* keys below are inert stubs until then.
+# The SA-direct GSM backend is Phase 1 (#2230); per-operator GCP token
+# exchange (Workload Identity Federation) is Phase 2 (#2232), configured
+# through the gsm.workloadIdentityFederation.* keys below (chart-wired in
+# #2642). This example leaves them empty, i.e. SA-direct.
+#
+# Background dispatch (#2642). Sensor evaluations and health probes run on a
+# background tick with no calling operator, so they have no JWT to federate.
+# This example is fine as-is: with WIF unconfigured, they read Secret Manager
+# under the pod's own Workload Identity ADC. If you enable per-operator WIF,
+# background dispatch needs an identity of its own — an ambient pod identity
+# (which GKE Workload Identity gives you) or the checkRunner service
+# principal below. On an on-prem cluster with no ambient GCP identity, the
+# checkRunner block is REQUIRED or no credentialed Sensor can evaluate. See
+# docs/deploying.md § GSM / Vault-free.
 #
 # Replace every value marked "# CHANGE ME" before applying.
 
@@ -79,11 +90,29 @@ config:
 gsm:
   enabled: true
   project: my-gcp-project # CHANGE ME (typically identical to config.gsmProject)
-  # Phase-2 (#2232) Workload Identity Federation stubs — declared but inert.
+  # Per-operator Workload Identity Federation (#2232). A non-empty `audience`
+  # switches credential reads onto the operator's identity — GCP's audit log
+  # then names the operator instead of MEHO's platform SA. Empty (as here)
+  # keeps the SA-direct Phase-1 path.
   workloadIdentityFederation:
+    audience: "" # e.g. //iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>
     poolId: ""
     providerId: ""
     serviceAccount: ""
+    subjectTokenType: "" # "" => urn:ietf:params:oauth:token-type:jwt
+
+# In-process check-runner service principal (#2642). Uncomment when you turn
+# on per-operator WIF above AND the pod has no ambient GCP identity: the
+# runner mints a client_credentials token for this Keycloak client and
+# presents it as the WIF subject token, so scheduled Sensor evaluations can
+# resolve credentials. Provision the Secret yourself (the secret is wired via
+# secretKeyRef only — never a plaintext chart value).
+# checkRunner:
+#   enabled: true
+#   clientId: meho-check-runner # CHANGE ME (confidential Keycloak client)
+#   clientSecret:
+#     secretName: meho-check-runner # CHANGE ME (Secret holding the client secret)
+#     secretKey: client_secret
 
 networkPolicy:
   enabled: true

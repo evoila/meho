@@ -41,11 +41,20 @@ System-initiated calls have no operator JWT
 -------------------------------------------
 
 Background/scheduled work runs as a synthesised system operator with
-``raw_jwt=""``. Such a call cannot perform an operator-context read, so
-:func:`load_basic_credentials` **fails closed** with a clear error rather
-than silently falling back. A backplane-AppRole fallback is a later,
-additive option to file only when a concrete need exists — not built
-speculatively now.
+``raw_jwt=""``. Such a call cannot perform an operator-context *Vault*
+read, so the Vault backend **fails closed** with a clear error rather than
+silently falling back. A backplane-AppRole fallback is a later, additive
+option to file only when a concrete need exists — not built speculatively
+now.
+
+That guard is per-backend, not shared (#2642). A store MEHO can read under
+a *deployment* identity (GSM SA-direct ADC) is able to serve a
+system-initiated call, and the check-runner can be given a Keycloak
+service-principal token of its own
+(:mod:`meho_backplane.auth.runner_identity`) so background dispatch carries
+a real operator-context JWT. Hoisting the empty-JWT check into the shared
+dispatch would fail both of those closed before the backend is even
+resolved, so it lives on the backend whose auth model requires it.
 
 The ``secret_ref`` shape
 ========================
@@ -78,6 +87,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import vault_client_for_operator
 from meho_backplane.connectors._shared.credential_backend import (
+    CredentialsReadError,
     register_credential_backend,
     resolve_credential_backend,
     split_credential_ref,
@@ -88,6 +98,7 @@ __all__ = [
     "DEFAULT_BASIC_CREDENTIAL_FIELDS",
     "DEFAULT_KV_MOUNT",
     "BasicCredentialsTargetLike",
+    "CredentialsReadError",
     "VaultCredentialBackend",
     "VaultCredentialsReadError",
     "load_basic_credentials",
@@ -150,7 +161,7 @@ class BasicCredentialsTargetLike(Protocol):
     secret_ref: str | None
 
 
-class VaultCredentialsReadError(Exception):
+class VaultCredentialsReadError(CredentialsReadError):
     """Read-phase failure resolving a target's KV-v2 basic credentials.
 
     Raised when the operator-context Vault *login* succeeded (or was
@@ -175,6 +186,12 @@ class VaultCredentialsReadError(Exception):
 
     The message names the target and (where relevant) the missing field.
     It **never** echoes a credential value.
+
+    Subclasses the backend-neutral
+    :class:`~meho_backplane.connectors._shared.credential_backend.CredentialsReadError`
+    (#2642) so a caller that means "the credential could not be read" catches
+    the base and still sees a GSM-backend failure, while everything that
+    already catches this class keeps working unchanged.
     """
 
 
@@ -278,7 +295,7 @@ class VaultCredentialBackend:
     Registered under kind ``"vault"`` (and the schemeless default), so a
     schemeless ``targets/<id>`` ref and an explicit ``vault:targets/<id>``
     ref resolve through exactly this read. It owns the Vault-specific
-    fail-closed guard:
+    fail-closed guards:
 
     * API-path-shaped ``secret_ref`` — a value embedding the mount or the
       ``/data/`` API segment (``secret/data/…``, ``kv/data/…``,
@@ -288,12 +305,16 @@ class VaultCredentialBackend:
       This is a KV-v2 wire-format concern, so it stays on the Vault path
       only (AC #4).
 
-    The empty-``raw_jwt`` operator-context precondition is **not** here:
-    it runs once in the shared loader (:func:`_resolve_and_load`) before
-    the backend is dispatched, matching today's ordering (the guard fires
-    before any settings read or store access). It reflects the
-    operator-context Vault model that is the only backend today; a future
-    backend that reads under a deployment identity would relax it there.
+    * empty ``operator.raw_jwt`` — the fail-closed system-call carve-out.
+      Vault reads run **only** under an operator identity here (the locked
+      Option A decision), so a system-initiated call has nothing to log in
+      with and must error rather than silently fall back to a backplane
+      identity. This precondition used to live in the shared loader
+      (:func:`_resolve_and_load`), which made it fire for *every* backend —
+      including one that has a deployment identity of its own and could
+      have served the call (#2642). It now lives here, on the backend whose
+      auth model actually requires it. The message and exception class are
+      unchanged, and it still fires before any Vault network round-trip.
     """
 
     async def load_secret_data(
@@ -306,13 +327,25 @@ class VaultCredentialBackend:
     ) -> dict[str, object]:
         """Read *secret_ref* as a KV-v2 secret under *operator*'s identity.
 
-        Applies the API-path guard, opens
+        Applies the operator-context and API-path guards, opens
         :func:`~meho_backplane.auth.vault.vault_client_for_operator`
         (JWT/OIDC login forwarding ``operator.raw_jwt``), reads the secret
         off the event loop (``asyncio.to_thread`` — hvac is synchronous),
         and structurally unwraps the nested ``data["data"]`` to the flat
         secret-field dict.
         """
+        # System-initiated calls (topology scheduler, readiness probe, the
+        # runbook verify dispatch's synthetic operator, and — unless a
+        # check-runner principal is configured, #2642 — the sensor runner)
+        # carry ``raw_jwt=""``. Vault's only auth model here is the
+        # operator's JWT, so fail closed before any network round-trip
+        # rather than reaching for a backplane identity.
+        if not operator.raw_jwt:
+            raise VaultCredentialsReadError(
+                "operator-context credential read requires an authenticated operator; "
+                f"target={target_name!r} has no operator JWT (system-initiated calls "
+                "cannot read per-target vendor credentials)"
+            )
         if _is_api_path_shaped(secret_ref):
             raise VaultCredentialsReadError(
                 f"target {target_name!r} has a KV-v2 API-path-shaped secret_ref "
@@ -350,11 +383,7 @@ async def _resolve_and_load(
 
     The shared backend-agnostic path both public loaders funnel through:
 
-    1. Enforce the operator-context precondition (empty ``operator.raw_jwt``
-       fails closed) and require a configured ``secret_ref``. Both run
-       before any settings read or store access, matching today's ordering
-       — a system-initiated call fails closed without needing chassis
-       configuration.
+    1. Require a configured ``secret_ref``.
     2. Split the scheme — schemeless refs resolve through the deployment
        default (``config.credentialBackend`` / ``CREDENTIAL_BACKEND``,
        default ``vault``); an explicit ``<kind>:`` prefix selects that
@@ -362,23 +391,18 @@ async def _resolve_and_load(
     3. Dispatch to the resolved backend (:class:`UnknownCredentialBackendError`
        on an unregistered kind) to read the store secret.
 
+    The operator-context precondition is **not** here (#2642). It used to
+    run first, fail-closing every system-initiated call before the scheme
+    was even split — which is right for Vault (its only auth model is the
+    operator's JWT) and wrong for a store MEHO can read under a deployment
+    identity: on a ``credentialBackend=gsm`` install it blocked the SA-direct
+    read that would have worked, so no Sensor could ever evaluate. Each
+    backend now enforces its own precondition inside ``load_secret_data``,
+    with its own (backend-named) error class.
+
     Returns ``(store_ref, secret_data)`` — the scheme-stripped store ref
     is handed back so the caller can name it in a missing-field error.
     """
-    # Operator-context precondition. System-initiated calls (topology
-    # scheduler, readiness probe, the runbook verify dispatch's synthetic
-    # operator) carry ``raw_jwt=""`` and must fail closed rather than
-    # silently fall back to a backplane identity — the decision's
-    # system-call carve-out. Runs before the settings read / dispatch so a
-    # system operator fails closed without needing chassis config, exactly
-    # as before the seam. Reflects the operator-context model of today's
-    # only backend (Vault); a deployment-identity backend would relax it.
-    if not operator.raw_jwt:
-        raise VaultCredentialsReadError(
-            "operator-context credential read requires an authenticated operator; "
-            f"target={target.name!r} has no operator JWT (system-initiated calls "
-            "cannot read per-target vendor credentials)"
-        )
     ref = _require_secret_ref(target)
     kind, store_ref = split_credential_ref(ref, default_backend=get_settings().credential_backend)
     backend = resolve_credential_backend(kind)
@@ -435,11 +459,15 @@ async def load_basic_credentials(
 
     Raises
     ------
-    VaultCredentialsReadError
-        Read-phase failure: ``operator.raw_jwt`` is empty (the
-        fail-closed system-call carve-out), ``target.secret_ref`` is
-        unset, the KV-v2 payload is malformed, or a requested field is
-        missing. Never a bare ``KeyError``.
+    CredentialsReadError
+        Read-phase failure. ``target.secret_ref`` is unset or a requested
+        field is missing → :class:`VaultCredentialsReadError` (the shared
+        loader's own errors keep the historical class). Otherwise the
+        resolved backend's subclass: the Vault backend raises
+        :class:`VaultCredentialsReadError` when ``operator.raw_jwt`` is
+        empty (the fail-closed system-call carve-out) or the KV-v2 payload
+        is malformed; a ``gsm:`` ref raises ``GcpSecretManagerReadError``.
+        Never a bare ``KeyError``.
     meho_backplane.auth.vault.VaultClientError
         Login-phase failure raised by
         :func:`vault_client_for_operator` —

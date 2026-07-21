@@ -72,7 +72,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.bind9.ops import BIND9_OPS
 from meho_backplane.connectors.schemas import (
@@ -482,7 +482,7 @@ class Bind9Connector(SshConnector):
             asyncssh.Error,
             ValueError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             _log.warning(
                 "bind9_fingerprint_unreachable",
@@ -581,7 +581,7 @@ class Bind9Connector(SshConnector):
             return _result(False, "ssh_handshake_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except (ValueError, VaultClientError, VaultCredentialsReadError):
+        except (ValueError, VaultClientError, CredentialsReadError):
             # Credential-resolution failure: ``probe()`` carries no
             # operator, so the Vault read runs under the synthesised
             # system operator and fails closed — an auth configuration

@@ -850,3 +850,156 @@ async def test_wif_end_to_end_via_shared_loader(monkeypatch: pytest.MonkeyPatch)
 
     assert creds == {"username": _CANARY_USERNAME, "password": _CANARY_PASSWORD}
     assert client.credentials is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Background dispatch: SA-direct fallback + backend-neutral errors (#2642)
+# ---------------------------------------------------------------------------
+
+
+async def test_sa_direct_fallback_taken_when_wif_configured_and_no_operator_jwt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC2: WIF configured + ``raw_jwt=""`` + ambient ADC -> SA-direct read.
+
+    The system-initiated case (a background sensor evaluation, a health
+    probe). There is no operator JWT to federate, but the pod's own ADC can
+    serve the read, so the backend falls back instead of failing closed. The
+    WIF factory must never be called -- taking the WIF path with an empty
+    subject token is what used to make every credentialed Sensor ``unknown``.
+    """
+    _set_wif_env(monkeypatch)
+    source = _SourceCreds()
+    adc = _adc_loader_returning(source)
+    client = _FakeClient(payload=_json_secret(username="u", password="p"))
+    wif_factory = _wif_factory_returning(object())
+    backend = GcpSecretManagerBackend(
+        adc_loader=adc,
+        client_factory=_factory_for(client),
+        wif_credentials_factory=wif_factory,
+    )
+
+    data = await backend.load_secret_data(
+        "my-project/db-creds", _make_operator(""), target_name="gcp-lab-01"
+    )
+
+    assert data == {"username": "u", "password": "p"}
+    assert client.credentials is source
+    assert wif_factory.calls == []
+
+
+async def test_sa_direct_fallback_logs_its_own_auth_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fallback is auditable: a distinct ``auth_path`` label, no pool/provider.
+
+    A read GCP attributed to MEHO's own identity must be distinguishable in
+    the log from one attributed to the calling operator.
+    """
+    _set_wif_env(monkeypatch)
+    client = _FakeClient(payload=_json_secret(username="u", password=_CANARY_PASSWORD))
+    backend = GcpSecretManagerBackend(
+        adc_loader=_adc_loader_returning(_SourceCreds()),
+        client_factory=_factory_for(client),
+    )
+
+    with capture_logs() as captured:
+        await backend.load_secret_data(
+            "my-project/db-creds", _make_operator(""), target_name="gcp-lab-01"
+        )
+
+    event = next(e for e in captured if e["event"] == "gsm_secret_accessed")
+    assert event["auth_path"] == "sa_direct_fallback"
+    assert event["wif_pool"] is None
+    assert event["wif_provider"] is None
+    assert _CANARY_PASSWORD not in repr(captured)
+
+
+async def test_system_call_without_ambient_adc_fails_closed_naming_both_remedies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No operator JWT and no ambient ADC -> fail closed, but actionably.
+
+    The on-prem per-operator-WIF deploy. Neither identity is available, so
+    the read must still fail -- with a message that names the two ways out
+    rather than only the GKE one.
+    """
+    _set_wif_env(monkeypatch)
+
+    def empty_adc(**_: Any) -> tuple[Any, str]:
+        return None, "adc-project"
+
+    backend = GcpSecretManagerBackend(adc_loader=empty_adc)
+
+    with pytest.raises(GcpSecretManagerReadError) as exc:
+        await backend.load_secret_data(
+            "my-project/db-creds", _make_operator(""), target_name="gcp-lab-01"
+        )
+
+    msg = str(exc.value)
+    assert "CHECK_RUNNER_CLIENT_ID" in msg
+    assert "ambient GCP identity" in msg
+
+
+async def test_operator_jwt_still_takes_the_wif_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fallback does not weaken the operator path: a JWT still federates."""
+    _set_wif_env(monkeypatch)
+    sentinel = object()
+    wif_factory = _wif_factory_returning(sentinel)
+    client = _FakeClient(payload=_json_secret(username="u", password="p"))
+    backend = GcpSecretManagerBackend(
+        client_factory=_factory_for(client),
+        wif_credentials_factory=wif_factory,
+    )
+
+    await backend.load_secret_data(
+        "my-project/db-creds", _make_operator(_OPERATOR_JWT), target_name="gcp-lab-01"
+    )
+
+    assert client.credentials is sentinel
+    assert wif_factory.calls[0]["operator_jwt"] == _OPERATOR_JWT
+
+
+async def test_system_call_on_gsm_deploy_never_raises_a_vault_named_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC3: a GSM credential-read failure carries no ``Vault`` in its class name.
+
+    The shared loader used to fail-close every system-initiated call with
+    ``VaultCredentialsReadError`` *before* resolving a backend, so a deploy
+    running no Vault at all reported a Vault error. Drive the failure through
+    the public loader (the path a dispatch takes) on a ``gsm:`` ref.
+    """
+    _set_wif_env(monkeypatch)
+
+    def empty_adc(**_: Any) -> tuple[Any, str]:
+        return None, "adc-project"
+
+    fake_backend = GcpSecretManagerBackend(adc_loader=empty_adc)
+    original = cb.CREDENTIAL_BACKEND_REGISTRY["gsm"]
+    cb.CREDENTIAL_BACKEND_REGISTRY["gsm"] = fake_backend
+    try:
+        with pytest.raises(cb.CredentialsReadError) as exc:
+            await load_basic_credentials(
+                _Target(secret_ref="gsm:my-project/db-creds"), _make_operator("")
+            )
+    finally:
+        cb.CREDENTIAL_BACKEND_REGISTRY["gsm"] = original
+
+    assert type(exc.value).__name__ == "GcpSecretManagerReadError"
+    assert "Vault" not in type(exc.value).__name__
+    assert "vault" not in str(exc.value).lower()
+
+
+async def test_gsm_read_error_is_a_backend_neutral_credentials_read_error() -> None:
+    """The two backends' read errors share one catchable base (#2642).
+
+    Connector probe paths catch "the credential could not be read" to report
+    ``auth_failed`` instead of crashing; before the shared base, a GSM error
+    sailed straight through an ``except VaultCredentialsReadError``.
+    """
+    from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+
+    assert issubclass(GcpSecretManagerReadError, cb.CredentialsReadError)
+    assert issubclass(VaultCredentialsReadError, cb.CredentialsReadError)
+    assert not issubclass(GcpSecretManagerReadError, VaultCredentialsReadError)

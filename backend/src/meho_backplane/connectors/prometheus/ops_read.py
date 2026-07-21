@@ -27,7 +27,7 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 
 if TYPE_CHECKING:
     # These attributes are provided by the concrete PrometheusConnector the
@@ -69,7 +69,7 @@ class PrometheusReadOps(_Base):
             payload = await self._api_get(
                 target, "/api/v1/targets", operator=operator, params={"state": "active"}
             )
-        except (httpx.HTTPError, OSError, VaultClientError, VaultCredentialsReadError):
+        except (httpx.HTTPError, OSError, VaultClientError, CredentialsReadError):
             return None
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
         active = data.get("activeTargets") if isinstance(data, dict) else None
@@ -79,7 +79,7 @@ class PrometheusReadOps(_Base):
         """Count firing alerts from ``/api/v1/alerts`` -- ``None`` on any error."""
         try:
             payload = await self._api_get(target, "/api/v1/alerts", operator=operator)
-        except (httpx.HTTPError, OSError, VaultClientError, VaultCredentialsReadError):
+        except (httpx.HTTPError, OSError, VaultClientError, CredentialsReadError):
             return None
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
         alerts = data.get("alerts") if isinstance(data, dict) else None
@@ -91,7 +91,7 @@ class PrometheusReadOps(_Base):
         """Count rule groups from ``/api/v1/rules`` -- ``None`` on any error."""
         try:
             payload = await self._api_get(target, "/api/v1/rules", operator=operator)
-        except (httpx.HTTPError, OSError, VaultClientError, VaultCredentialsReadError):
+        except (httpx.HTTPError, OSError, VaultClientError, CredentialsReadError):
             return None
         data = payload.get("data", {}) if isinstance(payload, dict) else {}
         groups = data.get("groups") if isinstance(data, dict) else None

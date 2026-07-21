@@ -847,6 +847,63 @@ async def test_register_rolls_back_client_on_vault_write_failure(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("token_invalid", [False, True])
+async def test_register_vault_write_failure_detail_splits_on_token_validity(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, token_invalid: bool
+) -> None:
+    """The 502 detail names the remediation the broker actually diagnosed (#2652).
+
+    A dead scheduler token and an under-scoped policy both reach the route
+    as a broker error, but only the broker knows which one Vault answered
+    (it runs ``lookup-self`` on the write-failure path). The route reads
+    that disposition off the exception rather than re-probing: dead token
+    → the three-clause ``scheduler_vault_token_invalid`` detail naming the
+    re-mint; live token → the pre-existing bare code, unchanged.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-vault-disposition")
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value="dd000000-0000-0000-0000-00000000bbbb")
+    mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    from meho_backplane.scheduler.vault_credentials import (
+        SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+        SchedulerVaultBrokerError,
+    )
+
+    async def _failing_write(identity_ref: str, client_secret: str) -> str:
+        raise SchedulerVaultBrokerError("vault denied", token_invalid=token_invalid)
+
+    monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _failing_write)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "vault-disposition-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    if token_invalid:
+        assert detail == SCHEDULER_VAULT_TOKEN_INVALID_DETAIL, detail
+        assert "policy must grant" not in detail, detail
+    else:
+        assert detail == "scheduler_vault_write_error", detail
+
+
+@pytest.mark.asyncio
 async def test_register_skips_vault_when_token_unset(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

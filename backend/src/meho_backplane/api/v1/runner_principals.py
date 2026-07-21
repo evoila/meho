@@ -71,7 +71,10 @@ from meho_backplane.auth.runner_principals import (
     RunnerPrincipalRead,
     RunnerPrincipalService,
 )
-from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
+from meho_backplane.scheduler.vault_credentials import (
+    SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+    SchedulerVaultBrokerError,
+)
 
 __all__ = ["router"]
 
@@ -198,10 +201,18 @@ async def register_runner_principal(
     except SchedulerVaultBrokerError as exc:
         # ``VAULT_SCHEDULER_TOKEN`` is set but the Vault write failed
         # (unreachable / denied). 502 upstream failure; the just-created
-        # Keycloak client is already rolled back.
+        # Keycloak client is already rolled back. The broker's
+        # ``lookup-self`` probe (#2652) says whether the token is dead —
+        # that case gets the gold-standard three-clause detail naming the
+        # re-mint, because its remediation *is* knowable; everything else
+        # keeps the bare ``scheduler_vault_write_error`` code.
         raise HTTPException(
             status_code=http_status.HTTP_502_BAD_GATEWAY,
-            detail="scheduler_vault_write_error",
+            detail=(
+                SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
+                if exc.token_invalid
+                else "scheduler_vault_write_error"
+            ),
         ) from exc
     except ValueError as exc:
         raise HTTPException(

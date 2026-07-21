@@ -67,7 +67,10 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
+from meho_backplane.scheduler.vault_credentials import (
+    SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+    SchedulerVaultBrokerError,
+)
 
 __all__ = ["router"]
 
@@ -205,10 +208,18 @@ async def register_agent_principal(
         # (unreachable / denied). 502 upstream failure; the just-created
         # Keycloak client is already rolled back. (An *unset* token is not
         # an error — the service skips the write and the agent uses the
-        # env-var fallback.)
+        # env-var fallback.) The broker's ``lookup-self`` probe (#2652)
+        # says whether the token is dead — that case gets the
+        # gold-standard three-clause detail naming the re-mint, because
+        # its remediation *is* knowable; everything else keeps the bare
+        # ``scheduler_vault_write_error`` code.
         raise HTTPException(
             status_code=http_status.HTTP_502_BAD_GATEWAY,
-            detail="scheduler_vault_write_error",
+            detail=(
+                SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
+                if exc.token_invalid
+                else "scheduler_vault_write_error"
+            ),
         ) from exc
     except ValueError as exc:
         raise HTTPException(

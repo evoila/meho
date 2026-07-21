@@ -112,8 +112,18 @@ document.addEventListener("alpine:init", () => {
     // ``YYYY-MM-DD HH:MM UTC`` (audit timestamps are UTC). Falls back to
     // the raw string on an unparseable value so a malformed frame never
     // blanks the row (mirrors ``broadcast-feed.js``'s ``formatTs``).
+    //
+    // ``occurred_at`` is UTC, but a suffix-less value (SQLite returns the
+    // ``DateTime(timezone=True)`` column without a ``+00:00`` offset) would
+    // be parsed as *local* time by ``new Date`` and then mislabelled by the
+    // ``getUTC*`` calls below in a non-UTC browser. Append ``Z`` when no
+    // timezone designator is present so the instant is always read as UTC.
     formatTs(ts) {
-      const d = new Date(ts);
+      if (!ts) {
+        return ts;
+      }
+      const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(ts);
+      const d = new Date(hasTz ? ts : ts + "Z");
       if (isNaN(d.getTime())) {
         return ts;
       }

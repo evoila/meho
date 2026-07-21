@@ -100,15 +100,19 @@ connector-related release-notes line.
   the operator verify policy, path pattern, and mount (all correct)
   before anyone thought to `vault token lookup` the token itself. The
   broker now fires the `auth/token/lookup-self` probe it already shipped
-  for #2328 on the write-failure path and carries the disposition on
+  for #2328 whenever Vault answers the write with a 403 — the one
+  ambiguous status — and carries the disposition on
   `SchedulerVaultBrokerError`; a dead token surfaces as
   `scheduler_vault_token_invalid: the scheduler Vault token is invalid or
   expired …` with the re-mint remediation on all four surfaces (the MCP
   `meho.agent_principals.register` `-32602` message, both REST register
   routes' 502 detail, and the `/ui/agents/principals` register banner),
   while a live-token-denied write keeps the existing policy-scope wording
-  unchanged. Diagnosis only — the write is not retried, and the
-  renew-on-use loop from #2328 is untouched.
+  unchanged. Only a 403 on the probe condemns the token: a sealed (503),
+  overloaded (429) or broken (500/502) Vault stays on the policy-scope
+  wording instead of ordering a re-mint mid-outage. Diagnosis only — the
+  write is not retried, and the renew-on-use loop from #2328 is
+  untouched.
   `docs/cross-repo/vault-provisioning.md` gains the dead-token row next
   to the under-scoped-policy row.
 

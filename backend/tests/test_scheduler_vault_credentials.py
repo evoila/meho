@@ -12,8 +12,10 @@ time, both under the scheduler's static service token. These tests cover:
 * the write happy path (payload shape + path derivation);
 * the read happy path, the not-found (``None``) path, and error mapping;
 * the write-failure disposition split (#2652) — a Vault 403 plus a
-  failing ``lookup-self`` means the token is dead, a Vault 403 plus a
-  succeeding ``lookup-self`` means the policy is under-scoped.
+  403 on ``lookup-self`` means the token is dead; a Vault 403 plus a
+  succeeding ``lookup-self`` means the policy is under-scoped; every
+  other Vault status (sealed, overloaded, upstream broken) is
+  inconclusive and keeps the policy-scope wording.
 
 The hvac client is faked via the ``_build_client`` seam — no running
 Vault. The live round-trip is covered by the integration suite.
@@ -266,6 +268,72 @@ async def test_write_denied_with_unreachable_lookup_stays_conservative(
         await vc.write_agent_secret("agent:reporter", "s")
 
     assert excinfo.value.token_invalid is False
+
+
+@pytest.mark.parametrize(
+    ("lookup_error", "expected_token_invalid"),
+    [
+        # 403 — the only status Vault gives an *invalid* token.
+        (hvac.exceptions.Forbidden("permission denied"), True),
+        # Everything below describes Vault, not the token. hvac maps each
+        # status onto its own VaultError subclass, so a blanket
+        # `except VaultError` would read all four as a dead token and send
+        # the operator to re-mint a healthy one mid-outage (#2652).
+        (hvac.exceptions.VaultDown("sealed"), False),  # 503
+        (hvac.exceptions.InternalServerError("boom"), False),  # 500
+        (hvac.exceptions.BadGateway("upstream"), False),  # 502
+        (hvac.exceptions.RateLimitExceeded("standby"), False),  # 429
+    ],
+    ids=["forbidden", "vault_down", "internal_error", "bad_gateway", "rate_limited"],
+)
+async def test_only_a_403_lookup_proves_the_token_is_dead(
+    fake_kv: _FakeKvV2,
+    lookup_error: BaseException,
+    expected_token_invalid: bool,
+) -> None:
+    """Only a 403 from lookup-self condemns the token; other statuses don't.
+
+    ``False`` is what every register surface maps onto the verbatim
+    policy-scope remediation (pinned per-surface, e.g.
+    ``test_mcp_tool_agent_principals.py``), so a Vault outage keeps the
+    pre-#2652 wording instead of ordering a needless re-mint.
+    """
+    _deny_write(fake_kv)
+    fake_kv.token_api.lookup_raises = lookup_error
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is expected_token_invalid
+    assert fake_kv.token_api.lookup_calls == 1
+
+
+@pytest.mark.parametrize(
+    "write_error",
+    [
+        hvac.exceptions.VaultDown("sealed"),
+        hvac.exceptions.InternalServerError("boom"),
+        hvac.exceptions.BadGateway("upstream"),
+        hvac.exceptions.RateLimitExceeded("standby"),
+        hvac.exceptions.InvalidRequest("bad request"),
+    ],
+    ids=["vault_down", "internal_error", "bad_gateway", "rate_limited", "invalid_request"],
+)
+async def test_non_403_write_rejection_skips_the_probe(
+    fake_kv: _FakeKvV2, write_error: BaseException
+) -> None:
+    """Only a 403 write rejection is ambiguous enough to be worth a probe."""
+
+    def _boom(**_: Any) -> None:
+        raise write_error
+
+    fake_kv.create_or_update_secret = _boom  # type: ignore[assignment]
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is False
+    assert fake_kv.token_api.lookup_calls == 0
 
 
 async def test_broker_error_defaults_to_token_valid() -> None:

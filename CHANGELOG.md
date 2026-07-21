@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — CLI targets import tls_server_name (#2643)
+
+- `meho targets import` now maps a manifest's `tls_server_name` to the
+  real top-level column on `TargetCreate` / `TargetUpdate` instead of
+  spilling it into the `extras` JSONB blob. Before this fix the import
+  reported "1 updated", the descriptor looked complete, and the typed
+  column stayed `NULL` — so dispatch kept deriving the SNI /
+  cert-verification hostname from `host` and an appliance reached by IP
+  with an FQDN-only SAN failed with `connector_tls_verify_failed`
+  ("IP address mismatch"), the exact class the #2398 SNI fix shipped to
+  unblock. Operators who worked around it with `PATCH
+  /api/v1/targets/{name}` can drop the manual step and let the
+  repo-tracked `targets.yaml` be the source of truth again.
+
 ## [0.25.0] - 2026-07-19
 
 This release lands the complete **v0.21/v0.22 dogfood-hardening cycle** —

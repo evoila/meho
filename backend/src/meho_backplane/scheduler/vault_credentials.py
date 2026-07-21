@@ -474,8 +474,9 @@ async def _scheduler_token_rejected(client: hvac.Client) -> bool:
     write with 403. A revoked / expired / lost-lease token and a live
     token on a policy without ``create``+``update`` both produce that
     403, so the write response alone cannot name the remediation.
-    ``auth/token/lookup-self`` can: Vault answers it for *any* live token
-    regardless of policy (it is self-scoped) and 403s an invalid one.
+    ``auth/token/lookup-self`` can: Vault answers it for a live token
+    granted ``read`` there (``meho-scheduler`` grants it — load-bearing,
+    see ``docs/cross-repo/vault-provisioning.md``) and 403s an invalid one.
 
     Probes the **same** client that failed the write — the answer must
     describe the identity that was actually denied, and re-resolving

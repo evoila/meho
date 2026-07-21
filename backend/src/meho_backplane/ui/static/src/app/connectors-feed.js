@@ -107,5 +107,29 @@ document.addEventListener("alpine:init", () => {
         this.events.length = this.cap;
       }
     },
+
+    // Render an ISO-8601 ``occurred_at`` as the console-standard
+    // ``YYYY-MM-DD HH:MM UTC`` (audit timestamps are UTC). Falls back to
+    // the raw string on an unparseable value so a malformed frame never
+    // blanks the row (mirrors ``broadcast-feed.js``'s ``formatTs``).
+    formatTs(ts) {
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) {
+        return ts;
+      }
+      const pad = (n) => String(n).padStart(2, "0");
+      return (
+        d.getUTCFullYear() +
+        "-" +
+        pad(d.getUTCMonth() + 1) +
+        "-" +
+        pad(d.getUTCDate()) +
+        " " +
+        pad(d.getUTCHours()) +
+        ":" +
+        pad(d.getUTCMinutes()) +
+        " UTC"
+      );
+    },
   }));
 });

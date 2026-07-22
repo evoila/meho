@@ -26,14 +26,19 @@
 # through the gsm.workloadIdentityFederation.* keys below (chart-wired in
 # #2642). This example leaves them empty, i.e. SA-direct.
 #
-# Background dispatch (#2642). Sensor evaluations and health probes run on a
-# background tick with no calling operator, so they have no JWT to federate.
-# This example is fine as-is: with WIF unconfigured, they read Secret Manager
-# under the pod's own Workload Identity ADC. If you enable per-operator WIF,
-# background dispatch needs an identity of its own — an ambient pod identity
-# (which GKE Workload Identity gives you) or the checkRunner service
-# principal below. On an on-prem cluster with no ambient GCP identity, the
-# checkRunner block is REQUIRED or no credentialed Sensor can evaluate. See
+# Background dispatch (#2642). Sensor evaluations, scheduled topology
+# refreshes and runbook verify dispatch run on a background tick with no
+# calling operator, so they have no JWT to federate. This example is fine
+# as-is: with WIF unconfigured, they read Secret Manager under the pod's own
+# Workload Identity ADC. If you enable per-operator WIF, background dispatch
+# needs an identity of its own — an ambient pod identity (which GKE Workload
+# Identity gives you) or the checkRunner service principal below. On an
+# on-prem cluster with no ambient GCP identity, the checkRunner block is
+# REQUIRED or no credentialed Sensor can evaluate.
+#
+# Connector probe() / fingerprint() are NOT covered by either lever: they
+# dispatch with a non-empty placeholder JWT, so they take the WIF branch and
+# the STS exchange rejects it whichever of the two you configure. See
 # docs/deploying.md § GSM / Vault-free.
 #
 # Replace every value marked "# CHANGE ME" before applying.

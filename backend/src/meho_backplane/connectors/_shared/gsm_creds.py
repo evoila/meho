@@ -161,7 +161,7 @@ _STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
 #: give the pod an identity, or give the check-runner a principal whose JWT
 #: can be federated.
 _NO_IDENTITY_REMEDY = (
-    "For background dispatch (sensor evaluations, health probes) on a "
+    "For background dispatch (sensor evaluations, scheduled refreshes) on a "
     "per-operator-WIF deploy, either give the pod an ambient GCP identity or "
     "configure the check-runner service principal (CHECK_RUNNER_CLIENT_ID / "
     "CHECK_RUNNER_CLIENT_SECRET) so the runner has a JWT to exchange."

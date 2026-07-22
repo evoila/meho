@@ -112,9 +112,11 @@ connector-related release-notes line.
   **The relaxation is not check-runner-only.** The guard it replaced fired
   for every `raw_jwt=""` caller, so on a `gsm` deploy the topology-refresh
   scheduler, runbook verify dispatch (whose operator is reconstructed from
-  `operator_sub` and not validated from a bearer token), the legacy
-  connector `execute()` shims and the health-probe path now resolve
-  per-target vendor credentials where they previously failed closed. The
+  `operator_sub` and not validated from a bearer token) and the legacy
+  connector `execute()` shims now resolve per-target vendor credentials
+  where they previously failed closed. Connector `probe()` / `fingerprint()`
+  are **not** in that set — they carry a non-empty placeholder JWT, so they
+  still take the WIF branch and still fail on a per-operator-WIF install. The
   read runs under MEHO's own ADC — the identity a Phase-1 install already
   uses for every read — so no GCP privilege boundary moves, but the
   "system-initiated calls cannot read per-target vendor credentials"
@@ -129,8 +131,14 @@ connector-related release-notes line.
   existing role once its token carries the `KEYCLOAK_AUDIENCE` mapper the
   realm recipe already asks for. Background dispatch then inherits the full
   policy. `vault-provisioning.md` § "Bounding the check-runner principal"
-  carries the two guardrail recipes (distinct audience + dedicated role, or
-  `bound_subject` / `bound_claims` on `meho-mcp`).
+  carries the two guardrail recipes — a distinct runner audience (*replacing*
+  the backplane one, since Keycloak audience mappers accumulate) plus a
+  dedicated narrower role, or an exact-match `bound_claims` on `meho-mcp`
+  keyed on a claim value only operator tokens carry. A
+  `bound_claims_type=glob` `"*"` is explicitly called out as **not** a
+  restriction: it matches any present value, and a `client_credentials`
+  token carries `preferred_username = service-account-<clientId>` like any
+  other principal.
 - Surface a **backend-neutral** credential-read error: a failed `gsm:` read
   now reports `connector_error: GcpSecretManagerReadError` instead of
   `VaultCredentialsReadError` on a deploy that runs no Vault (#2642). The

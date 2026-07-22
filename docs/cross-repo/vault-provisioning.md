@@ -386,12 +386,20 @@ choice is a dedicated realm role, reached through a JSON pointer because
 Keycloak nests realm roles under `realm_access.roles`:
 
 ```bash
-# Realm side, once. Grant the role to the humans (or the group) that
-# legitimately read Vault through MEHO. Do NOT grant it to the check-runner
-# client's service-account user — service accounts carry realm_access.roles
-# too (default-roles-<realm>, offline_access, …), so the claim's *presence*
-# proves nothing; only this specific value does.
+# Realm side, once. Creating the role is not enough — an unassigned role
+# never appears in anyone's token, so applying the Vault binding below on
+# its own locks out every operator AND the /api/v1/health federation proof.
 kcadm.sh create roles -r <realm> -s name=meho-operator
+
+# Assign it. Per group (preferred — one place to add and remove operators):
+kcadm.sh add-roles -r <realm> --gname meho-operators --rolename meho-operator
+# …or per user:
+kcadm.sh add-roles -r <realm> --uusername <operator> --rolename meho-operator
+
+# Do NOT assign it to the check-runner client's service-account user
+# (service-account-<CHECK_RUNNER_CLIENT_ID>). Service accounts carry
+# realm_access.roles too (default-roles-<realm>, offline_access, …), so the
+# claim's *presence* proves nothing; only this specific value does.
 
 vault write auth/jwt/role/meho-mcp \
   role_type=jwt \
@@ -433,9 +441,10 @@ actually carries first — a binding on a claim the runner happens to satisfy
 is the failure mode this section exists to prevent:
 
 ```bash
-# 1. The runner token's claims. Expect preferred_username =
-#    "service-account-<runner-client-id>", azp = the runner client id, and
-#    realm_access.roles WITHOUT meho-operator.
+# 1. The runner token's claims (the same decoder works for either token).
+#    Expect preferred_username = "service-account-<runner-client-id>",
+#    azp = the runner client id, and realm_access.roles WITHOUT
+#    meho-operator.
 python3 - "$RUNNER_TOKEN" <<'PY'
 import base64, json, sys
 payload = sys.argv[1].split(".")[1]
@@ -450,8 +459,11 @@ PY
 #    token here means the binding is not constraining — go back to step 1.
 vault write auth/jwt/login role=meho-mcp jwt="$RUNNER_TOKEN"
 
-# 3. An operator token must still succeed, or you have locked out the
-#    interactive path and /api/v1/health with it.
+# 3. The operator side, which the assignment step above is what makes work.
+#    Re-run the step-1 decoder against $OPERATOR_TOKEN and confirm
+#    realm_access.roles DOES contain meho-operator, then prove the login
+#    still succeeds — otherwise you have locked out the interactive path and
+#    /api/v1/health with it.
 vault write auth/jwt/login role=meho-mcp jwt="$OPERATOR_TOKEN"
 ```
 

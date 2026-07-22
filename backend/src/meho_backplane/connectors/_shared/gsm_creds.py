@@ -155,16 +155,21 @@ _LATEST_VERSION = "latest"
 #: in this module and stable across google-auth versions.
 _STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
 
-#: Appended to every "no ambient GCP identity" error (#2642). On a
-#: per-operator-WIF deploy this is the exact failure a background dispatch
-#: hits, and the two ways out are not obvious from the ADC message alone:
-#: give the pod an identity, or give the check-runner a principal whose JWT
-#: can be federated.
+#: Appended to every "no ambient GCP identity" error (#2642). Both raise
+#: sites live in :meth:`GcpSecretManagerBackend._build_credentials`, which
+#: every ADC read reaches — the Phase-1 ``sa_direct`` path as much as the
+#: ``sa_direct_fallback`` one. The check-runner remedy only applies to the
+#: latter, so the text scopes it explicitly: on a Phase-1 install
+#: ``_select_auth_path`` never looks at ``operator_jwt``, and giving the
+#: runner a principal would change nothing.
 _NO_IDENTITY_REMEDY = (
-    "For background dispatch (sensor evaluations, scheduled refreshes) on a "
-    "per-operator-WIF deploy, either give the pod an ambient GCP identity or "
-    "configure the check-runner service principal (CHECK_RUNNER_CLIENT_ID / "
-    "CHECK_RUNNER_CLIENT_SECRET) so the runner has a JWT to exchange."
+    "Give the pod an ambient GCP identity (GKE Workload Identity, a mounted "
+    "SA): with WIF unconfigured every read is SA-direct and that is the only "
+    "fix. On a per-operator-WIF deploy, background dispatch (sensor "
+    "evaluations, scheduled refreshes) reaches this path only because it "
+    "carries no operator JWT, so configuring the check-runner service "
+    "principal (CHECK_RUNNER_CLIENT_ID / CHECK_RUNNER_CLIENT_SECRET) gives it "
+    "a token to federate and takes the ADC path out of the picture."
 )
 
 #: Template for the IAM Credentials ``generateAccessToken`` URL google-auth's

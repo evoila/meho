@@ -125,10 +125,8 @@
           role="search"
           aria-label="Run a retrieval diagnostics query"
         >
-          <label class="form-control w-full">
-            <div class="label">
-              <span class="label-text">Query</span>
-            </div>
+          <label class="flex flex-col gap-1 w-full">
+            <span class="text-sm font-medium">Query</span>
             <textarea
               name="query"
               rows="2"
@@ -141,10 +139,8 @@
             >{{ query }}</textarea>
           </label>
           <div class="flex flex-col gap-3 sm:flex-row sm:items-end">
-            <label class="form-control w-full sm:w-48">
-              <div class="label">
-                <span class="label-text">Source <span class="opacity-50">(optional)</span></span>
-              </div>
+            <label class="flex flex-col gap-1 w-full sm:w-48">
+              <span class="text-sm font-medium">Source <span class="opacity-50">(optional)</span></span>
               {#- Source datalist (#2458): the tenant's distinct retrieval-visible
                   source namespaces, enumerated by a SELECT DISTINCT over the
                   ``documents`` table. ``list=`` keeps the input free-typing (kinds
@@ -160,6 +156,7 @@
                 placeholder="e.g. kb, memory"
                 class="input input-bordered w-full"
                 aria-label="Source filter"
+                aria-describedby="retrieval-source-help"
                 autocomplete="off"
               />
               <datalist id="retrieval-source-options">
@@ -167,18 +164,9 @@
                   <option value="{{ option }}"></option>
                 {% endfor %}
               </datalist>
-              <div class="label">
-                <span class="label-text-alt opacity-60">
-                  Retrieval sources only. Docs-corpus collections are a separate
-                  substrate &mdash; search them on
-                  <a href="/ui/corpus" class="link">/ui/corpus</a>, not here.
-                </span>
-              </div>
             </label>
-            <label class="form-control w-full sm:w-48">
-              <div class="label">
-                <span class="label-text">Kind <span class="opacity-50">(optional)</span></span>
-              </div>
+            <label class="flex flex-col gap-1 w-full sm:w-48">
+              <span class="text-sm font-medium">Kind <span class="opacity-50">(optional)</span></span>
               {#- Kind datalist (#2458): the tenant's distinct retrieval-visible
                   kinds from the same SELECT DISTINCT; a user-scoped memory kind
                   another principal owns is excluded (own-principal scoped). -#}
@@ -199,10 +187,8 @@
                 {% endfor %}
               </datalist>
             </label>
-            <label class="form-control w-full sm:w-32">
-              <div class="label">
-                <span class="label-text">Limit</span>
-              </div>
+            <label class="flex flex-col gap-1 w-full sm:w-32">
+              <span class="text-sm font-medium">Limit</span>
               <select
                 name="limit"
                 class="select select-bordered w-full"
@@ -227,6 +213,17 @@
               aria-label="Running the diagnostics query"
             ></span>
           </div>
+          {#- Source helper, full-width below the controls row (#169). Lived
+              inside the narrow ``sm:w-48`` Source column as a daisyUI-v4
+              ``label-text-alt``; that class is dead in v5 so the block flowed
+              inline and overlapped the adjacent controls. As a full-width note
+              it can no longer collide; the Source input references it via
+              ``aria-describedby``. -#}
+          <p id="retrieval-source-help" class="text-xs opacity-60">
+            Retrieval sources only. Docs-corpus collections are a separate
+            substrate &mdash; search them on
+            <a href="/ui/corpus" class="link">/ui/corpus</a>, not here.
+          </p>
         </form>
       </div>
     </div>
@@ -252,10 +249,8 @@
           class="flex flex-col gap-3 sm:flex-row sm:items-end"
           aria-label="Run a retrieval usage report"
         >
-          <label class="form-control w-full sm:w-48">
-            <div class="label">
-              <span class="label-text">Lookback window</span>
-            </div>
+          <label class="flex flex-col gap-1 w-full sm:w-48">
+            <span class="text-sm font-medium">Lookback window</span>
             <input
               type="text"
               name="since"
@@ -363,10 +358,8 @@
                   never sees this field, so the form they can submit carries no
                   ``tenant_filter`` and they stay own-tenant scoped. A forged
                   cross-tenant value still hits the backend 403. -#}
-              <label class="form-control w-full sm:w-80">
-                <div class="label">
-                  <span class="label-text">Tenant filter <span class="opacity-50">(platform admin)</span></span>
-                </div>
+              <label class="flex flex-col gap-1 w-full sm:w-80">
+                <span class="text-sm font-medium">Tenant filter <span class="opacity-50">(platform admin)</span></span>
                 <input
                   type="text"
                   name="tenant_filter"

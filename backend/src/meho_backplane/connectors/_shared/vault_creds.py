@@ -345,10 +345,13 @@ class VaultCredentialBackend:
         and structurally unwraps the nested ``data["data"]`` to the flat
         secret-field dict.
         """
-        # System-initiated calls (topology scheduler, readiness probe, the
-        # runbook verify dispatch's synthetic operator, and — unless a
-        # check-runner principal is configured, #2642 — the sensor runner)
-        # carry ``raw_jwt=""``. Vault's only auth model here is the
+        # System-initiated calls (topology scheduler, the runbook verify
+        # dispatch's synthetic operator, the legacy connector ``execute()``
+        # shims, and — unless a check-runner principal is configured, #2642
+        # — the sensor runner) carry ``raw_jwt=""``. The readiness probe is
+        # not among them: ``/ready`` runs registered backend probes and
+        # never resolves a per-target ``secret_ref``, so it does not reach
+        # this method. Vault's only auth model here is the
         # operator's JWT, so fail closed before any network round-trip
         # rather than reaching for a backplane identity.
         if not operator.raw_jwt:

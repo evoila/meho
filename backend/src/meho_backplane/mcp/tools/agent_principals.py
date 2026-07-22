@@ -32,10 +32,15 @@ Error mapping
   error class name for operator diagnostics.
 * :class:`~meho_backplane.scheduler.vault_credentials.SchedulerVaultBrokerError`
   (register only) → :class:`~meho_backplane.mcp.server.McpInvalidParamsError`
-  naming the ``VAULT_SCHEDULER_TOKEN`` write-policy remediation, mirroring
-  the REST/UI ``scheduler_vault_write_error`` 502 mapping. Without this
-  the broker error bubbled to the dispatcher's catch-all and surfaced as
-  an opaque ``-32603`` internal error.
+  naming the ``VAULT_SCHEDULER_TOKEN`` remediation, mirroring the REST/UI
+  502 mapping. Without this the broker error bubbled to the dispatcher's
+  catch-all and surfaced as an opaque ``-32603`` internal error. Which
+  remediation is named comes from the broker's ``token_invalid``
+  disposition (#2652): a dead token gets
+  :data:`~meho_backplane.scheduler.vault_credentials.SCHEDULER_VAULT_TOKEN_INVALID_DETAIL`
+  ("re-mint"), a live token denied by policy keeps
+  :data:`~meho_backplane.scheduler.vault_credentials.SCHEDULER_VAULT_WRITE_DENIED_DETAIL`
+  ("widen the policy").
 """
 
 from __future__ import annotations
@@ -58,7 +63,11 @@ from meho_backplane.auth.keycloak_admin import (
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
-from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
+from meho_backplane.scheduler.vault_credentials import (
+    SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+    SCHEDULER_VAULT_WRITE_DENIED_DETAIL,
+    SchedulerVaultBrokerError,
+)
 
 _log = structlog.get_logger(__name__)
 
@@ -164,15 +173,16 @@ async def _register_handler(
         raise McpInvalidParamsError(f"Keycloak admin error: {type(exc).__name__}") from exc
     except SchedulerVaultBrokerError as exc:
         # ``VAULT_SCHEDULER_TOKEN`` is set but the Vault write failed
-        # (unreachable / denied — most often a read-only token policy). The
-        # just-created Keycloak client is already rolled back. Mirror the
-        # REST/UI 502 ``scheduler_vault_write_error`` mapping so the MCP
+        # (unreachable / denied). The just-created Keycloak client is
+        # already rolled back. Mirror the REST/UI 502 mapping so the MCP
         # caller gets an actionable ``-32602`` naming the cause, not the
-        # opaque ``-32603`` a bubbled exception would produce. The message
-        # names the remediation without leaking the secret.
+        # opaque ``-32603`` a bubbled exception would produce. The broker
+        # already ran ``lookup-self`` and told us *which* remediation
+        # applies (#2652); neither message leaks the secret.
         raise McpInvalidParamsError(
-            "scheduler Vault write failed — VAULT_SCHEDULER_TOKEN policy must "
-            "grant create/update on the agent-credentials path"
+            SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
+            if exc.token_invalid
+            else SCHEDULER_VAULT_WRITE_DENIED_DETAIL
         ) from exc
     except ValueError as exc:
         raise McpInvalidParamsError(str(exc)) from exc

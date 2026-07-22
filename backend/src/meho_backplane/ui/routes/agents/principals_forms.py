@@ -67,7 +67,11 @@ shapes the REST surface emits, surfaced inline in the modal banner:
 * :class:`~meho_backplane.scheduler.vault_credentials.SchedulerVaultBrokerError`
   -> ``scheduler_vault_write_error`` (502; Vault is configured but the
   credential write failed and the just-created Keycloak client was rolled
-  back).
+  back) -- unless the broker's ``lookup-self`` probe found the scheduler
+  token itself dead (#2652), in which case the banner carries the
+  gold-standard
+  :data:`~meho_backplane.scheduler.vault_credentials.SCHEDULER_VAULT_TOKEN_INVALID_DETAIL`
+  naming the re-mint. Same 502 either way; only the remediation differs.
 """
 
 from __future__ import annotations
@@ -88,7 +92,10 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakAdminNotConfiguredError,
 )
 from meho_backplane.auth.operator import Operator
-from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
+from meho_backplane.scheduler.vault_credentials import (
+    SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+    SchedulerVaultBrokerError,
+)
 from meho_backplane.ui.auth.middleware import UISessionContext
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token
 from meho_backplane.ui.routes.agents.principals_views import fetch_principal_or_404
@@ -217,7 +224,10 @@ async def submit_register(
     * Keycloak admin unconfigured -> 503 banner (the gold-standard
       three-clause detail).
     * other Keycloak API failure -> 502 banner (bare code).
-    * Vault credential write failure -> 502 banner.
+    * Vault credential write failure -> 502 banner: the bare
+      ``scheduler_vault_write_error`` code when the scheduler token is
+      live (policy scope is the fault), the three-clause re-mint detail
+      when the broker's ``lookup-self`` probe found it dead (#2652).
     """
     owner_clean = (owner_sub or "").strip() or None
     raw_values: dict[str, object] = {"name": name, "owner_sub": owner_clean or ""}
@@ -264,12 +274,16 @@ async def submit_register(
             banner="keycloak_admin_error",
             status_code=status.HTTP_502_BAD_GATEWAY,
         )
-    except SchedulerVaultBrokerError:
+    except SchedulerVaultBrokerError as exc:
         return _render_register_with_error(
             request,
             csrf_session_id=str(session_ctx.session_id),
             values=raw_values,
-            banner="scheduler_vault_write_error",
+            banner=(
+                SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
+                if exc.token_invalid
+                else "scheduler_vault_write_error"
+            ),
             status_code=status.HTTP_502_BAD_GATEWAY,
         )
 

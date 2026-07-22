@@ -326,6 +326,53 @@ jobs:
           fi
           echo ">> agent-runtime env wiring verified: secretKeyRef on confidential values, plain env on operator config, no leakage when unset"
 
+      - name: Assert check-runner principal + GSM WIF wire first-class (#2642)
+        # #2642: background sensor dispatch needs a credential identity, and
+        # a per-operator-WIF GSM install needs the `GSM_WIF_*` env the chart
+        # previously declared but never rendered. Both had to be reachable
+        # from typed values — the #2594 rule is "no `extraEnv` escape hatch
+        # for a first-class feature". This gate proves three things the
+        # schema cannot see: the confidential client secret is `secretKeyRef`
+        # (never plaintext), the non-secret client id is plain env, and the
+        # WIF audience reaches the ConfigMap. The default render proves the
+        # opt-out path stays inert.
+        run: |
+          set -euo pipefail
+          helm template test deploy/charts/meho/ \
+            --set image.tag=test \
+            --set ingress.host=meho.test \
+            --set ingress.tls.secretName=meho-tls \
+            --set postgres.credentialsSecret=meho-postgres \
+            --set vault.address=https://vault.test \
+            --set keycloak.issuer=https://keycloak.test/realms/meho \
+            --set config.keycloakIssuerUrl=https://keycloak.test/realms/meho \
+            --set config.keycloakAudience=meho-backplane \
+            --set config.vaultAddr=https://vault.test \
+            --set networkPolicy.postgresCIDR=10.0.1.0/24 \
+            --set networkPolicy.vaultCIDR=10.0.2.0/24 \
+            --set networkPolicy.keycloakCIDR=10.0.3.0/24 \
+            --set checkRunner.enabled=true \
+            --set checkRunner.clientId=meho-check-runner \
+            --set checkRunner.clientSecret.secretName=check-runner-creds \
+            --set gsm.workloadIdentityFederation.audience=//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v \
+            > /tmp/rendered-check-runner.yaml
+
+          grep -A2 -F -e '- name: CHECK_RUNNER_CLIENT_SECRET' /tmp/rendered-check-runner.yaml \
+            | grep -F 'secretKeyRef' \
+            || { echo "::error::CHECK_RUNNER_CLIENT_SECRET is not wired via secretKeyRef (#2642 regression)"; exit 1; }
+          grep -A1 -F -e '- name: CHECK_RUNNER_CLIENT_ID' /tmp/rendered-check-runner.yaml \
+            | grep -F 'value: "meho-check-runner"' \
+            || { echo "::error::CHECK_RUNNER_CLIENT_ID is not wired as plain env (#2642 regression)"; exit 1; }
+          grep -Eq '^[[:space:]]*GSM_WIF_AUDIENCE:[[:space:]]*"//iam\.googleapis\.com/' /tmp/rendered-check-runner.yaml \
+            || { echo "::error::gsm.workloadIdentityFederation.audience did not reach GSM_WIF_AUDIENCE (#2642 regression)"; exit 1; }
+
+          # Opt-out path: no CHECK_RUNNER_* env without `checkRunner.enabled`.
+          if grep -qE '^\s+- name: CHECK_RUNNER_' /tmp/rendered.yaml; then
+            echo "::error::default render leaked CHECK_RUNNER_* env without opt-in (#2642 regression)"
+            exit 1
+          fi
+          echo ">> check-runner principal + GSM WIF wiring verified"
+
       - name: Assert Deployment carries CHART_VERSION env (#631)
         # GET /version reports a real chart_version only if the chart's
         # Deployment injects CHART_VERSION from .Chart.Version. Render the

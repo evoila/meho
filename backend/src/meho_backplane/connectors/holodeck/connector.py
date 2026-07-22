@@ -68,7 +68,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.holodeck._pwsh import PwshRunError, pwsh_run
 from meho_backplane.connectors.holodeck.ops import HOLODECK_OPS
@@ -274,11 +274,12 @@ class HolodeckConnector(SshConnector):
         # fingerprint failure -- there's no Photon-less Holodeck shape
         # to fall back to. The catch tuple covers the transport
         # (OSError / asyncssh.Error) plus the credential-resolution
-        # failures _auth_config raises: the two-phase Vault contract
-        # (VaultClientError login-phase, VaultCredentialsReadError
-        # read-phase) and ValueError (secret carries neither key nor
-        # password) — an unresolvable credential is an unreachable
-        # target, not an unhandled exception (#986 discipline).
+        # failures _auth_config raises: VaultClientError (the Vault
+        # login phase), CredentialsReadError (a failed store read on
+        # whichever credential backend is configured, Vault or GSM) and
+        # ValueError (secret carries neither key nor password) — an
+        # unresolvable credential is an unreachable target, not an
+        # unhandled exception (#986 discipline).
         try:
             photon_proc = await self._run_command(
                 target, "cat /etc/photon-release", operator=operator
@@ -288,7 +289,7 @@ class HolodeckConnector(SshConnector):
             asyncssh.Error,
             ValueError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             _log.warning(
                 "holodeck_fingerprint_unreachable",
@@ -407,11 +408,13 @@ class HolodeckConnector(SshConnector):
         # must be caught before DisconnectError; OSError is the TCP-
         # level failure. Credential-resolution failures fold into
         # ssh_auth_failed: ValueError (secret carries neither key nor
-        # password) and the Vault two-phase errors (VaultClientError /
-        # VaultCredentialsReadError). ``probe()`` carries no operator,
-        # so the Vault read runs under the synthesised system operator
-        # and fails closed — the operator's remediation is the same as
-        # for a rejected password: check the target's Vault secret.
+        # password), VaultClientError (the Vault login phase) and
+        # CredentialsReadError (a failed store read on whichever
+        # credential backend is configured, Vault or GSM). ``probe()``
+        # carries no operator, so on Vault the read runs under the
+        # synthesised system operator and fails closed — the operator's
+        # remediation is the same as for a rejected password: check the
+        # target's stored secret.
         try:
             await self._connect(target)
         except asyncssh.PermissionDenied:
@@ -420,7 +423,7 @@ class HolodeckConnector(SshConnector):
             return _result(False, "ssh_auth_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except (ValueError, VaultClientError, VaultCredentialsReadError):
+        except (ValueError, VaultClientError, CredentialsReadError):
             return _result(False, "ssh_auth_failed")
 
         # Photon health: ``/etc/photon-release`` must produce non-empty

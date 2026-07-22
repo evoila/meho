@@ -72,7 +72,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.bind9.ops import BIND9_OPS
 from meho_backplane.connectors.schemas import (
@@ -454,9 +454,11 @@ class Bind9Connector(SshConnector):
 
         # Catch tuple: transport failures plus credential-resolution
         # failures (ValueError — secret carries neither key nor
-        # password; VaultClientError / VaultCredentialsReadError — the
-        # two-phase Vault contract). An unresolvable credential is an
-        # unreachable target, not an unhandled exception (#986).
+        # password; VaultClientError — the Vault login phase;
+        # CredentialsReadError — a failed store read on whichever
+        # credential backend is configured, Vault or GSM). An
+        # unresolvable credential is an unreachable target, not an
+        # unhandled exception (#986).
         try:
             named_proc = await self._run_command(target, "named -v", operator=operator)
             banner_raw = (named_proc.stdout or "") if hasattr(named_proc, "stdout") else ""
@@ -482,7 +484,7 @@ class Bind9Connector(SshConnector):
             asyncssh.Error,
             ValueError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             _log.warning(
                 "bind9_fingerprint_unreachable",
@@ -581,11 +583,12 @@ class Bind9Connector(SshConnector):
             return _result(False, "ssh_handshake_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except (ValueError, VaultClientError, VaultCredentialsReadError):
-            # Credential-resolution failure: ``probe()`` carries no
-            # operator, so the Vault read runs under the synthesised
-            # system operator and fails closed — an auth configuration
-            # problem, not a network problem.
+        except (ValueError, VaultClientError, CredentialsReadError):
+            # Credential-resolution failure on whichever backend is
+            # configured (CredentialsReadError is backend-neutral):
+            # ``probe()`` carries no operator, so on Vault the read runs
+            # under the synthesised system operator and fails closed —
+            # an auth configuration problem, not a network problem.
             return _result(False, "auth_failed")
 
         # Post-connect commands are guarded: a connection drop, an

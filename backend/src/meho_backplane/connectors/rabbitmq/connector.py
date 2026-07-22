@@ -59,7 +59,7 @@ from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
 )
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.rabbitmq.ops import (
     RABBITMQ_OPS,
@@ -315,8 +315,11 @@ class RabbitMqConnector(HttpConnector):
         name, erlang / management versions, product name/version, and the
         per-node running/type summary land under ``extras``. Both endpoints
         require Basic auth, so an operator-less call falls back to the
-        synthesised system operator and fails closed at the live Vault read
-        (``reachable=False`` with ``extras["error"]``) rather than raising.
+        synthesised system operator; on a Vault backend that fails closed at
+        the live JWT round-trip. Any credential-read failure — the
+        backend-neutral :class:`CredentialsReadError`, so ``gsm:`` too —
+        surfaces as ``reachable=False`` with ``extras["error"]`` rather than
+        raising.
         """
         probed_at = datetime.now(UTC)
         effective_operator = operator or synthesise_system_operator()
@@ -328,7 +331,7 @@ class RabbitMqConnector(HttpConnector):
             OSError,
             RuntimeError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             return FingerprintResult(
                 vendor="rabbitmq",

@@ -34,6 +34,7 @@ import respx
 
 import meho_backplane.connectors.proxmox  # noqa: F401 -- registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerReadError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.proxmox import ProxmoxConnector
 from meho_backplane.connectors.proxmox.ops import (
@@ -112,6 +113,13 @@ def _fake_target() -> _FakeTarget:
 def _token_loader(_target: Any, _operator: Operator) -> Any:
     async def _load() -> ProxmoxCredentials:
         return ProxmoxCredentials(mode="token", token_id=_TOKEN_ID, token_secret=_TOKEN_SECRET)
+
+    return _load()
+
+
+def _gsm_failing_loader(_target: Any, _operator: Operator) -> Any:
+    async def _load() -> ProxmoxCredentials:
+        raise GcpSecretManagerReadError("gsm read failed")
 
     return _load()
 
@@ -360,6 +368,18 @@ async def test_fingerprint_unreachable_on_transport_error() -> None:
             await connector.aclose()
     assert fp.reachable is False
     assert "error" in fp.extras
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_degrades_on_gsm_credential_read_error() -> None:
+    """A ``gsm:`` credential-read failure degrades, it does not escape (#2642)."""
+    connector = ProxmoxConnector(credentials_loader=_gsm_failing_loader)
+    try:
+        fp = await connector.fingerprint(_fake_target(), _OPERATOR)
+    finally:
+        await connector.aclose()
+    assert fp.reachable is False
+    assert "GcpSecretManagerReadError" in fp.extras["error"]
 
 
 # ---------------------------------------------------------------------------

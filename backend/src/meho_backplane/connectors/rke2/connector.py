@@ -59,7 +59,7 @@ import structlog
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.ssh import SshConnector
 from meho_backplane.connectors.rke2.ops import RKE2_OPS
 from meho_backplane.connectors.rke2.ops_write import RKE2_WHEN_TO_USE_WRITE_BY_GROUP
@@ -195,7 +195,7 @@ class Rke2SshConnector(SshConnector):
             asyncssh.Error,
             ValueError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             _log.warning(
                 "rke2_fingerprint_unreachable",
@@ -268,7 +268,7 @@ class Rke2SshConnector(SshConnector):
             return _result(False, "ssh_auth_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except (ValueError, VaultClientError, VaultCredentialsReadError):
+        except (ValueError, VaultClientError, CredentialsReadError):
             return _result(False, "ssh_auth_failed")
 
         try:

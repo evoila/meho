@@ -302,6 +302,36 @@ The `helm test <release>` Pod
 vars resolve — the two `secretKeyRef` values and the plain client_id —
 when `uiConsole.enabled: true`.
 
+## Check-runner service principal (#2642)
+
+Sensor evaluations run on a background tick with **no calling operator**,
+so the check-runner presents no bearer token — and a target whose
+credentials MEHO has to fetch per read fails closed. On a
+`config.credentialBackend: gsm` deploy using per-operator Workload
+Identity Federation that is total: the WIF exchange needs a subject
+token, so **no** credentialed Sensor can evaluate even though the same
+op succeeds through `POST /api/v1/operations/call`.
+
+| Env var | Chart value | Kind | Rendered by |
+| --- | --- | --- | --- |
+| `CHECK_RUNNER_CLIENT_ID` | `checkRunner.clientId` | plain | Deployment (when `checkRunner.enabled`) |
+| `CHECK_RUNNER_CLIENT_SECRET` | `checkRunner.clientSecret.secretName` @ `.secretKey` | `secretKeyRef` | Deployment (when `checkRunner.enabled`) |
+
+Set both and the runner mints a Keycloak `client_credentials` token for
+that confidential client and dispatches under it; on a WIF deploy the
+token becomes the subject token exchanged at `sts.googleapis.com`, and
+GCP audits scheduled reads to that principal. Realm-side setup is the
+same shape as the agent / satellite-runner principal clients — see
+[`docs/cross-repo/keycloak-agent-client.md`](../../docs/cross-repo/keycloak-agent-client.md)
+— plus `roles/secretmanager.secretAccessor` for the federated principal.
+
+You do **not** need this when the pod has an ambient GCP identity (GKE
+Workload Identity): background reads fall back to the SA-direct path
+under MEHO's own identity. The full decision matrix is in
+[`docs/deploying.md`](../../docs/deploying.md) § GSM / Vault-free. Leaving
+`checkRunner.enabled: false` (the default) preserves the previous
+behaviour exactly.
+
 ## Internal-CA trust bundle (`extraVolumes` / `extraEnv`)
 
 The backplane connects to **Vault**, **Keycloak**, and **PostgreSQL**

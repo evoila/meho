@@ -349,23 +349,81 @@
         "workloadIdentityFederation": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Workload Identity Federation parameters for per-operator GCP token exchange. Phase-2 stub (#2232) — declared but not consumed by any template; the SA-direct Phase-1 backend ignores it. All fields optional and empty by default.",
+          "description": "Workload Identity Federation parameters for the GSM backend's per-operator token exchange (#2232), rendered into the ConfigMap as `GSM_WIF_*` (#2642 — the block was declared-but-unrendered before, forcing WIF installs through `extraEnv`). `audience` is the switch: empty (the default, and every Vault install) leaves the Phase-1 SA-direct path running unchanged. All fields optional and empty by default. A per-operator-WIF install must additionally give *background* dispatch an identity — an ambient pod identity or the `checkRunner` service principal — or credentialed Sensors cannot evaluate.",
           "properties": {
+            "audience": {
+              "type": "string",
+              "description": "Full WIF provider resource name google-auth exchanges the operator JWT against (`//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`). Non-empty selects the per-operator path. Rendered as `GSM_WIF_AUDIENCE`."
+            },
             "poolId": {
               "type": "string",
-              "description": "Workload Identity pool id (Phase-2 stub, #2232)."
+              "description": "Workload Identity pool id. Checked for consistency against `audience` (a mismatch fails the read) and used for non-secret log attribution. Rendered as `GSM_WIF_POOL_ID`."
             },
             "providerId": {
               "type": "string",
-              "description": "Workload Identity provider id within the pool (Phase-2 stub, #2232)."
+              "description": "Workload Identity provider id within the pool. Same consistency check as `poolId`. Rendered as `GSM_WIF_PROVIDER_ID`."
             },
             "serviceAccount": {
               "type": "string",
-              "description": "Service account the federated identity impersonates (Phase-2 stub, #2232)."
+              "description": "Service account the federated identity impersonates for the final Secret Manager read; empty skips impersonation. Rendered as `GSM_WIF_SERVICE_ACCOUNT`."
+            },
+            "subjectTokenType": {
+              "type": "string",
+              "description": "STS subject-token type. Empty (the default) resolves to `urn:ietf:params:oauth:token-type:jwt`, correct for a Keycloak OIDC JWT. Rendered as `GSM_WIF_SUBJECT_TOKEN_TYPE`."
             }
           }
         }
       }
+    },
+    "checkRunner": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "In-process check-runner service principal (#2642). The sensor check-runner dispatches on a background tick with no calling operator, so it presents no bearer token and a target whose credentials need an operator-context read fails closed. When `enabled: true` the chart wires `CHECK_RUNNER_CLIENT_ID` as plain env and `CHECK_RUNNER_CLIENT_SECRET` via `secretKeyRef`, and the runner mints a `client_credentials` token for that confidential Keycloak client and dispatches under it. Required in practice on a `credentialBackend: gsm` install using per-operator WIF with no ambient pod identity — that token is the subject token exchanged at `sts.googleapis.com`, and without it no credentialed Sensor can evaluate. The schema enforces non-empty `clientId` + `clientSecret.secretName` under `enabled: true`. Default `enabled: false` renders nothing and preserves the pre-#2642 behaviour (background dispatch carries no token; such Sensors read `unknown`). Distinct from the #2415 satellite-runner principals, which authenticate external runners *to* MEHO.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "clientId": {
+          "type": "string",
+          "description": "`client_id` of the confidential Keycloak client the check-runner authenticates as. Plain env (`CHECK_RUNNER_CLIENT_ID`). Required (non-empty) when `checkRunner.enabled: true`."
+        },
+        "clientSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Confidential client secret, wired via `secretKeyRef` — never as a plaintext chart value or env value.",
+          "properties": {
+            "secretName": {
+              "type": "string",
+              "description": "Name of the Kubernetes Secret holding the client secret. Referenced by name only — provisioning is the consumer's responsibility (an ExternalSecret, a sealed-secret, or a directly-applied Secret), mirroring `uiConsole.secretName`. Required (non-empty) when `checkRunner.enabled: true`."
+            },
+            "secretKey": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Key within `secretName` whose value is the client secret. Defaults to `client_secret`."
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "enabled": { "const": true } },
+            "required": ["enabled"]
+          },
+          "then": {
+            "required": ["clientId", "clientSecret"],
+            "properties": {
+              "clientId": { "type": "string", "minLength": 1 },
+              "clientSecret": {
+                "type": "object",
+                "required": ["secretName"],
+                "properties": {
+                  "secretName": { "type": "string", "minLength": 1 }
+                }
+              }
+            }
+          }
+        }
+      ]
     },
     "keycloak": {
       "type": "object",

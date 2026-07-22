@@ -81,6 +81,19 @@ data:
   CREDENTIAL_BACKEND: {{ .Values.config.credentialBackend | quote }}
   GSM_PROJECT: {{ .Values.config.gsmProject | quote }}
   GSM_IMPERSONATE_SA: {{ .Values.config.gsmImpersonateSa | quote }}
+  # Workload Identity Federation for the GSM backend's per-operator read
+  # path (#2232, chart-wired in #2642 — previously declared-only values no
+  # template consumed, which forced a WIF install through `extraEnv`).
+  # `GSM_WIF_AUDIENCE` is the switch: empty (the default, and every Vault
+  # install) leaves the SA-direct path running unchanged. All five are
+  # harmless empty strings otherwise — the backplane treats a blank
+  # `GSM_WIF_SUBJECT_TOKEN_TYPE` as its `urn:ietf:params:oauth:token-type:jwt`
+  # default.
+  GSM_WIF_AUDIENCE: {{ .Values.gsm.workloadIdentityFederation.audience | quote }}
+  GSM_WIF_POOL_ID: {{ .Values.gsm.workloadIdentityFederation.poolId | quote }}
+  GSM_WIF_PROVIDER_ID: {{ .Values.gsm.workloadIdentityFederation.providerId | quote }}
+  GSM_WIF_SERVICE_ACCOUNT: {{ .Values.gsm.workloadIdentityFederation.serviceAccount | quote }}
+  GSM_WIF_SUBJECT_TOKEN_TYPE: {{ .Values.gsm.workloadIdentityFederation.subjectTokenType | quote }}
   DATABASE_POOL_SIZE: {{ .Values.config.databasePoolSize | quote }}
   DATABASE_POOL_TIMEOUT: {{ .Values.config.databasePoolTimeout | quote }}
   # G0.4-T2 (#259) — retrieval substrate fastembed model + on-disk cache

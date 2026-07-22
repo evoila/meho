@@ -72,6 +72,7 @@ from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
 from meho_backplane.connectors._shared.vault_creds import (
+    CredentialsReadError,
     VaultCredentialsReadError,
     load_vault_secret_data,
     strip_credential_value,
@@ -342,7 +343,7 @@ class PrometheusConnector(PrometheusReadOps, HttpConnector):
                 headers=headers,
                 extensions=self._request_extensions(target),
             )
-        except (httpx.HTTPError, OSError, VaultClientError, VaultCredentialsReadError):
+        except (httpx.HTTPError, OSError, VaultClientError, CredentialsReadError):
             return None
         return resp.status_code == 200
 
@@ -395,7 +396,7 @@ class PrometheusConnector(PrometheusReadOps, HttpConnector):
             httpx.HTTPError,
             OSError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
             PrometheusReadOnlyError,
         ) as exc:
             _log.warning(
@@ -474,7 +475,7 @@ class PrometheusConnector(PrometheusReadOps, HttpConnector):
             httpx.HTTPError,
             OSError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
             PrometheusReadOnlyError,
         ) as exc:
             return ProbeResult(

@@ -47,7 +47,7 @@ import asyncpg
 import structlog
 
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.postgres import queries
 from meho_backplane.connectors.postgres.ops import PG_OPS, PG_WHEN_TO_USE_BY_GROUP
@@ -190,9 +190,12 @@ class PostgresConnector(Connector):
         ``server_version``, ``pg_is_in_recovery()``, ``server_encoding``,
         ``data_checksums``, and per-database sizes. A trust-auth target
         fingerprints with no operator; a credentialled target reads its secret
-        under *operator* (``None`` fails closed inside the loader). Any
-        connection or credential failure maps to ``reachable=False`` with the
-        error under ``extras`` rather than raising (#986 discipline).
+        under *operator* (``None`` fails closed inside the loader on a Vault
+        backend). Any connection or credential failure maps to
+        ``reachable=False`` with the error under ``extras`` rather than raising
+        (#986 discipline) — the credential arm catches the backend-neutral
+        :class:`CredentialsReadError`, so a ``gsm:`` read failure degrades the
+        same way a Vault one does.
         """
         probed_at = datetime.now(UTC)
         try:
@@ -201,7 +204,7 @@ class PostgresConnector(Connector):
         except (
             OSError,
             asyncpg.PostgresError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
             ValueError,
         ) as exc:
             _log.warning(
@@ -240,7 +243,7 @@ class PostgresConnector(Connector):
           (:exc:`asyncpg.InvalidPasswordError` /
           :exc:`asyncpg.InvalidAuthorizationSpecificationError`) or the
           credential could not be resolved
-          (:class:`VaultCredentialsReadError` / :exc:`ValueError` -- a
+          (:class:`CredentialsReadError` / :exc:`ValueError` -- a
           credentialled target on an operator-less probe).
         * ``tcp_unreachable`` -- the TCP connect failed (host down, firewall,
           wrong port; :exc:`OSError`, which covers
@@ -250,9 +253,9 @@ class PostgresConnector(Connector):
           (:exc:`asyncpg.PostgresError`).
 
         ``probe`` carries no operator, so a credentialled target's secret read
-        runs without an authenticated operator and fails closed to
-        ``auth_failed`` -- reachability of a credentialled target is confirmed
-        on the operator-carrying fingerprint / op path.
+        runs without an authenticated operator; on a Vault backend that fails
+        closed to ``auth_failed`` -- reachability of a credentialled target is
+        confirmed on the operator-carrying fingerprint / op path.
         """
         start = time.monotonic()
         probed_at = datetime.now(UTC)
@@ -271,7 +274,7 @@ class PostgresConnector(Connector):
         except (
             asyncpg.InvalidPasswordError,
             asyncpg.InvalidAuthorizationSpecificationError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
             ValueError,
         ):
             return _result(False, "auth_failed")

@@ -102,7 +102,10 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
 from meho_backplane.connectors._shared.system_operator import synthesise_system_operator
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    CredentialsReadError,
+    VaultCredentialsReadError,
+)
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.github.session import (
     DEFAULT_GITHUB_API_URL,
@@ -422,7 +425,7 @@ class GitHubRestConnector(HttpConnector):
                     "error_code": exc.code,
                 },
             )
-        except (httpx.HTTPError, OSError, VaultCredentialsReadError, RuntimeError) as exc:
+        except (httpx.HTTPError, OSError, CredentialsReadError, RuntimeError) as exc:
             return FingerprintResult(
                 vendor="github",
                 product="gh",

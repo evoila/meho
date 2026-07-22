@@ -300,6 +300,175 @@ probe whenever Vault answers the write with a 403 and emits
 `scheduler_vault_token_invalid` with the re-mint remediation instead.
 The two rows in *Failure modes* below are the decision table.
 
+### 7. Bounding the check-runner principal (#2642)
+
+Only relevant if you set the chart's `checkRunner.*` block (the in-process
+sensor check-runner's service principal) on a `credentialBackend: vault`
+install. **Do this first — enabling `checkRunner.*` without it widens what
+background dispatch can read.**
+
+Role `meho-mcp` above is deliberately loose: `user_claim=sub` with
+`bound_audiences` as its *only* binding and no `bound_subject` /
+`bound_claims`, paired with a policy that grants read on the whole
+`secret/data/meho/*` subtree. Any Keycloak principal whose token carries
+`aud=<keycloak-audience>` is therefore accepted by it, including a
+confidential service-account client. `check_runner_jwt()` mints the
+runner's token with `audience=KEYCLOAK_AUDIENCE`
+(`backend/src/meho_backplane/auth/runner_identity.py`), and the realm
+recipe in [`docs/deploying.md`](../deploying.md) tells you to give the
+client the matching audience mapper. Net effect of turning the flag on
+with the role as provisioned: Vault accepts the runner principal as-is,
+and every scheduled evaluation runs with read on **all** target
+credentials under `secret/meho/*`. That silently removes the
+"system-initiated calls cannot perform an operator-context Vault read"
+carve-out the rest of the credential layer is built around.
+
+Pick one of two guardrails before enabling the flag.
+
+**Option A (preferred) — a distinct audience and a dedicated role.** Give
+the runner client its own audience mapper (e.g. `meho-check-runner`)
+**instead of** the backplane audience mapper the realm recipe asks for, and
+provision a separate role + policy scoped to the secrets Sensors actually
+evaluate. *Instead of*, not *in addition to*: Keycloak's Audience protocol
+mapper calls `token.addAudience(...)`, so mappers accumulate — a runner
+client carrying both mappers still emits `aud` containing
+`<keycloak-audience>`, and `meho-mcp` keeps accepting it because
+`bound_audiences` matches if *any* audience in the token matches.
+
+```bash
+vault policy write meho-check-runner - <<'EOF'
+path "secret/data/meho/sensors/*" {
+  capabilities = ["read"]
+}
+path "secret/metadata/meho/sensors/*" {
+  capabilities = ["read"]
+}
+EOF
+
+vault write auth/jwt/role/meho-check-runner \
+  role_type=jwt \
+  user_claim=sub \
+  bound_audiences=meho-check-runner \
+  bound_subject=<runner-client-service-account-sub> \
+  policies=meho-check-runner \
+  token_ttl=1h
+```
+
+Substitute the subtree your Sensors' `secret_ref`s actually live under.
+Note the backplane resolves one role name from `VAULT_OIDC_ROLE` for every
+JWT login, so Option A currently requires either a per-deployment split or
+that you point `VAULT_OIDC_ROLE` at the narrower role and widen it back for
+the interactive path — until MEHO grows a per-principal role setting,
+Option B is the operationally simpler answer on a single-role install.
+
+**Option B — tighten `meho-mcp` so it does not accept the runner.** Vault's
+`bound_*` parameters are allowlists and have no negation, so "reject the
+runner" has to be written as "require a claim value only an operator token
+carries". The runner's token then fails role validation and cannot resolve
+target credentials at all — i.e. today's carve-out is kept, and credentialed
+Sensors stay `unknown` on Vault.
+
+**`preferred_username` with a `*` glob is not that restriction.** Under
+`bound_claims_type=glob` Vault reads bound values as globs "with `*`
+matching any number of characters"
+([JWT auth API][vault-jwt-api]), so `{"preferred_username":"*"}` is
+satisfied by any value that is present at all. Keycloak's
+`client_credentials` grant issues the token as the client's own
+service-account user, whose username is `service-account-` + the client id
+(`ServiceAccountConstants.SERVICE_ACCOUNT_USER_PREFIX`, applied by
+`ClientManager` when service accounts are enabled), so the runner's token
+carries an ordinary non-empty `preferred_username` and matches the glob.
+Applying that recipe overwrites the live role and leaves it accepting
+exactly what it accepted before.
+
+Bind on a value the runner's service account does not have. The portable
+choice is a dedicated realm role, reached through a JSON pointer because
+Keycloak nests realm roles under `realm_access.roles`:
+
+```bash
+# Realm side, once. Creating the role is not enough — an unassigned role
+# never appears in anyone's token, so applying the Vault binding below on
+# its own locks out every operator AND the /api/v1/health federation proof.
+kcadm.sh create roles -r <realm> -s name=meho-operator
+
+# Assign it. Per group (preferred — one place to add and remove operators):
+kcadm.sh add-roles -r <realm> --gname meho-operators --rolename meho-operator
+# …or per user:
+kcadm.sh add-roles -r <realm> --uusername <operator> --rolename meho-operator
+
+# Do NOT assign it to the check-runner client's service-account user
+# (service-account-<CHECK_RUNNER_CLIENT_ID>). Service accounts carry
+# realm_access.roles too (default-roles-<realm>, offline_access, …), so the
+# claim's *presence* proves nothing; only this specific value does.
+
+vault write auth/jwt/role/meho-mcp \
+  role_type=jwt \
+  user_claim=sub \
+  bound_audiences=<keycloak-audience> \
+  bound_claims='{"/realm_access/roles":"meho-operator"}' \
+  policies=meho-mcp \
+  token_ttl=1h
+```
+
+Note what is deliberately **absent**: no `bound_claims_type`. Its default is
+`string`, under which bound values "will be treated as literals and must
+match exactly" ([JWT auth API][vault-jwt-api]). Vault normalises both the
+bound value and the claim to lists and accepts when any bound value equals
+any claim value, so against Keycloak's `realm_access.roles` **array** this
+reads as "the token's realm roles must contain exactly `meho-operator`".
+
+If every operator reaches the backplane through a known set of Keycloak
+clients, an exact `azp` allowlist is equivalent and needs no new role —
+`azp` is "the OAuth client the token was issued for"
+(`JsonWebToken.issuedFor`), so it is `CHECK_RUNNER_CLIENT_ID` on the
+runner's token and the operator-facing client id on an operator's:
+
+```bash
+  bound_claims='{"azp":["<operator-facing-client-id>","<cli-client-id>"]}'
+```
+
+Either binding gates **every** `meho-mcp` login, not only the runner's —
+including the `/api/v1/health` federation proof, which dispatches
+`vault.kv.read` under the calling operator's own JWT. An operator without
+the role (or arriving through an unlisted client) then cannot log in at
+all: the JWT method answers a bound-claims mismatch with a **400** whose
+body names the claim, and MEHO surfaces that as `vault.reachable=false`
+with a `login_failed:` detail. Grant the role to everyone who legitimately
+reads Vault through MEHO *before* you apply the binding.
+
+Verify against real tokens before relying on it. Read what the runner
+actually carries first — a binding on a claim the runner happens to satisfy
+is the failure mode this section exists to prevent:
+
+```bash
+# 1. The runner token's claims (the same decoder works for either token).
+#    Expect preferred_username = "service-account-<runner-client-id>",
+#    azp = the runner client id, and realm_access.roles WITHOUT
+#    meho-operator.
+python3 - "$RUNNER_TOKEN" <<'PY'
+import base64, json, sys
+payload = sys.argv[1].split(".")[1]
+payload += "=" * (-len(payload) % 4)
+claims = json.loads(base64.urlsafe_b64decode(payload))
+print(json.dumps({k: claims.get(k) for k in ("azp", "preferred_username", "realm_access")}, indent=2))
+PY
+
+# 2. What Vault does with it. Option B is in force when this fails with
+#    `error validating claims: claim "/realm_access/roles" does not match
+#    any associated bound claim values` rather than returning a token. A
+#    token here means the binding is not constraining — go back to step 1.
+vault write auth/jwt/login role=meho-mcp jwt="$RUNNER_TOKEN"
+
+# 3. The operator side, which the assignment step above is what makes work.
+#    Re-run the step-1 decoder against $OPERATOR_TOKEN and confirm
+#    realm_access.roles DOES contain meho-operator, then prove the login
+#    still succeeds — otherwise you have locked out the interactive path and
+#    /api/v1/health with it.
+vault write auth/jwt/login role=meho-mcp jwt="$OPERATOR_TOKEN"
+```
+
+[vault-jwt-api]: https://developer.hashicorp.com/vault/api-docs/auth/jwt
+
 ## Verification
 
 Run from any host with the operator's Vault token (`vault login`

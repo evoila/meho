@@ -92,6 +92,17 @@ runner parking.
 
 ## Known issues / boundaries
 
+- **A Sensor's dispatch identity is not the row's `identity_sub`.** The
+  runner attributes the evaluation to `identity_sub` (audit, tenant scope)
+  but presents the check-runner *service principal*'s token downstream when
+  `CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET` are configured
+  (#2642, `auth/runner_identity.py`). The two are deliberately different:
+  MEHO attributes to the Sensor, the credential store authenticates the
+  principal. **Unconfigured, the runner presents no token at all** — so a
+  Sensor whose target's credentials need an operator-context read evaluates
+  `unknown` forever. That is the expected shape on a Vault deploy; on a
+  `credentialBackend=gsm` deploy using per-operator WIF it is the failure
+  mode `checkRunner.*` exists to fix (see `docs/deploying.md` § GSM).
 - The safe-only guard's descriptor read and the insert are in separate
   sessions (a TOCTOU window); acceptable because the dispatch-time policy
   gate is the real boundary.

@@ -38,13 +38,42 @@ and discards the token. This restores *GCP-layer* per-operator attribution
 the Vault ``vault_client_for_operator`` JIT contract (``auth/vault.py:198``):
 a fresh credential per operation, no caching across requests.
 
-Selection is per-read: WIF configured ⇒ the operator path; WIF unconfigured
-⇒ the Phase-1 SA-direct ADC path, unchanged (no behaviour change for
-Phase-1 installs). The shared loader's empty-``raw_jwt`` fail-closed guard
-(``vault_creds._resolve_and_load``) runs *before* dispatch, so a
-system-initiated call (``raw_jwt=""`` — health probe, scheduler) never
-reaches the WIF exchange: there is no operator JWT to exchange, so it fails
-closed upstream. That guard is load-bearing for the WIF path.
+Selection is per-read: WIF configured **and** an operator JWT present ⇒ the
+operator path; WIF unconfigured ⇒ the Phase-1 SA-direct ADC path, unchanged
+(no behaviour change for Phase-1 installs).
+
+Background dispatch (#2642)
+===========================
+
+WIF configured but an **empty** ``operator.raw_jwt`` — a background sensor
+evaluation, the topology-refresh scheduler, runbook verify dispatch, a
+legacy connector ``execute()`` shim — falls back to the SA-direct path
+rather than failing closed (``_select_auth_path``, logged as
+``auth_path="sa_direct_fallback"``). The shared loader used to reject such a
+call before dispatch, which on a GCP-native install blocked a read the pod's
+own identity could have served and left every credentialed Sensor stuck at
+``unknown``. Each backend now owns that precondition, and this backend has a
+deployment identity to fall back on. Note the relaxation is not scoped to
+the check-runner: it applies to every system-initiated caller with an empty
+``raw_jwt`` on a GSM deploy.
+
+Connector ``probe()`` / ``fingerprint()`` are **not** in that set.
+:func:`~meho_backplane.connectors._shared.system_operator.synthesise_system_operator`
+gives them a non-empty placeholder ``raw_jwt`` (G3.10), so
+``_select_auth_path`` returns ``"wif"`` and the exchange is attempted with a
+string STS will reject. The read then fails with
+:class:`GcpSecretManagerReadError` and the connector degrades to
+``reachable=False`` / ``auth_failed``; the placeholder is a fixed non-secret
+sentinel, so nothing leaks. Teaching ``_select_auth_path`` to treat the
+placeholder as absent is a behaviour change tracked separately.
+
+The fallback needs an ambient GCP identity, which an on-prem cluster does
+not have. That deployment class instead gives the check-runner its own
+Keycloak service principal
+(:mod:`meho_backplane.auth.runner_identity`): the runner's synthetic
+operator then carries a real JWT and the ordinary WIF exchange runs, with
+GCP attributing the read to the check-runner principal. With neither, the
+read fails closed with an error naming both remedies.
 
 MEHO's own audit attribution is unchanged in both paths — the audit row
 still carries the Keycloak ``sub`` (the policy/audit seam is untouched by
@@ -90,7 +119,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 import structlog
 
-from meho_backplane.connectors._shared.credential_backend import register_credential_backend
+from meho_backplane.connectors._shared.credential_backend import (
+    CredentialsReadError,
+    register_credential_backend,
+)
 from meho_backplane.settings import get_settings
 
 if TYPE_CHECKING:
@@ -123,6 +155,23 @@ _LATEST_VERSION = "latest"
 #: in this module and stable across google-auth versions.
 _STS_TOKEN_URL = "https://sts.googleapis.com/v1/token"
 
+#: Appended to every "no ambient GCP identity" error (#2642). Both raise
+#: sites live in :meth:`GcpSecretManagerBackend._build_credentials`, which
+#: every ADC read reaches — the Phase-1 ``sa_direct`` path as much as the
+#: ``sa_direct_fallback`` one. The check-runner remedy only applies to the
+#: latter, so the text scopes it explicitly: on a Phase-1 install
+#: ``_select_auth_path`` never looks at ``operator_jwt``, and giving the
+#: runner a principal would change nothing.
+_NO_IDENTITY_REMEDY = (
+    "Give the pod an ambient GCP identity (GKE Workload Identity, a mounted "
+    "SA): with WIF unconfigured every read is SA-direct and that is the only "
+    "fix. On a per-operator-WIF deploy, background dispatch (sensor "
+    "evaluations, scheduled refreshes) reaches this path only because it "
+    "carries no operator JWT, so configuring the check-runner service "
+    "principal (CHECK_RUNNER_CLIENT_ID / CHECK_RUNNER_CLIENT_SECRET) gives it "
+    "a token to federate and takes the ADC path out of the picture."
+)
+
 #: Template for the IAM Credentials ``generateAccessToken`` URL google-auth's
 #: external-account flow calls to impersonate the target SA after the STS
 #: exchange. ``projects/-`` lets IAM resolve the SA's project from its email.
@@ -132,7 +181,7 @@ _IAM_IMPERSONATION_URL_TEMPLATE = (
 )
 
 
-class GcpSecretManagerReadError(Exception):
+class GcpSecretManagerReadError(CredentialsReadError):
     """Read-phase failure resolving a ``gsm:`` credential ref.
 
     The GSM analogue of
@@ -143,6 +192,14 @@ class GcpSecretManagerReadError(Exception):
     Never a bare ``google.api_core`` exception surfacing from deep in the
     client, and never echoing a credential value — the message names the
     project / secret / field only.
+
+    Every credential-read failure on a ``credentialBackend=gsm`` deploy now
+    surfaces under **this** class (#2642). The dispatcher renders a handler
+    exception as ``connector_error: <class name>``, and the shared loader
+    used to fail system-initiated calls with the Vault-named class before a
+    backend was even resolved — so a GCP-native install with ``vault:
+    not_configured`` reported ``VaultCredentialsReadError`` and sent
+    operators looking for a component they do not run.
     """
 
 
@@ -318,6 +375,46 @@ def _resolve_wif_config() -> _WifConfig | None:
     )
 
 
+def _select_auth_path(
+    wif_config: _WifConfig | None, operator_jwt: str
+) -> tuple[str, _WifConfig | None]:
+    """Pick the credential path for one read: ``(label, active_wif_config)``.
+
+    * WIF configured **and** a non-empty ``operator_jwt`` → ``"wif"``.
+    * WIF unconfigured → ``"sa_direct"`` (the Phase-1 path, unchanged).
+    * WIF configured but an **empty** ``operator_jwt`` →
+      ``"sa_direct_fallback"`` (#2642).
+
+    The third case is the one that matters. A system-initiated read (a
+    background sensor evaluation with no check-runner principal configured,
+    the topology-refresh scheduler, runbook verify dispatch, a legacy
+    ``execute()`` shim) carries ``raw_jwt=""``, so there is nothing to
+    federate with — but a deployment whose pod carries an ambient GCP
+    identity (GKE Workload Identity, a mounted SA) can still read Secret
+    Manager under it. Failing such a read closed bought nothing: it is not a
+    privilege escalation (the pod identity is MEHO's own, and Phase-1
+    installs read under it for every call), it just made scheduled
+    evaluation impossible on deployments that had a perfectly good identity
+    available.
+
+    The test is truthiness, not "is this a real operator". Connector
+    ``probe()`` / ``fingerprint()`` run under
+    ``synthesise_system_operator()``, whose placeholder ``raw_jwt`` is
+    deliberately non-empty (G3.10), so they take the ``"wif"`` branch and
+    the exchange fails at STS — they do **not** get the fallback.
+
+    The fallback is not silent — it rides its own ``auth_path`` label in the
+    ``gsm_secret_accessed`` event, so an audit can tell a read GCP attributed
+    to the operator from one attributed to MEHO's own identity. Deployments
+    with no ambient ADC still fail closed, in ``_build_credentials``.
+    """
+    if wif_config is None:
+        return "sa_direct", None
+    if operator_jwt:
+        return "wif", wif_config
+    return "sa_direct_fallback", None
+
+
 def _assert_wif_audience_consistent(wif_config: _WifConfig, target_name: str) -> None:
     """Fail closed when the declared pool / provider disagree with the audience.
 
@@ -400,13 +497,13 @@ class GcpSecretManagerBackend:
     ) -> dict[str, object]:
         """Read *secret_ref* from GCP Secret Manager and return its field dict.
 
-        When Workload Identity Federation is configured (#2232), the read runs
-        under *operator*'s identity: ``operator.raw_jwt`` is exchanged at the
-        GCP STS for a short-lived federated token so GCP audits the read to
-        the operator. Otherwise Phase 1's SA-direct path reads under MEHO's
-        own ADC identity and ``operator`` is unused. The shared loader's
-        empty-``raw_jwt`` guard runs before dispatch, so an operator reaching
-        the WIF exchange always carries a JWT to exchange.
+        When Workload Identity Federation is configured (#2232) and *operator*
+        carries a JWT, the read runs under *operator*'s identity:
+        ``operator.raw_jwt`` is exchanged at the GCP STS for a short-lived
+        federated token so GCP audits the read to the operator. Otherwise
+        Phase 1's SA-direct path reads under MEHO's own ADC identity and
+        *operator* is unused — including as the #2642 fallback for a
+        system-initiated read on a WIF-configured install.
 
         ``mount`` is a Vault-KV concept with no GSM analogue and is ignored.
         The synchronous ``access_secret_version`` RPC (and the blocking
@@ -415,7 +512,7 @@ class GcpSecretManagerBackend:
         ``vault_creds``.
         """
         project, secret, version, field = _parse_gsm_ref(secret_ref, target_name=target_name)
-        wif_config = _resolve_wif_config()
+        auth_path, active_wif = _select_auth_path(_resolve_wif_config(), operator.raw_jwt)
 
         payload_bytes, resolved_name = await asyncio.to_thread(
             self._access_sync,
@@ -424,7 +521,7 @@ class GcpSecretManagerBackend:
             version,
             target_name,
             operator.raw_jwt,
-            wif_config,
+            active_wif,
         )
 
         secret_data = _decode_payload(
@@ -445,9 +542,9 @@ class GcpSecretManagerBackend:
             secret_name=secret,
             version=resolved_name or version,
             field=field,
-            auth_path="wif" if wif_config is not None else "sa_direct",
-            wif_pool=wif_config.pool_id if wif_config is not None else None,
-            wif_provider=wif_config.provider_id if wif_config is not None else None,
+            auth_path=auth_path,
+            wif_pool=active_wif.pool_id if active_wif is not None else None,
+            wif_provider=active_wif.provider_id if active_wif is not None else None,
         )
         return secret_data
 
@@ -469,9 +566,10 @@ class GcpSecretManagerBackend:
         Runs in a thread (``asyncio.to_thread``) because the google-cloud
         client and ``google.auth`` credential refresh — including the WIF STS
         exchange — all perform blocking transport under the hood. Credential
-        selection is per-call: *wif_config* present ⇒ the operator-context WIF
-        path (a fresh federated credential built from *operator_jwt*, never
-        cached across reads); ``None`` ⇒ the Phase-1 SA-direct ADC path.
+        selection is per-call and already resolved by ``_select_auth_path``:
+        *wif_config* present ⇒ the operator-context WIF path (a fresh federated
+        credential built from *operator_jwt*, never cached across reads);
+        ``None`` ⇒ the SA-direct ADC path (Phase 1, or the #2642 fallback).
         Access-denied, not-found, and transport failures are re-raised as
         :class:`GcpSecretManagerReadError` with an actionable message naming
         project / secret (AC #5) — not a bare ``google.api_core`` exception.
@@ -535,12 +633,12 @@ class GcpSecretManagerBackend:
                 f"no Application Default Credentials available to read gsm secrets for "
                 f"target {target_name!r}: MEHO must run under a GKE Workload Identity "
                 "service account (or have GOOGLE_APPLICATION_CREDENTIALS set to a "
-                "non-key-file credential)"
+                f"non-key-file credential). {_NO_IDENTITY_REMEDY}"
             ) from exc
         if source_credentials is None:
             raise GcpSecretManagerReadError(
                 f"Application Default Credentials resolved to no credentials for target "
-                f"{target_name!r}; cannot read gsm secrets"
+                f"{target_name!r}; cannot read gsm secrets. {_NO_IDENTITY_REMEDY}"
             )
 
         impersonate_sa = self._resolve_impersonate_sa()

@@ -55,7 +55,7 @@ import structlog
 from meho_backplane.auth.operator import Operator
 from meho_backplane.auth.vault import VaultClientError
 from meho_backplane.connectors._shared.vault_creds import (
-    VaultCredentialsReadError,
+    CredentialsReadError,
     strip_credential_value,
 )
 from meho_backplane.connectors.adapters.ssh import SshConnector
@@ -280,9 +280,11 @@ class PfSenseConnector(SshConnector):
 
         # Catch tuple: transport failures plus credential-resolution
         # failures (ValueError — key missing from the resolved secret;
-        # VaultClientError / VaultCredentialsReadError — the two-phase
-        # Vault contract). An unresolvable credential is an unreachable
-        # target, not an unhandled exception (#986 discipline).
+        # VaultClientError — the Vault login phase; CredentialsReadError
+        # — a failed store read on whichever credential backend is
+        # configured, Vault or GSM). An unresolvable credential is an
+        # unreachable target, not an unhandled exception (#986
+        # discipline).
         try:
             proc = await self._run_command(target, "cat /etc/version", operator=operator)
         except (
@@ -290,7 +292,7 @@ class PfSenseConnector(SshConnector):
             asyncssh.Error,
             ValueError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             _log.warning(
                 "pfsense_fingerprint_unreachable",
@@ -374,11 +376,12 @@ class PfSenseConnector(SshConnector):
         # must be caught before DisconnectError; OSError is the TCP-
         # level failure. Credential-resolution failures map to
         # auth_failed: ValueError (no ssh_private_key in the resolved
-        # secret) and the Vault two-phase errors (VaultClientError /
-        # VaultCredentialsReadError) -- ``probe()`` carries no operator,
-        # so the Vault read runs under the synthesised system operator
-        # and fails closed. Auth configuration problems, not network
-        # problems.
+        # secret), VaultClientError (the Vault login phase) and
+        # CredentialsReadError (a failed store read on whichever
+        # credential backend is configured, Vault or GSM) -- ``probe()``
+        # carries no operator, so on Vault the read runs under the
+        # synthesised system operator and fails closed. Auth
+        # configuration problems, not network problems.
         try:
             conn = await self._connect(target)
         except asyncssh.PermissionDenied:
@@ -387,7 +390,7 @@ class PfSenseConnector(SshConnector):
             return _result(False, "ssh_handshake_failed")
         except OSError:
             return _result(False, "tcp_unreachable")
-        except (ValueError, VaultClientError, VaultCredentialsReadError):
+        except (ValueError, VaultClientError, CredentialsReadError):
             return _result(False, "auth_failed")
 
         del conn  # connection is pooled; _run_command will reuse it

@@ -109,19 +109,55 @@ connector-related release-notes line.
   identity need no runner principal. The fallback is logged distinctly
   (`gsm_secret_accessed` `auth_path=sa_direct_fallback`) so an audit can
   tell a read attributed to the operator from one attributed to MEHO.
+  **The relaxation is not check-runner-only.** The guard it replaced fired
+  for every `raw_jwt=""` caller, so on a `gsm` deploy the topology-refresh
+  scheduler, runbook verify dispatch (whose operator is reconstructed from
+  `operator_sub` and not validated from a bearer token), the legacy
+  connector `execute()` shims and the health-probe path now resolve
+  per-target vendor credentials where they previously failed closed. The
+  read runs under MEHO's own ADC — the identity a Phase-1 install already
+  uses for every read — so no GCP privilege boundary moves, but the
+  "system-initiated calls cannot read per-target vendor credentials"
+  carve-out is now **Vault-only**.
+- Warn, in the chart's `helm install` notes and in `values.yaml` /
+  `docs/deploying.md` / `docs/cross-repo/vault-provisioning.md`, that
+  enabling `checkRunner.*` on a `credentialBackend: vault` install widens
+  privilege rather than being inert (#2642). The documented `meho-mcp` JWT
+  role binds on `bound_audiences` alone — no `bound_subject`, no
+  `bound_claims` — and its policy grants read on all of
+  `secret/data/meho/*`, so Vault accepts the runner principal against the
+  existing role once its token carries the `KEYCLOAK_AUDIENCE` mapper the
+  realm recipe already asks for. Background dispatch then inherits the full
+  policy. `vault-provisioning.md` § "Bounding the check-runner principal"
+  carries the two guardrail recipes (distinct audience + dedicated role, or
+  `bound_subject` / `bound_claims` on `meho-mcp`).
 - Surface a **backend-neutral** credential-read error: a failed `gsm:` read
   now reports `connector_error: GcpSecretManagerReadError` instead of
   `VaultCredentialsReadError` on a deploy that runs no Vault (#2642). The
-  two errors share a new `CredentialsReadError` base, which connector probe
-  and fingerprint paths now catch — previously a GSM read error escaped
-  handlers meant to degrade to `auth_failed`.
+  two errors share a new `CredentialsReadError` base, which the probe and
+  fingerprint handlers of bind9, github, holodeck, keycloak, mongodb,
+  pfsense, postgres, prometheus, proxmox, rabbitmq and rke2 now catch —
+  previously a GSM read error escaped handlers meant to degrade to
+  `auth_failed`, surfacing as an HTTP 500 instead of a `reachable=false`
+  row. Sites that *raise* a credential error of their own
+  (`_require_secret_ref`, the connector cache fast-path guards) still raise
+  the Vault-named class on every backend; unchanged here.
 - Render the `gsm.workloadIdentityFederation.*` chart keys into the
   backplane ConfigMap as `GSM_WIF_*` (#2642). They were declared-but-unwired
   stubs, so a per-operator-WIF install had to configure them through
   `extraEnv`. Adds `audience` and `subjectTokenType` alongside the existing
   pool / provider / service-account keys.
 - Document the per-operator-WIF requirement matrix (WIF × ambient identity ×
-  runner principal) in `docs/deploying.md` § GSM / Vault-free (#2642).
+  runner principal) in `docs/deploying.md` § GSM / Vault-free (#2642),
+  including the caveat that it describes the `raw_jwt=""` callers only:
+  connector `probe()` / `fingerprint()` carry the non-empty
+  `synthesise_system_operator()` placeholder, so `_select_auth_path` returns
+  `wif` and they attempt (and fail) the federation exchange on a
+  per-operator-WIF install rather than taking the SA-direct fallback. The
+  placeholder is a fixed non-secret sentinel and the connectors degrade to
+  `reachable=false` / `auth_failed`; changing the selection is out of scope
+  here.
+
 ### Fixed — CLI targets import tls_server_name (#2643)
 
 - `meho targets import` now maps a manifest's `tls_server_name` to the

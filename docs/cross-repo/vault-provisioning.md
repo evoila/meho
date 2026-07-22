@@ -258,6 +258,89 @@ the scheduler re-reads that file on **every** use, so a rewritten token
 is picked up without a restart. When both are set the file wins; an
 unreadable/empty file falls through to `VAULT_SCHEDULER_TOKEN`.
 
+### 7. Bounding the check-runner principal (#2642)
+
+Only relevant if you set the chart's `checkRunner.*` block (the in-process
+sensor check-runner's service principal) on a `credentialBackend: vault`
+install. **Do this first — enabling `checkRunner.*` without it widens what
+background dispatch can read.**
+
+Role `meho-mcp` above is deliberately loose: `user_claim=sub` with
+`bound_audiences` as its *only* binding and no `bound_subject` /
+`bound_claims`, paired with a policy that grants read on the whole
+`secret/data/meho/*` subtree. Any Keycloak principal whose token carries
+`aud=<keycloak-audience>` is therefore accepted by it, including a
+confidential service-account client. `check_runner_jwt()` mints the
+runner's token with `audience=KEYCLOAK_AUDIENCE`
+(`backend/src/meho_backplane/auth/runner_identity.py`), and the realm
+recipe in [`docs/deploying.md`](../deploying.md) tells you to give the
+client the matching audience mapper. Net effect of turning the flag on
+with the role as provisioned: Vault accepts the runner principal as-is,
+and every scheduled evaluation runs with read on **all** target
+credentials under `secret/meho/*`. That silently removes the
+"system-initiated calls cannot perform an operator-context Vault read"
+carve-out the rest of the credential layer is built around.
+
+Pick one of two guardrails before enabling the flag.
+
+**Option A (preferred) — a distinct audience and a dedicated role.** Give
+the runner client its own audience mapper (e.g. `meho-check-runner`) and
+provision a separate role + policy scoped to the secrets Sensors actually
+evaluate:
+
+```bash
+vault policy write meho-check-runner - <<'EOF'
+path "secret/data/meho/sensors/*" {
+  capabilities = ["read"]
+}
+path "secret/metadata/meho/sensors/*" {
+  capabilities = ["read"]
+}
+EOF
+
+vault write auth/jwt/role/meho-check-runner \
+  role_type=jwt \
+  user_claim=sub \
+  bound_audiences=meho-check-runner \
+  bound_subject=<runner-client-service-account-sub> \
+  policies=meho-check-runner \
+  token_ttl=1h
+```
+
+Substitute the subtree your Sensors' `secret_ref`s actually live under.
+Note the backplane resolves one role name from `VAULT_OIDC_ROLE` for every
+JWT login, so Option A currently requires either a per-deployment split or
+that you point `VAULT_OIDC_ROLE` at the narrower role and widen it back for
+the interactive path — until MEHO grows a per-principal role setting,
+Option B is the operationally simpler answer on a single-role install.
+
+**Option B — tighten `meho-mcp` so it does not accept the runner.** Add a
+`bound_claims` restriction that only human/operator tokens satisfy, so the
+runner's service-account token is rejected outright and the runner cannot
+resolve target credentials at all (i.e. keep today's carve-out and accept
+that credentialed Sensors stay `unknown` on Vault):
+
+```bash
+vault write auth/jwt/role/meho-mcp \
+  role_type=jwt \
+  user_claim=sub \
+  bound_audiences=<keycloak-audience> \
+  bound_claims_type=glob \
+  bound_claims='{"preferred_username":"*"}' \
+  policies=meho-mcp \
+  token_ttl=1h
+```
+
+Adjust the claim to whatever your realm emits for interactive logins but
+not for `client_credentials` grants — verify with a real runner token
+before relying on it:
+
+```bash
+vault write auth/jwt/login role=meho-mcp jwt="$RUNNER_TOKEN"
+# Option B is in force when this returns "permission denied" /
+# "claim validation failed" rather than a token.
+```
+
 ## Verification
 
 Run from any host with the operator's Vault token (`vault login`

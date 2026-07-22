@@ -626,8 +626,27 @@ gsm:
 # Kubernetes): the runner's token becomes the subject token exchanged at
 # `sts.googleapis.com`, and GCP audits the read to this principal. Deploys
 # with GKE Workload Identity don't need it — the backend falls back to the
-# SA-direct read. A Vault install may also set it, but the principal then
-# needs a Vault JWT role of its own.
+# SA-direct read.
+#
+# WARNING — on a `credentialBackend: vault` install this is a privilege
+# change, not a no-op. The `meho-mcp` JWT role this repo provisions
+# (`docs/cross-repo/vault-provisioning.md`) is `role_type=jwt
+# user_claim=sub bound_audiences=<keycloak-audience>` with **no**
+# `bound_subject` / `bound_claims`, and its policy grants read on all of
+# `secret/data/meho/*`. The runner mints its token with
+# `audience=KEYCLOAK_AUDIENCE`, so once the client carries the audience
+# mapper the realm setup asks for, Vault accepts the runner principal
+# against that existing role as-is and hands it the whole policy. Enabling
+# `checkRunner.*` therefore gives background dispatch a full
+# `secret/meho/*` read and removes the "system-initiated calls cannot
+# perform an operator-context Vault read" carve-out the rest of this
+# feature relies on. Bound the role BEFORE enabling this on Vault: either
+# give the runner client a distinct audience plus its own narrower JWT role
+# (`bound_audiences=<runner-audience>` + a policy scoped to the secrets
+# Sensors actually need), or add `bound_subject` / `bound_claims` to
+# `meho-mcp` so the runner's `sub` is not accepted by it. Recipe:
+# `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
+# principal".
 #
 # `clientId` is non-secret operator config; `clientSecret` is wired
 # exclusively as a `secretKeyRef` — never a plaintext chart value. Default

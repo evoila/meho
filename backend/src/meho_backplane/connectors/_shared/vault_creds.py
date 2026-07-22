@@ -56,6 +56,17 @@ a real operator-context JWT. Hoisting the empty-JWT check into the shared
 dispatch would fail both of those closed before the backend is even
 resolved, so it lives on the backend whose auth model requires it.
 
+Note what the second of those means on Vault: configuring a check-runner
+principal is what *ends* the fail-closed carve-out here. The guard below is
+a JWT-presence test, not an authorisation decision — once the runner has a
+token, whether the read succeeds is Vault-side role configuration, and the
+``meho-mcp`` role this project documents (``bound_audiences`` only, policy
+``read`` on all of ``secret/data/meho/*``) accepts the runner principal
+as-is and grants it every target credential. Operators enabling
+``checkRunner.*`` on Vault are told to bound the role first; see
+``docs/cross-repo/vault-provisioning.md`` § "Bounding the check-runner
+principal".
+
 The ``secret_ref`` shape
 ========================
 

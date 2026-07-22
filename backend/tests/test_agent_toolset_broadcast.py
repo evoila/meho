@@ -145,13 +145,47 @@ def test_broadcast_tools_require_operator_floor() -> None:
     ],
 )
 def test_read_tool_schema_matches_mcp(agent_name: str, mcp_name: str) -> None:
-    """The read tools advertise the exact MCP inputSchema (wire parity, AC2)."""
+    """The read tools advertise the exact MCP *wire* schema (wire parity, AC2).
+
+    Parity is against ``to_wire()["inputSchema"]``, not the registered
+    ``inputSchema``: the bridge publishes what MCP clients are served
+    (#2644), which is the registered schema minus any top-level JSON-Schema
+    combinator the Anthropic Messages API rejects.
+    """
     tools = resolve_agent_tools({"meta_tools": [agent_name]}, _make_operator())
     (tool,) = tools
     entry = get_tool(mcp_name)
     assert entry is not None
     definition, _handler = entry
-    assert tool.function_schema.json_schema == definition.inputSchema
+    assert tool.function_schema.json_schema == definition.to_wire()["inputSchema"]
+
+
+def test_watch_bridge_strips_anyof_but_registry_keeps_it() -> None:
+    """The bridged ``broadcast_watch`` schema drops the cursor XOR; MCP keeps it (#2644).
+
+    ``meho.broadcast.watch``'s registered ``inputSchema`` carries a top-level
+    ``anyOf`` so ``mcp/handlers.py``'s ``jsonschema.validate`` rejects a call
+    that supplies neither cursor spelling. That combinator 400s the Anthropic
+    Messages API when it reaches a tool's ``input_schema``, killing every
+    hosted run at model-init, so the agent bridge publishes the wire copy
+    instead. Both halves are asserted here because dropping either one is the
+    regression: strip it from the registry and server-side validation
+    narrows; publish it to the agent and every run dies.
+    """
+    tools = resolve_agent_tools({"meta_tools": ["broadcast_watch"]}, _make_operator())
+    (tool,) = tools
+    published = tool.function_schema.json_schema
+    assert "anyOf" not in published
+    # The parameters both cursor spellings live on survive the strip.
+    assert {"cursor", "since_cursor"} <= set(published["properties"])
+
+    entry = get_tool("meho.broadcast.watch")
+    assert entry is not None
+    registered = entry[0].inputSchema
+    assert registered["anyOf"] == [
+        {"required": ["cursor"]},
+        {"required": ["since_cursor"]},
+    ]
 
 
 def test_announce_schema_hides_run_scoped_fields() -> None:

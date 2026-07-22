@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — agent bridge publishes wire-safe tool schemas (#2644)
+
+- Every `meho agents run` on provider `anthropic` died at model-init with
+  `input_schema does not support oneOf, allOf, or anyOf at the top level`
+  and `turns: 0`, no matter what the agent's own toolset asked for —
+  reproducible with an empty toolset. The Anthropic Messages API validates
+  the whole `tools` array, so one malformed schema poisons the request
+  rather than just its own tool. The offender was `meho.broadcast.watch`:
+  its registered `inputSchema` carries a top-level `anyOf` enforcing the
+  `cursor` / `since_cursor` XOR, and the hosted-agent bridge deep-copied
+  the *registered* schema into the model-facing tool list, bypassing
+  `ToolDefinition.to_wire()` — which has stripped root-level combinators
+  since v0.6.0 for exactly this reason. The bridge now publishes the wire
+  shape at its single publish chokepoint, so every currently-bridged and
+  future-bridged tool inherits the guarantee. Nothing about the MCP surface
+  changes: the registered schema keeps its `anyOf`, `tools/call` keeps
+  validating both-or-neither cursor forms against it, and the deprecated
+  `since_cursor` alias is untouched. Scheduled runs, the approval-gated
+  agent-write flow, and operator-triggered runs all recover.
+  A new cross-surface sweep (`tests/test_published_tool_schema_shape.py`)
+  fails on any *published* schema — MCP wire copy or agent meta-tool —
+  whose root carries a combinator or is not `type: object`.
+
 ### Fixed — scheduler Vault dead-token diagnostics (#2652)
 
 - Agent- and runner-principal registration now tells operators **which**

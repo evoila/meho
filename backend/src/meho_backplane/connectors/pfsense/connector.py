@@ -280,9 +280,11 @@ class PfSenseConnector(SshConnector):
 
         # Catch tuple: transport failures plus credential-resolution
         # failures (ValueError — key missing from the resolved secret;
-        # VaultClientError / VaultCredentialsReadError — the two-phase
-        # Vault contract). An unresolvable credential is an unreachable
-        # target, not an unhandled exception (#986 discipline).
+        # VaultClientError — the Vault login phase; CredentialsReadError
+        # — a failed store read on whichever credential backend is
+        # configured, Vault or GSM). An unresolvable credential is an
+        # unreachable target, not an unhandled exception (#986
+        # discipline).
         try:
             proc = await self._run_command(target, "cat /etc/version", operator=operator)
         except (
@@ -374,11 +376,12 @@ class PfSenseConnector(SshConnector):
         # must be caught before DisconnectError; OSError is the TCP-
         # level failure. Credential-resolution failures map to
         # auth_failed: ValueError (no ssh_private_key in the resolved
-        # secret) and the Vault two-phase errors (VaultClientError /
-        # VaultCredentialsReadError) -- ``probe()`` carries no operator,
-        # so the Vault read runs under the synthesised system operator
-        # and fails closed. Auth configuration problems, not network
-        # problems.
+        # secret), VaultClientError (the Vault login phase) and
+        # CredentialsReadError (a failed store read on whichever
+        # credential backend is configured, Vault or GSM) -- ``probe()``
+        # carries no operator, so on Vault the read runs under the
+        # synthesised system operator and fails closed. Auth
+        # configuration problems, not network problems.
         try:
             conn = await self._connect(target)
         except asyncssh.PermissionDenied:

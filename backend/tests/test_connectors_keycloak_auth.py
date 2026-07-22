@@ -41,6 +41,7 @@ import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors._shared.cache_key import target_cache_key
+from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerReadError
 from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.keycloak import KeycloakConnector
@@ -128,6 +129,15 @@ def _client_loader(
 
     async def _load(_target: KeycloakTargetLike, _operator: Operator) -> KeycloakAdminCredentials:
         return creds
+
+    return _load
+
+
+def _gsm_failing_loader() -> Any:
+    """Return an injected loader standing in for a failed ``gsm:`` read."""
+
+    async def _load(_target: KeycloakTargetLike, _operator: Operator) -> KeycloakAdminCredentials:
+        raise GcpSecretManagerReadError("gsm read failed")
 
     return _load
 
@@ -450,6 +460,19 @@ async def test_fingerprint_unreachable_on_transport_error() -> None:
     assert fp.reachable is False
     assert "error" in fp.extras
     assert fp.version is None
+
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_degrades_on_gsm_credential_read_error() -> None:
+    """A ``gsm:`` credential-read failure degrades, it does not escape (#2642)."""
+    connector = KeycloakConnector(credentials_loader=_gsm_failing_loader())
+
+    fp = await connector.fingerprint(_TARGET, operator=_make_operator())
+
+    assert fp.reachable is False
+    assert "GcpSecretManagerReadError" in fp.extras["error"]
 
     await connector.aclose()
 

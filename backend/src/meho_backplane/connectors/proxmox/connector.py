@@ -56,7 +56,7 @@ from meho_backplane.connectors._shared.system_operator import (
     is_system_operator,
     synthesise_system_operator,
 )
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import CredentialsReadError
 from meho_backplane.connectors.adapters.http import HttpConnector
 from meho_backplane.connectors.proxmox.ops import (
     PROXMOX_READ_OPS,
@@ -285,9 +285,12 @@ class ProxmoxConnector(HttpConnector):
         ``repoid`` build hash plus a per-node ``[{node, status}]`` list land
         under ``extras``. Both endpoints require authentication (PVE has no
         unauthenticated identity endpoint), so a background call with
-        ``operator=None`` runs under the synthesised system operator and fails
-        closed at Vault → ``reachable=False``. Transport / auth / credential
-        failures map to ``reachable=False`` with ``extras["error"]``.
+        ``operator=None`` runs under the synthesised system operator; on a
+        Vault backend that fails closed at the live JWT round-trip →
+        ``reachable=False``. Transport / auth / credential failures map to
+        ``reachable=False`` with ``extras["error"]`` — the credential arm
+        catches the backend-neutral ``CredentialsReadError``, so a ``gsm:``
+        read failure degrades the same way a Vault one does.
         """
         effective_operator = operator or synthesise_system_operator()
         probed_at = datetime.now(UTC)
@@ -300,7 +303,7 @@ class ProxmoxConnector(HttpConnector):
             httpx.HTTPError,
             OSError,
             VaultClientError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             return FingerprintResult(
                 vendor="proxmox",

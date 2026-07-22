@@ -23,6 +23,7 @@ import pytest
 import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerReadError
 from meho_backplane.connectors.rabbitmq.connector import (
     RabbitMqConnector,
     RabbitMqMethodNotAllowedError,
@@ -62,6 +63,12 @@ async def _fake_loader(target: Any, operator: Any) -> dict[str, str]:
     """Injected credential loader — no Vault, returns fixed Basic creds."""
     del target, operator
     return {"username": _USERNAME, "password": _PASSWORD}
+
+
+async def _gsm_failing_loader(target: Any, operator: Any) -> dict[str, str]:
+    """Injected loader standing in for a failed ``gsm:`` credential read."""
+    del target, operator
+    raise GcpSecretManagerReadError("gsm read failed")
 
 
 def _connector() -> RabbitMqConnector:
@@ -178,6 +185,15 @@ async def test_fingerprint_unreachable_maps_to_reachable_false() -> None:
         fp = await connector.fingerprint(_Target(), _make_operator())
     assert fp.reachable is False
     assert "error" in fp.extras
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_degrades_on_gsm_credential_read_error() -> None:
+    """A ``gsm:`` credential-read failure degrades, it does not escape (#2642)."""
+    connector = RabbitMqConnector(credentials_loader=_gsm_failing_loader)
+    fp = await connector.fingerprint(_Target(), _make_operator())
+    assert fp.reachable is False
+    assert "GcpSecretManagerReadError" in fp.extras["error"]
 
 
 @pytest.mark.asyncio

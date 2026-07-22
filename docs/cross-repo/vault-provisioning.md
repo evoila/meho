@@ -422,9 +422,11 @@ runner's token and the operator-facing client id on an operator's:
 Either binding gates **every** `meho-mcp` login, not only the runner's —
 including the `/api/v1/health` federation proof, which dispatches
 `vault.kv.read` under the calling operator's own JWT. An operator without
-the role (or arriving through an unlisted client) gets
-`login_failed: VaultRoleDeniedError`, the same way a mismatched
-`bound_audiences` presents.
+the role (or arriving through an unlisted client) then cannot log in at
+all: the JWT method answers a bound-claims mismatch with a **400** whose
+body names the claim, and MEHO surfaces that as `vault.reachable=false`
+with a `login_failed:` detail. Grant the role to everyone who legitimately
+reads Vault through MEHO *before* you apply the binding.
 
 Verify against real tokens before relying on it. Read what the runner
 actually carries first — a binding on a claim the runner happens to satisfy
@@ -442,10 +444,10 @@ claims = json.loads(base64.urlsafe_b64decode(payload))
 print(json.dumps({k: claims.get(k) for k in ("azp", "preferred_username", "realm_access")}, indent=2))
 PY
 
-# 2. What Vault does with it. Option B is in force when this errors with
-#    `claim "/realm_access/roles" does not match any associated bound claim
-#    values` rather than returning a token. A token here means the binding
-#    is not constraining — go back to step 1.
+# 2. What Vault does with it. Option B is in force when this fails with
+#    `error validating claims: claim "/realm_access/roles" does not match
+#    any associated bound claim values` rather than returning a token. A
+#    token here means the binding is not constraining — go back to step 1.
 vault write auth/jwt/login role=meho-mcp jwt="$RUNNER_TOKEN"
 
 # 3. An operator token must still succeed, or you have locked out the

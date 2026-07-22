@@ -862,9 +862,12 @@ async def test_sa_direct_fallback_taken_when_wif_configured_and_no_operator_jwt(
 ) -> None:
     """AC2: WIF configured + ``raw_jwt=""`` + ambient ADC -> SA-direct read.
 
-    The system-initiated case (a background sensor evaluation, a health
-    probe). There is no operator JWT to federate, but the pod's own ADC can
-    serve the read, so the backend falls back instead of failing closed. The
+    The system-initiated case (a background sensor evaluation, a scheduled
+    topology refresh). Health and readiness probes are deliberately not the
+    example: they never resolve a per-target ``secret_ref`` and so never
+    reach this loader. There is no operator JWT to federate, but the pod's
+    own ADC can serve the read, so the backend falls back instead of
+    failing closed. The
     WIF factory must never be called -- taking the WIF path with an empty
     subject token is what used to make every credentialed Sensor ``unknown``.
     """

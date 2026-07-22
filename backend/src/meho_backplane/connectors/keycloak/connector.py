@@ -552,14 +552,21 @@ class KeycloakConnector(HttpConnector):
         ``/admin/serverinfo`` is the (undocumented but stable) endpoint
         the admin console's "Server Info" page reads; ``systemInfo.version``
         carries the Keycloak version (e.g. ``"26.0.5"``). Any failure
-        (404 on an older server, transport error, malformed body) returns
-        ``None`` rather than failing the fingerprint -- the realm
-        round-trip is the canonical reachability signal, the version is a
-        nice-to-have.
+        (404 on an older server, transport error, malformed body, or a
+        :class:`CredentialsReadError` from a credential store that went
+        away between this call and the realm round-trip) returns ``None``
+        rather than failing the fingerprint -- the realm round-trip is the
+        canonical reachability signal, the version is a nice-to-have.
         """
         try:
             info = await self._get_json(target, "/admin/serverinfo", operator=operator)
-        except (httpx.HTTPError, OSError, ValueError, KeycloakAdminTokenError):
+        except (
+            httpx.HTTPError,
+            OSError,
+            ValueError,
+            KeycloakAdminTokenError,
+            CredentialsReadError,
+        ):
             return None
         system_info = info.get("systemInfo") if isinstance(info, dict) else None
         version = system_info.get("version") if isinstance(system_info, dict) else None

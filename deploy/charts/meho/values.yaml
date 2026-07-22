@@ -585,10 +585,13 @@ gsm:
   # and the SA-direct Phase-1 path runs unchanged.
   #
   # A per-operator-WIF install must also decide how *background* dispatch
-  # (sensor evaluations, health probes — no calling operator, so no JWT to
-  # federate) gets an identity: either an ambient pod identity (GKE
-  # Workload Identity), or the `checkRunner` service principal below.
-  # Neither ⇒ credentialed Sensors cannot evaluate. See
+  # (sensor evaluations, scheduled topology refreshes, runbook verify
+  # dispatch — no calling operator, so no JWT to federate) gets an
+  # identity: either an ambient pod identity (GKE Workload Identity), or
+  # the `checkRunner` service principal below. Neither ⇒ credentialed
+  # Sensors cannot evaluate. Connector `probe()` / `fingerprint()` are not
+  # covered by either: they carry a non-empty placeholder JWT, so they take
+  # the WIF branch and the exchange fails whatever you configure here. See
   # `docs/deploying.md` (GSM / Vault-free).
   workloadIdentityFederation:
     # -- Full WIF provider resource name google-auth exchanges the operator
@@ -641,10 +644,12 @@ gsm:
 # `secret/meho/*` read and removes the "system-initiated calls cannot
 # perform an operator-context Vault read" carve-out the rest of this
 # feature relies on. Bound the role BEFORE enabling this on Vault: either
-# give the runner client a distinct audience plus its own narrower JWT role
-# (`bound_audiences=<runner-audience>` + a policy scoped to the secrets
-# Sensors actually need), or add `bound_subject` / `bound_claims` to
-# `meho-mcp` so the runner's `sub` is not accepted by it. Recipe:
+# give the runner client a distinct audience *instead of* the backplane one
+# plus its own narrower JWT role (`bound_audiences=<runner-audience>` + a
+# policy scoped to the secrets Sensors actually need), or add an
+# exact-match `bound_claims` to `meho-mcp` keyed on a claim value only
+# operator tokens carry — a `bound_claims_type=glob` `"*"` is NOT one, it
+# matches the runner's service-account claims too. Recipe:
 # `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
 # principal".
 #

@@ -188,11 +188,18 @@ decision, not a no-op.
 
 Bound the role first if it isn't:
 
-- **Preferred** — give the runner client a **distinct** audience and
-  provision it a **separate**, narrower Vault JWT role whose policy covers
-  only the secrets your Sensors evaluate.
-- **Otherwise** — add `bound_subject` / `bound_claims` to `meho-mcp` so the
-  runner's service-account `sub` is not accepted by the operator role.
+- **Preferred** — give the runner client a **distinct** audience *instead
+  of* the backplane audience mapper (Keycloak audience mappers add to `aud`
+  rather than replace it, so a client carrying both still passes
+  `meho-mcp`'s `bound_audiences`) and provision it a **separate**, narrower
+  Vault JWT role whose policy covers only the secrets your Sensors
+  evaluate.
+- **Otherwise** — add an **exact-match** `bound_claims` to `meho-mcp` keyed
+  on a claim value only operator tokens carry, e.g. a dedicated
+  `meho-operator` realm role. A `bound_claims_type=glob` `"*"` is not a
+  restriction: it matches any present value, and the runner's
+  `client_credentials` token carries `preferred_username =
+  service-account-<clientId>` like any other principal.
 
 Both recipes, plus the `vault write auth/jwt/login` command that proves
 which one is in force, are in

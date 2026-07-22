@@ -341,8 +341,14 @@ per-target vendor credentials where it previously failed closed:
   token**;
 - the legacy `execute()` shims in ~15 connectors (`postgres`, `keycloak`,
   `rabbitmq`, `loki`, `nsx`, …), whose own docstrings still assert they
-  "fail closed in the credential loader" — untrue on GSM since #2642;
-- the readiness/health probe path.
+  "fail closed in the credential loader" — untrue on GSM since #2642.
+
+The `/api/v1/health` and `/ready` probes are **not** on that list. They
+exercise backend reachability (Vault / Keycloak / migration state /
+broadcast / docs) and the `secret/meho/test/federation` federation proof,
+which the calling operator's own JWT authorises — no path through them
+resolves a per-target `secret_ref`, so the guard that moved never fired for
+them in the first place.
 
 The credential is read under MEHO's own ADC — the same identity a Phase-1
 install already uses for *every* read — so no GCP privilege boundary moves,
@@ -394,8 +400,11 @@ with no further provisioning and hands it the full policy. Enabling
 `checkRunner.*` on a Vault deploy therefore removes the "system-initiated
 calls cannot perform an operator-context Vault read" carve-out for *all*
 background dispatch, not just for Sensors. Operators are told to bound the
-role first — a distinct audience plus a dedicated narrower role, or
-`bound_subject` / `bound_claims` on `meho-mcp` — in
+role first — a distinct audience plus a dedicated narrower role, or an
+**exact-match** `bound_claims` on `meho-mcp` keyed on a claim value only
+operator tokens carry (a `bound_claims_type=glob` `"*"` is not one: it
+matches any present value, including the runner service account's
+`preferred_username`) — in
 `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
 principal", in the `checkRunner` block of `deploy/charts/meho/values.yaml`,
 and in a `helm install` NOTES warning the chart prints whenever

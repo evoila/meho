@@ -316,21 +316,54 @@ principal `roles/iam.workloadIdentityUser`, and the SA (or the pool
 principal directly) must hold `roles/secretmanager.secretAccessor` on the
 secret. MEHO never creates key material — the federation is keyless.
 
-**Background dispatch (#2642).** A system-initiated call (`raw_jwt=""` —
-health probe, sensor check-runner) has no JWT to exchange. It used to fail
-closed in the shared loader before dispatch; now `_select_auth_path` decides
-per read:
+**Background dispatch (#2642).** A system-initiated call with `raw_jwt=""`
+has no JWT to exchange. It used to fail closed in the shared loader before
+dispatch; now `_select_auth_path` decides per read:
 
 | WIF configured | Operator JWT | Path | `auth_path` label |
 |---|---|---|---|
 | no | either | Phase-1 SA-direct ADC | `sa_direct` |
-| yes | present | per-operator WIF exchange | `wif` |
+| yes | non-empty | per-operator WIF exchange | `wif` |
 | yes | empty | SA-direct fallback under MEHO's own ADC | `sa_direct_fallback` |
 
-The fallback is not a privilege escalation — the pod identity is MEHO's
-own, and every Phase-1 install reads under it for *every* call. It is
-labelled distinctly so an audit can tell a read GCP attributed to the
-operator from one attributed to MEHO.
+**Which callers this relaxation covers.** Moving the precondition off the
+shared loader was not scoped to the check-runner. The old guard fired for
+*any* `operator.raw_jwt == ""`, so on a `credentialBackend=gsm` install —
+including a plain Phase-1 SA-direct one, where `_select_auth_path` returns
+`sa_direct` and the read simply succeeds — every one of these now resolves
+per-target vendor credentials where it previously failed closed:
+
+- the sensor check-runner (`checks/runner.py`), the motivating case;
+- the topology-refresh scheduler's `_system_operator`
+  (`topology/scheduler.py`);
+- `runbooks/run_service.py::_build_operator_for_dispatch`'s operator, which
+  is reconstructed from `operator_sub` and **not validated from a bearer
+  token**;
+- the legacy `execute()` shims in ~15 connectors (`postgres`, `keycloak`,
+  `rabbitmq`, `loki`, `nsx`, …), whose own docstrings still assert they
+  "fail closed in the credential loader" — untrue on GSM since #2642;
+- the readiness/health probe path.
+
+The credential is read under MEHO's own ADC — the same identity a Phase-1
+install already uses for *every* read — so no GCP privilege boundary moves,
+and the fallback is labelled distinctly so an audit can tell a read GCP
+attributed to the operator from one attributed to MEHO. The point is that
+**the "system-initiated calls cannot read per-target vendor credentials"
+carve-out is now Vault-only.** On GSM it no longer holds for any of the
+callers above.
+
+**Connector `probe()` / `fingerprint()` are not in that set.** They run
+under `synthesise_system_operator()`, whose `raw_jwt` is a deliberately
+non-empty placeholder (G3.10). `_select_auth_path` tests truthiness only, so
+on a per-operator-WIF install those paths take the `wif` branch and federate
+the placeholder at `sts.googleapis.com`, which rejects it — the read fails
+with `GcpSecretManagerReadError` and the connector degrades to
+`reachable=False` / `auth_failed`. The placeholder is a fixed non-secret
+sentinel, so the failed exchange leaks nothing; but row 3 of the table above
+does not rescue credentialed-target probes, on GKE or on-prem. Making it do
+so means teaching `_select_auth_path` to treat the placeholder as absent
+(`system_operator.is_system_operator` already exists for it) — a behaviour
+change with its own blast radius, tracked separately.
 
 The fallback needs an ambient GCP identity (GKE Workload Identity, a mounted
 SA), which an on-prem cluster does not have. That deployment class instead
@@ -344,6 +377,30 @@ naming both remedies. MEHO's own audit attribution is unchanged on every
 path (the audit row carries the sensor's / operator's `sub`, never the
 runner principal).
 
+**The check-runner principal is not GSM-only, and on Vault it widens
+privilege.** `checks/runner.py` mints the token whenever
+`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET` are set, whatever
+`CREDENTIAL_BACKEND` says, so on a Vault install the synthetic operator
+stops carrying `raw_jwt=""` and `VaultCredentialBackend.load_secret_data`'s
+precondition no longer fires. Whether the read then succeeds is Vault-side
+configuration — and with the role this project documents
+(`docs/cross-repo/vault-provisioning.md`: `role_type=jwt user_claim=sub
+bound_audiences=<keycloak-audience>`, no `bound_subject`, no `bound_claims`,
+policy `read` on all of `secret/data/meho/*`) it succeeds. `check_runner_jwt()`
+requests `audience=settings.keycloak_audience`, and the realm recipe in
+`docs/deploying.md` has the operator add the matching audience mapper, so
+Vault accepts the runner principal against the **existing** `meho-mcp` role
+with no further provisioning and hands it the full policy. Enabling
+`checkRunner.*` on a Vault deploy therefore removes the "system-initiated
+calls cannot perform an operator-context Vault read" carve-out for *all*
+background dispatch, not just for Sensors. Operators are told to bound the
+role first — a distinct audience plus a dedicated narrower role, or
+`bound_subject` / `bound_claims` on `meho-mcp` — in
+`docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
+principal", in the `checkRunner` block of `deploy/charts/meho/values.yaml`,
+and in a `helm install` NOTES warning the chart prints whenever
+`checkRunner.enabled` meets `config.credentialBackend: vault`.
+
 **Error hierarchy (#2642).** `credential_backend.CredentialsReadError` is
 the backend-neutral base; `VaultCredentialsReadError` and
 `GcpSecretManagerReadError` both subclass it. The dispatcher renders a
@@ -351,7 +408,12 @@ handler exception as `connector_error: <class name>`, so a Vault-named class
 on a GSM deploy is an actively misleading diagnostic. Connector probe /
 fingerprint paths that mean "the credential could not be read" catch the
 **base** — catching only `VaultCredentialsReadError` let a GSM read error
-escape a handler that was supposed to degrade to `auth_failed`.
+escape a handler that was supposed to degrade to `auth_failed`. Widened in
+#2642: bind9, github, holodeck, keycloak, mongodb, pfsense, postgres,
+prometheus, proxmox, rabbitmq, rke2. Sites that *raise* a credential error
+of their own (`_require_secret_ref`, the connector cache fast-path guards)
+still raise the Vault-named class on every backend — an open inconsistency,
+not something #2642 changed.
 
 **Test seams.** The backend takes injectable `adc_loader` (replaces
 `google.auth.default`), `client_factory` (replaces

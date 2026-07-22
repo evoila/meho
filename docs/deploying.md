@@ -116,8 +116,8 @@ keys render into the ConfigMap as `GSM_WIF_*` — no `extraEnv` needed.
 
 Turning that on raises a question the interactive path doesn't have:
 **background dispatch has no calling operator.** Sensor evaluations
-(Initiative #2416) and health probes run on a timer with no bearer token, so
-there is nothing to federate. Decide which identity serves them:
+(Initiative #2416) run on a timer with no bearer token, so there is nothing
+to federate. Decide which identity serves them:
 
 | Deployment | Ambient GCP identity | Background reads run as | Extra config |
 |---|---|---|---|
@@ -125,6 +125,24 @@ there is nothing to federate. Decide which identity serves them:
 | GKE + per-operator WIF | yes (Workload Identity) | MEHO's Workload Identity SA (`auth_path=sa_direct_fallback`) | none |
 | On-prem / no pod identity + per-operator WIF | no | the check-runner principal, federated through WIF | `checkRunner.*` |
 | On-prem / no pod identity + per-operator WIF, no `checkRunner` | no | **nothing — credentialed Sensors read `unknown` forever** | — |
+
+**"Background reads" here means the empty-`raw_jwt` callers only** — the
+sensor check-runner, the topology-refresh scheduler, runbook verify
+dispatch, the legacy connector `execute()` shims. It does **not** cover
+connector `probe()` / `fingerprint()`. Those build their operator with
+`synthesise_system_operator()`, which by deliberate design (G3.10) carries a
+**non-empty placeholder** `raw_jwt`; `_select_auth_path` only tests
+truthiness, so on a per-operator-WIF install a probe takes the `wif` path
+and federates that placeholder at `sts.googleapis.com`, which rejects it.
+Row 2 does **not** rescue credentialed-target probes on a per-operator-WIF
+install — they fail with `GcpSecretManagerReadError` and `auth_path=wif`,
+on GKE as much as on-prem. The failed exchange is otherwise harmless: the
+placeholder is a fixed non-secret sentinel, not a credential, and the
+connector degrades to `reachable=false` / `auth_failed` rather than raising.
+Making probes take the fallback would mean teaching `_select_auth_path` to
+treat the placeholder as absent, which is a behaviour change with its own
+blast radius and is tracked separately — this release documents the
+behaviour rather than changing it.
 
 The last row is the failure the third one exists to prevent. Configure it:
 
@@ -145,6 +163,42 @@ and grant the federated principal `roles/secretmanager.secretAccessor` on the
 target secrets. Leaving `checkRunner.enabled: false` is safe on any
 deployment that does not use per-operator WIF, and changes nothing for
 targets whose credentials MEHO does not have to fetch per read.
+
+#### `checkRunner.*` on a Vault deploy widens what background dispatch can read
+
+`checkRunner.*` is not a GSM-only knob, and on `credentialBackend: vault` it
+is **not** inert-until-you-provision-more. The `meho-mcp` JWT role this
+project documents
+([`cross-repo/vault-provisioning.md`](cross-repo/vault-provisioning.md#2-role-meho-mcp))
+is `role_type=jwt user_claim=sub bound_audiences=<keycloak-audience>` with
+**no** `bound_subject` and **no** `bound_claims`, and the `meho-mcp` policy
+grants read on all of `secret/data/meho/*`. The runner mints its token with
+`audience=KEYCLOAK_AUDIENCE`, and the realm recipe just above tells you to
+add the matching audience mapper. Those two facts compose: Vault accepts
+the runner principal against the **existing** role with no further
+provisioning, and background dispatch inherits the role's entire policy.
+
+Concretely, enabling `checkRunner.*` on a Vault install removes the
+"system-initiated calls cannot perform an operator-context Vault read"
+carve-out that the rest of this credential layer is built on — every
+scheduled evaluation can then read any target credential under
+`secret/meho/*`. That may be exactly what you want (it is what makes
+credentialed Sensors work on Vault), but it is a deliberate privilege
+decision, not a no-op.
+
+Bound the role first if it isn't:
+
+- **Preferred** — give the runner client a **distinct** audience and
+  provision it a **separate**, narrower Vault JWT role whose policy covers
+  only the secrets your Sensors evaluate.
+- **Otherwise** — add `bound_subject` / `bound_claims` to `meho-mcp` so the
+  runner's service-account `sub` is not accepted by the operator role.
+
+Both recipes, plus the `vault write auth/jwt/login` command that proves
+which one is in force, are in
+[`cross-repo/vault-provisioning.md` § "Bounding the check-runner principal"](cross-repo/vault-provisioning.md#7-bounding-the-check-runner-principal-2642).
+The chart prints the same warning in its `helm install` notes whenever
+`checkRunner.enabled: true` meets `config.credentialBackend: vault`.
 
 Diagnostics: the `gsm_secret_accessed` structlog event carries an
 `auth_path` of `wif`, `sa_direct`, or `sa_direct_fallback`, so you can see

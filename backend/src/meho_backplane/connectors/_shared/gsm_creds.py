@@ -45,14 +45,27 @@ operator path; WIF unconfigured ⇒ the Phase-1 SA-direct ADC path, unchanged
 Background dispatch (#2642)
 ===========================
 
-WIF configured but **no** operator JWT — a background sensor evaluation, a
-health probe — falls back to the SA-direct path rather than failing closed
-(``_select_auth_path``, logged as ``auth_path="sa_direct_fallback"``). The
-shared loader used to reject such a call before dispatch, which on a
-GCP-native install blocked a read the pod's own identity could have served
-and left every credentialed Sensor stuck at ``unknown``. Each backend now
-owns that precondition, and this backend has a deployment identity to fall
-back on.
+WIF configured but an **empty** ``operator.raw_jwt`` — a background sensor
+evaluation, the topology-refresh scheduler, runbook verify dispatch, a
+legacy connector ``execute()`` shim — falls back to the SA-direct path
+rather than failing closed (``_select_auth_path``, logged as
+``auth_path="sa_direct_fallback"``). The shared loader used to reject such a
+call before dispatch, which on a GCP-native install blocked a read the pod's
+own identity could have served and left every credentialed Sensor stuck at
+``unknown``. Each backend now owns that precondition, and this backend has a
+deployment identity to fall back on. Note the relaxation is not scoped to
+the check-runner: it applies to every system-initiated caller with an empty
+``raw_jwt`` on a GSM deploy.
+
+Connector ``probe()`` / ``fingerprint()`` are **not** in that set.
+:func:`~meho_backplane.connectors._shared.system_operator.synthesise_system_operator`
+gives them a non-empty placeholder ``raw_jwt`` (G3.10), so
+``_select_auth_path`` returns ``"wif"`` and the exchange is attempted with a
+string STS will reject. The read then fails with
+:class:`GcpSecretManagerReadError` and the connector degrades to
+``reachable=False`` / ``auth_failed``; the placeholder is a fixed non-secret
+sentinel, so nothing leaks. Teaching ``_select_auth_path`` to treat the
+placeholder as absent is a behaviour change tracked separately.
 
 The fallback needs an ambient GCP identity, which an on-prem cluster does
 not have. That deployment class instead gives the check-runner its own
@@ -362,19 +375,28 @@ def _select_auth_path(
 ) -> tuple[str, _WifConfig | None]:
     """Pick the credential path for one read: ``(label, active_wif_config)``.
 
-    * WIF configured **and** an operator JWT to exchange → ``"wif"``.
+    * WIF configured **and** a non-empty ``operator_jwt`` → ``"wif"``.
     * WIF unconfigured → ``"sa_direct"`` (the Phase-1 path, unchanged).
-    * WIF configured but **no** JWT → ``"sa_direct_fallback"`` (#2642).
+    * WIF configured but an **empty** ``operator_jwt`` →
+      ``"sa_direct_fallback"`` (#2642).
 
     The third case is the one that matters. A system-initiated read (a
-    background sensor evaluation with no check-runner principal configured, a
-    health probe) has no operator JWT, so there is nothing to federate with —
-    but a deployment whose pod carries an ambient GCP identity (GKE Workload
-    Identity, a mounted SA) can still read Secret Manager under it. Failing
-    such a read closed bought nothing: it is not a privilege escalation (the
-    pod identity is MEHO's own, and Phase-1 installs read under it for every
-    call), it just made scheduled evaluation impossible on deployments that
-    had a perfectly good identity available.
+    background sensor evaluation with no check-runner principal configured,
+    the topology-refresh scheduler, runbook verify dispatch, a legacy
+    ``execute()`` shim) carries ``raw_jwt=""``, so there is nothing to
+    federate with — but a deployment whose pod carries an ambient GCP
+    identity (GKE Workload Identity, a mounted SA) can still read Secret
+    Manager under it. Failing such a read closed bought nothing: it is not a
+    privilege escalation (the pod identity is MEHO's own, and Phase-1
+    installs read under it for every call), it just made scheduled
+    evaluation impossible on deployments that had a perfectly good identity
+    available.
+
+    The test is truthiness, not "is this a real operator". Connector
+    ``probe()`` / ``fingerprint()`` run under
+    ``synthesise_system_operator()``, whose placeholder ``raw_jwt`` is
+    deliberately non-empty (G3.10), so they take the ``"wif"`` branch and
+    the exchange fails at STS — they do **not** get the fallback.
 
     The fallback is not silent — it rides its own ``auth_path`` label in the
     ``gsm_secret_accessed`` event, so an audit can tell a read GCP attributed

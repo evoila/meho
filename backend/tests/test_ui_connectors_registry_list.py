@@ -366,6 +366,36 @@ def test_registry_list_renders_rows() -> None:
     assert "ops: 2 / 2" not in body
 
 
+def test_registry_filter_form_triggers_on_any_select_change() -> None:
+    """#174: the filter form fires on ``change`` from every select.
+
+    The form previously used ``hx-trigger="change from:find select"``;
+    htmx's ``find <sel>`` resolves to the FIRST matching descendant, so
+    only the Status select fired the request — changing Product or Kind
+    was a silent no-op. The form must trigger on ``change`` at the form
+    level (the event bubbles from any of the three selects) so every
+    filter narrows the table.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_connector(tenant_id=_TENANT_A, review_status="staged")
+    client, mock, _csrf = _client_with_role(
+        tenant_id=_TENANT_A,
+        operator_sub=_OP_OPERATOR,
+        role=TenantRole.OPERATOR,
+    )
+    try:
+        response = client.get("/ui/connectors/registry")
+    finally:
+        mock.stop()
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The first-descendant-only binding must be gone.
+    assert "from:find select" not in body
+    # The filter form triggers on a bubbled ``change`` from any select.
+    assert 'hx-trigger="change"' in body
+
+
 def test_registry_list_status_filter_all_sentinel_renders() -> None:
     """The ``?status=all`` sentinel renders 200 (never 422); a bad value 422s."""
     _seed_tenant(_TENANT_A, "tenant-a")

@@ -113,12 +113,12 @@
 
       {# ---------- Catalog mode ---------- #}
       <div x-show="mode === 'catalog'" data-mode-panel="catalog">
-        <label class="form-control">
-          <span class="label-text">Catalog entry</span>
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Catalog entry</span>
           {% if catalog_entries %}
             <select
               name="catalog_entry"
-              class="select select-bordered select-sm"
+              class="select select-bordered select-sm w-full"
               aria-label="Catalog entry"
             >
               {#- ``ships_local`` (#1980) marks a row that ships a MEHO-authored
@@ -137,7 +137,7 @@
               {% endfor %}
             </select>
             {% if catalog_entries | selectattr("ships_local") | list %}
-              <span class="label-text-alt mt-1 opacity-70" data-ships-local-note>
+              <span class="text-xs opacity-70" data-ships-local-note>
                 Entries marked &ldquo;ships local spec/profile&rdquo; bundle a
                 MEHO-authored spec/profile &mdash; the catalog ingest needs no
                 spec upload.
@@ -157,34 +157,34 @@
       {# ---------- Explicit-quadruple mode ---------- #}
       <div x-show="mode === 'explicit'" data-mode-panel="explicit" class="space-y-3">
         <div class="grid gap-3 md:grid-cols-3">
-          <label class="form-control">
-            <span class="label-text">Product</span>
+          <label class="flex flex-col gap-1">
+            <span class="text-sm font-medium">Product</span>
             <input
               type="text"
               name="product"
-              class="input input-bordered input-sm"
+              class="input input-bordered input-sm w-full"
               maxlength="64"
               placeholder="vmware"
               autocomplete="off"
             />
           </label>
-          <label class="form-control">
-            <span class="label-text">Version</span>
+          <label class="flex flex-col gap-1">
+            <span class="text-sm font-medium">Version</span>
             <input
               type="text"
               name="version"
-              class="input input-bordered input-sm"
+              class="input input-bordered input-sm w-full"
               maxlength="64"
               placeholder="9.0"
               autocomplete="off"
             />
           </label>
-          <label class="form-control">
-            <span class="label-text">Impl id</span>
+          <label class="flex flex-col gap-1">
+            <span class="text-sm font-medium">Impl id</span>
             <input
               type="text"
               name="impl_id"
-              class="input input-bordered input-sm"
+              class="input input-bordered input-sm w-full"
               maxlength="128"
               placeholder="vmware-rest"
               autocomplete="off"
@@ -197,7 +197,7 @@
            removes rows; each row submits as a repeated ``spec_uri`` field
            the handler folds into ``specs[]``. #}
         <div x-data="{ rows: [''] }" data-spec-uris>
-          <span class="label-text">Spec URLs (https only)</span>
+          <span class="text-sm font-medium">Spec URLs (https only)</span>
           <template x-for="(uri, index) in rows" :key="index">
             <div class="mt-1 flex items-center gap-2">
               <input
@@ -239,17 +239,17 @@
          handler derives the tenant UUID from the authenticated operator
          (``global`` leaves tenant_id unset — the omit-equals-global
          REST contract per #2085). #}
-      <label class="form-control" data-scope-select>
-        <span class="label-text">Write scope</span>
+      <label class="flex flex-col gap-1" data-scope-select>
+        <span class="text-sm font-medium">Write scope</span>
         <select
           name="scope"
-          class="select select-bordered select-sm"
+          class="select select-bordered select-sm w-full"
           aria-label="Write scope"
         >
           <option value="global" selected>Global (built-in scope) &mdash; visible to every tenant</option>
           <option value="tenant">This tenant only</option>
         </select>
-        <span class="label-text-alt mt-1 opacity-70">
+        <span class="text-xs opacity-70">
           Global matches the CLI / REST default (omitting
           <span class="font-mono">tenant_id</span>); &ldquo;This
           tenant&rdquo; curates the connector under your tenant only.
@@ -264,7 +264,7 @@
           value="true"
           class="checkbox checkbox-sm"
         />
-        <span class="label-text">
+        <span class="text-sm font-medium">
           Dry-run &mdash; parse and report the counts only, write nothing.
         </span>
       </label>

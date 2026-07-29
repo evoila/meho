@@ -2633,8 +2633,11 @@ same first-match discipline `/ui/agents/create` follows).
   503** banner carrying the gold-standard `KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL`
   three-clause text; other Keycloak API failure → 502 `keycloak_admin_error`
   banner; Vault credential-write failure → 502 `scheduler_vault_write_error`
-  banner. The actionable backend detail is rendered verbatim, never
-  flattened to "something went wrong".
+  banner, or — when the broker's `lookup-self` probe found the scheduler
+  token itself dead rather than under-scoped (#2652) — the three-clause
+  `scheduler_vault_token_invalid` banner naming the token re-mint. The
+  actionable backend detail is rendered verbatim, never flattened to
+  "something went wrong".
 - `GET/POST /ui/agents/principals/{name}/revoke` — revoke = the **Keycloak
   kill switch** (**tenant_admin**): disables the Keycloak client, which
   blocks all new token grants for the identity (tokens already minted stay

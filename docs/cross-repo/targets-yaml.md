@@ -394,6 +394,7 @@ of this section for the bug history (PR #362's review on issue
 | --- | --- | --- |
 | `name`, `aliases`, `product`, `host`, `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`, `notes` | top-level column | required: `name`, `product`, `host` |
 | `preferred_impl_id` | top-level column | G0.3-T1.5 (#477) amendment — G0.6 resolver tie-break override |
+| `verify_tls`, `tls_ca_pin`, `tls_server_name` | top-level column | per-target TLS trust (#1780 / #1784) and SNI / cert-verification hostname (#2002, mapped by #2643) — set `tls_server_name` to the cert's FQDN when the appliance is reached by IP |
 | `extras` (explicit block) | `extras` JSONB | merges with the spilled-extras map from unknown keys |
 | `fingerprint` | dropped with warning | server-managed; only the probe verb writes it |
 | any other key | spilled into `extras` JSONB | the consumer's `sso_realm`, `kubeconfig_field`, `account`, `project_id` land here |

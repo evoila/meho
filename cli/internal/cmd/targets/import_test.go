@@ -266,6 +266,99 @@ func TestMapEntryTLSTrustTopLevelStillSpillsUnknown(t *testing.T) {
 	}
 }
 
+func TestMapEntryTLSServerNameIsTopLevel(t *testing.T) {
+	t.Parallel()
+	// #2002 shipped tls_server_name as a first-class TargetCreate /
+	// TargetUpdate column: the per-target SNI / cert-verification
+	// hostname, decoupled from `host`. It must land in the body root,
+	// NOT in extras — spilling leaves the typed column NULL, dispatch
+	// keeps deriving the SNI from `host`, and an appliance reached by
+	// IP with an FQDN-only SAN fails with connector_tls_verify_failed
+	// despite the descriptor naming the right hostname (#2643).
+	body, warnings := mapEntry(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"product":         "vmware-rest",
+		"host":            "10.20.30.40",
+		"tls_server_name": "sddc-manager.evba.lab",
+	})
+	if len(warnings) != 0 {
+		t.Errorf("warnings: got %v; want none", warnings)
+	}
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
+		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	}
+	if extras, ok := body["extras"].(map[string]any); ok {
+		if _, leaked := extras["tls_server_name"]; leaked {
+			t.Errorf("tls_server_name leaked into extras: %v", extras)
+		}
+	}
+}
+
+func TestEntryToUpdateBodyTLSServerNameIsTopLevel(t *testing.T) {
+	t.Parallel()
+	// `meho targets import --update` routes through entryToUpdateBody.
+	// tls_server_name must reach the sparse PATCH body's top level so a
+	// descriptor re-import flips the typed column; an explicit null
+	// clears the override and returns the target to deriving the SNI
+	// from `host` (TargetUpdate's documented clear semantics).
+	body, _ := entryToUpdateBody(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"tls_server_name": "sddc-manager.evba.lab",
+	})
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
+		t.Errorf("tls_server_name top-level on update: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	}
+	if extras, ok := body["extras"].(map[string]any); ok {
+		if _, leaked := extras["tls_server_name"]; leaked {
+			t.Errorf("tls_server_name leaked into extras on update: %v", extras)
+		}
+	}
+
+	cleared, _ := entryToUpdateBody(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"tls_server_name": nil, // clearing the override is an explicit-null PATCH
+	})
+	v, ok := cleared["tls_server_name"]
+	if !ok {
+		t.Errorf("tls_server_name missing from update body; want top-level null: %v", cleared)
+	}
+	if v != nil {
+		t.Errorf("tls_server_name cleared value: got %v; want nil", v)
+	}
+}
+
+func TestMapEntryTLSServerNameStillSpillsUnknown(t *testing.T) {
+	t.Parallel()
+	// No-regression guard: adding tls_server_name to knownTopLevel must
+	// not change the extras-spill behaviour for genuinely-unknown keys,
+	// and it must compose with the sibling TLS-trust columns (the server
+	// has no mutual-exclusion validator between them).
+	body, _ := mapEntry(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"product":         "vmware-rest",
+		"host":            "10.20.30.40",
+		"verify_tls":      true,
+		"tls_server_name": "sddc-manager.evba.lab",
+		"sso_realm":       "evba.lab", // unknown → spill
+	})
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
+		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	}
+	if v, ok := body["verify_tls"]; !ok || v != true {
+		t.Errorf("verify_tls top-level: got %v (present=%t); want true", v, ok)
+	}
+	extras, ok := body["extras"].(map[string]any)
+	if !ok {
+		t.Fatalf("extras: got %T; want map[string]any (unknown key should spill)", body["extras"])
+	}
+	if extras["sso_realm"] != "evba.lab" {
+		t.Errorf("extras.sso_realm: got %v; want evba.lab", extras["sso_realm"])
+	}
+	if _, leaked := extras["tls_server_name"]; leaked {
+		t.Errorf("tls_server_name must not be in extras: %v", extras)
+	}
+}
+
 func TestMapEntryExplicitExtrasMergesWithSpilled(t *testing.T) {
 	t.Parallel()
 	body, _ := mapEntry(map[string]any{

@@ -27,6 +27,12 @@ against ``meho.agent_principals.register`` whose Vault write raises
 descriptive, secret-free message — mirroring
 ``test_api_v1_agent_principals.py``'s REST equivalent.
 
+Since #2652 the same wire contract also carries the broker's
+``token_invalid`` disposition: a Vault 403 whose ``lookup-self`` probe
+also failed means the scheduler token is dead and the message must say
+"invalid or expired … re-mint", while a live token denied by policy keeps
+the pre-#2652 policy-scope wording verbatim.
+
 Out of scope:
 
 * Happy-path registration (service-layer suite covers it).
@@ -44,7 +50,11 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.agent_principals import AgentPrincipalService
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.schemas import INTERNAL_ERROR, INVALID_PARAMS
-from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
+from meho_backplane.scheduler.vault_credentials import (
+    SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+    SCHEDULER_VAULT_WRITE_DENIED_DETAIL,
+    SchedulerVaultBrokerError,
+)
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -114,4 +124,49 @@ def test_register_vault_write_failure_maps_to_invalid_params(
     assert "vault write failed" in message.lower(), message
     # No secret leakage: neither the client secret nor a raw token value
     # may appear in the operator-facing error.
+    assert _SENTINEL_SECRET not in message, message
+    # A write denied while the token is live keeps the pre-#2652
+    # policy-scope remediation, character for character.
+    assert message == SCHEDULER_VAULT_WRITE_DENIED_DETAIL, message
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_register_dead_token_names_the_remint_not_the_policy(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dead scheduler token gets the re-mint remediation, not the policy one.
+
+    The broker's ``lookup-self`` probe (#2652) stamps ``token_invalid`` on
+    the raised error; the MCP handler must translate that into a
+    ``-32602`` naming the token re-mint. Before this the operator was
+    told to widen a policy that was already correct.
+    """
+    client, _op = client_with_operator
+
+    async def _raise_dead_token(*_args: Any, **_kwargs: Any) -> Any:
+        raise SchedulerVaultBrokerError(
+            "vault rejected agent-secret write at "
+            "'secret/data/agents/VAULT_BOT/credentials': Forbidden",
+            token_invalid=True,
+        )
+
+    monkeypatch.setattr(AgentPrincipalService, "register", _raise_dead_token)
+
+    resp = post_mcp(client, _tools_call(_REGISTER_TOOL, {"name": "vault-bot"}))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "error" in body, body
+    assert body["error"]["code"] == INVALID_PARAMS, body
+
+    message = body["error"]["message"]
+    assert message == SCHEDULER_VAULT_TOKEN_INVALID_DETAIL, message
+    assert "invalid or expired" in message, message
+    assert "re-mint" in message.lower(), message
+    # The misleading remediation the filing is about must be gone.
+    assert "policy must grant" not in message, message
     assert _SENTINEL_SECRET not in message, message

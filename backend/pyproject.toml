@@ -41,7 +41,7 @@ dependencies = [
     # drives. The sync ``SecretManagerServiceClient.access_secret_version``
     # call is run off the event loop via ``asyncio.to_thread``.
     "google-cloud-secret-manager>=2.30.0",
-    "duckdb>=1.5.4",
+    "duckdb>=1.5.5",
     "pyarrow>=25.0.0",
     "msgspec>=0.20.0",
     "tabulate>=0.9.0",

@@ -23,3 +23,29 @@ Next steps:
 {{- end }}
   3. Tail backplane logs:
        kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "meho.name" . }} -f
+{{- if and .Values.checkRunner.enabled (eq .Values.config.credentialBackend "vault") }}
+
+WARNING: checkRunner.enabled=true on a Vault credential backend (#2642).
+
+  The check-runner principal mints its token with aud={{ .Values.config.keycloakAudience }}
+  (the KEYCLOAK_AUDIENCE this release renders into the ConfigMap).
+  The {{ .Values.config.vaultOidcRole }} JWT role this project documents binds on
+  bound_audiences alone -- no bound_subject, no bound_claims -- and its
+  policy grants read on all of secret/data/meho/*. Vault therefore accepts
+  the runner principal against that role as-is, and background dispatch
+  inherits the full policy: the "system-initiated calls cannot perform an
+  operator-context Vault read" carve-out no longer holds on this release.
+
+  If that is not what you intended, bound the role before relying on this:
+  give the runner client a distinct audience INSTEAD OF the backplane one
+  plus its own narrower JWT role, or add to {{ .Values.config.vaultOidcRole }} an
+  exact-match bound_claims keyed on a claim value only operator tokens
+  carry. A bound_claims_type=glob "*" is not a restriction -- it matches
+  the runner's service-account claims too. Recipe:
+  docs/cross-repo/vault-provisioning.md, "Bounding the check-runner
+  principal (#2642)".
+
+  Confirm what the role actually accepts -- an error, not a token, means
+  the binding is in force:
+       vault write auth/jwt/login role={{ .Values.config.vaultOidcRole }} jwt="$RUNNER_TOKEN"
+{{- end }}

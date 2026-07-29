@@ -69,11 +69,20 @@ dispatcher's `connector_error` branch.
   bind9 sudo password, #2155) call
   it directly on the fields they pluck. Only surrounding whitespace is
   trimmed — internal whitespace is preserved.
-- **`VaultCredentialsReadError`** — read-phase failure (empty JWT, unset
-  `secret_ref`, malformed payload, missing field). Deliberately distinct
-  from `auth.vault.VaultClientError` (login-phase: Vault unreachable,
-  role denied), so a caller can render an operator-actionable detail
-  string per phase. A missing field never surfaces as a bare `KeyError`.
+- **`CredentialsReadError`** (in `credential_backend.py`, re-exported from
+  `vault_creds`) — the backend-neutral read-phase base, added by #2642.
+  Catch this when the intent is "the credential could not be read, whatever
+  the store is": the dispatcher renders a handler exception as
+  `connector_error: <class name>`, so a Vault-named class on a
+  `credentialBackend=gsm` deploy points the operator at a component that
+  isn't installed. Connector probe / fingerprint handlers catch the base.
+- **`VaultCredentialsReadError`** — the Vault subclass: read-phase failure
+  (empty JWT, unset `secret_ref`, malformed payload, missing field).
+  Deliberately distinct from `auth.vault.VaultClientError` (login-phase:
+  Vault unreachable, role denied), so a caller can render an
+  operator-actionable detail string per phase. A missing field never
+  surfaces as a bare `KeyError`. `GcpSecretManagerReadError` is the GSM
+  sibling subclass.
 - **`BasicCredentialsTargetLike`** — runtime-checkable Protocol with
   fields `name`, `host`, `secret_ref`. The concrete `Target` model in
   `meho_backplane.targets` (G0.3 #224) satisfies it structurally
@@ -93,32 +102,37 @@ dispatcher's `connector_error` branch.
 
 ## Control flow
 
-1. **Fail closed on empty JWT.** If `operator.raw_jwt` is empty (a
-   system-initiated call — topology scheduler, readiness probe, the
-   runbook verify dispatch's synthetic operator built by
-   `runbooks/run_service.py::_build_operator_for_dispatch`), raise
-   `VaultCredentialsReadError` *before* touching Vault — and before the
-   scheme is split or `get_settings()` is read (`_resolve_and_load`). The
-   decision's system-call carve-out: such calls cannot perform an
-   operator-context read and must error, never silently fall back to a
-   backplane identity. This operator-context precondition lives in the
-   shared dispatch, not in a backend, so it fires before any settings /
-   store access exactly as before the seam; it reflects the
-   operator-context model of today's only backend (Vault), and a future
-   deployment-identity backend (GSM SA-direct, #2230) would relax it.
-   Synthetic operators must carry `raw_jwt=""` — a non-empty placeholder
-   would sail past this guard and forward an invalid string to Vault's
-   JWT/OIDC login (a live network round-trip before rejection).
-2. **Reject unset `secret_ref`.** A target with `secret_ref=None` is
+1. **Reject unset `secret_ref`.** A target with `secret_ref=None` is
    unconfigured → `VaultCredentialsReadError` (`_require_secret_ref`);
    the value is stripped for the scheme split and read.
-3. **Split the scheme and dispatch.** `split_credential_ref` resolves the
+2. **Split the scheme and dispatch.** `split_credential_ref` resolves the
    ref to `(kind, store_ref)`: a schemeless ref uses the deployment
    default (`config.credentialBackend`, default `vault`), an explicit
    `<kind>:` prefix selects that kind, and `resolve_credential_backend`
    maps the kind to a `CredentialBackend` (`UnknownCredentialBackendError`
    on an unregistered kind). Everything below runs inside the resolved
    backend; for the Vault backend:
+3. **Fail closed on empty JWT (Vault backend only, #2642).** If
+   `operator.raw_jwt` is empty — a system-initiated call: topology
+   scheduler, readiness probe, the runbook verify dispatch's synthetic
+   operator (`runbooks/run_service.py::_build_operator_for_dispatch`), or
+   the sensor check-runner with no principal configured — raise
+   `VaultCredentialsReadError` before any Vault network round-trip. Vault's
+   only auth model here is the operator's JWT, so such a call must error
+   rather than silently fall back to a backplane identity (the decision's
+   system-call carve-out). Synthetic operators pointed at Vault must carry
+   `raw_jwt=""` — a non-empty *invalid* placeholder would sail past this
+   guard and forward garbage to Vault's JWT/OIDC login (a live round-trip
+   before rejection); a genuine service-principal token (#2642) is a
+   different thing and is exactly what the guard is meant to admit.
+
+   **This guard used to run in the shared loader**, before the scheme was
+   even split, which made it fire for *every* backend. That was right for
+   Vault and wrong for a store MEHO can read under a deployment identity:
+   on a `credentialBackend=gsm` install it rejected the SA-direct read that
+   would have worked, so no Sensor could evaluate and the error was
+   Vault-named on a deploy running no Vault. Each backend now owns its own
+   precondition and raises its own error class.
 4. **Reject an API-path-shaped `secret_ref` (Vault backend only).**
    `secret_ref` must be the *logical* KV-v2 path relative to the mount —
    hvac builds the wire URL as `/{mount_point}/data/{path}` and inserts
@@ -272,10 +286,15 @@ when the credential goes out of scope. This restores *GCP-layer*
 per-operator attribution — GCP's audit log names the operator — mirroring
 the Vault `vault_client_for_operator` JIT contract (`auth/vault.py:198`): a
 fresh credential per operation, never cached across requests. Selection is
-per-read: WIF configured ⇒ operator path; unconfigured ⇒ the Phase-1
-SA-direct path, unchanged (no behaviour change for Phase-1 installs).
+per-read: WIF configured **and** an operator JWT present ⇒ operator path;
+unconfigured ⇒ the Phase-1 SA-direct path, unchanged (no behaviour change
+for Phase-1 installs); configured but no JWT ⇒ the #2642 SA-direct fallback
+(see **Background dispatch** below).
 
-The settings (`GSM_WIF_*`, #2231's chart keys map onto them):
+The settings (`GSM_WIF_*`, rendered into the ConfigMap from the
+`gsm.workloadIdentityFederation.*` chart keys since #2642 — they were
+declared-but-unrendered stubs before, so a WIF install had to reach for
+`extraEnv`):
 
 - `GSM_WIF_AUDIENCE` — the full WIF provider resource name google-auth
   consumes, `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`.
@@ -297,14 +316,113 @@ principal `roles/iam.workloadIdentityUser`, and the SA (or the pool
 principal directly) must hold `roles/secretmanager.secretAccessor` on the
 secret. MEHO never creates key material — the federation is keyless.
 
-**Operator-JWT guard interaction.** The shared loader's empty-`raw_jwt`
-fail-closed guard (`_resolve_and_load`) still runs before dispatch, so a
-system-initiated call (`raw_jwt=""` — health probe, scheduler) cannot
-resolve a `gsm:` ref: there is no operator JWT to exchange, so the WIF
-exchange is never reached and the call fails closed upstream. That guard is
-**load-bearing** for the WIF path; the backend also fails closed on an
-empty JWT as defence in depth. MEHO's own audit attribution is unchanged in
-both paths (the audit row carries the Keycloak `sub`).
+**Background dispatch (#2642).** A system-initiated call with `raw_jwt=""`
+has no JWT to exchange. It used to fail closed in the shared loader before
+dispatch; now `_select_auth_path` decides per read:
+
+| WIF configured | Operator JWT | Path | `auth_path` label |
+|---|---|---|---|
+| no | either | Phase-1 SA-direct ADC | `sa_direct` |
+| yes | non-empty | per-operator WIF exchange | `wif` |
+| yes | empty | SA-direct fallback under MEHO's own ADC | `sa_direct_fallback` |
+
+**Which callers this relaxation covers.** Moving the precondition off the
+shared loader was not scoped to the check-runner. The old guard fired for
+*any* `operator.raw_jwt == ""`, so on a `credentialBackend=gsm` install —
+including a plain Phase-1 SA-direct one, where `_select_auth_path` returns
+`sa_direct` and the read simply succeeds — every one of these now resolves
+per-target vendor credentials where it previously failed closed:
+
+- the sensor check-runner (`checks/runner.py`), the motivating case;
+- the topology-refresh scheduler's `_system_operator`
+  (`topology/scheduler.py`);
+- `runbooks/run_service.py::_build_operator_for_dispatch`'s operator, which
+  is reconstructed from `operator_sub` and **not validated from a bearer
+  token**;
+- the legacy `execute()` shims in ~15 connectors (`postgres`, `keycloak`,
+  `rabbitmq`, `loki`, `nsx`, …), whose own docstrings still assert they
+  "fail closed in the credential loader" — untrue on GSM since #2642.
+
+The `/api/v1/health` and `/ready` probes are **not** on that list. They
+exercise backend reachability (Vault / Keycloak / migration state /
+broadcast / docs) and the `secret/meho/test/federation` federation proof,
+which the calling operator's own JWT authorises — no path through them
+resolves a per-target `secret_ref`, so the guard that moved never fired for
+them in the first place.
+
+The credential is read under MEHO's own ADC — the same identity a Phase-1
+install already uses for *every* read — so no GCP privilege boundary moves,
+and the fallback is labelled distinctly so an audit can tell a read GCP
+attributed to the operator from one attributed to MEHO. The point is that
+**the "system-initiated calls cannot read per-target vendor credentials"
+carve-out is now Vault-only.** On GSM it no longer holds for any of the
+callers above.
+
+**Connector `probe()` / `fingerprint()` are not in that set.** They run
+under `synthesise_system_operator()`, whose `raw_jwt` is a deliberately
+non-empty placeholder (G3.10). `_select_auth_path` tests truthiness only, so
+on a per-operator-WIF install those paths take the `wif` branch and federate
+the placeholder at `sts.googleapis.com`, which rejects it — the read fails
+with `GcpSecretManagerReadError` and the connector degrades to
+`reachable=False` / `auth_failed`. The placeholder is a fixed non-secret
+sentinel, so the failed exchange leaks nothing; but row 3 of the table above
+does not rescue credentialed-target probes, on GKE or on-prem. Making it do
+so means teaching `_select_auth_path` to treat the placeholder as absent
+(`system_operator.is_system_operator` already exists for it) — a behaviour
+change with its own blast radius, tracked separately.
+
+The fallback needs an ambient GCP identity (GKE Workload Identity, a mounted
+SA), which an on-prem cluster does not have. That deployment class instead
+configures the **check-runner service principal**
+(`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET`, chart
+`checkRunner.*`, `backend/src/meho_backplane/auth/runner_identity.py`): the
+runner mints a Keycloak `client_credentials` token and the ordinary WIF
+exchange runs with it as the subject token, so GCP attributes scheduled
+reads to that principal. With neither, the read fails closed with an error
+naming both remedies. MEHO's own audit attribution is unchanged on every
+path (the audit row carries the sensor's / operator's `sub`, never the
+runner principal).
+
+**The check-runner principal is not GSM-only, and on Vault it widens
+privilege.** `checks/runner.py` mints the token whenever
+`CHECK_RUNNER_CLIENT_ID` / `CHECK_RUNNER_CLIENT_SECRET` are set, whatever
+`CREDENTIAL_BACKEND` says, so on a Vault install the synthetic operator
+stops carrying `raw_jwt=""` and `VaultCredentialBackend.load_secret_data`'s
+precondition no longer fires. Whether the read then succeeds is Vault-side
+configuration — and with the role this project documents
+(`docs/cross-repo/vault-provisioning.md`: `role_type=jwt user_claim=sub
+bound_audiences=<keycloak-audience>`, no `bound_subject`, no `bound_claims`,
+policy `read` on all of `secret/data/meho/*`) it succeeds. `check_runner_jwt()`
+requests `audience=settings.keycloak_audience`, and the realm recipe in
+`docs/deploying.md` has the operator add the matching audience mapper, so
+Vault accepts the runner principal against the **existing** `meho-mcp` role
+with no further provisioning and hands it the full policy. Enabling
+`checkRunner.*` on a Vault deploy therefore removes the "system-initiated
+calls cannot perform an operator-context Vault read" carve-out for *all*
+background dispatch, not just for Sensors. Operators are told to bound the
+role first — a distinct audience plus a dedicated narrower role, or an
+**exact-match** `bound_claims` on `meho-mcp` keyed on a claim value only
+operator tokens carry (a `bound_claims_type=glob` `"*"` is not one: it
+matches any present value, including the runner service account's
+`preferred_username`) — in
+`docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
+principal", in the `checkRunner` block of `deploy/charts/meho/values.yaml`,
+and in a `helm install` NOTES warning the chart prints whenever
+`checkRunner.enabled` meets `config.credentialBackend: vault`.
+
+**Error hierarchy (#2642).** `credential_backend.CredentialsReadError` is
+the backend-neutral base; `VaultCredentialsReadError` and
+`GcpSecretManagerReadError` both subclass it. The dispatcher renders a
+handler exception as `connector_error: <class name>`, so a Vault-named class
+on a GSM deploy is an actively misleading diagnostic. Connector probe /
+fingerprint paths that mean "the credential could not be read" catch the
+**base** — catching only `VaultCredentialsReadError` let a GSM read error
+escape a handler that was supposed to degrade to `auth_failed`. Widened in
+#2642: bind9, github, holodeck, keycloak, mongodb, pfsense, postgres,
+prometheus, proxmox, rabbitmq, rke2. Sites that *raise* a credential error
+of their own (`_require_secret_ref`, the connector cache fast-path guards)
+still raise the Vault-named class on every backend — an open inconsistency,
+not something #2642 changed.
 
 **Test seams.** The backend takes injectable `adc_loader` (replaces
 `google.auth.default`), `client_factory` (replaces
@@ -355,6 +473,19 @@ no-secret-in-logs behaviour with a canned payload and a mocked STS endpoint
 - Dynamic secrets, rotation, and response-wrapping are out of scope. A
   dynamic-secret backend would be a *different loader*, not a different
   call site (research doc §5).
+- Since #2642 the loader reads `Settings` (to resolve the deployment's
+  default backend kind) **before** any backend's empty-`raw_jwt` guard
+  fires. That is unobservable in a running backplane — the chassis env is
+  required at startup — but a unit test driving the fail-closed path with
+  no chassis env now needs to pin `KEYCLOAK_ISSUER_URL` /
+  `KEYCLOAK_AUDIENCE` (the six `tests/test_connectors_*_auth.py` suites
+  carry a `_chassis_settings_env` fixture for exactly this).
+- `_require_secret_ref` still raises `VaultCredentialsReadError` for an
+  unset `secret_ref` on **every** backend: it is a shared-loader error
+  raised before the scheme is split, so there is no backend to name it
+  after. Worth normalising onto `CredentialsReadError` if the seam grows a
+  third backend; it is not the failure #2642 addressed (that one is a
+  credential *read*, this one is an unconfigured target).
 
 ## Testing
 
@@ -378,6 +509,15 @@ no-secret-in-logs behaviour with a canned payload and a mocked STS endpoint
   the integration lane runs it (`pytest -x tests/integration/`); a
   Docker-absent sandbox skips cleanly. Image overridable via
   `MEHO_TEST_VAULT_IMAGE`.
+- **Background dispatch** (`backend/tests/test_connectors_gsm_creds.py` +
+  `backend/tests/test_sensor_runner.py`, #2642) — the SA-direct fallback,
+  the backend-neutral error class, and a real check-runner tick driven
+  through resolve → dispatch → credential load with a stubbed STS exchange
+  (the `wif_credentials_factory` seam) and a stubbed Keycloak token
+  endpoint (respx), asserting the presented subject token is the runner
+  principal's JWT. The principal itself is covered by
+  `backend/tests/test_auth_runner_identity.py` (opt-in, caching,
+  fail-soft, no secret in logs).
 
 ## References
 

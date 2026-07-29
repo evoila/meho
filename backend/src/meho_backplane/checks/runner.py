@@ -72,7 +72,7 @@ Dispatch identity
 
 Each dispatch runs as a synthetic per-tenant :class:`~meho_backplane.auth.operator.Operator`
 with ``sub=sensor.identity_sub`` (#2503's per-row column, default
-``"__sensor__"``), ``tenant_id=sensor.tenant_id``, ``raw_jwt=""``,
+``"__sensor__"``), ``tenant_id=sensor.tenant_id``,
 ``TenantRole.OPERATOR`` -- the topology-refresh ``_system_operator`` mould with
 the sub sourced from the row. ``principal_kind`` defaults to ``USER``, so
 :func:`~meho_backplane.operations._validate.policy_gate` auto-executes the
@@ -82,10 +82,19 @@ the platform's default-allow-on-``requires_approval`` policy, so an op
 re-registered to a higher safety level *after* a Sensor is created would still
 run here -- a caution/dangerous escalation is a platform-level concern, not
 re-gated in the runner. The agent-credential path is never touched here and
-no agent run may exist on this path). A connector requiring an operator-context
-Vault credential read fails closed for a synthetic operator -- such a dispatch
-returns a structured error and the sensor reads ``unknown``; targets with
-stored credentials (the topology-refresh model) evaluate normally.
+no agent run may exist on this path).
+
+``raw_jwt`` is the runner's own **service-principal** token (#2642) when
+``CHECK_RUNNER_CLIENT_ID`` / ``CHECK_RUNNER_CLIENT_SECRET`` are configured, and
+``""`` otherwise. This is the identity a *downstream* credential store
+authenticates -- the GSM backend's WIF exchange needs a subject token, and
+without one no credentialed Sensor on a per-operator-WIF deploy could evaluate
+at all. It never changes MEHO's own attribution: the audit row still carries
+``sensor.identity_sub``. With no principal configured, a connector requiring an
+operator-context credential read still fails closed for the synthetic operator
+-- such a dispatch returns a structured error and the sensor reads ``unknown``;
+targets with stored credentials (the topology-refresh model) evaluate normally
+either way. See :mod:`meho_backplane.auth.runner_identity`.
 
 Result vocabulary
 ================
@@ -115,6 +124,10 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.auth.runner_identity import (
+    check_runner_jwt,
+    reset_check_runner_token_cache,
+)
 from meho_backplane.checks.assertions import AssertionOutcome, AssertionSpec
 from meho_backplane.checks.evaluate import evaluate_assertion
 from meho_backplane.checks.investigate import investigate_on_transition
@@ -208,14 +221,17 @@ def _eval_semaphore() -> asyncio.Semaphore:
 def reset_sensor_runner_state() -> None:
     """Drop all per-process runner state (test seam).
 
-    Clears the in-flight registry and the lazily-built semaphore so a fresh
-    test starts with no leftover tasks and a semaphore bound to its own event
-    loop. Mirrors :func:`meho_backplane.db.engine.reset_engine_for_testing`'s
-    role as an explicit reset for module-level state.
+    Clears the in-flight registry, the lazily-built semaphore, and the
+    check-runner principal's cached token, so a fresh test starts with no
+    leftover tasks, a semaphore bound to its own event loop, and no token
+    minted against another test's settings. Mirrors
+    :func:`meho_backplane.db.engine.reset_engine_for_testing`'s role as an
+    explicit reset for module-level state.
     """
     _IN_FLIGHT.clear()
     global _EVAL_SEMAPHORE
     _EVAL_SEMAPHORE = None
+    reset_check_runner_token_cache()
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,20 +291,31 @@ async def _advisory_unlock(session: AsyncSession, key: int) -> None:
     await session.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
 
 
-def _sensor_operator(snap: _SensorSnapshot) -> Operator:
+async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
     """Build the synthetic per-tenant operator a sensor dispatch runs as.
 
-    ``raw_jwt`` is empty -- the runner forwards no bearer token; a target with
-    stored credentials evaluates normally, one needing an operator-context
-    Vault read fails closed to a structured error (-> ``unknown``).
-    ``principal_kind`` defaults to ``USER``, so the policy gate auto-executes
-    the ``safe`` op #2503's registration guard restricts sensors to.
+    ``raw_jwt`` carries the check-runner service principal's token when one is
+    configured (#2642, :func:`~meho_backplane.auth.runner_identity.check_runner_jwt`)
+    and is empty otherwise. With a principal, a target whose credentials need
+    an operator-context read resolves under that principal -- which is what
+    makes a Sensor on a per-operator-WIF GSM deploy evaluate at all, since the
+    WIF exchange needs a subject token. Without one the behaviour is unchanged:
+    targets with stored credentials evaluate normally, a target needing an
+    operator-context read fails closed to a structured error (-> ``unknown``).
+
+    MEHO's own audit attribution stays ``snap.identity_sub`` either way: the
+    ``sub`` is the sensor's identity, the bearer token is the runner's. The two
+    deliberately differ -- the sensor row is what MEHO attributes the
+    evaluation to, the principal is what the *downstream* credential store
+    authenticates. ``principal_kind`` defaults to ``USER``, so the policy gate
+    auto-executes the ``safe`` op #2503's registration guard restricts sensors
+    to (minting a token does not change the policy path).
     """
     return Operator(
         sub=snap.identity_sub,
         name=None,
         email=None,
-        raw_jwt="",
+        raw_jwt=await check_runner_jwt(),
         tenant_id=snap.tenant_id,
         tenant_role=TenantRole.OPERATOR,
     )
@@ -339,9 +366,14 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
     cause in the evidence.
     """
     now = datetime.now(UTC)
-    operator = _sensor_operator(snap)
     try:
         async with asyncio.timeout(_EVAL_TIMEOUT_SECONDS):
+            # Inside the timeout: building the operator may mint a
+            # check-runner principal token (#2642), i.e. reach Keycloak. That
+            # call carries its own HTTP timeout, but a slow IdP must burn the
+            # evaluation budget like any other step rather than stall the
+            # evaluation task outside every deadline.
+            operator = await _sensor_operator(snap)
             # Resolve name/alias -> Target row the same way call_operation does;
             # ``bind_audit_target=False`` -- the runner is off the HTTP
             # AuditMiddleware path (the dispatcher stamps ``target_id`` off the

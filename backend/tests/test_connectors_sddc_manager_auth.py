@@ -41,6 +41,7 @@ from meho_backplane.connectors.sddc_manager import (
     SddcManagerConnector,
     SddcTargetLike,
 )
+from meho_backplane.settings import get_settings
 
 _TOKEN_PATH = "/v1/tokens"
 
@@ -55,6 +56,24 @@ def _make_operator(raw_jwt: str = "") -> Operator:
         tenant_id=UUID(int=0),
         tenant_role=TenantRole.OPERATOR,
     )
+
+
+@pytest.fixture(autouse=True)
+def _chassis_settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the chassis env the shared credential loader now reads.
+
+    Since #2642 the empty-``raw_jwt`` fail-closed guard lives on the *backend*
+    (``VaultCredentialBackend.load_secret_data``) rather than ahead of the
+    scheme split, so the loader resolves ``CREDENTIAL_BACKEND`` — and
+    therefore ``Settings`` — before the guard fires. The behaviour under test
+    is unchanged; it just needs the chassis env a running backplane always
+    has.
+    """
+    monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
+    monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 @pytest.fixture(autouse=True)

@@ -1514,13 +1514,16 @@ def _build_operator_for_dispatch(
     the same shape). This operator is reconstructed from
     ``operator_sub``, not validated from a bearer token, so it must
     never be usable as operator context for a downstream credential
-    read: every Vault-touching layer short-circuits on an empty
-    ``raw_jwt`` (``_resolve_secret_ref`` in
+    read: the Vault credential backend short-circuits on an empty
+    ``raw_jwt`` (``VaultCredentialBackend.load_secret_data`` in
     :mod:`meho_backplane.connectors._shared.vault_creds` raises
     ``VaultCredentialsReadError`` before Vault is contacted). A verify
     ``op_id`` that resolves to a Vault-backed connector therefore fails
     closed locally with a structured refusal instead of forwarding a
-    placeholder string to Vault's JWT/OIDC login. Typed in-process
+    placeholder string to Vault's JWT/OIDC login. (A ``gsm:`` ref on a
+    deploy with an ambient GCP identity is served under MEHO's own
+    deployment identity instead — that backend owns its own precondition,
+    #2642.) Typed in-process
     verify handlers that need no per-target credential read never
     consume ``raw_jwt`` and dispatch unchanged.
 

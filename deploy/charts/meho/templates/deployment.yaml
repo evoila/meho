@@ -156,6 +156,24 @@ spec:
                   name: {{ .Values.uiConsole.secretName | quote }}
                   key: {{ .Values.uiConsole.sessionEncryptionKey | quote }}
             {{- end }}
+            {{- if .Values.checkRunner.enabled }}
+            # #2642 — the in-process check-runner's service-principal
+            # identity for background dispatch. Wired only when
+            # `checkRunner.enabled: true`; the schema requires a non-empty
+            # `clientId` + `clientSecret.secretName` under that flag, so
+            # neither reference is empty here. `CHECK_RUNNER_CLIENT_ID` is
+            # plain operator config; the secret is `secretKeyRef` only.
+            # Unset → the runner dispatches with no bearer token and a
+            # Sensor whose target needs an operator-context credential read
+            # reads `unknown` (`meho_backplane.auth.runner_identity`).
+            - name: CHECK_RUNNER_CLIENT_ID
+              value: {{ .Values.checkRunner.clientId | quote }}
+            - name: CHECK_RUNNER_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.checkRunner.clientSecret.secretName | quote }}
+                  key: {{ .Values.checkRunner.clientSecret.secretKey | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             # Operator-supplied extra env vars (full EnvVar shape — accepts
             # `value` or `valueFrom`). Most common use: pointing

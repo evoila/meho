@@ -43,6 +43,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerReadError
 from meho_backplane.connectors.postgres import (
     PG_OPS,
     PostgresConnector,
@@ -523,6 +524,21 @@ async def test_fingerprint_unreachable_maps_to_not_reachable(
     assert "error" in fp.extras
 
 
+@pytest.mark.asyncio
+async def test_fingerprint_degrades_on_gsm_credential_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``gsm:`` credential-read failure degrades, it does not escape (#2642)."""
+    monkeypatch.setattr(
+        connector_module,
+        "connect_read_only",
+        AsyncMock(side_effect=GcpSecretManagerReadError("gsm read failed")),
+    )
+    fp = await PostgresConnector().fingerprint(_PgTarget(), _make_operator())
+    assert fp.reachable is False
+    assert "GcpSecretManagerReadError" in fp.extras["error"]
+
+
 # ---------------------------------------------------------------------------
 # Probe reasons
 # ---------------------------------------------------------------------------
@@ -542,6 +558,7 @@ async def test_probe_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     ("exc", "reason"),
     [
         (__import__("asyncpg").InvalidPasswordError("bad password"), "auth_failed"),
+        (GcpSecretManagerReadError("gsm read failed"), "auth_failed"),
         (OSError("no route to host"), "tcp_unreachable"),
         (__import__("asyncpg").PostgresError("startup failed"), "connect_failed"),
     ],

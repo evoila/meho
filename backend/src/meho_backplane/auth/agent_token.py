@@ -16,18 +16,52 @@ in :class:`~meho_backplane.auth.keycloak_admin.KeycloakAdminClient`: a thin
 async ``httpx`` call, structured errors, and the client secret never logged.
 The autonomous trigger that supplies the credentials and consumes the token
 is G11.3's scope; this module is the authentication primitive it calls.
+
+It is now the shared grant primitive rather than an agent-only one: the
+check-runner's background-dispatch identity
+(:mod:`meho_backplane.auth.runner_identity`, #2642) mints its service
+principal's token through the same call. The ``AgentToken*`` names are kept
+for the existing call sites; :func:`get_client_credentials_grant` is the
+principal-agnostic entry point, and returns the declared lifetime so a
+caller that runs on a tick can cache instead of re-minting per use.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import httpx
 import structlog
 
-__all__ = ["AgentTokenError", "get_client_credentials_token"]
+__all__ = [
+    "AgentTokenError",
+    "ClientCredentialsGrant",
+    "get_client_credentials_grant",
+    "get_client_credentials_token",
+]
 
 _TOKEN_HTTP_TIMEOUT_SECONDS: float = 10.0
+
+#: Lifetime assumed when the token endpoint omits ``expires_in``. Keycloak
+#: always sends it, but the field is optional in RFC 6749 §5.1, so a caller
+#: that caches on it needs a floor rather than a ``KeyError``. Deliberately
+#: short: re-minting early is cheap, using an expired token is not.
+_DEFAULT_EXPIRES_IN_SECONDS: int = 60
+
+
+@dataclass(frozen=True)
+class ClientCredentialsGrant:
+    """A ``client_credentials`` token plus the lifetime the IdP declared.
+
+    ``expires_in`` is what lets a caller cache the token instead of
+    re-minting one per use — the check-runner's background-dispatch identity
+    (:mod:`meho_backplane.auth.runner_identity`) would otherwise hit Keycloak
+    once per sensor evaluation. The token value is never logged.
+    """
+
+    access_token: str
+    expires_in: int
 
 
 class AgentTokenError(Exception):
@@ -51,19 +85,38 @@ async def get_client_credentials_token(
     client_secret: str,
     audience: str | None = None,
 ) -> str:
+    """Return just the access token — see :func:`get_client_credentials_grant`."""
+    grant = await get_client_credentials_grant(
+        issuer_url=issuer_url,
+        client_id=client_id,
+        client_secret=client_secret,
+        audience=audience,
+    )
+    return grant.access_token
+
+
+async def get_client_credentials_grant(
+    *,
+    issuer_url: str,
+    client_id: str,
+    client_secret: str,
+    audience: str | None = None,
+) -> ClientCredentialsGrant:
     """Obtain an access token for *client_id* via the ``client_credentials`` grant.
 
     POSTs to the realm token endpoint derived from *issuer_url*
     (``{issuer}/protocol/openid-connect/token``) and returns the
-    ``access_token`` string. The token's ``sub`` is the agent's service
-    account, so an autonomous run authenticated with it is attributed to the
-    agent as subject — there is no separate actor.
+    ``access_token`` plus its declared lifetime. The token's ``sub`` is the
+    client's service account, so a run authenticated with it is attributed
+    to that principal as subject — there is no separate actor.
 
     Args:
         issuer_url: The Keycloak realm issuer URL (the token endpoint is
             derived from it).
-        client_id: The agent's OAuth client id (``agent:<name>``).
-        client_secret: The agent client's secret. Never logged.
+        client_id: The OAuth client id (``agent:<name>`` for an agent
+            principal, the configured check-runner client for background
+            dispatch).
+        client_secret: The client's secret. Never logged.
         audience: Optional ``aud`` to request (RFC 8707), when the token
             must be bound to a specific resource.
 
@@ -112,4 +165,10 @@ async def get_client_credentials_token(
             "missing_access_token",
             "agent client_credentials grant returned no access_token",
         )
-    return token
+    raw_expires_in = body.get("expires_in") if isinstance(body, dict) else None
+    expires_in = (
+        raw_expires_in
+        if isinstance(raw_expires_in, int) and not isinstance(raw_expires_in, bool)
+        else _DEFAULT_EXPIRES_IN_SECONDS
+    )
+    return ClientCredentialsGrant(access_token=token, expires_in=max(expires_in, 0))

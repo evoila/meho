@@ -578,17 +578,105 @@ gsm:
   # (which is the value the backplane actually reads at runtime).
   project: ""
   # -- Workload Identity Federation parameters for per-operator GCP token
-  # exchange. STUB for Phase 2 (#2232) — declared so a GSM adopter can pin
-  # the shape now, but NO template consumes these yet and the SA-direct
-  # Phase 1 backend ignores them. Leave empty until #2232 wires the STS
-  # token-exchange path.
+  # exchange (#2232). Wired into the ConfigMap as the `GSM_WIF_*` env vars
+  # the backend reads (#2642 — these were declared-but-unrendered stubs
+  # before, so a WIF install had to reach for `extraEnv`). `audience` is
+  # what switches the backend onto the per-operator path: leave it empty
+  # and the SA-direct Phase-1 path runs unchanged.
+  #
+  # A per-operator-WIF install must also decide how *background* dispatch
+  # (sensor evaluations, scheduled topology refreshes, runbook verify
+  # dispatch — no calling operator, so no JWT to federate) gets an
+  # identity: either an ambient pod identity (GKE Workload Identity), or
+  # the `checkRunner` service principal below. Neither ⇒ credentialed
+  # Sensors cannot evaluate. Connector `probe()` / `fingerprint()` are not
+  # covered by either: they carry a non-empty placeholder JWT, so they take
+  # the WIF branch and the exchange fails whatever you configure here. See
+  # `docs/deploying.md` (GSM / Vault-free).
   workloadIdentityFederation:
-    # -- Workload Identity **pool** id (Phase 2 stub, #2232).
+    # -- Full WIF provider resource name google-auth exchanges the operator
+    # JWT against, e.g.
+    # `//iam.googleapis.com/projects/<number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>`.
+    # Empty (the default) ⇒ SA-direct only. Rendered as `GSM_WIF_AUDIENCE`.
+    audience: ""
+    # -- Workload Identity **pool** id. Checked for consistency against
+    # `audience` (a mismatch fails the read with an actionable error) and
+    # used for non-secret log attribution. Rendered as `GSM_WIF_POOL_ID`.
     poolId: ""
-    # -- Workload Identity **provider** id within the pool (Phase 2 stub).
+    # -- Workload Identity **provider** id within the pool. Same
+    # consistency check as `poolId`. Rendered as `GSM_WIF_PROVIDER_ID`.
     providerId: ""
-    # -- Service account the federated identity impersonates (Phase 2 stub).
+    # -- Service account the federated identity impersonates for the final
+    # Secret Manager read; empty skips impersonation. Rendered as
+    # `GSM_WIF_SERVICE_ACCOUNT`.
     serviceAccount: ""
+    # -- STS subject-token type. Empty (the default) resolves to
+    # `urn:ietf:params:oauth:token-type:jwt`, correct for a Keycloak OIDC
+    # JWT. Rendered as `GSM_WIF_SUBJECT_TOKEN_TYPE`.
+    subjectTokenType: ""
+
+# In-process check-runner service principal (#2642). The sensor
+# check-runner (`meho_backplane.checks.runner`) dispatches on a background
+# tick with no calling operator, so it has no bearer token to present to a
+# credential store — and a target whose credentials need an operator-context
+# read fails closed. Point this at a confidential Keycloak client and the
+# runner mints a `client_credentials` token for it and dispatches under that
+# identity, so scheduled evaluations resolve credentials the same way an
+# interactive `POST /api/v1/operations/call` does.
+#
+# This is what makes credentialed Sensors work on a `credentialBackend: gsm`
+# install using per-operator WIF with no ambient pod identity (on-prem
+# Kubernetes): the runner's token becomes the subject token exchanged at
+# `sts.googleapis.com`, and GCP audits the read to this principal. Deploys
+# with GKE Workload Identity don't need it — the backend falls back to the
+# SA-direct read.
+#
+# WARNING — on a `credentialBackend: vault` install this is a privilege
+# change, not a no-op. The `meho-mcp` JWT role this repo provisions
+# (`docs/cross-repo/vault-provisioning.md`) is `role_type=jwt
+# user_claim=sub bound_audiences=<keycloak-audience>` with **no**
+# `bound_subject` / `bound_claims`, and its policy grants read on all of
+# `secret/data/meho/*`. The runner mints its token with
+# `audience=KEYCLOAK_AUDIENCE`, so once the client carries the audience
+# mapper the realm setup asks for, Vault accepts the runner principal
+# against that existing role as-is and hands it the whole policy. Enabling
+# `checkRunner.*` therefore gives background dispatch a full
+# `secret/meho/*` read and removes the "system-initiated calls cannot
+# perform an operator-context Vault read" carve-out the rest of this
+# feature relies on. Bound the role BEFORE enabling this on Vault: either
+# give the runner client a distinct audience *instead of* the backplane one
+# plus its own narrower JWT role (`bound_audiences=<runner-audience>` + a
+# policy scoped to the secrets Sensors actually need), or add an
+# exact-match `bound_claims` to `meho-mcp` keyed on a claim value only
+# operator tokens carry — a `bound_claims_type=glob` `"*"` is NOT one, it
+# matches the runner's service-account claims too. Recipe:
+# `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
+# principal".
+#
+# `clientId` is non-secret operator config; `clientSecret` is wired
+# exclusively as a `secretKeyRef` — never a plaintext chart value. Default
+# `enabled: false` renders nothing and keeps today's behaviour exactly:
+# background dispatch carries no token and a credential-needing Sensor reads
+# `unknown`. Realm-side setup mirrors the agent/runner principal clients (see
+# `docs/cross-repo/keycloak-agent-client.md`).
+checkRunner:
+  # -- Whether to wire `CHECK_RUNNER_CLIENT_ID` + `CHECK_RUNNER_CLIENT_SECRET`
+  # into the backplane Deployment. Default `false`: background dispatch runs
+  # with no credential identity (no behaviour change vs. a chart that doesn't
+  # ship this block).
+  enabled: false
+  # -- `client_id` of the confidential Keycloak client the check-runner
+  # authenticates as. Required (non-empty) when `checkRunner.enabled: true`.
+  clientId: ""
+  # -- Confidential client secret, wired via `secretKeyRef` only.
+  clientSecret:
+    # -- Name of the Kubernetes Secret holding the client secret. Referenced
+    # by name only — provisioning is the consumer's responsibility (a
+    # GSM-synced ExternalSecret, a sealed-secret, or a directly-applied
+    # Secret). Required (non-empty) when `checkRunner.enabled: true`.
+    secretName: ""
+    # -- Key within `secretName` whose value is the client secret.
+    secretKey: client_secret
 
 keycloak:
   # -- Keycloak issuer URL — MUST be set; empty fails the schema. The JWT

@@ -35,17 +35,21 @@ network is hit (python_best_practices §14 -- no network in unit tests).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+import respx
 import structlog
 
 import meho_backplane.operations._audit as audit_module
-from meho_backplane.auth.operator import Operator, PrincipalKind
+from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.checks.assertions import AssertionSpec
 from meho_backplane.checks.repository import (
@@ -55,11 +59,16 @@ from meho_backplane.checks.repository import (
 from meho_backplane.checks.runner import (
     _IN_FLIGHT,
     _SENSOR_RUNNER_ADVISORY_LOCK_KEY,
+    _sensor_operator,
+    _SensorSnapshot,
     reset_sensor_runner_state,
     run_one_sensor_tick,
     start_sensor_runner,
     stop_sensor_runner,
 )
+from meho_backplane.connectors._shared import credential_backend
+from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerBackend
+from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
@@ -900,6 +909,7 @@ async def _seed_target(
     product: str = _K8S_MOULD_PRODUCT,
     version: str = "1.x",
     tenant_id: uuid.UUID = _TENANT,
+    secret_ref: str | None = None,
 ) -> uuid.UUID:
     await _seed_tenant(tenant_id)
     target_id = uuid.uuid4()
@@ -916,7 +926,7 @@ async def _seed_target(
                 host="k8s.test",
                 port=6443,
                 fqdn=None,
-                secret_ref=None,
+                secret_ref=secret_ref,
                 auth_model="shared_service_account",
                 vpn_required=False,
                 extras={},
@@ -1067,3 +1077,307 @@ async def test_alias_collision_yields_ambiguous_target_evidence(
     assert row.last_state == "unknown"
     assert row.last_evidence is not None
     assert row.last_evidence["reason"] == "ambiguous_target"
+
+
+# --------------------------------------------------------------------------- #
+# Background-dispatch credential identity (#2642)
+# --------------------------------------------------------------------------- #
+#
+# #2595 made target-bound sensors resolve their target; this is the next layer
+# down. A Sensor on a target whose credentials live in a credential store still
+# could not evaluate: the runner dispatched with ``raw_jwt=""`` and the shared
+# loader fail-closed before any backend ran. On a ``credentialBackend=gsm``
+# deploy using per-operator WIF that is total -- the WIF exchange needs a
+# subject token -- so every credentialed Sensor read ``unknown`` forever while
+# ``POST /api/v1/operations/call`` with the same triple succeeded.
+#
+# These tests drive a real tick through the real resolve -> dispatch ->
+# credential-load path with a stubbed STS exchange (the ``wif_credentials_factory``
+# seam) and a stubbed Keycloak token endpoint (respx). No network, no GCP.
+
+_CREDS_OP = f"{_K8S_MOULD_PRODUCT}.pod.count.creds"
+_RUNNER_CLIENT_ID = "meho-check-runner"
+_RUNNER_CLIENT_SECRET = "check-runner-secret"
+_RUNNER_TOKEN = "runner.principal.jwt"
+_KC_TOKEN_URL = "https://keycloak.test/realms/meho/protocol/openid-connect/token"
+_WIF_AUDIENCE = (
+    "//iam.googleapis.com/projects/123/locations/global/"
+    "workloadIdentityPools/meho-pool/providers/keycloak"
+)
+
+
+async def _k8s_count_with_credentials(
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """Handler that resolves the target's stored credentials before answering.
+
+    The shape every REST connector's session builder has: load the target's
+    ``secret_ref`` under the caller's identity, then talk to the vendor. A
+    credential-read failure propagates and the dispatcher renders it as
+    ``connector_error: <class>``.
+    """
+    await load_basic_credentials(target, operator)
+    return {"count": 3}
+
+
+async def _register_credentialed_op(embedding_service: AsyncMock) -> None:
+    """Register the k8s mould plus a second op that needs target credentials."""
+    await _register_k8s_mould(embedding_service)
+    await register_typed_operation(
+        product=_K8S_MOULD_PRODUCT,
+        version="1.x",
+        impl_id=_K8S_MOULD_PRODUCT,
+        op_id=_CREDS_OP,
+        handler=_k8s_count_with_credentials,
+        summary="Count pods using the cluster's stored credentials.",
+        description="Resolve the target's stored credentials, then count pods.",
+        parameter_schema={"type": "object"},
+        when_to_use=None,
+        embedding_service=embedding_service,
+    )
+
+
+@contextlib.contextmanager
+def _gsm_backend(backend: Any) -> Iterator[None]:
+    """Swap the registered ``gsm`` backend for a test double for the block."""
+    original = credential_backend.CREDENTIAL_BACKEND_REGISTRY["gsm"]
+    credential_backend.CREDENTIAL_BACKEND_REGISTRY["gsm"] = backend
+    try:
+        yield
+    finally:
+        credential_backend.CREDENTIAL_BACKEND_REGISTRY["gsm"] = original
+
+
+class _StubSecretClient:
+    """Stub ``SecretManagerServiceClient`` returning one canned JSON payload."""
+
+    def __init__(self) -> None:
+        self.credentials: Any = None
+
+    def access_secret_version(self, *, name: str) -> Any:
+        payload = SimpleNamespace(data=b'{"username": "svc", "password": "pw"}')
+        return SimpleNamespace(payload=payload, name=name)
+
+
+def _stub_client_factory(client: _StubSecretClient) -> Any:
+    def factory(*, credentials: Any) -> _StubSecretClient:
+        client.credentials = credentials
+        return client
+
+    return factory
+
+
+def _capturing_wif_factory() -> Any:
+    """A ``wif_credentials_factory`` recording the subject token it was handed."""
+    calls: list[dict[str, Any]] = []
+
+    def factory(**kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return object()
+
+    factory.calls = calls  # type: ignore[attr-defined]
+    return factory
+
+
+def _enable_wif(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    monkeypatch.setenv("GSM_WIF_AUDIENCE", _WIF_AUDIENCE)
+    monkeypatch.setenv("GSM_WIF_POOL_ID", "meho-pool")
+    monkeypatch.setenv("GSM_WIF_PROVIDER_ID", "keycloak")
+    get_settings.cache_clear()
+
+
+def _enable_runner_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CHECK_RUNNER_CLIENT_ID", _RUNNER_CLIENT_ID)
+    monkeypatch.setenv("CHECK_RUNNER_CLIENT_SECRET", _RUNNER_CLIENT_SECRET)
+    get_settings.cache_clear()
+
+
+@pytest.mark.asyncio
+async def test_runner_presents_service_principal_jwt_as_wif_subject_token(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_registry: None,
+    _embedding_stub: AsyncMock,
+    _captured_broadcast: list[BroadcastEvent],
+) -> None:
+    """AC1: the STS subject token is the runner principal's JWT, not ``""``.
+
+    The whole point of #2642. With a check-runner principal configured, a
+    target-bound Sensor on a per-operator-WIF GSM deploy evaluates ``ok``
+    end-to-end, and the token federated at ``sts.googleapis.com`` is the one
+    Keycloak issued for the check-runner client.
+    """
+    _enable_wif(monkeypatch)
+    _enable_runner_principal(monkeypatch)
+    await _register_credentialed_op(_embedding_stub)
+    await _seed_target(name="k8s-prod", secret_ref="gsm:my-project/db-creds")
+
+    sensor_id = await _create_target_bound_sensor(target={"name": "k8s-prod"}, op_id=_CREDS_OP)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    wif_factory = _capturing_wif_factory()
+    backend = GcpSecretManagerBackend(
+        client_factory=_stub_client_factory(_StubSecretClient()),
+        wif_credentials_factory=wif_factory,
+    )
+    with respx.mock as r:
+        r.post(_KC_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200, json={"access_token": _RUNNER_TOKEN, "expires_in": 300}
+            )
+        )
+        with _gsm_backend(backend):
+            await run_one_sensor_tick()
+            await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "ok", row.last_evidence
+    assert row.last_value == 3
+
+    assert len(wif_factory.calls) == 1
+    subject_token = wif_factory.calls[0]["operator_jwt"]
+    assert subject_token == _RUNNER_TOKEN
+    assert subject_token != ""
+    assert subject_token != "op-admin"
+
+
+@pytest.mark.asyncio
+async def test_ambient_adc_serves_background_dispatch_without_a_principal(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_registry: None,
+    _embedding_stub: AsyncMock,
+    _captured_broadcast: list[BroadcastEvent],
+) -> None:
+    """AC2: ambient ADC + ``raw_jwt=""`` takes the SA-direct fallback.
+
+    A deployment with pod identity (GKE Workload Identity) needs no runner
+    principal: the read runs under MEHO's own ADC and the Sensor evaluates.
+    The WIF factory is never reached -- an empty subject token has nothing to
+    exchange.
+    """
+    _enable_wif(monkeypatch)
+    await _register_credentialed_op(_embedding_stub)
+    await _seed_target(name="k8s-prod", secret_ref="gsm:my-project/db-creds")
+
+    sensor_id = await _create_target_bound_sensor(target={"name": "k8s-prod"}, op_id=_CREDS_OP)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    ambient_adc = object()
+    wif_factory = _capturing_wif_factory()
+    client = _StubSecretClient()
+    backend = GcpSecretManagerBackend(
+        adc_loader=lambda **_: (ambient_adc, "adc-project"),
+        client_factory=_stub_client_factory(client),
+        wif_credentials_factory=wif_factory,
+    )
+    with _gsm_backend(backend):
+        await run_one_sensor_tick()
+        await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "ok", row.last_evidence
+    assert client.credentials is ambient_adc
+    assert wif_factory.calls == []
+
+
+@pytest.mark.asyncio
+async def test_gsm_credential_failure_never_reports_a_vault_error(
+    monkeypatch: pytest.MonkeyPatch,
+    _reset_registry: None,
+    _embedding_stub: AsyncMock,
+    _captured_broadcast: list[BroadcastEvent],
+) -> None:
+    """AC3: on a GSM deploy the sensor's ``dispatch_error`` says nothing about Vault.
+
+    With neither a runner principal nor ambient ADC the read still fails --
+    but a deploy running no Vault must not be told to go and look at Vault.
+    """
+    _enable_wif(monkeypatch)
+    await _register_credentialed_op(_embedding_stub)
+    await _seed_target(name="k8s-prod", secret_ref="gsm:my-project/db-creds")
+
+    sensor_id = await _create_target_bound_sensor(target={"name": "k8s-prod"}, op_id=_CREDS_OP)
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    backend = GcpSecretManagerBackend(adc_loader=lambda **_: (None, "adc-project"))
+    with _gsm_backend(backend):
+        await run_one_sensor_tick()
+        await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert row.last_evidence is not None
+    dispatch_error = str(row.last_evidence["dispatch_error"])
+    assert "Vault" not in dispatch_error
+    assert "vault" not in dispatch_error.lower()
+    assert dispatch_error == "connector_error: GcpSecretManagerReadError"
+
+
+@pytest.mark.asyncio
+async def test_no_principal_configured_keeps_the_empty_jwt_behaviour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opt-out: with no principal the synthetic operator still carries no token.
+
+    The pre-#2642 contract every existing deployment relies on -- minting is
+    opt-in, and an unconfigured install neither contacts Keycloak nor changes
+    what the runner presents.
+    """
+    monkeypatch.delenv("CHECK_RUNNER_CLIENT_ID", raising=False)
+    monkeypatch.delenv("CHECK_RUNNER_CLIENT_SECRET", raising=False)
+    get_settings.cache_clear()
+
+    snap = _SensorSnapshot(
+        id=uuid.uuid4(),
+        tenant_id=_TENANT,
+        name="s",
+        connector_id=_K8S_MOULD_CONNECTOR_ID,
+        op_id=_CREDS_OP,
+        target=None,
+        params={},
+        assertion=_OK_ASSERTION,
+        identity_sub="__sensor__",
+    )
+    operator = await _sensor_operator(snap)
+
+    assert operator.raw_jwt == ""
+    assert operator.sub == "__sensor__"
+    assert operator.principal_kind is PrincipalKind.USER
+
+
+@pytest.mark.asyncio
+async def test_configured_principal_does_not_change_meho_attribution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bearer token is the principal's; the audit ``sub`` stays the sensor's.
+
+    Two different identities on purpose: MEHO attributes the evaluation to the
+    Sensor row, the credential store authenticates the runner principal.
+    """
+    _enable_runner_principal(monkeypatch)
+
+    snap = _SensorSnapshot(
+        id=uuid.uuid4(),
+        tenant_id=_TENANT,
+        name="s",
+        connector_id=_K8S_MOULD_CONNECTOR_ID,
+        op_id=_CREDS_OP,
+        target=None,
+        params={},
+        assertion=_OK_ASSERTION,
+        identity_sub="sensor-identity",
+    )
+    with respx.mock as r:
+        r.post(_KC_TOKEN_URL).mock(
+            return_value=httpx.Response(
+                200, json={"access_token": _RUNNER_TOKEN, "expires_in": 300}
+            )
+        )
+        operator = await _sensor_operator(snap)
+
+    assert operator.raw_jwt == _RUNNER_TOKEN
+    assert operator.sub == "sensor-identity"
+    assert operator.tenant_role is TenantRole.OPERATOR
+    assert operator.principal_kind is PrincipalKind.USER

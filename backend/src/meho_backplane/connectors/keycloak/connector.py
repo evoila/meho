@@ -93,7 +93,10 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
-from meho_backplane.connectors._shared.vault_creds import VaultCredentialsReadError
+from meho_backplane.connectors._shared.vault_creds import (
+    CredentialsReadError,
+    VaultCredentialsReadError,
+)
 from meho_backplane.connectors._shared.vcf_auth import is_acceptable_auth_model
 from meho_backplane.connectors.adapters.http import HttpConnector, _retryable
 from meho_backplane.connectors.keycloak.session import (
@@ -490,9 +493,11 @@ class KeycloakConnector(HttpConnector):
         Unlike the unauthenticated-version-probe connectors (vRLI), every
         Keycloak admin endpoint requires the admin token, so the
         fingerprint needs a real ``operator`` to read the admin credential
-        from Vault. A ``None`` operator (background caller) falls back to
-        the synthesised system operator, which fails closed at the live
-        Vault round-trip -- surfaced here as ``reachable=False`` +
+        from the credential store. A ``None`` operator (background caller)
+        falls back to the synthesised system operator; on a Vault backend
+        that fails closed at the live JWT round-trip. Either way a failed
+        credential read (:class:`CredentialsReadError`, whichever backend
+        raised it) is surfaced here as ``reachable=False`` +
         ``extras["error"]`` rather than an unhandled exception.
 
         Transport / auth failure → ``reachable=False`` with
@@ -518,7 +523,7 @@ class KeycloakConnector(HttpConnector):
             OSError,
             ValueError,
             KeycloakAdminTokenError,
-            VaultCredentialsReadError,
+            CredentialsReadError,
         ) as exc:
             return FingerprintResult(
                 vendor="keycloak",
@@ -547,14 +552,21 @@ class KeycloakConnector(HttpConnector):
         ``/admin/serverinfo`` is the (undocumented but stable) endpoint
         the admin console's "Server Info" page reads; ``systemInfo.version``
         carries the Keycloak version (e.g. ``"26.0.5"``). Any failure
-        (404 on an older server, transport error, malformed body) returns
-        ``None`` rather than failing the fingerprint -- the realm
-        round-trip is the canonical reachability signal, the version is a
-        nice-to-have.
+        (404 on an older server, transport error, malformed body, or a
+        :class:`CredentialsReadError` from a credential store that went
+        away between this call and the realm round-trip) returns ``None``
+        rather than failing the fingerprint -- the realm round-trip is the
+        canonical reachability signal, the version is a nice-to-have.
         """
         try:
             info = await self._get_json(target, "/admin/serverinfo", operator=operator)
-        except (httpx.HTTPError, OSError, ValueError, KeycloakAdminTokenError):
+        except (
+            httpx.HTTPError,
+            OSError,
+            ValueError,
+            KeycloakAdminTokenError,
+            CredentialsReadError,
+        ):
             return None
         system_info = info.get("systemInfo") if isinstance(info, dict) else None
         version = system_info.get("version") if isinstance(system_info, dict) else None

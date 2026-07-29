@@ -939,18 +939,21 @@ built for `linux/amd64` (Hetzner deploy target) and `linux/arm64`
 
 ### Base image digest pin (Task #32)
 
-`ARG PYTHON_BASE_DIGEST` near the top of the Dockerfile pins the base
-image to a specific OCI manifest-list digest, not the floating
-`python:3.12-slim` tag. The digest references the manifest list, not a
-per-arch image — buildx resolves it to the correct `linux/amd64` or
-`linux/arm64` child at build time, so one pin covers both architectures.
+Both `FROM` lines inline a `python:<tag>@sha256:` pin, binding the base
+to a specific OCI manifest-list digest rather than the floating
+`python:3.14-slim` tag. The pin is inlined rather than held in an `ARG`
+because Dependabot only tracks literal tag-qualified `FROM` references
+(dependabot-core#2057 / #4597) — an `ARG`-held digest is never refreshed.
+The digest references the manifest list, not a per-arch image — buildx
+resolves it to the correct `linux/amd64` or `linux/arm64` child at build
+time, so one pin covers both architectures.
 
 | Field | Value |
 | --- | --- |
-| Base | `docker.io/library/python:3.12-slim` |
-| Pinned digest | `sha256:ec948fa5f90f4f8907e89f4800cfd2d2e91e391a4bce4a6afa77ba265bc3a2fe` |
-| Pinned on | 2026-05-10 |
-| Verify | `docker manifest inspect python:3.12-slim` or the [Docker Hub `tags` API](https://hub.docker.com/v2/repositories/library/python/tags/3.12-slim) |
+| Base | `docker.io/library/python:3.14-slim` |
+| Pinned digest | `sha256:d3400aa122fa42cf0af0dbe8ec3091b047eac5c8f7e3539f7135e86d855dc015` |
+| Pinned on | 2026-07-16 |
+| Verify | `docker manifest inspect python:3.14-slim` or the [Docker Hub `tags` API](https://hub.docker.com/v2/repositories/library/python/tags/3.14-slim) |
 
 The uv installer image (`ghcr.io/astral-sh/uv`) is also digest-pinned
 at `0.11.12@sha256:3a59a3cdd5f7c217faa36e32dbc7fddbb0412889c2a0a5229f6d790e5a019dd7`
@@ -958,7 +961,7 @@ in the same file. The two pins move together when the toolchain
 upgrades.
 
 **Refresh policy.** Every digest bump lands in a dedicated PR titled
-`chore(backend): bump python:3.12-slim base digest to <new>`. Open a
+`chore(backend): bump python:3.14-slim base digest to <new>`. Open a
 new PR rather than batching the digest bump into an unrelated change
 — the supply-chain audit trail (G2.4-T3 cosign + G2.4-T4 SBOM) reads
 this PR as the provenance event for the upgrade. The same rule

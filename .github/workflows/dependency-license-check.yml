@@ -120,7 +120,13 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         if: hashFiles('**/pyproject.toml') != ''
         with:
-          python-version: "3.13"
+          # Must track the ``requires-python`` floor in backend/pyproject.toml.
+          # The "Install project deps" step below runs a real
+          # ``pip install -e ./backend``, so an interpreter older than the
+          # floor fails resolution outright — the migration to 3.14 hit
+          # exactly that: ``Package 'meho-backplane' requires a different
+          # Python: 3.13.14 not in '>=3.14'``. Bump both together.
+          python-version: "3.14"
       - name: Install pip-licenses
         if: hashFiles('**/pyproject.toml') != ''
         # 5.5.5 reads PEP 639 ``License-Expression`` metadata; 5.0.0 did

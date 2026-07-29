@@ -69,7 +69,7 @@ _FAKE_JWT = "header.payload.signature"
 
 
 @pytest.fixture(autouse=True)
-def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
+def _required_settings_env(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Pin every env var :class:`Settings` requires for this module."""
     monkeypatch.setenv("KEYCLOAK_ISSUER_URL", "https://keycloak.test/realms/meho")
     monkeypatch.setenv("KEYCLOAK_AUDIENCE", "meho-backplane")
@@ -89,7 +89,7 @@ def _getaddrinfo_for_tests(
 
 
 @pytest.fixture(autouse=True)
-def _mock_getaddrinfo_for_test_hosts() -> Generator[None, None, None]:
+def _mock_getaddrinfo_for_test_hosts() -> Generator[None]:
     """Patch ``getaddrinfo`` for the SSRF guard so test HTTPS URLs resolve public."""
     with patch(
         "meho_backplane.operations.ingest.openapi.socket.getaddrinfo",

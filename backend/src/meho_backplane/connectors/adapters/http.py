@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+# code-quality-allow: file-size — pre-existing shared-transport module
+# (671 lines before this change). The Python 3.14 migration only clears
+# VERIFY_X509_STRICT in _build_ca_pinned_ssl_context and documents why;
+# splitting the module is separate refactor work, out of scope here.
 
 """Abstract HTTP-API connector with shared transport plumbing.
 
@@ -150,7 +154,7 @@ def _build_ca_pinned_ssl_context(ca_pem: str) -> ssl.SSLContext:
     :meth:`~ssl.SSLContext.load_verify_locations` the per-target CA/cert
     PEM into its trust store via the ``cadata`` parameter. Crucially,
     ``load_verify_locations`` does **not** touch ``check_hostname`` or
-    ``verify_mode`` (verified against the installed CPython 3.12 ``ssl``),
+    ``verify_mode`` (verified against the installed CPython ``ssl``),
     so the returned context still enforces chain **and** hostname -- now
     additionally trusting the pinned CA. This is the govc-``-thumbprint``
     pattern: trust *this specific* appliance's self-signed / internal-CA
@@ -161,6 +165,21 @@ def _build_ca_pinned_ssl_context(ca_pem: str) -> ssl.SSLContext:
     context starts from ``create_default_context``), so a pinned target
     still trusts public CAs too -- the pin is additive, not a replacement.
 
+    ``VERIFY_X509_STRICT`` is cleared because CPython 3.13 added it (and
+    ``VERIFY_X509_PARTIAL_CHAIN``) to ``create_default_context``'s default
+    ``verify_flags`` (python/cpython#107361). Strict mode enforces RFC 5280
+    to the letter -- notably requiring an Authority Key Identifier on
+    non-self-signed certs -- which is exactly the conformance the
+    self-signed / internal-CA appliance certs this function exists to trust
+    tend to lack. Leaving it on would reject, with an opaque
+    ``Missing Authority Key Identifier``, pinned targets that verify fine
+    today; the upstream docs call this out as "a small amount of
+    incompatibility with older X.509 certificates". Chain and hostname
+    verification are untouched -- this restores the pre-3.13 pinning
+    semantics, it does not weaken them. ``VERIFY_X509_PARTIAL_CHAIN`` is
+    deliberately left on: letting path validation terminate at the pinned
+    cert is precisely the intent of a pin.
+
     The PEM is validated at the API boundary
     (:func:`meho_backplane.targets.schemas.validate_ca_pin_pem`) before it
     is ever persisted, so by the time it reaches here it loads cleanly; a
@@ -168,6 +187,7 @@ def _build_ca_pinned_ssl_context(ca_pem: str) -> ssl.SSLContext:
     opaque dispatch failure.
     """
     ctx = ssl.create_default_context()
+    ctx.verify_flags &= ~ssl.VERIFY_X509_STRICT
     ctx.load_verify_locations(cadata=ca_pem)
     return ctx
 

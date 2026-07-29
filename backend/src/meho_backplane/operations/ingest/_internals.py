@@ -626,7 +626,7 @@ async def bulk_enable_read_ops(
 
 def validate_edit_op_args(
     *,
-    custom_description: str | None | _UnsetType,
+    custom_description: str | _UnsetType | None,
     safety_level: str | None,
     requires_approval: bool | None,
     is_enabled: bool | None,
@@ -664,7 +664,7 @@ def validate_edit_op_args(
 def apply_op_overrides(
     op_row: EndpointDescriptor,
     *,
-    custom_description: str | None | _UnsetType,
+    custom_description: str | _UnsetType | None,
     safety_level: str | None,
     requires_approval: bool | None,
     is_enabled: bool | None,

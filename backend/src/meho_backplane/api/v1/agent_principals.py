@@ -53,6 +53,7 @@ from fastapi import status as http_status
 from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.agent_principals import (
+    NAME_MAX_LENGTH,
     AgentPrincipalCreate,
     AgentPrincipalExistsError,
     AgentPrincipalNotFoundError,
@@ -66,7 +67,10 @@ from meho_backplane.auth.keycloak_admin import (
 )
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
-from meho_backplane.scheduler.vault_credentials import SchedulerVaultBrokerError
+from meho_backplane.scheduler.vault_credentials import (
+    SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+    SchedulerVaultBrokerError,
+)
 
 __all__ = ["router"]
 
@@ -81,8 +85,6 @@ _OP_IDS: Final[dict[str, str]] = {
     "register": "agent_principal.register",
     "revoke": "agent_principal.revoke",
 }
-
-_NAME_MAX_LENGTH: Final[int] = 128
 
 
 class AgentPrincipalListResponse(BaseModel):
@@ -150,7 +152,7 @@ async def list_agent_principals(
 
 @router.get("/{name}", response_model=AgentPrincipalRead)
 async def show_agent_principal(
-    name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
     operator: Operator = _require_operator,
 ) -> AgentPrincipalRead:
     """Return one agent principal by name."""
@@ -206,10 +208,18 @@ async def register_agent_principal(
         # (unreachable / denied). 502 upstream failure; the just-created
         # Keycloak client is already rolled back. (An *unset* token is not
         # an error — the service skips the write and the agent uses the
-        # env-var fallback.)
+        # env-var fallback.) The broker's ``lookup-self`` probe (#2652)
+        # says whether the token is dead — that case gets the
+        # gold-standard three-clause detail naming the re-mint, because
+        # its remediation *is* knowable; everything else keeps the bare
+        # ``scheduler_vault_write_error`` code.
         raise HTTPException(
             status_code=http_status.HTTP_502_BAD_GATEWAY,
-            detail="scheduler_vault_write_error",
+            detail=(
+                SCHEDULER_VAULT_TOKEN_INVALID_DETAIL
+                if exc.token_invalid
+                else "scheduler_vault_write_error"
+            ),
         ) from exc
     except ValueError as exc:
         raise HTTPException(
@@ -220,7 +230,7 @@ async def register_agent_principal(
 
 @router.delete("/{name}/revoke", response_model=AgentPrincipalRead)
 async def revoke_agent_principal(
-    name: Annotated[str, Path(max_length=_NAME_MAX_LENGTH)],
+    name: Annotated[str, Path(max_length=NAME_MAX_LENGTH)],
     operator: Operator = _require_admin,
 ) -> AgentPrincipalRead:
     """Revoke an agent principal (kill switch).

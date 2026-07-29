@@ -88,18 +88,23 @@
 
       <label class="flex flex-col gap-1">
         <span class="text-xs font-medium opacity-70">Edge kind</span>
-        <select
-          name="kind" required
-          class="select select-bordered select-sm font-mono w-full"
+        {# Free-text input + datalist (not a closed <select>): the kind
+           vocabulary is open (T1 #2534) — the well-known kinds are
+           offered as suggestions, and any lowercase slug (2–63 chars;
+           letters/digits joined by `.`, `_` or `-`) is accepted. #}
+        <input
+          type="text" name="kind" required
+          list="edge-kind-suggestions"
+          value="{{ submitted.get('kind') | default('') }}"
+          placeholder="depends-on, resolves-to, same-as, …"
+          class="input input-bordered input-sm font-mono w-full"
           aria-label="Edge kind"
-        >
-          <option value="" disabled {{ 'selected' if not submitted.get('kind') else '' }}>
-            Select a kind…
-          </option>
+        />
+        <datalist id="edge-kind-suggestions">
           {% for k in edge_kind_options %}
-            <option value="{{ k }}" {{ 'selected' if submitted.get('kind') == k else '' }}>{{ k }}</option>
+            <option value="{{ k }}"></option>
           {% endfor %}
-        </select>
+        </datalist>
       </label>
 
       <fieldset class="grid grid-cols-2 gap-3">

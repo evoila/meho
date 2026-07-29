@@ -47,7 +47,8 @@ NULL``) as well as registered targets.
 
 **Annotate / unannotate — Task #595 (G9.2-T3):** the curated-edge
 write service. Resolves both endpoints, validates ``kind`` against
-:class:`~meho_backplane.db.models.GraphEdgeKind`, runs §6 conflict
+the open slug grammar
+(:data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`), runs §6 conflict
 detection (sticky ``superseded_by`` for same-kind/different-endpoint
 auto edges; bidirectional ``conflicts_with`` for incompatible kinds
 over the same endpoint pair), and writes one audit row + one
@@ -108,6 +109,13 @@ from meho_backplane.topology.history_retention import (
     start_topology_history_retention_sweeper,
     stop_topology_history_retention_sweeper,
 )
+from meho_backplane.topology.node_delete import (
+    DeleteNodeResult,
+    NodeHasLiveEdgesError,
+    NodeNotDeletableError,
+    NodeNotFoundForDeleteError,
+    delete_node,
+)
 from meho_backplane.topology.nodes import (
     CreateNodeResult,
     InvalidNodeKindError,
@@ -137,9 +145,13 @@ __all__ = [
     "BulkImportRowError",
     "BulkImportValidationError",
     "CreateNodeResult",
+    "DeleteNodeResult",
     "InvalidEdgeKindError",
     "InvalidNodeKindError",
+    "NodeHasLiveEdgesError",
+    "NodeNotDeletableError",
     "NodeNotFoundError",
+    "NodeNotFoundForDeleteError",
     "NodeRef",
     "RefreshResult",
     "TopologyEdge",
@@ -149,6 +161,7 @@ __all__ = [
     "annotate_edge_in_txn",
     "bulk_import_edges",
     "create_or_get_node",
+    "delete_node",
     "list_edges",
     "refresh_target_topology",
     "resolve_node",

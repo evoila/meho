@@ -54,11 +54,50 @@
     seedFrom: 'broadcast-history-data'
   })"
 >
-  {# ---------- Status bar -- count + window ---------- #}
+  {# ---------- Status bar -- window + kind filter + count ----------
+     The kind filter (#2549) re-fetches this fragment with the ``?kind=``
+     query parameter and swaps it back into ``#broadcast-history`` (the
+     outer container in ``feed.html``); the active button reflects the
+     server-resolved ``kind_filter``. The former hard drop of announcement
+     rows became this user-facing selector. -#}
   <div
-    class="flex items-center justify-between gap-3 border-b border-base-300 px-3 py-1.5 text-xs opacity-70"
+    class="flex flex-wrap items-center justify-between gap-2 border-b border-base-300 px-3 py-1.5 text-xs opacity-70"
   >
-    <span>Last {{ retention_hours }}h replay</span>
+    <div class="flex items-center gap-2">
+      <span>Last {{ retention_hours }}h replay</span>
+      <div role="group" aria-label="Filter by event kind" class="join">
+        <button
+          type="button"
+          class="btn btn-xs join-item {% if not kind_filter %}btn-active{% endif %}"
+          hx-get="/ui/broadcast/history"
+          hx-target="#broadcast-history"
+          hx-swap="innerHTML"
+          aria-pressed="{{ 'true' if not kind_filter else 'false' }}"
+        >
+          All
+        </button>
+        <button
+          type="button"
+          class="btn btn-xs join-item {% if kind_filter == operation_kind %}btn-active{% endif %}"
+          hx-get="/ui/broadcast/history?kind={{ operation_kind }}"
+          hx-target="#broadcast-history"
+          hx-swap="innerHTML"
+          aria-pressed="{{ 'true' if kind_filter == operation_kind else 'false' }}"
+        >
+          Operations
+        </button>
+        <button
+          type="button"
+          class="btn btn-xs join-item {% if kind_filter == announcement_kind %}btn-active{% endif %}"
+          hx-get="/ui/broadcast/history?kind={{ announcement_kind }}"
+          hx-target="#broadcast-history"
+          hx-swap="innerHTML"
+          aria-pressed="{{ 'true' if kind_filter == announcement_kind else 'false' }}"
+        >
+          Announcements
+        </button>
+      </div>
+    </div>
     <span aria-live="polite" x-text="visibleEvents.length + ' / {{ in_dom_row_cap }} rows'"></span>
   </div>
 
@@ -96,7 +135,7 @@
     role="list"
     aria-label="Last 24h broadcast events"
   >
-    <template x-for="ev in visibleEvents" :key="ev.event_id">
+    <template x-for="ev in visibleEvents" :key="rowKey(ev)">
       {% include "broadcast/_event_row.html" %}
     </template>
   </ul>

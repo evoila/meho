@@ -70,10 +70,15 @@ def _make_operator() -> Operator:
 class _RecordingConnector:
     """Stub connector session that records sub-calls and serves canned JSON.
 
-    Stands in for :class:`VmwareRestConnector` on the direct-dispatch path:
-    the handlers call ``mount_op_path`` to resolve the live mount and then
-    ``_get_json`` / ``_post_json`` on the returned path. This double records
-    every call as ``{"method", "path", "query", "body"}`` and serves a
+    Stands in for :class:`VmwareRestConnector` on the direct-dispatch path.
+    GET (Automation ``/vcenter/*``) sub-ops call ``mount_op_path`` to
+    resolve the live mount and then ``_get_json`` on the returned path.
+    POST (vmomi VI-JSON) sub-ops call ``_post_vmomi_json`` with the
+    spec-relative path -- the connector's VI-JSON ``/sdk/vim25`` mount +
+    ``/api`` fallback is what that seam owns (#2466); the fake re-applies
+    ``mount_prefix`` for the recorded wire path so response keys stay in
+    the ``/api/...`` / ``/rest/...`` form. This double records every call
+    as ``{"method", "path", "query", "body", "vmomi"}`` and serves a
     response keyed either by the resolved (mounted) path or, in list form,
     sequentially -- the list form lets a test drive several calls to the
     same path (e.g. per-portgroup ``GET /api/vcenter/vm``) with distinct
@@ -117,7 +122,9 @@ class _RecordingConnector:
         operator: Operator,
         params: dict[str, Any] | None = None,
     ) -> Any:
-        self.calls.append({"method": "GET", "path": path, "query": params, "body": None})
+        self.calls.append(
+            {"method": "GET", "path": path, "query": params, "body": None, "vmomi": False}
+        )
         return self._serve(path)
 
     async def _post_json(
@@ -131,8 +138,28 @@ class _RecordingConnector:
         data: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
-        self.calls.append({"method": "POST", "path": path, "query": None, "body": json})
+        self.calls.append(
+            {"method": "POST", "path": path, "query": None, "body": json, "vmomi": False}
+        )
         return self._serve(path)
+
+    async def _post_vmomi_json(
+        self,
+        target: Any,
+        path: str,
+        *,
+        operator: Operator,
+        json: dict[str, Any] | None = None,
+    ) -> Any:
+        # #2466: vmomi POST sub-ops route through the connector's VI-JSON
+        # mount seam, NOT mount_op_path. The handler passes the
+        # spec-relative path; the fake re-applies mount_prefix so the
+        # recorded wire path + response keys keep the pre-#2466 form.
+        mounted = f"{self._mount_prefix}{path}"
+        self.calls.append(
+            {"method": "POST", "path": mounted, "query": None, "body": json, "vmomi": True}
+        )
+        return self._serve(mounted)
 
     def _serve(self, path: str) -> Any:
         if isinstance(self._responses, dict):
@@ -920,7 +947,10 @@ async def test_every_read_composite_dispatches_directly_on_the_session() -> None
     ingested descriptor, no L2 pre-flight -- so the composites work on a
     fresh boot with zero catalog ingest. Each handler is exercised with a
     minimal happy-path stub and must (a) record at least one session call
-    and (b) mount every path it hit.
+    and (b) route each sub-op through the right seam -- GET Automation
+    sub-ops via ``mount_op_path``, POST vmomi sub-ops via the VI-JSON seam
+    (:meth:`_post_vmomi_json`), so no vmomi path reaches the bare
+    Automation mount (#2466).
     """
     handlers: tuple[tuple[Any, dict[str, Any], list[Any]], ...] = (
         (
@@ -942,7 +972,13 @@ async def test_every_read_composite_dispatches_directly_on_the_session() -> None
             connector=conn,  # type: ignore[arg-type]
         )
         assert conn.calls, f"{handler.__qualname__} issued no session sub-calls"
-        # Every session call went through a mount resolution.
-        assert len(conn.mount_calls) == len(conn.calls), (
-            f"{handler.__qualname__} bypassed mount_op_path on a sub-op"
+        get_calls = [c for c in conn.calls if c["method"] == "GET"]
+        # GET (Automation /vcenter) sub-ops resolve through mount_op_path.
+        assert len(conn.mount_calls) == len(get_calls), (
+            f"{handler.__qualname__} GET sub-op bypassed mount_op_path"
+        )
+        # POST (vmomi) sub-ops resolve through the VI-JSON seam, never the
+        # bare Automation mount (#2466).
+        assert all(c["vmomi"] for c in conn.calls if c["method"] == "POST"), (
+            f"{handler.__qualname__} vmomi sub-op bypassed _post_vmomi_json"
         )

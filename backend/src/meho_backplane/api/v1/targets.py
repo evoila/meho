@@ -141,6 +141,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.connectors._shared.credential_backend import split_credential_ref
 from meho_backplane.connectors._shared.vault_creds import DEFAULT_KV_MOUNT
 from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import (
@@ -883,9 +884,27 @@ def _enforce_secret_ref_tenant_scope(
     unconfigured target fails dispatch with the existing actionable
     "no secret_ref configured" error, not a Vault denial.
 
+    The check only applies to refs that resolve through the **Vault**
+    credential backend. #2585 (Initiative #2592): the constraint is a
+    Vault KV path convention, so a ref bound to another store — a
+    ``gsm:<project>/<secret>`` ref, or any ref on a
+    ``CREDENTIAL_BACKEND=gsm`` deploy — has no Vault subtree to enforce
+    and is passed through untouched. Backend resolution reuses
+    :func:`~meho_backplane.connectors._shared.credential_backend.split_credential_ref`
+    with the deploy default, so the write-time gate's *applicability*
+    tracks the same backend dispatch resolves at read time
+    (:func:`~meho_backplane.connectors._shared.vault_creds.load_basic_credentials`).
+
     Raises a structured 422 (``kind="secret_ref_outside_tenant_scope"``)
     on violation; returns ``None`` otherwise.
     """
+    kind, _ = split_credential_ref(secret_ref, default_backend=get_settings().credential_backend)
+    if kind != "vault":
+        # Ref resolves through a non-Vault store (explicit ``gsm:`` scheme,
+        # or the deploy default on a GSM install) — the Vault tenant-subtree
+        # convention does not apply, so there is nothing to enforce.
+        return
+
     template = get_settings().vault_kv_tenant_scope_prefix.strip()
     if not template:
         # Guard disabled (mid-migration deploy) — no defined subtree to

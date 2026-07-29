@@ -216,7 +216,7 @@ is bounded by `MAX_PRIMING_BLOCKS` (#1315) and is **not** charged to
 the conventions budget. Behaviour for the conventions band:
 
 - **Reads `kind='operational'` only.** Decision #4 in
-  [v0.2-decisions.md](../planning/v0.2-decisions.md) -- workflow
+  [locked-decisions.md](../decisions/locked-decisions.md) -- workflow
   and reference rules are reference material the operator surfaces
   on demand and never enter the session preamble.
 - **Orders deterministically: `priority DESC, created_at ASC`.**
@@ -631,7 +631,7 @@ by 0001-0014:
   [`backend/alembic/versions/0002_create_tenant_and_audit_tenant_id.py`](../../backend/alembic/versions/0002_create_tenant_and_audit_tenant_id.py)
   (unique-index discipline).
 - Decision #4 (G7 partition):
-  [`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md).
+  [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md).
 - MCP spec 2025-06-18 -- `initialize`:
   https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle
   (the spec-optional `instructions` field on the response carries

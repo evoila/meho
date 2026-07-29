@@ -17,7 +17,7 @@ How MEHO speaks the Model Context Protocol alongside its HTTP API. The substrate
 
 ## Why MCP-in-v0.2
 
-The locked decision (#7 in [v0.2-decisions.md](../planning/v0.2-decisions.md)) was to ship MCP alongside the CLI in v0.2 rather than defer to v0.2.next. Two consequences:
+The locked decision (#7 in [locked-decisions.md](../decisions/locked-decisions.md)) was to ship MCP alongside the CLI in v0.2 rather than defer to v0.2.next. Two consequences:
 
 - Operators + agents get a unified working surface; the CLI + MCP dispatch through the same backplane path.
 - External pilots (the first being a customer beyond `rdc-internal`) get day-1 agent-native access via Claude Desktop, Cline, Continue, or any MCP-spec-conformant client.
@@ -347,7 +347,7 @@ If Claude renders a connector error rather than the tools, the OAuth handshake f
 - [MCP 2025-06-18 Tools](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) — tool definition + invocation.
 - [MCP 2025-06-18 Resources](https://modelcontextprotocol.io/specification/2025-06-18/server/resources) — resource definition + templates/list vs list.
 - [RFC 9728 (Protected Resource Metadata)](https://datatracker.ietf.org/doc/html/rfc9728), [RFC 8707 (Resource Indicators)](https://www.rfc-editor.org/rfc/rfc8707.html), [OAuth 2.1 draft](https://datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-13).
-- [docs/planning/v0.2-decisions.md](../planning/v0.2-decisions.md) — decision #7 (ship MCP in v0.2).
+- [docs/decisions/locked-decisions.md](../decisions/locked-decisions.md) — decision #7 (ship MCP in v0.2).
 - [docs/architecture/connectors.md](connectors.md) — the parallel connector op registry every MCP tool wraps.
 - [docs/architecture/runbooks.md](runbooks.md) — the runbook substrate, where the step opacity contract that priming is the UX surface for lives ([#1198](https://github.com/evoila/meho/issues/1198), [#1314](https://github.com/evoila/meho/issues/1314)).
 - [docs/runbooks/authoring.md](../runbooks/authoring.md) — the authoring-side counterpart for runbook templates ([#1299](https://github.com/evoila/meho/issues/1299)).

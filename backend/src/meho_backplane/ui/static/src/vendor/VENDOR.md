@@ -4,7 +4,7 @@ This directory contains the **vendored** JavaScript and CSS-plugin
 dependencies the MEHO Operator Console (Initiative #337, Task #863)
 serves verbatim from `/ui/static/src/vendor/*`.
 
-Per [v0.2-decisions.md #9 + #10](../../../../../../../docs/planning/v0.2-decisions.md):
+Per [locked-decisions.md #9 + #10](../../../../../../../docs/decisions/locked-decisions.md):
 the UI ships with **zero `node_modules`**, **no `npm` in CI**, and **no
 runtime CDN fetches**. Every browser-bound asset is committed to this
 repo and its content is pinned by SHA256 below. The Dockerfile and any

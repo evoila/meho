@@ -68,6 +68,17 @@ type importDoc struct {
 // the descriptor. The server enforces their mutual exclusivity
 // (`verify_tls=false` ⊕ `tls_ca_pin`) and PEM validation with a 422,
 // which the import path surfaces via the existing error handling.
+//
+// #2002 amendment: `tls_server_name` is the third first-class TLS
+// column (per-target SNI / cert-verification hostname, decoupled from
+// `host`). It belongs in the same bucket for the same reason —
+// spilling it into `extras` leaves the typed column NULL, so dispatch
+// keeps deriving the SNI from `host` and an appliance reached by IP
+// with an FQDN-only SAN fails verification with
+// `connector_tls_verify_failed` even though the descriptor named the
+// right hostname. The column composes with `verify_tls` / `tls_ca_pin`
+// (no mutual-exclusion validator); the server caps it at 512 chars and
+// returns 422 on overflow, which the import path already surfaces.
 var knownTopLevel = map[string]struct{}{
 	"aliases":           {},
 	"auth_model":        {},
@@ -81,6 +92,7 @@ var knownTopLevel = map[string]struct{}{
 	"product":           {},
 	"secret_ref":        {},
 	"tls_ca_pin":        {},
+	"tls_server_name":   {},
 	"verify_tls":        {},
 	"vpn_required":      {},
 }
@@ -179,7 +191,8 @@ func newImportCmd() *cobra.Command {
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +
-			"notes, preferred_impl_id, verify_tls, tls_ca_pin. Any other field " +
+			"notes, preferred_impl_id, verify_tls, tls_ca_pin, tls_server_name. " +
+			"Any other field " +
 			"is spilled into the `extras` JSONB column. `fingerprint` is " +
 			"server-managed and skipped with a warning if present in the YAML " +
 			"(the probe verb is the only legitimate writer).\n\n" +
@@ -433,6 +446,12 @@ func mapEntry(entry map[string]any) (map[string]any, []string) {
 // patch — the PR #362 regression that motivated the sparse-body
 // fix) or require per-field option plumbing for every patchable
 // column. The untyped path is the smaller blast radius for v0.2.
+//
+// That rationale covers request *bodies* only. Responses decode into
+// the generated types (see listExistingNames) — nothing about the
+// sparse-body contract requires a private response decoder, and #2577
+// is what one costs: a hand-rolled list decoder that #2338's
+// type-based sweep could not see.
 type httpDoer func(ctx context.Context, method, path string, body []byte) ([]byte, error)
 
 // httpError carries a non-2xx response from the import-path HTTP
@@ -644,6 +663,15 @@ func renderApplyResult(cmd *cobra.Command, p *plan, jsonOut bool) error {
 // listExistingNames fetches `GET /api/v1/targets` with full keyset
 // pagination and returns a set of target names in the operator's
 // tenant. Used by buildLivePlan to decide CREATE vs UPDATE.
+//
+// The page decodes into the generated `api.TargetListResponse` rather
+// than a decoder private to this file, so `make snapshot-openapi &&
+// make generate` propagates the next list-shape change into a build
+// failure here instead of a runtime one. #2338 converged this route
+// off a bare array onto the `{items, next_cursor}` envelope and swept
+// the sibling verbs by type; the private decoder that replaced was
+// invisible to that sweep and broke every import — dry-run included —
+// against a v0.21.0+ backplane (#2577).
 func listExistingNames(ctx context.Context, doer httpDoer) (map[string]struct{}, error) {
 	existing := map[string]struct{}{}
 	cursor := ""
@@ -656,26 +684,22 @@ func listExistingNames(ctx context.Context, doer httpDoer) (map[string]struct{},
 		if err != nil {
 			return nil, fmt.Errorf("list existing targets: %w", err)
 		}
-		var page []struct {
-			Name string `json:"name"`
-		}
+		var page api.TargetListResponse
 		if err := json.Unmarshal(raw, &page); err != nil {
 			return nil, fmt.Errorf("decode list response: %w", err)
 		}
-		if len(page) == 0 {
-			break
-		}
-		for _, t := range page {
+		for _, t := range page.Items {
 			existing[t.Name] = struct{}{}
 		}
-		// Keyset cursor is the last returned name. When the page is
-		// shorter than the limit we've consumed every row.
-		if len(page) < 500 {
-			break
+		// `next_cursor` is authoritative: the route over-fetches
+		// `limit + 1` so an extra row proves another page exists, which
+		// a page-length check cannot decide on an exact-multiple final
+		// page. Non-null implies a non-empty page, so this terminates.
+		if page.NextCursor == nil {
+			return existing, nil
 		}
-		cursor = page[len(page)-1].Name
+		cursor = *page.NextCursor
 	}
-	return existing, nil
 }
 
 // executePlan applies the plan: POST for each Create, PATCH for

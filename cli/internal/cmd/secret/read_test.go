@@ -139,6 +139,11 @@ func TestSecretRead(t *testing.T) {
 	if captured.Params["mount"] != "secret" || captured.Params["path"] != "app/db" {
 		t.Errorf("params should carry mount+path; got %v", captured.Params)
 	}
+	// reveal_secret opts out of the default credential_read response scrub
+	// (#2467); without it the piped value would be the redaction sentinel.
+	if captured.Params["reveal_secret"] != true {
+		t.Errorf("params should carry reveal_secret=true (#2467); got %v", captured.Params)
+	}
 	if _, leaked := captured.Params["field"]; leaked {
 		t.Errorf("field must NOT cross the wire (client-side extraction); got %v", captured.Params)
 	}

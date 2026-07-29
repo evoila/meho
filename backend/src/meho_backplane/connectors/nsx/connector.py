@@ -253,6 +253,7 @@ class NsxConnector(HttpConnector):
                 resp = await client.post(
                     _SESSION_CREATE_PATH,
                     data={_FORM_USERNAME_KEY: username, _FORM_PASSWORD_KEY: password},
+                    extensions=self._request_extensions(target),
                 )
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:

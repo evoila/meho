@@ -85,7 +85,7 @@
               <span>{{ err.message }}</span>
               {% if err.kinds %}
                 <span class="opacity-70">
-                  (valid: {{ err.kinds | join(', ') }})
+                  (well-known kinds: {{ err.kinds | join(', ') }})
                 </span>
               {% endif %}
             </li>

@@ -18,9 +18,9 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 **Read half — entry points (async, read-only):**
 
-- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None)`
+- `find_dependents(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
   — reverse traversal, "what depends on me".
-- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None)`
+- `find_dependencies(operator, name_or_alias, *, kind=None, depth=16, kind_filter=None, include_stale=True)`
   — forward traversal, "what I depend on".
 - `find_path(operator, from_name, to_name, *, from_kind=None, to_kind=None, max_hops=8)`
   — shortest unweighted path, or `None` if unreachable.
@@ -29,7 +29,9 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 - `annotate_edge(session, operator, from_ref, kind, to_ref, *, note=None, evidence_url=None) -> GraphEdge`
   — create or refresh a curated edge. Resolves both endpoints via
-  `resolve_node`, validates `kind` against `GraphEdgeKind`,
+  `resolve_node`, validates `kind` against the open slug grammar
+  (`KIND_SLUG_PATTERN`, T1 #2534 — any lowercase slug, 2–63 chars;
+  `GraphEdgeKind` is the documented well-known set, not a gate),
   idempotent on `(tenant_id, from_node_id, to_node_id, kind)`. Runs
   §6 conflict detection (sticky `superseded_by` for
   same-kind/different-endpoint auto edges; bidirectional
@@ -52,13 +54,18 @@ models that G9.1-T1 (#448, migration `0007`) created.
 
 - `create_or_get_node(session, operator, *, kind, name, note=None, evidence_url=None) -> CreateNodeResult`
   — manually seed a `graph_node` row in the operator's tenant.
-  Validates `kind` against `_GRAPH_NODE_KINDS` (raise
-  `InvalidNodeKindError` *before* any DB write), then idempotent
+  Validates `kind` against the open slug grammar
+  (`KIND_SLUG_PATTERN`; raise `InvalidNodeKindError` *before* any DB
+  write — `WELL_KNOWN_NODE_KINDS` is the documented core set, not a
+  gate), then idempotent
   upsert on the `graph_node_tenant_kind_name_idx`
   (`(tenant_id, kind, name)`) unique key. Manual seeds set
-  `discovered_by=operator.sub`; a re-seed over an auto-discovered row
-  promotes `discovered_by` to the operator (mirrors `annotate_edge`'s
-  auto→curated promotion). Writes one audit row
+  `source='curated'` + `discovered_by=operator.sub`; a re-seed over an
+  auto-discovered row promotes it to `source='curated'` +
+  `discovered_by=operator.sub` (mirrors `annotate_edge`'s
+  auto→curated promotion; #2536). The `source` column is what shields
+  curated nodes from refresh overwrites, target adoption, and
+  refresh-driven soft-deletes. Writes one audit row
   (`op_id="topology.create_node"`, `op_class="write"`,
   `method="CREATE_NODE"`) and publishes one broadcast event
   (fail-open after commit). Closes the **empty-tenant bootstrap gap**:
@@ -68,6 +75,35 @@ models that G9.1-T1 (#448, migration `0007`) created.
   `meho topology refresh <target>`. The verb is also the canonical
   path for **curated inner-graph nodes the probes cannot derive**
   (vault-role, keycloak-realm, externally-managed principals).
+
+**Manual node delete — entry point (async, write half, #2485):**
+
+- `delete_node(session, operator, *, node_id) -> DeleteNodeResult`
+  (`topology/node_delete.py`) — guarded hard-delete of a
+  manually-seeded node. Resolves `node_id` tenant-scoped, then applies
+  three guards in order: `NodeNotFoundForDeleteError` (404) when the id
+  does not resolve in the tenant (cross-tenant ids indistinguishable
+  from missing); `NodeNotDeletableError` (409 `probe_owned_node`) when
+  the row is probe-owned — `source != 'curated'` (probe-derived,
+  including auto-discovered inner-graph nodes refresh reconciliation
+  owns) **or** `target_id IS NOT NULL` (adopted onto a target; would
+  resurrect on the next probe); `NodeHasLiveEdgesError` (409
+  `node_has_edges`, echoing the blocking `edge_ids`) when any live
+  `graph_edge` (`last_seen IS NOT NULL`) references the node. Only
+  `source='curated'` **and** `target_id IS NULL` seeds are deletable —
+  the delete-half mirror of the §3 auto-edge rule
+  `unannotate_edge` enforces. On the happy path it writes one `removed`
+  `graph_node_history` tombstone (`before=snapshot` / `after=None`) +
+  one audit row (`op_id="topology.delete_node"`, `op_class="write"`,
+  `method="DELETE_NODE"`), hard-deletes the row, and publishes one
+  broadcast event (fail-open after commit). The DB `ON DELETE CASCADE`
+  on `graph_edge` stays a backstop only (tenant purges + test cleanup):
+  a bare cascade would drop referencing edges without their
+  `graph_edge_history` tombstones, which is exactly why the service
+  refuses instead. The node's prior `graph_node_history` rows (and the
+  fresh tombstone) survive the hard-delete with `node_id` NULL via the
+  `graph_node_history.node_id` `ON DELETE SET NULL` FK, so the timeline
+  facet stays renderable.
 
 Both service functions own a `session.begin()` block internally and
 publish broadcast events after commit (fail-open per the refresh
@@ -98,7 +134,8 @@ funnel through these primitives.
   filter-composable edge listing. Joins both endpoint nodes so
   `from` / `to` carry `(id, kind, name)` without a second round
   trip. Filters compose: `kind=` restricts to one
-  `GraphEdgeKind`, `source=` selects `'auto'` vs `'curated'`,
+  kind slug (any well-formed slug; the vocabulary is open), `source=`
+  selects `'auto'` vs `'curated'`,
   `from_ref` / `to_ref` resolve via `resolve_node` (a ref that maps
   to no node yields an empty list, not an error; an ambiguous bare
   name raises `AmbiguousNodeError`), `conflicts_only=True` returns
@@ -134,15 +171,73 @@ REST wrappers). G9.2-T7 (#598) widened the parametric tool with the
 `edges` facet (dispatches to `list_edges` — replaces a standalone
 `list_edges` meta-tool) and added the admin-namespace pair
 `meho.topology.annotate` / `meho.topology.unannotate`
-(`required_role=TENANT_ADMIN`, `op_class="write"`); both admin tools
-call `annotate_edge` / `unannotate_edge` directly and are visible only
+(`required_role=TENANT_ADMIN`, `op_class="write"`), visible only
 to a tenant_admin-scoped session. G0.9.1-T6 (#778) added a third
 admin meta-tool `meho.topology.create_node` in
 `mcp/tools/topology_create_node.py` (separate module to keep
 `mcp/tools/topology.py` from accreting further past the 600-line
 guidance; the registry auto-discovers either way) that closes the
-empty-tenant bootstrap gap — calls `create_or_get_node` directly,
-same `tenant_admin` / `write` shape as the annotate pair.
+empty-tenant bootstrap gap — same `tenant_admin` / `write` shape as
+the annotate pair. #2539 added a fourth admin meta-tool
+`meho.topology.bulk_import` (own module `mcp/tools/topology_bulk_import.py`,
+same separate-module reason) — batch curated-edge authoring for the
+agent surface, closing the MCP half of the propose→plan→apply loop the
+REST / CLI / console bulk-import fronts already had. #2485 added a fifth
+admin meta-tool `meho.topology.delete_node` (own module
+`mcp/tools/topology_delete_node.py`, same separate-module reason) — the
+guarded hard-delete counterpart to `create_node` that removes a
+manually-seeded node by id (same `tenant_admin` / `write` shape).
+
+Since #2537 the MCP write handlers no longer call the service
+primitives directly: they route through `operations.dispatch()` with
+the targetless typed ops `topology.annotate` / `topology.create_node`
+/ `topology.delete_node` / `topology.unannotate` / `topology.bulk_import`
+registered by
+`connectors/topology/ops.py` under the synthetic connector id
+`topology-graph-1.x` (the `secret.move` mold — module-level handlers,
+`target=None`, `parse_connector_id`-compatible identity). The
+descriptors carry `safety_level="caution"` + `requires_approval=False`:
+an AGENT principal's write hits the needs-approval floor in
+`policy_gate` and parks as a durable `ApprovalRequest` (the MCP tool
+returns a `{status: awaiting_approval, approval_request_id, ...}`
+envelope; the write executes with the stored params when a human
+approves from any approvals surface), while a human tenant_admin rides
+the default-allow branch and executes immediately — same UX as before.
+The typed-op handlers unwrap params and call `annotate_edge_with_plan` /
+`create_or_get_node` / `unannotate_edge` / `bulk_import_edges` unchanged;
+domain errors come
+back as `connector_error` results whose `exception_class` the MCP shim
+(`dispatch_topology_write` in `mcp/tools/topology.py`) maps back to
+JSON-RPC `-32602`. Each gated MCP write therefore produces one extra
+audit row (`method="DISPATCH"`, `path=<op_id>`, with
+`policy_decision`) alongside the service-level row.
+
+`meho.topology.bulk_import` (#2539) is the one two-behaviour tool. Its
+`dry_run` param splits the path: `dry_run=true` (the default,
+read-shaped) calls `bulk_import_edges(dry_run=True)` **directly** — no
+dispatch, no gate — so an agent's harmless plan preview never parks; a
+`BulkImportValidationError` becomes a -32602 whose `error.data` carries
+every row's diagnostic (the REST `422 invalid_bulk` analogue).
+`dry_run=false` dispatches the apply-only typed op `topology.bulk_import`
+(registered with `rows` alone — no `dry_run`, so the parked
+`ApprovalRequest` holds exactly the batch to apply) through the same
+gate: an AGENT parks the whole batch as one request, a human applies
+immediately, and approve-time re-dispatch applies all rows in the
+service's all-or-nothing transaction. The 1000-row cap is enforced at
+the tool boundary via the `inputSchema` `maxItems` (mirroring the REST
+`_BULK_IMPORT_MAX_EDGES` guard); like `query_topology`'s inline edge
+list, the plan is returned inline under a hard row cap rather than a
+JSONFlux handle. `meho.topology.annotate`'s return shape gained a
+`superseded` list (#2539): the ids of the auto edges the assertion
+displaced — already stamped on the shared audit / broadcast payload, so
+surfacing them on the return is a shape change, not a new query (the
+handler reads `plan.audit_payload["superseded"]` from
+`annotate_edge_with_plan`, the plan-returning sibling of `annotate_edge`). The REST + UI
+write fronts are human-only surfaces and keep calling the service
+primitives directly. The three write ops are also discoverable /
+dispatchable through the generic agent meta-tools (`search_operations`
+/ `call_operation`) with identical gating, since the gate lives in the
+dispatcher, not the front.
 G9.1-T8 (#456) shipped the closing
 acceptance suite
 (`backend/tests/integration/test_topology_g91_acceptance.py` + the
@@ -189,11 +284,14 @@ as a warning callout next to the counts (#2210).
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | `UUID` | `graph_node.id`. |
-| `kind` | `str` | `graph_node.kind` (closed enum from migration 0007). |
+| `kind` | `str` | `graph_node.kind` (open slug vocabulary since migration 0063 / T1 #2534; `WELL_KNOWN_NODE_KINDS` is the documented core set). |
 | `name` | `str` | `graph_node.name`, unique within `(tenant_id, kind)`. |
+| `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-seeded / promoted; #2536). Mirrors `TopologyEdge.source`. |
 | `properties` | `dict` | `graph_node.properties` JSONB; wrapped in `MappingProxyType` after validation so the frozen model is deeply immutable, serialised back to a plain `dict`. |
 | `depth` | `int` | Distance from the query root: root = 0, immediate = 1, transitive = 2, … |
 | `via_edge_kind` | `str \| None` | The `graph_edge.kind` of the edge used to reach this node; `None` for the root. |
+| `parent_node_id` | `UUID \| None` | #2538 chain provenance: the `graph_node.id` the walk stepped from; `None` for the root. In a closure result the parent is always itself a row of that result, so the flat list reconstructs the exact dependency chain without follow-up edge lookups. Additive (`None` default). |
+| `via_edge_id` | `UUID \| None` | #2538 chain provenance: the `graph_edge.id` that was walked to reach this node; `None` for the root. Additive (`None` default). |
 
 ### `TopologyPath` — frozen Pydantic v2 (read half)
 
@@ -223,7 +321,7 @@ separately via `resolve_node`.
 | `id` | `UUID` | `graph_edge.id`. |
 | `from_endpoint` | `TopologyEdgeEndpoint` | The edge's source node identity. The route layer (T5) applies the `from` / `to` alias on `model_dump(by_alias=True)` for the wire shape — the substrate model itself keeps plain attribute names so mypy/static checkers don't lose the kwarg signature. |
 | `to_endpoint` | `TopologyEdgeEndpoint` | The edge's destination node identity. |
-| `kind` | `str` | One of the ten `GraphEdgeKind` values (closed enum since G9.2-T1 #593). |
+| `kind` | `str` | Any kind slug (open vocabulary since migration 0063 / T1 #2534); the ten `GraphEdgeKind` values are the documented well-known set. |
 | `source` | `str` | `'auto'` (probe-derived) or `'curated'` (operator-asserted). |
 | `properties` | `dict` | `graph_edge.properties` JSONB; deep-frozen (same discipline as `TopologyNode.properties`). Carries the conflict markers `conflicts_with` (array, G9.2-T3 #595) and `superseded_by` (UUID, also #595). |
 | `last_seen` | `datetime \| None` | The refresh service's "I observed this edge at" timestamp. NULL after a soft-delete; soft-deleted edges are excluded from `list_edges` by default. Also the stable total-order key the helper paginates against. |
@@ -251,19 +349,29 @@ separately via `resolve_node`.
    the tenant, every row whose `(kind, name)` is in the snapshot **or**
    whose `target_id` is the refreshing target's id:
    - INSERT nodes in the snapshot with no existing `(tenant, kind, name)`
-     row.
-   - For a node already present under *any* `target_id` (another
-     target's discovery, or a manual annotation with `target_id IS
-     NULL`): refresh `last_seen`, apply the probe `properties`, and
-     **adopt** the row onto the refreshing target (`target_id` claimed)
-     so this target owns its lifecycle going forward. A no-change
-     refresh of an already-owned node only touches `last_seen`, so the
-     `unchanged` path reports zero `updated`.
-   - Soft-delete (set `last_seen = NULL`) only nodes **owned by the
-     refreshing target** (`target_id == target_id`) that are absent
-     from the snapshot. Rows owned by another target — or a manual
-     annotation — are never soft-deleted by a refresh that does not own
-     them. A node already soft-deleted is not re-counted.
+     row (`source='auto'`).
+   - For an **auto** node already present under *any* `target_id`
+     (another target's discovery): refresh `last_seen`, apply the probe
+     `properties`, and **adopt** the row onto the refreshing target
+     (`target_id` claimed) so this target owns its lifecycle going
+     forward. A no-change refresh of an already-owned node only touches
+     `last_seen`, so the `unchanged` path reports zero `updated`.
+   - For a **curated** node (`source='curated'` — operator-seeded via
+     `create_or_get_node`, or promoted by a re-seed over an auto row):
+     bump `last_seen` only (`_refresh_curated_node`, the node-side
+     mirror of `_refresh_curated_edge`; #2536). No property overwrite,
+     no `target_id` adoption — the probe's view of an operator-owned
+     row is not authoritative. A resurrected curated node
+     (`last_seen IS NULL → now`) counts as `updated` and emits a
+     history row; a pure heartbeat does neither.
+   - Soft-delete (set `last_seen = NULL`) only **auto** nodes owned by
+     the refreshing target (`target_id == target_id`) that are absent
+     from the snapshot. Rows owned by another target are never
+     soft-deleted by a refresh that does not own them, and curated
+     nodes are never soft-deleted by *any* refresh (the explicit
+     `source == 'curated'` guard is load-bearing for promoted rows,
+     which keep the historical `target_id` from their auto days;
+     #2536). A node already soft-deleted is not re-counted.
    Returns two key→id maps: `live` (snapshot-present nodes only) and
    `all` (every loaded node, including soft-deleted ones owned by this
    target).
@@ -356,18 +464,51 @@ bind.
 
 The traversal is a single `WITH RECURSIVE walk AS (...) CYCLE id SET
 is_cycle USING path` statement. The anchor row is the root at depth 0
-(`via_edge_kind` NULL), filtered by `CAST(:kind AS text) IS NULL OR
-n.kind = :kind` so a pinned `kind` resolves the `(tenant_id, kind,
-name)` unique row. The recursive term joins `graph_edge` to the walk
-frontier, scoped on `tenant_id` on both the edge and the destination
-node, applies `CAST(:kind_filter AS text) IS NULL OR e.kind =
-:kind_filter`, and bounds `w.depth < :depth`. The final projection
-wraps the filtered walk in a `SELECT DISTINCT ON (id) ... ORDER BY id,
-depth, name` subquery (keeping the minimum-depth occurrence of each
-node) and re-orders the result by `(depth, name)`. `CYCLE` only
-prevents revisiting a node on the *same* branch; the `DISTINCT ON`
-collapse is what makes a converging DAG return one row per node rather
-than one row per path.
+(`via_edge_kind` / `parent_node_id` / `via_edge_id` NULL), filtered by
+`CAST(:kind AS text) IS NULL OR n.kind = :kind` so a pinned `kind`
+resolves the `(tenant_id, kind, name)` unique row. The recursive term
+joins `graph_edge` to the walk frontier, scoped on `tenant_id` on both
+the edge and the destination node, applies `CAST(:kind_filter AS text)
+IS NULL OR e.kind = :kind_filter`, bounds `w.depth < :depth`, and
+projects the chain provenance (`w.id AS parent_node_id`, `e.id AS
+via_edge_id` — #2538). The final projection wraps the filtered walk in
+a `SELECT DISTINCT ON (id) ... ORDER BY id, depth, name,
+parent_node_id, via_edge_id` subquery (keeping the minimum-depth
+occurrence of each node; the provenance columns extend the ORDER BY as
+a deterministic tie-break so converging equal-depth parents resolve
+identically on every run) and re-orders the result by `(depth, name)`.
+`CYCLE` only prevents revisiting a node on the *same* branch; the
+`DISTINCT ON` collapse is what makes a converging DAG return one row
+per node rather than one row per path.
+
+### Staleness opt-out (`include_stale`, #2538)
+
+Traversal defaults to **last-refresh-wins**: soft-deleted rows
+(`last_seen IS NULL`) stay reachable, because the row was real at the
+last observation and a blast-radius answer that silently forgets it is
+a false negative. `list_edges` takes the opposite default (a live
+inventory view). #2538 makes the disagreement per-query controllable:
+all three traversal verbs (`find_dependents` / `find_dependencies` /
+`find_path`) accept `include_stale: bool = True`. Passing `False` adds
+`last_seen IS NOT NULL` predicates via the `CAST(:include_stale AS
+boolean) OR ...` idiom:
+
+- closure verbs: on the stepped-to node **and** the walked edge in the
+  recursive term;
+- `find_path`: on **both** `bi_edge` legs (same both-legs rule as the
+  superseded-edge guard — missing the reversed leg would let a stale
+  edge be walked backwards into a path) and on the stepped-to node
+  (`dn` join in the recursive term), where the `to` endpoint is
+  exempted via `EXISTS` against the non-recursive `target` CTE — the
+  `from` endpoint enters through the walk's base term, so both named
+  endpoints stay reachable and `include_stale=False` reachability is
+  symmetric in argument order.
+
+The anchor / endpoint rows named by the caller are exempt — anchor
+existence is governed by the `NodeNotFoundError` / silent-`None`
+contracts, not staleness. The flag rides the whole stack: REST query
+param `include_stale` on all three routes, CLI `--include-stale=false`,
+MCP `query_topology.include_stale`.
 
 ### Anchor disambiguation
 
@@ -420,13 +561,37 @@ isn't in the graph."
 ### Path search
 
 `find_path` builds a `bi_edge` CTE — the union of forward and reversed
-tenant-scoped edges — so reachability is undirected while storage
-stays directed. The recursive `walk` accumulates `node_ids` and
-`edge_kinds` arrays; `CYCLE node_id SET is_cycle USING visited` plus
-the `hops < :max_hops` bound terminate the search. `ORDER BY hops
-LIMIT 1` yields a shortest path. A second query materialises the
-winning path's node rows; `_build_path_nodes` re-orders them into path
-sequence and attaches `depth` / `via_edge_kind`.
+tenant-scoped edges (each leg projecting the edge `id` since #2538) —
+so reachability is undirected while storage stays directed. The
+recursive `walk` accumulates `node_ids`, `edge_kinds`, and `edge_ids`
+arrays; `CYCLE node_id SET is_cycle USING visited` plus the `hops <
+:max_hops` bound terminate the search. `ORDER BY hops LIMIT 1` yields
+a shortest path. A second query materialises the winning path's node
+rows; `_build_path_nodes` re-orders them into path sequence and
+attaches `depth` / `via_edge_kind` / `via_edge_id` (positionally, hop
+`i` belongs to node `i+1`) plus `parent_node_id` (the previous node on
+the path).
+
+**Per-branch target pruning (#2535).** The walk enumerates simple
+paths, so on a dense mesh its row count grows ~branch_factor^hops. A
+non-recursive `target` CTE resolves the destination id once, and the
+recursive term carries `NOT EXISTS (SELECT 1 FROM target t WHERE t.id
+= w.node_id)` — a branch that reaches the target stops growing.
+Extending past a hit can never shorten a path to that same hit (and
+the CYCLE guard already forbids re-entering the target on the same
+branch), so pruning removes only rows the final select could never
+pick: results are identical, cost is bounded per branch. Referencing
+the non-recursive `target` CTE from the recursive term's subquery is
+legal — PostgreSQL's recursive-term restrictions cover only the
+recursive self-reference (`walk`), which must appear exactly once and
+not inside a subquery. That same restriction is why **global**
+cross-branch early termination cannot be written, and `ORDER BY hops
+LIMIT 1` cannot stop evaluation early because the sort consumes the
+full walk. The unreachable-target worst case therefore still
+enumerates the whole ≤`max_hops` ball; its envelope is pinned by
+`tests/integration/test_topology_path_pruning.py` on a dense
+`MeshSpec` mesh (row-count pin + load-invariant timing ratio, see
+`docs/architecture/topology.md` §Performance expectations).
 
 ### Cycle safety
 
@@ -469,8 +634,10 @@ so the guard runs only where the column is JSONB.
 
 ### `annotate_edge`
 
-1. Validate `kind` against `GraphEdgeKind` (raise
-   `InvalidEdgeKindError` *before* any DB read).
+1. Validate `kind` against the open slug grammar
+   (`KIND_SLUG_PATTERN` via `is_valid_kind_slug`; raise
+   `InvalidEdgeKindError` *before* any DB read — the error message
+   names the pattern and echoes the well-known kinds as suggestions).
 2. `async with session.begin()` — one transaction wraps the whole
    resolve + write + conflict-scan + audit-row.
 3. `resolve_node` for both endpoints (`operator.tenant_id` is the
@@ -594,7 +761,9 @@ Edge reconciliation is identical, with one extra wrinkle: the
 `updated` history row even though the only changed column is
 `last_seen` — the resurrection is operator-observable (the edge
 returned to traversal), so it warrants a row. A pure heartbeat on
-an already-live curated edge does not.
+an already-live curated edge does not. Since #2536 the node pass
+carries the same wrinkle: `_refresh_curated_node` emits `updated`
+only for a resurrected curated node, never for a heartbeat.
 
 ### Annotate path
 
@@ -716,7 +885,7 @@ O(per_side_fetch) = O(limit + 1) per side, bounded by `limit ≤ 1000`.
 ### Audit class
 
 The REST route binds `audit_op_id="topology.timeline"` /
-`audit_op_class="audit_query"` per [decision #3](../planning/v0.2-decisions.md)
+`audit_op_class="audit_query"` per [decision #3](../decisions/locked-decisions.md)
 — temporal graph queries are inspections of system state, parallel
 to G8's audit-log query surface. The broadcast event carries only
 `{op_id, result_status, row_count}` so the request filter (which
@@ -823,8 +992,11 @@ SSE / Slack feed.
 
 ### `create_or_get_node`
 
-1. Validate `kind` against `_GRAPH_NODE_KINDS` (raise
-   `InvalidNodeKindError` *before* any DB read).
+1. Validate `kind` against the open slug grammar
+   (`KIND_SLUG_PATTERN` via `is_valid_kind_slug`; raise
+   `InvalidNodeKindError` *before* any DB read — the error message
+   names the pattern and echoes `WELL_KNOWN_NODE_KINDS` as
+   suggestions).
 2. Pre-allocate `audit_id = uuid.uuid4()` (chassis "audit-id
    pre-allocation" pattern shared with `refresh` / `annotate` —
    the same uuid is threaded into the `audit_log` row and the
@@ -838,10 +1010,13 @@ SSE / Slack feed.
    merge the four manual-seed property keys (`note`,
    `evidence_url`, `seeded_by`, `seeded_at`) onto the existing JSONB
    (auto-discovered keys like `status`, `phase` are preserved),
-   refresh `last_seen`, and promote `discovered_by` to the operator
-   iff the existing row was probe-derived (auto→curated promotion;
-   matches `annotate_edge`'s shape). Absent → `INSERT` a fresh row
-   with `discovered_by=operator.sub`, `target_id=None` (manual seeds
+   refresh `last_seen`, and promote to `source='curated'` +
+   `discovered_by=operator.sub` iff the existing row was
+   probe-derived (auto→curated promotion; matches `annotate_edge`'s
+   shape; #2536 — the `source` flip is what moves the row under the
+   refresh service's curated-durability discipline). Absent →
+   `INSERT` a fresh row with `source='curated'`,
+   `discovered_by=operator.sub`, `target_id=None` (manual seeds
    never adopt onto a target — only the refresh service does that),
    `properties={note, evidence_url, seeded_by, seeded_at}`,
    `first_seen = last_seen = now`; `before` is `None`.
@@ -886,24 +1061,26 @@ can never disagree about which mutations committed.
 insert — the unique index guarantees one row per triple, and the
 refresh service's `_node_key((kind, name))` lookup recognises
 operator-seeded rows on the next probe (refresh keys on the same
-unique tuple, not on `discovered_by`). A manually-seeded node that
-the refresh service later discovers is adopted normally: refresh
-keeps `(tenant_id, kind, name)` as its identity, updates
-`last_seen` + `properties` from the probe payload, and the operator
-retains audit-trail authorship (the `audit_log` row from this verb
-is permanent — even an auto-rewrite of `discovered_by` by a
-subsequent refresh does not erase it).
+unique tuple, not on `discovered_by`). A seeded node the refresh
+service later re-observes is heartbeat-only, never adopted:
+`_refresh_curated_node` bumps `last_seen` and nothing else —
+`properties`, `target_id`, and `discovered_by` are untouched
+(`source='curated'` is the shield; #2536), and no refresh ever
+soft-deletes the row. Audit-trail authorship is likewise permanent:
+the `audit_log` row from this verb outlives any number of
+subsequent probe re-observations.
 
 **Not a refresh trigger.** This verb is a manual seed for nodes the
 operator wants to assert directly (the empty-tenant bootstrap entry
 point, or curated inner-graph nodes the probes cannot derive). It
 does not run any probe, does not write edges, and does not set
-`target_id`. If the seeded node corresponds to a target that
-should be auto-discovered going forward, run
-`meho topology refresh <target>` after the bootstrap: the refresh
-will adopt the node onto the target (`target_id` gets set, the
-node's properties pick up probe-derived shape) without losing the
-manual-seed audit trail.
+`target_id`. The adopt-onto-target workflow (`target_id` claimed,
+properties reshaped from the probe payload) applies to
+`source='auto'` rows only; it no longer exists for seeded nodes.
+A seeded node stays operator-owned forever — `target_id=None`,
+properties exactly as asserted — until the operator deletes it and
+lets a refresh re-discover the resource as a fresh `source='auto'`
+row.
 
 ## Diff query (read half — G9.3-T4 #860)
 
@@ -978,7 +1155,7 @@ Surfaces:
 ## REST API surface (T5, #453 + G9.2-T5 #597 + G9.3-T5 #861 + G9.3-T4 #860 + G9.3-T3 #859)
 
 `backend/src/meho_backplane/api/v1/topology.py` is the HTTP front for
-the read + write halves. Twelve routes total — eleven on the topology
+the read + write halves. Thirteen routes total — twelve on the topology
 router, one on the targets router:
 
 | Method + path | Wraps | op_id | RBAC |
@@ -989,6 +1166,7 @@ router, one on the targets router:
 | `POST /api/v1/topology/refresh/{target_name}` | `refresh_target_topology` | `topology.refresh` | operator |
 | `POST /api/v1/topology/edges` | `annotate_edge` (T3 #595) | `topology.annotate` | **tenant_admin** |
 | `DELETE /api/v1/topology/edges/{edge_id}` | `unannotate_edge` (T3 #595) | `topology.unannotate` | **tenant_admin** |
+| `DELETE /api/v1/topology/nodes/{node_id}` | `delete_node` (#2485) | `topology.delete_node` | **tenant_admin** |
 | `GET /api/v1/topology/edges` | `list_edges` (T4 #596) | `topology.list_edges` | operator |
 | `POST /api/v1/topology/edges/bulk` | `bulk_import_edges` (T8 #600) | `topology.bulk_import` | **tenant_admin** |
 | `GET /api/v1/topology/timeline` | `query_timeline` (G9.3-T5 #861) | `topology.timeline` | operator |
@@ -1075,12 +1253,14 @@ Load-bearing details:
   broadcast event would under-emit per §10. `GET /edges` binds
   `op_class="read"`.
 - **`POST /edges` body shape.** The request body is
-  `{"from": {"name": ..., "kind"?}, "kind": <GraphEdgeKind>,
+  `{"from": {"name": ..., "kind"?}, "kind": <kind-slug>,
     "to": {"name": ..., "kind"?}, "note"?, "evidence_url"?}` —
   `from` / `to` are nested `_EdgeEndpoint` objects (mirrors the
   service-layer `NodeRef` dataclass on the wire). `kind` is typed
-  against `GraphEdgeKind` so Pydantic rejects unknown kinds at the
-  boundary with 422 before the service runs. `extra="forbid"` rejects
+  against the `_EdgeKindSlug` `StringConstraints` alias
+  (`KIND_SLUG_PATTERN`, 2–63 chars) so Pydantic rejects malformed
+  kinds at the boundary with 422 before the service runs; any
+  well-formed slug — well-known or novel — passes through. `extra="forbid"` rejects
   typo'd keys at the boundary too.
 - **`GET /edges` query params** are forwarded straight through to
   `list_edges` (`kind?`, `source?` constrained to `auto|curated` by a
@@ -1175,9 +1355,10 @@ and broadcast event.
 **Wire shape.** The REST body is
 `{"edges": [{"from", "kind", "to", "note"?, "evidence_url"?}, ...], "dry_run"?: bool}`.
 `from` / `to` accept the same `_EdgeEndpoint` `{name, kind?}` shape
-the single-edge endpoint uses; `kind` is the closed `GraphEdgeKind`
-enum so an unknown kind is rejected at the Pydantic boundary (422)
-before any service runs. `extra="forbid"` rejects typo'd fields at
+the single-edge endpoint uses; `kind` is the `_EdgeKindSlug`
+`StringConstraints` alias so a malformed kind slug is rejected at the
+Pydantic boundary (422) before any service runs (the vocabulary is
+open — well-known and novel slugs both pass). `extra="forbid"` rejects typo'd fields at
 the boundary. The response is
 `{dry_run, created, updated, conflicts, rows: [...]}` where each row
 carries `{index, action, edge_id?, from_name, from_kind, to_name,
@@ -1223,7 +1404,7 @@ sits under the `/api/v1/targets` prefix, so its verb sits under the
 | Verb | Route | Default render |
 |---|---|---|
 | `meho topology refresh <target>` | `POST /topology/refresh/{t}` | `nodes: +A -R ~U` / `edges: +A -R ~U` summary |
-| `meho topology dependents <name>` | `GET /topology/dependents/{n}` | `DEPTH / KIND / NAME / VIA` table |
+| `meho topology dependents <name>` | `GET /topology/dependents/{n}` | `DEPTH / KIND / NAME / VIA / PARENT` table |
 | `meho topology dependencies <name>` | `GET /topology/dependencies/{n}` | same table, mirror direction |
 | `meho topology path <from> <to>` | `GET /topology/path?from=&to=` | `kind/name -> … (N hops)` chain |
 | `meho topology annotate <from> <kind> <to>` | `POST /topology/edges` | `annotated edge: ...` summary |
@@ -1393,8 +1574,12 @@ shape.
 - **PostgreSQL-only read path.** The `WITH RECURSIVE ... CYCLE` clause
   is not implemented by SQLite, so the query verbs cannot run on the
   unit suite's per-test SQLite DB. Tests live in
-  `backend/tests/integration/test_topology_query.py` against a real
-  `pgvector/pgvector:pg16` testcontainer (Docker-gated skip on
+  `backend/tests/integration/test_topology_query.py` (plus the
+  dense-mesh pruning/worst-case suite in
+  `backend/tests/integration/test_topology_path_pruning.py` and the
+  refresh-vs-annotate concurrency suite in
+  `backend/tests/integration/test_topology_concurrency.py`) against a
+  real `pgvector/pgvector:pg16` testcontainer (Docker-gated skip on
   no-Docker sandboxes; runs in CI). The pure Pydantic result-model
   contracts (deep `properties` immutability, `TopologyPath` invariants)
   have no DB dependency and are unit-tested in
@@ -1409,20 +1594,26 @@ shape.
   resolution is deferred to the CLI/MCP fronts (T6/T7).
 - Streaming refresh progress for very large topologies — v0.2 is
   single-shot; deferred per Initiative #363.
-- Soft-delete is retention-only for the traversal verbs —
-  `find_dependents` / `find_dependencies` / `find_path` do **not**
-  filter `last_seen IS NULL`, so a soft-deleted node stays reachable
-  (last-refresh-wins). Only the list verbs (`list_edges` /
+- Soft-delete is retention-first for the traversal verbs —
+  `find_dependents` / `find_dependencies` / `find_path` keep
+  soft-deleted rows reachable **by default** (last-refresh-wins), with
+  a per-query `include_stale=False` opt-out since #2538 (see
+  §Staleness opt-out above). Only the list verbs (`list_edges` /
   `list_nodes`) exclude soft-deleted rows by default. Point-in-time
   visibility ("when did this disappear?") is answered by the dedicated
   history/diff/timeline verbs (G9.3,
   [#365](https://github.com/evoila/meho/issues/365)) over the retained
-  rows — G9.3 did not add `last_seen` filtering to the traversal CTE.
+  rows.
   See `docs/architecture/topology.md` §Soft-delete semantics; pinned by
-  `test_scenario4_soft_delete_retains_row`.
+  `test_scenario4_soft_delete_retains_row` and the #2538
+  `include_stale` toggle tests in `test_topology_query.py`.
 - Per-connector `discover_topology` overrides — each G3.x Initiative.
 - The advisory lock is a multi-replica stampede guard only; a single
   process serialises naturally and the SQLite test path no-ops it.
+  The real-PG lock path (skip while held, proceed after release) is
+  pinned by
+  `test_scheduler_advisory_lock_skips_and_releases_on_real_pg` in
+  `backend/tests/integration/test_topology_concurrency.py`.
 
 ## References
 

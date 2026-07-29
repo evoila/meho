@@ -1063,9 +1063,12 @@ wrap the targets registry routes from G0.3-T3 (#254), the G0.3-T1.5
 verb. The verbs are the operator-side surface for the per-tenant
 `targets` table — a fingerprinted catalog of vendor systems the
 operator manages (vCenter hosts, Vault instances, k8s clusters, …)
-that the G0.6 dispatcher resolves at `call` time. Write verbs
-(`create` / `update` / `delete`) are deferred; bulk import lands
-under G0.3-T6 (#257).
+that the G0.6 dispatcher resolves at `call` time. Registration and
+updates flow through `meho targets import` (POST for new rows, PATCH
+under `--update`); a standalone `create` verb was explicitly ruled out
+in favour of file-based import (#1574 / #1559). No standalone `delete`
+verb is surfaced yet, though the API supports `DELETE
+/api/v1/targets/{name}` (`tenant_admin`).
 
 ### Subcommands
 
@@ -1154,10 +1157,11 @@ the comment block on `httpDoer` for the rationale.
 
 ### Out of scope (v0.2)
 
-- Write verbs (`create` / `update` / `delete`). The API supports them
-  (require `tenant_admin`); the CLI surfaces them in a follow-up
-  task when operators ask. Bulk import via T6 (#257) lands in a
-  sibling PR.
+- Standalone `delete` verb. The API supports `DELETE
+  /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it in a
+  follow-up task when operators ask. Create and update are already
+  covered by `meho targets import` (POST for new rows, PATCH under
+  `--update`), so no separate `create` / `update` verb is planned.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the
@@ -1263,18 +1267,26 @@ the canonical `/api/v1/targets` prefix.
   identically to a typo (cross-tenant refresh is impossible by
   construction).
 - `meho topology dependents <name|alias> [--depth N] [--kind K]
-  [--node-kind K]` — `GET /api/v1/topology/dependents/<name>`.
+  [--node-kind K] [--include-stale=false]` —
+  `GET /api/v1/topology/dependents/<name>`.
   Reverse closure ("what depends on me" — the blast-radius verb
   consumer-needs.md L258 specifies, run *before* a destructive op).
-  Renders a depth-ordered `DEPTH / KIND / NAME / VIA` table; the
-  anchor is row 0 (empty VIA) so an operator distinguishes "exists,
-  no dependents" (one row) from "not in this tenant" (zero rows).
+  Renders a depth-ordered `DEPTH / KIND / NAME / VIA / PARENT` table
+  (#2538: PARENT is the node this row hangs off, resolved to its name
+  from the closure itself; `--json` carries the raw `parent_node_id`
+  / `via_edge_id` fields); the anchor is row 0 (empty VIA/PARENT) so
+  an operator distinguishes "exists, no dependents" (one row) from
+  "not in this tenant" (zero rows). `--include-stale=false` restricts
+  the walk to live rows (default keeps soft-deleted rows reachable,
+  last-refresh-wins).
 - `meho topology dependencies <name|alias> [--depth N] [--kind K]
-  [--node-kind K]` — `GET /api/v1/topology/dependencies/<name>`.
+  [--node-kind K] [--include-stale=false]` —
+  `GET /api/v1/topology/dependencies/<name>`.
   Forward closure ("what I depend on") — the mirror of `dependents`,
   same table shape and contract, opposite walk direction.
 - `meho topology path <from> <to> [--max-hops N] [--from-kind K]
-  [--to-kind K]` — `GET /api/v1/topology/path?from=A&to=B`. Shortest
+  [--to-kind K] [--include-stale=false]` —
+  `GET /api/v1/topology/path?from=A&to=B`. Shortest
   unweighted path rendered as a `kind/name -> … (N hops)` chain, or
   the no-path line when unreachable / an endpoint is missing /
   cross-tenant (all the same `null` answer, exit 0, never an error).
@@ -2004,9 +2016,10 @@ targets registry (Initiative #224). The v0.2 surface ships:
 
 `import.go` implements `meho targets import <file>` with the
 flags called out in the issue body: `--update` (PATCH existing
-targets instead of erroring), `--dry-run` (print the plan; no API
-calls), `--json` (structured plan output), `--backplane` (override
-the configured backplane URL).
+targets instead of erroring), `--dry-run` (print the plan; one
+listing `GET`, zero writes — #1785 made the preview existence-aware,
+so it is read-only rather than offline), `--json` (structured plan
+output), `--backplane` (override the configured backplane URL).
 
 **Mapping rules.** The CLI parses the YAML as a generic
 `map[string]any` per entry and partitions every key:
@@ -2014,11 +2027,14 @@ the configured backplane URL).
 - **Known top-level columns** map 1:1 to the API's `TargetCreate` /
   `TargetUpdate` body fields: `name`, `aliases`, `product`, `host`,
   `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`,
-  `notes`, `preferred_impl_id`. The list in
+  `notes`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
+  `tls_server_name`. The list in
   `knownTopLevel` is the canonical reference; the
   Python-side mirror lives in
-  `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL` and
-  keeps drift detectable in CI.
+  `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL`,
+  which pins the pre-#1774 core set the consumer fixture exercises
+  (it carries none of the TLS columns, so the two sets agree on
+  every key that fixture can produce).
 - **`fingerprint`** is dropped silently with a warning log line.
   Server-managed per the G0.3-T1.5 (#477) amendment — the probe
   verb is the only legitimate writer, and the API rejects
@@ -2029,6 +2045,15 @@ the configured backplane URL).
 - **`preferred_impl_id`** is a real top-level column post-#477.
   Sent at the body root, not spilled into extras — the G0.6 #388
   resolver's tie-break ladder reads it.
+- **`verify_tls` / `tls_ca_pin` / `tls_server_name`** are the
+  per-target TLS columns (Initiative #1774's #1780 / #1784, plus
+  #2002's SNI override). All three go at the body root. Spilling any
+  of them into `extras` is silent misconfiguration: the typed column
+  keeps its default, the import still prints "1 updated", and the
+  operator only finds out at dispatch time — `tls_server_name`
+  specifically surfaces as `connector_tls_verify_failed` /
+  "IP address mismatch" on an appliance reached by IP whose leaf cert
+  carries an FQDN-only SAN (#2643).
 - **Every other key** spills into the `extras` JSONB column.
   Explicit `extras:` blocks in the YAML merge with spilled keys
   rather than overwriting them.
@@ -2040,6 +2065,22 @@ in tenant). Default mode aborts the whole import on the first
 duplicate — operators have to re-run with `--update` to opt into
 PATCH semantics. The plan is built before *any* write fires, so a
 partial-conflict YAML never leaves the tenant half-imported.
+
+`listExistingNames` decodes that listing into the generated
+`api.TargetListResponse` (`{items, next_cursor}` per
+`docs/codebase/api-shape-conventions.md` §2) and walks pages until
+`next_cursor` is null. Both are load-bearing. The response type is
+generated, so a future list-shape change fails `go build` here
+instead of the operator's import; a decoder private to `import.go` is
+exactly what #2338 could not see when it converged this route off the
+bare array and swept the sibling verbs by type, and the import fake
+minting its own bare-array body is why the suite stayed green while
+`meho targets import` was hard-broken on every v0.21.0+ backplane
+(#2577). Termination follows `next_cursor` rather than page length
+because the route proves a further page by over-fetching `limit + 1`;
+page length cannot decide an exact-multiple final page. The write
+half of the verb deliberately stays untyped — see the sparse-PATCH
+contract below.
 
 **Sparse-PATCH contract.** The PATCH body for each updated entry
 is sparse: only keys present in the YAML appear, with `name` and

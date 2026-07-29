@@ -13,10 +13,12 @@ Coverage matrix (Task #448 acceptance criteria):
   :class:`GraphNode` and ``(tenant_id, from_node_id, to_node_id, kind)``
   on :class:`GraphEdge` both reject duplicate rows with
   :class:`IntegrityError`. Cross-tenant collision is allowed.
-* **CHECK constraints** -- ``graph_node.kind``, ``graph_edge.kind``,
-  ``graph_edge.source`` each reject an out-of-vocabulary value with
-  :class:`IntegrityError`. The closed-enum vocabulary is the v0.2
-  contract; G9.2 widens it via a follow-up migration.
+* **CHECK constraints** -- ``graph_node.kind`` / ``graph_edge.kind``
+  reject a shape-violating value (uppercase, too short, too long) and
+  accept any well-formed slug (the vocabulary is open per T1 #2534;
+  migration ``0063`` replaced the closed IN-lists with the minimal
+  shape CHECK); ``graph_edge.source`` remains a closed enum and
+  rejects unknown values with :class:`IntegrityError`.
 * **Foreign keys** -- ``graph_node.target_id`` rejects an unknown
   target id, and ``graph_edge.from_node_id`` / ``to_node_id`` reject
   unknown node ids, with :class:`IntegrityError`. SQLite enforces FKs
@@ -63,7 +65,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
-    _GRAPH_EDGE_KINDS,
     GraphEdge,
     GraphEdgeKind,
     GraphNode,
@@ -336,13 +337,41 @@ async def test_graph_node_same_name_allowed_across_tenants() -> None:
 
 
 @pytest.mark.asyncio
-async def test_graph_node_kind_check_constraint_rejects_unknown() -> None:
-    """A ``graph_node.kind`` outside the closed enum raises :class:`IntegrityError`.
+async def test_graph_node_kind_check_accepts_novel_slug() -> None:
+    """A well-formed novel ``graph_node.kind`` inserts cleanly (open vocabulary).
 
-    The DB-layer CHECK is what makes the closed-enum contract
-    unbreakable: a typo'd kind (``"vmm"`` instead of ``"vm"``) cannot
-    silently land. Widening the vocabulary is a coordinated
-    migration + :data:`_GRAPH_NODE_KINDS` update.
+    T1 #2534 / migration ``0063``: the closed 14-kind IN-list is gone;
+    any lowercase slug passes the DB-layer shape CHECK. Full slug
+    validation lives Python-side at the write boundaries.
+    """
+    sessionmaker = get_sessionmaker()
+    node_id = uuid.uuid4()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        session.add(
+            GraphNode(
+                id=node_id,
+                tenant_id=tenant_id,
+                kind="dns-record",  # not in the old closed enum
+                name="www.example.com",
+                discovered_by="curated",
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(GraphNode).where(GraphNode.id == node_id))).scalar_one()
+    assert row.kind == "dns-record"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_kind", ["Bad-Kind", "x", "a" * 64])
+async def test_graph_node_kind_check_constraint_rejects_malformed(bad_kind: str) -> None:
+    """A shape-violating ``graph_node.kind`` raises :class:`IntegrityError`.
+
+    Migration ``0063``'s minimal shape CHECK (length 2--63, lowercase)
+    is the DB-layer backstop for out-of-band inserts; uppercase,
+    single-char, and over-long kinds must not land.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -350,7 +379,7 @@ async def test_graph_node_kind_check_constraint_rejects_unknown() -> None:
         session.add(
             GraphNode(
                 tenant_id=tenant_id,
-                kind="not-a-real-kind",  # outside the closed enum
+                kind=bad_kind,
                 name="bad-kind",
                 discovered_by="vmware",
             )
@@ -552,13 +581,44 @@ async def test_graph_edge_different_kind_between_same_endpoints_allowed() -> Non
 
 
 @pytest.mark.asyncio
-async def test_graph_edge_kind_check_constraint_rejects_unknown() -> None:
-    """A ``graph_edge.kind`` outside the closed v0.2 enum raises :class:`IntegrityError`.
+async def test_graph_edge_kind_check_accepts_novel_slug() -> None:
+    """A well-formed novel ``graph_edge.kind`` inserts cleanly (open vocabulary).
 
-    Post-G9.2 (#364 / migration ``0010``), the closed v0.2 vocabulary is
-    the ten-kind set on :class:`GraphEdgeKind`. The CHECK constraint
-    rejects anything outside that set; widening requires a new
-    migration that updates the constraint and the enum in lock-step.
+    T1 #2534 / migration ``0063``: the closed ten-kind IN-list is gone;
+    any lowercase slug passes the DB-layer shape CHECK (`resolves-to`,
+    `same-as`, ...). Full slug validation lives Python-side at the
+    write boundaries.
+    """
+    sessionmaker = get_sessionmaker()
+    edge_id = uuid.uuid4()
+    async with sessionmaker() as session:
+        tenant_id = await _seed_tenant(session)
+        from_id, to_id = await _seed_two_nodes(session, tenant_id)
+        session.add(
+            GraphEdge(
+                id=edge_id,
+                tenant_id=tenant_id,
+                from_node_id=from_id,
+                to_node_id=to_id,
+                kind="resolves-to",  # not in the old closed enum
+                source="curated",
+                discovered_by="curated",
+            )
+        )
+        await session.commit()
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(GraphEdge).where(GraphEdge.id == edge_id))).scalar_one()
+    assert row.kind == "resolves-to"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_kind", ["Bad-Kind", "x", "a" * 64])
+async def test_graph_edge_kind_check_constraint_rejects_malformed(bad_kind: str) -> None:
+    """A shape-violating ``graph_edge.kind`` raises :class:`IntegrityError`.
+
+    Migration ``0063``'s minimal shape CHECK (length 2--63, lowercase)
+    is the DB-layer backstop for out-of-band inserts.
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -569,7 +629,7 @@ async def test_graph_edge_kind_check_constraint_rejects_unknown() -> None:
                 tenant_id=tenant_id,
                 from_node_id=from_id,
                 to_node_id=to_id,
-                kind="not-a-real-edge-kind",  # outside the v0.2 ten-kind vocabulary
+                kind=bad_kind,
                 source="auto",
                 discovered_by="curated",
             )
@@ -979,14 +1039,14 @@ _G9_2_CURATED_KINDS: tuple[str, ...] = (
 
 
 def test_graph_edge_kind_enum_has_exactly_ten_members() -> None:
-    """:class:`GraphEdgeKind` has the ten members the v0.2 vocabulary lock requires.
+    """:class:`GraphEdgeKind` carries the ten documented well-known members.
 
-    Decision #6 in :file:`docs/planning/v0.2-decisions.md` fixes the
-    closed-vocabulary set at ten kinds for v0.2 -- four
-    auto-discoverable (G9.1) plus six curated-only (G9.2). A
-    regression that drops or adds a member without a coordinated
-    migration would fragment the v0.2.next policy-engine grammar; the
-    explicit member count is the regression guard.
+    Post-T1 #2534 the enum is the *well-known set*, not an enforced
+    vocabulary -- it feeds docs tables, UI ``datalist`` suggestions,
+    and error-message hints. The explicit member pin guards against a
+    silent drop/rename that would desynchronise those surfaces from
+    :file:`docs/architecture/topology.md`'s well-known table; widening
+    the set is a deliberate docs + enum change (no migration needed).
     """
     assert len(GraphEdgeKind) == 10
     assert {k.value for k in GraphEdgeKind} == {
@@ -1001,20 +1061,6 @@ def test_graph_edge_kind_enum_has_exactly_ten_members() -> None:
         "routes-via",
         "policy-binds",
     }
-
-
-def test_graph_edge_kind_enum_matches_ck_constraint_tuple() -> None:
-    """:data:`_GRAPH_EDGE_KINDS` mirrors :class:`GraphEdgeKind`; equality is the drift guard.
-
-    The Python type-level enum and the DB-layer ``CHECK kind IN (...)``
-    constraint must move in lock-step -- a v0.2.next addition that
-    updated the enum without a corresponding migration (or vice
-    versa) would let agents emit an enum value the DB rejects, or let
-    the DB accept a value the agent's type checker forbids. The
-    equality assertion is what makes the closed-vocabulary contract
-    enforceable at unit-test time.
-    """
-    assert set(_GRAPH_EDGE_KINDS) == {k.value for k in GraphEdgeKind}
 
 
 @pytest.mark.asyncio

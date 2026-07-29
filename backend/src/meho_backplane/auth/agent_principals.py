@@ -57,7 +57,7 @@ import uuid
 from datetime import UTC, datetime
 
 import structlog
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -67,6 +67,12 @@ from meho_backplane.auth.keycloak_admin import (
     KeycloakClientNotFoundError,
 )
 from meho_backplane.auth.operator import TenantRole
+
+# Reuse the runner path's shared name-length bound (#2508) rather than a
+# second literal, so the agent intake schema and the by-name lookup ``Path``
+# params in :mod:`meho_backplane.api.v1.agent_principals` cannot drift from
+# each other — or from the runner path's — as #2502 established (#2523).
+from meho_backplane.auth.runner_principals import NAME_MAX_LENGTH
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AgentPrincipal
 from meho_backplane.scheduler.vault_credentials import (
@@ -76,6 +82,7 @@ from meho_backplane.scheduler.vault_credentials import (
 from meho_backplane.settings import get_settings
 
 __all__ = [
+    "NAME_MAX_LENGTH",
     "AgentPrincipalCreate",
     "AgentPrincipalExistsError",
     "AgentPrincipalNotFoundError",
@@ -131,7 +138,7 @@ class AgentPrincipalCreate(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
+    name: str = Field(max_length=NAME_MAX_LENGTH)
     owner_sub: str | None = None
 
 
@@ -199,28 +206,16 @@ class AgentPrincipalService:
         client_id = _keycloak_client_id(payload.name)
         audience = get_settings().keycloak_audience
 
-        # Phase 1: create Keycloak client + capture its generated secret
-        # in the same admin session (create_client returns only the
-        # internal UUID; Keycloak never echoes the generated secret on
-        # create). The client is provisioned with the audience +
-        # tenant-claim mappers and the default scopes that carry ``sub``,
-        # so its client_credentials token validates through the JWT chain
-        # with no manual Keycloak surgery (#1487). Fail before any DB write
-        # on error.
-        kc_client = KeycloakAdminClient.from_settings()
-        try:
-            async with kc_client:
-                internal_id = await kc_client.create_client(
-                    client_id=client_id,
-                    name=payload.name,
-                    tenant_id=str(tenant_id),
-                    owner_sub=owner,
-                    audience=audience,
-                    tenant_role=_AGENT_TENANT_ROLE,
-                )
-                client_secret = await kc_client.get_client_secret(internal_id)
-        except KeycloakClientConflictError as exc:
-            raise AgentPrincipalExistsError(payload.name) from exc
+        # Phase 1: create the Keycloak client + capture its generated secret.
+        # Any failure after create_client rolls the just-created client back
+        # (see _provision_keycloak_client) so register never orphans an
+        # un-revocable identity before any DB row exists.
+        internal_id, client_secret = await self._provision_keycloak_client(
+            name=payload.name,
+            tenant_id=tenant_id,
+            owner_sub=owner,
+            audience=audience,
+        )
 
         # Phase 1b: persist the captured secret to Vault for the scheduler.
         await self._persist_secret_to_vault(
@@ -251,6 +246,60 @@ class AgentPrincipalService:
             created_by_sub=created_by_sub,
         )
         return entry
+
+    async def _provision_keycloak_client(
+        self,
+        *,
+        name: str,
+        tenant_id: uuid.UUID,
+        owner_sub: str,
+        audience: str,
+    ) -> tuple[str, str]:
+        """Create the agent's Keycloak client and read back its secret.
+
+        Phase 1 of :meth:`register`, isolated so its rollback contract is a
+        single unit. Creates the confidential client (clientId
+        ``agent:<name>``) with the audience + tenant-claim mappers and the
+        default scopes that carry ``sub``, so its ``client_credentials``
+        token validates through the JWT chain with no manual Keycloak
+        surgery (#1487), then reads back the generated secret in the same
+        admin session (``create_client`` returns only the internal UUID;
+        Keycloak never echoes the generated secret on create).
+
+        Rollback contract: if *anything* after ``create_client`` raises — most
+        importantly ``get_client_secret`` — the just-created, live client is
+        deleted before the error propagates, so register never orphans an
+        un-revocable identity. ``internal_id`` is still ``None`` when
+        ``create_client`` itself failed (nothing created, nothing to roll
+        back). A 409 conflict surfaces as :class:`AgentPrincipalExistsError`
+        — the conflicting client belongs to a prior registration and is not
+        ours to delete.
+
+        Returns the ``(keycloak_internal_id, client_secret)`` pair.
+        """
+        client_id = _keycloak_client_id(name)
+        internal_id: str | None = None
+        kc_client = KeycloakAdminClient.from_settings()
+        try:
+            async with kc_client:
+                internal_id = await kc_client.create_client(
+                    client_id=client_id,
+                    name=name,
+                    tenant_id=str(tenant_id),
+                    owner_sub=owner_sub,
+                    audience=audience,
+                    tenant_role=_AGENT_TENANT_ROLE,
+                )
+                client_secret = await kc_client.get_client_secret(internal_id)
+        except KeycloakClientConflictError as exc:
+            raise AgentPrincipalExistsError(name) from exc
+        except BaseException as exc:
+            if internal_id is not None:
+                await self._rollback_orphan_client(
+                    internal_id, tenant_id=tenant_id, name=name, cause=exc
+                )
+            raise
+        return internal_id, client_secret
 
     async def _insert_row(
         self,

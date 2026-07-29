@@ -68,8 +68,10 @@ class _FakeConnector:
     """Records the transport calls ``host_usage_impl`` makes.
 
     Mirrors the surface of :class:`VmwareRestConnector` the handler uses:
-    :meth:`mount_op_path` (prefixes the live mount), :meth:`_get_json`
-    (the host listing), :meth:`_post_json` (per-host RetrievePropertiesEx).
+    :meth:`mount_op_path` (prefixes the live mount for the ``/vcenter/host``
+    listing), :meth:`_get_json` (the host listing), :meth:`_post_vmomi_json`
+    (per-host RetrievePropertiesEx — the VI-JSON ``/sdk/vim25`` mount is the
+    connector's job, so the handler passes the spec-relative path; #2466).
     """
 
     def __init__(
@@ -113,7 +115,7 @@ class _FakeConnector:
         self.get_calls.append((path, params))
         return self._listing
 
-    async def _post_json(
+    async def _post_vmomi_json(
         self,
         target: Any,
         path: str,
@@ -121,6 +123,9 @@ class _FakeConnector:
         operator: Operator,
         json: dict[str, Any] | None = None,
     ) -> Any:
+        # The handler now issues the vmomi read via _post_vmomi_json with
+        # the spec-relative path; the /sdk/vim25 mount + /api fallback is
+        # the connector's job (see the transport-level path tests, #2466).
         del target, operator
         assert json is not None
         self.post_calls.append((path, json))
@@ -197,15 +202,15 @@ async def test_host_usage_lists_then_reads_each_host_mounted() -> None:
 
     out = await host_usage_impl(conn, _make_operator(), _Target(), {})
 
-    # Both the host listing and the PropertyCollector path were mounted.
-    assert conn.mount_calls[0] == "/vcenter/host"
-    assert "/PropertyCollector/propertyCollector/RetrievePropertiesEx" in conn.mount_calls
+    # The host listing was mounted (Automation /vcenter path).
+    assert conn.mount_calls == ["/vcenter/host"]
     # The listing GET used the mounted (/api-prefixed) path.
     assert conn.get_calls[0][0] == "/api/vcenter/host"
-    # One RetrievePropertiesEx POST per host, all against the mounted path.
+    # One RetrievePropertiesEx POST per host via the vmomi seam, addressed
+    # by the spec-relative path (the /sdk/vim25 mount is the connector's job).
     assert len(conn.post_calls) == 2
     assert all(
-        path == "/api/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        path == "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
         for path, _ in conn.post_calls
     )
 
@@ -230,8 +235,13 @@ async def test_host_usage_lists_then_reads_each_host_mounted() -> None:
 
 
 @pytest.mark.asyncio
-async def test_host_usage_resolves_mount_once_not_per_host() -> None:
-    """The RetrievePropertiesEx path is host-independent — mount it once."""
+async def test_host_usage_mounts_only_the_listing_via_mount_op_path() -> None:
+    """Only the /vcenter/host listing goes through mount_op_path.
+
+    The per-host RetrievePropertiesEx read routes through the vmomi seam
+    (:meth:`_post_vmomi_json`) — one POST per host — so mount_op_path is
+    called exactly once (the listing), not per host (#2466).
+    """
     listing = [{"host": f"host-{i}", "name": f"esx-{i}"} for i in range(3)]
     props = {
         f"host-{i}": _retrieve_result(f"host-{i}", _QS_FULL, _HW_FULL, False) for i in range(3)
@@ -240,12 +250,8 @@ async def test_host_usage_resolves_mount_once_not_per_host() -> None:
 
     await host_usage_impl(conn, _make_operator(), _Target(), {})
 
-    # Exactly two mount calls total: the host listing + one for the
-    # per-host property path (resolved once, reused across the 3 hosts).
-    assert conn.mount_calls == [
-        "/vcenter/host",
-        "/PropertyCollector/propertyCollector/RetrievePropertiesEx",
-    ]
+    assert conn.mount_calls == ["/vcenter/host"]
+    assert len(conn.post_calls) == 3
 
 
 @pytest.mark.asyncio

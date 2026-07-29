@@ -327,6 +327,26 @@ async def test_handler_rejects_both_cursor_and_since_cursor() -> None:
         )
 
 
+async def test_handler_rejects_neither_cursor_nor_since_cursor() -> None:
+    """Supplying neither cursor spelling rejects with -32602 at the handler (#2644).
+
+    The registered ``inputSchema``'s top-level ``anyOf`` catches this on the
+    MCP wire (``test_missing_since_cursor_rejects_with_invalid_params``), but
+    that combinator is stripped from every *published* schema — the MCP
+    ``tools/list`` copy and the agent bridge's copy alike — because the
+    Anthropic Messages API rejects it. The handler is therefore the surface
+    that has to reject the both-or-neither forms wherever no jsonschema layer
+    runs first, which is exactly the hosted-agent path
+    (``pydantic_ai.Tool.from_schema`` does not validate arguments against the
+    advertised schema).
+    """
+    op = build_operator(TenantRole.OPERATOR)
+    with pytest.raises(McpInvalidParamsError, match="cursor"):
+        await _handler_watch(op, {})
+    with pytest.raises(McpInvalidParamsError, match="cursor"):
+        await _handler_watch(op, {"timeout_ms": _WATCH_DEFAULT_TIMEOUT_MS})
+
+
 # ---------------------------------------------------------------------------
 # timeout_ms cap (schema + handler validation)
 # ---------------------------------------------------------------------------
@@ -522,6 +542,14 @@ def test_new_events_returned_with_advanced_cursor(
     op_ids = [e["op_id"] for e in result["events"]]
     assert op_ids == ["vsphere.vm.list", "vsphere.vm.create", "vsphere.vm.delete"]
     assert result["next_cursor"] == "1747800000300-0"
+    # Each row self-labels its stream entry id as ``cursor`` (#2479);
+    # ``id`` stays as the legacy alias of the same value.
+    assert [e["cursor"] for e in result["events"]] == [
+        "1747800000100-0",
+        "1747800000200-0",
+        "1747800000300-0",
+    ]
+    assert all(e["cursor"] == e["id"] for e in result["events"])
 
 
 @pytest.mark.parametrize(

@@ -391,6 +391,160 @@ async def test_blank_document_id_normalises_to_none(
 
 
 @pytest.mark.asyncio
+async def test_top_level_title_threads_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A top-level ``title`` threads onto the chunk (#2475).
+
+    An upstream corpus that supplies a human-legible per-chunk title is the
+    only place a title can originate (MEHO has no doc-ingest path). A
+    top-level ``title`` must reach the consumed ``CorpusChunk.title`` so the
+    downstream citation-label chain can prefer it.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "d-042",
+                    "title": "Some KB title",
+                    "text": "titled body",
+                    "source_uri": "https://docs.example/d-042",
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].title == "Some KB title"
+
+
+@pytest.mark.asyncio
+async def test_metadata_title_is_the_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``metadata["title"]`` is used when no top-level title is present (#2475).
+
+    A corpus may nest the title under the per-chunk ``metadata`` bag rather
+    than emit it top-level; that value is the fallback so either wire shape
+    yields a human-legible label.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "document_id": "d-042",
+                    "text": "titled body",
+                    "source_uri": "https://docs.example/d-042",
+                    "metadata": {"title": "Some KB title", "product": "vsphere"},
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].title == "Some KB title"
+
+
+@pytest.mark.asyncio
+async def test_top_level_title_wins_over_metadata_title(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The top-level ``title`` wins over a ``metadata["title"]`` (#2475)."""
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "title": "Top level title",
+                    "text": "titled body",
+                    "source_uri": "https://docs.example/c1",
+                    "metadata": {"title": "Nested title"},
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].title == "Top level title"
+
+
+@pytest.mark.asyncio
+async def test_absent_title_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A chunk with no title anywhere parses to ``title is None`` (#2475).
+
+    Today's corpus emits no per-chunk title; that must not fail parse and
+    must leave ``title`` cleanly ``None`` so no behaviour changes until a
+    title is supplied.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "text": "untitled body",
+                    "source_uri": "https://docs.example/c1",
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].title is None
+
+
+@pytest.mark.asyncio
+async def test_blank_title_normalises_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blank-after-strip ``title`` normalises to ``None`` (#2475, #2004 pattern).
+
+    An empty ``title: ""`` must not thread onto the label chain as an empty
+    preferred label; it normalises to ``None`` so the chain falls through to
+    ``document_id`` / filename / URL.
+    """
+    _pin_settings(monkeypatch, corpus_url=_CORPUS_URL)
+    response = httpx.Response(
+        200,
+        json={
+            "results": [
+                {
+                    "chunk_id": "c1",
+                    "title": "   ",
+                    "document_id": "d-042",
+                    "text": "blank-titled body",
+                    "source_uri": "https://docs.example/d-042",
+                }
+            ],
+        },
+    )
+    _patch_async_client(monkeypatch, _transport_capturing([], response), [])
+
+    result = await search_corpus(_make_operator(), "q")
+
+    assert result.chunks[0].title is None
+
+
+@pytest.mark.asyncio
 async def test_unrecognized_envelope_fails_loud_not_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

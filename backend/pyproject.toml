@@ -33,7 +33,7 @@ dependencies = [
     "packaging>=24.0",
     "python-frontmatter>=1.3.0",
     "jinja2>=3.1.6",
-    "google-auth>=2.55.2",
+    "google-auth>=2.56.0",
     # GCP Secret Manager credential backend (#2230). Reads a target's
     # ``gsm:<project>/<secret>[#field]`` ref under MEHO's own GKE Workload
     # Identity ADC (optionally impersonating a configured SA), reusing the
@@ -56,7 +56,7 @@ dependencies = [
     # resolver shape can route to OpenAI SaaS / vLLM / Ollama via
     # ``OpenAIProvider(base_url=...)``. All three extras live on the
     # same pin so the version sweep stays monotonic.
-    "pydantic-ai-slim[anthropic,bedrock,openai]>=2.9.1",
+    "pydantic-ai-slim[anthropic,bedrock,openai]>=2.10.0",
     "croniter>=6.2.4",
     "markdown-it-py[linkify]>=4.2.0",
     "pygments>=2.18",

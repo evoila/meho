@@ -37,6 +37,7 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
 from meho_backplane.db.models import (
+    AgentDefinition,
     AgentRun,
     AgentRunStatus,
     AgentRunTrigger,
@@ -109,12 +110,40 @@ def _seed_tenant(tenant_id: uuid.UUID, slug: str) -> None:
     asyncio.run(_do())
 
 
+def _seed_definition(*, tenant_id: uuid.UUID, name: str) -> uuid.UUID:
+    """Insert an ``agent_definition`` row and return its id (for the soft-FK)."""
+    did = uuid.uuid4()
+
+    async def _do() -> uuid.UUID:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                AgentDefinition(
+                    id=did,
+                    tenant_id=tenant_id,
+                    name=name,
+                    identity_ref=f"agent:{name}",
+                    model_tier="standard",
+                    system_prompt="You triage incidents.",
+                    toolset={},
+                    turn_budget=5,
+                    output_schema=None,
+                    enabled=True,
+                    created_by_sub="seed-admin",
+                ),
+            )
+        return did
+
+    return asyncio.run(_do())
+
+
 def _seed_run(
     *,
     tenant_id: uuid.UUID,
     run_id: uuid.UUID | None = None,
     status_value: str = AgentRunStatus.RUNNING.value,
     trigger: str = AgentRunTrigger.DIRECT.value,
+    agent_definition_id: uuid.UUID | None = None,
     work_ref: str | None = None,
     provider: str | None = "anthropic",
     model: str | None = "claude-sonnet",
@@ -140,7 +169,7 @@ def _seed_run(
             session.add(
                 AgentRun(
                     id=rid,
-                    agent_definition_id=None,
+                    agent_definition_id=agent_definition_id,
                     tenant_id=tenant_id,
                     identity_sub=_OP_OPERATOR,
                     identity_act=None,
@@ -231,6 +260,56 @@ def test_list_renders_run_row_for_operator() -> None:
     # The list never leaks the agent's prompt / toolset.
     assert "system_prompt" not in body
     assert "toolset" not in body
+
+
+def test_list_run_id_cell_is_visible_identity_link() -> None:
+    """The run_id cell is a visible link to the run detail (#2463).
+
+    The identity cell (previously plain text) now links to the same run
+    URL as the trailing View button, styled ``link link-primary`` so the
+    cell is visibly clickable -- the page-nav list-surface convention.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_run(tenant_id=_TENANT_A, status_value=AgentRunStatus.SUCCEEDED.value)
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs")
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Visible identity link on the run_id cell.
+    assert 'class="link link-primary"' in body
+    # Two hrefs per row point at the same run URL: the identity link + View.
+    assert body.count(f'href="/ui/agents/runs/{rid}"') == 2
+
+
+def test_list_renders_agent_name_column() -> None:
+    """A run with a live definition shows the agent name in its row (#2472)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    did = _seed_definition(tenant_id=_TENANT_A, name="triage-bot")
+    _seed_run(
+        tenant_id=_TENANT_A,
+        status_value=AgentRunStatus.SUCCEEDED.value,
+        agent_definition_id=did,
+    )
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs")
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert "Agent" in body  # column header
+    assert "triage-bot" in body  # resolved per-run agent name
+
+
+def test_list_renders_dash_for_ad_hoc_run_agent() -> None:
+    """A run with no definition (ad-hoc) renders without an agent name, no 500 (#2472)."""
+    _seed_tenant(_TENANT_A, "tenant-a")
+    rid = _seed_run(
+        tenant_id=_TENANT_A,
+        status_value=AgentRunStatus.SUCCEEDED.value,
+        agent_definition_id=None,
+    )
+    client = _client_for_tenant(_TENANT_A)
+    response = client.get("/ui/agents/runs")
+    assert response.status_code == 200, response.text
+    assert str(rid)[:8] in response.text
 
 
 def test_list_renders_back_to_agents_breadcrumb() -> None:

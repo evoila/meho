@@ -10,8 +10,8 @@ Two ``meho.agents.*`` tools that mirror the REST invocation routes
   server-side timeout and returns the final output; ``async=true`` (or a
   sync run that exceeds the timeout) returns a run handle. Role:
   ``operator``.
-* ``meho.agents.run_status`` — poll a run's durable status by handle. Role:
-  ``operator``.
+* ``meho.agents.run_status`` — poll a run's durable status by ``run_id``
+  (the deprecated ``handle`` alias is still accepted). Role: ``operator``.
 
 SSE streaming is REST-only: the MCP request/response shape has no
 streaming-events transport here, so an MCP caller that wants progress polls
@@ -61,6 +61,69 @@ _RUN_OP_IDS: Final[dict[str, str]] = {
     "status": "agent.run_status",
     "list": "agent.list_runs",
 }
+
+#: Canonical ``run_id`` schema fragment for ``meho.agents.run_status``.
+#: The row key ``meho.agents.run`` / ``meho.agents.list_runs`` return —
+#: so a value read off a run response round-trips into ``run_status``
+#: verbatim (§14.3 ``<noun>_id`` grammar; approvals precedent #1358).
+_RUN_ID_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "format": "uuid",
+    "minLength": 1,
+    "description": (
+        "Run UUID. Canonical name (G0.32 #2471) — the `run_id` key "
+        "`meho.agents.run` and `meho.agents.list_runs` return, matching "
+        "the `<noun>_id` convention used by every other MCP tool that "
+        "names a resource UUID."
+    ),
+}
+
+#: Deprecated ``handle`` alias kept for backward compat with the pre-#2471
+#: wire shape.
+_RUN_STATUS_LEGACY_HANDLE_PROPERTY: Final[dict[str, Any]] = {
+    "type": "string",
+    "minLength": 1,
+    "description": (
+        "DEPRECATED alias for `run_id` (pre-#2471 wire shape). Accepted "
+        "for backward compatibility; new callers SHOULD use `run_id`. "
+        "Mutually exclusive with `run_id`; passing both rejects with "
+        "-32602."
+    ),
+    "deprecated": True,
+}
+
+#: Either alias satisfies the "run id required" constraint; the handler
+#: enforces the XOR.
+_RUN_STATUS_ID_ANYOF: Final[list[dict[str, Any]]] = [
+    {"required": ["run_id"]},
+    {"required": ["handle"]},
+]
+
+
+def _require_run_id(arguments: dict[str, Any]) -> uuid.UUID:
+    """Resolve the run UUID from the wire arguments.
+
+    Accepts the canonical ``run_id`` (G0.32 #2471) and the deprecated
+    ``handle`` (pre-#2471 wire shape) as aliases — exactly one must be
+    supplied. Passing both rejects with -32602. The ``<noun>_id`` rename
+    aligns ``meho.agents.run_status`` with the ``run_id`` key its sibling
+    ``meho.agents.run`` / ``meho.agents.list_runs`` already return, so a
+    value read off a run response round-trips verbatim; ``handle`` is
+    retained for one cycle so pre-#2471 callers continue to work.
+    """
+    canonical = arguments.get("run_id")
+    legacy = arguments.get("handle")
+    if canonical is not None and legacy is not None:
+        raise McpInvalidParamsError(
+            "pass either `run_id` (canonical) or `handle` (deprecated alias), not both",
+        )
+    raw = canonical if canonical is not None else legacy
+    if not isinstance(raw, str) or not raw:
+        raise McpInvalidParamsError("run_id is required and must be a non-empty UUID string")
+    try:
+        return uuid.UUID(raw)
+    except ValueError as exc:
+        raise McpInvalidParamsError("run_id must be a valid run id (UUID)") from exc
 
 
 def _require_name(arguments: dict[str, Any]) -> str:
@@ -190,13 +253,7 @@ async def _run_status_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    raw = arguments.get("handle")
-    if not isinstance(raw, str) or not raw:
-        raise McpInvalidParamsError("handle is required and must be a non-empty string")
-    try:
-        run_id = uuid.UUID(raw)
-    except ValueError as exc:
-        raise McpInvalidParamsError("handle must be a valid run id (UUID)") from exc
+    run_id = _require_run_id(arguments)
     structlog.contextvars.bind_contextvars(
         audit_op_id=_RUN_OP_IDS["status"],
         audit_op_class="read",
@@ -214,6 +271,10 @@ async def _run_status_handler(
         "model": view.model,
         "output": view.output,
         "error": view.error,
+        "agent_definition_id": (
+            str(view.agent_definition_id) if view.agent_definition_id is not None else None
+        ),
+        "agent_name": view.agent_name,
     }
 
 
@@ -221,23 +282,25 @@ register_mcp_tool(
     definition=ToolDefinition(
         name="meho.agents.run_status",
         description=(
-            "Poll an agent run's durable status by handle (Initiative "
+            "Poll an agent run's durable status by run_id (Initiative "
             "#802). Operator-level. Returns {run_id, status, turns, "
-            "provider, model, output, error}; output/error are set once the "
-            "run reaches a terminal state. Reads the durable run record, so "
-            "it works after the call that started the run returned. An "
-            "unknown / cross-tenant handle returns 'agent_run_not_found'."
+            "provider, model, output, error, agent_definition_id, "
+            "agent_name}; output/error are set once the run reaches a "
+            "terminal state; agent_definition_id / agent_name are null for "
+            "an ad-hoc run or a definition deleted after the run (#2472). "
+            "Reads the durable run record, so it works after the call that "
+            "started the run returned. Pass the `run_id` a `meho.agents.run` "
+            "/ `meho.agents.list_runs` row returned (canonical name; G0.32 "
+            "#2471) or the deprecated `handle` alias. An unknown / "
+            "cross-tenant run_id returns 'agent_run_not_found'."
         ),
         inputSchema={
             "type": "object",
             "properties": {
-                "handle": {
-                    "type": "string",
-                    "minLength": 1,
-                    "description": "The run handle (run id, a UUID) to poll.",
-                },
+                "run_id": _RUN_ID_PROPERTY,
+                "handle": _RUN_STATUS_LEGACY_HANDLE_PROPERTY,
             },
-            "required": ["handle"],
+            "anyOf": _RUN_STATUS_ID_ANYOF,
             "additionalProperties": False,
         },
         required_role=TenantRole.OPERATOR,
@@ -259,6 +322,9 @@ async def _list_runs_handler(
     work_ref = arguments.get("work_ref")
     if work_ref is not None and not isinstance(work_ref, str):
         raise McpInvalidParamsError("work_ref must be a string when supplied")
+    agent_name = arguments.get("agent_name")
+    if agent_name is not None and not isinstance(agent_name, str):
+        raise McpInvalidParamsError("agent_name must be a string when supplied")
     status_arg = arguments.get("status")
     status: AgentRunStatus | None = None
     if status_arg is not None:
@@ -283,6 +349,7 @@ async def _list_runs_handler(
         operator,
         work_ref=work_ref,
         status=status,
+        agent_name=agent_name,
         limit=limit,
         offset=offset,
     )
@@ -297,6 +364,10 @@ async def _list_runs_handler(
                 "model": s.model,
                 "turns": s.turns,
                 "work_ref": s.work_ref,
+                "agent_definition_id": (
+                    str(s.agent_definition_id) if s.agent_definition_id is not None else None
+                ),
+                "agent_name": s.agent_name,
                 "created_at": s.created_at.isoformat(),
                 "started_at": s.started_at.isoformat() if s.started_at is not None else None,
                 "ended_at": s.ended_at.isoformat() if s.ended_at is not None else None,
@@ -313,12 +384,16 @@ register_mcp_tool(
             "List the operator's tenant's agent runs, newest first "
             "(Initiative #802; work_ref I3-T2 #1662). Operator-level. "
             "Returns {runs: [{run_id, status, trigger, model_tier, "
-            "provider, model, turns, work_ref, created_at, started_at, "
-            "ended_at}]}. Filter by work_ref (exact-match external "
-            "change-ticket reference, e.g. 'gh:evoila/meho#11') and/or "
-            "status; page with limit (1..500, default 100) + offset. "
-            "Tenant-isolated server-side — only your tenant's runs are "
-            "visible."
+            "provider, model, turns, work_ref, agent_definition_id, "
+            "agent_name, created_at, started_at, ended_at}]}; "
+            "agent_definition_id / agent_name are null for an ad-hoc run "
+            "or a definition deleted after the run (#2472). Filter by "
+            "work_ref (exact-match external change-ticket reference, e.g. "
+            "'gh:evoila/meho#11'), status, and/or agent_name (exact-match "
+            "agent definition name — an unknown name returns an empty "
+            "list, not an error); page with limit (1..500, default 100) + "
+            "offset. Tenant-isolated server-side — only your tenant's runs "
+            "are visible."
         ),
         inputSchema={
             "type": "object",
@@ -328,6 +403,13 @@ register_mcp_tool(
                     "description": (
                         "Exact-match external change-ticket reference filter, "
                         "e.g. 'gh:evoila/meho#11'."
+                    ),
+                },
+                "agent_name": {
+                    "type": "string",
+                    "description": (
+                        "Exact-match agent definition name filter. An unknown "
+                        "name returns an empty list rather than an error."
                     ),
                 },
                 "status": {

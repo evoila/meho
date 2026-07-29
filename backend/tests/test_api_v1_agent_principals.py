@@ -34,6 +34,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 import meho_backplane.audit as _audit_module
+from meho_backplane.auth.agent_principals import NAME_MAX_LENGTH
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.keycloak_admin import (
     KEYCLOAK_ADMIN_NOT_CONFIGURED_DETAIL,
@@ -320,6 +321,31 @@ async def test_duplicate_register_returns_409(client: TestClient) -> None:
         second = client.post("/api/v1/agent-principals", json={"name": "dup-bot"}, headers=headers)
     assert second.status_code == 409, second.text
     assert second.json()["detail"] == "agent_principal_already_exists"
+
+
+@pytest.mark.asyncio
+async def test_register_rejects_overlong_name_422(client: TestClient) -> None:
+    """A name past the 128-char bound is rejected at the schema boundary (422).
+
+    show / revoke bound the by-name lookup at ``NAME_MAX_LENGTH``
+    (``Path(max_length=...)`` -> 422), so a longer name that registered would
+    be un-showable and un-revocable by name — the kill switch would be
+    unreachable. The intake schema must reject it symmetrically, before any
+    Keycloak call, so intake and lookup limits cannot drift apart.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-toolong")
+    overlong = "a" * (NAME_MAX_LENGTH + 1)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": overlong},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+    assert resp.status_code == 422, resp.text
+    # The rejection is at the request boundary — no row is written.
+    assert await _fetch_principals(_TENANT_A) == []
 
 
 @pytest.mark.asyncio
@@ -672,6 +698,55 @@ async def test_register_rolls_back_orphan_client_on_db_failure(client: TestClien
     mock_client.delete_client.assert_awaited_once_with(new_internal_id)
 
 
+@pytest.mark.asyncio
+async def test_register_rolls_back_keycloak_client_when_secret_fetch_fails(
+    client: TestClient,
+) -> None:
+    """A failure after ``create_client`` rolls the just-created client back.
+
+    Regression for the orphan gap: ``create_client`` succeeds, then the
+    immediately following ``get_client_secret`` raises. The live, enabled
+    Keycloak client must be deleted before the error propagates (the module's
+    "Keycloak failure -> no row" contract) and no DB row may be written.
+    Without the rollback the agent would be an orphan — token-issuing yet
+    un-listable and un-revocable through MEHO — the unreachable-kill-switch
+    failure this lifecycle exists to prevent. Before #2523 the ``except`` here
+    only handled the 409-conflict path, leaving this case orphaned.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-secret-orphan")
+
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value=_KC_INTERNAL_ID)
+    mock_client.get_client_secret = AsyncMock(side_effect=KeycloakAdminError("secret fetch failed"))
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "secret-orphan-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    # The post-create failure surfaces as 502 (generic KeycloakAdminError) ...
+    assert resp.status_code == 502, resp.text
+    # ... the orphaned client is deleted (rolled back) — not merely disabled ...
+    mock_client.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
+    mock_client.disable_client.assert_not_awaited()
+    # ... and no DB row was written.
+    assert await _fetch_principals(_TENANT_A) == []
+
+
 # ---------------------------------------------------------------------------
 # Vault secret persistence at registration (G0.19-T2 #1478)
 # ---------------------------------------------------------------------------
@@ -769,6 +844,63 @@ async def test_register_rolls_back_client_on_vault_write_failure(
     assert resp.status_code == 502, resp.text
     mock_client.delete_client.assert_awaited_once_with(new_internal_id)
     assert await _fetch_principals(_TENANT_A) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_invalid", [False, True])
+async def test_register_vault_write_failure_detail_splits_on_token_validity(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, token_invalid: bool
+) -> None:
+    """The 502 detail names the remediation the broker actually diagnosed (#2652).
+
+    A dead scheduler token and an under-scoped policy both reach the route
+    as a broker error, but only the broker knows which one Vault answered
+    (it runs ``lookup-self`` on the write-failure path). The route reads
+    that disposition off the exception rather than re-probing: dead token
+    → the three-clause ``scheduler_vault_token_invalid`` detail naming the
+    re-mint; live token → the pre-existing bare code, unchanged.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-vault-disposition")
+    mock_client = AsyncMock()
+    mock_client.create_client = AsyncMock(return_value="dd000000-0000-0000-0000-00000000bbbb")
+    mock_client.get_client_secret = AsyncMock(return_value="generated-secret")
+    mock_client.delete_client = AsyncMock(return_value=None)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+    factory = MagicMock(return_value=mock_client)
+
+    from meho_backplane.scheduler.vault_credentials import (
+        SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+        SchedulerVaultBrokerError,
+    )
+
+    async def _failing_write(identity_ref: str, client_secret: str) -> str:
+        raise SchedulerVaultBrokerError("vault denied", token_invalid=token_invalid)
+
+    monkeypatch.setattr("meho_backplane.auth.agent_principals.write_agent_secret", _failing_write)
+
+    with (
+        patch(
+            "meho_backplane.auth.agent_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/agent-principals",
+            json={"name": "vault-disposition-bot"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    if token_invalid:
+        assert detail == SCHEDULER_VAULT_TOKEN_INVALID_DETAIL, detail
+        assert "policy must grant" not in detail, detail
+    else:
+        assert detail == "scheduler_vault_write_error", detail
 
 
 @pytest.mark.asyncio

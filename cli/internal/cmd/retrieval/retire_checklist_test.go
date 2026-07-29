@@ -137,13 +137,13 @@ func TestPrintRetireTableRendersOverallAndPerSurface(t *testing.T) {
 				Verdict: api.SurfaceChecklistVerdictREADYTORETIRE,
 				Criteria: []api.CriterionResult{
 					{
-						Name:             api.DailyUseDuration,
+						Name:             api.CriterionResultNameDailyUseDuration,
 						Verdict:          api.CriterionResultVerdictGreen,
 						ObservedValue:    "40 days since first use",
 						ThresholdSummary: ">= 30 days",
 					},
 					{
-						Name:             api.OpenBlockers,
+						Name:             api.CriterionResultNameOpenBlockers,
 						Verdict:          api.CriterionResultVerdictGreen,
 						ObservedValue:    "0 open",
 						ThresholdSummary: "== 0 open blockers",
@@ -182,7 +182,7 @@ func TestPrintRetireTableHandlesNotesAndNilTenant(t *testing.T) {
 				Verdict: api.SurfaceChecklistVerdictREVIEWMANUALLY,
 				Criteria: []api.CriterionResult{
 					{
-						Name:             api.MehoVsBaseline,
+						Name:             api.CriterionResultNameMehoVsBaseline,
 						Verdict:          api.CriterionResultVerdictYellow,
 						ObservedValue:    "baseline did not run",
 						ThresholdSummary: "every metric >= baseline",

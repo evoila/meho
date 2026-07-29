@@ -119,7 +119,7 @@ from meho_backplane.broadcast import (
 )
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import AuditLog
-from meho_backplane.operations._audit import work_ref_var
+from meho_backplane.operations._audit import resolve_broadcast_lineage, work_ref_var
 
 __all__ = ["AuditMiddleware", "bind_preallocated_audit_id"]
 
@@ -461,7 +461,7 @@ def _resolve_op_id_and_class_override(
     verb suffix, so without the explicit ``op_class="audit_query"``
     override the broadcast would emit the full request payload and
     defeat the aggregate-only-for-audit-query discipline in decision
-    #3 of ``docs/planning/v0.2-decisions.md``.
+    #3 of ``docs/decisions/locked-decisions.md``.
 
     Returns ``(op_id, op_class_override_or_None)``. The op_class
     override is threaded into :func:`compute_effective_broadcast_detail`
@@ -513,6 +513,7 @@ async def _publish_broadcast_event(
     downstream consumer needs.
     """
     result_status = _classify_http_status(status_code, handler_exc)
+    lineage = resolve_broadcast_lineage()
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=datetime.now(UTC),
@@ -523,6 +524,9 @@ async def _publish_broadcast_event(
         result_status=result_status,
         audit_id=audit_id,
         payload=redact_payload(op_class, payload, result_status, detail=detail),
+        actor_sub=lineage.actor_sub,
+        agent_session_id=lineage.agent_session_id,
+        work_ref=lineage.work_ref,
     )
     await publish_event(event)
 

@@ -35,6 +35,8 @@
     query           -- str: current query (empty on first render)
     source          -- str: current source filter (empty on first render)
     kind            -- str: current kind filter (empty on first render)
+    source_options  -- tuple[str]: distinct retrieval-visible sources (datalist)
+    kind_options    -- tuple[str]: distinct retrieval-visible kinds (datalist)
     limit           -- int: current limit selection
     limit_options   -- tuple[int]: the limit selector's options
     hits            -- list[RetrievalHit]: empty on first render
@@ -116,6 +118,9 @@
           hx-target="#retrieval-diagnostics-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-diagnostics-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="space-y-3"
           role="search"
           aria-label="Run a retrieval diagnostics query"
@@ -140,31 +145,59 @@
               <div class="label">
                 <span class="label-text">Source <span class="opacity-50">(optional)</span></span>
               </div>
+              {#- Source datalist (#2458): the tenant's distinct retrieval-visible
+                  source namespaces, enumerated by a SELECT DISTINCT over the
+                  ``documents`` table. ``list=`` keeps the input free-typing (kinds
+                  are free-form by design) while offering the real values, so an
+                  operator no longer guesses a namespace that silently returns 0
+                  hits. Empty on the initial render when the corpus is empty. -#}
               <input
                 type="text"
                 name="source"
                 value="{{ source }}"
                 maxlength="64"
+                list="retrieval-source-options"
                 placeholder="e.g. kb, memory"
                 class="input input-bordered w-full"
                 aria-label="Source filter"
                 autocomplete="off"
               />
+              <datalist id="retrieval-source-options">
+                {% for option in source_options %}
+                  <option value="{{ option }}"></option>
+                {% endfor %}
+              </datalist>
+              <div class="label">
+                <span class="label-text-alt opacity-60">
+                  Retrieval sources only. Docs-corpus collections are a separate
+                  substrate &mdash; search them on
+                  <a href="/ui/corpus" class="link">/ui/corpus</a>, not here.
+                </span>
+              </div>
             </label>
             <label class="form-control w-full sm:w-48">
               <div class="label">
                 <span class="label-text">Kind <span class="opacity-50">(optional)</span></span>
               </div>
+              {#- Kind datalist (#2458): the tenant's distinct retrieval-visible
+                  kinds from the same SELECT DISTINCT; a user-scoped memory kind
+                  another principal owns is excluded (own-principal scoped). -#}
               <input
                 type="text"
                 name="kind"
                 value="{{ kind }}"
                 maxlength="64"
+                list="retrieval-kind-options"
                 placeholder="e.g. kb-entry"
                 class="input input-bordered w-full"
                 aria-label="Kind filter"
                 autocomplete="off"
               />
+              <datalist id="retrieval-kind-options">
+                {% for option in kind_options %}
+                  <option value="{{ option }}"></option>
+                {% endfor %}
+              </datalist>
             </label>
             <label class="form-control w-full sm:w-32">
               <div class="label">
@@ -184,6 +217,15 @@
               {{ icon("search") }}
               Run
             </button>
+            {#- In-flight feedback (#2459): the form's hx-indicator toggles this
+                spinner's visibility while the request is in flight and
+                hx-disabled-elt disables the submit button; hx-disinherit keeps
+                both off any descendant htmx request in the results region. -#}
+            <span
+              id="retrieval-diagnostics-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+              aria-label="Running the diagnostics query"
+            ></span>
           </div>
         </form>
       </div>
@@ -255,6 +297,9 @@
           hx-target="#retrieval-eval-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-eval-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="flex flex-wrap items-center justify-between gap-3"
           aria-label="Run the retrieval eval corpus"
         >
@@ -267,6 +312,13 @@
             {{ icon("gauge") }}
             Run eval
           </button>
+          {#- In-flight feedback (#2459): eval runs are multi-second; the spinner
+              shows progress and the submit button disables while in flight. -#}
+          <span
+            id="retrieval-eval-spinner"
+            class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+            aria-label="Running the eval corpus"
+          ></span>
         </form>
       </div>
     </div>
@@ -294,6 +346,9 @@
           hx-target="#retrieval-retire-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-retire-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"
           aria-label="Run the retire-decision checklist"
         >
@@ -328,6 +383,13 @@
               {{ icon("shield-check") }}
               Run checklist
             </button>
+            {#- In-flight feedback (#2459): checklist runs scan every surface; the
+                spinner shows progress and the submit button disables in flight. -#}
+            <span
+              id="retrieval-retire-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+              aria-label="Running the retire checklist"
+            ></span>
           </div>
         </form>
       </div>

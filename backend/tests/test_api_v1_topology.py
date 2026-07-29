@@ -8,8 +8,9 @@ Coverage matrix (G9.1-T5 / Task #453 acceptance criteria):
 * **Route mounting** — the four topology routes appear on
   :mod:`meho_backplane.main`'s app and in the OpenAPI document.
 * **dependents / dependencies / path** — each route wraps its T4 verb,
-  forwards the query params (depth / kind / kind_filter / max_hops),
-  and serialises the frozen result model over the wire.
+  forwards the query params (depth / kind / kind_filter / max_hops /
+  include_stale, #2538), and serialises the frozen result model over
+  the wire.
 * **path returns null** — an unreachable pair yields HTTP 200 with a
   ``null`` body (unreachability is a valid answer, not an error).
 * **Ambiguous anchor → 409** — :class:`AmbiguousNodeError` from the
@@ -65,6 +66,12 @@ from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.annotate import AutoEdgeDeletionError, NodeRef
+from meho_backplane.topology.node_delete import (
+    DeleteNodeResult,
+    NodeHasLiveEdgesError,
+    NodeNotDeletableError,
+    NodeNotFoundForDeleteError,
+)
 from meho_backplane.topology.query import AmbiguousNodeError
 from meho_backplane.topology.refresh import RefreshResult
 from meho_backplane.topology.resolvers import NodeNotFoundError
@@ -146,6 +153,7 @@ def _make_node(name: str, kind: str = "host", depth: int = 0) -> TopologyNode:
         id=uuid.uuid4(),
         kind=kind,
         name=name,
+        source="auto",
         properties={"seeded": name},
         depth=depth,
         via_edge_kind=None if depth == 0 else "runs-on",
@@ -248,10 +256,36 @@ def test_dependents_wraps_find_dependents_and_forwards_params(client: TestClient
     body = resp.json()
     assert [n["name"] for n in body] == ["host1", "vm1"]
     assert body[1]["via_edge_kind"] == "runs-on"
+    # #2538 chain provenance is part of the serialised shape (null on
+    # the factory-built rows; the substrate fills it from the CTE).
+    assert body[0]["parent_node_id"] is None
+    assert body[0]["via_edge_id"] is None
     # The query params are forwarded as keyword args to the T4 verb.
     _, kwargs = fake.call_args
-    assert kwargs == {"kind": "host", "depth": 8, "kind_filter": "runs-on"}
+    assert kwargs == {
+        "kind": "host",
+        "depth": 8,
+        "kind_filter": "runs-on",
+        "include_stale": True,
+    }
     assert fake.call_args.args[1] == "host1"
+
+
+def test_dependents_forwards_include_stale_false(client: TestClient) -> None:
+    """``?include_stale=false`` (#2538) reaches the T4 verb as a bool."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=[_make_node("host1", "host", 0)])
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_dependents", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/dependents/host1?include_stale=false",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    assert fake.call_args.kwargs["include_stale"] is False
 
 
 def test_dependents_envelope_v2_returns_kind_nodes_shape(
@@ -462,6 +496,25 @@ def test_path_returns_serialised_path(client: TestClient) -> None:
     # `from` / `to` query params are forwarded positionally.
     assert fake.call_args.args[1:] == ("a", "b")
     assert fake.call_args.kwargs["max_hops"] == 5
+    # #2538: default include_stale=true is forwarded explicitly.
+    assert fake.call_args.kwargs["include_stale"] is True
+
+
+def test_path_forwards_include_stale_false(client: TestClient) -> None:
+    """``?include_stale=false`` (#2538) reaches ``find_path`` as a bool."""
+    key, token = _token(TenantRole.OPERATOR)
+    fake = AsyncMock(return_value=None)
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.find_path", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.get(
+            "/api/v1/topology/path?from=a&to=b&include_stale=false",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 200, resp.text
+    assert fake.call_args.kwargs["include_stale"] is False
 
 
 def test_path_unreachable_returns_200_null(client: TestClient) -> None:
@@ -925,10 +978,43 @@ async def test_annotate_edge_admin_round_trip(client: TestClient) -> None:
     }
 
 
-def test_annotate_edge_unknown_kind_returns_422(client: TestClient) -> None:
-    """Pydantic enum field rejects an unknown ``kind`` before the service runs."""
+def test_annotate_edge_malformed_kind_returns_422(client: TestClient) -> None:
+    """The Pydantic slug pattern rejects a malformed ``kind`` before the service runs.
+
+    T1 #2534: the vocabulary is open — rejection is by slug shape
+    (pattern + length), not membership. Uppercase / punctuated and
+    over-long kinds both 422 at the boundary.
+    """
     key, token = _admin_token_value()
     fake = AsyncMock()
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.annotate_edge", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        for bad_kind in ("Made Up Kind!", "a" * 64):
+            resp = client.post(
+                "/api/v1/topology/edges",
+                headers=_authed(token),
+                json={
+                    "from": {"name": "a"},
+                    "kind": bad_kind,
+                    "to": {"name": "b"},
+                },
+            )
+            assert resp.status_code == 422, bad_kind
+    fake.assert_not_awaited()
+
+
+def test_annotate_edge_novel_kind_passes_boundary(client: TestClient) -> None:
+    """A well-formed novel ``kind`` (`resolves-to`) reaches the service.
+
+    The open-vocabulary counterpart of the malformed-kind 422: the
+    boundary must not re-close the kind space, so a slug outside the
+    well-known set flows through to ``annotate_edge`` verbatim.
+    """
+    key, token = _admin_token_value()
+    fake = AsyncMock(side_effect=NodeNotFoundError("a", None))
     with (
         respx.mock as mock_router,
         patch("meho_backplane.api.v1.topology.annotate_edge", fake),
@@ -939,12 +1025,14 @@ def test_annotate_edge_unknown_kind_returns_422(client: TestClient) -> None:
             headers=_authed(token),
             json={
                 "from": {"name": "a"},
-                "kind": "made-up-kind",
+                "kind": "resolves-to",
                 "to": {"name": "b"},
             },
         )
-    assert resp.status_code == 422
-    fake.assert_not_awaited()
+    # 404 proves the request cleared Pydantic validation and invoked
+    # the (mocked) service with the novel kind.
+    assert resp.status_code == 404
+    assert fake.call_args.args[3] == "resolves-to"
 
 
 def test_annotate_edge_unknown_field_returns_422(client: TestClient) -> None:
@@ -1091,6 +1179,131 @@ def test_unannotate_edge_invalid_uuid_returns_422(client: TestClient) -> None:
     assert resp.status_code == 422
 
 
+# --- DELETE /nodes/{node_id} — 204 + 409 + 404 (#2485) ---------------------
+
+
+def test_delete_node_route_mounted_on_main_app() -> None:
+    """The node-delete route appears on the prod app + OpenAPI doc."""
+    from meho_backplane.main import app
+
+    paths = app.openapi()["paths"]
+    assert "/api/v1/topology/nodes/{node_id}" in paths
+    assert "delete" in paths["/api/v1/topology/nodes/{node_id}"]
+
+
+def test_delete_node_unauthenticated_returns_401(client: TestClient) -> None:
+    resp = client.delete(f"/api/v1/topology/nodes/{uuid.uuid4()}")
+    assert resp.status_code == 401
+
+
+def test_delete_node_operator_returns_403(client: TestClient) -> None:
+    """``operator``-level principal must not hard-delete nodes."""
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{uuid.uuid4()}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 403
+
+
+async def test_delete_node_admin_round_trip(client: TestClient) -> None:
+    """``tenant_admin`` DELETE invokes ``delete_node`` by id, 204 on ok."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    fake = AsyncMock(
+        return_value=DeleteNodeResult(node_id=node_id, kind="vault-role", name="rdc-vault")
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 204, resp.text
+    # The service is keyed on ``node_id``; the path-param surface is id-only.
+    assert fake.call_args.kwargs == {"node_id": node_id}
+
+
+def test_delete_node_probe_owned_returns_409(client: TestClient) -> None:
+    """``NodeNotDeletableError`` maps to 409 ``probe_owned_node``."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    fake = AsyncMock(side_effect=NodeNotDeletableError(node_id, source="auto", target_id=None))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "probe_owned_node"
+    assert detail["node_id"] == str(node_id)
+    assert detail["source"] == "auto"
+    assert detail["target_id"] is None
+
+
+def test_delete_node_has_edges_returns_409_with_edge_ids(client: TestClient) -> None:
+    """``NodeHasLiveEdgesError`` maps to 409 ``node_has_edges`` listing edge ids."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    edge_ids = [uuid.uuid4(), uuid.uuid4()]
+    fake = AsyncMock(side_effect=NodeHasLiveEdgesError(node_id, edge_ids=edge_ids))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "node_has_edges"
+    assert detail["edge_ids"] == [str(e) for e in edge_ids]
+
+
+def test_delete_node_missing_returns_404(client: TestClient) -> None:
+    """``NodeNotFoundForDeleteError`` maps to 404 (cross-tenant id same)."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    fake = AsyncMock(side_effect=NodeNotFoundForDeleteError(node_id))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert detail["error"] == "node_not_found"
+    assert detail["node_id"] == str(node_id)
+
+
+def test_delete_node_invalid_uuid_returns_422(client: TestClient) -> None:
+    """A non-UUID path segment is a 422 — FastAPI rejects before the handler."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            "/api/v1/topology/nodes/not-a-uuid",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 422
+
+
 # --- GET /edges — filters + 409 + serialisation ----------------------------
 
 
@@ -1144,12 +1357,16 @@ def test_list_edges_default_filters(client: TestClient) -> None:
 
 
 def test_list_edges_invalid_kind_returns_422(client: TestClient) -> None:
-    """Pydantic rejects an unknown ``kind`` query param."""
+    """Pydantic rejects a malformed ``kind`` query param (slug pattern).
+
+    T1 #2534: any well-formed slug is a legal filter (the vocabulary
+    is open), so only a shape-violating value 422s here.
+    """
     key, token = _token(TenantRole.OPERATOR)
     with respx.mock as mock_router:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         resp = client.get(
-            "/api/v1/topology/edges?kind=not-a-kind",
+            "/api/v1/topology/edges?kind=Not%20A%20Kind!",
             headers=_authed(token),
         )
     assert resp.status_code == 422

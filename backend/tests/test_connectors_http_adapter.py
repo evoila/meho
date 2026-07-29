@@ -63,6 +63,7 @@ from meho_backplane.connectors.adapters.http import HttpConnector as _HttpConnec
 from meho_backplane.connectors.adapters.http import (
     _build_ca_pinned_ssl_context,
     _ca_pin_digest,
+    _effective_scheme,
     _same_origin,
     _SameOriginRedirectClient,
 )
@@ -99,6 +100,7 @@ def _make_target(
     verify_tls: bool = True,
     tls_ca_pin: str | None = None,
     tls_server_name: str | None = None,
+    extras: dict[str, Any] | None = None,
 ) -> Any:
     """Return a minimal duck-typed Target stub.
 
@@ -111,6 +113,8 @@ def _make_target(
     construction path match a verifying, unpinned target.
     ``tls_server_name`` defaults to ``None`` (#2002) — no SNI / cert-verify
     override, so the dispatch derives the verification name from ``host``.
+    ``extras`` mirrors the model's NOT NULL ``{}`` default (#2587) — no
+    ``scheme`` key, so ``_base_url`` builds an ``https`` URL as before.
     """
     return types.SimpleNamespace(
         name=name,
@@ -122,6 +126,7 @@ def _make_target(
         verify_tls=verify_tls,
         tls_ca_pin=tls_ca_pin,
         tls_server_name=tls_server_name,
+        extras=extras if extras is not None else {},
     )
 
 
@@ -1300,3 +1305,129 @@ def test_same_origin_normalises_default_ports() -> None:
     assert _same_origin(base, plain_http) is False
     # A non-default explicit port is a genuinely different origin.
     assert _same_origin(base, non_default_port) is False
+
+
+# ---------------------------------------------------------------------------
+# Explicit http scheme on HttpConnector targets (#2587)
+# ---------------------------------------------------------------------------
+
+
+def test_base_url_defaults_to_https_and_elides_443() -> None:
+    """No ``extras.scheme`` → https, with the :443 default port elided."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="vc.example.com", port=443)
+    assert conn._base_url(target) == "https://vc.example.com"
+
+
+def test_base_url_honors_explicit_http_scheme_with_port() -> None:
+    """``extras={'scheme':'http'}`` + port 15672 → ``http://host:15672``.
+
+    The RabbitMQ Management API case: plain HTTP on a non-default port must
+    be reachable when the operator opts in via ``extras.scheme``.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="rabbit.example.com", port=15672, extras={"scheme": "http"})
+    assert conn._base_url(target) == "http://rabbit.example.com:15672"
+
+
+def test_base_url_http_elides_default_port_80() -> None:
+    """An explicit http target on port 80 elides the default port."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="plain.example.com", port=80, extras={"scheme": "http"})
+    assert conn._base_url(target) == "http://plain.example.com"
+
+
+def test_base_url_explicit_https_is_identical_to_default() -> None:
+    """``extras={'scheme':'https'}`` behaves exactly like the implicit default."""
+    conn = _ConcreteHttpConnector()
+    explicit = _make_target(host="vc.example.com", port=443, extras={"scheme": "https"})
+    implicit = _make_target(host="vc.example.com", port=443)
+    assert conn._base_url(explicit) == conn._base_url(implicit) == "https://vc.example.com"
+
+
+def test_base_url_https_keeps_non_default_port() -> None:
+    """A non-default https port is preserved (regression guard on elision)."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="vc.example.com", port=8443, extras={"scheme": "https"})
+    assert conn._base_url(target) == "https://vc.example.com:8443"
+
+
+@pytest.mark.parametrize("bad_scheme", ["ftp", "htp", "HTTP", "ws", "", "tcp"])
+def test_base_url_rejects_invalid_scheme(bad_scheme: str) -> None:
+    """An invalid ``extras.scheme`` is refused at use, not silently coerced."""
+    conn = _ConcreteHttpConnector()
+    target = _make_target(extras={"scheme": bad_scheme})
+    with pytest.raises(ValueError, match=r"invalid.*extras\.scheme"):
+        conn._base_url(target)
+
+
+def test_effective_scheme_missing_extras_defaults_https() -> None:
+    """A target whose ``extras`` is absent/non-dict falls back to https."""
+    no_extras = types.SimpleNamespace(name="t")
+    assert _effective_scheme(no_extras) == "https"
+    non_dict = types.SimpleNamespace(name="t", extras=None)
+    assert _effective_scheme(non_dict) == "https"
+
+
+@pytest.mark.asyncio
+async def test_http_scheme_target_dispatches_over_http() -> None:
+    """End-to-end: an http-scheme target's request reaches the http origin.
+
+    Proves the scheme flows through ``_base_url`` into the pooled client and
+    onto the wire — a request against a plain-HTTP management endpoint on
+    :15672 is dispatched over ``http://``, not forced to ``https``.
+    """
+    conn = _ConcreteHttpConnector()
+    target = _make_target(host="rabbit.example.com", port=15672, extras={"scheme": "http"})
+
+    client = await conn._http_client(target)
+    assert str(client.base_url) == "http://rabbit.example.com:15672"
+
+    async with respx.mock(base_url="http://rabbit.example.com:15672") as mock:
+        route = mock.get("/api/overview").respond(200, json={"ok": True})
+        result = await conn._get_json(target, "/api/overview", operator=_make_operator("tok"))
+
+    assert result == {"ok": True}
+    assert route.called
+    assert route.calls[0].request.url.scheme == "http"
+    await conn.aclose()
+
+
+@pytest.mark.asyncio
+async def test_http_target_follows_same_origin_redirect_over_http() -> None:
+    """An http target's same-origin trailing-slash redirect is followed.
+
+    The same-origin redirect comparison keys on the *effective* scheme: an
+    http base URL follows a same-origin http canonicalisation, and a
+    scheme-upgrade to https is treated as cross-origin and refused (so no
+    credential is replayed across the http→https boundary).
+    """
+    seen: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.scheme, request.url.path))
+        if request.url.path == "/api/whoami":
+            return httpx.Response(301, headers={"Location": "/api/whoami/"})
+        return httpx.Response(200, json={"user": "guest"})
+
+    transport = httpx.MockTransport(handler)
+    async with _SameOriginRedirectClient(
+        base_url="http://rabbit.example.com:15672",
+        transport=transport,
+    ) as client:
+        resp = await client.get("/api/whoami")
+
+    assert resp.status_code == 200
+    assert seen == [
+        ("GET", "http", "/api/whoami"),
+        ("GET", "http", "/api/whoami/"),
+    ]
+
+
+def test_same_origin_http_scheme_upgrade_is_cross_origin() -> None:
+    """An http→https redirect on the same host is a different origin."""
+    http_base = httpx.URL("http://rabbit.example.com:15672/api/whoami")
+    https_same_host = httpx.URL("https://rabbit.example.com:15672/api/whoami/")
+    http_same = httpx.URL("http://rabbit.example.com:15672/api/whoami/")
+    assert _same_origin(http_base, https_same_host) is False
+    assert _same_origin(http_base, http_same) is True

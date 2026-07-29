@@ -66,6 +66,7 @@ from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_s
 __all__ = [
     "ConnectorListItem",
     "ConnectorListResponse",
+    "ConnectorScope",
     "ConnectorState",
     "ConnectorStatusFilter",
     "EditGroupBody",
@@ -550,6 +551,23 @@ class IngestResponse(BaseModel):
 ConnectorState = Literal["ingested", "registered"]
 
 
+#: Operator-facing scope discriminator for a connector row.
+#:
+#: #2474. A named projection of ``tenant_id``: ``"builtin"`` for the
+#: global rows every operator sees (``tenant_id IS NULL``), ``"tenant"``
+#: for tenant-curated rows (``tenant_id == <operator tenant>``). The
+#: field is additive and fully derivable from ``tenant_id`` — it exists
+#: because ``connector_id`` encodes only ``(impl_id, version)``, so a
+#: connector ingested once built-in and once tenant-scoped (the #2085
+#: re-ingest trap; default fixed by #2204 in v0.20.0, but legacy rows
+#: persist on live deploys) renders the *same* ``connector_id`` twice.
+#: Without a scope discriminator a consumer counting unique connectors
+#: or picking the row ``call_operation`` resolves cannot tell the two
+#: apart. See :attr:`ConnectorListItem.shadowed_by_tenant_scope` for the
+#: precedence marker that names which of a twin pair actually dispatches.
+ConnectorScope = Literal["builtin", "tenant"]
+
+
 #: Operator-facing authoring-mode discriminator for a connector row.
 #:
 #: G0.28-T6 (#1979). Orthogonal to :data:`ConnectorState` (the
@@ -704,6 +722,27 @@ class ConnectorListItem(BaseModel):
     existing construction call sites (tests, MCP fakes) keep working;
     the listing always sets them explicitly. See
     :data:`ConnectorAuthoringKind`.
+
+    ``scope`` (#2474) is the named projection of ``tenant_id`` —
+    ``"builtin"`` for ``tenant_id IS NULL`` rows, ``"tenant"`` for
+    tenant-curated ones. It is additive and fully derivable from
+    ``tenant_id``, but surfacing it directly lets a consumer key on it
+    without re-deriving. ``shadowed_by_tenant_scope`` is the precedence
+    marker: within a single response, a ``"builtin"`` row carries
+    ``True`` when a ``"tenant"`` row shares its ``connector_id`` — i.e.
+    the built-in copy is *shadowed* by a tenant-scoped twin that
+    :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
+    first (tenant-wins dispatch precedence). The two fields exist because
+    ``connector_id`` encodes only ``(impl_id, version)``, so scope twins
+    from the #2085 re-ingest trap render the same id twice; the marker
+    tells an agent exactly which row ``call_operation`` dispatches to and
+    lets it count unique connectors. Both default to the built-in,
+    unshadowed reading (``scope="builtin"``, ``shadowed_by_tenant_scope
+    =False``) so existing construction call sites (tests, MCP fakes)
+    keep working; the listing sets ``scope`` explicitly per row and
+    stamps ``shadowed_by_tenant_scope`` in a post-pass over the full
+    response. Invariant: within one response no two rows share
+    ``(connector_id, scope)``. See :data:`ConnectorScope`.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -723,6 +762,8 @@ class ConnectorListItem(BaseModel):
     next_step: NextStep | None = None
     kind: ConnectorAuthoringKind = "ingested-shim"
     dispatchable: bool = False
+    scope: ConnectorScope = "builtin"
+    shadowed_by_tenant_scope: bool = False
 
 
 class ConnectorListResponse(BaseModel):

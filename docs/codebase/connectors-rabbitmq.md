@@ -149,6 +149,13 @@ never an exception. `probe` delegates to `fingerprint`.
 - **Read-only by design.** No write/admin ops (create/delete shovel,
   set policy, …) — those would be a separate approval-gated G3.x write
   surface, not part of this connector.
+- **Plain-HTTP brokers need `extras.scheme`.** `HttpConnector` dials
+  `https` by default, so a broker whose Management API is HTTP-only on
+  `15672` (the common default — HTTPS on `15671` only when the mgmt TLS
+  listener is enabled) is unreachable until the operator opts in by
+  setting `extras: {"scheme": "http"}` on the target (#2587). The scheme
+  is validated to `http`/`https` at dispatch and is orthogonal to
+  `verify_tls` (certificate trust vs. transport selection).
 
 ## References
 

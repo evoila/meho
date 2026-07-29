@@ -189,12 +189,15 @@ async def tasks_recent_impl(
     Reads, directly on the connector session (no ``dispatch_child``, no
     ingested descriptor):
 
-    1. ``POST .../RetrievePropertiesEx`` (mounted) reading
+    1. ``POST .../RetrievePropertiesEx`` reading
        ``TaskManager.recentTask`` -- the recent Task MoRefs.
-    2. ``POST .../RetrievePropertiesEx`` (mounted) reading ``Task.info``
+    2. ``POST .../RetrievePropertiesEx`` reading ``Task.info``
        on those MoRefs (capped at ``max_tasks``) -- a single round trip.
 
-    Both calls route through :meth:`VmwareRestConnector.mount_op_path`.
+    Both vmomi reads route through
+    :meth:`VmwareRestConnector._post_vmomi_json`, which mounts them on the
+    documented VI-JSON base ``/sdk/vim25/{release}`` (single ``/api``
+    fallback) so they resolve on vCenter 8.0.x instead of 404ing (#2466).
     Returns ``{"tasks": [{task, operation, entity, entity_type,
     entity_name, state, progress, cancelled, queue_time, start_time,
     complete_time, error_message}, ...]}``, most recent as vCenter orders
@@ -204,18 +207,20 @@ async def tasks_recent_impl(
     if not isinstance(max_tasks, int) or isinstance(max_tasks, bool) or max_tasks < 1:
         max_tasks = _DEFAULT_MAX_TASKS
 
-    props_path = await connector.mount_op_path(target, _RETRIEVE_PROPERTIES_PATH, operator)
-    recent_result = await connector._post_json(
-        target, props_path, operator=operator, json=build_recent_tasks_retrieve_params()
+    recent_result = await connector._post_vmomi_json(
+        target,
+        _RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=build_recent_tasks_retrieve_params(),
     )
     task_moids = _extract_recent_task_moids(recent_result)[:max_tasks]
     if not task_moids:
         _log.info("vmware_tasks_recent_read", target=target.name, task_count=0)
         return {"tasks": []}
 
-    info_result = await connector._post_json(
+    info_result = await connector._post_vmomi_json(
         target,
-        props_path,
+        _RETRIEVE_PROPERTIES_PATH,
         operator=operator,
         json=build_task_info_retrieve_params(task_moids),
     )

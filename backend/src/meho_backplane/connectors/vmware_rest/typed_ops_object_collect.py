@@ -147,9 +147,13 @@ async def object_collect_impl(
     ingested descriptor):
 
     1. ``POST .../PropertyCollector/propertyCollector/RetrievePropertiesEx``
-       (mounted) requesting the caller's ``properties`` on the single
-       ``(type, moid)`` object. Load-bearing: a failure raises and the
-       dispatcher records it as a ``connector_error``.
+       requesting the caller's ``properties`` on the single ``(type,
+       moid)`` object, mounted on the documented VI-JSON base
+       ``/sdk/vim25/{release}`` via
+       :meth:`VmwareRestConnector._post_vmomi_json` (single ``/api``
+       fallback) so it resolves on vCenter 8.0.x instead of 404ing
+       (#2466). Load-bearing: a failure raises and the dispatcher records
+       it as a ``connector_error``.
 
     The size / depth bound is enforced upstream by ``parameter_schema``
     validation in the dispatcher, so by the time this runs ``params`` is
@@ -163,10 +167,9 @@ async def object_collect_impl(
     moid = params["moid"]
     properties: list[str] = list(params["properties"])
 
-    props_path = await connector.mount_op_path(target, _RETRIEVE_PROPERTIES_PATH, operator)
-    result = await connector._post_json(
+    result = await connector._post_vmomi_json(
         target,
-        props_path,
+        _RETRIEVE_PROPERTIES_PATH,
         operator=operator,
         json=build_object_collect_retrieve_params(mo_type, moid, properties),
     )

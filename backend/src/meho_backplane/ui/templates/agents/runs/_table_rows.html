@@ -44,13 +44,28 @@
   {% if rows %}
     {% for row in rows %}
       <tr data-run-id="{{ row.run_id }}">
-        <td class="font-mono text-xs">{{ row.run_id[:8] }}…</td>
+        <td class="font-mono text-xs">
+          <a
+            href="/ui/agents/runs/{{ row.run_id }}"
+            class="link link-primary"
+            aria-label="View run {{ row.run_id }}"
+          >{{ row.run_id[:8] }}…</a>
+        </td>
         <td>
           <span class="badge {{ row.status_badge }} badge-sm">{{ row.status }}</span>
           {% if row.is_awaiting_approval %}
             {# A run parked on a policy-gated tool call deep-links to the
                approvals queue so an operator can act on it (T7). #}
             <a href="/ui/approvals" class="link link-primary text-xs ml-1" aria-label="Review pending approval">review &rarr;</a>
+          {% endif %}
+        </td>
+        <td class="text-xs">
+          {% if row.agent_name %}
+            <span class="font-medium">{{ row.agent_name }}</span>
+          {% else %}
+            {# Ad-hoc run, or the producing definition was deleted after the
+               run: no agent back-link to render (#2472). #}
+            <span class="opacity-40">—</span>
           {% endif %}
         </td>
         <td><span class="badge badge-ghost badge-sm">{{ row.trigger }}</span></td>
@@ -97,7 +112,7 @@
     {% endfor %}
   {% else %}
     <tr>
-      <td colspan="9" class="text-center text-sm opacity-60 py-6">
+      <td colspan="10" class="text-center text-sm opacity-60 py-6">
         No agent runs match the current filter.
       </td>
     </tr>

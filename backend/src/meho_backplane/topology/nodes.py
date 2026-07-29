@@ -25,11 +25,14 @@ the bootstrap gap. It mirrors the
   ``graph_node_tenant_kind_name_idx`` unique key drives the lookup;
   a repeat call refreshes ``last_seen`` + merges ``properties`` instead
   of erroring with a unique-constraint violation. Manual seeds set
-  ``discovered_by=operator.sub`` (the operator is the canonical author);
-  an idempotent re-seed of an already-curated row keeps that author,
-  while a re-seed over an auto-discovered row promotes
-  ``discovered_by`` to the operator (same shape as
-  :func:`annotate_edge`'s auto→curated promotion).
+  ``source='curated'`` + ``discovered_by=operator.sub`` (the operator
+  is the canonical author); an idempotent re-seed of an
+  already-curated row keeps that author, while a re-seed over an
+  auto-discovered row promotes it to ``source='curated'`` +
+  ``discovered_by=operator.sub`` (same shape as
+  :func:`annotate_edge`'s auto→curated promotion; #2536). The
+  ``source`` column is what the refresh service keys its curated-node
+  durability discipline on.
 * **Audit + broadcast.** One ``audit_log`` row (``op_id=
   'topology.create_node'``, ``op_class='write'``) + one broadcast event
   per call. ``op_class`` is set explicitly: ``.create_node`` is not in
@@ -60,13 +63,19 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
-    _GRAPH_NODE_KINDS,
+    KIND_SLUG_MAX_LENGTH,
+    KIND_SLUG_MIN_LENGTH,
+    KIND_SLUG_PATTERN,
+    WELL_KNOWN_NODE_KINDS,
     AuditLog,
     GraphHistoryChangeKind,
     GraphNode,
+    is_valid_kind_slug,
 )
+from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.topology.history import node_snapshot, record_node_change
 
 if TYPE_CHECKING:
@@ -115,21 +124,24 @@ _CREATE_NODE_HEARTBEAT_PROPERTY_KEYS: tuple[str, ...] = ("seeded_at",)
 
 
 class InvalidNodeKindError(ValueError):
-    """The supplied ``kind`` is not in the v0.2 ``_GRAPH_NODE_KINDS`` vocabulary.
+    """The supplied ``kind`` is not a valid kind slug.
 
     Raised by :func:`create_or_get_node` before any DB write — the
-    closed enum is the policy-layer grammar's first guard rail and
-    failing here avoids a more obscure DB ``CHECK ck_graph_node_kind``
-    violation later. The MCP layer maps it to a JSON-RPC ``-32602``
-    with the candidate list echoed in the message; the REST layer (when
-    one lands) would map it to a 422.
+    slug grammar (T1 #2534's open vocabulary) is the first guard rail
+    and failing here avoids a more obscure DB ``CHECK
+    ck_graph_node_kind`` violation later. The MCP layer maps it to a
+    JSON-RPC ``-32602`` with the pattern and the well-known suggestions
+    echoed in the message; the REST layer (when one lands) would map it
+    to a 422.
     """
 
     def __init__(self, kind: str) -> None:
         self.kind = kind
         super().__init__(
-            f"node kind {kind!r} is not in the v0.2 vocabulary; "
-            f"valid kinds: {list(_GRAPH_NODE_KINDS)!r}"
+            f"node kind {kind!r} is not a valid kind slug (pattern "
+            f"{KIND_SLUG_PATTERN}, {KIND_SLUG_MIN_LENGTH}-"
+            f"{KIND_SLUG_MAX_LENGTH} chars); well-known kinds: "
+            f"{sorted(WELL_KNOWN_NODE_KINDS)!r}"
         )
 
 
@@ -151,15 +163,17 @@ class CreateNodeResult:
 
 
 def _validate_kind(kind: str) -> str:
-    """Validate ``kind`` against :data:`_GRAPH_NODE_KINDS`; return the value.
+    """Validate ``kind`` against the open slug grammar; return the value.
 
-    Mirrors :func:`annotate._validate_kind`'s shape — the closed enum
+    Mirrors :func:`annotate._validate_kind`'s shape — the slug check
     is the first guard rail, failing here avoids a more obscure DB
-    ``CHECK`` violation later. Returns the canonical string (the
-    constant itself, not the raw input) so subsequent code uses the
-    vocabulary value, not whatever the caller typed.
+    ``CHECK`` violation later. Any slug matching
+    :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN` (2-63 chars)
+    is accepted (T1 #2534's open vocabulary); membership in
+    :data:`~meho_backplane.db.models.WELL_KNOWN_NODE_KINDS` is a
+    documentation convention, not a gate.
     """
-    if kind not in _GRAPH_NODE_KINDS:
+    if not is_valid_kind_slug(kind):
         raise InvalidNodeKindError(kind)
     return kind
 
@@ -210,6 +224,7 @@ def _build_audit_row(
         id=audit_id,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
+        actor_sub=resolve_actor_sub(),
         tenant_id=operator.tenant_id,
         target_id=target_id,
         method=_AUDIT_METHOD,
@@ -266,6 +281,7 @@ async def _publish(
     a successful create_or_get.
     """
     try:
+        lineage = resolve_broadcast_lineage()
         event = BroadcastEvent(
             event_id=uuid.uuid4(),
             ts=datetime.now(UTC),
@@ -278,6 +294,9 @@ async def _publish(
             result_status="ok",
             audit_id=audit_id,
             payload=payload,
+            actor_sub=lineage.actor_sub,
+            agent_session_id=lineage.agent_session_id,
+            work_ref=lineage.work_ref,
         )
         await publish_event(event)
     except Exception:
@@ -288,6 +307,9 @@ async def _publish(
         )
 
 
+# code-quality-allow: pre-existing >100-line function (210 lines on
+# main, ~140 of them contract docstring); #2536 adds only the
+# source='curated' stamp + promotion flip.
 async def create_or_get_node(
     session: AsyncSession,
     operator: Operator,
@@ -305,27 +327,28 @@ async def create_or_get_node(
     :func:`~meho_backplane.topology.annotate.annotate_edge` to assert
     the cross-system edge between them.
 
-    Validates ``kind`` against the closed
-    :data:`~meho_backplane.db.models._GRAPH_NODE_KINDS` vocabulary
-    *before* any DB write — raises :class:`InvalidNodeKindError` so a
-    typo never reaches the DB-layer CHECK.
+    Validates ``kind`` against the open slug grammar
+    (:data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`) *before* any
+    DB write — raises :class:`InvalidNodeKindError` so a malformed
+    kind never reaches the DB-layer CHECK.
 
     Idempotency keyed on the unique
     ``graph_node_tenant_kind_name_idx`` (``(tenant_id, kind, name)``):
 
-    * **Absent row** → insert with ``discovered_by=operator.sub``
+    * **Absent row** → insert with ``source='curated'`` +
+      ``discovered_by=operator.sub``
       (operator is the canonical author for manual seeds),
       ``target_id=None`` (manual seeds reference targets by separate
-      annotation; the refresh service is the only path that adopts a
-      node onto a target), ``properties = {note, evidence_url,
+      annotation; the refresh service adopts only auto nodes onto a
+      target), ``properties = {note, evidence_url,
       seeded_by, seeded_at}``, ``first_seen = last_seen = now``.
     * **Existing row** → merge the four manual-seed property keys
       (``note``, ``evidence_url``, ``seeded_by``, ``seeded_at``) onto
       the existing ``properties`` JSONB (auto-discovered keys like
       ``status``, ``phase`` are preserved), refresh ``last_seen``,
-      promote ``discovered_by`` to the operator iff the existing row
-      was probe-derived (mirrors the
-      :func:`annotate_edge` auto→curated promotion). Returns
+      promote to ``source='curated'`` + ``discovered_by=operator.sub``
+      iff the existing row was probe-derived (mirrors the
+      :func:`annotate_edge` auto→curated promotion; #2536). Returns
       ``was_created=False``.
 
     Writes one ``audit_log`` row (``op_id='topology.create_node'``,
@@ -358,9 +381,12 @@ async def create_or_get_node(
             audit attribution. Role gating (``tenant_admin``) is the
             front layer's job (MCP / REST); the service trusts its
             caller.
-        kind: One of the v0.2
-            :data:`~meho_backplane.db.models._GRAPH_NODE_KINDS` values.
-            Wrong value raises :class:`InvalidNodeKindError`.
+        kind: Any slug matching
+            :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`
+            (2-63 chars); prefer a
+            :data:`~meho_backplane.db.models.WELL_KNOWN_NODE_KINDS`
+            member when one fits. A malformed slug raises
+            :class:`InvalidNodeKindError`.
         name: ``graph_node.name``. Must be non-empty (the MCP
             inputSchema enforces ``minLength=1`` before the call).
         note: Optional free-text annotation. Stored on
@@ -374,8 +400,7 @@ async def create_or_get_node(
         row + ``was_created`` flag.
 
     Raises:
-        InvalidNodeKindError: ``kind`` not in
-            :data:`_GRAPH_NODE_KINDS`.
+        InvalidNodeKindError: ``kind`` is not a valid kind slug.
     """
     canonical_kind = _validate_kind(kind)
     # Pre-allocate ``audit_id`` so the history row's ``audit_id``
@@ -410,6 +435,7 @@ async def create_or_get_node(
                 kind=canonical_kind,
                 name=name,
                 target_id=None,
+                source="curated",
                 properties=dict(seed_props),
                 discovered_by=operator.sub,
                 first_seen=now,
@@ -437,15 +463,18 @@ async def create_or_get_node(
                 merged[key] = value
             existing.properties = merged
             existing.last_seen = now
-            # Promote ``discovered_by`` iff the row was probe-derived.
-            # An auto-discovered row that the operator now seeds
-            # becomes operator-authored from this call onward — same
-            # shape as :func:`annotate_edge`'s auto→curated promotion.
-            # The promoted node is still recognized by future refresh
-            # cycles (refresh keys on ``(tenant_id, kind, name)``, not
-            # on ``discovered_by``) but the audit trail credits the
-            # operator as the canonical author.
-            if existing.discovered_by not in {operator.sub}:
+            # Promote the row to ``source='curated'`` iff it was
+            # probe-derived, and credit the operator as the canonical
+            # author — same shape as :func:`annotate_edge`'s
+            # auto→curated promotion (#2536). From this call onward
+            # the refresh service treats the node as operator-owned:
+            # a probe re-observation bumps ``last_seen`` only (no
+            # property overwrite, no ``target_id`` adoption) and no
+            # refresh soft-deletes it. The promoted node is still
+            # recognized by future refresh cycles (refresh keys on
+            # ``(tenant_id, kind, name)``, not on ``source``).
+            if existing.source != "curated":
+                existing.source = "curated"
                 existing.discovered_by = operator.sub
             node = existing
             was_created = False

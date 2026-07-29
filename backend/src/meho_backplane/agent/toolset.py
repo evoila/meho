@@ -72,13 +72,14 @@ must not break an older runtime.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
 from pydantic_ai import ModelRetry, RunContext, Tool
 
 from meho_backplane.agent.approval_wait import resume_or_surface_awaiting_approval
+from meho_backplane.agent.meta_tool import MetaToolSpec
+from meho_backplane.agent.toolset_broadcast import build_broadcast_meta_tools
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.mcp.registry import role_at_least
 from meho_backplane.operations.meta_tools import (
@@ -98,54 +99,6 @@ __all__ = [
 
 _log = structlog.get_logger(__name__)
 
-#: The shape of a handler the agent meta-tools adapt: the existing
-#: ``(operator, arguments) -> dict`` MEHO meta-tool signature shared by the
-#: REST, MCP, and CLI surfaces. The adapter repacks the framework's
-#: ``RunContext``-first, keyword-only tool call onto this shape.
-_MetaToolHandler = Callable[[Operator, dict[str, Any]], Awaitable[dict[str, Any]]]
-
-
-class MetaToolSpec:
-    """One meta-tool's agent-facing wiring: handler + schema + role floor.
-
-    The agent front-end's source of truth for *its* tool surface, parallel
-    to the MCP front-end's :func:`~meho_backplane.mcp.registry.register_mcp_tool`
-    registrations in :mod:`meho_backplane.mcp.tools.operations`. Both adapt
-    the same handlers in :mod:`meho_backplane.operations.meta_tools`; neither
-    is a wrapper around the other (the CLAUDE.md dual-front-end contract).
-
-    Fields:
-
-    * ``name`` — the tool name the model sees (matches the MCP tool name so
-      a definition author's allow-list reads identically across surfaces).
-    * ``handler`` — the ``(operator, arguments) -> dict`` meta-tool handler.
-    * ``description`` — the model-facing prompt for *when* to call the tool.
-    * ``parameter_schema`` — JSON Schema 2020-12 for the tool's arguments;
-      the framework advertises it to the model. The dispatcher re-validates
-      ``call_operation`` params against the descriptor's own
-      ``parameter_schema`` (defence in depth — the agent-tool schema only
-      shapes the meta-tool *arguments*, not the per-op params).
-    * ``required_role`` — the :class:`TenantRole` floor; the identity must
-      meet it (via :func:`role_at_least`) for the tool to register.
-    """
-
-    __slots__ = ("description", "handler", "name", "parameter_schema", "required_role")
-
-    def __init__(
-        self,
-        *,
-        name: str,
-        handler: _MetaToolHandler,
-        description: str,
-        parameter_schema: dict[str, Any],
-        required_role: TenantRole,
-    ) -> None:
-        self.name = name
-        self.handler = handler
-        self.description = description
-        self.parameter_schema = parameter_schema
-        self.required_role = required_role
-
 
 #: Argument key on the ``call_operation`` meta-tool that names the connector
 #: the dispatch targets. Lifted to a constant so the connector allow-list
@@ -153,13 +106,15 @@ class MetaToolSpec:
 _CONNECTOR_ID_ARG = "connector_id"
 
 
-#: The agent meta-tool catalog. Three meta-tools form the agent's working
+#: The connector-execution meta-tools. These three form the agent's working
 #: surface over the G0.6 substrate (CLAUDE.md "the load-bearing pattern":
 #: pick connector → list operation groups → search operations → call). The
 #: parameter schemas mirror the canonical MCP ``inputSchema`` fragments in
 #: :mod:`meho_backplane.mcp.tools.operations`; the descriptions are the
-#: model's prompt for when to reach for each tool.
-_META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
+#: model's prompt for when to reach for each tool. The full
+#: :data:`_META_TOOL_CATALOG` appends the broadcast coordination tools built
+#: by :func:`_build_broadcast_meta_tools`.
+_OPERATIONS_META_TOOLS: tuple[MetaToolSpec, ...] = (
     MetaToolSpec(
         name="list_operation_groups",
         handler=list_operation_groups,
@@ -247,6 +202,16 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
         },
         required_role=TenantRole.OPERATOR,
     ),
+)
+
+
+#: The full agent meta-tool catalog: the connector-execution tools plus the
+#: broadcast coordination tools (#2548,
+#: :mod:`meho_backplane.agent.toolset_broadcast`). Catalog order is the order
+#: tools are advertised to the model.
+_META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
+    *_OPERATIONS_META_TOOLS,
+    *build_broadcast_meta_tools(),
 )
 
 #: The set of meta-tool names the agent surface knows about. Public so a

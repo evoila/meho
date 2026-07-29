@@ -67,6 +67,9 @@
           hx-target="#corpus-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#corpus-search-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="flex flex-col gap-3 sm:flex-row sm:items-end"
           role="search"
           aria-label="Search the docs corpus"
@@ -157,6 +160,13 @@
             {{ icon("search") }}
             Go
           </button>
+          {#- In-flight feedback (#2459): the Ask pipeline can take many seconds;
+              the spinner shows progress and Go disables while in flight. -#}
+          <span
+            id="corpus-search-spinner"
+            class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+            aria-label="Searching the corpus"
+          ></span>
         </form>
       {% elif entitlement_diagnostic %}
         {# A corpus EXISTS but the resolved session identity is missing the

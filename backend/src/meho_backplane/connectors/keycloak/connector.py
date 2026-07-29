@@ -432,6 +432,7 @@ class KeycloakConnector(HttpConnector):
                     "Content-Type": "application/x-www-form-urlencoded",
                     "Accept": "application/json",
                 },
+                extensions=self._request_extensions(target),
             )
             resp.raise_for_status()
             payload = resp.json()

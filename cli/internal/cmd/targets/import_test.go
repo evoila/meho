@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -265,6 +266,99 @@ func TestMapEntryTLSTrustTopLevelStillSpillsUnknown(t *testing.T) {
 	}
 }
 
+func TestMapEntryTLSServerNameIsTopLevel(t *testing.T) {
+	t.Parallel()
+	// #2002 shipped tls_server_name as a first-class TargetCreate /
+	// TargetUpdate column: the per-target SNI / cert-verification
+	// hostname, decoupled from `host`. It must land in the body root,
+	// NOT in extras — spilling leaves the typed column NULL, dispatch
+	// keeps deriving the SNI from `host`, and an appliance reached by
+	// IP with an FQDN-only SAN fails with connector_tls_verify_failed
+	// despite the descriptor naming the right hostname (#2643).
+	body, warnings := mapEntry(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"product":         "vmware-rest",
+		"host":            "10.20.30.40",
+		"tls_server_name": "sddc-manager.evba.lab",
+	})
+	if len(warnings) != 0 {
+		t.Errorf("warnings: got %v; want none", warnings)
+	}
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
+		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	}
+	if extras, ok := body["extras"].(map[string]any); ok {
+		if _, leaked := extras["tls_server_name"]; leaked {
+			t.Errorf("tls_server_name leaked into extras: %v", extras)
+		}
+	}
+}
+
+func TestEntryToUpdateBodyTLSServerNameIsTopLevel(t *testing.T) {
+	t.Parallel()
+	// `meho targets import --update` routes through entryToUpdateBody.
+	// tls_server_name must reach the sparse PATCH body's top level so a
+	// descriptor re-import flips the typed column; an explicit null
+	// clears the override and returns the target to deriving the SNI
+	// from `host` (TargetUpdate's documented clear semantics).
+	body, _ := entryToUpdateBody(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"tls_server_name": "sddc-manager.evba.lab",
+	})
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
+		t.Errorf("tls_server_name top-level on update: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	}
+	if extras, ok := body["extras"].(map[string]any); ok {
+		if _, leaked := extras["tls_server_name"]; leaked {
+			t.Errorf("tls_server_name leaked into extras on update: %v", extras)
+		}
+	}
+
+	cleared, _ := entryToUpdateBody(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"tls_server_name": nil, // clearing the override is an explicit-null PATCH
+	})
+	v, ok := cleared["tls_server_name"]
+	if !ok {
+		t.Errorf("tls_server_name missing from update body; want top-level null: %v", cleared)
+	}
+	if v != nil {
+		t.Errorf("tls_server_name cleared value: got %v; want nil", v)
+	}
+}
+
+func TestMapEntryTLSServerNameStillSpillsUnknown(t *testing.T) {
+	t.Parallel()
+	// No-regression guard: adding tls_server_name to knownTopLevel must
+	// not change the extras-spill behaviour for genuinely-unknown keys,
+	// and it must compose with the sibling TLS-trust columns (the server
+	// has no mutual-exclusion validator between them).
+	body, _ := mapEntry(map[string]any{
+		"name":            "vcf-sddc-manager",
+		"product":         "vmware-rest",
+		"host":            "10.20.30.40",
+		"verify_tls":      true,
+		"tls_server_name": "sddc-manager.evba.lab",
+		"sso_realm":       "evba.lab", // unknown → spill
+	})
+	if v, ok := body["tls_server_name"]; !ok || v != "sddc-manager.evba.lab" {
+		t.Errorf("tls_server_name top-level: got %v (present=%t); want sddc-manager.evba.lab", v, ok)
+	}
+	if v, ok := body["verify_tls"]; !ok || v != true {
+		t.Errorf("verify_tls top-level: got %v (present=%t); want true", v, ok)
+	}
+	extras, ok := body["extras"].(map[string]any)
+	if !ok {
+		t.Fatalf("extras: got %T; want map[string]any (unknown key should spill)", body["extras"])
+	}
+	if extras["sso_realm"] != "evba.lab" {
+		t.Errorf("extras.sso_realm: got %v; want evba.lab", extras["sso_realm"])
+	}
+	if _, leaked := extras["tls_server_name"]; leaked {
+		t.Errorf("tls_server_name must not be in extras: %v", extras)
+	}
+}
+
 func TestMapEntryExplicitExtrasMergesWithSpilled(t *testing.T) {
 	t.Parallel()
 	body, _ := mapEntry(map[string]any{
@@ -388,6 +482,81 @@ func TestDryRunPlanExistingRendersUpdateNewRendersCreate(t *testing.T) {
 	}
 }
 
+// TestListExistingNamesReadsTheListEnvelope pins #2577: the existence
+// check decodes the `{items, next_cursor}` envelope `GET
+// /api/v1/targets` has returned since #2338 converged it off the
+// v0.8.0 bare array. The bare-array subtest is the regression guard
+// proper — it is the body the pre-#2577 decoder wanted and the shipped
+// backplane no longer emits, so it must now be a hard decode error
+// rather than a silently-empty existence set (which would plan CREATE
+// for every existing target and fail apply on a 409).
+func TestListExistingNamesReadsTheListEnvelope(t *testing.T) {
+	t.Parallel()
+
+	t.Run("envelope body yields the names", func(t *testing.T) {
+		t.Parallel()
+		f := &fakeDoer{existing: []string{"rdc-vault", "rdc-vcenter"}}
+		got, err := listExistingNames(context.Background(), f.do)
+		if err != nil {
+			t.Fatalf("listExistingNames: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("names: %v; want rdc-vault + rdc-vcenter", got)
+		}
+		for _, want := range []string{"rdc-vault", "rdc-vcenter"} {
+			if _, ok := got[want]; !ok {
+				t.Errorf("missing %q from %v", want, got)
+			}
+		}
+	})
+
+	t.Run("bare-array body is a decode error", func(t *testing.T) {
+		t.Parallel()
+		bareArray := func(_ context.Context, _, _ string, _ []byte) ([]byte, error) {
+			return []byte(`[{"name": "rdc-vault"}]`), nil
+		}
+		got, err := listExistingNames(context.Background(), bareArray)
+		if err == nil {
+			t.Fatalf("bare-array body decoded cleanly into %v; want a decode error", got)
+		}
+		if !strings.Contains(err.Error(), "decode list response") {
+			t.Errorf("error = %v; want it to name the decode step", err)
+		}
+	})
+}
+
+// TestListExistingNamesPaginatesOnNextCursor pins that the walk is
+// driven by `next_cursor` rather than a page-length heuristic: three
+// names at one row per page must collect all three across three pages
+// and stop on the null cursor. The old `len(page) < limit` check
+// mis-decides the exact-multiple final page, which is why the route
+// over-fetches `limit + 1` and hands back an authoritative cursor.
+func TestListExistingNamesPaginatesOnNextCursor(t *testing.T) {
+	t.Parallel()
+	f := &fakeDoer{
+		existing: []string{"rdc-vault", "rdc-vcenter", "rdc-argocd"},
+		pageSize: 1,
+	}
+	got, err := listExistingNames(context.Background(), f.do)
+	if err != nil {
+		t.Fatalf("listExistingNames: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("names: %v; want all three across pages", got)
+	}
+	for _, want := range []string{"rdc-vault", "rdc-vcenter", "rdc-argocd"} {
+		if _, ok := got[want]; !ok {
+			t.Errorf("missing %q from %v", want, got)
+		}
+	}
+	// Three single-row pages: the third reports next_cursor null and
+	// ends the walk, so a fourth request would mean length-based
+	// termination crept back in.
+	if f.listPages != 3 {
+		t.Errorf("listPages = %d; want 3 (one per row, terminating on the null cursor)", f.listPages)
+	}
+}
+
 // --- buildLivePlan + listExistingNames ---------------------------------
 
 // fakeDoer records calls and serves canned responses. It substitutes
@@ -396,6 +565,7 @@ func TestDryRunPlanExistingRendersUpdateNewRendersCreate(t *testing.T) {
 // covered by cli/internal/auth's own tests.
 type fakeDoer struct {
 	existing  []string // names returned by listExistingNames
+	pageSize  int      // rows per list page; 0 serves every name at once
 	listPages int      // bumped each time the GET handler fires
 	creates   []recorded
 	updates   []recorded
@@ -410,17 +580,8 @@ type recorded struct {
 func (f *fakeDoer) do(_ context.Context, method, path string, body []byte) ([]byte, error) {
 	switch method {
 	case http.MethodGet:
-		// Pagination: any cursor query → empty second page.
-		if strings.Contains(path, "cursor=") {
-			return []byte(`[]`), nil
-		}
 		f.listPages++
-		out := []map[string]any{}
-		for _, n := range f.existing {
-			out = append(out, map[string]any{"name": n})
-		}
-		raw, _ := json.Marshal(out)
-		return raw, nil
+		return f.listPage(path)
 	case http.MethodPost:
 		f.creates = append(f.creates, recorded{Method: method, Path: path, Body: append([]byte(nil), body...)})
 		return []byte(`{}`), nil
@@ -429,6 +590,50 @@ func (f *fakeDoer) do(_ context.Context, method, path string, body []byte) ([]by
 		return []byte(`{}`), nil
 	}
 	return nil, &httpError{StatusCode: http.StatusMethodNotAllowed, Body: "fakeDoer: method " + method}
+}
+
+// listPage serves one keyset page of the `{items, next_cursor}`
+// envelope `GET /api/v1/targets` returns, mirroring the route's
+// contract rather than a shape convenient to the fake: rows are
+// ordered by name, `cursor` is exclusive (`name > cursor`), and
+// `next_cursor` is the page's last name when further rows remain and
+// null when they don't — the route proves "further rows" by
+// over-fetching `limit + 1`, never by page length. See
+// backend/src/meho_backplane/api/v1/targets.py:950-970.
+//
+// The fake serving the real envelope is the point: the bare-array
+// body this replaced is what let #2338 ship a broken import verb past
+// a green suite (#2577).
+func (f *fakeDoer) listPage(rawPath string) ([]byte, error) {
+	names := append([]string(nil), f.existing...)
+	sort.Strings(names)
+
+	u, err := url.Parse(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	if cursor := u.Query().Get("cursor"); cursor != "" {
+		i := sort.SearchStrings(names, cursor)
+		if i < len(names) && names[i] == cursor {
+			i++
+		}
+		names = names[i:]
+	}
+
+	page := names
+	if f.pageSize > 0 && f.pageSize < len(names) {
+		page = names[:f.pageSize]
+	}
+
+	items := make([]map[string]any, 0, len(page))
+	for _, n := range page {
+		items = append(items, map[string]any{"name": n})
+	}
+	envelope := map[string]any{"items": items, "next_cursor": nil}
+	if len(names) > len(page) {
+		envelope["next_cursor"] = page[len(page)-1]
+	}
+	return json.Marshal(envelope)
 }
 
 func TestBuildLivePlanPartitionsCreateAndUpdate(t *testing.T) {
@@ -525,7 +730,7 @@ targets:
 			t.Errorf("dry-run issued a %s; want only GET", r.Method)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -570,7 +775,7 @@ targets:
 		}
 		w.Header().Set("Content-Type", "application/json")
 		// Existing tenant target with the same name → must plan UPDATE.
-		_, _ = w.Write([]byte(`[{"name":"rdc-vault"}]`))
+		_, _ = w.Write([]byte(`{"items":[{"name":"rdc-vault"}],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -614,7 +819,7 @@ targets:
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/targets", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
+		_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -664,7 +869,7 @@ targets:
 		case http.MethodGet:
 			gets.Add(1)
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`[]`))
+			_, _ = w.Write([]byte(`{"items":[],"next_cursor":null}`))
 		default:
 			// Any POST/PATCH on the collection is a write — dry-run
 			// must never reach here.

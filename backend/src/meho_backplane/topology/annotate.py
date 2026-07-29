@@ -20,9 +20,11 @@ off — they own:
    impossible by construction (the resolver scopes on
    ``operator.tenant_id``).
 
-2. **Kind validation** against :class:`GraphEdgeKind` (#593). The closed
-   v0.2 ten-kind vocabulary is the load-bearing modeling decision; a
-   typo'd / made-up kind never reaches the DB-layer CHECK.
+2. **Kind validation** against the open slug grammar
+   (:data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`, T1 #2534). Any
+   lowercase slug (2-63 chars) is a valid edge kind; the ten
+   :class:`GraphEdgeKind` members survive as the documented well-known
+   set. A malformed kind never reaches the DB-layer CHECK.
 
 3. **Idempotent upsert** keyed on
    ``graph_edge_tenant_endpoints_kind_idx`` (``(tenant_id,
@@ -81,14 +83,20 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from sqlalchemy import select
 
+from meho_backplane.auth.delegation import resolve_actor_sub
 from meho_backplane.broadcast import BroadcastEvent, publish_event
 from meho_backplane.db.models import (
+    KIND_SLUG_MAX_LENGTH,
+    KIND_SLUG_MIN_LENGTH,
+    KIND_SLUG_PATTERN,
     AuditLog,
     GraphEdge,
     GraphEdgeKind,
     GraphHistoryChangeKind,
     GraphNode,
+    is_valid_kind_slug,
 )
+from meho_backplane.operations._audit import resolve_broadcast_lineage
 from meho_backplane.topology.history import (
     edge_snapshot,
     record_edge_change,
@@ -109,6 +117,7 @@ __all__ = [
     "UnannotateSelectorError",
     "annotate_edge",
     "annotate_edge_in_txn",
+    "annotate_edge_with_plan",
     "unannotate_edge",
 ]
 
@@ -176,20 +185,23 @@ class NodeRef:
 
 
 class InvalidEdgeKindError(ValueError):
-    """The supplied ``kind`` is not in the v0.2 :class:`GraphEdgeKind` enum.
+    """The supplied ``kind`` is not a valid kind slug.
 
-    Raised by :func:`annotate_edge` before any DB write — the closed
-    enum is the policy-layer grammar's first guard rail. The API layer
-    maps it to a 422 with the supplied value and the candidate list in
-    ``detail``; CLI maps it to a usage error with the same candidate
-    list.
+    Raised by :func:`annotate_edge` before any DB write — the slug
+    grammar (T1 #2534's open vocabulary) is the first guard rail. The
+    API layer maps it to a 422 with the supplied value, the pattern,
+    and the well-known suggestions in ``detail``; CLI maps it to a
+    usage error with the same hints.
     """
 
     def __init__(self, kind: str) -> None:
         self.kind = kind
-        valid = sorted(k.value for k in GraphEdgeKind)
+        well_known = sorted(k.value for k in GraphEdgeKind)
         super().__init__(
-            f"edge kind {kind!r} is not in the v0.2 vocabulary; valid kinds: {valid!r}"
+            f"edge kind {kind!r} is not a valid kind slug (pattern "
+            f"{KIND_SLUG_PATTERN}, {KIND_SLUG_MIN_LENGTH}-"
+            f"{KIND_SLUG_MAX_LENGTH} chars); well-known kinds: "
+            f"{well_known!r}"
         )
 
 
@@ -242,17 +254,17 @@ class AnnotateConflictError(ValueError):
 
 
 def _validate_kind(kind: str) -> str:
-    """Validate ``kind`` against :class:`GraphEdgeKind`; return the value.
+    """Validate ``kind`` against the open slug grammar; return the value.
 
-    The enum membership check is the first guard rail — failing here
-    avoids a more obscure DB ``CHECK`` violation later. Returns the
-    canonical string form so subsequent code uses the StrEnum value,
-    not the raw input (defensive against future kind aliases).
+    The slug check is the first guard rail — failing here avoids a
+    more obscure DB ``CHECK`` violation later. Any slug matching
+    :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN` (2-63 chars)
+    is accepted (T1 #2534's open vocabulary); :class:`GraphEdgeKind`
+    membership is a documentation convention, not a gate.
     """
-    try:
-        return GraphEdgeKind(kind).value
-    except ValueError as exc:
-        raise InvalidEdgeKindError(kind) from exc
+    if not is_valid_kind_slug(kind):
+        raise InvalidEdgeKindError(kind)
+    return kind
 
 
 async def _find_existing_edge(
@@ -554,6 +566,7 @@ def _build_audit_row(
         id=audit_id,
         occurred_at=datetime.now(UTC),
         operator_sub=operator.sub,
+        actor_sub=resolve_actor_sub(),
         tenant_id=operator.tenant_id,
         target_id=target_id,
         method=method,
@@ -592,6 +605,7 @@ async def _publish(
     never rolls back a successful annotate / unannotate.
     """
     try:
+        lineage = resolve_broadcast_lineage()
         event = BroadcastEvent(
             event_id=uuid.uuid4(),
             ts=datetime.now(UTC),
@@ -604,6 +618,9 @@ async def _publish(
             result_status="ok",
             audit_id=audit_id,
             payload=payload,
+            actor_sub=lineage.actor_sub,
+            agent_session_id=lineage.agent_session_id,
+            work_ref=lineage.work_ref,
         )
         await publish_event(event)
     except Exception:
@@ -632,8 +649,8 @@ async def annotate_edge(
     """Create or refresh a curated ``graph_edge`` row + apply §6 conflicts.
 
     Resolves the two endpoints in ``operator.tenant_id`` via
-    :func:`resolve_node` (#594), validates ``kind`` against
-    :class:`GraphEdgeKind` (#593), then:
+    :func:`resolve_node` (#594), validates ``kind`` against the open
+    slug grammar (T1 #2534), then:
 
     * If a row already exists for ``(tenant_id, from_node_id,
       to_node_id, kind)`` (the
@@ -670,8 +687,11 @@ async def annotate_edge(
             (T5 #597) — the service trusts its caller.
         from_ref: Operator-supplied :class:`NodeRef` for the
             ``from`` endpoint.
-        kind: One of the v0.2 :class:`GraphEdgeKind` values.
-            Wrong value raises :class:`InvalidEdgeKindError`.
+        kind: Any slug matching
+            :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN`
+            (2-63 chars); prefer a :class:`GraphEdgeKind` member when
+            one fits. A malformed slug raises
+            :class:`InvalidEdgeKindError`.
         to_ref: Operator-supplied :class:`NodeRef` for the
             ``to`` endpoint.
         note: Optional free-text annotation. Stored on
@@ -684,13 +704,47 @@ async def annotate_edge(
         The created or refreshed :class:`GraphEdge` row (post-commit).
 
     Raises:
-        InvalidEdgeKindError: ``kind`` not in
-            :class:`GraphEdgeKind`.
+        InvalidEdgeKindError: ``kind`` is not a valid kind slug.
         NodeNotFoundError: Either endpoint does not exist in this
             tenant.
         AmbiguousNodeError: An endpoint's name is ambiguous across
             kinds and no ``kind`` was pinned on the
             :class:`NodeRef`.
+    """
+    plan = await annotate_edge_with_plan(
+        session,
+        operator,
+        from_ref,
+        kind,
+        to_ref,
+        note=note,
+        evidence_url=evidence_url,
+    )
+    return plan.edge
+
+
+async def annotate_edge_with_plan(
+    session: AsyncSession,
+    operator: Operator,
+    from_ref: NodeRef,
+    kind: str,
+    to_ref: NodeRef,
+    *,
+    note: str | None = None,
+    evidence_url: str | None = None,
+) -> AnnotatePlan:
+    """Same as :func:`annotate_edge`, but return the full :class:`AnnotatePlan`.
+
+    :func:`annotate_edge` returns only the :class:`GraphEdge` row, which
+    is all its human-front callers (REST / UI) need. A caller that also
+    needs the §6 diagnostics the write produced — the ``superseded`` /
+    ``conflicts`` id lists the write stamped, which live on
+    ``plan.audit_payload`` rather than on the curated edge's own
+    properties — calls this variant instead. The MCP ``topology.annotate``
+    typed-op handler uses it so it can surface ``superseded`` on the tool
+    return shape (#2539) without a second query. Identical transaction /
+    broadcast semantics: one ``session.begin()`` block, one fail-open
+    broadcast publish after commit.
     """
     async with session.begin():
         plan = await annotate_edge_in_txn(
@@ -710,7 +764,7 @@ async def annotate_edge(
         target_name=plan.target_name,
         payload=plan.audit_payload,
     )
-    return plan.edge
+    return plan
 
 
 @dataclass(frozen=True, slots=True)
@@ -1347,8 +1401,8 @@ async def unannotate_edge(
         AmbiguousNodeError: A triple-form endpoint's name is
             ambiguous and no ``kind`` was pinned on the ``NodeRef``.
         AutoEdgeDeletionError: The targeted row has ``source='auto'``.
-        InvalidEdgeKindError: A triple-form ``kind`` is not in
-            :class:`GraphEdgeKind`.
+        InvalidEdgeKindError: A triple-form ``kind`` is not a valid
+            kind slug.
         ValueError: The triple form resolves to no row.
     """
     _check_unannotate_selectors(edge_id=edge_id, from_ref=from_ref, kind=kind, to_ref=to_ref)

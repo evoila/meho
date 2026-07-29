@@ -856,6 +856,61 @@
         }
       }
     },
+    "/api/v1/doc_collections/{collection_key}": {
+      "delete": {
+        "tags": [
+          "docs"
+        ],
+        "summary": "Delete Collection Endpoint",
+        "description": "Deregister a disabled, tenant-owned collection, freeing its key (#2487).\n\nThe delete half of the registry \u2014 the REST counterpart to\n``POST /api/v1/doc_collections``. Resolves the collection tenant-first\n(an unknown key \u2192 404 with the typed ``known_keys`` hint), then\nhard-deletes it behind two guards owned by the service:\n\n* **Tenant-owned only** \u2014 a global row (``tenant_id IS NULL``) is\n  refused with a structured 403 ``detail.error='global_collection'``;\n  removing a platform-catalogue row every tenant sees is an ops action,\n  out of the tenant API.\n* **Disabled-first** \u2014 a collection whose ``status`` is not\n  ``disabled`` is refused with a structured 409\n  ``detail.error='collection_not_disabled'`` naming the current status.\n\nOn success the row is gone and its ``collection_key`` is freed: a\nre-``POST`` of the same key then succeeds 201 (the recovery loop that\nmotivated the issue). Deleting a tenant row that shadowed a global key\nun-shadows the global row (the resolver is tenant-first). One\n``audit_log`` row per call, bound ``op_id=\"meho.docs.collections.delete\"``.",
+        "operationId": "delete_collection_endpoint_api_v1_doc_collections__collection_key__delete",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "The resolved collection is a global (``tenant_id IS NULL``) platform-catalogue row \u2014 a tenant admin cannot delete it (structured ``detail.error='global_collection'``)."
+          },
+          "404": {
+            "description": "No collection with this key is visible to the tenant."
+          },
+          "409": {
+            "description": "The collection is not ``disabled`` \u2014 disable it first (structured ``detail.error='collection_not_disabled'`` + the current ``status``)."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/targets": {
       "get": {
         "tags": [
@@ -1312,7 +1367,7 @@
           "topology"
         ],
         "summary": "Dependents",
-        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 (the substrate's depth-0 anchor\nrow), so a tracked node with no dependents returns a one-element\nlist with the root.\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.\n\nG0.18-T4 (#1357, RDC #789 N2) \u2014 an anchor name with no matching\n:class:`~meho_backplane.db.models.GraphNode` in the tenant returns\n**404 ``node_untracked``** rather than an empty list. Pre-G0.18-T4\nthe route returned ``[]`` for an untracked anchor, which conflated\n\"tracked, nothing depends on me\" with \"anchor isn't in the graph\nat all\" \u2014 for the pre-destructive blast-radius use case the empty\nlist read as \"safe to delete,\" a false-negative. Auto-discovery\nis k8s-only (only\n:class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`\noverrides\n:meth:`~meho_backplane.connectors.base.Connector.discover_topology`),\nso every registered ``vault`` / ``vcenter`` / ``nsx`` /\n``sddc-manager`` / ``gh`` target currently surfaces as untracked\nuntil non-k8s populators or a curated annotation lands. The\ndistinct 404 lets the CLI / MCP front render the explicit \"not\nin graph \u2014 `meho topology refresh` first / annotate the\nrelationships\" prompt instead of misleading the operator.\n\nG0.16-T6 Finding E (#1312) \u2014 opt-in to the REST\u2194MCP envelope\nagreement per ``docs/codebase/api-shape-conventions.md`` \u00a74.\nDefault response stays the v0.8.0 bare ``list[TopologyNode]`` so\nno client breaks; passing ``?envelope=v2`` returns the\ndiscriminated envelope ``{\"kind\": \"dependents\", \"nodes\": [...]}``\nmatching the MCP ``query_topology`` tool's shape. The convention\ndoc names \"migration is REST-toward-MCP, not the other way\";\nthe v2 opt-in is the migration mechanism.",
+        "description": "Reverse closure: every node that depends on *name*.\n\nWraps :func:`~meho_backplane.topology.query.find_dependents`. The\nroot node is included at depth 0 (the substrate's depth-0 anchor\nrow), so a tracked node with no dependents returns a one-element\nlist with the root.\n\n``kind`` pins the anchor to the ``(tenant_id, kind, name)`` unique\nrow; omit it only when *name* is unique across kinds in the tenant.\nA bare *name* that resolves to multiple kinds returns 409\n(``ambiguous_node``) rather than silently merging unrelated\nclosures. ``kind_filter`` restricts the walk to edges of that\n``graph_edge.kind``.\n\nEach non-root row carries ``parent_node_id`` / ``via_edge_id``\n(#2538) \u2014 the node the walk stepped from and the edge it walked \u2014\nso the caller reconstructs the exact dependency chain from the\nflat list. ``include_stale=false`` opts out of the default\nlast-refresh-wins view and drops soft-deleted nodes/edges from\nthe walk.\n\nG0.18-T4 (#1357, RDC #789 N2) \u2014 an anchor name with no matching\n:class:`~meho_backplane.db.models.GraphNode` in the tenant returns\n**404 ``node_untracked``** rather than an empty list. Pre-G0.18-T4\nthe route returned ``[]`` for an untracked anchor, which conflated\n\"tracked, nothing depends on me\" with \"anchor isn't in the graph\nat all\" \u2014 for the pre-destructive blast-radius use case the empty\nlist read as \"safe to delete,\" a false-negative. Auto-discovery\nis k8s-only (only\n:class:`~meho_backplane.connectors.kubernetes.KubernetesConnector`\noverrides\n:meth:`~meho_backplane.connectors.base.Connector.discover_topology`),\nso every registered ``vault`` / ``vcenter`` / ``nsx`` /\n``sddc-manager`` / ``gh`` target currently surfaces as untracked\nuntil non-k8s populators or a curated annotation lands. The\ndistinct 404 lets the CLI / MCP front render the explicit \"not\nin graph \u2014 `meho topology refresh` first / annotate the\nrelationships\" prompt instead of misleading the operator.\n\nG0.16-T6 Finding E (#1312) \u2014 opt-in to the REST\u2194MCP envelope\nagreement per ``docs/codebase/api-shape-conventions.md`` \u00a74.\nDefault response stays the v0.8.0 bare ``list[TopologyNode]`` so\nno client breaks; passing ``?envelope=v2`` returns the\ndiscriminated envelope ``{\"kind\": \"dependents\", \"nodes\": [...]}``\nmatching the MCP ``query_topology`` tool's shape. The convention\ndoc names \"migration is REST-toward-MCP, not the other way\";\nthe v2 opt-in is the migration mechanism.",
         "operationId": "dependents_api_v1_topology_dependents__name__get",
         "parameters": [
           {
@@ -1355,6 +1410,18 @@
               "nullable": true,
               "title": "Kind Filter"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "envelope",
@@ -1498,7 +1565,7 @@
           "topology"
         ],
         "summary": "Dependencies",
-        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping, **same G0.18-T4 (#1357) untracked-anchor\ntreatment** (404 ``node_untracked`` rather than an empty list) \u2014\nwalking edges out of the current node rather than into it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`. Honours\nthe same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)\nreturning ``{\"kind\": \"dependencies\", \"nodes\": [...]}``.",
+        "description": "Forward closure: everything *name* depends on.\n\nThe mirror of :func:`dependents` \u2014 same shape, same one-row-per-\nnode closure dedupe, same ``kind`` disambiguation contract, same\ntenant scoping, same #2538 chain provenance (``parent_node_id`` /\n``via_edge_id``) and ``include_stale`` opt-out, **same G0.18-T4\n(#1357) untracked-anchor treatment** (404 ``node_untracked``\nrather than an empty list) \u2014 walking edges out of the current\nnode rather than into it. Wraps\n:func:`~meho_backplane.topology.query.find_dependencies`. Honours\nthe same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)\nreturning ``{\"kind\": \"dependencies\", \"nodes\": [...]}``.",
         "operationId": "dependencies_api_v1_topology_dependencies__name__get",
         "parameters": [
           {
@@ -1541,6 +1608,18 @@
               "nullable": true,
               "title": "Kind Filter"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "envelope",
@@ -1684,7 +1763,7 @@
           "topology"
         ],
         "summary": "Path",
-        "description": "Shortest unweighted path from ``from`` to ``to``, or ``null``.\n\nWraps :func:`~meho_backplane.topology.query.find_path`. The query\nparams are ``from`` / ``to`` (matching the Initiative #363 route\nspec ``?from=A&to=B``); the handler binds them via ``alias`` since\n``from`` is a Python keyword. Walks edges in both directions so the\npath follows the graph's connectivity rather than only its edge\norientation. Returns ``null`` (HTTP 200) when *to* is unreachable\nfrom *from* within ``max_hops`` or either endpoint does not exist\nin this tenant \u2014 unreachability is a valid answer, not an error.\n\n``from_kind`` / ``to_kind`` pin each endpoint independently; an\nunpinned name resolving to multiple kinds returns 409\n(``ambiguous_node``).",
+        "description": "Shortest unweighted path from ``from`` to ``to``, or ``null``.\n\nWraps :func:`~meho_backplane.topology.query.find_path`. The query\nparams are ``from`` / ``to`` (matching the Initiative #363 route\nspec ``?from=A&to=B``); the handler binds them via ``alias`` since\n``from`` is a Python keyword. Walks edges in both directions so the\npath follows the graph's connectivity rather than only its edge\norientation. Returns ``null`` (HTTP 200) when *to* is unreachable\nfrom *from* within ``max_hops`` or either endpoint does not exist\nin this tenant \u2014 unreachability is a valid answer, not an error.\n\n``from_kind`` / ``to_kind`` pin each endpoint independently; an\nunpinned name resolving to multiple kinds returns 409\n(``ambiguous_node``).\n\nEach non-root path node carries ``via_edge_id`` (the exact edge of\nthe hop) and ``parent_node_id`` (the previous node) per #2538.\n``include_stale=false`` drops soft-deleted nodes/edges from the\nsearch \u2014 on both edge directions, so a stale edge is never walked\nbackwards into a path.",
         "operationId": "path_api_v1_topology_path_get",
         "parameters": [
           {
@@ -1736,6 +1815,18 @@
               "default": 8,
               "title": "Max Hops"
             }
+          },
+          {
+            "name": "include_stale",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows.",
+              "default": true,
+              "title": "Include Stale"
+            },
+            "description": "Include soft-deleted (stale) nodes and edges in the walk. Defaults to true (last-refresh-wins: rows a refresh soft-deleted stay reachable). Pass false to restrict the traversal to live rows only \u2014 the same view the edge inventory listing shows."
           },
           {
             "name": "authorization",
@@ -1968,7 +2059,7 @@
           "topology"
         ],
         "summary": "List Edges Route",
-        "description": "Flat filterable listing of edges in the caller's tenant.\n\nWraps :func:`~meho_backplane.topology.query.list_edges` (G9.2-T4\n#596). The query params are forwarded straight through (``from`` /\n``to`` are bound via :class:`Query` ``alias`` because ``from`` is a\nPython keyword); the tenant boundary comes from ``operator.tenant_id``\nand is non-overrideable by query string or body.\n\n``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind\nis rejected at the HTTP boundary (422) before the helper runs;\n``source`` is constrained to the two ``graph_edge.source`` values\nby a regex pattern; ``conflicts=true`` forwards\n``conflicts_only=True`` to surface the recoverability listing for\na wrong annotation (\u00a76 of Initiative #364).\n\nA bare ``from`` / ``to`` name that resolves to multiple kinds in\nthe tenant surfaces as **409 ambiguous_node** (same shape as the\ntraversal verbs) so the caller can re-issue with a kind-qualified\nendpoint. A name that does not resolve at all yields an empty\nlist, not a 404 \u2014 consistent with the helper's \"missing anchor \u2192\nempty result\" shape.\n\nThe route binds ``audit_op_id=\"topology.list_edges\"`` /\n``audit_op_class=\"read\"`` so the audit row + broadcast event carry\nthe canonical identity. ``.list_edges`` is not in the broadcast\nclassifier's read/write suffix tables, so the explicit override is\nload-bearing (same rationale as the traversal verbs' ``.dependents``\n/ ``.dependencies`` / ``.path`` bindings).",
+        "description": "Flat filterable listing of edges in the caller's tenant.\n\nWraps :func:`~meho_backplane.topology.query.list_edges` (G9.2-T4\n#596). The query params are forwarded straight through (``from`` /\n``to`` are bound via :class:`Query` ``alias`` because ``from`` is a\nPython keyword); the tenant boundary comes from ``operator.tenant_id``\nand is non-overrideable by query string or body.\n\n``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind\nis rejected at the HTTP boundary (422) before the helper runs\n(any well-formed slug is a legal filter \u2014 the vocabulary is open);\n``source`` is constrained to the two ``graph_edge.source`` values\nby a regex pattern; ``conflicts=true`` forwards\n``conflicts_only=True`` to surface the recoverability listing for\na wrong annotation (\u00a76 of Initiative #364).\n\nA bare ``from`` / ``to`` name that resolves to multiple kinds in\nthe tenant surfaces as **409 ambiguous_node** (same shape as the\ntraversal verbs) so the caller can re-issue with a kind-qualified\nendpoint. A name that does not resolve at all yields an empty\nlist, not a 404 \u2014 consistent with the helper's \"missing anchor \u2192\nempty result\" shape.\n\nThe route binds ``audit_op_id=\"topology.list_edges\"`` /\n``audit_op_class=\"read\"`` so the audit row + broadcast event carry\nthe canonical identity. ``.list_edges`` is not in the broadcast\nclassifier's read/write suffix tables, so the explicit override is\nload-bearing (same rationale as the traversal verbs' ``.dependents``\n/ ``.dependencies`` / ``.path`` bindings).",
         "operationId": "list_edges_route_api_v1_topology_edges_get",
         "parameters": [
           {
@@ -1976,7 +2067,10 @@
             "in": "query",
             "required": false,
             "schema": {
-              "$ref": "#/components/schemas/GraphEdgeKind",
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 63,
+              "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
               "nullable": true,
               "title": "Kind"
             }
@@ -2131,6 +2225,53 @@
         }
       }
     },
+    "/api/v1/topology/nodes/{node_id}": {
+      "delete": {
+        "tags": [
+          "topology"
+        ],
+        "summary": "Delete Node Route",
+        "description": "Hard-delete a manually-seeded ``graph_node`` by id.\n\nWraps :func:`~meho_backplane.topology.node_delete.delete_node`\n(#2485). Returns 204 on success, writing a ``removed``\n``graph_node_history`` tombstone in the same transaction. Requires\n:class:`TenantRole.TENANT_ADMIN` \u2014 the same gate the curated-edge\n``DELETE /edges/{edge_id}`` route sits behind.\n\nError mapping (mirrors the \u00a73 auto-edge discipline\n:func:`unannotate_edge_route` enforces):\n\n* **409 ``probe_owned_node``** when the row is probe-derived\n  (``source='auto'``) or bound to a registered target\n  (``target_id IS NOT NULL``). Refresh reconciliation owns those and\n  they resurrect on the next probe, so a manual delete is\n  meaningless \u2014 only ``source='curated'``, target-unbound seeds are\n  deletable.\n* **409 ``node_has_edges``** with the blocking ``edge_ids`` when a\n  live ``graph_edge`` references the node. The caller unannotates\n  those first; the service refuses rather than letting the DB\n  ``ON DELETE CASCADE`` drop them without their history tombstones.\n* **404** when no node with that id exists in the caller's tenant\n  (cross-tenant ids and missing ids are indistinguishable \u2014 the\n  tenant boundary is opaque to the caller).",
+        "operationId": "delete_node_route_api_v1_topology_nodes__node_id__delete",
+        "parameters": [
+          {
+            "name": "node_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Node Id"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/topology/edges/bulk": {
       "post": {
         "tags": [
@@ -2191,7 +2332,7 @@
           "topology"
         ],
         "summary": "Timeline Route",
-        "description": "Tenant-wide chronological feed of graph changes.\n\nWraps :func:`~meho_backplane.topology.query.query_timeline` (G9.3-T5\n#861). Walks ``graph_node_history`` + ``graph_edge_history`` in\n``(valid_from DESC, history_id DESC)`` order, paginated via opaque\nforward-only cursor encoding ``(valid_from, history_id, source)``.\nTenant scope is ``operator.tenant_id`` -- no surface accepts a\ntenant id on this route.\n\nQuery parameters:\n\n* ``target`` -- optional target name or alias. Resolved tenant-\n  scoped via :func:`~meho_backplane.targets.resolver.resolve_target`\n  (alias-aware, 404 with near-misses when nothing matches). The\n  resolved target id narrows the timeline to history rows for\n  resources belonging to that target -- nodes whose ``target_id``\n  matches, and edges whose either endpoint belongs to the target.\n* ``since`` / ``until`` -- ISO-8601 absolute datetimes; either\n  bound is optional. Duration shorthand (``\"24h\"`` / ``\"7d\"``) is\n  a CLI convenience that the CLI front parses; the REST API\n  accepts absolute timestamps only, mirroring the audit-query\n  router's split (G8.1-T2 #466).\n* ``limit`` -- page size (default ``50`` per the issue body;\n  ceiling ``1000``).\n* ``cursor`` -- opaque next-page token from a prior response.\n\nErrors:\n\n* **404 ``no_target``** -- ``target`` did not resolve to a row in\n  the tenant. Near-miss matches surface in ``detail.matches`` for\n  operator self-correction (same shape as the ``refresh`` route).\n* **400 ``invalid_cursor``** -- ``cursor`` is not a valid opaque\n  token (tampered or hand-crafted). The substrate's\n  :class:`InvalidTimelineCursorError` message is echoed.\n\nThe route binds ``audit_op_id=\"topology.timeline\"`` /\n``audit_op_class=\"audit_query\"`` per [decision #3](docs/planning/v0.2-decisions.md)\n-- temporal graph queries are inspections of system state, parallel\nto G8's audit-log query surface; the broadcast event carries only\n``{op_id, result_status, row_count}`` so the request filter (which\nmay name a sensitive target) and the rows themselves never leak\nonto the SSE / Slack feed.",
+        "description": "Tenant-wide chronological feed of graph changes.\n\nWraps :func:`~meho_backplane.topology.query.query_timeline` (G9.3-T5\n#861). Walks ``graph_node_history`` + ``graph_edge_history`` in\n``(valid_from DESC, history_id DESC)`` order, paginated via opaque\nforward-only cursor encoding ``(valid_from, history_id, source)``.\nTenant scope is ``operator.tenant_id`` -- no surface accepts a\ntenant id on this route.\n\nQuery parameters:\n\n* ``target`` -- optional target name or alias. Resolved tenant-\n  scoped via :func:`~meho_backplane.targets.resolver.resolve_target`\n  (alias-aware, 404 with near-misses when nothing matches). The\n  resolved target id narrows the timeline to history rows for\n  resources belonging to that target -- nodes whose ``target_id``\n  matches, and edges whose either endpoint belongs to the target.\n* ``since`` / ``until`` -- ISO-8601 absolute datetimes; either\n  bound is optional. Duration shorthand (``\"24h\"`` / ``\"7d\"``) is\n  a CLI convenience that the CLI front parses; the REST API\n  accepts absolute timestamps only, mirroring the audit-query\n  router's split (G8.1-T2 #466).\n* ``limit`` -- page size (default ``50`` per the issue body;\n  ceiling ``1000``).\n* ``cursor`` -- opaque next-page token from a prior response.\n\nErrors:\n\n* **404 ``no_target``** -- ``target`` did not resolve to a row in\n  the tenant. Near-miss matches surface in ``detail.matches`` for\n  operator self-correction (same shape as the ``refresh`` route).\n* **400 ``invalid_cursor``** -- ``cursor`` is not a valid opaque\n  token (tampered or hand-crafted). The substrate's\n  :class:`InvalidTimelineCursorError` message is echoed.\n\nThe route binds ``audit_op_id=\"topology.timeline\"`` /\n``audit_op_class=\"audit_query\"`` per [decision #3](docs/decisions/locked-decisions.md)\n-- temporal graph queries are inspections of system state, parallel\nto G8's audit-log query surface; the broadcast event carries only\n``{op_id, result_status, row_count}`` so the request filter (which\nmay name a sensitive target) and the rows themselves never leak\nonto the SSE / Slack feed.",
         "operationId": "timeline_route_api_v1_topology_timeline_get",
         "parameters": [
           {
@@ -2291,7 +2432,7 @@
           "topology"
         ],
         "summary": "History Route",
-        "description": "Chronological history walk anchored at one ``graph_node``.\n\nWraps :func:`~meho_backplane.topology.query.query_history` (G9.3-T3\n#859). Companion to ``GET /topology/timeline`` (G9.3-T5): timeline\nis \"what changed in the graph at all in this window\"; history is\n\"what changed for THIS specific resource\". Resolved via the G9.1\nresolver :func:`~meho_backplane.topology.resolvers.resolve_node` so\nname + optional kind disambiguation use the same surface every\nG9.1 + G9.2 verb does.\n\nQuery parameters:\n\n* ``kind`` -- optional ``graph_node.kind`` pin to disambiguate\n  when a bare *name* resolves to multiple kinds in the tenant.\n* ``since`` / ``until`` -- ISO-8601 absolute datetime bounds on\n  ``valid_from`` (inclusive at both ends). The CLI front resolves\n  duration shorthand (``\"24h\"`` / ``\"7d\"``) to an absolute\n  timestamp before crossing the wire, mirroring the timeline\n  route's split.\n* ``include_edges`` -- when ``true``, also walk every history row\n  for edges incident to the resolved node (joined via the inner\n  subquery ``edge_id IN (SELECT id FROM graph_edge WHERE\n  from_node_id = anchor OR to_node_id = anchor)``). The merged\n  result still orders newest-first.\n* ``limit`` -- hard cap on returned rows (1..``_HISTORY_LIMIT_MAX``).\n  Defaults to the ceiling because per-resource history is bounded\n  by retention; tighter caps would silently truncate the walk.\n\nErrors:\n\n* **404 ``node_not_found``** -- *name* (and *kind*, when supplied)\n  does not resolve to any node in the tenant. Cross-tenant names\n  surface identically -- the tenant boundary is opaque to the\n  caller.\n* **409 ``ambiguous_node``** -- bare *name* resolves to multiple\n  kinds; pass ``kind`` to disambiguate.\n\nThe route binds ``audit_op_id=\"topology.history\"`` /\n``audit_op_class=\"audit_query\"`` per [decision #3](docs/planning/v0.2-decisions.md)\n-- temporal graph queries are inspections of system state,\nparallel to G8's audit-log query surface; the broadcast event\ncarries only ``{op_id, result_status, row_count}`` so the\nresponse rows (which may carry the snapshot of a sensitive\nresource's pre/post payload) never leak onto the SSE / Slack\nfeed. Same shape T5's timeline route uses.",
+        "description": "Chronological history walk anchored at one ``graph_node``.\n\nWraps :func:`~meho_backplane.topology.query.query_history` (G9.3-T3\n#859). Companion to ``GET /topology/timeline`` (G9.3-T5): timeline\nis \"what changed in the graph at all in this window\"; history is\n\"what changed for THIS specific resource\". Resolved via the G9.1\nresolver :func:`~meho_backplane.topology.resolvers.resolve_node` so\nname + optional kind disambiguation use the same surface every\nG9.1 + G9.2 verb does.\n\nQuery parameters:\n\n* ``kind`` -- optional ``graph_node.kind`` pin to disambiguate\n  when a bare *name* resolves to multiple kinds in the tenant.\n* ``since`` / ``until`` -- ISO-8601 absolute datetime bounds on\n  ``valid_from`` (inclusive at both ends). The CLI front resolves\n  duration shorthand (``\"24h\"`` / ``\"7d\"``) to an absolute\n  timestamp before crossing the wire, mirroring the timeline\n  route's split.\n* ``include_edges`` -- when ``true``, also walk every history row\n  for edges incident to the resolved node (joined via the inner\n  subquery ``edge_id IN (SELECT id FROM graph_edge WHERE\n  from_node_id = anchor OR to_node_id = anchor)``). The merged\n  result still orders newest-first.\n* ``limit`` -- hard cap on returned rows (1..``_HISTORY_LIMIT_MAX``).\n  Defaults to the ceiling because per-resource history is bounded\n  by retention; tighter caps would silently truncate the walk.\n\nErrors:\n\n* **404 ``node_not_found``** -- *name* (and *kind*, when supplied)\n  does not resolve to any node in the tenant. Cross-tenant names\n  surface identically -- the tenant boundary is opaque to the\n  caller.\n* **409 ``ambiguous_node``** -- bare *name* resolves to multiple\n  kinds; pass ``kind`` to disambiguate.\n\nThe route binds ``audit_op_id=\"topology.history\"`` /\n``audit_op_class=\"audit_query\"`` per [decision #3](docs/decisions/locked-decisions.md)\n-- temporal graph queries are inspections of system state,\nparallel to G8's audit-log query surface; the broadcast event\ncarries only ``{op_id, result_status, row_count}`` so the\nresponse rows (which may carry the snapshot of a sensitive\nresource's pre/post payload) never leak onto the SSE / Slack\nfeed. Same shape T5's timeline route uses.",
         "operationId": "history_route_api_v1_topology_history__name__get",
         "parameters": [
           {
@@ -6194,7 +6335,7 @@
           "agents"
         ],
         "summary": "List Runs",
-        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state. Returns ``created_at DESC``.",
+        "description": "List the operator's tenant's agent runs, newest first.\n\nTenant-isolated server-side via the JWT \u2014 cross-tenant runs are\ninvisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one\nchange ticket (exact match); ``?status=running`` narrows to one\nlifecycle state; ``?agent_name=triage`` narrows to runs produced by\nthat agent definition (an unknown name yields an empty list). Returns\n``created_at DESC``.",
         "operationId": "list_runs_api_v1_agents_runs_get",
         "parameters": [
           {
@@ -6220,6 +6361,18 @@
               "title": "Status"
             },
             "description": "Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state."
+          },
+          {
+            "name": "agent_name",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "description": "Filter by agent definition name (exact match) \u2014 the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter.",
+              "title": "Agent Name"
+            },
+            "description": "Filter by agent definition name (exact match) \u2014 the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter."
           },
           {
             "name": "limit",
@@ -7764,6 +7917,473 @@
         }
       }
     },
+    "/api/v1/sensors": {
+      "get": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "List Sensors",
+        "description": "List sensors for the operator's tenant, newest-first.\n\nTenant scoping: callers are scoped to ``operator.tenant_id``; a\n``tenant_filter`` naming a *different* tenant returns 403\n``cross_tenant_requires_platform_admin`` unless the caller holds the\n``platform_admin`` cross-tenant capability. The list response carries\nthe latest-result projection (``last_state`` / ``last_evaluated_at`` /\n...), which is the status view for each sensor.",
+        "operationId": "list_sensors_api_v1_sensors_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "active",
+                "paused"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "cadence_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "interval",
+                "cron"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "Cadence Kind"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Create Sensor",
+        "description": "Create one sensor under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set, the\nsensor is created under that tenant (cross-tenant admin); when null,\nunder ``operator.tenant_id``. The safe-only guard refuses a non-safe or\nunknown op with 422; a duplicate name returns 409.",
+        "operationId": "create_sensor_api_v1_sensors_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SensorCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorRead"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sensors/{sensor_id}": {
+      "delete": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "Delete Sensor",
+        "description": "Hard-delete one sensor by id.\n\n``tenant_admin`` only. A cross-tenant / absent id returns 404\n``sensor_not_found`` -- never 403 -- so the existence of a sensor is\nnot leaked across the tenant boundary. The delete is a hard ``DELETE``:\nno tombstone row is retained.",
+        "operationId": "delete_sensor_api_v1_sensors__sensor_id__delete",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/dashboards": {
+      "get": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "List Dashboards",
+        "description": "List Dashboards for the operator's tenant, newest-first.\n\nEach row carries its five-state rolled-up ``state`` (evaluated on read)\nand ``member_count``. A ``tenant_filter`` naming a *different* tenant is\n403 ``cross_tenant_requires_platform_admin`` unless the caller holds\n``platform_admin``.",
+        "operationId": "list_dashboards_api_v1_checks_dashboards_get",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Create Dashboard",
+        "description": "Create one Dashboard under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set to a\n*different* tenant the create is cross-tenant and requires\n``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent\nsensor id is 422 ``sensor_not_found``; a duplicate name is 409.",
+        "operationId": "create_dashboard_api_v1_checks_dashboards_post",
+        "parameters": [
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DashboardCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/checks/dashboards/{dashboard_id}": {
+      "get": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Get Dashboard",
+        "description": "Return one Dashboard's rollup + per-member breakdown by id.\n\nA cross-tenant / absent id returns 404 ``dashboard_not_found`` -- never\n403 -- so the existence of a Dashboard is not leaked across the tenant\nboundary.",
+        "operationId": "get_dashboard_api_v1_checks_dashboards__dashboard_id__get",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DashboardDetail"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "checks-dashboards"
+        ],
+        "summary": "Delete Dashboard",
+        "description": "Hard-delete one Dashboard by id (memberships go with it).\n\n``tenant_admin`` only. A cross-tenant / absent id returns 404\n``dashboard_not_found`` -- never 403 -- so existence is not leaked.",
+        "operationId": "delete_dashboard_api_v1_checks_dashboards__dashboard_id__delete",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
+            }
+          },
+          {
+            "name": "tenant_filter",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "nullable": true,
+              "title": "Tenant Filter"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/approvals": {
       "get": {
         "tags": [
@@ -8862,8 +9482,23 @@
           "ui-broadcast"
         ],
         "summary": "Ui Broadcast History",
-        "description": "``GET /ui/broadcast/history`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.",
+        "description": "``GET /ui/broadcast/history[?kind=]`` -- the Last-24h replay fragment.\n\nPulls the session tenant's last-24h events via the shared\nfail-soft read helper, passes them as a list the template\nserialises with Jinja ``| tojson`` into a\n``<script type=\"application/json\">`` data island the shared\n``broadcastFeed`` controller seeds from, and returns the\n``broadcast/_history.html`` fragment (no ``base.html`` chrome --\nthe tab swaps it into the page's history container). The\ntenant comes from the validated session, never a query\nparameter.\n\nThe optional ``kind`` query parameter narrows the pane to a\nsingle event kind (``operation`` / ``agent_announcement``); it is\nclamped to a known kind by :func:`_normalise_kind_filter`, so a\nblank or unknown value renders both kinds.",
         "operationId": "ui_broadcast_history_ui_broadcast_history_get",
+        "parameters": [
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds.",
+              "title": "Kind"
+            },
+            "description": "Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds."
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -8871,6 +9506,16 @@
               "text/html": {
                 "schema": {
                   "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -14467,6 +15112,58 @@
         }
       }
     },
+    "/ui/corpus/chunks/{collection_key}/{chunk_id}": {
+      "get": {
+        "tags": [
+          "ui-corpus"
+        ],
+        "summary": "Ui Corpus Chunk Detail",
+        "description": "``GET /ui/corpus/chunks/{collection_key}/{chunk_id}`` \u2014 cited-source view.",
+        "operationId": "ui_corpus_chunk_detail_ui_corpus_chunks__collection_key___chunk_id__get",
+        "parameters": [
+          {
+            "name": "collection_key",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Collection Key"
+            }
+          },
+          {
+            "name": "chunk_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Chunk Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/ui/corpus": {
       "get": {
         "tags": [
@@ -16188,6 +16885,150 @@
             }
           }
         },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/checks": {
+      "get": {
+        "tags": [
+          "ui-checks"
+        ],
+        "summary": "Ui Checks List",
+        "description": "Serve ``GET /ui/checks``. See module docstring for the contract.",
+        "operationId": "ui_checks_list_ui_checks_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/checks/{dashboard_id}": {
+      "get": {
+        "tags": [
+          "ui-checks"
+        ],
+        "summary": "Checks Detail",
+        "description": "Render the per-Dashboard detail page (rollup badge + member table).",
+        "operationId": "checks_detail_ui_checks__dashboard_id__get",
+        "parameters": [
+          {
+            "name": "dashboard_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Dashboard Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/runners": {
+      "get": {
+        "tags": [
+          "ui-runners"
+        ],
+        "summary": "Ui Runners List",
+        "description": "Serve ``GET /ui/runners``. See module docstring for the contract.",
+        "operationId": "ui_runners_list_ui_runners_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ui/sensors": {
+      "get": {
+        "tags": [
+          "ui-sensors"
+        ],
+        "summary": "Ui Sensors List",
+        "description": "Serve ``GET /ui/sensors[?status=&cadence_kind=]``. See module docstring.",
+        "operationId": "ui_sensors_list_ui_sensors_get",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Status"
+            }
+          },
+          {
+            "name": "cadence_kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "nullable": true,
+              "title": "Cadence Kind"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -18732,6 +19573,7 @@
         "properties": {
           "name": {
             "type": "string",
+            "maxLength": 128,
             "title": "Name"
           },
           "owner_sub": {
@@ -18898,6 +19740,17 @@
             "type": "string",
             "nullable": true,
             "title": "Error"
+          },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Definition Id"
+          },
+          "agent_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent Name"
           }
         },
         "type": "object",
@@ -18908,7 +19761,9 @@
           "provider",
           "model",
           "output",
-          "error"
+          "error",
+          "agent_definition_id",
+          "agent_name"
         ],
         "title": "AgentRunStatusResponse",
         "description": "Poll response for ``GET /agents/runs/{handle}``."
@@ -18950,6 +19805,17 @@
             "nullable": true,
             "title": "Work Ref"
           },
+          "agent_definition_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Agent Definition Id"
+          },
+          "agent_name": {
+            "type": "string",
+            "nullable": true,
+            "title": "Agent Name"
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -18978,6 +19844,8 @@
           "model",
           "turns",
           "work_ref",
+          "agent_definition_id",
+          "agent_name",
           "created_at",
           "started_at",
           "ended_at"
@@ -19231,6 +20099,51 @@
         ],
         "title": "AskDocsResponse",
         "description": "Successful response shape for ``/api/v1/ask_docs``.\n\n``answer`` is the grounded, cited answer -- composed strictly from the\nretrieved chunks (no claim without a citation) or, on an empty\nretrieval, the deterministic\n:data:`~meho_backplane.docs_search.NO_GROUNDED_ANSWER` string. Frozen so\nan accidental post-construction mutation surfaces as a pydantic error\nrather than a silently-altered response.\n\n``citations`` is the subset of retrieved chunks the answer relied on,\neach serialised with its resolved navigable ``link`` (#1919) -- the\n**same** citation shape the MCP ``ask_docs`` tool returns, so a client\nconsuming either face resolves citations identically. The list entries\nare the raw :class:`~meho_backplane.docs_search.DocsChunk` fields plus a\n``link`` member; modelled as ``list[dict]`` (not a typed model) because\nthe ``link`` shape is produced by the shared\n:func:`~meho_backplane.docs_search.citation_link_payload` helper, kept as\nthe single source of truth for the citation-link contract."
+      },
+      "AssertionSpec": {
+        "properties": {
+          "select": {
+            "$ref": "#/components/schemas/SelectSpec"
+          },
+          "compare": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ThresholdCompare"
+              },
+              {
+                "$ref": "#/components/schemas/EqualsCompare"
+              },
+              {
+                "$ref": "#/components/schemas/InCompare"
+              },
+              {
+                "$ref": "#/components/schemas/BoolCompare"
+              },
+              {
+                "$ref": "#/components/schemas/FreshnessCompare"
+              }
+            ],
+            "title": "Compare",
+            "discriminator": {
+              "propertyName": "type",
+              "mapping": {
+                "bool": "#/components/schemas/BoolCompare",
+                "equals": "#/components/schemas/EqualsCompare",
+                "freshness": "#/components/schemas/FreshnessCompare",
+                "in": "#/components/schemas/InCompare",
+                "threshold": "#/components/schemas/ThresholdCompare"
+              }
+            }
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "select",
+          "compare"
+        ],
+        "title": "AssertionSpec",
+        "description": "A full assertion: one select stage feeding one typed comparator.\n\n#2503 imports this model to validate a Sensor's ``assertion`` payload at\nthe wire (a bad path or comparator is a 422 at create); #2505 feeds it the\nop-result payload; #2506 rolls the outcomes up into a Dashboard."
       },
       "AssignmentDocument": {
         "properties": {
@@ -21353,6 +22266,27 @@
         "type": "object",
         "title": "Body_vault_put_ui_vault_put_post"
       },
+      "BoolCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "bool",
+            "title": "Type"
+          },
+          "expect": {
+            "type": "boolean",
+            "title": "Expect",
+            "default": true
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type"
+        ],
+        "title": "BoolCompare",
+        "description": "Boolean comparator: the value must be strictly ``bool``.\n\nA non-boolean observed value is ``unknown`` (no truthiness coercion);\na boolean that does not match :attr:`expect` is ``critical``."
+      },
       "BroadcastOverrideCreate": {
         "properties": {
           "op_id_pattern": {
@@ -21734,6 +22668,20 @@
             "type": "boolean",
             "title": "Dispatchable",
             "default": false
+          },
+          "scope": {
+            "type": "string",
+            "enum": [
+              "builtin",
+              "tenant"
+            ],
+            "title": "Scope",
+            "default": "builtin"
+          },
+          "shadowed_by_tenant_scope": {
+            "type": "boolean",
+            "title": "Shadowed By Tenant Scope",
+            "default": false
           }
         },
         "type": "object",
@@ -21751,7 +22699,7 @@
           "enabled_operation_count"
         ],
         "title": "ConnectorListItem",
-        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho.connector.list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`."
+        "description": "One row in the ``GET /api/v1/connectors`` response.\n\nProjects :class:`OperationGroup` aggregation. ``connector_id`` is\nthe operator-facing identifier (``\"<impl_id>-<version>\"``);\n``product`` / ``version`` / ``impl_id`` are the parsed triple.\n\n``tenant_id`` is ``None`` for built-in / global connectors and a\nUUID for tenant-curated ones. ``group_count`` totals the rows\nvisible to the caller; the three ``*_group_count`` fields split\nthat total by ``review_status`` so operators can spot\nreview-queue backlog at a glance.\n\n``operation_count`` is the sum of operations across all groups\nin scope; ``enabled_operation_count`` (G0.23-T5 / #1636) is the\nsubset of those rows whose per-op ``is_enabled`` flag is set --\nthe operations the dispatcher will actually resolve\n(dispatchable), vs ingested-but-disabled rows that only surface\nin review. The naming mirrors the ``*_group_count`` family above:\nthe unprefixed field is the total, the ``enabled_``-prefixed\nfield is the subset. Kept additive (rather than renaming the\ntotal to ``total_operation_count``) so existing consumers of\n``operation_count`` -- the CLI's ``listEntry`` decode shape and\nevery ``meho.connector.list`` client -- keep working unchanged.\nMind the axis difference between the two ``enabled_*`` fields:\n``enabled_group_count`` buckets groups by *review_status*, while\n``enabled_operation_count`` counts the per-op ``is_enabled`` bit\n(the dispatchability flag that survives connector-level\nenable/disable cycles via operator overrides). Useful for the\nCLI's ``meho connector list --status staged`` summary view and\nfor an LLM browsing the catalog: ``vmware-rest-9.0`` ingests\n~2,211 ops of which only a fraction are enabled, and before the\nsplit nothing on the row said which of the two numbers\n``operation_count`` was.\n\n``state`` (G0.9.1-T1 / #773) distinguishes *dispatchable* rows\n(``\"ingested\"`` \u2014 DB-backed, resolves through the dispatcher) from\n*registered-but-empty* rows (``\"registered\"`` \u2014 v2-registry entries\nwithout descriptor rows yet). Rows that wouldn't round-trip\nthrough the resolver at all (stale-impl_id DB rows, v2 entries\nwhose registry product disagrees with the parser's derived\nproduct) are filtered out before the response is built;\n``connector_id``s the listing emits are guaranteed to resolve\nthrough :func:`~meho_backplane.operations._lookup.connector_exists`\nwhen ``state == \"ingested\"``, and explicitly labelled\nnot-yet-dispatchable when ``state == \"registered\"``. Defaults to\n``\"ingested\"`` so existing call sites (tests, MCP fakes)\nconstruct rows without breakage.\n\n``next_step`` (G0.13-T3 / #1133) is the self-describing hint that\ncloses the workflow gap the v0.6.0 RDC dogfood surfaced (signal 11:\nhalf-registered connectors fail lookup with no in-product hint\nabout what verb closes the workflow). It is a :class:`NextStep`\nobject on ``state=\"registered\"`` rows and ``None`` on\n``state=\"ingested\"`` rows (no operator action remains for an\ningested connector). The hint is computed against the curated\nconnector-spec catalog (#743): when the catalog carries an entry\nfor the registry's ``(product, version)`` the verb points at\n``meho connector ingest --catalog ...``; otherwise it points at\nthe manual-mode flags. Defaults to ``None`` so existing\nconstruction call sites (tests, MCP fakes) continue to compile\nwithout explicit assignment.\n\n``kind`` (G0.28-T6 / #1979) is the authoring-mode discriminator \u2014\ntyped / ingested-shim / profiled / profiled-but-unreviewed \u2014 an\n**additive** sibling to ``state`` (which is deliberately left\nunchanged: it is the documented dispatch-resolution state machine\nwith its own consumers). ``dispatchable`` is the boolean roll-up of\nthe same projection: ``True`` for ``typed`` and ``profiled``,\n``False`` for ``ingested-shim`` and ``profiled-but-unreviewed``.\nTogether they let the operator console / CLI distinguish a working\nprofiled connector from a dead bare shim, which neither ``state``\nnor the count fields could express. Both default to the bare-shim\nreading (``kind=\"ingested-shim\"``, ``dispatchable=False``) so\nexisting construction call sites (tests, MCP fakes) keep working;\nthe listing always sets them explicitly. See\n:data:`ConnectorAuthoringKind`.\n\n``scope`` (#2474) is the named projection of ``tenant_id`` \u2014\n``\"builtin\"`` for ``tenant_id IS NULL`` rows, ``\"tenant\"`` for\ntenant-curated ones. It is additive and fully derivable from\n``tenant_id``, but surfacing it directly lets a consumer key on it\nwithout re-deriving. ``shadowed_by_tenant_scope`` is the precedence\nmarker: within a single response, a ``\"builtin\"`` row carries\n``True`` when a ``\"tenant\"`` row shares its ``connector_id`` \u2014 i.e.\nthe built-in copy is *shadowed* by a tenant-scoped twin that\n:func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves\nfirst (tenant-wins dispatch precedence). The two fields exist because\n``connector_id`` encodes only ``(impl_id, version)``, so scope twins\nfrom the #2085 re-ingest trap render the same id twice; the marker\ntells an agent exactly which row ``call_operation`` dispatches to and\nlets it count unique connectors. Both default to the built-in,\nunshadowed reading (``scope=\"builtin\"``, ``shadowed_by_tenant_scope\n=False``) so existing construction call sites (tests, MCP fakes)\nkeep working; the listing sets ``scope`` explicitly per row and\nstamps ``shadowed_by_tenant_scope`` in a post-pass over the full\nresponse. Invariant: within one response no two rows share\n``(connector_id, scope)``. See :data:`ConnectorScope`."
       },
       "ConnectorListResponse": {
         "properties": {
@@ -22495,6 +23443,331 @@
         "title": "DailyUsageBucket",
         "description": "One ``(date, surface)`` row of the usage report.\n\nFrozen so callers (CLI table renderer, ``--json`` consumers,\nMarkdown report generators) can pass instances around without\naccidental mutation. ``action_conversion_pct`` is rounded to two\ndecimals at construction time so JSON serialisation is stable\nacross runs."
       },
+      "DashboardCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 2048,
+            "nullable": true,
+            "title": "Description"
+          },
+          "sensor_ids": {
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "title": "Sensor Ids"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "DashboardCreate",
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``."
+      },
+      "DashboardDetail": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Description"
+          },
+          "member_count": {
+            "type": "integer",
+            "title": "Member Count"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "State"
+          },
+          "last_rollup_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "nullable": true,
+            "title": "Last Rollup State"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "members": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardMemberView"
+            },
+            "type": "array",
+            "title": "Members"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "description",
+          "member_count",
+          "state",
+          "last_rollup_state",
+          "created_by_sub",
+          "created_at",
+          "updated_at",
+          "members"
+        ],
+        "title": "DashboardDetail",
+        "description": "Response shape for ``GET /api/v1/checks/dashboards/{id}``.\n\nExtends :class:`DashboardRead` with the per-member breakdown the console\ndetail page + the REST detail expose."
+      },
+      "DashboardListResponse": {
+        "properties": {
+          "dashboards": {
+            "items": {
+              "$ref": "#/components/schemas/DashboardRead"
+            },
+            "type": "array",
+            "title": "Dashboards"
+          }
+        },
+        "type": "object",
+        "required": [
+          "dashboards"
+        ],
+        "title": "DashboardListResponse",
+        "description": "Response envelope for ``GET /api/v1/checks/dashboards``.\n\nWrapped in ``{\"dashboards\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape the Sensor list adopts."
+      },
+      "DashboardMemberView": {
+        "properties": {
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "raw_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Raw State"
+          },
+          "effective_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Effective State"
+          },
+          "pending": {
+            "type": "boolean",
+            "title": "Pending"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity"
+          },
+          "for_seconds": {
+            "type": "integer",
+            "title": "For Seconds"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SensorStatus"
+          },
+          "state_since": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "State Since"
+          },
+          "last_value": {
+            "title": "Last Value"
+          },
+          "last_evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Last Evidence"
+          },
+          "last_evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Evaluated At"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Fire At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensor_id",
+          "name",
+          "connector_id",
+          "op_id",
+          "raw_state",
+          "effective_state",
+          "pending",
+          "severity",
+          "for_seconds",
+          "status",
+          "state_since",
+          "last_value",
+          "last_evidence",
+          "last_evaluated_at",
+          "next_fire_at"
+        ],
+        "title": "DashboardMemberView",
+        "description": "One member Sensor as rendered on a Dashboard detail read.\n\nCarries the raw + rolled-up per-member states (``raw_state`` /\n``effective_state`` / ``pending`` from\n:mod:`meho_backplane.checks.rollup`) plus the Sensor context an operator\nneeds to act -- the op identity, the severity cap, the ``for:`` window,\nthe hysteresis clock (``state_since``), and the last observed value /\nevidence."
+      },
+      "DashboardRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "title": "Description"
+          },
+          "member_count": {
+            "type": "integer",
+            "title": "Member Count"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "State"
+          },
+          "last_rollup_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "nullable": true,
+            "title": "Last Rollup State"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "description",
+          "member_count",
+          "state",
+          "last_rollup_state",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "DashboardRead",
+        "description": "Response shape for one Dashboard row on the list surface.\n\nCarries the rolled-up ``state`` (evaluated on read) and the\n``member_count`` so the list answers \"is everything OK?\" per Dashboard\nwithout a detail fetch. ``last_rollup_state`` is the memo column (always\nNULL until #2507 writes it). ``frozen=True`` so a handler cannot mutate\nthe row after returning it."
+      },
       "DbStatus": {
         "properties": {
           "migrated": {
@@ -22915,6 +24188,11 @@
             "nullable": true,
             "title": "Document Id"
           },
+          "title": {
+            "type": "string",
+            "nullable": true,
+            "title": "Title"
+          },
           "content": {
             "type": "string",
             "title": "Content"
@@ -22941,7 +24219,7 @@
           "content"
         ],
         "title": "DocsChunk",
-        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire."
+        "description": "One cited chunk in MEHO's ``search_docs`` response surface.\n\nA stable projection of the corpus's :class:`~meho_backplane.auth.corpus.CorpusChunk`\ninto the shape the MCP tool (T4) and CLI (T5) render: chunk text +\nsource citation + score. Decoupling MEHO's surface from the corpus's\nwire contract means a corpus field rename doesn't churn the public\n``search_docs`` response; the projection in :func:`_project_chunk` is\nthe one place that mapping lives.\n\n``collection`` is the **provenance** tag (G4.6-T5 #1554): which\ncollection the chunk came from. It is ``None`` on the single-collection\npath (the collection is already implied by the request scope) and set\nto the source collection key on the cross-collection fan-out path so an\nagent fusing hits from several collections can attribute each chunk.\n\n``document_id`` is ``str | None`` (#2004): it mirrors the corpus's own\noptional owning-document id (``None`` when the corpus has no document\nconcept for a chunk) and is only read as a citation-label fallback.\n\n``title`` is the **optional** human-legible chunk title (#2475), passed\nthrough from the corpus (``CorpusChunk.title``). It is the *preferred*\ncitation label \u2014 every citation face (``ask_docs``, ``/ui/corpus``)\nfeeds it to the ``title -> document_id -> filename -> URL`` label chain\n\u2014 and is ``None`` until the upstream corpus supplies one, so today's\ncorpus (which sends no title) sees no behaviour change.\n\n``source_url`` is the **backend-agnostic** citation reference (#132): a\ncanonical public URL where one is derivable, else an opaque\n``meho://docs/<collection>/<chunk_id>`` ref. It is **never** the corpus's\nraw ``gs://`` object path \u2014 the projection in :func:`_project_chunk`\nnormalizes it via\n:func:`~meho_backplane.docs_search.citation_links.normalize_source_ref`\nso no storage-backend scheme or internal bucket/layout reaches the wire."
       },
       "DraftTemplateRequest": {
         "properties": {
@@ -23141,6 +24419,41 @@
         "title": "EnableReadsResponse",
         "description": "Response body for ``POST /api/v1/connectors/{id}/enable-reads`` (G0.25-T7 #1749).\n\nThe bulk read-class enable path returns ``200`` with a count\nrather than ``204`` (the enable / disable transition shape) so the\noperator and the generated Go client see how many ops the action\nflipped \u2014 the AC requires the audit row carry a count, and echoing\nit on the wire lets the CLI render ``enabled N read operation(s)``\nwithout a follow-up review fetch.\n\n``connector_id`` echoes the targeted connector so a ``--json``\npipeline has a self-contained artifact. ``ops_enabled`` is the\nnumber of read-class ops that flipped from ``is_enabled=false`` to\n``true``; it is ``0`` on the idempotent re-run (every read already\nenabled), in which case no audit row was written. Both fields are\nrequired (no default) so the OpenAPI schema marks them\nalways-present and the Go client gets plain value types."
       },
+      "EqualsCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "equals",
+            "title": "Type"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              }
+            ],
+            "nullable": true,
+            "title": "Value"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "value"
+        ],
+        "title": "EqualsCompare",
+        "description": "Strict-equality comparator: ``ok`` on match, ``critical`` otherwise.\n\nEquality is type-strict for booleans -- ``True`` never equals ``1`` -- so\nthe ``value`` operand keeps whatever JSON scalar type it was given (Pydantic\nsmart-union preserves it) and the evaluator compares with matching strictness."
+      },
       "EvalRequest": {
         "properties": {
           "surface": {
@@ -23281,6 +24594,36 @@
         "title": "ForkInfo",
         "description": "Surfaced by ``meho.runbook.edit_template`` when editing a published template forks.\n\nEditing a *published* template cannot mutate it in place (published\ntemplates are immutable); the edit forks a new draft instead. This\nshape tells the senior what they are forking from -- the source\nversion and how many runs are still pinned to it -- so they can decide\nwhether the fork is the right move."
       },
+      "FreshnessCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "freshness",
+            "title": "Type"
+          },
+          "max_age_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "exclusiveMinimum": true,
+            "title": "Max Age Seconds"
+          },
+          "degraded_age_seconds": {
+            "type": "number",
+            "minimum": 0.0,
+            "exclusiveMinimum": true,
+            "nullable": true,
+            "title": "Degraded Age Seconds"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "max_age_seconds"
+        ],
+        "title": "FreshnessCompare",
+        "description": "Age comparator over a timestamp carried in the payload.\n\nThe observed value is the timestamp: an RFC3339 string (which **must**\ncarry a timezone offset -- a naive string is ``unknown`` because a\nhost-TZ-dependent comparison is banned) or an ``int``/``float`` of epoch\nseconds interpreted as UTC. ``age = now - timestamp``; ``age >\nmax_age_seconds`` is ``critical``, ``> degraded_age_seconds`` (when set)\nis ``degraded``, otherwise ``ok`` (a future timestamp is ``ok``). ``now``\nis injected by the caller -- the op-result envelope carries no timestamp\nfield of its own."
+      },
       "GatewayCommandEnvelope": {
         "properties": {
           "id": {
@@ -23379,23 +24722,6 @@
         "title": "GatewayResultBody",
         "description": "POST body for ``.../result`` \u2014 the runner's outcome report."
       },
-      "GraphEdgeKind": {
-        "type": "string",
-        "enum": [
-          "runs-on",
-          "mounts",
-          "routes-through",
-          "belongs-to",
-          "authenticates-via",
-          "depends-on",
-          "replicates-to",
-          "backed-up-by",
-          "routes-via",
-          "policy-binds"
-        ],
-        "title": "GraphEdgeKind",
-        "description": "Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.\n\nInitiative #364 (G9.2) locks the edge-kind vocabulary at ten members:\nthe four auto-discoverable kinds G9.1 (#363) shipped, plus six\noperator-curated cross-system kinds that auto-discovery cannot infer\n(decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary\nis closed -- widening it is a coordinated DB + model change (new\nmigration, new enum member, new decision row) so the v0.2.next\npolicy-engine grammar parsing ``kind`` stays portable across tenants.\n\nThe four auto-discoverable kinds (refresh service writes these on\nevery probe-derived edge):\n\n* :attr:`RUNS_ON` -- ``vm`` ``runs-on`` ``host``, ``pod`` ``runs-on``\n  ``node``: the physical / scheduling host of a workload.\n* :attr:`MOUNTS` -- ``vm`` ``mounts`` ``datastore``, ``pod`` ``mounts``\n  ``volume``: storage attachment.\n* :attr:`ROUTES_THROUGH` -- ``ingress`` ``routes-through`` ``service``,\n  ``service`` ``routes-through`` ``pod``: network routing path.\n* :attr:`BELONGS_TO` -- ``pod`` ``belongs-to`` ``namespace``, ``vm``\n  ``belongs-to`` ``host`` (logical group membership).\n\nThe six curated-only kinds (operator-asserted via\n``meho topology annotate``; cannot be derived from probes):\n\n* :attr:`AUTHENTICATES_VIA` -- principal -> identity-provider node\n  (e.g. ``k8s-sa-foo`` -> ``vault-role-bar``). The canonical\n  cross-system example.\n* :attr:`DEPENDS_ON` -- cross-system functional dependency (e.g.\n  ``service-X`` -> ``database-Y`` where neither side knows about the\n  other in its own probe output).\n* :attr:`REPLICATES_TO` -- operator-asserted replication relationship\n  between two storage / database nodes.\n* :attr:`BACKED_UP_BY` -- operator-asserted backup relationship.\n* :attr:`ROUTES_VIA` -- operator-asserted network path through an\n  intermediary (e.g., ``vm-A`` -> ``firewall-X`` -> ``vm-B`` when the\n  probes only see point-to-point reachability).\n* :attr:`POLICY_BINDS` -- RBAC / policy attachment that crosses\n  connector boundaries (e.g., ``kubernetes-namespace-prod`` ->\n  ``vault-policy-prod-read``).\n\nMirrors the closed-enum pattern :class:`AuthModel`\n(:mod:`meho_backplane.connectors.schemas`) sets: a Python\n:class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,\nboth moved in lock-step by one Alembic migration so the enum and the\nconstraint cannot drift."
-      },
       "GroupingResultModel": {
         "properties": {
           "connector_id": {
@@ -23478,6 +24804,45 @@
         ],
         "title": "HealthResponse",
         "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"always\"`` \u2014 any ``Mcp-Session-Id`` header the client sends is\n  captured into ``audit_log.agent_session_id``; a missing header is\n  accepted (the row's session id lands as NULL). This is the\n  default and what G8.2 audit-replay needs to light up on a stock\n  deploy.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in\n  compliance deploys that forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
+      },
+      "InCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "in",
+            "title": "Type"
+          },
+          "values": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                }
+              ],
+              "nullable": true
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Values"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "values"
+        ],
+        "title": "InCompare",
+        "description": "Membership comparator: ``ok`` if the value strict-equals a member.\n\nSame boolean strictness as :class:`EqualsCompare`, applied per member."
       },
       "IngestJobHandle": {
         "properties": {
@@ -25770,6 +27135,12 @@
             "type": "string",
             "format": "date-time",
             "title": "Updated At"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Seen At"
           }
         },
         "type": "object",
@@ -25783,7 +27154,8 @@
           "revoked",
           "created_by_sub",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "last_seen_at"
         ],
         "title": "RunnerPrincipalRead",
         "description": "Row representation returned by every accessor."
@@ -26235,6 +27607,330 @@
         ],
         "title": "SearchDocsResponse",
         "description": "Successful response shape for ``/api/v1/search_docs``.\n\n``chunks`` is the corpus's ranked cited-chunk list (best first),\nprojected into MEHO's :class:`~meho_backplane.docs_search.DocsChunk`\nsurface so the wire contract is decoupled from the corpus's. Frozen\nso an accidental post-construction mutation surfaces as a pydantic\nerror rather than a silently-altered response.\n\n``grounded`` is the **out-of-corpus discipline signal** (#133): ``True``\nwhen retrieval returned at least one chunk to ground on, ``False`` when it\nreturned none. A consumer must treat ``grounded=False`` as *\"the corpus\nhas no answer\"* and **not** fall back to ungrounded generation \u2014 the\nfeature's contract (*empty/low-score = not in the corpus; do not silently\nfall back to training data*). The verdict is computed server-side by the\nshared :func:`~meho_backplane.docs_search.retrieval_is_grounded` seam \u2014\nthe **same** determination ``ask_docs`` uses to short-circuit to its \"no\ngrounded answer\" reply, so the two surfaces never diverge.\n\n**Score scale + limits of this signal.** Each chunk's ``score`` is the\ncorpus's raw relevance score \u2014 an **opaque, backend-defined scale** MEHO\ndoes not normalise or threshold; do not compare it across collections or\nagainst a fixed cutoff. ``grounded`` is therefore **presence-based**, not\nrelevance-judged: a query that retrieves topically-irrelevant chunks at\nhigh scores still reports ``grounded=True``. Distinguishing that case\nneeds a calibrated per-collection score floor, deferred as the Option-A\nfollow-on (evoila-bosnia/meho-internal#133); it will refine\n``retrieval_is_grounded`` in one place for both surfaces."
+      },
+      "SelectSpec": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "aggregate": {
+            "type": "string",
+            "enum": [
+              "max",
+              "min",
+              "sum",
+              "count",
+              "any",
+              "all"
+            ],
+            "nullable": true,
+            "title": "Aggregate"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "SelectSpec",
+        "description": "The select stage: a dotted path and at most one bounded aggregate.\n\nWith no aggregate the path must resolve to a scalar; with an aggregate it\nmust resolve to a list (either a ``[*]`` projection or a directly selected\narray). The path is compiled at model-parse time so an invalid grammar is\na 422, not an evaluation-time surprise."
+      },
+      "SensorCadenceKind": {
+        "type": "string",
+        "enum": [
+          "interval",
+          "cron"
+        ],
+        "title": "SensorCadenceKind",
+        "description": "Closed enum of the two cadence shapes a :class:`Sensor` may carry.\n\nInitiative #2416 (parent goal #221), Task #2503. One ``sensor`` row\ncarries exactly one cadence, selected by this discriminator; the\ninvariant is enforced by the DB-side ``ck_sensor_cadence_fields``\nCHECK that pairs each kind with its mandatory column (mirroring\n:class:`ScheduledTriggerKind`).\n\nMembers:\n\n* :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The\n  sub-minute path #2505's interval-tick loop drives.\n* :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The\n  >=1-minute path #2505 rides on #804's durable scheduler discipline.\n\nClosed enum: widening it is a coordinated DB + model change so the\nenum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration\n``0064``'s frozen tuple cannot drift."
+      },
+      "SensorCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Op Id"
+          },
+          "target": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "assertion": {
+            "$ref": "#/components/schemas/AssertionSpec"
+          },
+          "cadence_kind": {
+            "$ref": "#/components/schemas/SensorCadenceKind"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "maximum": 86400.0,
+            "minimum": 5.0,
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "maxLength": 128,
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "maxLength": 64,
+            "title": "Timezone",
+            "default": "UTC"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity",
+            "default": "critical"
+          },
+          "for_seconds": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "For Seconds",
+            "default": 0
+          },
+          "identity_sub": {
+            "type": "string",
+            "maxLength": 256,
+            "title": "Identity Sub",
+            "default": "__sensor__"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "connector_id",
+          "op_id",
+          "assertion",
+          "cadence_kind"
+        ],
+        "title": "SensorCreate",
+        "description": "Request body for ``POST /api/v1/sensors``.\n\nDiscriminated by *cadence_kind*: exactly one of ``interval_seconds``\n(interval cadence, 5..86400 s) / ``cron_expr`` + ``timezone`` (cron\ncadence) must be set, matching the DB-side ``ck_sensor_cadence_fields``\ninvariant. The :meth:`_validate_cadence_and_assertion` validator\nenforces this at the wire, validates the cron expression + timezone\nexactly as :mod:`meho_backplane.scheduler.schemas` does, and caps the\nserialized assertion size.\n\n``status`` is deliberately **not** a field: sensors are\nset-at-create-only (like scheduled triggers), and a row is only ever\nparked (``status='paused'``) by #2505's runner, never at create. With\n``extra=\"forbid\"`` a body carrying ``status`` is a 422.\n\n*identity_sub* defaults to ``\"__sensor__\"`` (the sentinel #2505's\nrunner dispatches under). *tenant_id* (optional) lets a platform-admin\ncaller target another tenant; the boundary enforces the RBAC."
+      },
+      "SensorListResponse": {
+        "properties": {
+          "sensors": {
+            "items": {
+              "$ref": "#/components/schemas/SensorRead"
+            },
+            "type": "array",
+            "title": "Sensors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensors"
+        ],
+        "title": "SensorListResponse",
+        "description": "Response envelope for ``GET /api/v1/sensors``.\n\nWrapped in ``{\"sensors\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape\n:class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`\nadopted."
+      },
+      "SensorRead": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "connector_id": {
+            "type": "string",
+            "title": "Connector Id"
+          },
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "target": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Target"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "assertion": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Assertion"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SensorStatus"
+          },
+          "status_reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Status Reason"
+          },
+          "cadence_kind": {
+            "$ref": "#/components/schemas/SensorCadenceKind"
+          },
+          "interval_seconds": {
+            "type": "integer",
+            "nullable": true,
+            "title": "Interval Seconds"
+          },
+          "cron_expr": {
+            "type": "string",
+            "nullable": true,
+            "title": "Cron Expr"
+          },
+          "timezone": {
+            "type": "string",
+            "title": "Timezone"
+          },
+          "next_fire_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Next Fire At"
+          },
+          "severity": {
+            "$ref": "#/components/schemas/SensorSeverity"
+          },
+          "for_seconds": {
+            "type": "integer",
+            "title": "For Seconds"
+          },
+          "last_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "Last State"
+          },
+          "last_value": {
+            "title": "Last Value"
+          },
+          "last_evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Last Evidence"
+          },
+          "last_evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "Last Evaluated At"
+          },
+          "state_since": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "title": "State Since"
+          },
+          "identity_sub": {
+            "type": "string",
+            "title": "Identity Sub"
+          },
+          "created_by_sub": {
+            "type": "string",
+            "title": "Created By Sub"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "tenant_id",
+          "name",
+          "connector_id",
+          "op_id",
+          "target",
+          "params",
+          "assertion",
+          "status",
+          "status_reason",
+          "cadence_kind",
+          "interval_seconds",
+          "cron_expr",
+          "timezone",
+          "next_fire_at",
+          "severity",
+          "for_seconds",
+          "last_state",
+          "last_value",
+          "last_evidence",
+          "last_evaluated_at",
+          "state_since",
+          "identity_sub",
+          "created_by_sub",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "SensorRead",
+        "description": "Response shape for one ``sensor`` row.\n\nMirrors :class:`~meho_backplane.db.models.Sensor`'s column set,\nprojected to the wire types the JSON renderer can serialise. Includes\nthe latest-result projection (``last_state`` / ``last_value`` /\n``last_evidence`` / ``last_evaluated_at`` / ``state_since``) so the\nlist response carries the current status view (there is no REST\nGET-by-id -- the mould exposes none). ``frozen=True`` so a route\nhandler cannot mutate the row after returning it."
+      },
+      "SensorSeverity": {
+        "type": "string",
+        "enum": [
+          "degraded",
+          "critical"
+        ],
+        "title": "SensorSeverity",
+        "description": "Worst dashboard state a failing assertion on a :class:`Sensor` may drive.\n\nThe per-sensor cap #2506 applies to the rollup: a ``degraded``-severity\nsensor whose assertion fails contributes at most ``degraded``, a\n``critical`` one contributes ``critical``. The five-state vocabulary\nitself is declared once in #2504's :data:`CheckState`; this is only\nthe two operator-selectable severities."
+      },
+      "SensorStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "paused"
+        ],
+        "title": "SensorStatus",
+        "description": "Closed lifecycle status of a :class:`Sensor`.\n\n``ScheduledTriggerStatus`` minus the trigger-only terminal states:\na sensor is either eligible for evaluation (:attr:`ACTIVE`) or held\n(:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is\nnot accepted at create; #2505 parks a row to ``paused`` (plus a\n``status_reason``) when it hits an unparseable persisted cadence, and\n#2506's rollup derives ``skip`` for paused rows."
       },
       "ShowTemplateResponse": {
         "properties": {
@@ -27224,6 +28920,43 @@
         "title": "TenantRole",
         "description": "Per-tenant role granted to the operator by the JWT issuer.\n\nThe set is intentionally small in v0.2: a closed three-value enum\nlets the RBAC primitive (Task #234, ``require_role``) make\nexhaustive comparisons without leaking arbitrary string handling\ninto route code. A richer policy engine \u2014 topology-aware\npermissions, ABAC, approval workflows \u2014 is a separate v0.2.next\nGoal; widening this enum is the only ratcheting mechanism in the\ninterim.\n\nValues are the literal strings the Keycloak protocol-mapper recipe\n(Task #235) emits, so a JWT carrying ``\"tenant_admin\"`` materialises\ncleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in\n3.11+) gives the members ``str`` semantics for free, so\n``f\"role={role}\"`` renders as ``\"role=tenant_admin\"`` rather than\n``\"role=TenantRole.TENANT_ADMIN\"``."
       },
+      "ThresholdCompare": {
+        "properties": {
+          "type": {
+            "type": "string",
+            "const": "threshold",
+            "title": "Type"
+          },
+          "op": {
+            "type": "string",
+            "enum": [
+              "gt",
+              "gte",
+              "lt",
+              "lte"
+            ],
+            "title": "Op"
+          },
+          "degraded": {
+            "type": "number",
+            "nullable": true,
+            "title": "Degraded"
+          },
+          "critical": {
+            "type": "number",
+            "nullable": true,
+            "title": "Critical"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "type",
+          "op"
+        ],
+        "title": "ThresholdCompare",
+        "description": "Numeric-bound comparator: ``ok`` / ``degraded`` / ``critical``.\n\nThe observed value is tested ``value <op> bound``. ``critical`` is checked\nbefore ``degraded``, so the more-severe band wins. At least one bound is\nrequired; when both are set they must be ordered by severity for the\noperator direction (``gt``/``gte``: ``degraded <= critical``; ``lt``/``lte``:\n``degraded >= critical``). Non-numeric (or boolean) input is ``unknown``."
+      },
       "Thresholds": {
         "properties": {
           "precision_at_5": {
@@ -27495,6 +29228,10 @@
             "type": "string",
             "title": "Name"
           },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
           "properties": {
             "additionalProperties": true,
             "type": "object",
@@ -27508,6 +29245,18 @@
             "type": "string",
             "nullable": true,
             "title": "Via Edge Kind"
+          },
+          "parent_node_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Parent Node Id"
+          },
+          "via_edge_id": {
+            "type": "string",
+            "format": "uuid",
+            "nullable": true,
+            "title": "Via Edge Id"
           }
         },
         "type": "object",
@@ -27515,11 +29264,12 @@
           "id",
           "kind",
           "name",
+          "source",
           "depth",
           "via_edge_kind"
         ],
         "title": "TopologyNode",
-        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge)."
+        "description": "One ``graph_node`` row reached during a traversal.\n\n``depth`` is the distance from the query root: the root itself is\ndepth ``0``, its immediate dependents/dependencies are depth ``1``,\ntransitive ones depth ``2``, and so on. ``via_edge_kind`` is the\n``graph_edge.kind`` of the edge used to reach this node, or\n``None`` for the root (which is reached by no edge). ``source``\nis ``'auto'`` (probe-derived) or ``'curated'`` (operator-seeded /\npromoted; #2536) \u2014 mirrors :attr:`TopologyEdge.source`.\n\n``parent_node_id`` / ``via_edge_id`` (#2538) are the chain\nprovenance: the ``graph_node.id`` the walk stepped from and the\n``graph_edge.id`` it walked to reach this node, both ``None`` on\nthe root row. They let a caller reconstruct the exact dependency\nchain from the flat closure list without follow-up edge lookups \u2014\nevery ``parent_node_id`` in a closure result is itself a row of\nthat result. Additive with ``None`` defaults so pre-#2538\nconstructors and payloads stay valid."
       },
       "TopologyPath": {
         "properties": {
@@ -27784,7 +29534,11 @@
             "$ref": "#/components/schemas/_EdgeEndpoint"
           },
           "kind": {
-            "$ref": "#/components/schemas/GraphEdgeKind"
+            "type": "string",
+            "maxLength": 63,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "title": "Kind"
           },
           "to": {
             "$ref": "#/components/schemas/_EdgeEndpoint"
@@ -27810,7 +29564,7 @@
           "to"
         ],
         "title": "_AnnotateEdgeRequest",
-        "description": "Inbound body for ``POST /api/v1/topology/edges``.\n\n``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind\nfails Pydantic validation (HTTP 422) **before** the service runs \u2014\nthe service still raises :class:`InvalidEdgeKindError` for\nnon-route callers, but at the HTTP boundary the operator gets the\nstandard FastAPI validation error shape (with the candidate list in\nthe error context) rather than a 500-shaped diagnostic.\n\nThe keyword ``from`` is reserved in Python so the attribute name is\n``from_endpoint``; ``alias=\"from\"`` keeps the wire shape the issue\nbody specifies (``{from, kind, to, note?, evidence_url?}``).\n``populate_by_name`` lets the alias **and** the attribute name both\nwork \u2014 handy for hand-written test fixtures that use the Python\nattribute names."
+        "description": "Inbound body for ``POST /api/v1/topology/edges``.\n\n``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind\nfails Pydantic validation (HTTP 422) **before** the service runs \u2014\nthe service still raises :class:`InvalidEdgeKindError` for\nnon-route callers, but at the HTTP boundary the operator gets the\nstandard FastAPI validation error shape (with the pattern in the\nerror context) rather than a 500-shaped diagnostic.\n\nThe keyword ``from`` is reserved in Python so the attribute name is\n``from_endpoint``; ``alias=\"from\"`` keeps the wire shape the issue\nbody specifies (``{from, kind, to, note?, evidence_url?}``).\n``populate_by_name`` lets the alias **and** the attribute name both\nwork \u2014 handy for hand-written test fixtures that use the Python\nattribute names."
       },
       "_BulkImportEdge": {
         "properties": {
@@ -27818,7 +29572,11 @@
             "$ref": "#/components/schemas/_EdgeEndpoint"
           },
           "kind": {
-            "$ref": "#/components/schemas/GraphEdgeKind"
+            "type": "string",
+            "maxLength": 63,
+            "minLength": 2,
+            "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+            "title": "Kind"
           },
           "to": {
             "$ref": "#/components/schemas/_EdgeEndpoint"
@@ -27844,7 +29602,7 @@
           "to"
         ],
         "title": "_BulkImportEdge",
-        "description": "One edge in the ``POST /api/v1/topology/edges/bulk`` body.\n\nSame wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,\nnote?, evidence_url?}``) \u2014 ``from`` is bound via ``alias`` because\nit is a Python keyword. ``kind`` is typed against\n:class:`GraphEdgeKind` so an unknown kind fails at the boundary\n(HTTP 422) before any service call runs, and the per-row error\nsurfaces inside the standard FastAPI validation envelope with the\nrow index in ``loc``. ``extra=\"forbid\"`` rejects typo'd keys so a\nmisspelled ``evidnce_url`` is caught at the boundary rather than\nsilently dropped."
+        "description": "One edge in the ``POST /api/v1/topology/edges/bulk`` body.\n\nSame wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,\nnote?, evidence_url?}``) \u2014 ``from`` is bound via ``alias`` because\nit is a Python keyword. ``kind`` is typed against\n:data:`_EdgeKindSlug` so a malformed kind fails at the boundary\n(HTTP 422) before any service call runs, and the per-row error\nsurfaces inside the standard FastAPI validation envelope with the\nrow index in ``loc``. ``extra=\"forbid\"`` rejects typo'd keys so a\nmisspelled ``evidnce_url`` is caught at the boundary rather than\nsilently dropped."
       },
       "_BulkImportRequest": {
         "properties": {

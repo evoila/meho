@@ -218,6 +218,7 @@ class ProxmoxConnector(HttpConnector):
             resp = await client.post(
                 _TICKET_PATH,
                 data={"username": creds.username, "password": creds.password},
+                extensions=self._request_extensions(target),
             )
             resp.raise_for_status()
             data = resp.json().get("data") or {}

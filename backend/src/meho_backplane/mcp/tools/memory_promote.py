@@ -9,7 +9,7 @@ Lives in the **admin namespace** (``meho.*``) and is registered with
 list-time filter hides it from non-admin sessions -- it is NOT on the
 agent's daily surface. Promotion is a privileged broaden-visibility
 operation; consumer-needs.md §G5 names tenant-shared memory as "real
-organisational state -- others depend on it" and the v0.2-decisions
+organisational state -- others depend on it" and the locked-decisions
 document carves the agent surface narrowly. Operators initiate
 promotion via the matching CLI verb (T5 #627); the admin meta-tool
 exists for orchestrators / Claude Desktop sessions running under a

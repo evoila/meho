@@ -948,6 +948,7 @@ def resolve_authoring_kind(
     product: str,
     version: str,
     enabled_operation_count: int,
+    has_code_shipped_op: bool = False,
 ) -> tuple[ConnectorAuthoringKind, bool]:
     """Project the connector's authoring-mode ``(kind, dispatchable)`` for the wire.
 
@@ -974,16 +975,31 @@ def resolve_authoring_kind(
       until an operator enables an op; ``profiled-but-unreviewed`` is
       that not-yet-cleared sub-state surfaced on the read surfaces.
 
-    Resolver misses / ties (:exc:`NoMatchingConnector`,
-    :exc:`AmbiguousConnectorResolution`) read as ``("ingested-shim",
-    False)``: no dispatchable class backs the row, which is operationally
-    the same dead end as a bare shim. Fail-soft — a read-surface
-    projection must never raise.
+    Resolver misses (:exc:`NoMatchingConnector`) split on
+    *has_code_shipped_op* (#2496):
 
-    *enabled_operation_count* is the connector's enabled-op rollup the
-    listing already aggregates (the ``is_enabled`` dispatchable subset,
-    #1636); it stands in for "has the review gate been cleared" without a
-    second DB round-trip.
+    * **True → class-less typed mold** → ``("typed", True)``. The
+      ``net.*`` / ``secret.*`` families register module-level
+      ``source_kind='typed'`` handlers and call neither
+      ``register_connector`` nor ``register_connector_v2``, so no class
+      resolves — yet the dispatcher routes them fine with
+      ``connector_instance=None``. Keying on the row's own
+      ``source_kind`` keeps the projection from drifting from what the
+      dispatcher actually does.
+    * **False → genuinely ingested catalog row** → ``("ingested-shim",
+      False)``. Every op is a raw ``source_kind='ingested'`` primitive
+      with no dispatch path — the same dead end as a bare shim.
+
+    Resolver ties (:exc:`AmbiguousConnectorResolution`) always read
+    ``("ingested-shim", False)`` regardless of the flag: a tie between
+    registered classes is a config error, not a dispatchable surface.
+    Fail-soft throughout — a read-surface projection must never raise.
+
+    *enabled_operation_count* is the ``is_enabled`` dispatchable-op
+    rollup (#1636), standing in for "review gate cleared" without a
+    second DB round-trip. *has_code_shipped_op* is the sibling rollup:
+    ``True`` when any descriptor row carries a code-shipped
+    ``source_kind`` (``'typed'`` / ``'composite'``).
     """
     from meho_backplane.connectors.resolver import (
         AmbiguousConnectorResolution,
@@ -993,12 +1009,27 @@ def resolve_authoring_kind(
 
     try:
         cls = resolve_connector(_EnableTimeTarget(product=product, version=version))
-    except (NoMatchingConnector, AmbiguousConnectorResolution) as exc:
+    except NoMatchingConnector:
+        if has_code_shipped_op:
+            _log.debug(
+                "authoring_kind_probe_classless_typed",
+                product=product,
+                version=version,
+            )
+            return "typed", True
         _log.debug(
             "authoring_kind_probe_unresolved",
             product=product,
             version=version,
-            reason=type(exc).__name__,
+            reason="NoMatchingConnector",
+        )
+        return "ingested-shim", False
+    except AmbiguousConnectorResolution:
+        _log.debug(
+            "authoring_kind_probe_unresolved",
+            product=product,
+            version=version,
+            reason="AmbiguousConnectorResolution",
         )
         return "ingested-shim", False
 

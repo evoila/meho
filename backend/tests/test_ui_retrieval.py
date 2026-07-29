@@ -49,7 +49,7 @@ from fastapi.testclient import TestClient
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker, reset_engine_for_testing
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import Document, Tenant
 from meho_backplane.retrieval.eval.result_models import EvalResult, SurfaceResult
 from meho_backplane.retrieval.retire import (
     CriterionResult,
@@ -179,6 +179,48 @@ def _seed_tenant(tenant_id: uuid.UUID, slug: str) -> None:
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session, session.begin():
             session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
+
+    asyncio.run(_do())
+
+
+def _seed_document(
+    *,
+    tenant_id: uuid.UUID,
+    source: str,
+    kind: str,
+    source_id: str,
+    body: str = "seeded document body",
+    user_sub: str | None = None,
+) -> None:
+    """Insert one ``documents`` row so the datalist DISTINCT query sees it (#2458).
+
+    Seeds the substrate directly (no embedding service) with a fixed zero
+    vector; the facet query reads only ``source`` / ``kind`` / ``tenant_id`` /
+    ``metadata``. A ``user_sub`` populates ``metadata['user_sub']`` so the
+    per-principal memory-visibility predicate can be exercised.
+    """
+    metadata: dict[str, object] = {}
+    if user_sub is not None:
+        metadata["user_sub"] = user_sub
+    doc_id = uuid.uuid4()
+
+    async def _do() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            session.add(
+                Document(
+                    id=doc_id,
+                    tenant_id=tenant_id,
+                    source=source,
+                    source_id=source_id,
+                    kind=kind,
+                    body=body,
+                    body_hash=f"sha256:test:{doc_id}",
+                    embedding=[0.0] * 384,
+                    doc_metadata=metadata,
+                    tokens=len(body.split()),
+                ),
+            )
 
     asyncio.run(_do())
 
@@ -325,6 +367,157 @@ def test_retrieval_index_renders_diagnostics_tab_active_and_empty_results() -> N
     assert 'hx-post="/ui/retrieval/diagnostics"' in body
 
 
+def test_run_buttons_carry_in_flight_spinner_and_disable_attrs() -> None:
+    """Each multi-second Run form wires hx-indicator + hx-disabled-elt (#2459).
+
+    The Diagnostics / Eval / Retire forms declare ``hx-indicator`` (pointing at
+    an ``htmx-indicator`` spinner span) and ``hx-disabled-elt`` targeting their
+    own submit button, plus an ``hx-disinherit`` guard so neither attribute
+    leaks onto a descendant htmx request in the swapped results region (#2340).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A)
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+
+    # Each Run form: indicator target + submit-button disable + disinherit guard.
+    for spinner_id in (
+        "retrieval-diagnostics-spinner",
+        "retrieval-eval-spinner",
+        "retrieval-retire-spinner",
+    ):
+        assert f'hx-indicator="#{spinner_id}"' in body
+        # The spinner span exists and carries the htmx-indicator class.
+        assert f'id="{spinner_id}"' in body
+    assert body.count('hx-disabled-elt="find button[type=submit]"') >= 3
+    assert body.count('hx-disinherit="hx-disabled-elt hx-indicator"') >= 3
+    assert body.count("htmx-indicator loading loading-spinner") >= 3
+
+
+# ---------------------------------------------------------------------------
+# GET /ui/retrieval -- Source / Kind datalists (#2458)
+# ---------------------------------------------------------------------------
+
+
+def test_index_source_kind_datalists_enumerate_distinct_visible_values() -> None:
+    """The Source / Kind inputs are backed by datalists of distinct visible values.
+
+    A ``SELECT DISTINCT source, kind`` over the tenant's retrieval-visible
+    ``documents`` rows populates the two ``<datalist>`` elements. Duplicate
+    (source, kind) rows collapse to one option, and the Source help text notes
+    docs-corpus collections are searched elsewhere.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-42")
+    # Two kb rows (distinct source_id) collapse to a single kb / kb-entry option.
+    _seed_document(tenant_id=_TENANT_A, source="kb", kind="kb-entry", source_id="kb-1")
+    _seed_document(tenant_id=_TENANT_A, source="kb", kind="kb-entry", source_id="kb-2")
+    # A user-scoped memory row owned by this principal is visible to them.
+    _seed_document(
+        tenant_id=_TENANT_A,
+        source="memory",
+        kind="memory-user",
+        source_id="mem-1",
+        user_sub="op-42",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Inputs are bound to their datalists.
+    assert 'list="retrieval-source-options"' in body
+    assert 'list="retrieval-kind-options"' in body
+    assert 'id="retrieval-source-options"' in body
+    assert 'id="retrieval-kind-options"' in body
+    # Distinct sources + kinds are offered as options.
+    assert '<option value="kb"></option>' in body
+    assert '<option value="memory"></option>' in body
+    assert '<option value="kb-entry"></option>' in body
+    assert '<option value="memory-user"></option>' in body
+    # DISTINCT collapses the two kb rows to one source option.
+    assert body.count('<option value="kb"></option>') == 1
+    # Source help text steers docs-corpus lookups to /ui/corpus, not here.
+    assert "/ui/corpus" in body
+    assert "Docs-corpus collections are a separate" in body
+
+
+def test_index_datalists_are_tenant_scoped() -> None:
+    """Values seeded under a different tenant never appear in the datalists.
+
+    The DISTINCT query is tenant-scoped, so another tenant's source/kind values
+    cannot leak into this operator's suggestions.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_tenant(_TENANT_B, "tenant-b")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-42")
+    _seed_document(tenant_id=_TENANT_A, source="kb", kind="kb-entry", source_id="a-1")
+    # Foreign-tenant rows with unmistakable source/kind values.
+    _seed_document(
+        tenant_id=_TENANT_B,
+        source="tenant-b-secret-source",
+        kind="tenant-b-secret-kind",
+        source_id="b-1",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert '<option value="kb"></option>' in body
+    # No cross-tenant leak.
+    assert "tenant-b-secret-source" not in body
+    assert "tenant-b-secret-kind" not in body
+
+
+def test_index_datalists_exclude_other_principals_user_scoped_memory() -> None:
+    """A user-scoped memory row another principal owns is not offered (#1797 gate).
+
+    The datalists enumerate *retrieval-visible* rows, so a ``source='memory'``
+    user-scoped ``kind`` owned by a different ``user_sub`` is excluded -- the
+    operator would get 0 hits typing it, so it must not be suggested.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    operator = _operator(tenant_id=_TENANT_A, sub="op-42")
+    _seed_document(tenant_id=_TENANT_A, source="kb", kind="kb-entry", source_id="kb-1")
+    # A user-scoped memory row owned by a DIFFERENT principal -- not visible to op-42.
+    _seed_document(
+        tenant_id=_TENANT_A,
+        source="memory",
+        kind="memory-user",
+        source_id="mem-intruder",
+        user_sub="someone-else",
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        with patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator):
+            response = client.get("/ui/retrieval")
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    assert '<option value="kb"></option>' in body
+    # The other principal's user-scoped memory row does not leak into either list.
+    assert '<option value="memory"></option>' not in body
+    assert '<option value="memory-user"></option>' not in body
+
+
 # ---------------------------------------------------------------------------
 # POST /ui/retrieval/diagnostics -- successful fragment + per-signal breakdown
 # ---------------------------------------------------------------------------
@@ -369,6 +562,45 @@ def test_diagnostics_renders_fused_score_and_per_signal_breakdown() -> None:
     assert "1 hit" in body
 
 
+def test_diagnostics_clamps_hit_body_with_expand_toggle() -> None:
+    """Each hit body is clamped to a snippet with an Alpine expand-on-click toggle (#2456).
+
+    Acceptance criterion: ranked hits render as comparable snippet cards so ten
+    hits fit one screen; each card exposes an expand affordance revealing the
+    full body. The clamp is a static ``line-clamp-3`` (so it holds with JS
+    disabled) that the ``expanded`` binding removes on click.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    hits = [_hit(source_id=f"kb-entry-{i}") for i in range(10)]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RETRIEVE, new_callable=AsyncMock, return_value=hits),
+        ):
+            response = client.post(
+                "/ui/retrieval/diagnostics",
+                data={"query": "snapshot quiesce", "limit": 10},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # One clamped snippet + one expand toggle per hit (all ten).
+    assert body.count("whitespace-pre-wrap line-clamp-3") == 10
+    assert body.count('x-data="{ expanded: false, clamped: false }"') == 10
+    assert body.count("expanded = !expanded") == 10
+    # The clamp is removed on expand, and the toggle labels both directions.
+    assert "{ 'line-clamp-3': !expanded }" in body
+    assert "Show more" in body
+    assert "Show less" in body
+
+
 def test_diagnostics_renders_absent_marker_for_none_rank() -> None:
     """A hit absent from a signal's top-N renders an explicit 'absent' marker, not a blank.
 
@@ -403,6 +635,78 @@ def test_diagnostics_renders_absent_marker_for_none_rank() -> None:
     assert "top-50" in body
     # The present signal still shows its rank.
     assert "#1" in body
+
+
+def test_diagnostics_labels_provenance_and_links_kb_source_id() -> None:
+    """Provenance is labelled visibly and a kb hit's source_id links to its entry (#2457).
+
+    Acceptance criteria: the provenance row carries a visible ``Source id``
+    caption (not only a ``title=`` attribute), and a ``source == "kb"`` hit
+    renders its ``source_id`` as an anchor to ``/ui/kb/<source_id>`` (kb
+    documents persist ``source_id=slug``, so the id is the KB slug).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    hits = [_hit(source="kb", kind="kb-entry", source_id="quiesce-snapshots")]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RETRIEVE, new_callable=AsyncMock, return_value=hits),
+        ):
+            response = client.post(
+                "/ui/retrieval/diagnostics",
+                data={"query": "snapshot", "limit": 10},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # Provenance labels are rendered as visible captions, not hover-only.
+    assert ">Source</span>" in body
+    assert ">Kind</span>" in body
+    assert ">Source id</span>" in body
+    # A kb hit's source_id is a same-tab anchor to its KB entry detail page.
+    assert 'href="/ui/kb/quiesce-snapshots"' in body
+    assert ">quiesce-snapshots</a>" in body
+
+
+def test_diagnostics_non_kb_source_id_is_plain_text_never_a_dead_link() -> None:
+    """A non-kb hit keeps its source_id as plain text with no anchor (#2457).
+
+    Acceptance criterion: a memory hit (no resolvable ``/ui/kb`` route) must
+    not wrap its source_id in an anchor, and must never emit an ``href`` that
+    would 404 against the KB detail route.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(tenant_id=_TENANT_A)
+    hits = [_hit(source="memory", kind="note", source_id="mem-scope-slug")]
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_RETRIEVE, new_callable=AsyncMock, return_value=hits),
+        ):
+            response = client.post(
+                "/ui/retrieval/diagnostics",
+                data={"query": "recall", "limit": 10},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The id is still shown, but as plain selectable text -- never a dead link.
+    assert "mem-scope-slug" in body
+    assert ">mem-scope-slug</a>" not in body
+    assert 'href="/ui/kb/mem-scope-slug"' not in body
 
 
 def test_diagnostics_empty_results_renders_no_matches_state() -> None:

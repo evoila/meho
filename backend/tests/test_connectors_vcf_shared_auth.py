@@ -559,6 +559,73 @@ async def test_vcf_session_login_payload_builder_takes_precedence(
 
 
 # ---------------------------------------------------------------------------
+# vcf_session_login — TLS SNI / cert-verify override threading (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vcf_session_login_threads_request_extensions_sni(
+    _client: httpx.AsyncClient,
+) -> None:
+    """``request_extensions`` reaches the login POST as httpx ``extensions``.
+
+    #2398: the three consumers (vROps token/acquire, vRLI sessions, SDDC
+    ``/v1/tokens``) pass ``HttpConnector._request_extensions(target)`` so a
+    by-IP appliance whose cert pins an FQDN establishes its session under
+    ``verify_tls=true``. httpcore resolves ``server_hostname =
+    request.extensions["sni_hostname"]``.
+    """
+    captured: dict[str, object] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured["extensions"] = dict(request.extensions)
+        return httpx.Response(200, json={}, headers={"sessionId": "tok"})
+
+    with respx.mock(base_url="https://vrli-a.test.invalid") as mock:
+        mock.post("/api/v2/sessions").mock(side_effect=_capture)
+        await vcf_session_login(
+            _client,
+            "/api/v2/sessions",
+            username="admin",
+            password="p",
+            target_name="vrli-a",
+            token_extractor=lambda r: r.headers.get("sessionId"),
+            request_extensions={"sni_hostname": "vrli.corp.example"},
+        )
+
+    exts = captured["extensions"]
+    assert isinstance(exts, dict)
+    assert exts.get("sni_hostname") == "vrli.corp.example"
+
+
+@pytest.mark.asyncio
+async def test_vcf_session_login_default_omits_sni_extension(
+    _client: httpx.AsyncClient,
+) -> None:
+    """No ``request_extensions`` dispatches byte-identically (empty dict, #2398)."""
+    captured: dict[str, object] = {}
+
+    def _capture(request: httpx.Request) -> httpx.Response:
+        captured["extensions"] = dict(request.extensions)
+        return httpx.Response(200, json={}, headers={"sessionId": "tok"})
+
+    with respx.mock(base_url="https://vrli-a.test.invalid") as mock:
+        mock.post("/api/v2/sessions").mock(side_effect=_capture)
+        await vcf_session_login(
+            _client,
+            "/api/v2/sessions",
+            username="admin",
+            password="p",
+            target_name="vrli-a",
+            token_extractor=lambda r: r.headers.get("sessionId"),
+        )
+
+    exts = captured["extensions"]
+    assert isinstance(exts, dict)
+    assert "sni_hostname" not in exts
+
+
+# ---------------------------------------------------------------------------
 # vcf_session_login — failure modes
 # ---------------------------------------------------------------------------
 

@@ -26,10 +26,9 @@ records AppRole as the alternative service identity but flags its
 ``secret_id`` bootstrap (secret-zero) cost. A static token bound to a
 narrow read/write policy on the agent-credentials path is the
 lowest-friction shippable identity — it reuses hvac's
-``Client(token=…)`` primitive (the same one the live-Vault test harness
-uses) with no ``secret_id`` exchange. An operator who prefers AppRole
-runs a Vault Agent sidecar that renews a token into
-``VAULT_SCHEDULER_TOKEN``: additive, no code change here.
+``Client(token=…)`` primitive with no ``secret_id`` exchange. An
+operator who prefers AppRole runs a Vault Agent sidecar that renews a
+token into ``VAULT_SCHEDULER_TOKEN``: additive, no code change here.
 
 Path convention
 ===============
@@ -43,9 +42,9 @@ mount (they insert ``data/`` themselves — verified against hvac 2.4.0).
 setting keeps working unchanged (#823 promised "a code swap, not an
 env-var rename").
 
-The secret payload shape is ``{"client_secret": "<value>"}``; the read
-returns the ``client_secret`` field. No secret value ever enters a log
-event or an error message — only the path and the field *name* do.
+The secret payload shape is ``{"client_secret": "<value>"}``. No secret
+value ever enters a log event or an error message — only the path and
+the field *name* do.
 
 Token lifetime — renew-on-use + self-lookup (#2328)
 ===================================================
@@ -58,18 +57,24 @@ Vault-first read returns 403 and the scheduler silently skips. Two
 mechanisms defuse it here:
 
 * :func:`_maybe_renew_scheduler_token` fires a best-effort
-  ``auth/token/renew-self`` after every successful read/write. The
-  token is renewed at scheduler-tick frequency, so a periodic token
-  with any sane ``period`` never expires while the process runs. The
-  renewal is best-effort: the read/write already succeeded, so a failed
-  renewal is logged and swallowed rather than turned into a new failure
-  mode.
+  ``auth/token/renew-self`` after every successful read/write, at
+  scheduler-tick frequency, so a periodic token with any sane
+  ``period`` never expires while the process runs. A failed renewal is
+  logged and swallowed — the read/write it follows already succeeded.
 * :func:`verify_scheduler_token` runs ``auth/token/lookup-self`` at
   scheduler startup and on a slow cadence from the tick loop. It does
   not fix the fuse — it shortens time-to-notice from weeks to minutes
-  by logging a dead/unreachable token as a loud ``ERROR`` the moment
-  it's observed. Sibling #2327 consumes the same signal for its
-  ``/ready features.scheduler`` skip-state surface.
+  by logging a dead/unreachable token as a loud ``ERROR``. Sibling
+  #2327 consumes the same signal for its ``/ready features.scheduler``
+  skip-state surface.
+
+The same ``lookup-self`` primitive also disambiguates the *write*
+failure path (#2652): a dead token and a live token on an under-scoped
+policy both draw a **403**, but the fixes are opposites (re-mint vs.
+widen the policy). :func:`write_agent_secret` probes
+:func:`_scheduler_token_rejected` on that 403 — and only that 403 — and
+stamps ``token_invalid`` on the raised
+:class:`SchedulerVaultBrokerError`. Diagnosis only: no retry.
 
 The token is resolved from its live source on **every** use
 (:func:`_current_scheduler_token`) rather than frozen at process start,
@@ -92,6 +97,8 @@ from meho_backplane.auth.vault import _build_client
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
+    "SCHEDULER_VAULT_TOKEN_INVALID_DETAIL",
+    "SCHEDULER_VAULT_WRITE_DENIED_DETAIL",
     "SECRET_FIELD",
     "SchedulerTokenStatus",
     "SchedulerVaultBrokerError",
@@ -109,6 +116,26 @@ _log = structlog.get_logger(__name__)
 #: Both the write (register) and the read (scheduler) agree on this key.
 SECRET_FIELD: str = "client_secret"
 
+#: Remediation for a write Vault denied while the scheduler token is
+#: **live** — the bound policy lacks ``create``/``update`` on the
+#: agent-credentials path. Kept verbatim from the pre-#2652 MCP message.
+SCHEDULER_VAULT_WRITE_DENIED_DETAIL: str = (
+    "scheduler Vault write failed — VAULT_SCHEDULER_TOKEN policy must "
+    "grant create/update on the agent-credentials path"
+)
+
+#: Remediation for a write Vault denied **because the token is dead**
+#: (revoked / expired / lost lease) — indistinguishable from the case
+#: above by status code alone, hence the ``lookup-self`` probe (#2652).
+#: Three-clause shape per ``docs/codebase/error-message-shape.md``.
+SCHEDULER_VAULT_TOKEN_INVALID_DETAIL: str = (
+    "scheduler_vault_token_invalid: the scheduler Vault token is invalid "
+    "or expired — Vault rejected auth/token/lookup-self for it, so the "
+    "policy scope is not the fault. Re-mint VAULT_SCHEDULER_TOKEN (or "
+    "refresh the file VAULT_SCHEDULER_TOKEN_FILE points at) and update "
+    "the deployment secret per docs/cross-repo/vault-provisioning.md."
+)
+
 
 class SchedulerVaultBrokerError(Exception):
     """Base class for scheduler-service-token Vault broker failures.
@@ -116,7 +143,19 @@ class SchedulerVaultBrokerError(Exception):
     Raised on read/write failures that are *not* the
     not-configured case (which has its own subclass so callers can choose
     to fall back to the env-var path rather than fail).
+
+    ``token_invalid`` carries the broker's ``lookup-self`` disposition
+    (#2652) so every consuming surface — MCP, the two REST register
+    routes, the UI banner — picks the right remediation from one shared
+    diagnosis instead of re-probing Vault itself. ``True``: the token was
+    403'd by ``auth/token/lookup-self`` and must be re-minted. ``False``:
+    it is live, or its liveness could not be established — either way the
+    pre-existing policy-scope remediation stands.
     """
+
+    def __init__(self, *args: object, token_invalid: bool = False) -> None:
+        super().__init__(*args)
+        self.token_invalid = token_invalid
 
 
 class SchedulerVaultNotConfiguredError(SchedulerVaultBrokerError):
@@ -293,7 +332,12 @@ async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
         with a warning (env-var fallback remains); the read caller treats
         it as "fall back to the env var".
     SchedulerVaultBrokerError
-        Vault is unreachable or rejected the write.
+        Vault is unreachable or rejected the write. On a **403** the
+        error carries ``token_invalid=True`` when a follow-up
+        ``lookup-self`` also 403s (the token is dead — re-mint it) and
+        ``False`` when the token is live, leaving the policy scope at
+        fault (#2652). No other status is evidence about the token, so
+        each keeps ``False``.
     """
     settings = get_settings()
     api_path = vault_path_for_client_id(identity_ref, settings=settings)
@@ -310,7 +354,28 @@ async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
         raise SchedulerVaultBrokerError(
             f"vault unreachable writing agent secret at {api_path!r}: {type(exc).__name__}"
         ) from exc
+    except hvac.exceptions.Forbidden as exc:
+        # 403 is the one ambiguous rejection: a dead token and a live-but-
+        # under-scoped policy look identical, yet the remediations are
+        # opposites (re-mint vs. widen the policy). Split them with one
+        # ``lookup-self`` on the *same* client that just failed and carry
+        # the disposition so all four register surfaces inherit it
+        # (#2652). Diagnosis only — the write is never retried.
+        token_invalid = await _scheduler_token_rejected(client)
+        if token_invalid:
+            _log.error(
+                "scheduler_vault_token_dead",
+                reason=type(exc).__name__,
+                check="agent_secret_write",
+            )
+        raise SchedulerVaultBrokerError(
+            f"vault rejected agent-secret write at {api_path!r}: {type(exc).__name__}",
+            token_invalid=token_invalid,
+        ) from exc
     except hvac.exceptions.VaultError as exc:
+        # Every other status hvac maps onto ``VaultError`` (429, 500, 502,
+        # 503 sealed/down …) describes Vault, not the token — nothing to
+        # disambiguate, so no probe; the policy-scope remediation stands.
         raise SchedulerVaultBrokerError(
             f"vault rejected agent-secret write at {api_path!r}: {type(exc).__name__}"
         ) from exc
@@ -402,6 +467,45 @@ def _lookup_self_blocking(client: hvac.Client) -> object:
     return client.auth.token.lookup_self()
 
 
+async def _scheduler_token_rejected(client: hvac.Client) -> bool:
+    """Is *client*'s token itself dead, rather than merely under-scoped?
+
+    Called from the write-failure path (#2652) after Vault answered a
+    write with 403. A revoked / expired / lost-lease token and a live
+    token on a policy without ``create``+``update`` both produce that
+    403, so the write response alone cannot name the remediation.
+    ``auth/token/lookup-self`` can: Vault answers it for a live token
+    granted ``read`` there (``meho-scheduler`` grants it — load-bearing,
+    see ``docs/cross-repo/vault-provisioning.md``) and 403s an invalid one.
+
+    Probes the **same** client that failed the write — the answer must
+    describe the identity that was actually denied, and re-resolving
+    could pick up a token re-minted between the two calls.
+
+    Returns ``True`` only on a 403. hvac maps *every* Vault status onto a
+    :class:`~hvac.exceptions.VaultError` subclass, so a sealed (503),
+    overloaded (429) or broken (500/502) Vault would otherwise read as a
+    dead token and have an operator re-mint a healthy one mid-outage.
+    Those, like a transport failure, are inconclusive — ``False``, which
+    keeps the caller on the policy-scope remediation.
+    """
+    try:
+        await asyncio.to_thread(_lookup_self_blocking, client)
+    except hvac.exceptions.Forbidden:
+        return True
+    except hvac.exceptions.VaultError as exc:
+        _log.warning(
+            "scheduler_vault_token_lookup_inconclusive",
+            reason=type(exc).__name__,
+            check="agent_secret_write",
+        )
+        return False
+    except requests.exceptions.RequestException:
+        _log.warning("scheduler_vault_token_lookup_unreachable", check="agent_secret_write")
+        return False
+    return False
+
+
 def _unwrap_token_lifetime(payload: object) -> tuple[int | None, str | None]:
     """Pull ``(ttl_seconds, expire_time)`` from a lookup-self response.
 
@@ -425,10 +529,7 @@ async def verify_scheduler_token(*, reason: str = "check") -> SchedulerTokenStat
 
     Called at scheduler startup and on a slow cadence from the tick loop
     (:mod:`meho_backplane.scheduler.loop`). It does **not** fix the fuse
-    (that is :func:`_maybe_renew_scheduler_token`) — it shortens
-    time-to-notice from weeks to minutes by surfacing a dead or
-    unreachable token as a loud ``ERROR`` the moment it's observed,
-    rather than as silent credential-unresolved skips downstream.
+    (that is :func:`_maybe_renew_scheduler_token`; see the module docstring).
 
     Never raises. An unconfigured token returns ``configured=False``
     (the documented env-var-fallback opt-out) and any Vault failure is

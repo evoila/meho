@@ -140,14 +140,17 @@ def _register_vcenter_routes(mock: respx.MockRouter) -> None:
     ``GET /api/about`` (the fingerprint probe), ``DELETE /api/session``
     (the ``aclose`` revoke against the established path), plus the
     ``vmware.host.usage`` surface: ``GET /api/vcenter/host`` and the
-    per-host ``POST /api/PropertyCollector/propertyCollector/RetrievePropertiesEx``
-    (both mounted onto ``/api`` by :meth:`VmwareRestConnector.mount_op_path`).
+    per-host vmomi ``POST /sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/
+    RetrievePropertiesEx`` (the listing mounts onto ``/api`` via
+    :meth:`VmwareRestConnector.mount_op_path`; the vmomi read mounts onto the
+    documented VI-JSON ``/sdk/vim25/{release}`` base via ``_post_vmomi_json``,
+    release ``9.0.0.0`` derived from the ``about.version`` above; #2466).
     """
     mock.post("/api/session").respond(200, json=SESSION_TOKEN)
     mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
     mock.delete("/api/session").respond(204)
     mock.get("/api/vcenter/host").respond(200, json=HOST_LISTING)
-    mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+    mock.post("/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
         side_effect=_retrieve_properties_response
     )
 
@@ -612,10 +615,12 @@ async def test_host_network_uplinks_over_modern_mount_returns_per_host_pnics(
         assert_all_mocked=False,
     ) as mock:
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        # The vmomi read derives its VI-JSON {release} from about.version (#2466).
+        mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
         mock.get("/api/vcenter/host").respond(200, json=HOST_LISTING)
-        mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
-            side_effect=_network_props_response
-        )
+        mock.post(
+            "/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        ).mock(side_effect=_network_props_response)
         mock.delete("/api/session").respond(204)
         try:
             result = await connector.host_network_uplinks(_operator(), vcsim_target, {})
@@ -941,10 +946,12 @@ async def test_vm_info_over_modern_mount_returns_guest_signals(
         assert_all_mocked=False,
     ) as mock:
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        # The vmomi read derives its VI-JSON {release} from about.version (#2466).
+        mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
         mock.get("/api/vcenter/vm").respond(200, json=[{"vm": "vm-9", "name": "hung-appliance"}])
-        mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
-            side_effect=_vm_props
-        )
+        mock.post(
+            "/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        ).mock(side_effect=_vm_props)
         mock.delete("/api/session").respond(204)
         try:
             result = await connector.vm_info(_operator(), vcsim_target, {"name": "hung-appliance"})
@@ -1076,9 +1083,11 @@ async def test_tasks_recent_over_modern_mount_returns_task_rows(
         assert_all_mocked=False,
     ) as mock:
         mock.post("/api/session").respond(200, json=SESSION_TOKEN)
-        mock.post("/api/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
-            side_effect=_tasks
-        )
+        # The vmomi read derives its VI-JSON {release} from about.version (#2466).
+        mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
+        mock.post(
+            "/sdk/vim25/9.0.0.0/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+        ).mock(side_effect=_tasks)
         mock.delete("/api/session").respond(204)
         try:
             result = await connector.tasks_recent(_operator(), vcsim_target, {"max_tasks": 10})

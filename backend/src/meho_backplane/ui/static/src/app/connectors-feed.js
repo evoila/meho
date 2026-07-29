@@ -76,6 +76,17 @@ document.addEventListener("alpine:init", () => {
       } catch {
         return;
       }
+      // #2549: the shared ``/ui/broadcast/stream`` now also carries
+      // agent-authored announcements. This card is the target's audit
+      // recent-ops list; an announcement has no ``op_id`` / ``payload``
+      // method/path, so drop it here (it renders on the broadcast feed /
+      // history instead) rather than projecting a blank operation row.
+      if (
+        frame &&
+        (frame.kind === "agent_announcement" || frame.event_kind === "agent_announcement")
+      ) {
+        return;
+      }
       // Project the BroadcastEvent wire shape into the row shape the
       // template renders. Missing fields render as empty -- never
       // throw.

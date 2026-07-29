@@ -18,7 +18,7 @@ Why a subprocess wrapper instead of in-process ``re``
 Two reasons, both load-bearing:
 
 1. **The baseline is what operators actually run.** The
-   pre-MEHO retire-criterion in v0.2-decisions.md decision #2 is
+   pre-MEHO retire-criterion in locked-decisions.md decision #2 is
    literally "operators retire the in-repo path only once
    ``meho kb search`` is in daily use ... and grep returns
    equivalent answers". Calling the same ``grep`` binary the
@@ -56,7 +56,7 @@ Out of scope
   ``grep paths.txt + yq`` flow against locally-cloned spec" per
   the Initiative body, deferred to T3 (#442) when the operations
   corpus lands. Today this module ships kb-only.
-* **Ranked grep alternatives** (ag, rg, ack-grep). v0.2-decisions
+* **Ranked grep alternatives** (ag, rg, ack-grep). locked-decisions
   pinned the baseline to literal ``grep`` per the operator
   workflow; switching to a ranked grep would produce different
   numbers and obscure the "is MEHO better than what they actually

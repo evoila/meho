@@ -34,7 +34,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
-from meho_backplane.conventions.preamble import BLOCK_END, BLOCK_START, GUARD_PREFIX
+from meho_backplane.conventions.preamble import (
+    BLOCK_END,
+    BLOCK_START,
+    BROADCAST_BLOCK_START,
+    BROADCAST_DISCIPLINE_BAND,
+    GUARD_PREFIX,
+)
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Tenant, TenantConvention
 from meho_backplane.mcp.schemas import PROTOCOL_VERSION
@@ -71,13 +77,12 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     client_with_operator: tuple[TestClient, Operator],
     seeded_operator_tenant: None,
 ) -> None:
-    """Empty tenant -> the ``instructions`` field is absent from the response.
+    """Empty tenant -> ``instructions`` carries the broadcast-discipline band.
 
-    Acceptance criterion: empty tenant -> ``PreambleResult("", [])``;
-    the handler maps the empty string to ``None`` and the wire
-    serializer drops ``None`` optional fields (per the
-    :func:`~meho_backplane.mcp.server._build_success_response`
-    ``exclude_none=True`` policy).
+    Since G6.5-T6 (#2546) the static broadcast-discipline band is
+    injected into every assembled preamble, so even a tenant with no
+    operational conventions receives it. The ``instructions`` field is
+    therefore present and equals the band alone (no conventions block).
     """
     client, _op = client_with_operator
 
@@ -85,10 +90,9 @@ async def test_initialize_instructions_omitted_for_empty_tenant(
     assert response.status_code == 200
     body = response.json()
     assert "error" not in body
-    # The wire shape omits ``instructions`` entirely when the
-    # handler returns ``None`` for it (mirrors the v0.5-T1 behaviour
-    # the existing test_mcp_initialize tests assert).
-    assert "instructions" not in body["result"]
+    instructions = body["result"]["instructions"]
+    assert instructions == BROADCAST_DISCIPLINE_BAND
+    assert BLOCK_START not in instructions  # no conventions block
 
 
 @pytest.mark.asyncio
@@ -131,8 +135,11 @@ async def test_initialize_instructions_populated_for_seeded_tenant(
     instructions = body["result"]["instructions"]
     assert isinstance(instructions, str)
     assert instructions  # non-empty
-    # Block delimiters + guard prefix present per the issue body.
-    assert instructions.startswith(BLOCK_START)
+    # Since G6.5-T6 (#2546) the always-on broadcast-discipline band
+    # leads the preamble; the conventions block follows and (with no
+    # priming / catalogue) closes the text.
+    assert instructions.startswith(BROADCAST_BLOCK_START)
+    assert BLOCK_START in instructions
     assert instructions.endswith(BLOCK_END)
     assert GUARD_PREFIX in instructions
     # Convention content is included verbatim.

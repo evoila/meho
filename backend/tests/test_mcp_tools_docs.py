@@ -376,6 +376,10 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     assert len(payload["chunks"]) == 1
     chunk = payload["chunks"][0]
     assert chunk["chunk_id"] == "nsx-9.0-maximums-0007"
+    # #2475: the chunk payload always carries a ``title`` key — null until the
+    # upstream corpus supplies one (this sample has none).
+    assert "title" in chunk
+    assert chunk["title"] is None
     # #133: the MCP search_docs tool exposes the same grounded verdict as REST.
     assert payload["grounded"] is True
     # The backend id never appears in the response.
@@ -386,6 +390,44 @@ def test_tools_call_search_docs_routes_to_collection_backend(
     assert captured["limit"] == 5
     assert captured["metadata_filters"] == {"product": "nsx", "version": "9.0"}
     assert captured["operator"].tenant_id == op.tenant_id
+
+
+@pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)
+def test_tools_call_search_docs_chunk_carries_upstream_title(
+    docs_client: tuple[TestClient, Operator],
+) -> None:
+    """An upstream-supplied chunk title reaches the ``search_docs`` payload (#2475).
+
+    When the corpus emits a per-chunk ``title`` it must thread through the
+    ``CorpusChunk -> DocsChunk`` projection and appear on the MCP tool's
+    returned chunk, so a hit can render human-legibly instead of by raw id.
+    """
+    client, _op = docs_client
+    _seed_collection_sync()
+    titled = CorpusChunk(
+        chunk_id="nsx-9.0-maximums-0007",
+        document_id="nsx-9.0-config-maximums",
+        title="NSX 9.0 Configuration Maximums",
+        content="NSX 9.0 supports up to 10,000 logical switches per manager.",
+        source_url="https://docs.example.com/nsx/9.0/maximums",
+        score=0.91,
+    )
+    with patch(_CORPUS_SEAM, new=_fake_corpus(titled)):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {
+                    "name": "search_docs",
+                    "arguments": {"query": "config maximums", "collection": "vmware"},
+                },
+            },
+        )
+    assert response.status_code == 200
+    payload = json.loads(response.json()["result"]["content"][0]["text"])
+    assert payload["chunks"][0]["title"] == "NSX 9.0 Configuration Maximums"
 
 
 @pytest.mark.parametrize("docs_client", [_ENTITLED], indirect=True)

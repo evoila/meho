@@ -49,6 +49,10 @@ from meho_backplane.mcp.tools import (  # noqa: F401
     scheduler,
     topology,
 )
+from meho_backplane.mcp.tools.agent_grants import _mirror_grant_id
+from meho_backplane.mcp.tools.runbook_runs import _mirror_run_status
+from meho_backplane.mcp.tools.runbooks import _mirror_template_slug
+from meho_backplane.mcp.tools.scheduler import _mirror_trigger_id
 
 
 def _tool_def(name: str) -> ToolDefinition:
@@ -216,6 +220,64 @@ def test_approvals_tools_expose_approval_request_id_canonical_name(
         {"required": ["id"]},
     ]
     assert "required" not in schema
+
+
+def test_run_status_exposes_run_id_canonical_name_with_handle_alias() -> None:
+    """`meho.agents.run_status` names its run UUID `run_id` (G0.32 #2471).
+
+    Convention §14.3: every MCP tool that names a resource UUID uses the
+    `<noun>_id` form. `run_status` was the sole remaining resource-UUID
+    input arg spelling it `handle` while its sibling `meho.agents.run` /
+    `meho.agents.list_runs` rows return `run_id` — so the obvious
+    round-trip `run_status(run_id=row.run_id)` failed. `run_id` is now
+    canonical; `handle` survives as a deprecated alias for one cycle,
+    guarded by the same `anyOf` + handler XOR the approvals tools use.
+    """
+    properties = _properties("meho.agents.run_status")
+    assert "run_id" in properties, (
+        f"meho.agents.run_status: missing canonical `run_id` (properties={sorted(properties)})"
+    )
+    assert properties["run_id"]["format"] == "uuid"
+    # The deprecated `handle` alias survives for backward compat.
+    assert "handle" in properties
+    assert properties["handle"].get("deprecated") is True
+    assert "deprecated" not in properties["run_id"]
+    # Either alias name satisfies the schema-level required check.
+    schema = _input_schema("meho.agents.run_status")
+    assert schema["anyOf"] == [
+        {"required": ["run_id"]},
+        {"required": ["handle"]},
+    ]
+    assert "required" not in schema
+
+
+def test_run_status_handler_resolves_run_id_xor_handle() -> None:
+    """The `run_id` ↔ `handle` XOR + canonical error strings are pinned.
+
+    §14.3 alias mold (approvals precedent #1358): the handler-level
+    resolver accepts either alias, rejects both-supplied with `-32602`
+    naming both, and speaks `run_id` in every error string.
+    """
+    from meho_backplane.mcp.server import McpInvalidParamsError
+    from meho_backplane.mcp.tools.agent_runs import _require_run_id
+
+    uuid_str = "11111111-1111-1111-1111-111111111111"
+    # Canonical resolves.
+    assert str(_require_run_id({"run_id": uuid_str})) == uuid_str
+    # Deprecated alias resolves.
+    assert str(_require_run_id({"handle": uuid_str})) == uuid_str
+    # Both supplied -> -32602 naming both.
+    with pytest.raises(McpInvalidParamsError) as both:
+        _require_run_id({"run_id": uuid_str, "handle": uuid_str})
+    assert "run_id" in str(both.value) and "handle" in str(both.value)
+    # Missing -> error speaks the canonical name.
+    with pytest.raises(McpInvalidParamsError) as missing:
+        _require_run_id({})
+    assert "run_id" in str(missing.value)
+    # Malformed -> error speaks the canonical name.
+    with pytest.raises(McpInvalidParamsError) as bad:
+        _require_run_id({"run_id": "not-a-uuid"})
+    assert "run_id" in str(bad.value)
 
 
 # ---------------------------------------------------------------------------
@@ -509,3 +571,61 @@ def test_runbook_run_tools_keep_template_slug_field(tool_name: str) -> None:
     properties = _properties(tool_name)
     assert "template_slug" in properties
     assert "slug" not in properties
+
+
+# ---------------------------------------------------------------------------
+# §14.10 — list-row identifiers mirror the qualified name the sibling verb
+#          accepts (alongside the model-native key)
+# ---------------------------------------------------------------------------
+#
+# Where a family's list-row model is REST-shared (so a field rename is off
+# the table), the MCP handler mirrors the identifier / state field at the
+# wire boundary: every row carries the qualified name its sibling verb
+# accepts (`grant_id`, `trigger_id`, `status`, `template_slug`) alongside
+# the model-native key (`id`, `state`, `slug`), equal values — so the
+# obvious round-trip `sibling(qualified=row.qualified)` works (G0.32
+# #2471; response-mirror precedent #1612).
+
+
+def test_grant_row_mirrors_id_as_grant_id_accepted_by_sibling_verbs() -> None:
+    """A grant row carries `grant_id` (== native `id`), accepted by show / revoke."""
+    row = _mirror_grant_id({"id": "grant-uuid", "principal_sub": "agent:x"})
+    assert row["grant_id"] == row["id"] == "grant-uuid"
+    # The sibling verbs require that exact key.
+    for tool_name in ("meho.agents.grant.show", "meho.agents.grant.revoke"):
+        assert "grant_id" in _properties(tool_name)
+        assert _input_schema(tool_name)["required"] == ["grant_id"]
+
+
+def test_scheduler_row_mirrors_id_as_trigger_id_accepted_by_cancel() -> None:
+    """A scheduler row carries `trigger_id` (== native `id`), accepted by cancel."""
+    row = _mirror_trigger_id({"id": "trigger-uuid", "kind": "cron"})
+    assert row["trigger_id"] == row["id"] == "trigger-uuid"
+    assert "trigger_id" in _properties("meho.scheduler.cancel")
+    assert _input_schema("meho.scheduler.cancel")["required"] == ["trigger_id"]
+
+
+@pytest.mark.parametrize("state", ("in_progress", "completed", "abandoned"))
+def test_runbook_run_row_mirrors_state_as_status_within_filter_enum(state: str) -> None:
+    """A run summary carries `status` (== native `state`), a `status`-filter member.
+
+    §14.6 keeps the `meho.runbook.list_runs` filter named `status`; the
+    row model keeps its native `state`. The mirror makes the row's
+    `status` value round-trippable into the filter — so each mirrored
+    value is a member of the `status` filter enum.
+    """
+    row = _mirror_run_status({"state": state, "run_id": "run-uuid"})
+    assert row["status"] == row["state"] == state
+    status_enum = _properties("meho.runbook.list_runs")["status"]["enum"]
+    assert state in status_enum
+
+
+def test_template_row_mirrors_slug_as_template_slug_both_present() -> None:
+    """A template row carries both `slug` (native) and `template_slug` (mirror).
+
+    #2476: the retained #1612 mirror means every template response carries
+    both keys with equal values — no payload change, description
+    clarification only (see `_TEMPLATE_SLUG_PROPERTY`).
+    """
+    row = _mirror_template_slug({"slug": "cert-rotation", "title": "Rotate"})
+    assert row["template_slug"] == row["slug"] == "cert-rotation"

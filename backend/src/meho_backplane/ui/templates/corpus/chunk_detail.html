@@ -1,0 +1,89 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Internal cited-source detail page (Initiative #2495 Task #2462).
+
+  The landing a ``meho://`` citation click-throughs to (#2462). A citation
+  whose source has no public URL was a dead end on the search / ask cards;
+  this view gives it a consistent view-source affordance -- an
+  entitlement-checked, shareable permalink that names *where a grounded
+  answer's claim came from* and links onward to the collection.
+
+  Extends ``base.html`` so the chrome matches the console; sets
+  ``active_surface="corpus"`` so the sidebar highlight stays on the corpus
+  surface. Read-only (a GET) -- no forms, no CSRF token.
+
+  Why not the chunk body: the retrieved chunk's content is already shown on
+  the citation card, and the backend-agnostic search interface has no
+  fetch-by-id seam to re-load it here (see ``chunk_detail.py``). So this view
+  renders identity + provenance, not a re-fetched body.
+
+  Context contract (set by ``chunk_detail._render_chunk_detail``):
+    * ``collection`` -- dict: the projected collection summary (key / vendor /
+      products / status / when_to_use / description).
+    * ``chunk_id``   -- str: the cited chunk's stable id.
+    * ``chunk_ref``  -- str: the stable ``meho://docs/<collection>/<chunk_id>``
+      reference the citation carried.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}Cited source &middot; {{ collection.collection_key }} &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-4">
+  {# ---------- Breadcrumb ---------- #}
+  <nav aria-label="Breadcrumb" class="text-xs opacity-70">
+    <a href="/ui/corpus" class="link link-hover">Docs Corpus</a>
+    <span aria-hidden="true">/</span>
+    <a href="/ui/corpus/collections/{{ collection.collection_key | urlencode }}" class="link link-hover font-mono">{{ collection.collection_key }}</a>
+    <span aria-hidden="true">/</span>
+    <span>Cited source</span>
+  </nav>
+
+  <header>
+    <h1 class="text-2xl font-semibold">Cited source</h1>
+    <p class="text-sm opacity-70">
+      This source was cited in a grounded answer but has no public URL, so it
+      opens here rather than as an outbound link. The internal reference below
+      identifies the exact chunk; MEHO resolves it to the underlying object.
+    </p>
+  </header>
+
+  <article class="card bg-base-100 border-base-300 border shadow-sm" aria-label="Cited source properties">
+    <div class="card-body space-y-2">
+      <h2 class="card-title text-base">Provenance</h2>
+      <dl class="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-sm">
+        <dt class="opacity-60">reference</dt>
+        <dd class="font-mono text-xs break-all" title="Stable backend-agnostic citation reference">{{ chunk_ref }}</dd>
+        <dt class="opacity-60">chunk id</dt>
+        <dd class="font-mono text-xs break-all">{{ chunk_id }}</dd>
+        <dt class="opacity-60">collection</dt>
+        <dd>
+          <a href="/ui/corpus/collections/{{ collection.collection_key | urlencode }}" class="link link-primary font-mono">{{ collection.collection_key }}</a>
+        </dd>
+        <dt class="opacity-60">vendor</dt>
+        <dd>{{ collection.vendor }}</dd>
+        <dt class="opacity-60">products</dt>
+        <dd>
+          {% if collection.products %}
+            {{ collection.products | join(", ") }}
+          {% else %}
+            <span class="opacity-50">&mdash;</span>
+          {% endif %}
+        </dd>
+      </dl>
+      {% if collection.when_to_use %}
+        <div class="mt-1">
+          <h3 class="text-xs font-semibold uppercase opacity-60">When to use this collection</h3>
+          <p class="text-sm whitespace-pre-line">{{ collection.when_to_use }}</p>
+        </div>
+      {% endif %}
+    </div>
+  </article>
+
+  <div>
+    <a href="/ui/corpus" class="link link-hover text-sm">&larr; Back to Docs Corpus</a>
+  </div>
+</section>
+{% endblock %}

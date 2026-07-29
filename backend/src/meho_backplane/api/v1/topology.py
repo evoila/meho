@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
+# code-quality-allow: file-size — pre-existing >1600-line single-surface
+# topology REST router (G9.1 read/refresh + G9.2 curated-edge + G9.3
+# temporal facets); #2485 only adds the DELETE /nodes/{node_id} route.
+# Splitting the router into per-facet modules is its own refactor, out of
+# scope for a delete-verb task.
+
 """``/api/v1/topology*`` — REST front for the G9.1 + G9.2 topology graph.
 
 G9.1-T5 (#453) of Initiative #363 mounted the four read/refresh routes
@@ -94,11 +100,11 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any, Final
+from typing import Annotated, Any, Final
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.api.v1._envelope import ENVELOPE_QUERY, EnvelopeVersion
@@ -109,7 +115,14 @@ from meho_backplane.connectors import (
     NoMatchingConnector,
 )
 from meho_backplane.db.engine import get_raw_session
-from meho_backplane.db.models import GraphEdge, GraphEdgeKind, GraphNode
+from meho_backplane.db.models import (
+    KIND_SLUG_MAX_LENGTH,
+    KIND_SLUG_MIN_LENGTH,
+    KIND_SLUG_PATTERN,
+    GraphEdge,
+    GraphEdgeKind,
+    GraphNode,
+)
 from meho_backplane.targets.resolver import resolve_target
 from meho_backplane.topology.annotate import (
     AutoEdgeDeletionError,
@@ -122,6 +135,12 @@ from meho_backplane.topology.bulk_import import (
     BulkImportRow,
     BulkImportValidationError,
     bulk_import_edges,
+)
+from meho_backplane.topology.node_delete import (
+    NodeHasLiveEdgesError,
+    NodeNotDeletableError,
+    NodeNotFoundForDeleteError,
+    delete_node,
 )
 from meho_backplane.topology.query import (
     AmbiguousNodeError,
@@ -173,6 +192,7 @@ _OP_PATH = "topology.path"
 _OP_REFRESH = "topology.refresh"
 _OP_ANNOTATE = "topology.annotate"
 _OP_UNANNOTATE = "topology.unannotate"
+_OP_DELETE_NODE = "topology.delete_node"
 _OP_LIST_EDGES = "topology.list_edges"
 _OP_BULK_IMPORT = "topology.bulk_import"
 _OP_TIMELINE = "topology.timeline"
@@ -224,6 +244,23 @@ _DEPTH_DEFAULT = 16
 _DEPTH_MAX = 64
 _MAX_HOPS_DEFAULT = 8
 _MAX_HOPS_MAX = 32
+
+#: Shared ``include_stale`` query param for the three traversal verbs
+#: (#2538). Default ``True`` preserves the last-refresh-wins contract
+#: (soft-deleted rows stay reachable); ``false`` restricts the walk to
+#: live rows (``last_seen IS NOT NULL``) — the same view
+#: ``GET /topology/edges`` shows. Declared once so the three routes
+#: cannot drift on default or prose.
+_INCLUDE_STALE_QUERY = Query(
+    default=True,
+    description=(
+        "Include soft-deleted (stale) nodes and edges in the walk. "
+        "Defaults to true (last-refresh-wins: rows a refresh "
+        "soft-deleted stay reachable). Pass false to restrict the "
+        "traversal to live rows only — the same view the edge "
+        "inventory listing shows."
+    ),
+)
 
 
 #: OpenAPI 404 + 409 declarations for the closure routes (``dependents``
@@ -391,6 +428,7 @@ async def dependents(
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    include_stale: bool = _INCLUDE_STALE_QUERY,
     envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
 ) -> list[TopologyNode] | dict[str, object]:
@@ -407,6 +445,13 @@ async def dependents(
     (``ambiguous_node``) rather than silently merging unrelated
     closures. ``kind_filter`` restricts the walk to edges of that
     ``graph_edge.kind``.
+
+    Each non-root row carries ``parent_node_id`` / ``via_edge_id``
+    (#2538) — the node the walk stepped from and the edge it walked —
+    so the caller reconstructs the exact dependency chain from the
+    flat list. ``include_stale=false`` opts out of the default
+    last-refresh-wins view and drops soft-deleted nodes/edges from
+    the walk.
 
     G0.18-T4 (#1357, RDC #789 N2) — an anchor name with no matching
     :class:`~meho_backplane.db.models.GraphNode` in the tenant returns
@@ -446,6 +491,7 @@ async def dependents(
             kind=kind,
             depth=depth,
             kind_filter=kind_filter,
+            include_stale=include_stale,
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
@@ -465,6 +511,7 @@ async def dependencies(
     depth: int = Query(default=_DEPTH_DEFAULT, ge=1, le=_DEPTH_MAX),
     kind: str | None = Query(default=None),
     kind_filter: str | None = Query(default=None),
+    include_stale: bool = _INCLUDE_STALE_QUERY,
     envelope: EnvelopeVersion | None = ENVELOPE_QUERY,
     operator: Operator = _require_operator,
 ) -> list[TopologyNode] | dict[str, object]:
@@ -472,9 +519,11 @@ async def dependencies(
 
     The mirror of :func:`dependents` — same shape, same one-row-per-
     node closure dedupe, same ``kind`` disambiguation contract, same
-    tenant scoping, **same G0.18-T4 (#1357) untracked-anchor
-    treatment** (404 ``node_untracked`` rather than an empty list) —
-    walking edges out of the current node rather than into it. Wraps
+    tenant scoping, same #2538 chain provenance (``parent_node_id`` /
+    ``via_edge_id``) and ``include_stale`` opt-out, **same G0.18-T4
+    (#1357) untracked-anchor treatment** (404 ``node_untracked``
+    rather than an empty list) — walking edges out of the current
+    node rather than into it. Wraps
     :func:`~meho_backplane.topology.query.find_dependencies`. Honours
     the same ``?envelope=v2`` opt-in (G0.16-T6 Finding E #1312)
     returning ``{"kind": "dependencies", "nodes": [...]}``.
@@ -490,6 +539,7 @@ async def dependencies(
             kind=kind,
             depth=depth,
             kind_filter=kind_filter,
+            include_stale=include_stale,
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
@@ -510,6 +560,7 @@ async def path(
     from_kind: str | None = Query(default=None),
     to_kind: str | None = Query(default=None),
     max_hops: int = Query(default=_MAX_HOPS_DEFAULT, ge=1, le=_MAX_HOPS_MAX),
+    include_stale: bool = _INCLUDE_STALE_QUERY,
     operator: Operator = _require_operator,
 ) -> TopologyPath | None:
     """Shortest unweighted path from ``from`` to ``to``, or ``null``.
@@ -526,6 +577,12 @@ async def path(
     ``from_kind`` / ``to_kind`` pin each endpoint independently; an
     unpinned name resolving to multiple kinds returns 409
     (``ambiguous_node``).
+
+    Each non-root path node carries ``via_edge_id`` (the exact edge of
+    the hop) and ``parent_node_id`` (the previous node) per #2538.
+    ``include_stale=false`` drops soft-deleted nodes/edges from the
+    search — on both edge directions, so a stale edge is never walked
+    backwards into a path.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id=_OP_PATH,
@@ -539,6 +596,7 @@ async def path(
             from_kind=from_kind,
             to_kind=to_kind,
             max_hops=max_hops,
+            include_stale=include_stale,
         )
     except AmbiguousNodeError as exc:
         raise _ambiguous_node_http(exc) from exc
@@ -707,15 +765,35 @@ class _EdgeEndpoint(BaseModel):
         return NodeRef(name=self.name, kind=self.kind)
 
 
+#: Wire type for an edge kind under the open vocabulary (T1 #2534):
+#: any lowercase slug matching
+#: :data:`~meho_backplane.db.models.KIND_SLUG_PATTERN` (2-63 chars).
+#: Pydantic enforces the same grammar the service-side
+#: :func:`~meho_backplane.db.models.is_valid_kind_slug` checks, so a
+#: malformed kind 422s at the HTTP boundary while a novel-but-valid
+#: kind (``resolves-to``, ``same-as``) passes straight through. The
+#: constraints surface as ``pattern`` / ``minLength`` / ``maxLength``
+#: in the generated OpenAPI schema (the old closed ``GraphEdgeKind``
+#: enum component becomes a plain constrained string on the wire).
+_EdgeKindSlug = Annotated[
+    str,
+    StringConstraints(
+        min_length=KIND_SLUG_MIN_LENGTH,
+        max_length=KIND_SLUG_MAX_LENGTH,
+        pattern=KIND_SLUG_PATTERN,
+    ),
+]
+
+
 class _AnnotateEdgeRequest(BaseModel):
     """Inbound body for ``POST /api/v1/topology/edges``.
 
-    ``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind
+    ``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind
     fails Pydantic validation (HTTP 422) **before** the service runs —
     the service still raises :class:`InvalidEdgeKindError` for
     non-route callers, but at the HTTP boundary the operator gets the
-    standard FastAPI validation error shape (with the candidate list in
-    the error context) rather than a 500-shaped diagnostic.
+    standard FastAPI validation error shape (with the pattern in the
+    error context) rather than a 500-shaped diagnostic.
 
     The keyword ``from`` is reserved in Python so the attribute name is
     ``from_endpoint``; ``alias="from"`` keeps the wire shape the issue
@@ -732,7 +810,7 @@ class _AnnotateEdgeRequest(BaseModel):
     )
 
     from_endpoint: _EdgeEndpoint = Field(alias="from")
-    kind: GraphEdgeKind
+    kind: _EdgeKindSlug
     to_endpoint: _EdgeEndpoint = Field(alias="to")
     note: str | None = Field(default=None, max_length=2000)
     evidence_url: str | None = Field(default=None, max_length=2000)
@@ -784,24 +862,25 @@ async def annotate_edge_route(
             session,
             operator,
             body.from_endpoint.to_ref(),
-            body.kind.value,
+            body.kind,
             body.to_endpoint.to_ref(),
             note=body.note,
             evidence_url=body.evidence_url,
         )
     except InvalidEdgeKindError as exc:
-        # The Pydantic ``kind: GraphEdgeKind`` field rejects unknown
+        # The Pydantic ``kind: _EdgeKindSlug`` field rejects malformed
         # kinds at the boundary, so this branch only ever fires for a
-        # mid-flight enum widening where Pydantic accepts a value the
-        # service-layer ``_validate_kind`` does not yet recognise.
-        # Re-raise as 422 with the candidate list so the operator's
-        # diagnostic still matches the Pydantic-rejected case.
+        # drift between the wire pattern and the service-layer
+        # ``_validate_kind`` grammar. Re-raise as 422 with the pattern
+        # and the well-known suggestions so the operator's diagnostic
+        # still matches the Pydantic-rejected case.
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "error": "invalid_edge_kind",
                 "kind": exc.kind,
-                "kinds": sorted(k.value for k in GraphEdgeKind),
+                "pattern": KIND_SLUG_PATTERN,
+                "well_known_kinds": sorted(k.value for k in GraphEdgeKind),
             },
         ) from exc
     except AmbiguousNodeError as exc:
@@ -883,9 +962,81 @@ async def unannotate_edge_route(
         ) from exc
 
 
+@router.delete(
+    "/nodes/{node_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_node_route(
+    node_id: uuid.UUID,
+    operator: Operator = _require_admin,
+    session: AsyncSession = Depends(get_raw_session),
+) -> None:
+    """Hard-delete a manually-seeded ``graph_node`` by id.
+
+    Wraps :func:`~meho_backplane.topology.node_delete.delete_node`
+    (#2485). Returns 204 on success, writing a ``removed``
+    ``graph_node_history`` tombstone in the same transaction. Requires
+    :class:`TenantRole.TENANT_ADMIN` — the same gate the curated-edge
+    ``DELETE /edges/{edge_id}`` route sits behind.
+
+    Error mapping (mirrors the §3 auto-edge discipline
+    :func:`unannotate_edge_route` enforces):
+
+    * **409 ``probe_owned_node``** when the row is probe-derived
+      (``source='auto'``) or bound to a registered target
+      (``target_id IS NOT NULL``). Refresh reconciliation owns those and
+      they resurrect on the next probe, so a manual delete is
+      meaningless — only ``source='curated'``, target-unbound seeds are
+      deletable.
+    * **409 ``node_has_edges``** with the blocking ``edge_ids`` when a
+      live ``graph_edge`` references the node. The caller unannotates
+      those first; the service refuses rather than letting the DB
+      ``ON DELETE CASCADE`` drop them without their history tombstones.
+    * **404** when no node with that id exists in the caller's tenant
+      (cross-tenant ids and missing ids are indistinguishable — the
+      tenant boundary is opaque to the caller).
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_OP_DELETE_NODE,
+        audit_op_class="write",
+    )
+    try:
+        await delete_node(session, operator, node_id=node_id)
+    except NodeNotDeletableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "probe_owned_node",
+                "node_id": str(exc.node_id),
+                "source": exc.source,
+                "target_id": str(exc.target_id) if exc.target_id is not None else None,
+                "message": str(exc),
+            },
+        ) from exc
+    except NodeHasLiveEdgesError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "node_has_edges",
+                "node_id": str(exc.node_id),
+                "edge_ids": [str(e) for e in exc.edge_ids],
+                "message": str(exc),
+            },
+        ) from exc
+    except NodeNotFoundForDeleteError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "error": "node_not_found",
+                "node_id": str(node_id),
+                "message": str(exc),
+            },
+        ) from exc
+
+
 @router.get("/edges", response_model=list[TopologyEdge])
 async def list_edges_route(
-    kind: GraphEdgeKind | None = Query(default=None),
+    kind: _EdgeKindSlug | None = Query(default=None),
     source: str | None = Query(default=None, pattern="^(auto|curated)$"),
     from_name: str | None = Query(default=None, alias="from"),
     to_name: str | None = Query(default=None, alias="to"),
@@ -907,8 +1058,9 @@ async def list_edges_route(
     Python keyword); the tenant boundary comes from ``operator.tenant_id``
     and is non-overrideable by query string or body.
 
-    ``kind`` is typed against :class:`GraphEdgeKind` so an unknown kind
-    is rejected at the HTTP boundary (422) before the helper runs;
+    ``kind`` is typed against :data:`_EdgeKindSlug` so a malformed kind
+    is rejected at the HTTP boundary (422) before the helper runs
+    (any well-formed slug is a legal filter — the vocabulary is open);
     ``source`` is constrained to the two ``graph_edge.source`` values
     by a regex pattern; ``conflicts=true`` forwards
     ``conflicts_only=True`` to surface the recoverability listing for
@@ -936,7 +1088,7 @@ async def list_edges_route(
         edges = await list_edges(
             session,
             operator.tenant_id,
-            kind=kind.value if kind is not None else None,
+            kind=kind,
             source=source,
             from_ref=from_name,
             to_ref=to_name,
@@ -960,7 +1112,7 @@ class _BulkImportEdge(BaseModel):
     Same wire shape as :class:`_AnnotateEdgeRequest` (``{from, kind, to,
     note?, evidence_url?}``) — ``from`` is bound via ``alias`` because
     it is a Python keyword. ``kind`` is typed against
-    :class:`GraphEdgeKind` so an unknown kind fails at the boundary
+    :data:`_EdgeKindSlug` so a malformed kind fails at the boundary
     (HTTP 422) before any service call runs, and the per-row error
     surfaces inside the standard FastAPI validation envelope with the
     row index in ``loc``. ``extra="forbid"`` rejects typo'd keys so a
@@ -971,7 +1123,7 @@ class _BulkImportEdge(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", populate_by_name=True)
 
     from_endpoint: _EdgeEndpoint = Field(alias="from")
-    kind: GraphEdgeKind
+    kind: _EdgeKindSlug
     to_endpoint: _EdgeEndpoint = Field(alias="to")
     note: str | None = Field(default=None, max_length=2000)
     evidence_url: str | None = Field(default=None, max_length=2000)
@@ -1086,7 +1238,7 @@ async def bulk_import_edges_route(
     rows = [
         BulkImportRow(
             from_ref=edge.from_endpoint.to_ref(),
-            kind=edge.kind.value,
+            kind=edge.kind,
             to_ref=edge.to_endpoint.to_ref(),
             note=edge.note,
             evidence_url=edge.evidence_url,
@@ -1296,7 +1448,7 @@ async def timeline_route(
       :class:`InvalidTimelineCursorError` message is echoed.
 
     The route binds ``audit_op_id="topology.timeline"`` /
-    ``audit_op_class="audit_query"`` per [decision #3](docs/planning/v0.2-decisions.md)
+    ``audit_op_class="audit_query"`` per [decision #3](docs/decisions/locked-decisions.md)
     -- temporal graph queries are inspections of system state, parallel
     to G8's audit-log query surface; the broadcast event carries only
     ``{op_id, result_status, row_count}`` so the request filter (which
@@ -1456,7 +1608,7 @@ async def history_route(
       kinds; pass ``kind`` to disambiguate.
 
     The route binds ``audit_op_id="topology.history"`` /
-    ``audit_op_class="audit_query"`` per [decision #3](docs/planning/v0.2-decisions.md)
+    ``audit_op_class="audit_query"`` per [decision #3](docs/decisions/locked-decisions.md)
     -- temporal graph queries are inspections of system state,
     parallel to G8's audit-log query surface; the broadcast event
     carries only ``{op_id, result_status, row_count}`` so the

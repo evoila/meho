@@ -90,6 +90,94 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — CI merge gates no longer block every PR
+
+- Two independent CI misconfigurations made most open PRs structurally
+  unmergeable, and both are fixed here. **First**, `Python License Check`
+  and `NPM License Check` are required status checks, but their workflow
+  was gated by `on.pull_request.paths` limited to dependency manifests.
+  GitHub leaves a required context *Pending forever* when its whole
+  workflow is skipped by a path filter — so every PR that did not touch a
+  `pyproject.toml` / `package.json` / `package-lock.json` could never
+  satisfy branch protection and could only land via an admin bypass. The
+  narrowing moved to a `changes` job plus a job-level `if:`, because a job
+  skipped by its own `if:` reports **Success** and does satisfy the
+  required check. This is the same shape `ci.yml` adopted in #2140 for the
+  migration gate and documents at its own `changes` job; the license
+  workflow was simply never converted. Which manifests trigger a real
+  license run is unchanged. **Second**, every Dependabot PR failed
+  `Python (ruff + mypy + pytest)` and `Python (integration testcontainers)`
+  at `docker/login-action` with `Username and password required`:
+  Dependabot-triggered runs read the *Dependabot* secret store rather than
+  the Actions one, so `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` resolve
+  empty and the action hard-fails instead of no-opping. All four login
+  steps now carry an empty-secret guard. Skipping the login is safe —
+  the testcontainers images all resolve through the `harbor.evba.lab`
+  proxy cache — it only forfeits the Docker Hub rate-limit headroom, which
+  mirroring those two secrets into the repo's Dependabot secrets restores.
+
+### Fixed — agent bridge publishes wire-safe tool schemas (#2644)
+
+- Every `meho agents run` on provider `anthropic` died at model-init with
+  `input_schema does not support oneOf, allOf, or anyOf at the top level`
+  and `turns: 0`, no matter what the agent's own toolset asked for —
+  reproducible with an empty toolset. The Anthropic Messages API validates
+  the whole `tools` array, so one malformed schema poisons the request
+  rather than just its own tool. The offender was `meho.broadcast.watch`:
+  its registered `inputSchema` carries a top-level `anyOf` enforcing the
+  `cursor` / `since_cursor` XOR, and the hosted-agent bridge deep-copied
+  the *registered* schema into the model-facing tool list, bypassing
+  `ToolDefinition.to_wire()` — which has stripped root-level combinators
+  since v0.6.0 for exactly this reason. The bridge now publishes the wire
+  shape at its single publish chokepoint, so every currently-bridged and
+  future-bridged tool inherits the guarantee. Nothing about the MCP surface
+  changes: the registered schema keeps its `anyOf`, `tools/call` keeps
+  validating both-or-neither cursor forms against it, and the deprecated
+  `since_cursor` alias is untouched. Scheduled runs, the approval-gated
+  agent-write flow, and operator-triggered runs all recover.
+  A new cross-surface sweep (`tests/test_published_tool_schema_shape.py`)
+  fails on any *published* schema — MCP wire copy or agent meta-tool —
+  whose root carries a combinator or is not `type: object`.
+
+### Fixed — scheduler Vault dead-token diagnostics (#2652)
+
+- Agent- and runner-principal registration now tells operators **which**
+  Vault fault they hit. A dead scheduler token (revoked, expired, or a
+  periodic token whose lease lapsed) and an under-scoped `meho-scheduler`
+  policy both make Vault answer the credential write with a 403, but
+  every surface named only the policy remediation — so a field report had
+  the operator verify policy, path pattern, and mount (all correct)
+  before anyone thought to `vault token lookup` the token itself. The
+  broker now fires the `auth/token/lookup-self` probe it already shipped
+  for #2328 whenever Vault answers the write with a 403 — the one
+  ambiguous status — and carries the disposition on
+  `SchedulerVaultBrokerError`; a dead token surfaces as
+  `scheduler_vault_token_invalid: the scheduler Vault token is invalid or
+  expired …` with the re-mint remediation on all four surfaces (the MCP
+  `meho.agent_principals.register` `-32602` message, both REST register
+  routes' 502 detail, and the `/ui/agents/principals` register banner),
+  while a live-token-denied write keeps the existing policy-scope wording
+  unchanged. Only a 403 on the probe condemns the token: a sealed (503),
+  overloaded (429) or broken (500/502) Vault stays on the policy-scope
+  wording instead of ordering a re-mint mid-outage. Diagnosis only — the
+  write is not retried, and the renew-on-use loop from #2328 is
+  untouched.
+  `docs/cross-repo/vault-provisioning.md` gains the dead-token row next
+  to the under-scoped-policy row.
+### Fixed — CLI targets import tls_server_name (#2643)
+
+- `meho targets import` now maps a manifest's `tls_server_name` to the
+  real top-level column on `TargetCreate` / `TargetUpdate` instead of
+  spilling it into the `extras` JSONB blob. Before this fix the import
+  reported "1 updated", the descriptor looked complete, and the typed
+  column stayed `NULL` — so dispatch kept deriving the SNI /
+  cert-verification hostname from `host` and an appliance reached by IP
+  with an FQDN-only SAN failed with `connector_tls_verify_failed`
+  ("IP address mismatch"), the exact class the #2398 SNI fix shipped to
+  unblock. Operators who worked around it with `PATCH
+  /api/v1/targets/{name}` can drop the manual step and let the
+  repo-tracked `targets.yaml` be the source of truth again.
+
 ## [0.25.0] - 2026-07-19
 
 This release lands the complete **v0.21/v0.22 dogfood-hardening cycle** —

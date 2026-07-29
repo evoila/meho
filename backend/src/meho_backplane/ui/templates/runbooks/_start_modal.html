@@ -62,15 +62,15 @@
         </div>
       {% endif %}
 
-      <label class="form-control">
-        <span class="label-text">Template slug</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Template slug</span>
         <input
           type="text"
           name="template_slug"
           list="runbook-run-published-slugs"
           required
           maxlength="256"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
           placeholder="e.g. drain-node"
           autocomplete="off"
           aria-describedby="runbook-run-start-slug-hint"
@@ -83,7 +83,7 @@
             <option value="{{ slug }}"></option>
           {% endfor %}
         </datalist>
-        <span id="runbook-run-start-slug-hint" class="text-xs opacity-60 mt-1">
+        <span id="runbook-run-start-slug-hint" class="text-xs opacity-60">
           {% if published_slugs %}
             Pick a published template or type its slug.
           {% else %}
@@ -92,50 +92,69 @@
         </span>
       </label>
 
-      <label class="form-control">
-        <span class="label-text">Target</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Target</span>
         <input
           type="text"
           name="target"
           required
           maxlength="512"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
           placeholder="the run's subject -- host, cluster, cert thumbprint"
           autocomplete="off"
           aria-describedby="runbook-run-start-target-hint"
         />
-        <span id="runbook-run-start-target-hint" class="text-xs opacity-60 mt-1">
+        <span id="runbook-run-start-target-hint" class="text-xs opacity-60">
           Substituted into the steps as <code>${run.target}</code>.
         </span>
       </label>
 
-      <label class="form-control">
-        <span class="label-text">Params <span class="opacity-60">(optional, JSON object)</span></span>
+      {#- ``formatParams`` pretty-prints the Params JSON on blur so the
+          operator sees a readable, indented object instead of a one-line
+          blob (#176). Invalid / partial JSON is left exactly as typed —
+          the server (``_parse_json_object``) still validates and surfaces a
+          422/typed error, so formatting never eats an in-progress edit. -#}
+      <label
+        class="flex flex-col gap-1"
+        x-data="{
+          formatParams(el) {
+            const raw = el.value.trim();
+            if (!raw) { return; }
+            try {
+              el.value = JSON.stringify(JSON.parse(raw), null, 2);
+            } catch (e) {
+              /* invalid JSON: leave as typed; the server validates it */
+            }
+          }
+        }"
+      >
+        <span class="text-sm font-medium">Params <span class="opacity-60">(optional, JSON object)</span></span>
         <textarea
           name="params"
           maxlength="16384"
-          class="textarea textarea-bordered min-h-[8rem] font-mono text-sm"
+          class="textarea textarea-bordered min-h-[8rem] w-full font-mono text-sm"
           placeholder='{"namespace": "prod", "replicas": 3}'
           aria-describedby="runbook-run-start-params-hint"
+          x-on:blur="formatParams($event.target)"
         ></textarea>
-        <span id="runbook-run-start-params-hint" class="text-xs opacity-60 mt-1">
+        <span id="runbook-run-start-params-hint" class="text-xs opacity-60">
           A JSON object of <code>${run.params.X}</code> substitutions. Leave
           blank for none.
         </span>
       </label>
 
-      <label class="form-control">
-        <span class="label-text">Work ref <span class="opacity-60">(optional)</span></span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Work ref <span class="opacity-60">(optional)</span></span>
         <input
           type="text"
           name="work_ref"
           maxlength="512"
-          class="input input-bordered input-sm font-mono"
+          class="input input-bordered input-sm font-mono w-full"
           placeholder="gh:evoila/meho#9, a Jira key, a CR id"
           autocomplete="off"
           aria-describedby="runbook-run-start-work-ref-hint"
         />
-        <span id="runbook-run-start-work-ref-hint" class="text-xs opacity-60 mt-1">
+        <span id="runbook-run-start-work-ref-hint" class="text-xs opacity-60">
           The external change ticket this run executes under. Pinned on the
           run and every step's audit row.
         </span>

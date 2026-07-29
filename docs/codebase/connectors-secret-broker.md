@@ -182,6 +182,12 @@ the posture and relies on the existing gate). The policy refinement
 - The `reason` param is recorded for the approver/audit trail but is not
   read by the handler; it is surfaced to the approver in the ref-only
   `proposed_effect` summary (#1579).
+- **Read-surface projection (#2496):** the synthetic `secret-broker-1.x`
+  identity has no connector class, so `resolve_authoring_kind`'s resolver
+  replay misses. It keys on the row's own `source_kind` to recognize this
+  class-less typed mold, so the connector listing and
+  `meho.connector.review` report `secret-broker-1.x` as `kind="typed"` /
+  `dispatchable=true` rather than the `ingested-shim` dead end.
 
 ## References
 

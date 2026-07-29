@@ -393,6 +393,12 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # real runner (and its get_settings() tick read) back in.
                 start_sensor_runner=MagicMock(),
                 stop_sensor_runner=AsyncMock(),
+                # #2547 broadcast-announcement retention sweeper. Defensive
+                # patch (gated on broadcast_announcement_prune_enabled) so the
+                # real sweeper never starts its get_settings() tick read and
+                # KeyErrors on KEYCLOAK_ISSUER_URL in this env-free lifespan test.
+                start_announcement_retention_sweeper=MagicMock(),
+                stop_announcement_retention_sweeper=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),
@@ -510,6 +516,12 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # lifespan test) so the real runner can never start here.
                 start_sensor_runner=MagicMock(),
                 stop_sensor_runner=AsyncMock(),
+                # #2547 broadcast-announcement retention sweeper. Defensive
+                # patch (gated on broadcast_announcement_prune_enabled) so the
+                # real sweeper never starts its get_settings() tick read and
+                # KeyErrors on KEYCLOAK_ISSUER_URL in this env-free lifespan test.
+                start_announcement_retention_sweeper=MagicMock(),
+                stop_announcement_retention_sweeper=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),

@@ -910,6 +910,51 @@ func TestPrintListTableHappyPath(t *testing.T) {
 	}
 }
 
+// TestPrintListTableMarksShadowedBuiltin — a built-in row shadowed by a
+// tenant-scoped twin (#2474) renders "(shadowed)" in the tenant column,
+// while the tenant-scoped twin that dispatch resolves keeps its tenant
+// id. Both rows carry the same connector_id (scope twins), so the tenant
+// column is what tells the operator which copy `call_operation` hits.
+func TestPrintListTableMarksShadowedBuiltin(t *testing.T) {
+	tenantA := "tenant-a"
+	r := &connectorListEnvelope{
+		Items: []listEntry{
+			{
+				ConnectorID:           "vmware-rest-9.0",
+				GroupCount:            2,
+				StagedGroupCount:      2,
+				OperationCount:        42,
+				TenantID:              nil,
+				Kind:                  "profiled",
+				Dispatchable:          true,
+				Scope:                 "builtin",
+				ShadowedByTenantScope: true,
+			},
+			{
+				ConnectorID:       "vmware-rest-9.0",
+				GroupCount:        2,
+				EnabledGroupCount: 2,
+				OperationCount:    42,
+				TenantID:          &tenantA,
+				Kind:              "profiled",
+				Dispatchable:      true,
+				Scope:             "tenant",
+			},
+		},
+	}
+	var buf bytes.Buffer
+	printListTable(&buf, "all", r)
+	out := buf.String()
+	for _, want := range []string{"(shadowed)", "tenant-a"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("shadowed-twin render missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "(built-in)") {
+		t.Errorf("the shadowed built-in row must not render as (built-in); got:\n%s", out)
+	}
+}
+
 // TestDeriveRollupLabelTable pins the per-status → rollup mapping.
 // Operators reading `meho connector list` see this label; getting it
 // right matters for the "is there review backlog?" question.
@@ -964,7 +1009,9 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 		"state": "ingested",
 		"next_step": null,
 		"kind": "profiled",
-		"dispatchable": true
+		"dispatchable": true,
+		"scope": "builtin",
+		"shadowed_by_tenant_scope": true
 	}`)
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -993,6 +1040,13 @@ func TestListEntryDecodesCanonical(t *testing.T) {
 	if got.Kind != "profiled" || !got.Dispatchable {
 		t.Errorf("authoring-mode kind/dispatchable: want profiled/true; got %q/%v",
 			got.Kind, got.Dispatchable)
+	}
+	// #2474: the scope-twin disambiguation fields decode from the wire.
+	if got.Scope != "builtin" {
+		t.Errorf("scope: want builtin; got %q", got.Scope)
+	}
+	if !got.ShadowedByTenantScope {
+		t.Error("shadowed_by_tenant_scope: want true (built-in shadowed by tenant twin); got false")
 	}
 }
 
@@ -1075,7 +1129,9 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 			"state": "ingested",
 			"next_step": null,
 			"kind": "profiled",
-			"dispatchable": true
+			"dispatchable": true,
+			"scope": "builtin",
+			"shadowed_by_tenant_scope": false
 		}`)
 		var got listEntry
 		if err := json.Unmarshal(raw, &got); err != nil {
@@ -1094,6 +1150,14 @@ func TestListEntryJSONRoundTrip(t *testing.T) {
 		}
 		if !strings.Contains(out, `"state": "ingested"`) {
 			t.Errorf("state must survive the --json round trip; got:\n%s", out)
+		}
+		// #2474: the scope-twin fields must survive --json — including a
+		// `false` shadow bit, the exact drop class #1645 closed.
+		if !strings.Contains(out, `"scope": "builtin"`) {
+			t.Errorf("scope must survive the --json round trip; got:\n%s", out)
+		}
+		if !strings.Contains(out, `"shadowed_by_tenant_scope": false`) {
+			t.Errorf("shadowed_by_tenant_scope=false must survive --json, not be dropped; got:\n%s", out)
 		}
 	})
 }

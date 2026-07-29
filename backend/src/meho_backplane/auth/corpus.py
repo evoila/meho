@@ -49,7 +49,14 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.settings import get_settings
@@ -150,12 +157,24 @@ class CorpusChunk(BaseModel):
     The validator below normalises blank-after-strip to ``None`` so the
     absence is honestly typed and the label chain skips a cleanly-``None``
     rung rather than a misleading empty string.
+
+    ``title`` is an **optional** human-legible chunk title (#2475). The corpus
+    is the only place a title can originate — MEHO has no doc-ingest path to
+    derive one (federation-only by design, #1864 -> #2049). It is read as the
+    *preferred* citation label (``title -> document_id -> humanised filename ->
+    URL`` in :func:`~meho_backplane.docs_search.citation_links._label_for`),
+    which is starved today because no title survives the corpus projection. A
+    title can arrive top-level (``title``) or nested under the per-chunk
+    ``metadata`` (``metadata["title"]``); the top-level key wins, the metadata
+    key is the fallback. Blank-after-strip (or absent) normalises to ``None``
+    (the #2004 pattern) so the label chain skips a cleanly-``None`` rung.
     """
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
     chunk_id: str
     document_id: str | None = None
+    title: str | None = None
     content: str = Field(validation_alias=AliasChoices("content", "text"))
     source_url: str | None = Field(
         default=None,
@@ -178,6 +197,28 @@ class CorpusChunk(BaseModel):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_title(cls, data: object) -> object:
+        """Resolve the optional chunk title, top-level or from metadata (#2475).
+
+        A human-legible title can arrive as a top-level ``title`` or nested
+        under the per-chunk ``metadata`` (``metadata["title"]``). The
+        top-level key wins; the metadata key is the fallback. Blank-after-strip
+        (or absent) normalises to ``None`` so the citation-label chain skips a
+        cleanly-``None`` rung rather than preferring an empty string. Runs
+        pre-validation because the metadata fallback needs to see a sibling
+        field a per-field validator cannot reach.
+        """
+        if not isinstance(data, dict):
+            return data
+        title = data.get("title")
+        if not (isinstance(title, str) and title.strip()):
+            metadata = data.get("metadata")
+            title = metadata.get("title") if isinstance(metadata, dict) else None
+        resolved = title.strip() if isinstance(title, str) and title.strip() else None
+        return {**data, "title": resolved}
 
 
 class CorpusSearchResponse(BaseModel):

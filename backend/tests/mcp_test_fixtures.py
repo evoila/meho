@@ -210,7 +210,9 @@ def isolated_registry() -> Iterator[None]:
         runbook_runs,
         runbooks,
         topology,
+        topology_bulk_import,
         topology_create_node,
+        topology_delete_node,
     )
     from meho_backplane.mcp.tools import broadcast as broadcast_tools
     from meho_backplane.mcp.tools import (
@@ -218,6 +220,9 @@ def isolated_registry() -> Iterator[None]:
     )
     from meho_backplane.mcp.tools import (
         doc_collections_create as doc_collections_create_tool,
+    )
+    from meho_backplane.mcp.tools import (
+        doc_collections_delete as doc_collections_delete_tool,
     )
     from meho_backplane.mcp.tools import memory as memory_tools
     from meho_backplane.mcp.tools import memory_promote as memory_promote_tool
@@ -269,8 +274,29 @@ def isolated_registry() -> Iterator[None]:
     # unregistered in any test file that imports this fixture after the
     # first one runs in the process.
     importlib.reload(doc_collections_create_tool)
+    # #2487: the ``delete_doc_collections`` registry-delete tool lives in a
+    # separate module (mirroring ``doc_collections_create``) so it joins the
+    # reload list for the same reason every other tool module does -- the
+    # autouse ``clear_registries()`` above would otherwise leave it
+    # unregistered in any test file that imports this fixture after the
+    # first one runs in the process.
+    importlib.reload(doc_collections_delete_tool)
     importlib.reload(topology)
     importlib.reload(topology_create_node)
+    # #2485: the guarded node hard-delete tool
+    # (``meho.topology.delete_node``) lives in its own module (mirroring
+    # topology_create_node) so ``mcp.tools.topology`` does not grow past
+    # the 600-line guidance; it joins the reload list for the same reason
+    # every other tool module does.
+    importlib.reload(topology_delete_node)
+    # #2539: the batch curated-edge authoring tool
+    # (``meho.topology.bulk_import``) lives in its own module (mirroring
+    # topology_create_node) so ``mcp.tools.topology`` does not grow past
+    # the 600-line guidance; it joins the reload list for the same reason
+    # every other tool module does -- the autouse ``clear_registries()``
+    # above would otherwise leave it unregistered in any test file that
+    # imports this fixture after the first one runs in the process.
+    importlib.reload(topology_bulk_import)
     # G12.2-T4 (#1298): the runbook template MCP tools
     # (``meho.runbook.*_template`` x 6) join the reload list for the same
     # reason every other tool module does -- the autouse

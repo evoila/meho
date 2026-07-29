@@ -107,6 +107,7 @@ class _StubTarget:
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
     provider: str | None = None
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642). Distinct ``id`` per
     # instance so two stub targets never collapse onto one cache entry.
     id: UUID = field(default_factory=uuid4)
@@ -746,3 +747,29 @@ def test_stub_target_satisfies_vcf_logs_target_like_protocol() -> None:
     explicit inheritance required.
     """
     assert isinstance(_TARGET_A, VcfLogsTargetLike)
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on the vRLI sessions login (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_sessions_login_threads_sni_extension() -> None:
+    """#2398: the vRLI /api/v2/sessions login POST carries the SNI override."""
+    connector = _make_connector()
+    target = _StubTarget(
+        name="vrli-sni",
+        host="vrli-sni.test.invalid",
+        port=443,
+        secret_ref="vrli/vrli-sni",
+        tls_server_name="vrli.corp.example",
+    )
+
+    async with respx.mock(base_url="https://vrli-sni.test.invalid") as mock:
+        route = mock.post("/api/v2/sessions").respond(200, json={"sessionId": "tok", "ttl": 1800})
+        await connector.auth_headers(target, operator=_make_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "vrli.corp.example"
+    await connector.aclose()

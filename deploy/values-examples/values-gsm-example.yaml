@@ -55,6 +55,26 @@ config:
   # Optional: impersonate a dedicated reader SA instead of reading directly
   # under the pod's Workload Identity ADC. Leave "" for direct ADC.
   gsmImpersonateSa: "" # e.g. meho-secret-reader@my-gcp-project.iam.gserviceaccount.com
+  # --- Operator console (/ui/*) OAuth (#2594, Goal #336) ---
+  # Public client_id of the confidential `meho-web` Keycloak client the
+  # browser BFF login runs its authorization-code grant against. Leave
+  # commented (empty) to keep the browser console disabled — /api/* and the
+  # `meho login` CLI are unaffected. Uncomment together with the uiConsole
+  # block below to light up the console. See
+  # deploy/values-examples/README.md § operator-console (browser BFF).
+  # uiKeycloakClientId: meho-web # CHANGE ME (client_id of the meho-web client)
+
+# Operator console (/ui/*) confidential OAuth credentials (#2594). On a
+# GSM/no-Vault deploy, provision ONE Kubernetes Secret holding both the
+# meho-web client secret and the session encryption key, then point the
+# chart at it here. Leave commented to keep the browser console disabled.
+# Recipe (Secret creation + session-key generation) is in
+# deploy/values-examples/README.md § operator-console (browser BFF).
+# uiConsole:
+#   enabled: true
+#   secretName: meho-ui-oauth # CHANGE ME (Secret with client_secret + session_encryption_key)
+#   clientSecretKey: client_secret
+#   sessionEncryptionKey: session_encryption_key
 
 gsm:
   enabled: true

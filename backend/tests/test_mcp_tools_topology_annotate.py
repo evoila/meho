@@ -428,6 +428,9 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
     assert payload["kind"] == "authenticates-via"
     assert payload["source"] == "curated"
     assert payload["conflicts"] == []
+    # #2539: superseded is now an additive return key; empty on a pair
+    # no probe covers (no competing auto edge to displace).
+    assert payload["superseded"] == []
     assert uuid.UUID(payload["edge_id"])  # valid UUID
 
     # One curated row in the tenant — the service primitive owns the upsert.
@@ -469,6 +472,61 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
 
     # Exactly one broadcast event (the service-level emission).
     assert publish_mock.await_count == 1
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+async def test_annotate_return_superseded_matches_audit_payload(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _seeded_tenant: None,
+) -> None:
+    """#2539: the annotate return's ``superseded`` equals the audit payload's list.
+
+    Seed an ``source='auto'`` edge (A depends-on B), then assert a
+    curated edge over the same ``from`` + same ``kind`` to a *different*
+    endpoint (A depends-on C). The §6 same-kind/different-endpoint scan
+    stamps ``superseded_by`` on the auto edge and records its id on the
+    shared audit / broadcast payload. The tool return now surfaces that
+    same list — the acceptance criterion asserts they are equal.
+    """
+    client, _op = client_with_operator
+    a_id = await _seed_node(kind="service", name="svc-a")
+    b_id = await _seed_node(kind="database", name="db-b")
+    await _seed_node(kind="database", name="db-c")
+    auto_edge_id = await _seed_auto_edge(from_id=a_id, to_id=b_id, kind="depends-on")
+
+    with patch(_PUBLISH_PATCH, new=AsyncMock()):
+        response = _annotate_call(
+            client,
+            60,
+            {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-c"},
+        )
+
+    body = response.json()
+    assert body["result"]["isError"] is False, body
+    payload = json.loads(body["result"]["content"][0]["text"])
+    # The curated assertion displaced exactly the seeded auto edge.
+    assert payload["superseded"] == [str(auto_edge_id)]
+
+    # ... and that list is byte-identical to the one on the service's
+    # audit payload (the ids already existed there pre-#2539 — this task
+    # only surfaced them on the return).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        from sqlalchemy import select
+
+        service_row = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "topology.annotate",
+                        AuditLog.method == "ANNOTATE",
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert service_row.payload["superseded"] == payload["superseded"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
@@ -1070,16 +1128,16 @@ def test_annotate_description_scopes_auto_kind_warning_to_actual_conflict() -> N
 
 
 def test_annotate_description_matches_actual_response_shape() -> None:
-    """The annotate description must not advertise response fields the handler
-    does not populate (B1 regression on PR #654).
+    """The annotate description must advertise exactly the response fields
+    the handler populates (B1 regression on PR #654).
 
-    The handler returns ``edge_id / from / to / kind / source / conflicts``;
-    earlier iterations also claimed ``superseded: [<auto-edge-id>...]`` on
-    the response shape, but ``annotate_edge`` only stamps that on the
-    auto-edge ``properties`` and on the audit/broadcast payload — it
-    never surfaces it on the return value. Description-vs-impl drift
-    here is load-bearing for an LLM agent reading the description as
-    the API contract.
+    Since #2539 the handler returns ``edge_id / from / to / kind /
+    source / conflicts / superseded`` — ``superseded`` is now an additive
+    return key surfacing the auto edges the assertion displaced (the ids
+    already computed on the audit/broadcast payload; MCP authoring parity
+    with the REST/CLI fronts). Description-vs-impl drift here is
+    load-bearing for an LLM agent reading the description as the API
+    contract.
     """
     entry = get_tool("meho.topology.annotate")
     assert entry is not None
@@ -1092,19 +1150,12 @@ def test_annotate_description_matches_actual_response_shape() -> None:
     declared = set(executed_shape.get("properties", {}).keys())
     # outputSchema is the canonical contract — anything the description
     # *names* as a response key must be in it.
-    assert declared == {"edge_id", "from", "to", "kind", "source", "conflicts"}
+    assert declared == {"edge_id", "from", "to", "kind", "source", "conflicts", "superseded"}
     assert parked_shape["properties"]["status"] == {"const": "awaiting_approval"}
     # Belt-and-suspenders: the literal "Returns `{...}`" clause names
-    # only the keys above.
+    # the keys above, including the new `superseded` list.
     assert "Returns `{edge_id, from:" in desc
-    # `superseded` is the substrate-side §6 marker
-    # (`properties.superseded_by` on the displaced auto-edge row +
-    # audit payload field), never a response key on this tool. The
-    # description may *mention*
-    # the mechanism in parenthetical guidance but must not advertise it
-    # as a returned key.
-    assert "superseded: [<auto-edge-id>...]" not in desc
-    assert "superseded_by" in desc  # parenthetical reference to the substrate mechanism remains
+    assert "superseded: [<edge-id>...]" in desc
 
 
 def test_unannotate_description_names_auto_refusal() -> None:

@@ -73,6 +73,39 @@ Filter parameters narrow the candidate set in both signals symmetrically:
   {source:"memory"}` and the MCP retrieve resource returned other
   principals' user-scoped memories within the same tenant.
 
+### `list_retrieval_facets(...)` (`meho_backplane.retrieval.retriever`)
+
+Enumerates the distinct `source` / `kind` values retrievable in a
+tenant, for populating value-discovery affordances (the `/ui/retrieval`
+diagnostics Source / Kind datalists, #2458).
+
+```python
+async def list_retrieval_facets(
+    tenant_id: uuid.UUID,
+    *,
+    principal_sub: str | None = None,
+    session: AsyncSession | None = None,
+) -> RetrievalFacets
+```
+
+Runs one `SELECT DISTINCT source, kind FROM documents` scoped to
+`tenant_id` and gated by the **same** per-principal visibility predicate
+`retrieve` enforces: when `principal_sub` is set, a user-scoped
+`source='memory'` row (`memory-user` / `memory-user-tenant` /
+`memory-user-target`) contributes its value only to the principal that
+wrote it. The result is therefore exactly the set of values a diagnostics
+`retrieve` call could actually match — a docs-corpus collection name (a
+different substrate `retrieve` never queries) can never appear, and no
+cross-tenant or cross-principal value leaks into the suggestions.
+
+Returns a frozen `RetrievalFacets` with sorted, de-duplicated `sources`
+and `kinds` tuples. Unlike the candidate queries, the DISTINCT query is
+expressed through the ORM (`select(Document.source, Document.kind)` +
+`doc_metadata['user_sub'].as_string()`) so it stays portable across the
+PG production engine and the SQLite test engine — the raw
+`metadata ->> 'user_sub'` text extraction the candidate queries inline is
+PG-only.
+
 ### `RetrievalHit`
 
 Frozen Pydantic v2 model. Carries the projected `Document` row

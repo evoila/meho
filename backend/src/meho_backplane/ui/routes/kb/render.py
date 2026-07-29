@@ -71,17 +71,70 @@ __all__ = ["pygments_css", "render_markdown"]
 
 _lock = threading.Lock()
 
-#: Shared HtmlFormatter instance: ``nowrap=True`` emits bare ``<span>``
-#: tokens so the wrapping ``<pre><code>`` block is controlled by the
-#: highlight callback. ``cssclass`` is set to a non-default value so
-#: the generated style rules don't collide with DaisyUI's own ``.highlight``
-#: utility class. The CSS is emitted once via :func:`pygments_css` and
-#: injected as a ``<style>`` block in the entry-detail template.
+#: Shared HtmlFormatter instance used for the highlight callback:
+#: ``nowrap=True`` emits bare ``<span>`` tokens so the wrapping
+#: ``<pre><code>`` block is controlled by the highlight callback.
+#: ``cssclass`` is set to a non-default value so the generated style
+#: rules don't collide with DaisyUI's own ``.highlight`` utility class.
+#: The token *colours* are style-independent (the emitted spans carry
+#: only class names); the theme-scoped colour rules come from
+#: :data:`_PYGMENTS_CSS`.
 _FORMATTER = HtmlFormatter(nowrap=True, cssclass="kb-code")
 
-#: Cached CSS for the current pygments style. Generated once at module
-#: load; safe to embed in a ``<style>`` block.
-_PYGMENTS_CSS: str = _FORMATTER.get_style_defs(".kb-code")
+#: Pygments styles paired to the console's two DaisyUI 5 themes. The
+#: default/dark scope uses a dark-background style (light token colours);
+#: the ``meho-light`` scope keeps pygments' light ``default`` style (dark
+#: token colours). Both surfaces sit on ``var(--color-base-200)``, which
+#: the templates pin — so the code block follows the active theme instead
+#: of the dead DaisyUI 4 ``--b2`` variable that used to force a light
+#: background in both themes (#2452).
+_DARK_STYLE = "github-dark"
+_LIGHT_STYLE = "default"
+
+#: Selector the light-theme rules are scoped under. Higher specificity
+#: than the bare ``.kb-code`` default block, so it wins when the
+#: ``data-theme="meho-light"`` attribute is present and is inert
+#: otherwise.
+_LIGHT_SCOPE = '[data-theme="meho-light"] .kb-code'
+
+
+def _style_defs(style: str, scope: str, *, tokens_only: bool) -> str:
+    """Return pygments colour rules for *style*, scoped under *scope*.
+
+    The opaque container rule pygments emits (``<scope> { background:
+    ...; color: ... }``) is always dropped: the template owns the code
+    block background via ``var(--color-base-200)`` so it follows the
+    active theme, and keeping pygments' hard-coded background/foreground
+    would (a) fight the DaisyUI surface and (b) leak a light style's dark
+    text — or a dark style's light text — into the wrong theme.
+
+    ``tokens_only`` additionally drops the style-independent global rules
+    (``pre { line-height }``, ``td.linenos`` / ``span.linenos``) so the
+    second (light) block does not re-emit them; the first (dark) block
+    keeps them once.
+    """
+    defs = HtmlFormatter(nowrap=True, cssclass="kb-code", style=style).get_style_defs(scope)
+    container_prefix = f"{scope} {{ background:"
+    kept: list[str] = []
+    for line in defs.splitlines():
+        if line.startswith(container_prefix):
+            continue
+        if tokens_only and not line.startswith(scope):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+#: Cached, theme-scoped CSS for the ``kb-code`` formatter. Generated once
+#: at module load; safe to embed in a ``<style>`` block. Two blocks: the
+#: default/dark token colours under ``.kb-code`` and the light-theme
+#: overrides under ``[data-theme="meho-light"] .kb-code``.
+_PYGMENTS_CSS: str = "\n".join(
+    (
+        _style_defs(_DARK_STYLE, ".kb-code", tokens_only=False),
+        _style_defs(_LIGHT_STYLE, _LIGHT_SCOPE, tokens_only=True),
+    )
+)
 
 
 def _highlight_code(code: str, lang: str, attrs: str) -> str:
@@ -141,11 +194,15 @@ def render_markdown(body: str) -> Markup:
 
 
 def pygments_css() -> str:
-    """Return the CSS rules for the ``kb-code`` pygments formatter.
+    """Return the theme-scoped CSS rules for the ``kb-code`` formatter.
 
     Callers inject this into a ``<style>`` block in the entry-detail
-    template so code blocks render with the default pygments style.
-    The string is pure CSS (no ``<style>`` wrapper) so callers can
-    compose it with other inline styles as needed.
+    template. The string carries two token-colour rule sets: a
+    default/dark set under ``.kb-code`` and a ``[data-theme="meho-light"]
+    .kb-code`` override, so code blocks stay legible in both console
+    themes. The container background is deliberately omitted — the
+    template pins it to ``var(--color-base-200)`` so the block follows
+    the active theme. The string is pure CSS (no ``<style>`` wrapper) so
+    callers can compose it with other inline styles as needed.
     """
     return _PYGMENTS_CSS

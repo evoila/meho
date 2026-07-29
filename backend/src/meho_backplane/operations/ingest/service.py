@@ -82,6 +82,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.operations.ingest._internals import (
+    _UNSET,
     OP_DELETE_CONNECTOR,
     OP_DISABLE_CONNECTOR,
     OP_EDIT_GROUP,
@@ -90,6 +91,7 @@ from meho_backplane.operations.ingest._internals import (
     OP_ENABLE_GROUP,
     OP_ENABLE_READS,
     ConnectorScope,
+    _UnsetType,
     apply_op_overrides,
     audit_profile_stamp,
     bulk_enable_read_ops,
@@ -139,19 +141,26 @@ _log = structlog.get_logger(__name__)
 def _authoring_kind_for_payload(
     scope: ConnectorScope,
     rendered_groups: list[ConnectorReviewGroup],
+    *,
+    has_code_shipped_op: bool,
 ) -> tuple[ConnectorAuthoringKind, bool]:
     """Project the review payload's ``(kind, dispatchable)`` for *scope* (#1979).
 
     The review gate (#1971) is "cleared" once any op is enabled; the
     enabled-op count is derived from the already-rendered groups so no
-    second DB round-trip is needed. Delegates the resolver replay + tier
-    mapping to :func:`resolve_authoring_kind`.
+    second DB round-trip is needed. *has_code_shipped_op* rides in from
+    the caller's loaded descriptor rows (their ``source_kind``) so the
+    class-less typed mold (``net.*`` / ``secret.*``) projects as
+    dispatchable typed rather than the ingested-shim dead end (#2496).
+    Delegates the resolver replay + tier mapping to
+    :func:`resolve_authoring_kind`.
     """
     enabled_op_count = sum(1 for group in rendered_groups for op in group.ops if op.is_enabled)
     return resolve_authoring_kind(
         product=scope.product,
         version=scope.version,
         enabled_operation_count=enabled_op_count,
+        has_code_shipped_op=has_code_shipped_op,
     )
 
 
@@ -505,7 +514,10 @@ class ReviewService:
             )
             for group in groups
         ]
-        kind, dispatchable = _authoring_kind_for_payload(scope, rendered_groups)
+        has_code_shipped_op = any(op.source_kind in ("typed", "composite") for op in ops)
+        kind, dispatchable = _authoring_kind_for_payload(
+            scope, rendered_groups, has_code_shipped_op=has_code_shipped_op
+        )
         grouped_op_count = sum(group.op_count for group in rendered_groups)
         # #125: count the full descriptor universe (the same one the
         # ``GET /api/v1/connectors`` listing counts) so ops not in a rendered
@@ -602,7 +614,7 @@ class ReviewService:
         op_id: str,
         *,
         tenant_id: UUID | None,
-        custom_description: str | None = None,
+        custom_description: str | None | _UnsetType = _UNSET,
         safety_level: Literal["safe", "caution", "dangerous"] | None = None,
         requires_approval: bool | None = None,
         is_enabled: bool | None = None,
@@ -612,6 +624,11 @@ class ReviewService:
 
         Passing none of the five fields raises :class:`ValueError`.
         Out-of-enum ``safety_level`` raises :class:`ValueError`.
+
+        ``custom_description`` also honours a clear (#2488): the
+        :data:`_UNSET` default leaves it untouched, an explicit ``None``
+        writes SQL NULL (the MCP tool's ``null`` arg), a string sets it.
+        REST forwards it only when supplied (``EditOpBody`` min_length=1).
 
         Returns :class:`EditOpWarning` advisories — empty on the
         common path. ``is_enabled=True`` runs the enable-time

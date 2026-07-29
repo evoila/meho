@@ -48,7 +48,7 @@ back a successful batch.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import structlog
 from sqlalchemy import select
@@ -82,7 +82,10 @@ __all__ = [
     "BulkImportRow",
     "BulkImportRowError",
     "BulkImportValidationError",
+    "build_bulk_import_rows",
     "bulk_import_edges",
+    "serialize_bulk_result",
+    "serialize_bulk_validation_error",
 ]
 
 _log = structlog.get_logger(__name__)
@@ -706,3 +709,88 @@ def _materialise_apply_rows(
             )
         )
     return out
+
+
+# ---------------------------------------------------------------------------
+# Front adapters (shared by the MCP dry-run front and the typed-op apply
+# handler so the two paths coerce input + serialise output identically).
+# ---------------------------------------------------------------------------
+
+
+def build_bulk_import_rows(rows: list[dict[str, Any]]) -> list[BulkImportRow]:
+    """Coerce a list of param dicts into :class:`BulkImportRow` objects.
+
+    Each dict is one single-edge annotate's params (the row grammar is
+    :data:`~meho_backplane.connectors.topology.schemas.ANNOTATE_PARAMETER_SCHEMA`):
+    ``from_name`` / ``kind`` / ``to_name`` plus the optional
+    ``from_node_kind`` / ``to_node_kind`` pins and ``note`` /
+    ``evidence_url``. Shared by the ``meho.topology.bulk_import`` MCP
+    front (dry-run) and the ``topology.bulk_import`` typed-op handler
+    (apply) so the two paths build identical rows from identical input.
+    """
+    return [
+        BulkImportRow(
+            from_ref=NodeRef(str(row["from_name"]), row.get("from_node_kind")),
+            kind=str(row["kind"]),
+            to_ref=NodeRef(str(row["to_name"]), row.get("to_node_kind")),
+            note=row.get("note"),
+            evidence_url=row.get("evidence_url"),
+        )
+        for row in rows
+    ]
+
+
+def serialize_bulk_result(result: BulkImportResult) -> dict[str, Any]:
+    """Render a :class:`BulkImportResult` into the JSON wire shape.
+
+    Matches
+    :data:`~meho_backplane.connectors.topology.schemas.BULK_IMPORT_RESPONSE_SCHEMA`.
+    Shared by the dry-run and apply fronts so both return the same
+    envelope.
+    """
+    return {
+        "dry_run": result.dry_run,
+        "created": result.created,
+        "updated": result.updated,
+        "conflicts": result.conflicts,
+        "rows": [
+            {
+                "index": row.index,
+                "action": row.action,
+                "edge_id": row.edge_id,
+                "from_name": row.from_name,
+                "from_kind": row.from_kind,
+                "to_name": row.to_name,
+                "to_kind": row.to_kind,
+                "kind": row.kind,
+                "superseded": row.superseded,
+                "conflicts": row.conflicts,
+            }
+            for row in result.rows
+        ],
+    }
+
+
+def serialize_bulk_validation_error(exc: BulkImportValidationError) -> dict[str, Any]:
+    """Render a :class:`BulkImportValidationError` into the structured detail shape.
+
+    Mirrors the REST ``422 invalid_bulk`` body
+    (``api/v1/topology.bulk_import_edges_route``) so the MCP front can
+    surface every row's failure together on the ``error.data`` member of
+    a JSON-RPC -32602 — the same "fix the whole file in one pass"
+    diagnostic the REST front gives.
+    """
+    return {
+        "error": "invalid_bulk",
+        "errors": [
+            {
+                "index": e.index,
+                "error": e.error,
+                "message": e.message,
+                "name": e.name,
+                "kind": e.kind,
+                "kinds": e.kinds,
+            }
+            for e in exc.errors
+        ],
+    }

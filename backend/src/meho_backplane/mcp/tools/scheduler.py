@@ -90,9 +90,24 @@ _SCHEDULER_OP_IDS: Final[dict[str, str]] = {
 }
 
 
+def _mirror_trigger_id(payload: dict[str, Any]) -> dict[str, Any]:
+    """Mirror the native ``id`` response key as ``trigger_id``.
+
+    The row model :class:`ScheduledTriggerRead` is shared with the REST
+    route ``/api/v1/scheduler/triggers``, so the MCP handler mirrors the
+    id at the wire boundary instead of renaming it: every trigger row
+    carries ``trigger_id`` — the field ``meho.scheduler.cancel`` accepts
+    verbatim, and the same top-level key ``meho.scheduler.create``
+    already returns — alongside the model's native ``id``.
+    """
+    if "id" in payload:
+        payload["trigger_id"] = payload["id"]
+    return payload
+
+
 def _row_to_dict(entry: ScheduledTriggerRead) -> dict[str, Any]:
     """Serialise a :class:`ScheduledTriggerRead` to the MCP wire dict."""
-    return entry.model_dump(mode="json")
+    return _mirror_trigger_id(entry.model_dump(mode="json"))
 
 
 def _require_trigger_id(arguments: dict[str, Any]) -> uuid.UUID:
@@ -147,7 +162,9 @@ register_mcp_tool(
         description=(
             "List scheduled triggers for the operator's tenant "
             "(Initiative #804). Operator-level read. Returns "
-            "{triggers: [trigger, ...]} sorted newest-first. "
+            "{triggers: [trigger, ...]} sorted newest-first; each row "
+            "carries `trigger_id` (accepted verbatim by "
+            "meho.scheduler.cancel) alongside the model-native `id`. "
             "Optional filters: kind ('cron'|'one_off'|'event'), "
             "status ('active'|'paused'|'cancelled'|'fired'), "
             "work_ref (exact-match change-ticket reference). "

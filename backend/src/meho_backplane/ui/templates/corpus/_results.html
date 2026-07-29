@@ -53,13 +53,22 @@
     {% for entry in cited %}
       {% set chunk = entry.chunk %}
       {% set link = entry.link %}
+      {#- The chunk's human title (#2461/#2475). ``default(none, true)`` reads it
+          defensively under StrictUndefined and coerces a blank title to none, so
+          the demotion below keys on a genuine title only. -#}
+      {% set chunk_title = chunk.title | default(none, true) %}
       <li class="card bg-base-100 border-base-300 border shadow-sm">
         <div class="card-body py-3 space-y-2">
           <div class="flex flex-wrap items-start justify-between gap-2">
-            {# Title as link text -> the resolved canonical URL (#1919). A raw
-               gs:// source_url is resolved to a navigable web link or, when no
-               canonical link exists, a non-clickable label -- never a broken
-               gs:// anchor. #}
+            {# Title as link text -> a consistent view-source affordance (#2462).
+               A public-URL source (#1919) resolves to a clickable outbound
+               anchor (opens the doc in a new tab -- by design, #1919 AC 2). A
+               source with no public URL normalizes to an opaque meho:// ref
+               (#132): rather than a dead end, its title click-throughs to the
+               internal cited-source detail view (``entry.view_href``) so the
+               operator can always inspect the cited chunk. A genuine no-source
+               citation stays plain text. Retrieve and Ask render the identical
+               affordance -- both flow through ``_cited_chunks``. #}
             <div class="min-w-0">
               <h3 class="card-title text-sm font-semibold">
                 {% if link.clickable %}
@@ -69,6 +78,12 @@
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-label="Open source document for this chunk"
+                  >{{ link.label }}</a>
+                {% elif entry.view_href | default(none, true) %}
+                  <a
+                    href="{{ entry.view_href }}"
+                    class="link link-primary"
+                    aria-label="View cited source detail"
                   >{{ link.label }}</a>
                 {% else %}
                   {{ link.label }}
@@ -84,6 +99,16 @@
               {% endif %}
             </div>
             <div class="flex flex-wrap items-center gap-1 text-xs" aria-label="Chunk metadata">
+              {# When a human title heads the card (#2461), the resolver put that
+                 title in ``link.label`` and demoted the opaque/numeric document
+                 id out of the heading -- surface it here so provenance stays
+                 visible as metadata. When no title was supplied the id remains
+                 the heading (``link.label``), so it is not repeated as a badge. #}
+              {% if chunk_title and chunk.document_id %}
+                <span class="badge badge-ghost badge-outline font-mono" title="Document id">
+                  {{ chunk.document_id }}
+                </span>
+              {% endif %}
               {% if chunk.collection %}
                 <span class="badge badge-ghost badge-outline" title="Source collection">
                   {{ chunk.collection }}
@@ -100,7 +125,32 @@
               {% endif %}
             </div>
           </div>
-          <p class="text-sm whitespace-pre-wrap">{{ chunk.content }}</p>
+          {#- Body snippet: clamp to a few lines so ranked cited chunks stay
+              comparable on one screen; the toggle expands the full content on
+              click (#2456). Alpine scope is per chunk card; the static
+              ``line-clamp-3`` clamps with JS disabled (no layout shift), and
+              the ``expanded`` binding removes it on expand. The toggle hides
+              itself when the content does not overflow the clamp. -#}
+          <div x-data="{ expanded: false, clamped: false }" class="flex flex-col gap-1">
+            <p
+              x-ref="body"
+              class="text-sm whitespace-pre-wrap line-clamp-3"
+              x-bind:class="{ 'line-clamp-3': !expanded }"
+              x-init="$nextTick(() => { clamped = $refs.body.scrollHeight > $refs.body.clientHeight })"
+            >{{ chunk.content }}</p>
+            <button
+              type="button"
+              class="btn btn-ghost btn-xs self-start px-1"
+              x-show="clamped || expanded"
+              x-cloak
+              x-on:click="expanded = !expanded"
+              x-bind:aria-expanded="expanded.toString()"
+              aria-label="Toggle full chunk content"
+            >
+              <span x-show="!expanded">Show more</span>
+              <span x-show="expanded" x-cloak>Show less</span>
+            </button>
+          </div>
         </div>
       </li>
     {% endfor %}

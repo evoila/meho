@@ -426,7 +426,14 @@ naming the matched rule.
 - **Pure — no network I/O.** Links are derived from the path (via
   `urllib.parse.urlsplit` + `pathlib.PurePosixPath`) or from an already-web
   `source_url`. The label is chosen title-first: explicit `title` →
-  `document_id` → humanised filename stem → the raw URL (never empty).
+  `document_id` → humanised filename stem → the raw URL (never empty). The
+  `title` rung is fed by the optional `DocsChunk.title` pass-through (#2475):
+  an upstream corpus title (top-level `title` or `metadata["title"]`, #1732
+  discipline, blank → `None`) threads `CorpusChunk.title` → `DocsChunk.title`
+  → the `ask_docs` (`_citation_payload`) and `/ui/corpus` (`_cited_chunks`)
+  seams, so a hit renders by its human title instead of a raw id. It is
+  `None` until the corpus supplies one — MEHO has no ingest path to derive a
+  title (federation-only, #1864 → #2049), so today's corpus is unchanged.
 - **One resolver, every face.** `citation_link_payload(...)` is the JSON
   form embedded under each `ask_docs` citation's `link` key (the MCP tool and
   the REST `POST /api/v1/ask_docs` route, #1917 — both reuse it unchanged);

@@ -108,8 +108,30 @@ netdiag:
   #   * Enabling it only widens who may open unprivileged ICMP *datagram*
   #     sockets in this pod; it does NOT grant `CAP_NET_RAW` or
   #     packet-crafting. `net.ping` remains allowlist-gated
-  #     (`MEHO_NETDIAG_PROBE_ALLOWLIST`) regardless.
+  #     (`netdiag.probeAllowlist`, below) regardless.
   pingGroupRange: ""
+  # -- Probe-destination allowlist for the `net.*` diagnostics connector
+  # (Initiative #2405). Unlike `config.targetSsrfAllowlist` (a scoped
+  # opt-OUT of a default-deny-non-public guard), this is an *inverted,
+  # allow-only-what-is-listed* floor: the parsed set is the WHOLE
+  # permitted probe space, so an empty value means **deny every probe**
+  # — the connector is inert until an operator opts a range in. It
+  # renders into the `MEHO_NETDIAG_PROBE_ALLOWLIST` env var the connector
+  # reads per probe (`backend/src/meho_backplane/connectors/net/allowlist.py`,
+  # `PROBE_ALLOWLIST_ENV`), NOT via settings.py. Comma-separated entries:
+  # CIDR ranges (`10.0.0.0/8`), bare IPs (`192.168.7.10`), and/or
+  # hostname literals (`vcenter.lab.internal`, matched verbatim — never
+  # resolved-then-matched, to stay TOCTOU-free); whitespace around commas
+  # is ignored.
+  #
+  # Default `""` keeps the connector inert (fail-closed) — a genuine
+  # no-op render that changes nothing on existing installs. Because
+  # `net.*` ops are agent-auto-runnable (`safety_level="safe"`), this
+  # allowlist is the sole floor on a network-vantage recon primitive:
+  # scope it to exactly the ranges/hosts operators must probe, never a
+  # global off-switch. A malformed CIDR fails loudly at runtime naming
+  # the offending token. See `docs/codebase/connectors-net-diagnostics.md`.
+  probeAllowlist: ""
 
 service:
   type: ClusterIP
@@ -369,6 +391,24 @@ config:
   # a warning and falls back to 30 min — a misconfigured budget can never
   # disable the watchdog. See `docs/codebase/spec-ingestion.md`.
   ingestJobTimeoutSeconds: ""
+  # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
+  # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
+  # authorization-code + PKCE grant server-side against the operator's
+  # Keycloak realm using a **confidential** web client (suggested name
+  # `meho-web`; see `docs/cross-repo/keycloak-web-client.md`). This is the
+  # public `client_id` of that client; it is NOT a secret and is rendered
+  # unconditionally as `UI_KEYCLOAK_CLIENT_ID` so the env-var contract
+  # stays stable across deploys. The console gate
+  # (`meho_backplane.features._ui_surface_block`) requires this AND the two
+  # `uiConsole` secrets non-empty, so the empty default keeps the browser
+  # console cleanly disabled (`GET /ui/auth/login` → `503
+  # ui_oauth_not_configured`) with NO effect on `/api/*` or the `meho
+  # login` CLI (which use `keycloakCliClientId` / `keycloakAudience`
+  # instead). Set this together with `uiConsole.enabled: true` +
+  # `uiConsole.secretName` to light up the console — the schema then
+  # requires all of them (the console is all-or-nothing). See
+  # `deploy/values-examples/README.md` § operator-console (browser BFF).
+  uiKeycloakClientId: ""
 
 # Memory layer (G5.2 #374). The backplane ships an in-process
 # memory-expiry sweeper that runs in the FastAPI lifespan and removes
@@ -438,6 +478,37 @@ topology:
   # proves retention is policy-driven); `false` here skips starting
   # the loop entirely (no audit-row noise, no log line).
   historyPruneEnabled: true
+
+# Durable-announcement retention (Broadcast v2 #2547). Agent-authored
+# announcements published via `meho.broadcast.announce` are persisted to
+# an append-only `agent_announcement` DB table (the durable archive that
+# outlives the ~24h Valkey stream). The retention prune -- registered in
+# the FastAPI lifespan as a weekly `asyncio.create_task` loop, the same
+# mold as the topology-history prune -- deletes rows older than
+# `retentionDays`. Disable `pruneEnabled` only when an external retention
+# mechanism reaps rows instead. Distinct from the broadcast subchart
+# (`broadcast:` above, the Valkey substrate) and from the stream
+# read-window heuristic (`BROADCAST_RETENTION_HOURS`, unset -> default).
+broadcastAnnouncement:
+  # -- Maximum age (in days) of `agent_announcement` rows the retention
+  # prune preserves. Rows whose `created_at` is older than
+  # `now() - retentionDays` are deleted in one bounded batch per run.
+  # Default 90 gives a quarterly cross-shift coordination window. Set `0`
+  # for keep-forever -- the prune task still runs as a heartbeat but every
+  # tick is a no-op; operators picking 0 accept unbounded disk growth in
+  # exchange for full historical retention. Range [0, 3650] (10y ceiling).
+  retentionDays: 90
+  # -- Cadence of the in-process announcement retention prune sweeper, in
+  # seconds. Default 604800 (7d / weekly). Range [60, 604800]: below one
+  # minute the prune competes with the announce write load; the ceiling
+  # is the documented weekly cadence.
+  pruneIntervalSeconds: 604800
+  # -- Whether to start the in-process announcement retention prune
+  # sweeper. Set false when an external retention mechanism reaps rows
+  # instead. Distinct from `retentionDays: 0`: `0` keeps the loop running
+  # but every tick is a no-op heartbeat; `false` skips starting the loop
+  # entirely (no audit-row noise, no log line).
+  pruneEnabled: true
 
 postgres:
   # -- PostgreSQL host. v0.1 expects an operator-managed PG cluster (Goal #11
@@ -607,6 +678,47 @@ keycloakAdmin:
     # `eso.keycloakAdmin` when that path is enabled, so operators who
     # opt into both don't have to reconcile names.
     secretKey: client_secret
+
+# Operator-console (`/ui/*`) OAuth confidential credentials (#2594,
+# Goal #336). The browser BFF login flow served at `/ui/auth/*` needs two
+# confidential values in addition to the plain `config.uiKeycloakClientId`:
+# the confidential web client's `client_secret` (carried on the
+# server-side token-endpoint POST) and a session-cookie encryption key
+# (Fernet key the BFF encrypts the session payload with). Both are
+# wired into the backplane container EXCLUSIVELY via `secretKeyRef` —
+# never a plaintext chart value — mirroring the Postgres DSN / Keycloak
+# admin-client-secret precedent. Point `secretName` at a Kubernetes
+# Secret holding both keys (a GSM/no-Vault deploy provisions it directly;
+# a Vault deploy syncs it via ESO). All rendered as env only when
+# `enabled: true`; unset (the default) leaves the console cleanly
+# disabled (`503 ui_oauth_not_configured` on `/ui/auth/login`) with no
+# effect on `/api/*` or the `meho login` CLI. See
+# `docs/cross-repo/keycloak-web-client.md` for the realm-side recipe and
+# `deploy/values-examples/README.md` for the GSM/no-Vault wiring.
+uiConsole:
+  # -- Whether to wire `UI_KEYCLOAK_CLIENT_SECRET` +
+  # `UI_SESSION_ENCRYPTION_KEY` into the backplane Deployment. Default
+  # `false`: the operator console stays disabled and the two env vars are
+  # not rendered. Flip to `true` and provide `secretName` (+ set
+  # `config.uiKeycloakClientId`) to enable the browser console — the
+  # schema requires both under `enabled: true`, so a half-configured
+  # console fails at `helm install` rather than 503-ing at first login.
+  enabled: false
+  # -- Name of the Kubernetes Secret holding BOTH the confidential web
+  # client secret and the session encryption key. Referenced by name only
+  # (like `postgres.credentialsSecret`) — provisioning is the consumer's
+  # responsibility (GSM-synced ExternalSecret, a sealed-secret, or a
+  # directly-applied Secret). Required and non-empty when
+  # `uiConsole.enabled: true`.
+  secretName: ""
+  # -- Key within `secretName` whose value is the confidential web
+  # client's `client_secret` (rendered into `UI_KEYCLOAK_CLIENT_SECRET`).
+  clientSecretKey: client_secret
+  # -- Key within `secretName` whose value is the session-cookie
+  # encryption key (rendered into `UI_SESSION_ENCRYPTION_KEY`). Generate a
+  # url-safe base64 32-byte Fernet key:
+  # `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.
+  sessionEncryptionKey: session_encryption_key
 
 audit:
   # -- v0.1: audit rows written to PostgreSQL only. The S3 / object-store

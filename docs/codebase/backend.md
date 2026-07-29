@@ -1244,8 +1244,9 @@ surfaces in the workflow log so the operator knows to rotate.
 **v0.2 improvement on the horizon.** The PAT is the v0.1 expedient.
 A GitHub App + installation token would carry shorter-lived
 credentials (1-hour installation tokens vs PATs that live until
-manually rotated), and CodeRabbit consistently flags long-lived PATs
-as such. The GitHub App migration is tracked separately; v0.1 ships
+manually rotated), and long-lived PATs have repeatedly been flagged
+in review for exactly that. The GitHub App migration is tracked
+separately; v0.1 ships
 with the PAT because the rotation discipline is captured on the
 coordination tracker
 ([`docs/cross-repo/rke2-infra-coordination.md`](../cross-repo/rke2-infra-coordination.md))

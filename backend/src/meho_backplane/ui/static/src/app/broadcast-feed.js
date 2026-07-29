@@ -268,5 +268,101 @@ document.addEventListener("alpine:init", () => {
         return "(aggregate-only)";
       }
     },
+
+    // True when the event is an agent-authored announcement
+    // (``meho.broadcast.announce``) rather than an audit-driven
+    // operation. Two event kinds now share the stream (G6.4-T2 / #2549);
+    // the row partial branches on this so an announcement renders its
+    // agent-authored variant (phase chip + quoted activity + the #2544
+    // claim fields) instead of blank audit cells. Reads the top-level
+    // ``kind`` discriminator, falling back to the historical
+    // ``event_kind`` alias for v0.8.0 in-flight frames.
+    isAnnouncement(ev) {
+      const kind = ev && (ev.kind || ev.event_kind);
+      return kind === "agent_announcement";
+    },
+
+    // A stable ``x-for`` key for one row. Audit events key on their
+    // durable ``event_id``; history rows also carry the Valkey stream
+    // ``cursor`` / ``id``. Live announcement frames carry none of those
+    // (announcements mint no UUID pre-T2), so fall back to a composite of
+    // the fields that identify one announcement on the tenant stream.
+    // Without this, ``:key="ev.event_id"`` would collapse every live
+    // announcement onto the ``undefined`` key and Alpine would reconcile
+    // them into a single row.
+    rowKey(ev) {
+      if (!ev) {
+        return "";
+      }
+      return (
+        ev.event_id ||
+        ev.cursor ||
+        ev.id ||
+        [ev.kind || "op", ev.ts || "", ev.principal_sub || "", ev.activity || ""].join("|")
+      );
+    },
+
+    // Accessible label for a row. Audit rows name the op_id; announcement
+    // rows name the phase so the announcement variant does not read
+    // "Inspect event undefined".
+    rowAriaLabel(ev) {
+      if (this.isAnnouncement(ev)) {
+        return "Agent announcement (" + ((ev && ev.phase) || "update") + ")";
+      }
+      return "Inspect event " + ((ev && ev.op_id) || "");
+    },
+
+    // DaisyUI badge variant for an announcement phase. ``start`` (intent)
+    // and ``completion`` (wrap-up) stand out; ``update`` (the default) is
+    // the neutral ghost. Unknown values fall back to ghost.
+    phaseBadgeClass(phase) {
+      switch (phase) {
+        case "start":
+          return "badge-info";
+        case "completion":
+          return "badge-success";
+        default:
+          return "badge-ghost";
+      }
+    },
+
+    // Comma-joined target attribution for an announcement: the single
+    // ``target`` plus any of the ``targets[]`` list (#2544). Empty when
+    // the announcement is target-less. Each value is rendered through
+    // ``x-text`` (escaped) by the template, so this only assembles the
+    // string; it never touches innerHTML.
+    announcementTargets(ev) {
+      const out = [];
+      if (ev && ev.target) {
+        out.push(ev.target);
+      }
+      if (ev && Array.isArray(ev.targets)) {
+        for (const t of ev.targets) {
+          if (t) {
+            out.push(t);
+          }
+        }
+      }
+      return out.join(", ");
+    },
+
+    // Compact claim-metadata summary for an announcement's payload column:
+    // the declared op-class, the TTL (minutes), and the work_ref, in that
+    // order, joined by a middot. Trusted structured fields
+    // (``planned_op_class`` / ``ttl_minutes``) render clean; ``work_ref``
+    // is agent-authored but rendered escaped via ``x-text``.
+    announcementMeta(ev) {
+      const parts = [];
+      if (ev && ev.planned_op_class) {
+        parts.push("will " + ev.planned_op_class);
+      }
+      if (ev && ev.ttl_minutes != null) {
+        parts.push("TTL " + ev.ttl_minutes + "m");
+      }
+      if (ev && ev.work_ref) {
+        parts.push(ev.work_ref);
+      }
+      return parts.join(" · ");
+    },
   }));
 });

@@ -27,8 +27,10 @@ identity + routing fields (``collection_key`` / ``vendor`` / ``products`` /
 ``id`` / ``tenant_id`` / timestamps / ``status`` / the probe-written
 liveness are server-derived and deliberately absent — ``tenant_id`` in
 particular comes from the JWT, never the body (the ``create_target``
-precedent). There is still no ``DocCollectionUpdate`` here — PATCH /
-DELETE are a separate follow-up (out of scope per #1739).
+precedent). There is still no ``DocCollectionUpdate`` here — PATCH is a
+separate follow-up; DELETE shipped in #2487 as a bodyless route
+(``DELETE /api/v1/doc_collections/{collection_key}``), so it needs no
+request schema.
 
 :class:`DocCollectionCreateResponse` is the create route's reply (#1756):
 the full :class:`DocCollection` read shape plus a ``next_step`` hint that

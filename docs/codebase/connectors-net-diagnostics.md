@@ -384,6 +384,22 @@ ICMP datagram sockets — it never grants `CAP_NET_RAW`. Empty (default)
 renders no sysctl. A privileged `CAP_NET_RAW` sidecar remains the
 documented escalation path (not implemented).
 
+The probe allowlist itself is a first-class chart value:
+`netdiag.probeAllowlist` in `values.yaml` renders into
+`MEHO_NETDIAG_PROBE_ALLOWLIST` on the backplane ConfigMap
+(`templates/configmap.yaml`), which the Deployment injects into the
+container via `envFrom.configMapRef` — so a populated value reaches
+`connectors/net/allowlist.py` with no `extraEnv` escape hatch. It is
+schema-typed in `values.schema.json` as a plain optional string:
+deliberately absent from any `required` list and carrying no `minLength`,
+so the safe default `""` validates on every install (and surfaces under
+`helm show values`). That default renders `MEHO_NETDIAG_PROBE_ALLOWLIST: ""`,
+which — given the inverted allow-only-what-is-listed semantics — keeps
+the connector **inert** (every probe denied). This mirrors the typed
+`config.targetSsrfAllowlist` treatment (#2240) so both fail-closed
+allowlists share one configuration shape, differing only in default
+posture. Chart-only — the allowlist parser is untouched.
+
 ## Broadcast classification
 
 `net.*` ops classify as `read` in the broadcast sensitivity taxonomy
@@ -480,6 +496,15 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
 - `safety_level="safe"` (agent-auto-runnable) is the chosen posture; the
   reviewed alternative `"caution"` (operators auto-run, agents do not)
   is a one-line change if a security review prefers it.
+- **Read-surface projection (#2496):** because `net.*` registers
+  module-level `source_kind='typed'` ops with **no** backing connector
+  class, `resolve_authoring_kind`'s resolver replay misses. It keys on
+  the row's own `source_kind` to recognize this class-less typed mold, so
+  the connector listing and `meho.connector.review` report
+  `net-probe-1.x` as `kind="typed"` / `dispatchable=true` rather than the
+  `ingested-shim` dead end. A prior projection bug read the miss as
+  non-dispatchable, so a live operator concluded the connector was dead
+  (#2468 finding 3a).
 
 ## References
 

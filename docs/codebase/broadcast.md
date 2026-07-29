@@ -50,14 +50,18 @@ Three layers, separated for traceability:
    The SSE backlog prelude is the v0.8.0 fix for #1305 — see *Known
    issues* below.
 
-   **Row identifier semantics (MCP recent/watch, #2479).** Every event
-   row the two MCP read tools return carries the entry's Valkey stream
-   id twice: `cursor` (self-labelled; round-trips as the tools'
+   **Row identifier semantics (MCP recent/watch, #2479 / #2547).** Every
+   event row the two MCP read tools return carries the entry's Valkey
+   stream id twice: `cursor` (self-labelled; round-trips as the tools'
    `cursor` input arg) and `id` (legacy alias of the same value —
    unlike every other MCP surface, a broadcast row's `id` is NOT the
    row's domain UUID). The durable identifiers live on the event
-   fields: `event_id` / `audit_id` on operation rows; announcement
-   rows have no UUID (until #2547 mints one).
+   fields: `event_id` / `audit_id` on operation rows; and, since #2547,
+   `event_id` on announcement rows too — a genuine per-announcement UUID
+   minted at publish (equal to the durable `agent_announcement` row's PK),
+   now distinct from the stream `cursor`. A DB-backfilled announcement
+   (see *Durable announcements* below) carries `event_id` but a **null**
+   `cursor` / `id` (it has no Valkey stream entry of its own).
 
    **Read-side `filter` object (MCP recent/watch).** Both tools accept a
    `filter` object narrowing by exact-match `op_class` / `principal` /
@@ -100,7 +104,10 @@ Three layers, separated for traceability:
     doing"); an announcement never qualifies for a lineage filter.
 - `AgentAnnouncementEvent` (`broadcast/agent_events.py`) — agent-
   authored announcements published via `meho.broadcast.announce`.
-  Fields: `tenant_id`, `principal_sub`, `activity`, `target`, `scope`,
+  Fields: `event_id` (UUID, minted at publish via `default_factory=uuid4`
+  — the real per-announcement identity, #2547; also the durable
+  `agent_announcement` row's PK, served unwrapped), `tenant_id`,
+  `principal_sub`, `activity`, `target`, `scope`,
   `phase`, plus the optional **structured intent claims** (Broadcast
   v2, #2544): `targets` (list, ≤10 names, each ≤256 chars — supersedes
   the single `target` for multi-target work), `planned_op_class` (the
@@ -123,7 +130,14 @@ Three layers, separated for traceability:
   `work_ref`) stay agent-authored prose and keep the untrusted-content
   envelope (`_ANNOUNCEMENT_UNTRUSTED_FIELDS` +
   `_ANNOUNCEMENT_UNTRUSTED_LIST_FIELDS`, wrapped per-element for the
-  list). All filtering (`event_matches`) runs on the raw model **before**
+  list) **only on LLM-facing re-serves**. The wrap is applied by the
+  read-side serialiser: `list_recent_events_strict` (the MCP
+  `broadcast.recent` tool) passes `dump_event_wire` (wraps prose);
+  `list_recent_events_fail_soft` (the UI history pane) passes
+  `_dump_event_plain` (no wrap) because the browser sink escapes every
+  field separately (Alpine `x-text` sets `textContent`) and the
+  multi-line guard block would be human-visible noise on a feed row
+  (#2549). All filtering (`event_matches`) runs on the raw model **before**
   the wrap, so narrowing is unaffected by the envelope — the same split
   the pre-existing `target` filter already relied on. Invalid claims
   (11 targets, `ttl_minutes=0`, a 257-char `work_ref`, a non-UUID
@@ -209,13 +223,20 @@ MCP tools/call meho.broadcast.announce
       → count > limit → AnnounceRateLimitExceeded
            → McpRateLimitedError → JSON-RPC -32000 (retry-after in data)
     → publish_agent_announcement(AgentAnnouncementEvent)  ← fail-loud
+      → INSERT agent_announcement (id = event.event_id, typed claims)  ← durable, first
       → XADD meho:feed:{operator.tenant_id} {event: <json>} MAXLEN ~ 10000
       → returns Valkey entry id verbatim
     → returns {event_id, cursor} to the agent
-      (both the stream entry id — `cursor` is the canonical
-       self-labelled name, #2479; `event_id` is the legacy alias
-       and NOT a durable UUID: announcements carry no UUID)
+      (`event_id` is the real per-announcement UUID minted at publish —
+       equal to the durable row's id and to the event's `event_id` on
+       recent/watch reads, #2547; `cursor` is the stream entry id, the
+       canonical self-labelled name, #2479. The two are now distinct.)
 ```
+
+The durable INSERT runs **before** the `XADD` so the archive is never
+lost to a stream-side failure; both legs are fail-loud (a persistence or
+publish failure surfaces to the agent as JSON-RPC `-32603`, not a silent
+drop). See *Durable announcements* below.
 
 The rate limit (G6.5-T6 #2546) is a per-`(tenant, principal)`
 fixed-window counter (the canonical Redis `INCR` rate-limiter pattern)
@@ -250,6 +271,24 @@ GET /api/v1/feed (Bearer JWT)
       → heartbeat on outbound silence ≥ 30s
 ```
 
+**Union validation (#2549).** `_process_entries` peeks the wire `kind`
+discriminator (`select_event_model`, shared with the XRANGE `parse_entry`)
+and validates each entry against `BroadcastEvent` *or*
+`AgentAnnouncementEvent`, so **both** audit-driven operations and
+agent-authored announcements ride the SSE feed as first-class
+`event: broadcast` frames. Before #2549 the generator validated only
+`BroadcastEvent` and dropped announcements on the resulting
+`ValidationError` (`feed_skipped_malformed_event`) — the feed was
+write-only for humans. Genuinely malformed entries (undecodable JSON,
+invalid payload of either kind) still skip with that log. Filtering
+delegates to `event_matches`, so an `op_class` filter narrows to
+operations only (an announcement has no op-class), while `principal` /
+`target` match both kinds (`target` against an announcement's `target`
+or any `targets[]`). The surviving entry's raw wire JSON is emitted
+verbatim (unwrapped); SSE consumers escape/render the agent prose on
+their side. `/ui/broadcast/stream` imports `_process_entries`, so the
+same union validation covers the browser feed.
+
 ### Read path (UI SSE bridge)
 
 `GET /ui/broadcast/stream` is the session-cookie-gated mirror of
@@ -259,7 +298,149 @@ GET /api/v1/feed (Bearer JWT)
 authenticates via `UISessionMiddleware` and the BFF session cookie.
 Frame shape is byte-compatible with the API edge — the `_process_entries`
 helper, the cursor resolver, and the backlog prelude are imported
-verbatim from `api/v1/feed.py`.
+verbatim from `api/v1/feed.py`. Since #2549 that shared helper
+union-validates both kinds, so announcements reach the browser feed too.
+
+**Rendering both kinds (#2549).** The shared row partial
+(`broadcast/_event_row.html`) branches on `ev.kind`: an operation renders
+the audit columns (`op_id` / `op_class` / `result_status` / `payload`); an
+announcement renders its agent-authored variant — a 📣 principal badge, a
+phase chip (`start` / `update` / `completion`), the `activity` as escaped
+quoted prose (bound via `x-text`, never `innerHTML`), the `target`/`targets`
+attribution, and a claim-metadata cell (`planned_op_class` · TTL ·
+`work_ref`, the #2544 structured fields). Rows key on `rowKey(ev)`
+(`event_id` → `cursor`/`id` → composite) because live announcement frames
+carry no durable id. The announcement row is not clickable — announcements
+have no `audit_id`, so `openDrawer` no-ops.
+
+**Adjacent stream consumers.** The dashboard recent-activity tray
+(`dashboard-feed.js`) and the connectors recent-ops card
+(`connectors-feed.js`) also subscribe to `/ui/broadcast/stream`. They are
+operation-activity surfaces (their row shape is the audit `BroadcastEvent`),
+so they **drop** announcement frames in `onSseMessage` — announcements
+render on the broadcast feed / history (their first-class home), not as
+blank operation rows.
+
+### Read path (UI history — Last 24h)
+
+`GET /ui/broadcast/history[?kind=]` renders the finite XRANGE replay pane
+via `list_recent_events_fail_soft` (fail-soft: a Valkey blip degrades to
+the empty state, not a 500). Since #2549 it renders **both** kinds through
+the same row partial; the former hard drop of announcement rows
+(`_is_audit_event`) became the optional `?kind=` filter
+(`operation` / `agent_announcement`, clamped by `_normalise_kind_filter`;
+absent renders both), surfaced as an "All / Operations / Announcements"
+button group that `hx-get`s the fragment back into `#broadcast-history`.
+The fail-soft path serialises via `_dump_event_plain` (unwrapped); the
+pane's HTML sink escapes announcement prose separately.
+
+### Read path (dispatch-time target-activity advisory)
+
+On the **success path of a write-class dispatch**, the operation response
+carries a compact advisory of recent *peer* activity on the same target so
+the caller learns another principal is already active there — post-op
+awareness, not a lock or a block (pre-op checking stays the discipline's
+`meho.broadcast.recent` read step). The advisory rides
+`OperationResult.extras["target_activity_advisory"]`
+(`connectors/schemas.py`), the established envelope-extension slot.
+
+```text
+dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
+  → build_target_activity_advisory(operator, op_id, target_name)
+      [gate — returns {} without any stream read when:]
+        · settings.dispatch_activity_advisory_window_minutes == 0
+        · classify_op(op_id) not in {write, credential_write, credential_mint}
+        · target_name is None
+      [otherwise — one bounded, newest-first read:]
+        → XREVRANGE meho:feed:{tenant} + <since-ms> COUNT 100
+          (newest-first, so the COUNT cap keeps the newest window
+           entries — not the oldest, which an XRANGE + COUNT would)
+        → parse + event_matches(target=target_name, active_only=True)
+        → drop entries where (principal_sub, actor_sub) == the caller's
+        → keep the newest 5, restore chronological order
+  → wrap_ok_result(..., extras=advisory)
+```
+
+Design contract:
+
+- **Write-class only.** Read-class dispatches (`read` / `credential_read`
+  / `audit_query` / `other` / `approval`) short-circuit on the frozenset
+  check before any Valkey call — the hot read path pays nothing.
+- **Structure only, no prose.** Each entry is
+  `{principal_sub, actor_sub?, kind (operation|announcement), op_id?/phase?, ts}`.
+  The untrusted announcement free-text fields (`activity` / `scope` /
+  `target` / `targets`) are never projected — the untrusted-prose envelope
+  does not enter an op response (Initiative #2543, review finding 27).
+- **Self-excluded.** An entry whose `principal_sub` *and* `actor_sub` both
+  match the caller is the caller's own activity and is dropped; a sibling
+  agent under the same human (distinct `actor_sub`) is a peer and surfaces.
+- **Newest-first, so the cap keeps what matters.** The read is a single
+  `XREVRANGE` (newest-first) time-bounded by the window and capped at 100
+  entries; the newest five surviving peer entries are then re-ordered
+  chronologically. An oldest-first `XRANGE` + `COUNT` would clip the tail
+  and silently invert the "most-recent" contract on a busy target.
+- **Fail-open and bounded.** Any error in the lookup (a Valkey teardown
+  included) is swallowed and warn-logged (`target_activity_advisory_failed`),
+  yielding no advisory rather than failing the op. The lookup *is* awaited
+  on the success path, so it adds one small, bounded stream read to a
+  write dispatch's latency — it never fails the dispatch, and the cost is
+  capped by the `COUNT`.
+- **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
+  `30`, `0` = off) gates the whole feature.
+
+## Durable announcements (#2547)
+
+The Valkey stream is the hot real-time path but not durable: it is
+count-trimmed at `BROADCAST_MAXLEN = 10_000` and the broadcast subchart
+runs with persistence disabled (`save ""` / `appendonly no` — "streams
+are ephemeral by design"), so a restart wipes the whole coordination
+window. Operations persist forever in `audit_log`; coordination *intent*
+had no durable home until T2.
+
+**Archive table.** `publish_agent_announcement` writes an append-only
+`agent_announcement` row (migration `0067`, model
+`db/models.py::AgentAnnouncement`) keyed on the event's minted UUID
+(`event_id`), persisting the typed claim fields (T1 #2544) and lineage.
+The row is written **before** the `XADD` so a stream-side failure never
+costs the durable record; both legs are fail-loud. Columns: `id` (UUID
+PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
+`targets` (JSONB), `phase`, `planned_op_class`, `ttl_minutes`,
+`work_ref`, `run_id`, `created_at` (the event's `ts`). Indexes:
+`(tenant_id, created_at DESC)` (recent backfill + prune) and
+`(tenant_id, work_ref)` (filter). This is the split Kubernetes draws
+between its bounded Events TTL and the durable records it expects
+elsewhere.
+
+**Recent DB backfill.** `meho.broadcast.recent` reads the archive when
+the requested window reaches before the stream's oldest surviving entry
+(`_backfill_recent_from_db` in `broadcast/history.py`). The stream
+`XRANGE` from the window start defines the covered range; the gap
+`[window_start, oldest_stream_entry)` (or the whole window when the
+stream is empty — the restart / `FLUSHALL` shape) is filled from the DB,
+deduped against the stream page by `event_id` and bounded by the
+remaining page budget. Backfilled rows carry `event_id` but a **null**
+`cursor` / `id`. Only wall-clock windows (default or ISO `cursor`)
+backfill; a stream-cursor `cursor` is forward pagination and skips it.
+`op_class` / `actor_sub` filters short-circuit (no announcement carries
+either). `watch` does **not** backfill — it is a forward live-tail poll
+for events strictly past a cursor, which has no archive dimension. Deep
+DB-only pagination is out of scope (T5 owns deep-history UX).
+
+**Retention prune.** `broadcast/announcement_retention.py` is a
+lifespan-owned weekly `asyncio` loop (a deliberate copy of the
+topology-history prune mold, `topology/history_retention.py`) that
+deletes rows older than `broadcast_announcement_retention_days` (default
+90) in one bounded audited batch per tick. `days=0` is the keep-forever
+opt-out (a no-op heartbeat, no DELETE, no audit row);
+`broadcast_announcement_prune_enabled=false` skips starting the loop
+entirely. Each non-no-op tick writes one `INTERNAL` audit row
+(`operator_sub='system:broadcast-announcement-retention'`,
+`path='broadcast.announcement.prune'`, `payload={dropped_rows,
+retention_days, cutoff}`) attributed to the system-wide sentinel tenant.
+Helm knobs: `broadcastAnnouncement.{retentionDays,pruneIntervalSeconds,pruneEnabled}`
+(env `BROADCAST_ANNOUNCEMENT_*`). This is distinct from
+`broadcast_retention_hours` (the *stream* read-window heuristic, a
+different substrate).
 
 ## Dependencies
 
@@ -510,6 +691,7 @@ investigation. #1305 is the closing fix.
   - `XREVRANGE` — https://valkey.io/commands/xrevrange/
 - SSE / EventSource — https://html.spec.whatwg.org/multipage/server-sent-events.html.
 - Untrusted-text envelope on announcement re-serve (`dump_event_wire`
-  wrapping `activity`/`scope`/`target` on the `recent`/`watch`/
-  `tenant_feed` LLM-facing paths) —
+  wrapping `activity`/`scope`/`target`/`work_ref` on the `recent`/`watch`/
+  `tenant_feed` LLM-facing paths; the human UI history + SSE surfaces
+  serve unwrapped and escape at the sink) —
   [`untrusted-text-envelope.md`](./untrusted-text-envelope.md).

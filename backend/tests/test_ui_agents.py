@@ -478,6 +478,37 @@ def test_list_card_hides_toggle_for_operator() -> None:
     assert "/ui/agents/on-agent/toggle" not in response.text
 
 
+def test_list_card_carries_view_link_and_visible_identity_for_operator() -> None:
+    """Each card offers the converged detail-nav pair, for every role (#2463).
+
+    The name heading is a visible ``link link-primary`` (not the invisible
+    ``link link-hover``) to the detail page, and ``card-actions`` carries a
+    ``View`` link -- rendered even for a non-admin operator (outside the
+    ``can_write`` toggle guard) so the affordance never depends on write
+    privileges.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_agent(tenant_id=_TENANT_A, name="on-agent", enabled=True)
+    keypair, jwks = _make_keypair_and_jwks()
+    token = _operator_session(keypair)
+    session_id = _seed_session_sync(tenant_id=_TENANT_A, access_token=token, operator_sub=_OP_A)
+    client, mock, _csrf = _authenticated_client(session_id=session_id, jwks=jwks)
+    try:
+        response = client.get("/ui/agents")
+    finally:
+        mock.stop()
+    assert response.status_code == 200
+    body = response.text
+    # Visible identity link on the name heading (never the hover-only style).
+    assert 'class="link link-primary font-mono font-semibold break-all"' in body
+    assert "link link-hover" not in body
+    # A View link in card-actions to the detail page -- rendered for the
+    # operator despite the toggle being hidden (no write privileges).
+    assert 'data-action="toggle"' not in body  # toggle stays admin-only
+    assert 'aria-label="View agent on-agent"' in body
+    assert 'href="/ui/agents/on-agent"' in body
+
+
 # ---------------------------------------------------------------------------
 # Detail view
 # ---------------------------------------------------------------------------

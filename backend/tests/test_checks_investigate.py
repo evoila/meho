@@ -28,6 +28,7 @@ memory + DB layers are real against the SQLite engine from :mod:`tests.conftest`
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -448,6 +449,98 @@ async def test_no_dashboard_is_noop() -> None:
     await investigate_on_transition(sensor_id=sid, tenant_id=_TENANT)
     await inv._await_pending_investigations()
     assert stub.calls == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_transitions_coalesce_to_one_investigation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two interleaved outcomes on one Dashboard schedule exactly one investigation.
+
+    Regression for #2575: the memo transition is an atomic compare-and-swap, so
+    two Sensor persists that land together (raced here via ``asyncio.gather``)
+    coalesce -- exactly one caller wins the swap and schedules the investigation,
+    and its member set covers **both** failing Sensors (correlated over the
+    settled membership, not a partial pre-commit view).
+    """
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="critical")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="critical")
+    await _seed_dashboard(name="prod", sensor_ids=[sid_a, sid_b], last_rollup_state=None)
+
+    await asyncio.gather(
+        investigate_on_transition(sensor_id=sid_a, tenant_id=_TENANT),
+        investigate_on_transition(sensor_id=sid_b, tenant_id=_TENANT),
+    )
+
+    assert len(fired) == 1
+    # The single investigation correlates over the full, settled member set.
+    assert {m.name for m in fired[0]["members"]} == {"sensor-a", "sensor-b"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_transitions_fire_one_agent_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end: two raced outcomes on one Dashboard produce one investigator run.
+
+    Both Sensors share a topology anchor so the single winning investigation
+    correlates them into one cause group -> exactly one ``run_scheduled`` fire
+    (#2575). Without the coalescing claim each outcome would drive its own
+    investigation and the stub -- which persists no real ``agent_run`` row for the
+    ``_has_in_flight_run`` gate to see -- would record two fires.
+    """
+    await _seed_definition()
+    _patch_creds(monkeypatch)
+    stub = _install_stub(
+        outcome=_succeeded_outcome(
+            ChecksFinding(verdict="acknowledged", re_escalate=False, summary="ok")
+        )
+    )
+    shared = _node("datastore", "shared", 1)
+
+    async def _fake_deps(operator: Operator, name: str, *, kind: str | None = None, **_: Any):
+        return [_node("target", name, 0), shared]
+
+    monkeypatch.setattr(inv, "find_dependencies", _fake_deps)
+
+    sid_a = await _seed_sensor(name="sensor-a", last_state="critical", target={"name": "anchor-a"})
+    sid_b = await _seed_sensor(name="sensor-b", last_state="critical", target={"name": "anchor-b"})
+    await _seed_dashboard(name="prod", sensor_ids=[sid_a, sid_b], last_rollup_state=None)
+
+    await asyncio.gather(
+        investigate_on_transition(sensor_id=sid_a, tenant_id=_TENANT),
+        investigate_on_transition(sensor_id=sid_b, tenant_id=_TENANT),
+    )
+    await inv._await_pending_investigations()
+
+    assert len(stub.calls) == 1
+    assert await _agent_run_count() == 0  # the stub persists no real run rows
+
+
+@pytest.mark.asyncio
+async def test_lost_swap_caller_does_not_reschedule(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller that already sees the transitioned memo makes no new claim.
+
+    The sequential companion to the raced test: once the memo is `critical`, a
+    later outcome on the same Dashboard reads `current == previous` and issues no
+    compare-and-swap, so it neither re-fires nor rewrites the memo.
+    """
+    fired: list[dict[str, Any]] = []
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **kw: fired.append(kw))
+    await _seed_tenant()
+    sid_a = await _seed_sensor(name="sensor-a", last_state="critical")
+    sid_b = await _seed_sensor(name="sensor-b", last_state="critical")
+    dash = await _seed_dashboard(name="prod", sensor_ids=[sid_a, sid_b], last_rollup_state=None)
+
+    await investigate_on_transition(sensor_id=sid_a, tenant_id=_TENANT)
+    assert len(fired) == 1
+    assert await _memo(dash) == "critical"
+
+    fired.clear()
+    await investigate_on_transition(sensor_id=sid_b, tenant_id=_TENANT)
+    assert fired == []
+    assert await _memo(dash) == "critical"
 
 
 # ---------------------------------------------------------------------------

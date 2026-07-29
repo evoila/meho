@@ -109,6 +109,13 @@ from meho_backplane.topology.history_retention import (
     start_topology_history_retention_sweeper,
     stop_topology_history_retention_sweeper,
 )
+from meho_backplane.topology.node_delete import (
+    DeleteNodeResult,
+    NodeHasLiveEdgesError,
+    NodeNotDeletableError,
+    NodeNotFoundForDeleteError,
+    delete_node,
+)
 from meho_backplane.topology.nodes import (
     CreateNodeResult,
     InvalidNodeKindError,
@@ -138,9 +145,13 @@ __all__ = [
     "BulkImportRowError",
     "BulkImportValidationError",
     "CreateNodeResult",
+    "DeleteNodeResult",
     "InvalidEdgeKindError",
     "InvalidNodeKindError",
+    "NodeHasLiveEdgesError",
+    "NodeNotDeletableError",
     "NodeNotFoundError",
+    "NodeNotFoundForDeleteError",
     "NodeRef",
     "RefreshResult",
     "TopologyEdge",
@@ -150,6 +161,7 @@ __all__ = [
     "annotate_edge_in_txn",
     "bulk_import_edges",
     "create_or_get_node",
+    "delete_node",
     "list_edges",
     "refresh_target_topology",
     "resolve_node",

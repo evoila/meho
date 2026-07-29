@@ -296,6 +296,7 @@ class SddcManagerConnector(HttpConnector):
                 payload_builder=_sddc_login_body,
                 token_extractor=_extract_access_token,
                 request_headers=dict(_SESSION_REQUEST_HEADERS),
+                request_extensions=self._request_extensions(target),
             )
             if not is_system_operator(operator):
                 self._session_tokens[cache_key] = token

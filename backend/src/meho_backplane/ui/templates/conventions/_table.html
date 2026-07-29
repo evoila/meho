@@ -30,6 +30,7 @@
             <th scope="col">Title</th>
             <th scope="col">Kind</th>
             <th scope="col" class="text-right">Priority</th>
+            <th scope="col" class="sr-only">Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -38,7 +39,7 @@
               <td class="font-mono break-all">
                 <a
                   href="/ui/conventions/{{ entry.slug | urlencode }}"
-                  class="link link-hover"
+                  class="link link-primary"
                   data-slug="{{ entry.slug }}"
                 >
                   {{ entry.slug }}
@@ -51,6 +52,15 @@
                 </span>
               </td>
               <td class="text-right font-mono">{{ entry.priority }}</td>
+              <td>
+                <a
+                  href="/ui/conventions/{{ entry.slug | urlencode }}"
+                  class="btn btn-ghost btn-xs"
+                  aria-label="View convention {{ entry.slug }}"
+                >
+                  View
+                </a>
+              </td>
             </tr>
           {% endfor %}
         </tbody>

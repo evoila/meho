@@ -1004,6 +1004,58 @@ sibling). Template-verb responses still mirror the id as
 `list_templates` round-trips into `meho.runbook.start` verbatim. See
 also [`mcp.md`](mcp.md) §Tool naming grammar.
 
+### §14.10 — List rows mirror the qualified name the sibling verb accepts
+
+**Every list row carries the qualified identifier / state name its
+sibling `show` / `cancel` / `poll` / filter verb accepts, alongside
+the model-native key — so the obvious round-trip works verbatim.**
+
+A recurring papercut (G0.32 #2471, folding dogfood reports #2476 /
+#2477 / #2478 / #2482): a family's list row spelled its identifier or
+state one way while the sibling verb that consumes it required another,
+so `run_status(run_id=row.run_id)`, `grant.show(grant_id=row.id)`,
+`scheduler.cancel(trigger_id=row.id)`, and `list_runs(status=row.state)`
+each failed with `-32602`. The row models are REST-shared (or mirror a
+DB column), so a field rename is off the table — #1612 kept shared
+models out of a rename's scope.
+
+The convention closes the gap at the **MCP wire boundary** with two
+already-codified molds, picked by whether the mismatch is on an
+**input** or a **response**:
+
+* **Input mismatch → §14.3 canonical-name + deprecated-alias.** When
+  the offending name is an *input arg* (a resource UUID that violated
+  the `<noun>_id` grammar), rename it to the canonical `<noun>_id` and
+  keep the old name as a `deprecated: true` alias for one cycle, guarded
+  by a top-level `anyOf` (`[{required:[canonical]}, {required:[alias]}]`)
+  and a handler-level XOR resolver that names both on a both-supplied
+  `-32602` and speaks the canonical name in every error string. This is
+  the approvals `id`→`approval_request_id` mold (§14.3); #2471 applied
+  it to `meho.agents.run_status` (`handle`→`run_id`), the last
+  resource-UUID input arg violating the grammar.
+
+* **Response mismatch → additive mirror (native key stays).** When the
+  offending name is a *response key* on a REST-shared row, mirror it at
+  the wire boundary: the row carries **both** the model-native key and
+  the qualified name the sibling verb accepts, equal values. The REST
+  surface and the shared Pydantic model are untouched. This is the
+  `_mirror_template_slug` mold (#1612). #2471 added three more:
+  `meho.agents.grant.{list,show,create,elevate}` rows mirror `id` →
+  `grant_id` (accepted by `grant.show` / `grant.revoke`);
+  `meho.scheduler.list` rows mirror `id` → `trigger_id` (accepted by
+  `scheduler.cancel`, and the same key `scheduler.create` already
+  returns at top level); `meho.runbook.list_runs` run summaries mirror
+  `state` → `status`. The runbook filter itself stays `status` (§14.6
+  pins `*.list.status` surface-wide), so the mirror makes the row's
+  `status` value a member of the filter's own enum — a clean
+  round-trip without touching either the shared `RunSummary.state`
+  field or the filter name.
+
+Removing the native `id` / `state` / `slug` key from the mirrored
+response is explicitly **not** part of this convention — the #1612
+precedent keeps both, so a consumer reading either name keeps working.
+Tool descriptions state which key round-trips into which sibling verb.
+
 ### Code reference
 
 The pack of regression tests in

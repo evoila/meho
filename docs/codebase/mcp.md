@@ -144,6 +144,19 @@ can predict the rest. (A handful of single-purpose reference tools
 predating the grammar — `search_docs`, `add_to_memory`,
 `call_operation`, … — remain flat.)
 
+One flat pair carries a deliberate cross-surface name split: the kb
+meta-tools are `search_knowledge` / `add_to_knowledge` on MCP, but every
+other surface names the substrate `kb` — REST `/api/v1/kb`, CLI
+`meho kb`, console `/ui/kb`. The names were pinned to the consumer
+agent-prompt contract (#417 / #331, "CLAUDE.md naming aligned") and the
+alias machinery a rename would need was removed in #1625, so the split is
+intentional and not a rename candidate. Because `/api/v1/knowledge` does
+not exist, an agent that writes via `add_to_knowledge` and then reaches
+for a REST cleanup path 404s unless it knows the substrate is `kb`; the
+two tool descriptions therefore cross-reference the `kb` REST/CLI surface
+and note that entry deletion is REST/CLI-only (`DELETE /api/v1/kb/{slug}`
+or `meho kb delete` — there is no MCP delete tool).
+
 ### Runbook family canonicalisation (#1612)
 
 The 11 runbook tools were the last flat multi-verb family
@@ -202,6 +215,38 @@ The conventions are structurally pinned in
 [`backend/tests/test_mcp_tools_list_shape_conventions.py`](../../backend/tests/test_mcp_tools_list_shape_conventions.py)
 (§14.9) and documented alongside the other tools/list shape rules in
 [`api-shape-conventions.md`](api-shape-conventions.md) §14.
+
+### List-row identifier mirrors (#2471)
+
+The `template_slug` response mirror generalises to a surface-wide rule
+(§14.10): **every list row carries the qualified name its sibling verb
+accepts, alongside the model-native key.** #2471 closed the last four
+mismatches — where a family's list row spelled its id/state one way
+while the sibling `show` / `cancel` / `poll` / filter verb required
+another, so the obvious round-trip failed with `-32602`.
+
+Two molds apply, by where the mismatch sits:
+
+* **Input arg** (a resource UUID off the `<noun>_id` grammar) →
+  canonical-name + deprecated-alias, the §14.3 approvals mold.
+  `meho.agents.run_status` took `handle`; #2471 renamed it to the
+  canonical `run_id` (the key its sibling `meho.agents.run` /
+  `meho.agents.list_runs` rows already return) and kept `handle` as a
+  `deprecated: true` alias for one cycle, guarded by an `anyOf` and a
+  handler-level XOR resolver that speaks `run_id` in every error string.
+* **Response key** on a REST-shared row → additive mirror, the
+  `_mirror_template_slug` mold. The row carries **both** the native key
+  and the qualified name, equal values; the REST surface and shared
+  Pydantic model are untouched. #2471 added `_mirror_grant_id` (`id` →
+  `grant_id` on `meho.agents.grant.{list,show,create,elevate}`),
+  `_mirror_trigger_id` (`id` → `trigger_id` on `meho.scheduler.list`),
+  and `_mirror_run_status` (`state` → `status` on
+  `meho.runbook.list_runs` summaries — the filter itself stays `status`
+  per §14.6, so the mirror makes the row value a member of the filter's
+  own enum).
+
+The native key is never removed (the #1612 precedent keeps both), so a
+consumer reading either name keeps working.
 
 ## Audit URI redaction for query-bearing resources
 

@@ -11,6 +11,14 @@
   ``htmx:afterSwap`` so it shows without an extra click and dismisses on the
   close button / ESC / backdrop.
 
+  Layout (#2464): the box adopts the ``/ui/kb`` editor's form language --
+  a ``p-0`` box with a bordered header + close-circle button, padded
+  section rows (Identity / Metadata / Backend) split by
+  ``border-base-300`` dividers, ``label py-0`` label rows with a
+  right-aligned ``label-text-alt`` hint, and a bordered footer. The scroll
+  region lives between the pinned header and footer so long input never
+  pushes the actions off-screen.
+
   Submit contract: the form ``hx-post``s to
   ``/ui/corpus/collections/register``, swapping
   ``#corpus-collections-modal-container`` (``hx-swap="innerHTML"``).
@@ -57,12 +65,23 @@
 {%- endmacro -%}
 
 <dialog id="corpus-register-modal" class="modal">
-  <div class="modal-box max-w-2xl">
-    <h3 class="font-semibold text-lg" id="corpus-register-modal-title">Register collection</h3>
-    <p class="text-sm opacity-70 mt-1">
-      The collection starts at <code>provisioning</code>; probe it after
-      registering to make it searchable.
-    </p>
+  <div class="modal-box w-11/12 max-w-3xl p-0 overflow-hidden flex flex-col max-h-[90vh]">
+    {# ----- Header ----- #}
+    <div class="flex items-start justify-between gap-4 px-6 py-4 border-b border-base-300">
+      <div>
+        <h3 class="text-lg font-semibold" id="corpus-register-modal-title">Register collection</h3>
+        <p class="text-sm opacity-70 mt-1">
+          The collection starts at <code>provisioning</code>; probe it after
+          registering to make it searchable.
+        </p>
+      </div>
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm btn-circle"
+        aria-label="Close register collection modal"
+        onclick="document.getElementById('corpus-register-modal').close()"
+      >✕</button>
+    </div>
 
     {#- On a 422/409 the route returns this whole ``<dialog>`` re-rendered
         with per-field errors. Target the modal container (not the form) and
@@ -77,120 +96,161 @@
       hx-swap="innerHTML"
       hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
       hx-disabled-elt="find button[type=submit]"
-      class="space-y-3 py-2"
+      class="flex flex-col flex-1 min-h-0 overflow-hidden"
       aria-labelledby="corpus-register-modal-title"
     >
-      <label class="form-control">
-        <span class="label-text">Collection key</span>
-        <input
-          type="text"
-          name="collection_key"
-          required
-          minlength="1"
-          maxlength="128"
-          value="{{ field_value('collection_key') }}"
-          class="input input-bordered input-sm font-mono {{ error_class('collection_key', 'input-error') }}"
-          aria-label="Collection key"
-          placeholder="vmware"
-        />
-        {{ error_for('collection_key') }}
-      </label>
+      <div class="flex-1 min-h-0 overflow-y-auto">
+        {# ----- Identity section ----- #}
+        <div class="px-6 pt-4 pb-4 border-b border-base-300">
+          <div class="text-xs font-medium opacity-60 uppercase tracking-wide mb-3">Identity</div>
 
-      <div class="grid gap-3 md:grid-cols-2">
-        <label class="form-control">
-          <span class="label-text">Vendor</span>
-          <input
-            type="text"
-            name="vendor"
-            required
-            minlength="1"
-            maxlength="256"
-            value="{{ field_value('vendor') }}"
-            class="input input-bordered input-sm {{ error_class('vendor', 'input-error') }}"
-            aria-label="Vendor"
-            placeholder="VMware by Broadcom"
-          />
-          {{ error_for('vendor') }}
-        </label>
+          <label class="form-control">
+            <div class="label py-0">
+              <span class="label-text font-medium">Collection key</span>
+              <span class="label-text-alt opacity-60">required</span>
+            </div>
+            <input
+              type="text"
+              name="collection_key"
+              required
+              minlength="1"
+              maxlength="128"
+              value="{{ field_value('collection_key') }}"
+              class="input input-bordered input-sm font-mono {{ error_class('collection_key', 'input-error') }}"
+              aria-label="Collection key"
+              placeholder="vmware"
+            />
+            {{ error_for('collection_key') }}
+          </label>
 
-        <label class="form-control">
-          <span class="label-text">Products <span class="opacity-60">(comma-separated, optional)</span></span>
-          <input
-            type="text"
-            name="products"
-            maxlength="2048"
-            value="{{ field_value('products') }}"
-            class="input input-bordered input-sm {{ error_class('products', 'input-error') }}"
-            aria-label="Products"
-            placeholder="vsphere, nsx"
-          />
-          {{ error_for('products') }}
-        </label>
+          <div class="flex flex-wrap gap-4 mt-3">
+            <label class="form-control flex-1 min-w-48">
+              <div class="label py-0">
+                <span class="label-text font-medium">Vendor</span>
+                <span class="label-text-alt opacity-60">required</span>
+              </div>
+              <input
+                type="text"
+                name="vendor"
+                required
+                minlength="1"
+                maxlength="256"
+                value="{{ field_value('vendor') }}"
+                class="input input-bordered input-sm {{ error_class('vendor', 'input-error') }}"
+                aria-label="Vendor"
+                placeholder="VMware by Broadcom"
+              />
+              {{ error_for('vendor') }}
+            </label>
+
+            <label class="form-control flex-1 min-w-48">
+              <div class="label py-0">
+                <span class="label-text font-medium">Products</span>
+                <span class="label-text-alt opacity-60">comma-separated, optional</span>
+              </div>
+              <input
+                type="text"
+                name="products"
+                maxlength="2048"
+                value="{{ field_value('products') }}"
+                class="input input-bordered input-sm {{ error_class('products', 'input-error') }}"
+                aria-label="Products"
+                placeholder="vsphere, nsx"
+              />
+              {{ error_for('products') }}
+            </label>
+          </div>
+        </div>
+
+        {# ----- Metadata section ----- #}
+        <div class="px-6 pt-4 pb-4 border-b border-base-300">
+          <div class="text-xs font-medium opacity-60 uppercase tracking-wide mb-3">Metadata</div>
+
+          <div class="flex flex-wrap gap-4">
+            <label class="form-control flex-1 min-w-48">
+              <div class="label py-0">
+                <span class="label-text font-medium">Description</span>
+                <span class="label-text-alt opacity-60">optional</span>
+              </div>
+              <textarea
+                name="description"
+                maxlength="8192"
+                class="textarea textarea-bordered min-h-[4rem] text-sm {{ error_class('description', 'textarea-error') }}"
+                aria-label="Description"
+                placeholder="What this corpus covers."
+              >{{ field_value('description') }}</textarea>
+              {{ error_for('description') }}
+            </label>
+
+            <label class="form-control flex-1 min-w-48">
+              <div class="label py-0">
+                <span class="label-text font-medium">When to use</span>
+                <span class="label-text-alt opacity-60">optional</span>
+              </div>
+              <textarea
+                name="when_to_use"
+                maxlength="8192"
+                class="textarea textarea-bordered min-h-[4rem] text-sm {{ error_class('when_to_use', 'textarea-error') }}"
+                aria-label="When to use"
+                placeholder="Pick this collection for ... questions."
+              >{{ field_value('when_to_use') }}</textarea>
+              {{ error_for('when_to_use') }}
+            </label>
+          </div>
+        </div>
+
+        {# ----- Backend section ----- #}
+        <div class="px-6 pt-4 pb-4">
+          <div class="text-xs font-medium opacity-60 uppercase tracking-wide mb-3">Backend</div>
+
+          <label class="form-control">
+            <div class="label py-0">
+              <span class="label-text font-medium">Backend type</span>
+              <span class="label-text-alt opacity-60">required</span>
+            </div>
+            <input
+              type="text"
+              name="backend_type"
+              required
+              minlength="1"
+              maxlength="128"
+              value="{{ field_value('backend_type') }}"
+              class="input input-bordered input-sm font-mono {{ error_class('backend_type', 'input-error') }}"
+              aria-label="Backend type"
+              placeholder="corpus-http"
+              aria-describedby="corpus-backend-type-hint"
+            />
+            <span id="corpus-backend-type-hint" class="text-xs opacity-60 mt-1">
+              The search backend this collection routes to (validated against
+              the registered backends).
+            </span>
+            {{ error_for('backend_type') }}
+          </label>
+
+          <label class="form-control mt-3">
+            <div class="label py-0">
+              <span class="label-text font-medium">Backend ref</span>
+              <span class="label-text-alt opacity-60">JSON, optional</span>
+            </div>
+            <textarea
+              name="backend_ref"
+              maxlength="16384"
+              class="textarea textarea-bordered min-h-[5rem] font-mono text-xs {{ error_class('backend_ref', 'textarea-error') }}"
+              aria-label="Backend ref"
+              placeholder='{"endpoint": "https://corpus/v1/search"}'
+              aria-describedby="corpus-backend-ref-hint"
+            >{{ field_value('backend_ref') }}</textarea>
+            <span id="corpus-backend-ref-hint" class="text-xs opacity-60 mt-1">
+              Per-collection backend config the resolved adapter reads. Leave
+              blank for a backend that needs none.
+            </span>
+            {{ error_for('backend_ref') }}
+          </label>
+        </div>
       </div>
 
-      <label class="form-control">
-        <span class="label-text">Description <span class="opacity-60">(optional)</span></span>
-        <textarea
-          name="description"
-          maxlength="8192"
-          class="textarea textarea-bordered min-h-[4rem] text-sm {{ error_class('description', 'textarea-error') }}"
-          aria-label="Description"
-          placeholder="What this corpus covers."
-        >{{ field_value('description') }}</textarea>
-        {{ error_for('description') }}
-      </label>
-
-      <label class="form-control">
-        <span class="label-text">When to use <span class="opacity-60">(optional)</span></span>
-        <textarea
-          name="when_to_use"
-          maxlength="8192"
-          class="textarea textarea-bordered min-h-[4rem] text-sm {{ error_class('when_to_use', 'textarea-error') }}"
-          aria-label="When to use"
-          placeholder="Pick this collection for ... questions."
-        >{{ field_value('when_to_use') }}</textarea>
-        {{ error_for('when_to_use') }}
-      </label>
-
-      <label class="form-control">
-        <span class="label-text">Backend type</span>
-        <input
-          type="text"
-          name="backend_type"
-          required
-          minlength="1"
-          maxlength="128"
-          value="{{ field_value('backend_type') }}"
-          class="input input-bordered input-sm font-mono {{ error_class('backend_type', 'input-error') }}"
-          aria-label="Backend type"
-          placeholder="corpus-http"
-          aria-describedby="corpus-backend-type-hint"
-        />
-        <span id="corpus-backend-type-hint" class="text-xs opacity-60 mt-1">
-          The search backend this collection routes to (validated against
-          the registered backends).
-        </span>
-        {{ error_for('backend_type') }}
-      </label>
-
-      <label class="form-control">
-        <span class="label-text">Backend ref <span class="opacity-60">(JSON, optional)</span></span>
-        <textarea
-          name="backend_ref"
-          maxlength="16384"
-          class="textarea textarea-bordered min-h-[5rem] font-mono text-xs {{ error_class('backend_ref', 'textarea-error') }}"
-          aria-label="Backend ref"
-          placeholder='{"endpoint": "https://corpus/v1/search"}'
-          aria-describedby="corpus-backend-ref-hint"
-        >{{ field_value('backend_ref') }}</textarea>
-        <span id="corpus-backend-ref-hint" class="text-xs opacity-60 mt-1">
-          Per-collection backend config the resolved adapter reads. Leave
-          blank for a backend that needs none.
-        </span>
-        {{ error_for('backend_ref') }}
-      </label>
-
-      <div class="modal-action">
+      {# ----- Footer: actions ----- #}
+      <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-base-300">
         <button
           type="button"
           class="btn btn-sm btn-ghost"

@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, patch
@@ -517,13 +518,13 @@ async def test_publish_agent_announcement_propagates_exception() -> None:
 def test_successful_publish_returns_event_id(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """On success the handler returns the entry id as ``cursor`` + ``event_id``.
+    """On success the ack carries a real UUID ``event_id`` + stream ``cursor``.
 
-    Both keys carry the Valkey stream entry id of the appended
-    announcement: ``cursor`` is the self-labelled canonical name
-    (round-trips through recent/watch's ``cursor`` arg, #2479);
-    ``event_id`` is the legacy alias kept for wire compatibility --
-    it is NOT a durable event UUID.
+    T2 (#2547) mints a genuine per-announcement UUID at publish: the ack's
+    ``event_id`` is that UUID (equal to the durable ``agent_announcement``
+    row's id), while ``cursor`` remains the Valkey stream entry id. The two
+    are now distinct values (#2479 contract) -- historically both carried
+    the mislabelled stream cursor.
     """
     client, _op = client_with_operator
     bc = get_broadcast_client()
@@ -533,7 +534,10 @@ def test_successful_publish_returns_event_id(
             _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
         )
     result = _result_dict(resp)
-    assert result == {"event_id": "1747800000000-7", "cursor": "1747800000000-7"}
+    assert result["cursor"] == "1747800000000-7"
+    # event_id is a genuine UUID, distinct from the stream cursor.
+    assert result["event_id"] != result["cursor"]
+    assert UUID(result["event_id"]).version == 4
 
 
 @pytest.mark.parametrize(
@@ -798,15 +802,20 @@ class TestBroadcastAnnounceIntegration:
             },
         )
         assert "event_id" in result
-        # Announce self-labels the entry id as ``cursor`` (#2479);
-        # ``event_id`` is the legacy alias of the same stream cursor.
-        assert result["cursor"] == result["event_id"]
+        # T2 (#2547): event_id is a genuine UUID minted at publish,
+        # distinct from the stream cursor (#2479 contract).
+        assert result["cursor"] != result["event_id"]
+        assert UUID(result["event_id"]).version == 4
 
         recent = await _handler_recent(op, {})
         assert len(recent["events"]) == 1
         event = recent["events"][0]
         assert event["event_kind"] == "agent_announcement"
         assert event["cursor"] == result["cursor"]
+        # The durable event UUID round-trips on the read as ``event_id``,
+        # equal to the announce ack's event_id and distinct from cursor.
+        assert event["event_id"] == result["event_id"]
+        assert event["event_id"] != event["cursor"]
         # dump_event_wire re-serves agent-authored free text inside the
         # untrusted-content envelope (_ANNOUNCEMENT_UNTRUSTED_FIELDS).
         assert event["activity"] == wrap_untrusted_text("investigating")
@@ -855,3 +864,36 @@ class TestBroadcastAnnounceIntegration:
         # (the raw string would trivially pass against wrapped entries).
         assert wrap_untrusted_text("tenant-b-secret") not in a_activities
         assert wrap_untrusted_text("tenant-a-secret") not in b_activities
+
+    async def test_announce_survives_valkey_flush_via_db_backfill(
+        self,
+        valkey_url: str,
+    ) -> None:
+        """T2 (#2547) AC1: announce -> FLUSHALL -> recent still returns it from DB.
+
+        The durable ``agent_announcement`` row is the archive: after the
+        Valkey stream is wiped, a wide-window ``recent`` backfills the
+        announcement from the DB, wrapped per the T1 trust rule, and the
+        event's UUID ``event_id`` (equal to the durable row id) round-trips
+        distinct from the (now null) stream ``cursor``.
+        """
+        op = build_operator(TenantRole.OPERATOR)
+        ack = await _handler_announce(
+            op,
+            {"activity": "rotating tokens", "targets": ["cluster-x"], "phase": "start"},
+        )
+
+        # Wipe the whole Valkey instance -- the stream is gone.
+        bc = get_broadcast_client()
+        await bc.flushall()
+        assert await _handler_recent(op, {}) is not None  # stream now empty
+
+        # Wide window so the archived row is inside the look-back.
+        wide_since = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+        recent = await _handler_recent(op, {"cursor": wide_since})
+        assert len(recent["events"]) == 1, "announcement must survive the flush via the DB"
+        event = recent["events"][0]
+        assert event["event_id"] == ack["event_id"]
+        assert event["cursor"] is None  # DB-sourced row, no stream cursor
+        assert event["event_kind"] == "agent_announcement"
+        assert event["activity"] == wrap_untrusted_text("rotating tokens")

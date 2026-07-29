@@ -402,7 +402,11 @@ _TEMPLATE_SLUG_PROPERTY: Final[dict[str, Any]] = {
         "lowercase letters, digits, hyphens, or dots. Example: "
         "'vcenter-9.0-cert-rotation'. REQUIRED. Canonical field name "
         "across all 12 runbook tools (#1612) — the same name "
-        "`meho.runbook.start` takes and every template response returns."
+        "`meho.runbook.start` takes. Template responses (show_template, "
+        "each list_templates summary) carry this id under both "
+        "`template_slug` (this canonical mirror) and the model-native "
+        "`slug`, equal values — either round-trips into "
+        "`meho.runbook.start` verbatim."
     ),
 }
 

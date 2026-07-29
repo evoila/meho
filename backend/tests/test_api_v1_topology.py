@@ -66,6 +66,12 @@ from meho_backplane.db.models import AuditLog, GraphEdge, GraphNode
 from meho_backplane.middleware import RequestContextMiddleware
 from meho_backplane.settings import get_settings
 from meho_backplane.topology.annotate import AutoEdgeDeletionError, NodeRef
+from meho_backplane.topology.node_delete import (
+    DeleteNodeResult,
+    NodeHasLiveEdgesError,
+    NodeNotDeletableError,
+    NodeNotFoundForDeleteError,
+)
 from meho_backplane.topology.query import AmbiguousNodeError
 from meho_backplane.topology.refresh import RefreshResult
 from meho_backplane.topology.resolvers import NodeNotFoundError
@@ -1168,6 +1174,131 @@ def test_unannotate_edge_invalid_uuid_returns_422(client: TestClient) -> None:
         _mock_discovery_and_jwks(mock_router, _public_jwks(key))
         resp = client.delete(
             "/api/v1/topology/edges/not-a-uuid",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 422
+
+
+# --- DELETE /nodes/{node_id} — 204 + 409 + 404 (#2485) ---------------------
+
+
+def test_delete_node_route_mounted_on_main_app() -> None:
+    """The node-delete route appears on the prod app + OpenAPI doc."""
+    from meho_backplane.main import app
+
+    paths = app.openapi()["paths"]
+    assert "/api/v1/topology/nodes/{node_id}" in paths
+    assert "delete" in paths["/api/v1/topology/nodes/{node_id}"]
+
+
+def test_delete_node_unauthenticated_returns_401(client: TestClient) -> None:
+    resp = client.delete(f"/api/v1/topology/nodes/{uuid.uuid4()}")
+    assert resp.status_code == 401
+
+
+def test_delete_node_operator_returns_403(client: TestClient) -> None:
+    """``operator``-level principal must not hard-delete nodes."""
+    key, token = _token(TenantRole.OPERATOR)
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{uuid.uuid4()}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 403
+
+
+async def test_delete_node_admin_round_trip(client: TestClient) -> None:
+    """``tenant_admin`` DELETE invokes ``delete_node`` by id, 204 on ok."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    fake = AsyncMock(
+        return_value=DeleteNodeResult(node_id=node_id, kind="vault-role", name="rdc-vault")
+    )
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 204, resp.text
+    # The service is keyed on ``node_id``; the path-param surface is id-only.
+    assert fake.call_args.kwargs == {"node_id": node_id}
+
+
+def test_delete_node_probe_owned_returns_409(client: TestClient) -> None:
+    """``NodeNotDeletableError`` maps to 409 ``probe_owned_node``."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    fake = AsyncMock(side_effect=NodeNotDeletableError(node_id, source="auto", target_id=None))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "probe_owned_node"
+    assert detail["node_id"] == str(node_id)
+    assert detail["source"] == "auto"
+    assert detail["target_id"] is None
+
+
+def test_delete_node_has_edges_returns_409_with_edge_ids(client: TestClient) -> None:
+    """``NodeHasLiveEdgesError`` maps to 409 ``node_has_edges`` listing edge ids."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    edge_ids = [uuid.uuid4(), uuid.uuid4()]
+    fake = AsyncMock(side_effect=NodeHasLiveEdgesError(node_id, edge_ids=edge_ids))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 409
+    detail = resp.json()["detail"]
+    assert detail["error"] == "node_has_edges"
+    assert detail["edge_ids"] == [str(e) for e in edge_ids]
+
+
+def test_delete_node_missing_returns_404(client: TestClient) -> None:
+    """``NodeNotFoundForDeleteError`` maps to 404 (cross-tenant id same)."""
+    key, token = _admin_token_value()
+    node_id = uuid.uuid4()
+    fake = AsyncMock(side_effect=NodeNotFoundForDeleteError(node_id))
+    with (
+        respx.mock as mock_router,
+        patch("meho_backplane.api.v1.topology.delete_node", fake),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            f"/api/v1/topology/nodes/{node_id}",
+            headers=_authed(token),
+        )
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert detail["error"] == "node_not_found"
+    assert detail["node_id"] == str(node_id)
+
+
+def test_delete_node_invalid_uuid_returns_422(client: TestClient) -> None:
+    """A non-UUID path segment is a 422 — FastAPI rejects before the handler."""
+    key, token = _admin_token_value()
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        resp = client.delete(
+            "/api/v1/topology/nodes/not-a-uuid",
             headers=_authed(token),
         )
     assert resp.status_code == 422

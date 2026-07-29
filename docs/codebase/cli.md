@@ -1063,9 +1063,12 @@ wrap the targets registry routes from G0.3-T3 (#254), the G0.3-T1.5
 verb. The verbs are the operator-side surface for the per-tenant
 `targets` table — a fingerprinted catalog of vendor systems the
 operator manages (vCenter hosts, Vault instances, k8s clusters, …)
-that the G0.6 dispatcher resolves at `call` time. Write verbs
-(`create` / `update` / `delete`) are deferred; bulk import lands
-under G0.3-T6 (#257).
+that the G0.6 dispatcher resolves at `call` time. Registration and
+updates flow through `meho targets import` (POST for new rows, PATCH
+under `--update`); a standalone `create` verb was explicitly ruled out
+in favour of file-based import (#1574 / #1559). No standalone `delete`
+verb is surfaced yet, though the API supports `DELETE
+/api/v1/targets/{name}` (`tenant_admin`).
 
 ### Subcommands
 
@@ -1154,10 +1157,11 @@ the comment block on `httpDoer` for the rationale.
 
 ### Out of scope (v0.2)
 
-- Write verbs (`create` / `update` / `delete`). The API supports them
-  (require `tenant_admin`); the CLI surfaces them in a follow-up
-  task when operators ask. Bulk import via T6 (#257) lands in a
-  sibling PR.
+- Standalone `delete` verb. The API supports `DELETE
+  /api/v1/targets/{name}` (`tenant_admin`); the CLI surfaces it in a
+  follow-up task when operators ask. Create and update are already
+  covered by `meho targets import` (POST for new rows, PATCH under
+  `--update`), so no separate `create` / `update` verb is planned.
 - Auto-completion of target names. Operators type names; tab-completion
   would need a separate `cobra-complete`-style design pass.
 - Client-side caching. Every CLI invocation hits the API fresh — the
@@ -2023,11 +2027,14 @@ output), `--backplane` (override the configured backplane URL).
 - **Known top-level columns** map 1:1 to the API's `TargetCreate` /
   `TargetUpdate` body fields: `name`, `aliases`, `product`, `host`,
   `port`, `fqdn`, `secret_ref`, `auth_model`, `vpn_required`,
-  `notes`, `preferred_impl_id`. The list in
+  `notes`, `preferred_impl_id`, `verify_tls`, `tls_ca_pin`,
+  `tls_server_name`. The list in
   `knownTopLevel` is the canonical reference; the
   Python-side mirror lives in
-  `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL` and
-  keeps drift detectable in CI.
+  `backend/tests/test_api_v1_targets_import.py:_KNOWN_TOP_LEVEL`,
+  which pins the pre-#1774 core set the consumer fixture exercises
+  (it carries none of the TLS columns, so the two sets agree on
+  every key that fixture can produce).
 - **`fingerprint`** is dropped silently with a warning log line.
   Server-managed per the G0.3-T1.5 (#477) amendment — the probe
   verb is the only legitimate writer, and the API rejects
@@ -2038,6 +2045,15 @@ output), `--backplane` (override the configured backplane URL).
 - **`preferred_impl_id`** is a real top-level column post-#477.
   Sent at the body root, not spilled into extras — the G0.6 #388
   resolver's tie-break ladder reads it.
+- **`verify_tls` / `tls_ca_pin` / `tls_server_name`** are the
+  per-target TLS columns (Initiative #1774's #1780 / #1784, plus
+  #2002's SNI override). All three go at the body root. Spilling any
+  of them into `extras` is silent misconfiguration: the typed column
+  keeps its default, the import still prints "1 updated", and the
+  operator only finds out at dispatch time — `tls_server_name`
+  specifically surfaces as `connector_tls_verify_failed` /
+  "IP address mismatch" on an appliance reached by IP whose leaf cert
+  carries an FQDN-only SAN (#2643).
 - **Every other key** spills into the `extras` JSONB column.
   Explicit `extras:` blocks in the YAML merge with spilled keys
   rather than overwriting them.

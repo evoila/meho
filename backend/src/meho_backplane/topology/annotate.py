@@ -117,6 +117,7 @@ __all__ = [
     "UnannotateSelectorError",
     "annotate_edge",
     "annotate_edge_in_txn",
+    "annotate_edge_with_plan",
     "unannotate_edge",
 ]
 
@@ -710,6 +711,41 @@ async def annotate_edge(
             kinds and no ``kind`` was pinned on the
             :class:`NodeRef`.
     """
+    plan = await annotate_edge_with_plan(
+        session,
+        operator,
+        from_ref,
+        kind,
+        to_ref,
+        note=note,
+        evidence_url=evidence_url,
+    )
+    return plan.edge
+
+
+async def annotate_edge_with_plan(
+    session: AsyncSession,
+    operator: Operator,
+    from_ref: NodeRef,
+    kind: str,
+    to_ref: NodeRef,
+    *,
+    note: str | None = None,
+    evidence_url: str | None = None,
+) -> AnnotatePlan:
+    """Same as :func:`annotate_edge`, but return the full :class:`AnnotatePlan`.
+
+    :func:`annotate_edge` returns only the :class:`GraphEdge` row, which
+    is all its human-front callers (REST / UI) need. A caller that also
+    needs the §6 diagnostics the write produced — the ``superseded`` /
+    ``conflicts`` id lists the write stamped, which live on
+    ``plan.audit_payload`` rather than on the curated edge's own
+    properties — calls this variant instead. The MCP ``topology.annotate``
+    typed-op handler uses it so it can surface ``superseded`` on the tool
+    return shape (#2539) without a second query. Identical transaction /
+    broadcast semantics: one ``session.begin()`` block, one fail-open
+    broadcast publish after commit.
+    """
     async with session.begin():
         plan = await annotate_edge_in_txn(
             session,
@@ -728,7 +764,7 @@ async def annotate_edge(
         target_name=plan.target_name,
         payload=plan.audit_payload,
     )
-    return plan.edge
+    return plan
 
 
 @dataclass(frozen=True, slots=True)

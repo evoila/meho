@@ -6,7 +6,8 @@
 The lifespan-owned background loop at the heart of Initiative #2416's check
 layer. On each cadence (default 10 s, ``SENSOR_RUNNER_TICK_INTERVAL_SECONDS``)
 it claims every due :class:`~meho_backplane.db.models.Sensor` row (#2503),
-dispatches each sensor's ``safe`` read-only op through the operations
+resolves each sensor's stored ``target`` through the shared ``call_operation``
+seam and dispatches its ``safe`` read-only op through the operations
 :func:`~meho_backplane.operations.dispatcher.dispatch` seam under a synthetic
 per-tenant identity, feeds the payload to #2504's pure
 :func:`~meho_backplane.checks.evaluate.evaluate_assertion`, and persists the
@@ -92,7 +93,11 @@ Result vocabulary
 The runner never synthesizes any state other than ``unknown``: a ``status ==
 "ok"`` dispatch routes its payload into #2504's evaluator and persists its
 emitted ``{state, value, evidence}``; any non-``ok`` dispatch status or an
-evaluation timeout persists ``unknown`` with evidence carrying the failure.
+evaluation timeout persists ``unknown`` with evidence carrying the failure. A
+target-resolution failure (#2595) persists ``unknown`` too, with the evidence
+``reason`` in the #136/#2110 target vocabulary (``no_target`` /
+``ambiguous_target`` / ``target_required`` / ``target_invalid_type``) rather
+than the misleading ``no_connector`` a raw-dict dispatch used to yield.
 Rollup, hysteresis, and ``skip`` derivation belong to #2506.
 """
 
@@ -122,6 +127,7 @@ from meho_backplane.checks.repository import (
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
 from meho_backplane.operations.dispatcher import dispatch
+from meho_backplane.operations.meta_tools import _resolve_target_or_error
 from meho_backplane.scheduler.cron import (
     InvalidCronExpressionError,
     InvalidTimezoneError,
@@ -295,22 +301,61 @@ def _unknown_outcome(reason: str, **extra: object) -> AssertionOutcome:
     return AssertionOutcome(state="unknown", value=None, evidence=evidence)
 
 
-async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
-    """Dispatch the sensor's op and evaluate the assertion. Never raises.
+def _target_resolution_outcome(envelope: dict[str, object]) -> AssertionOutcome:
+    """Map a #136/#2110 target-resolution error envelope to an ``unknown`` outcome.
 
-    ``status == "ok"`` routes the payload into #2504's evaluator; any non-``ok``
-    dispatch status, an evaluation timeout, or a spec/evaluator failure maps to
-    ``unknown`` with the cause in the evidence.
+    The runner resolves the sensor's stored ``target`` through the same
+    :func:`~meho_backplane.operations.meta_tools._resolve_target_or_error` seam
+    every other dispatch caller (``call_operation`` / ``preview_operation``)
+    runs before dispatch. A resolution failure rides the dispatcher envelope
+    (``status="error"`` + ``extras.error_code`` -- ``no_target`` /
+    ``ambiguous_target`` / ``target_required`` / ``target_invalid_type``), so
+    surface that ``error_code`` verbatim as the evidence ``reason``. Before
+    #2595 the raw stored dict went straight to ``dispatch``, which read no
+    ``product`` / ``version`` off it and mislabelled every target-bound sensor
+    ``no_connector``; the resolved row makes the connector resolve and a
+    genuinely broken target reads in the target-failure vocabulary instead.
+    """
+    extras = envelope.get("extras")
+    error_code = extras.get("error_code") if isinstance(extras, dict) else None
+    return _unknown_outcome(
+        str(error_code) if error_code else "target_error",
+        dispatch_error=envelope.get("error"),
+    )
+
+
+async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
+    """Resolve the sensor's target, dispatch its op, and evaluate. Never raises.
+
+    The stored ``target`` is resolved through the shared ``call_operation`` seam
+    (:func:`~meho_backplane.operations.meta_tools._resolve_target_or_error`)
+    before dispatch -- the dispatcher's connector resolver reads ``product`` /
+    ``version`` off a resolved :class:`~meho_backplane.db.models.Target` row, not
+    off the raw stored dict, so skipping this step mislabelled every
+    target-bound sensor ``no_connector`` (#2595). A resolution failure maps to
+    ``unknown`` in the #136/#2110 target vocabulary; ``status == "ok"`` routes
+    the payload into #2504's evaluator; any non-``ok`` dispatch status, an
+    evaluation timeout, or a spec/evaluator failure maps to ``unknown`` with the
+    cause in the evidence.
     """
     now = datetime.now(UTC)
     operator = _sensor_operator(snap)
     try:
         async with asyncio.timeout(_EVAL_TIMEOUT_SECONDS):
+            # Resolve name/alias -> Target row the same way call_operation does;
+            # ``bind_audit_target=False`` -- the runner is off the HTTP
+            # AuditMiddleware path (the dispatcher stamps ``target_id`` off the
+            # resolved row directly), so there is no contextvar consumer here.
+            resolved_target, target_error = await _resolve_target_or_error(
+                operator, snap.op_id, snap.target, bind_audit_target=False
+            )
+            if target_error is not None:
+                return _target_resolution_outcome(target_error)
             result = await dispatch(
                 operator=operator,
                 connector_id=snap.connector_id,
                 op_id=snap.op_id,
-                target=snap.target,
+                target=resolved_target,
                 params=snap.params,
             )
     except TimeoutError:

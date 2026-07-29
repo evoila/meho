@@ -395,7 +395,9 @@ async def _render_read(
             request, "vault/_secret.html", _no_connector_error_context()
         )
 
-    envelope = await _dispatch(operator, connector_id, _OP_READ, target, mount, path)
+    envelope = await _dispatch(
+        operator, connector_id, _OP_READ, target, mount, path, reveal_secret=True
+    )
     context: dict[str, Any] = {
         "error": None,
         "envelope": envelope,
@@ -439,6 +441,8 @@ async def _dispatch(
     target: str,
     mount: str,
     path: str,
+    *,
+    reveal_secret: bool = False,
 ) -> dict[str, Any]:
     """Call ``call_operation`` in-process for one KV op; return the envelope.
 
@@ -448,6 +452,15 @@ async def _dispatch(
     do not consume a target, so an unset target field is valid). ``mount``
     is omitted from ``params`` when blank so the connector applies its
     ``_DEFAULT_KV_MOUNT``.
+
+    *reveal_secret* opts this dispatch into the raw ``credential_read``
+    value (#2467). The dispatcher key-name-scrubs ``vault.kv.read``
+    responses by default so an agent transcript never receives the secret;
+    the Vault console is an explicit reveal-on-click operator surface, so
+    the read path passes ``reveal_secret=True`` to keep the secret reaching
+    the browser. The choice is stamped on the audit row, so a console reveal
+    is queryable. ``vault.kv.list`` / ``vault.kv.versions`` are value-free
+    and leave it ``False``.
 
     The structured envelope is returned verbatim -- ``ok`` (carrying the
     result / handle) / ``error`` / ``denied`` all ride inside it (the
@@ -461,6 +474,10 @@ async def _dispatch(
     clean_mount = mount.strip()
     if clean_mount:
         params["mount"] = clean_mount
+    if reveal_secret:
+        # #2467 -- opt this operator-initiated reveal-on-click read out of
+        # the default credential_read response scrub.
+        params["reveal_secret"] = True
     arguments: dict[str, Any] = {
         "connector_id": connector_id,
         "op_id": op_id,

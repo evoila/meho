@@ -33,6 +33,11 @@
     <h1 class="text-xl font-semibold flex items-center gap-3">
       <span>Run</span>
       <span class="font-mono text-sm opacity-70">{{ run.run_id }}</span>
+      {% if run.agent_name %}
+        {# The producing agent's back-link (#2472); absent for an ad-hoc run
+           or a definition deleted after the run. #}
+        <span class="badge badge-outline badge-sm">{{ run.agent_name }}</span>
+      {% endif %}
     </h1>
   </header>
 

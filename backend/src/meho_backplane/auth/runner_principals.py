@@ -158,6 +158,15 @@ class RunnerPrincipalRead(BaseModel):
     created_by_sub: str
     created_at: datetime
     updated_at: datetime
+    #: Central-clock liveness marker (#2501): the last time an authenticated
+    #: runner-plane request re-stamped this principal (never a client value).
+    #: The ORM column is ``NOT NULL`` (server-default ``now()`` from migration
+    #: ``0061``), so this is populated for every stored row; declared nullable
+    #: so a not-yet-persisted projection never trips validation. Additive to
+    #: the wire shape -- the ``/api/v1/runner-principals`` list/get/register
+    #: responses carry it and the ``/ui/runners`` fleet page derives liveness
+    #: from it (#2589).
+    last_seen_at: datetime | None
 
 
 class RunnerPrincipalService:

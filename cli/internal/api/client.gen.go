@@ -85,6 +85,12 @@ const (
 	ConnectorListItemKindTyped                 ConnectorListItemKind = "typed"
 )
 
+// Defines values for ConnectorListItemScope.
+const (
+	ConnectorListItemScopeBuiltin ConnectorListItemScope = "builtin"
+	ConnectorListItemScopeTenant  ConnectorListItemScope = "tenant"
+)
+
 // Defines values for ConnectorListItemState.
 const (
 	ConnectorListItemStateIngested   ConnectorListItemState = "ingested"
@@ -950,11 +956,13 @@ type AgentRunStatus string
 
 // AgentRunStatusResponse Poll response for “GET /agents/runs/{handle}“.
 type AgentRunStatusResponse struct {
-	Error    *string                 `json:"error"`
-	Model    *string                 `json:"model"`
-	Output   *map[string]interface{} `json:"output"`
-	Provider *string                 `json:"provider"`
-	RunId    openapi_types.UUID      `json:"run_id"`
+	AgentDefinitionId *openapi_types.UUID     `json:"agent_definition_id"`
+	AgentName         *string                 `json:"agent_name"`
+	Error             *string                 `json:"error"`
+	Model             *string                 `json:"model"`
+	Output            *map[string]interface{} `json:"output"`
+	Provider          *string                 `json:"provider"`
+	RunId             openapi_types.UUID      `json:"run_id"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -1002,13 +1010,15 @@ type AgentRunStatusResponse struct {
 // “output“ blob is omitted — a caller wanting a run's result polls
 // “GET /agents/runs/{handle}“.
 type AgentRunSummaryResponse struct {
-	CreatedAt time.Time          `json:"created_at"`
-	EndedAt   *time.Time         `json:"ended_at"`
-	Model     *string            `json:"model"`
-	ModelTier string             `json:"model_tier"`
-	Provider  *string            `json:"provider"`
-	RunId     openapi_types.UUID `json:"run_id"`
-	StartedAt *time.Time         `json:"started_at"`
+	AgentDefinitionId *openapi_types.UUID `json:"agent_definition_id"`
+	AgentName         *string             `json:"agent_name"`
+	CreatedAt         time.Time           `json:"created_at"`
+	EndedAt           *time.Time          `json:"ended_at"`
+	Model             *string             `json:"model"`
+	ModelTier         string              `json:"model_tier"`
+	Provider          *string             `json:"provider"`
+	RunId             openapi_types.UUID  `json:"run_id"`
+	StartedAt         *time.Time          `json:"started_at"`
 
 	// Status Closed lifecycle status of an :class:`AgentRun`.
 	//
@@ -2781,6 +2791,27 @@ type ConfirmVerifyResponseAnswer string
 // existing construction call sites (tests, MCP fakes) keep working;
 // the listing always sets them explicitly. See
 // :data:`ConnectorAuthoringKind`.
+//
+// “scope“ (#2474) is the named projection of “tenant_id“ —
+// “"builtin"“ for “tenant_id IS NULL“ rows, “"tenant"“ for
+// tenant-curated ones. It is additive and fully derivable from
+// “tenant_id“, but surfacing it directly lets a consumer key on it
+// without re-deriving. “shadowed_by_tenant_scope“ is the precedence
+// marker: within a single response, a “"builtin"“ row carries
+// “True“ when a “"tenant"“ row shares its “connector_id“ — i.e.
+// the built-in copy is *shadowed* by a tenant-scoped twin that
+// :func:`~meho_backplane.operations._lookup.lookup_descriptor` resolves
+// first (tenant-wins dispatch precedence). The two fields exist because
+// “connector_id“ encodes only “(impl_id, version)“, so scope twins
+// from the #2085 re-ingest trap render the same id twice; the marker
+// tells an agent exactly which row “call_operation“ dispatches to and
+// lets it count unique connectors. Both default to the built-in,
+// unshadowed reading (“scope="builtin"“, “shadowed_by_tenant_scope
+// =False“) so existing construction call sites (tests, MCP fakes)
+// keep working; the listing sets “scope“ explicitly per row and
+// stamps “shadowed_by_tenant_scope“ in a post-pass over the full
+// response. Invariant: within one response no two rows share
+// “(connector_id, scope)“. See :data:`ConnectorScope`.
 type ConnectorListItem struct {
 	ConnectorId           string                 `json:"connector_id"`
 	DisabledGroupCount    int                    `json:"disabled_group_count"`
@@ -2814,17 +2845,22 @@ type ConnectorListItem struct {
 	// Frozen for the same reason every wire shape in this module is frozen:
 	// responses are read-only and any in-place mutation should surface as a
 	// Pydantic error rather than a silently-modified payload.
-	NextStep         *NextStep               `json:"next_step,omitempty"`
-	OperationCount   int                     `json:"operation_count"`
-	Product          string                  `json:"product"`
-	StagedGroupCount int                     `json:"staged_group_count"`
-	State            *ConnectorListItemState `json:"state,omitempty"`
-	TenantId         *openapi_types.UUID     `json:"tenant_id"`
-	Version          string                  `json:"version"`
+	NextStep              *NextStep               `json:"next_step,omitempty"`
+	OperationCount        int                     `json:"operation_count"`
+	Product               string                  `json:"product"`
+	Scope                 *ConnectorListItemScope `json:"scope,omitempty"`
+	ShadowedByTenantScope *bool                   `json:"shadowed_by_tenant_scope,omitempty"`
+	StagedGroupCount      int                     `json:"staged_group_count"`
+	State                 *ConnectorListItemState `json:"state,omitempty"`
+	TenantId              *openapi_types.UUID     `json:"tenant_id"`
+	Version               string                  `json:"version"`
 }
 
 // ConnectorListItemKind defines model for ConnectorListItem.Kind.
 type ConnectorListItemKind string
+
+// ConnectorListItemScope defines model for ConnectorListItem.Scope.
+type ConnectorListItemScope string
 
 // ConnectorListItemState defines model for ConnectorListItem.State.
 type ConnectorListItemState string
@@ -3697,6 +3733,13 @@ type DocCollectionSummary struct {
 // optional owning-document id (“None“ when the corpus has no document
 // concept for a chunk) and is only read as a citation-label fallback.
 //
+// “title“ is the **optional** human-legible chunk title (#2475), passed
+// through from the corpus (“CorpusChunk.title“). It is the *preferred*
+// citation label — every citation face (“ask_docs“, “/ui/corpus“)
+// feeds it to the “title -> document_id -> filename -> URL“ label chain
+// — and is “None“ until the upstream corpus supplies one, so today's
+// corpus (which sends no title) sees no behaviour change.
+//
 // “source_url“ is the **backend-agnostic** citation reference (#132): a
 // canonical public URL where one is derivable, else an opaque
 // “meho://docs/<collection>/<chunk_id>“ ref. It is **never** the corpus's
@@ -3711,6 +3754,7 @@ type DocsChunk struct {
 	DocumentId *string  `json:"document_id"`
 	Score      *float32 `json:"score"`
 	SourceUrl  *string  `json:"source_url"`
+	Title      *string  `json:"title"`
 }
 
 // DraftTemplateRequest Request body for “meho.runbook.draft_template“ -- create a new draft.
@@ -5586,6 +5630,7 @@ type RunnerPrincipalRead struct {
 	Id                 openapi_types.UUID `json:"id"`
 	KeycloakClientId   string             `json:"keycloak_client_id"`
 	KeycloakInternalId string             `json:"keycloak_internal_id"`
+	LastSeenAt         *time.Time         `json:"last_seen_at"`
 	Name               string             `json:"name"`
 	OwnerSub           string             `json:"owner_sub"`
 	Revoked            bool               `json:"revoked"`
@@ -7542,6 +7587,9 @@ type ListRunsApiV1AgentsRunsGetParams struct {
 	// Status Filter by lifecycle status (pending / running / awaiting_approval / succeeded / failed / cancelled). Omit for every state.
 	Status *AgentRunStatus `form:"status,omitempty" json:"status,omitempty"`
 
+	// AgentName Filter by agent definition name (exact match) — the runs produced by agent X (#2472). An unknown name returns an empty list, not an error. Omit for no agent filter.
+	AgentName *string `form:"agent_name,omitempty" json:"agent_name,omitempty"`
+
 	// Limit Max runs per page (1..500, default 100).
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
 
@@ -7828,6 +7876,11 @@ type ListDocCollectionsEndpointApiV1DocCollectionsGetParams struct {
 
 // CreateDocCollectionEndpointApiV1DocCollectionsPostParams defines parameters for CreateDocCollectionEndpointApiV1DocCollectionsPost.
 type CreateDocCollectionEndpointApiV1DocCollectionsPostParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
+// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams defines parameters for DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete.
+type DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams struct {
 	Authorization *string `json:"authorization,omitempty"`
 }
 
@@ -8299,6 +8352,11 @@ type HistoryRouteApiV1TopologyHistoryNameGetParams struct {
 	Authorization *string    `json:"authorization,omitempty"`
 }
 
+// DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams defines parameters for DeleteNodeRouteApiV1TopologyNodesNodeIdDelete.
+type DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams struct {
+	Authorization *string `json:"authorization,omitempty"`
+}
+
 // PathApiV1TopologyPathGetParams defines parameters for PathApiV1TopologyPathGet.
 type PathApiV1TopologyPathGetParams struct {
 	From     string  `form:"from" json:"from"`
@@ -8434,6 +8492,12 @@ type UiBroadcastFeedFragmentUiBroadcastFeedGetParams struct {
 	Principal *string `form:"principal,omitempty" json:"principal,omitempty"`
 	Target    *string `form:"target,omitempty" json:"target,omitempty"`
 	OpId      *string `form:"op_id,omitempty" json:"op_id,omitempty"`
+}
+
+// UiBroadcastHistoryUiBroadcastHistoryGetParams defines parameters for UiBroadcastHistoryUiBroadcastHistoryGet.
+type UiBroadcastHistoryUiBroadcastHistoryGetParams struct {
+	// Kind Optional event-kind filter: 'operation' (audit-driven) or 'agent_announcement'. Absent/blank renders both kinds.
+	Kind *string `form:"kind,omitempty" json:"kind,omitempty"`
 }
 
 // UiBroadcastOverridesUiBroadcastOverridesGetParams defines parameters for UiBroadcastOverridesUiBroadcastOverridesGet.
@@ -8583,6 +8647,12 @@ type UiSchedulerListUiSchedulerGetParams struct {
 	Kind    *KindFilterValue   `form:"kind,omitempty" json:"kind,omitempty"`
 	Status  *StatusFilterValue `form:"status,omitempty" json:"status,omitempty"`
 	WorkRef *string            `form:"work_ref,omitempty" json:"work_ref,omitempty"`
+}
+
+// UiSensorsListUiSensorsGetParams defines parameters for UiSensorsListUiSensorsGet.
+type UiSensorsListUiSensorsGetParams struct {
+	Status      *string `form:"status,omitempty" json:"status,omitempty"`
+	CadenceKind *string `form:"cadence_kind,omitempty" json:"cadence_kind,omitempty"`
 }
 
 // UiTopologyTableUiTopologyGetParams defines parameters for UiTopologyTableUiTopologyGet.
@@ -10661,6 +10731,9 @@ type ClientInterface interface {
 
 	CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete request
+	DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -10910,6 +10983,9 @@ type ClientInterface interface {
 	// HistoryRouteApiV1TopologyHistoryNameGet request
 	HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// DeleteNodeRouteApiV1TopologyNodesNodeIdDelete request
+	DeleteNodeRouteApiV1TopologyNodesNodeIdDelete(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PathApiV1TopologyPathGet request
 	PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -11135,7 +11211,7 @@ type ClientInterface interface {
 	UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastHistoryUiBroadcastHistoryGet request
-	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+	UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiBroadcastOverridesUiBroadcastOverridesGet request
 	UiBroadcastOverridesUiBroadcastOverridesGet(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11340,6 +11416,9 @@ type ClientInterface interface {
 
 	// CorpusIndexUiCorpusGet request
 	CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet request
+	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBody(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -11651,6 +11730,9 @@ type ClientInterface interface {
 
 	RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBody(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// UiRunnersListUiRunnersGet request
+	UiRunnersListUiRunnersGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// UiSchedulerListUiSchedulerGetWithBody request with any body
 	UiSchedulerListUiSchedulerGetWithBody(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -11685,6 +11767,9 @@ type ClientInterface interface {
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// UiSensorsListUiSensorsGet request
+	UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// UiTopologyTableUiTopologyGet request
 	UiTopologyTableUiTopologyGet(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -12779,6 +12864,18 @@ func (c *Client) CreateDocCollectionEndpointApiV1DocCollectionsPostWithBody(ctx 
 
 func (c *Client) CreateDocCollectionEndpointApiV1DocCollectionsPost(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequest(c.Server, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest(c.Server, collectionKey, params)
 	if err != nil {
 		return nil, err
 	}
@@ -13893,6 +13990,18 @@ func (c *Client) HistoryRouteApiV1TopologyHistoryNameGet(ctx context.Context, na
 	return c.Client.Do(req)
 }
 
+func (c *Client) DeleteNodeRouteApiV1TopologyNodesNodeIdDelete(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteRequest(c.Server, nodeId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) PathApiV1TopologyPathGet(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewPathApiV1TopologyPathGetRequest(c.Server, params)
 	if err != nil {
@@ -14901,8 +15010,8 @@ func (c *Client) UiBroadcastFeedFragmentUiBroadcastFeedGet(ctx context.Context, 
 	return c.Client.Do(req)
 }
 
-func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server)
+func (c *Client) UiBroadcastHistoryUiBroadcastHistoryGet(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -15863,6 +15972,18 @@ func (c *Client) UiConventionsHistoryUiConventionsSlugHistoryGet(ctx context.Con
 
 func (c *Client) CorpusIndexUiCorpusGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewCorpusIndexUiCorpusGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(c.Server, collectionKey, chunkId)
 	if err != nil {
 		return nil, err
 	}
@@ -17301,6 +17422,18 @@ func (c *Client) RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBody(ctx co
 	return c.Client.Do(req)
 }
 
+func (c *Client) UiRunnersListUiRunnersGet(ctx context.Context, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiRunnersListUiRunnersGetRequest(c.Server)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
 func (c *Client) UiSchedulerListUiSchedulerGetWithBody(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiSchedulerListUiSchedulerGetRequestWithBody(c.Server, params, contentType, body)
 	if err != nil {
@@ -17459,6 +17592,18 @@ func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBody(c
 
 func (c *Client) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPost(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequest(c.Server, triggerId, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) UiSensorsListUiSensorsGet(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewUiSensorsListUiSensorsGetRequest(c.Server, params)
 	if err != nil {
 		return nil, err
 	}
@@ -18616,6 +18761,22 @@ func NewListRunsApiV1AgentsRunsGetRequest(server string, params *ListRunsApiV1Ag
 		if params.Status != nil {
 
 			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.AgentName != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "agent_name", runtime.ParamLocationQuery, *params.AgentName); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
@@ -21646,6 +21807,55 @@ func NewCreateDocCollectionEndpointApiV1DocCollectionsPostRequestWithBody(server
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest generates requests for DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete
+func NewDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteRequest(server string, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/doc_collections/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	if params != nil {
 
@@ -26496,6 +26706,55 @@ func NewHistoryRouteApiV1TopologyHistoryNameGetRequest(server string, name strin
 	return req, nil
 }
 
+// NewDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteRequest generates requests for DeleteNodeRouteApiV1TopologyNodesNodeIdDelete
+func NewDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteRequest(server string, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "node_id", runtime.ParamLocationPath, nodeId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/topology/nodes/%s", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
 // NewPathApiV1TopologyPathGetRequest generates requests for PathApiV1TopologyPathGet
 func NewPathApiV1TopologyPathGetRequest(server string, params *PathApiV1TopologyPathGetParams) (*http.Request, error) {
 	var err error
@@ -29650,7 +29909,7 @@ func NewUiBroadcastFeedFragmentUiBroadcastFeedGetRequest(server string, params *
 }
 
 // NewUiBroadcastHistoryUiBroadcastHistoryGetRequest generates requests for UiBroadcastHistoryUiBroadcastHistoryGet
-func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string) (*http.Request, error) {
+func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string, params *UiBroadcastHistoryUiBroadcastHistoryGetParams) (*http.Request, error) {
 	var err error
 
 	serverURL, err := url.Parse(server)
@@ -29666,6 +29925,28 @@ func NewUiBroadcastHistoryUiBroadcastHistoryGetRequest(server string) (*http.Req
 	queryURL, err := serverURL.Parse(operationPath)
 	if err != nil {
 		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Kind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "kind", runtime.ParamLocationQuery, *params.Kind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
 	}
 
 	req, err := http.NewRequest("GET", queryURL.String(), nil)
@@ -31759,6 +32040,47 @@ func NewCorpusIndexUiCorpusGetRequest(server string) (*http.Request, error) {
 	}
 
 	operationPath := fmt.Sprintf("/ui/corpus")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest generates requests for UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet
+func NewUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetRequest(server string, collectionKey string, chunkId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "collection_key", runtime.ParamLocationPath, collectionKey)
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithLocation("simple", false, "chunk_id", runtime.ParamLocationPath, chunkId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/corpus/chunks/%s/%s", pathParam0, pathParam1)
 	if operationPath[0] == '/' {
 		operationPath = "." + operationPath
 	}
@@ -35119,6 +35441,33 @@ func NewRunbooksPublishUiRunbooksSlugPublishPostRequestWithBody(server string, s
 	return req, nil
 }
 
+// NewUiRunnersListUiRunnersGetRequest generates requests for UiRunnersListUiRunnersGet
+func NewUiRunnersListUiRunnersGetRequest(server string) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/runners")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewUiSchedulerListUiSchedulerGetRequest calls the generic UiSchedulerListUiSchedulerGet builder with application/json body
 func NewUiSchedulerListUiSchedulerGetRequest(server string, params *UiSchedulerListUiSchedulerGetParams, body UiSchedulerListUiSchedulerGetJSONRequestBody) (*http.Request, error) {
 	var bodyReader io.Reader
@@ -35470,6 +35819,71 @@ func NewUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostRequestWithBody(ser
 	}
 
 	req.Header.Add("Content-Type", contentType)
+
+	return req, nil
+}
+
+// NewUiSensorsListUiSensorsGetRequest generates requests for UiSensorsListUiSensorsGet
+func NewUiSensorsListUiSensorsGetRequest(server string, params *UiSensorsListUiSensorsGetParams) (*http.Request, error) {
+	var err error
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/ui/sensors")
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "status", runtime.ParamLocationQuery, *params.Status); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.CadenceKind != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cadence_kind", runtime.ParamLocationQuery, *params.CadenceKind); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
 
 	return req, nil
 }
@@ -37115,6 +37529,9 @@ type ClientWithResponsesInterface interface {
 
 	CreateDocCollectionEndpointApiV1DocCollectionsPostWithResponse(ctx context.Context, params *CreateDocCollectionEndpointApiV1DocCollectionsPostParams, body CreateDocCollectionEndpointApiV1DocCollectionsPostJSONRequestBody, reqEditors ...RequestEditorFn) (*CreateDocCollectionEndpointApiV1DocCollectionsPostResponse, error)
 
+	// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse request
+	DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse, error)
+
 	// DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request
 	DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error)
 
@@ -37364,6 +37781,9 @@ type ClientWithResponsesInterface interface {
 	// HistoryRouteApiV1TopologyHistoryNameGetWithResponse request
 	HistoryRouteApiV1TopologyHistoryNameGetWithResponse(ctx context.Context, name string, params *HistoryRouteApiV1TopologyHistoryNameGetParams, reqEditors ...RequestEditorFn) (*HistoryRouteApiV1TopologyHistoryNameGetResponse, error)
 
+	// DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse request
+	DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse, error)
+
 	// PathApiV1TopologyPathGetWithResponse request
 	PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error)
 
@@ -37589,7 +38009,7 @@ type ClientWithResponsesInterface interface {
 	UiBroadcastFeedFragmentUiBroadcastFeedGetWithResponse(ctx context.Context, params *UiBroadcastFeedFragmentUiBroadcastFeedGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastFeedFragmentUiBroadcastFeedGetResponse, error)
 
 	// UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request
-	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
+	UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error)
 
 	// UiBroadcastOverridesUiBroadcastOverridesGetWithResponse request
 	UiBroadcastOverridesUiBroadcastOverridesGetWithResponse(ctx context.Context, params *UiBroadcastOverridesUiBroadcastOverridesGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastOverridesUiBroadcastOverridesGetResponse, error)
@@ -37794,6 +38214,9 @@ type ClientWithResponsesInterface interface {
 
 	// CorpusIndexUiCorpusGetWithResponse request
 	CorpusIndexUiCorpusGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*CorpusIndexUiCorpusGetResponse, error)
+
+	// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request
+	UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error)
 
 	// UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with any body
 	UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse(ctx context.Context, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiCorpusCollectionsTableUiCorpusCollectionsGetResponse, error)
@@ -38105,6 +38528,9 @@ type ClientWithResponsesInterface interface {
 
 	RunbooksPublishUiRunbooksSlugPublishPostWithFormdataBodyWithResponse(ctx context.Context, slug string, body RunbooksPublishUiRunbooksSlugPublishPostFormdataRequestBody, reqEditors ...RequestEditorFn) (*RunbooksPublishUiRunbooksSlugPublishPostResponse, error)
 
+	// UiRunnersListUiRunnersGetWithResponse request
+	UiRunnersListUiRunnersGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiRunnersListUiRunnersGetResponse, error)
+
 	// UiSchedulerListUiSchedulerGetWithBodyWithResponse request with any body
 	UiSchedulerListUiSchedulerGetWithBodyWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error)
 
@@ -38139,6 +38565,9 @@ type ClientWithResponsesInterface interface {
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithBodyWithResponse(ctx context.Context, triggerId openapi_types.UUID, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error)
 
 	UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostWithResponse(ctx context.Context, triggerId openapi_types.UUID, body UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostJSONRequestBody, reqEditors ...RequestEditorFn) (*UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse, error)
+
+	// UiSensorsListUiSensorsGetWithResponse request
+	UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error)
 
 	// UiTopologyTableUiTopologyGetWithResponse request
 	UiTopologyTableUiTopologyGetWithResponse(ctx context.Context, params *UiTopologyTableUiTopologyGetParams, reqEditors ...RequestEditorFn) (*UiTopologyTableUiTopologyGetResponse, error)
@@ -39656,6 +40085,28 @@ func (r CreateDocCollectionEndpointApiV1DocCollectionsPostResponse) Status() str
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CreateDocCollectionEndpointApiV1DocCollectionsPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -41238,6 +41689,28 @@ func (r HistoryRouteApiV1TopologyHistoryNameGetResponse) StatusCode() int {
 	return 0
 }
 
+type DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PathApiV1TopologyPathGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -42491,6 +42964,7 @@ func (r UiBroadcastFeedFragmentUiBroadcastFeedGetResponse) StatusCode() int {
 type UiBroadcastHistoryUiBroadcastHistoryGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
 }
 
 // Status returns HTTPResponse.Status
@@ -43469,6 +43943,28 @@ func (r CorpusIndexUiCorpusGetResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r CorpusIndexUiCorpusGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -45053,6 +45549,27 @@ func (r RunbooksPublishUiRunbooksSlugPublishPostResponse) StatusCode() int {
 	return 0
 }
 
+type UiRunnersListUiRunnersGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+}
+
+// Status returns HTTPResponse.Status
+func (r UiRunnersListUiRunnersGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiRunnersListUiRunnersGetResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type UiSchedulerListUiSchedulerGetResponse struct {
 	Body         []byte
 	HTTPResponse *http.Response
@@ -45201,6 +45718,28 @@ func (r UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse) Status() 
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type UiSensorsListUiSensorsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r UiSensorsListUiSensorsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r UiSensorsListUiSensorsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -46472,6 +47011,15 @@ func (c *ClientWithResponses) CreateDocCollectionEndpointApiV1DocCollectionsPost
 	return ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp)
 }
 
+// DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse request returning *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse
+func (c *ClientWithResponses) DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse(ctx context.Context, collectionKey string, params *DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteParams, reqEditors ...RequestEditorFn) (*DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse, error) {
+	rsp, err := c.DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDelete(ctx, collectionKey, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse(rsp)
+}
+
 // DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse request returning *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse
 func (c *ClientWithResponses) DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse(ctx context.Context, collectionKey string, params *DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostParams, reqEditors ...RequestEditorFn) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
 	rsp, err := c.DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePost(ctx, collectionKey, params, reqEditors...)
@@ -47273,6 +47821,15 @@ func (c *ClientWithResponses) HistoryRouteApiV1TopologyHistoryNameGetWithRespons
 	return ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp)
 }
 
+// DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse request returning *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse
+func (c *ClientWithResponses) DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse(ctx context.Context, nodeId openapi_types.UUID, params *DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse, error) {
+	rsp, err := c.DeleteNodeRouteApiV1TopologyNodesNodeIdDelete(ctx, nodeId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse(rsp)
+}
+
 // PathApiV1TopologyPathGetWithResponse request returning *PathApiV1TopologyPathGetResponse
 func (c *ClientWithResponses) PathApiV1TopologyPathGetWithResponse(ctx context.Context, params *PathApiV1TopologyPathGetParams, reqEditors ...RequestEditorFn) (*PathApiV1TopologyPathGetResponse, error) {
 	rsp, err := c.PathApiV1TopologyPathGet(ctx, params, reqEditors...)
@@ -48002,8 +48559,8 @@ func (c *ClientWithResponses) UiBroadcastFeedFragmentUiBroadcastFeedGetWithRespo
 }
 
 // UiBroadcastHistoryUiBroadcastHistoryGetWithResponse request returning *UiBroadcastHistoryUiBroadcastHistoryGetResponse
-func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
-	rsp, err := c.UiBroadcastHistoryUiBroadcastHistoryGet(ctx, reqEditors...)
+func (c *ClientWithResponses) UiBroadcastHistoryUiBroadcastHistoryGetWithResponse(ctx context.Context, params *UiBroadcastHistoryUiBroadcastHistoryGetParams, reqEditors ...RequestEditorFn) (*UiBroadcastHistoryUiBroadcastHistoryGetResponse, error) {
+	rsp, err := c.UiBroadcastHistoryUiBroadcastHistoryGet(ctx, params, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -48692,6 +49249,15 @@ func (c *ClientWithResponses) CorpusIndexUiCorpusGetWithResponse(ctx context.Con
 		return nil, err
 	}
 	return ParseCorpusIndexUiCorpusGetResponse(rsp)
+}
+
+// UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse request returning *UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse
+func (c *ClientWithResponses) UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse(ctx context.Context, collectionKey string, chunkId string, reqEditors ...RequestEditorFn) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error) {
+	rsp, err := c.UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGet(ctx, collectionKey, chunkId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp)
 }
 
 // UiCorpusCollectionsTableUiCorpusCollectionsGetWithBodyWithResponse request with arbitrary body returning *UiCorpusCollectionsTableUiCorpusCollectionsGetResponse
@@ -49718,6 +50284,15 @@ func (c *ClientWithResponses) RunbooksPublishUiRunbooksSlugPublishPostWithFormda
 	return ParseRunbooksPublishUiRunbooksSlugPublishPostResponse(rsp)
 }
 
+// UiRunnersListUiRunnersGetWithResponse request returning *UiRunnersListUiRunnersGetResponse
+func (c *ClientWithResponses) UiRunnersListUiRunnersGetWithResponse(ctx context.Context, reqEditors ...RequestEditorFn) (*UiRunnersListUiRunnersGetResponse, error) {
+	rsp, err := c.UiRunnersListUiRunnersGet(ctx, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiRunnersListUiRunnersGetResponse(rsp)
+}
+
 // UiSchedulerListUiSchedulerGetWithBodyWithResponse request with arbitrary body returning *UiSchedulerListUiSchedulerGetResponse
 func (c *ClientWithResponses) UiSchedulerListUiSchedulerGetWithBodyWithResponse(ctx context.Context, params *UiSchedulerListUiSchedulerGetParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*UiSchedulerListUiSchedulerGetResponse, error) {
 	rsp, err := c.UiSchedulerListUiSchedulerGetWithBody(ctx, params, contentType, body, reqEditors...)
@@ -49835,6 +50410,15 @@ func (c *ClientWithResponses) UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelP
 		return nil, err
 	}
 	return ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse(rsp)
+}
+
+// UiSensorsListUiSensorsGetWithResponse request returning *UiSensorsListUiSensorsGetResponse
+func (c *ClientWithResponses) UiSensorsListUiSensorsGetWithResponse(ctx context.Context, params *UiSensorsListUiSensorsGetParams, reqEditors ...RequestEditorFn) (*UiSensorsListUiSensorsGetResponse, error) {
+	rsp, err := c.UiSensorsListUiSensorsGet(ctx, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseUiSensorsListUiSensorsGetResponse(rsp)
 }
 
 // UiTopologyTableUiTopologyGetWithResponse request returning *UiTopologyTableUiTopologyGetResponse
@@ -52090,6 +52674,32 @@ func ParseCreateDocCollectionEndpointApiV1DocCollectionsPostResponse(rsp *http.R
 	return response, nil
 }
 
+// ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse parses an HTTP response from a DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteWithResponse call
+func ParseDeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse(rsp *http.Response) (*DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteCollectionEndpointApiV1DocCollectionsCollectionKeyDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParseDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse parses an HTTP response from a DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostWithResponse call
 func ParseDisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse(rsp *http.Response) (*DisableCollectionEndpointApiV1DocCollectionsCollectionKeyDisablePostResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -54309,6 +54919,32 @@ func ParseHistoryRouteApiV1TopologyHistoryNameGetResponse(rsp *http.Response) (*
 	return response, nil
 }
 
+// ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse parses an HTTP response from a DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteWithResponse call
+func ParseDeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse(rsp *http.Response) (*DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &DeleteNodeRouteApiV1TopologyNodesNodeIdDeleteResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
 // ParsePathApiV1TopologyPathGetResponse parses an HTTP response from a PathApiV1TopologyPathGetWithResponse call
 func ParsePathApiV1TopologyPathGetResponse(rsp *http.Response) (*PathApiV1TopologyPathGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -55776,6 +56412,16 @@ func ParseUiBroadcastHistoryUiBroadcastHistoryGetResponse(rsp *http.Response) (*
 		HTTPResponse: rsp,
 	}
 
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
 	return response, nil
 }
 
@@ -56898,6 +57544,32 @@ func ParseCorpusIndexUiCorpusGetResponse(rsp *http.Response) (*CorpusIndexUiCorp
 	response := &CorpusIndexUiCorpusGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
+// ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse parses an HTTP response from a UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetWithResponse call
+func ParseUiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse(rsp *http.Response) (*UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiCorpusChunkDetailUiCorpusChunksCollectionKeyChunkIdGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
 	}
 
 	return response, nil
@@ -58715,6 +59387,22 @@ func ParseRunbooksPublishUiRunbooksSlugPublishPostResponse(rsp *http.Response) (
 	return response, nil
 }
 
+// ParseUiRunnersListUiRunnersGetResponse parses an HTTP response from a UiRunnersListUiRunnersGetWithResponse call
+func ParseUiRunnersListUiRunnersGetResponse(rsp *http.Response) (*UiRunnersListUiRunnersGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiRunnersListUiRunnersGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	return response, nil
+}
+
 // ParseUiSchedulerListUiSchedulerGetResponse parses an HTTP response from a UiSchedulerListUiSchedulerGetWithResponse call
 func ParseUiSchedulerListUiSchedulerGetResponse(rsp *http.Response) (*UiSchedulerListUiSchedulerGetResponse, error) {
 	bodyBytes, err := io.ReadAll(rsp.Body)
@@ -58880,6 +59568,32 @@ func ParseUiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse(rsp *htt
 	}
 
 	response := &UiSchedulerCancelSubmitUiSchedulerTriggerIdCancelPostResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseUiSensorsListUiSensorsGetResponse parses an HTTP response from a UiSensorsListUiSensorsGetWithResponse call
+func ParseUiSensorsListUiSensorsGetResponse(rsp *http.Response) (*UiSensorsListUiSensorsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &UiSensorsListUiSensorsGetResponse{
 		Body:         bodyBytes,
 		HTTPResponse: rsp,
 	}

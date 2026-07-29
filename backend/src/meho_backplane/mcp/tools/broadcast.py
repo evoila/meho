@@ -531,13 +531,15 @@ async def _publish_agent_announcement_impl(
         ts=datetime.now(UTC),
     )
     entry_id = await publish_agent_announcement(event)
-    # Both keys carry the Valkey stream entry id of the appended
-    # announcement. ``cursor`` is the self-labelled canonical name
-    # (round-trips through recent/watch's ``cursor`` arg, #2479);
-    # ``event_id`` is the historical alias — a misnomer kept for wire
-    # compatibility: it is the stream cursor, NOT a durable event
-    # UUID (announcements carry no UUID today; #2547 mints one).
-    ack: dict[str, Any] = {"event_id": entry_id, "cursor": entry_id}
+    # The two keys are now genuinely distinct values (#2479 / #2547):
+    # ``event_id`` is the real per-announcement UUID minted at publish
+    # (equal to the durable ``agent_announcement`` row's PK, round-trips
+    # as the event's ``event_id`` on recent/watch reads); ``cursor`` is
+    # the Valkey stream entry id, self-labelled to round-trip through
+    # recent/watch's ``cursor`` arg. Historically both carried the
+    # mislabelled stream cursor; T2 mints the UUID that makes ``event_id``
+    # a stable durable identity.
+    ack: dict[str, Any] = {"event_id": str(event.event_id), "cursor": entry_id}
     # Echo only the declared (non-empty) structured claims -- a plain
     # announce keeps the pre-v2 ``{event_id, cursor}`` ack shape. These
     # are trusted structured values, so they are echoed unwrapped.
@@ -682,14 +684,18 @@ register_mcp_tool(
             "(distinct from the audit-driven publisher which fail-opens). "
             "Tenant scoping is structural -- the input schema has no "
             "tenant_id argument; the event always writes to the "
-            "operator's own tenant stream. Returns {event_id, cursor} "
-            "plus any declared claim fields echoed back. Both event_id "
-            "and cursor are the Valkey stream entry id of the appended "
-            "announcement; 'cursor' is the canonical self-labelled name "
-            "and round-trips through meho.broadcast.recent/watch's "
-            "'cursor' arg for verification; 'event_id' is a legacy "
-            "alias of the same stream cursor, NOT a durable event "
-            "UUID (announcements carry no UUID). Announces are "
+            "operator's own tenant stream. The announcement is persisted "
+            "to a durable agent_announcement DB row so it survives a "
+            "Valkey restart and the stream's ~24h trim window; "
+            "meho.broadcast.recent backfills from that archive when the "
+            "requested window predates the stream's oldest surviving "
+            "entry. Returns {event_id, cursor} plus any declared claim "
+            "fields echoed back. 'event_id' is the real per-announcement "
+            "UUID (equal to the durable row's id; it round-trips as the "
+            "event's 'event_id' on recent/watch reads); 'cursor' is the "
+            "Valkey stream entry id, self-labelled to round-trip through "
+            "meho.broadcast.recent/watch's 'cursor' arg for verification. "
+            "The two are distinct values (#2479 / #2547). Announces are "
             "rate-limited per principal (default 10 per minute); "
             "exceeding the limit returns a -32000 error naming the "
             "window and a retry-after -- announce meaningful "

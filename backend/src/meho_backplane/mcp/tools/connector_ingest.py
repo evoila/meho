@@ -475,7 +475,7 @@ async def _ingest_status_handler(
     poll endpoint also returns.
 
     An unknown / cross-tenant / malformed handle surfaces as JSON-RPC
-    ``-32602`` (``handle must be a valid job id (UUID)`` /
+    ``-32602`` (``job_id must be a valid UUID`` /
     ``ingest_job_not_found``) — the closest spec-blessed shape for
     "bad input" / "not found", matching the connector-ingest error
     convention.
@@ -484,7 +484,7 @@ async def _ingest_status_handler(
     try:
         job_id = UUID(raw)
     except (ValueError, TypeError, AttributeError) as exc:
-        raise McpInvalidParamsError("handle must be a valid job id (UUID)") from exc
+        raise McpInvalidParamsError("job_id must be a valid UUID") from exc
     registry = get_job_registry()
     try:
         job = await registry.get(

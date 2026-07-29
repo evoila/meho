@@ -195,6 +195,12 @@ jobs:
     # the existing branch-protection required check stays satisfied.
     timeout-minutes: 25
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
       # anonymous consumer auth, wired into runner DinD via
@@ -247,6 +253,20 @@ jobs:
         # vault custody — see meho-internal#74 for the regression
         # context this addresses. Long-term, the in-cluster proxy
         # cache from claude-rdc-hetzner-dc#463 retires this step.
+        #
+        # The `if:` guard is what keeps Dependabot PRs green. A
+        # Dependabot-triggered run reads the *Dependabot* secret store,
+        # not the Actions one, so `secrets.DOCKERHUB_USERNAME` is empty
+        # there — and `docker/login-action` hard-fails with "Username and
+        # password required" instead of no-opping, which failed this job
+        # (and every other job carrying this step) on all ~18 open
+        # Dependabot PRs. Skipping the login is safe: every image above
+        # resolves through the harbor.evba.lab proxy cache, so an
+        # unauthenticated run still pulls — it only gives up the Docker
+        # Hub rate-limit headroom the login buys. Mirroring
+        # DOCKERHUB_USERNAME / DOCKERHUB_TOKEN into the repo's Dependabot
+        # secrets restores that headroom and makes this guard a no-op.
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -550,6 +570,12 @@ jobs:
     timeout-minutes: 50
     continue-on-error: true
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
@@ -564,6 +590,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
 
       - name: Docker Hub login (for testcontainers pulls)
+        # Empty-secret guard — see the python-tests job's login step for
+        # why Dependabot runs need it.
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -696,6 +725,12 @@ jobs:
     runs-on: meho-runners-ci
     timeout-minutes: 60
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
@@ -735,6 +770,12 @@ jobs:
         # integration subtree is the heaviest testcontainers consumer
         # (pgvector/valkey/k3d/vcsim), so authenticated pulls are
         # load-bearing here in particular.
+        # Empty-secret guard — see the python-tests job's login step for
+        # why Dependabot runs need it. This job pulls the most images, so
+        # it is the likeliest to feel the lost rate-limit headroom; that
+        # is an argument for mirroring the Dependabot secrets, not for
+        # letting the step hard-fail.
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -787,6 +828,12 @@ jobs:
     runs-on: meho-runners-ci
     timeout-minutes: 30
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       # The 3 forward-compat rollback tests spin up pgvector via
       # testcontainers; route the pull through the Harbor proxy cache like
       # the sibling jobs (never `:latest`).
@@ -802,6 +849,9 @@ jobs:
       - name: Docker Hub login (for testcontainers pulls)
         # Authenticated pulls avoid the shared-NAT Docker Hub anonymous
         # rate limit when the rollback tests spin up pgvector/pgvector:pg16.
+        # Empty-secret guard — see the python-tests job's login step for
+        # why Dependabot runs need it.
+        if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}

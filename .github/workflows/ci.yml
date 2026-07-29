@@ -267,7 +267,7 @@ jobs:
         # DOCKERHUB_USERNAME / DOCKERHUB_TOKEN into the repo's Dependabot
         # secrets restores that headroom and makes this guard a no-op.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -593,7 +593,7 @@ jobs:
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -776,7 +776,7 @@ jobs:
         # is an argument for mirroring the Dependabot secrets, not for
         # letting the step hard-fail.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -852,7 +852,7 @@ jobs:
         # Empty-secret guard — see the python-tests job's login step for
         # why Dependabot runs need it.
         if: env.DOCKERHUB_USERNAME != ''
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}

@@ -90,6 +90,32 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — CI merge gates no longer block every PR
+
+- Two independent CI misconfigurations made most open PRs structurally
+  unmergeable, and both are fixed here. **First**, `Python License Check`
+  and `NPM License Check` are required status checks, but their workflow
+  was gated by `on.pull_request.paths` limited to dependency manifests.
+  GitHub leaves a required context *Pending forever* when its whole
+  workflow is skipped by a path filter — so every PR that did not touch a
+  `pyproject.toml` / `package.json` / `package-lock.json` could never
+  satisfy branch protection and could only land via an admin bypass. The
+  narrowing moved to a `changes` job plus a job-level `if:`, because a job
+  skipped by its own `if:` reports **Success** and does satisfy the
+  required check. This is the same shape `ci.yml` adopted in #2140 for the
+  migration gate and documents at its own `changes` job; the license
+  workflow was simply never converted. Which manifests trigger a real
+  license run is unchanged. **Second**, every Dependabot PR failed
+  `Python (ruff + mypy + pytest)` and `Python (integration testcontainers)`
+  at `docker/login-action` with `Username and password required`:
+  Dependabot-triggered runs read the *Dependabot* secret store rather than
+  the Actions one, so `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN` resolve
+  empty and the action hard-fails instead of no-opping. All four login
+  steps now carry an empty-secret guard. Skipping the login is safe —
+  the testcontainers images all resolve through the `harbor.evba.lab`
+  proxy cache — it only forfeits the Docker Hub rate-limit headroom, which
+  mirroring those two secrets into the repo's Dependabot secrets restores.
+
 ### Fixed — agent bridge publishes wire-safe tool schemas (#2644)
 
 - Every `meho agents run` on provider `anthropic` died at model-init with

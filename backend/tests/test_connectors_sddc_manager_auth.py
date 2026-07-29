@@ -89,6 +89,7 @@ class _StubTarget:
     port: int | None
     secret_ref: str
     auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    tls_server_name: str | None = None  # #2398: per-target TLS SNI / cert-verify name
     # Tenant-unique cache key components (#1642). Distinct ``id`` per
     # instance so two stub targets never collapse onto one cache entry.
     id: UUID = field(default_factory=uuid4)
@@ -887,4 +888,30 @@ async def test_fingerprint_without_operator_falls_back_to_system_operator() -> N
 
     assert len(captured) == 1
     assert captured[0].sub == SYSTEM_OPERATOR_SUB
+    await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# TLS SNI / cert-verify override on the SDDC /v1/tokens login (#2398)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tokens_login_threads_sni_extension() -> None:
+    """#2398: the SDDC Manager /v1/tokens login POST carries the SNI override."""
+    connector = _make_connector()
+    target = _StubTarget(
+        name="sddc-sni",
+        host="sddc-sni.test.invalid",
+        port=443,
+        secret_ref="sddc/sddc-sni",
+        tls_server_name="sddc.corp.example",
+    )
+
+    async with respx.mock(base_url="https://sddc-sni.test.invalid") as mock:
+        route = mock.post(_TOKEN_PATH).respond(200, json={"accessToken": "tok-abc"})
+        await connector.auth_headers(target, operator=_make_operator())
+
+    assert route.called
+    assert route.calls[0].request.extensions["sni_hostname"] == "sddc.corp.example"
     await connector.aclose()

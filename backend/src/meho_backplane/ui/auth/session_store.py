@@ -5,7 +5,7 @@
 
 Initiative #337 (G10.0 Frontend chassis), Task #864 (T3). The
 operator-console is locked to the Backend-for-Frontend (BFF) custody
-shape per decision #11 (``docs/planning/v0.2-decisions.md``): the
+shape per decision #11 (``docs/decisions/locked-decisions.md``): the
 browser holds an opaque session-cookie value, the real OAuth access +
 refresh tokens live encrypted in the server-side ``web_session`` row.
 This module owns the encryption / load / revoke / rotation surface

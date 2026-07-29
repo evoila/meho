@@ -209,7 +209,12 @@ class _FakeBackend(SearchBackend):
         )
         return CorpusSearchResponse(
             chunks=[
-                CorpusChunk(chunk_id="f1", document_id="fd1", content="the fake answer"),
+                CorpusChunk(
+                    chunk_id="f1",
+                    document_id="fd1",
+                    title="The Fake Answer Guide",
+                    content="the fake answer",
+                ),
             ]
         )
 
@@ -437,6 +442,8 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
     # surface (the backend-agnostic contract).
     assert len(result.chunks) == 1
     assert result.chunks[0].content == "the fake answer"
+    # #2475: an upstream chunk title threads through the projection.
+    assert result.chunks[0].title == "The Fake Answer Guide"
     serialised = result.model_dump_json()
     assert "fake-rag" not in serialised
     assert "fake.test" not in serialised
@@ -444,6 +451,7 @@ async def test_search_docs_routes_through_resolved_backend(_restore_registry: No
     assert set(result.chunks[0].model_dump()) == {
         "chunk_id",
         "document_id",
+        "title",
         "content",
         "source_url",
         "score",

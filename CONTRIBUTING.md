@@ -97,8 +97,10 @@ target — coordinate via the consumer-side ticket.
    `Closes #<task-number>` (or `Refs #<n>` for partial work).
 6. **Push, open a PR** targeting `main` on `evoila/meho`.
 7. **CI must pass** — every required check is green; no overrides.
-8. **CodeRabbit review** posts automatically on every PR; address the
-   findings or document why a finding is wrong inline.
+8. **Claude review** is the review of record on every PR — the
+   in-house review pass (`/auto-review-pr` in auto-runs,
+   `/review-pr-slim` interactively); address the findings or document
+   why a finding is wrong inline.
 9. **Maintainer review** approves the human side. Reviews on
    `evoila/meho` are mandatory; reviews on `evoila-bosnia/meho-internal`
    PRs (planning-only, ADRs, governance docs) are best-effort because

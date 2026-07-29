@@ -255,6 +255,58 @@ crash) are caught and converted to a structured `connector_error`
 preserved — a redactor failure must not leak raw payloads through a
 500 with no audit record.
 
+### credential_read response scrub + `reveal_secret` opt-in (#2467)
+
+The Tier-1 engine matches only **labelled** secret shapes inside
+string leaves (`password=…`, `Bearer …`); a structured `{"password":
+"<value>"}` dict carries no label in the leaf, so the engine passes it
+through verbatim. That is the correct behaviour for most responses, but
+a `credential_read` op — `vault.kv.read` and its allowlist siblings
+(`broadcast/events.py:_CREDENTIAL_READ_OPS`) — returns exactly this
+shape: its documented contract is *to return the secret value*. Before
+#2467 that raw value reached the `call_operation` caller, and for an
+agent caller it landed in the model-API transcript.
+
+The dispatcher adds a second, structured-dict layer for
+`credential_read`-classified ops only:
+
+- `dispatch()` strips a reserved `params.reveal_secret` control flag
+  **before** hashing / schema validation / handler forwarding (the op
+  schemas are `additionalProperties: false`, so the flag would
+  otherwise 422). It then classifies the op (`classify_op(op_id) ==
+  "credential_read"`) and, unless the caller opted in, passes
+  `scrub_response=True` down to `_reduce_and_audit_success`.
+- `_reduce_and_audit_success` runs
+  `broadcast.events.scrub_secret_named_values` (the public entry to the
+  same key-name walk the broadcast params scrub uses) over
+  **`redaction.redacted` only** — the caller-bound copy. Secret-named
+  values become `[REDACTED:param_name]`; non-secret siblings
+  (`username`, `version`) survive. `redaction.raw`, captured before the
+  scrub, is untouched, so the audit `raw_payload` keeps the raw secret.
+  This mirrors the #2172 secret-handler posture: the ledger keeps the
+  raw result, the transport response does not.
+- The reveal choice is stamped on the audit row via
+  `reveal_secret_var` (a ContextVar bound with the same token/finally
+  discipline as `policy_decision_var`), read in `_build_audit_payload`
+  as `payload['reveal_secret']` (`True` = raw returned, `False` = the
+  default scrubbed response). Non-`credential_read` dispatches leave the
+  var `None`, so the key is absent — "which credential reads returned a
+  raw value" is queryable without a new column.
+
+The scrub keys on the **op class, not the caller kind**: the reported
+incident's caller was a backplane service-account token driven by an
+agent, so principal-kind gating would have missed it (and no
+`human_agent` principal kind exists). Approved human flows keep working
+by opting in at their two known call sites — the `/ui` Vault console BFF
+(`ui/routes/vault/routes.py`, reveal-on-click) and CLI `meho secret
+read` (`cli/internal/cmd/secret/read.go`, the pipe-only raw path) both
+pass `reveal_secret: true`, so their audit rows honestly record the
+reveal. `secret.move` remains the recommended no-transit path for piping
+a credential onward; `vault.kv.versions` is the metadata-only browse.
+`meho vault kv read` is deliberately **not** an opt-in site — its
+browse envelope now shows the scrubbed value; use `meho secret read` for
+the raw bytes.
+
 ### Audit columns
 
 Migration `0030` adds two nullable JSON columns to `audit_log`

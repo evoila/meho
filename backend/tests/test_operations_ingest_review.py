@@ -715,6 +715,136 @@ async def test_edit_op_requires_at_least_one_field() -> None:
 
 
 @pytest.mark.asyncio
+async def test_edit_op_explicit_null_custom_description_clears_column() -> None:
+    """Explicit ``custom_description=None`` clears the column to SQL NULL (#2488).
+
+    An operator who set an override and later wants it gone can pass an
+    explicit ``null`` (the MCP tool's ``[string, null]`` inputSchema). The
+    column must land NULL — not the empty string the pre-#2488
+    empty-string workaround left — and the clear must be recorded in the
+    audit payload's ``fields_updated`` like any other edit.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    target_op = "GET:/api/v1/group-0/0"
+
+    # First set an override so the clear has something to remove.
+    await service.edit_op(
+        "vmware-rest-9.0",
+        target_op,
+        tenant_id=tenant_id,
+        custom_description="An operator override to be cleared.",
+    )
+    # Now clear it with an explicit null.
+    await service.edit_op(
+        "vmware-rest-9.0",
+        target_op,
+        tenant_id=tenant_id,
+        custom_description=None,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id == tenant_id,
+            EndpointDescriptor.op_id == target_op,
+        )
+        op_row = (await session.execute(stmt)).scalar_one()
+        assert op_row.custom_description is None
+        assert op_row.custom_description != ""
+
+    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    payload: Any = row.payload
+    assert payload["fields_updated"] == ["custom_description"]
+
+
+@pytest.mark.asyncio
+async def test_edit_op_null_custom_description_with_other_field_clears_and_applies() -> None:
+    """``custom_description=None`` alongside another field clears AND applies (#2488).
+
+    The pre-#2488 bug silently dropped an explicit null when it rode
+    alongside another override (the all-``None`` guard never fired, and
+    the apply step skipped every ``None``). Both effects must now land:
+    the description clears to NULL and the sibling field is written, with
+    both names in ``fields_updated``.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    target_op = "GET:/api/v1/group-0/0"
+
+    await service.edit_op(
+        "vmware-rest-9.0",
+        target_op,
+        tenant_id=tenant_id,
+        custom_description="An override that should be cleared below.",
+    )
+    await service.edit_op(
+        "vmware-rest-9.0",
+        target_op,
+        tenant_id=tenant_id,
+        custom_description=None,
+        is_enabled=False,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id == tenant_id,
+            EndpointDescriptor.op_id == target_op,
+        )
+        op_row = (await session.execute(stmt)).scalar_one()
+        assert op_row.custom_description is None
+        assert op_row.is_enabled is False
+
+    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    payload: Any = row.payload
+    assert sorted(payload["fields_updated"]) == ["custom_description", "is_enabled"]
+    assert payload["is_enabled_set_to"] is False
+
+
+@pytest.mark.asyncio
+async def test_edit_op_omitted_custom_description_left_unchanged() -> None:
+    """Omitting ``custom_description`` leaves the column untouched (#2488 regression).
+
+    The sentinel default must keep the pre-#2488 "omitted = leave alone"
+    semantics REST and the MCP omitted-key path both rely on: an edit that
+    touches only ``is_enabled`` must not clobber an existing description.
+    """
+    tenant_id = uuid.uuid4()
+    await _seed_connector(tenant_id=tenant_id, group_count=1, ops_per_group=1)
+    service = ReviewService(_make_operator(tenant_id=tenant_id))
+    target_op = "GET:/api/v1/group-0/0"
+
+    await service.edit_op(
+        "vmware-rest-9.0",
+        target_op,
+        tenant_id=tenant_id,
+        custom_description="Keep me across an unrelated edit.",
+    )
+    await service.edit_op(
+        "vmware-rest-9.0",
+        target_op,
+        tenant_id=tenant_id,
+        is_enabled=True,
+    )
+
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        stmt = select(EndpointDescriptor).where(
+            EndpointDescriptor.tenant_id == tenant_id,
+            EndpointDescriptor.op_id == target_op,
+        )
+        op_row = (await session.execute(stmt)).scalar_one()
+        assert op_row.custom_description == "Keep me across an unrelated edit."
+
+    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    payload: Any = row.payload
+    assert payload["fields_updated"] == ["is_enabled"]
+
+
+@pytest.mark.asyncio
 async def test_edit_op_is_enabled_false_override_sticks_after_enable_connector() -> None:
     """Operator-set ``is_enabled=False`` survives a subsequent ``enable_connector``."""
     tenant_id = uuid.uuid4()

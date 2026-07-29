@@ -40,6 +40,7 @@ __all__ = [
     "METHOD_NOT_FOUND",
     "PARSE_ERROR",
     "PROTOCOL_VERSION",
+    "RATE_LIMITED",
     "InitializeRequest",
     "InitializeResponse",
     "JsonRpcError",
@@ -249,3 +250,14 @@ INVALID_PARAMS: int = -32602
 
 #: "Internal JSON-RPC error." (spec §5.1)
 INTERNAL_ERROR: int = -32603
+
+#: Implementation-defined server error: a request was rejected by a
+#: per-principal rate limit (G6.5-T6 #2546, ``meho.broadcast.announce``).
+#: JSON-RPC §5.1 reserves ``-32000..-32099`` for "implementation-defined
+#: server-errors"; this is the analogue of HTTP 429. Distinct from
+#: :data:`INVALID_PARAMS` (the params are well-formed; the caller is
+#: simply over its window) and from :data:`INTERNAL_ERROR` (the server
+#: is healthy — it is deliberately refusing). The ``error.data`` member
+#: carries ``{limit, window_seconds, retry_after_seconds}`` so the
+#: calling agent can back off precisely rather than guess.
+RATE_LIMITED: int = -32000

@@ -131,7 +131,21 @@ authorization URL, so the realm must accept this shape:
      works.
 4. **Save.**
 
-### Step 3 — Copy the client secret to Vault
+### Step 3 — Copy the client secret into a Secret the pod reads
+
+> **Chart-native wiring (#2594).** The Helm chart now renders all three
+> console env vars from first-class values — no hand-rolled `extraEnv`
+> `valueFrom` needed. Set `config.uiKeycloakClientId` (plain, →
+> `UI_KEYCLOAK_CLIENT_ID`) and `uiConsole.enabled: true` +
+> `uiConsole.secretName` pointing at a Kubernetes Secret holding the
+> client secret and the session key (→ `UI_KEYCLOAK_CLIENT_SECRET` /
+> `UI_SESSION_ENCRYPTION_KEY` via `secretKeyRef`). The Vault path below
+> is the recipe for a **Vault-backed** deploy; a **GSM / no-Vault**
+> deploy skips Vault entirely and provisions a plain Kubernetes Secret
+> (or a GSM-synced ExternalSecret) instead — the end-to-end recipe,
+> including generating the session encryption key, is in
+> [`deploy/values-examples/README.md`](../../deploy/values-examples/README.md)
+> § operator-console (browser BFF).
 
 1. On the `meho-web` client → **Credentials** tab.
 2. Copy the **Client secret** value. Treat this value as

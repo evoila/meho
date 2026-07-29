@@ -233,10 +233,12 @@ References
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import Final, get_args
 
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
@@ -259,8 +261,21 @@ from sqlalchemy.engine import Dialect
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator, TypeEngine
 
+# The set-wide five-state check vocabulary is declared exactly once, in
+# #2504's assertion spec module (:mod:`meho_backplane.checks.assertions`).
+# The ``sensor`` table's ``last_state`` CHECK is drift-guarded against
+# it in :mod:`tests.test_db_sensor`; ``db.models`` never re-declares the
+# enum. The import is safe against a cycle: the ``checks`` package is
+# dependency-pure (stdlib + pydantic + itself) and never imports ``db``.
+from meho_backplane.checks.assertions import CheckState
+
 __all__ = [
     "EVENT_OUTBOX_NOTIFY_CHANNEL",
+    "KIND_SLUG_MAX_LENGTH",
+    "KIND_SLUG_MIN_LENGTH",
+    "KIND_SLUG_PATTERN",
+    "KIND_SLUG_RE",
+    "WELL_KNOWN_NODE_KINDS",
     "AgentRun",
     "AgentRunStatus",
     "AgentRunTrigger",
@@ -288,6 +303,7 @@ __all__ = [
     "TenantConvention",
     "TenantConventionHistory",
     "WebSession",
+    "is_valid_kind_slug",
 ]
 
 
@@ -1665,12 +1681,56 @@ class SpecProvenance(Base):
     )
 
 
-#: Closed enum of :attr:`GraphNode.kind` values. Mirrored verbatim in
-#: migration ``0007``'s ``_NODE_KINDS`` constant; the two MUST stay in
-#: lock-step or the DB-layer CHECK constraint will reject ORM-shaped
-#: inserts. Widening the vocabulary (G9.2's curated extensions) is a
-#: migration that updates both sides at once.
-_GRAPH_NODE_KINDS: tuple[str, ...] = (
+#: Slug grammar for :attr:`GraphNode.kind` / :attr:`GraphEdge.kind` --
+#: the open-vocabulary contract Initiative #2533 (T1 #2534) replaces the
+#: closed IN-list CHECKs with. Lowercase alphanumeric runs joined by
+#: single ``.`` / ``_`` / ``-`` separators; no leading / trailing /
+#: doubled separators. Full validation (pattern + length) lives in
+#: Python at every write boundary (:mod:`meho_backplane.topology.nodes`,
+#: :mod:`meho_backplane.topology.annotate`, the REST body models, the
+#: MCP inputSchemas); the DB layer keeps only the portable minimal
+#: shape CHECK below (length bounds + lowercase) because regex CHECKs
+#: are not portable across PostgreSQL and the SQLite unit suite.
+KIND_SLUG_PATTERN: Final[str] = r"^[a-z0-9]+(?:[._-][a-z0-9]+)*$"
+
+#: Length bounds for a kind slug. Mirrored in migration ``0063``'s
+#: shape CHECK and in every boundary schema (Pydantic
+#: ``StringConstraints``, MCP ``minLength`` / ``maxLength``).
+KIND_SLUG_MIN_LENGTH: Final[int] = 2
+KIND_SLUG_MAX_LENGTH: Final[int] = 63
+
+#: Compiled form of :data:`KIND_SLUG_PATTERN` for the Python-side
+#: validators. Module-level so the write paths don't recompile per call.
+KIND_SLUG_RE: Final[re.Pattern[str]] = re.compile(KIND_SLUG_PATTERN)
+
+
+def is_valid_kind_slug(kind: str) -> bool:
+    """Return ``True`` when *kind* satisfies the open-vocabulary slug grammar.
+
+    The single Python-side source of truth for kind validation --
+    :func:`meho_backplane.topology.nodes._validate_kind` and
+    :func:`meho_backplane.topology.annotate._validate_kind` both call
+    this, so the node and edge paths cannot drift. Checks the length
+    bounds first (the regex has no length anchor) and then the slug
+    pattern.
+    """
+    return (
+        KIND_SLUG_MIN_LENGTH <= len(kind) <= KIND_SLUG_MAX_LENGTH
+        and KIND_SLUG_RE.fullmatch(kind) is not None
+    )
+
+
+#: Well-known :attr:`GraphNode.kind` values -- the documented core set,
+#: **not** an enforced vocabulary. Initiative #2533 (T1 #2534) opened
+#: the kind space: any slug matching :data:`KIND_SLUG_PATTERN` is a
+#: valid node kind, and this tuple survives as the convention layer --
+#: docs tables, UI filter dropdowns, and error-message suggestions all
+#: source from it. Prefer a well-known kind when one fits; a novel kind
+#: (``dns-record``, ``database``, ``certificate``, ...) enters the
+#: graph through a normal write. Same open-set-plus-documented-core
+#: pattern as Backstage's well-known relations and ServiceNow's
+#: extensible CI classes.
+WELL_KNOWN_NODE_KINDS: tuple[str, ...] = (
     "target",
     "vm",
     "host",
@@ -1689,15 +1749,20 @@ _GRAPH_NODE_KINDS: tuple[str, ...] = (
 
 
 class GraphEdgeKind(StrEnum):
-    """Closed enum of :attr:`GraphEdge.kind` values -- v0.2 vocabulary.
+    """Well-known :attr:`GraphEdge.kind` values -- the documented core set.
 
-    Initiative #364 (G9.2) locks the edge-kind vocabulary at ten members:
-    the four auto-discoverable kinds G9.1 (#363) shipped, plus six
-    operator-curated cross-system kinds that auto-discovery cannot infer
-    (decision #6 in :file:`docs/planning/v0.2-decisions.md`). The vocabulary
-    is closed -- widening it is a coordinated DB + model change (new
-    migration, new enum member, new decision row) so the v0.2.next
-    policy-engine grammar parsing ``kind`` stays portable across tenants.
+    Initiative #364 (G9.2) originally locked the edge-kind vocabulary at
+    these ten members so the (never-shipped) v0.2.next policy-engine
+    grammar would stay portable across tenants. Initiative #2533 (T1
+    #2534) reversed the lock: the kind space is **open** -- any slug
+    matching :data:`KIND_SLUG_PATTERN` is a valid edge kind -- and this
+    enum survives as the *well-known* set, the convention layer that
+    feeds docs tables, UI suggestion lists (``datalist``), and
+    error-message hints. Membership is no longer enforced anywhere;
+    prefer a well-known kind when one fits, and use a novel slug
+    (``resolves-to``, ``same-as``, ...) when none does. The ``same-as``
+    curated-edge convention for cross-system identity stitching is
+    documented in :file:`docs/architecture/topology.md`.
 
     The four auto-discoverable kinds (refresh service writes these on
     every probe-derived edge):
@@ -1730,11 +1795,11 @@ class GraphEdgeKind(StrEnum):
       connector boundaries (e.g., ``kubernetes-namespace-prod`` ->
       ``vault-policy-prod-read``).
 
-    Mirrors the closed-enum pattern :class:`AuthModel`
-    (:mod:`meho_backplane.connectors.schemas`) sets: a Python
-    :class:`enum.StrEnum` paired with a portable DB ``CHECK`` constraint,
-    both moved in lock-step by one Alembic migration so the enum and the
-    constraint cannot drift.
+    Unlike the closed-enum pattern :class:`AuthModel` follows, this
+    enum is **not** paired with a membership CHECK constraint --
+    migration ``0063`` replaced ``ck_graph_edge_kind``'s IN-list with
+    the minimal slug-shape CHECK (length bounds + lowercase), and full
+    slug validation lives Python-side via :func:`is_valid_kind_slug`.
     """
 
     RUNS_ON = "runs-on"
@@ -1749,22 +1814,37 @@ class GraphEdgeKind(StrEnum):
     POLICY_BINDS = "policy-binds"
 
 
-#: Closed enum of :attr:`GraphEdge.kind` -- the v0.2 ten-kind vocabulary.
-#: Derived from :class:`GraphEdgeKind` so the enum and the CHECK constraint
-#: cannot drift; the drift guard
-#: :func:`tests.test_topology_schema.test_graph_edge_kinds_match_enum`
-#: enforces the equality at unit-test time.
-_GRAPH_EDGE_KINDS: tuple[str, ...] = tuple(k.value for k in GraphEdgeKind)
-
-#: Closed enum of :attr:`GraphEdge.source` -- ``auto`` for
-#: probe-derived edges (T3 refresh), ``curated`` reserved for the
-#: operator-asserted edges G9.2 lands. v0.2 writes ``auto`` exclusively.
-_GRAPH_EDGE_SOURCES: tuple[str, ...] = ("auto", "curated")
+#: Closed enum of :attr:`GraphNode.source` / :attr:`GraphEdge.source`
+#: -- ``auto`` for probe-derived rows (T3 refresh), ``curated`` for
+#: operator-asserted ones (G9.2 edges; #2536 node seeds via
+#: :func:`meho_backplane.topology.nodes.create_or_get_node`). Shared
+#: between ``ck_graph_node_source`` (migration ``0066``) and
+#: ``ck_graph_edge_source`` (migration ``0007``) so the two halves of
+#: the curated-durability discipline cannot drift.
+_GRAPH_SOURCES: tuple[str, ...] = ("auto", "curated")
 
 
 def _ck_in(column: str, values: tuple[str, ...]) -> str:
     """Render a portable ``column IN ('a', 'b', ...)`` CHECK body."""
     return f"{column} IN ({', '.join(f"'{v}'" for v in values)})"
+
+
+def _ck_kind_shape(column: str) -> str:
+    """Render the portable minimal shape CHECK for an open kind column.
+
+    Length bounds plus a lowercase guard -- ``length()`` and ``lower()``
+    are portable across PostgreSQL 16 and SQLite, while regex CHECKs
+    are not (PG's ``~`` operator has no SQLite equivalent). The full
+    slug grammar (:data:`KIND_SLUG_PATTERN`) is enforced Python-side
+    at every write boundary; this CHECK is the DB-layer backstop that
+    keeps out-of-band inserts from landing obviously-malformed kinds.
+    Mirrored verbatim in migration ``0063``.
+    """
+    return (
+        f"length({column}) >= {KIND_SLUG_MIN_LENGTH} "
+        f"AND length({column}) <= {KIND_SLUG_MAX_LENGTH} "
+        f"AND {column} = lower({column})"
+    )
 
 
 class GraphNode(Base):
@@ -1774,8 +1854,10 @@ class GraphNode(Base):
     one object an agent may need to reason about: a registered target,
     a VM, a host, a network, a datastore, a namespace, a pod, a
     service, an ingress, a node, a principal, a vault mount, a vault
-    role, a volume. The closed enum (``kind``) is documented on the
-    migration; widening it is a coordinated DB + model change.
+    role, a volume -- or any other resource class a connector or
+    operator needs to represent: ``kind`` is an open slug-validated
+    vocabulary (T1 #2534), with :data:`WELL_KNOWN_NODE_KINDS` as the
+    documented core set.
 
     Schema decisions for :class:`GraphNode`:
 
@@ -1795,9 +1877,11 @@ class GraphNode(Base):
       ``ondelete`` clause -- tenant deletion is a major operation
       that must clear the tenant's graph first; the default
       ``NO ACTION`` blocks the cascade.
-    * ``kind`` -- Text NOT NULL with a DB-layer
-      ``CHECK kind IN (...)`` constraint enforced by migration
-      ``0007`` (see :data:`_GRAPH_NODE_KINDS` for the v0.2 vocabulary).
+    * ``kind`` -- Text NOT NULL with a DB-layer minimal shape CHECK
+      (length 2--63, lowercase; migration ``0063``). The vocabulary is
+      open: full slug validation (:data:`KIND_SLUG_PATTERN`) runs
+      Python-side at every write boundary, and
+      :data:`WELL_KNOWN_NODE_KINDS` documents the core set.
     * ``name`` -- Text NOT NULL. Human-readable handle within the
       tenant + kind axis. Uniqueness is enforced by the named
       ``graph_node_tenant_kind_name_idx`` (unique b-tree on
@@ -1808,6 +1892,17 @@ class GraphNode(Base):
       datastore). ``SET NULL`` because removing a target should not
       cascade-delete the topology data the agent may still want to
       reason about; the node lives on as a non-target row.
+    * ``source`` -- Text NOT NULL DEFAULT ``'auto'`` with a DB-layer
+      ``CHECK source IN (...)`` constraint (migration ``0066``;
+      mirrors :attr:`GraphEdge.source` / ``ck_graph_edge_source``).
+      ``auto`` for probe-derived rows (T3 refresh); ``curated`` for
+      operator/agent-seeded rows
+      (:func:`meho_backplane.topology.nodes.create_or_get_node`).
+      The refresh service keys its curated-node durability discipline
+      on this column (#2536): a probe re-observation of a curated
+      node bumps ``last_seen`` only -- no property overwrite, no
+      ``target_id`` adoption -- and no refresh ever soft-deletes a
+      curated node.
     * ``properties`` -- portable JSON -> JSONB NOT NULL DEFAULT
       ``{}``. Per-node structured data the connector populates at
       discover time (e.g. a VM's power state, a pod's status phase);
@@ -1815,9 +1910,9 @@ class GraphNode(Base):
       evolution without DDL changes.
     * ``discovered_by`` -- Text NOT NULL. Connector product slug
       (``vmware``, ``kubernetes``, ``vault``, ...) when probe-derived,
-      or ``curated`` for operator-asserted rows (G9.2). No CHECK
-      constraint -- the value space is open-ended as new connectors
-      land.
+      or the operator's JWT ``sub`` for manually-seeded rows (G9.2).
+      No CHECK constraint -- the value space is open-ended as new
+      connectors land.
     * ``first_seen`` -- ``timestamptz`` NOT NULL. PG-side ``now()``
       server default via the migration; the ORM also declares
       ``default=lambda: datetime.now(UTC)`` for SQLite dev/test.
@@ -1860,6 +1955,7 @@ class GraphNode(Base):
         nullable=True,
         default=None,
     )
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="auto")
     properties: Mapped[dict[str, object]] = mapped_column(
         _PORTABLE_JSON,
         nullable=False,
@@ -1887,8 +1983,12 @@ class GraphNode(Base):
             postgresql_using="btree",
         ),
         sa.CheckConstraint(
-            _ck_in("kind", _GRAPH_NODE_KINDS),
+            _ck_kind_shape("kind"),
             name="ck_graph_node_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("source", _GRAPH_SOURCES),
+            name="ck_graph_node_source",
         ),
     )
 
@@ -1914,15 +2014,12 @@ class GraphEdge(Base):
       soft-deletes (``GraphNode.last_seen=NULL``) leave the edges
       alone, so the cascade is invisible during normal operation and
       exists only for tenant purges + test cleanup.
-    * ``kind`` -- Text NOT NULL with a DB-layer
-      ``CHECK kind IN (...)`` constraint. The closed v0.2 ten-kind
-      vocabulary is :class:`GraphEdgeKind` -- four auto-discoverable
-      kinds (refresh writes these) plus six curated-only kinds
-      (operator annotation only). :data:`_GRAPH_EDGE_KINDS` is derived
-      from the enum so the CHECK constraint and the Python type cannot
-      drift; widening requires a new Alembic migration that updates
-      both in lock-step (G9.2 #364 / migration ``0010`` was the first
-      widening, from G9.1's four to v0.2's ten).
+    * ``kind`` -- Text NOT NULL with a DB-layer minimal shape CHECK
+      (length 2--63, lowercase; migration ``0063``). The vocabulary is
+      open: full slug validation (:data:`KIND_SLUG_PATTERN`) runs
+      Python-side at every write boundary, and :class:`GraphEdgeKind`
+      documents the well-known core set (four auto-discoverable kinds
+      the refresh service writes plus six curated cross-system kinds).
     * ``source`` -- Text NOT NULL with a DB-layer
       ``CHECK source IN (...)`` constraint. ``auto`` for
       probe-derived (T3 refresh); ``curated`` for the
@@ -2022,11 +2119,11 @@ class GraphEdge(Base):
             postgresql_using="btree",
         ),
         sa.CheckConstraint(
-            _ck_in("kind", _GRAPH_EDGE_KINDS),
+            _ck_kind_shape("kind"),
             name="ck_graph_edge_kind",
         ),
         sa.CheckConstraint(
-            _ck_in("source", _GRAPH_EDGE_SOURCES),
+            _ck_in("source", _GRAPH_SOURCES),
             name="ck_graph_edge_source",
         ),
     )
@@ -2240,8 +2337,9 @@ class GraphHistoryChangeKind(StrEnum):
 #: Derived from :class:`GraphHistoryChangeKind` so the enum and the
 #: DB-layer ``CHECK`` constraint cannot drift; the drift guard at
 #: :mod:`tests.test_topology_history_migration` enforces the equality
-#: at unit-test time. Mirrors the :data:`_GRAPH_EDGE_KINDS` pattern
-#: :class:`GraphEdge` uses.
+#: at unit-test time. (The graph ``kind`` columns dropped this
+#: derived-tuple pattern when T1 #2534 opened their vocabularies;
+#: ``change_kind`` remains a genuinely closed enum.)
 _GRAPH_HISTORY_CHANGE_KINDS: tuple[str, ...] = tuple(k.value for k in GraphHistoryChangeKind)
 
 
@@ -2469,12 +2567,133 @@ class GraphEdgeHistory(Base):
     )
 
 
+class AgentAnnouncement(Base):
+    """An append-only durable record of one agent-authored announcement.
+
+    Broadcast v2 Initiative #2543, Task #2547 (T2). The durable home for
+    the coordination *intent* an agent publishes via
+    ``meho.broadcast.announce``. Until this table, an announcement lived
+    only on the count-trimmed per-tenant Valkey stream
+    (``BROADCAST_MAXLEN`` = 10000) which the broadcast subchart runs with
+    persistence disabled (``save ""`` / ``appendonly no``) -- so a Valkey
+    restart wiped the whole coordination window and cross-shift
+    coordination ("does this conflict with what agent A said yesterday?")
+    had no substrate. This row is that substrate: the stream stays the
+    hot real-time path, this table is the archive
+    (``meho.broadcast.recent`` backfills from here when the requested
+    window predates the stream's oldest surviving entry).
+
+    Append-only by contract: the application never issues an UPDATE
+    against this table, and the only DELETE is the retention prune
+    (:mod:`meho_backplane.broadcast.announcement_retention`) which drops
+    rows older than ``broadcast_announcement_retention_days`` in one
+    audited bounded batch per tick -- the same mold as
+    :class:`GraphNodeHistory` / :class:`GraphEdgeHistory` (migration
+    ``0012``, prune :mod:`meho_backplane.topology.history_retention`).
+
+    Row identity is the real per-announcement UUID (#2479 / #2547): the
+    ``id`` minted at publish time is written both here (as the PK) and
+    onto the stream entry's JSON as ``event_id``, so a reader correlating
+    the two surfaces sees one stable UUID. This finally makes the
+    announce return's ``event_id`` (the UUID) genuinely distinct from
+    ``cursor`` (the Valkey stream entry id) -- historically they were the
+    same mislabelled cursor.
+
+    Schema decisions:
+
+    * ``id`` -- ``UUID`` PK, minted Python-side at publish
+      (:class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`'s
+      ``event_id`` default). Not a ``BIGSERIAL`` like the history tables:
+      the value must be known *before* the row is written so the same
+      UUID can ride the stream entry, which a server-assigned counter
+      cannot provide without a read-back round-trip.
+    * ``tenant_id`` -- ``UUID`` NOT NULL with a real
+      ``REFERENCES tenant(id)`` FK. Brand-new substrate, no chassis-era
+      rows -- same rationale as :class:`GraphNodeHistory.tenant_id`.
+    * ``principal_sub`` -- ``Text`` NOT NULL. The announcing operator's
+      JWT ``sub`` claim, copied verbatim from the event.
+    * ``activity`` -- ``Text`` NOT NULL. The free-text announcement body.
+      Persisted raw; the untrusted-content envelope is applied on the
+      read/serve boundary (:func:`dump_event_wire`), not in storage.
+    * ``target`` -- ``Text`` nullable. The legacy single-target
+      attribution (T1 #2544). Persisted alongside ``targets`` so a row
+      is a faithful archive of the event even for pre-``targets``
+      announcements.
+    * ``scope`` -- ``Text`` nullable. Optional free-form scope hint.
+    * ``targets`` -- portable ``JSON`` -> ``JSONB`` NOT NULL DEFAULT
+      ``[]``. The typed multi-target claim list (T1 #2544).
+    * ``phase`` -- ``Text`` NOT NULL. ``"start"`` / ``"update"`` /
+      ``"completion"``; no DB-side CHECK (the pydantic ``Literal`` on the
+      event is the boundary guard, and a future phase value should not
+      require a migration to land on the archive).
+    * ``planned_op_class`` -- ``Text`` nullable. The declared intent
+      op-class (T1 #2544).
+    * ``ttl_minutes`` -- ``Integer`` nullable. The claim lifetime;
+      readers derive ``expires_at = created_at + ttl_minutes``.
+    * ``work_ref`` -- ``Text`` nullable. Opaque change-ticket reference,
+      same convention as :attr:`AgentRun.work_ref`.
+    * ``run_id`` -- ``UUID`` nullable. The agent run the announcement
+      belongs to (T1 #2544 / lineage #2545). Soft reference, no FK --
+      the run may live in a different retention window than the archive.
+    * ``created_at`` -- ``timestamptz`` NOT NULL. The event's server-side
+      ``ts`` (handler entry wall clock), carried verbatim so the archive
+      timeline matches the stream timeline. PG-side ``now()`` server
+      default plus an ORM ``default`` for the SQLite dev/test path.
+
+    Indexes (declared at the migration layer, not here, because the
+    ``(tenant_id, created_at DESC)`` DESC ordering does not round-trip
+    through Alembic autogenerate -- same discipline as the history
+    tables):
+
+    * ``agent_announcement_tenant_created_at_idx`` --
+      ``(tenant_id, created_at DESC)``. Drives the recent-window archive
+      backfill (newest-first tenant scan) and the retention prune's
+      bounded ``created_at < cutoff`` delete.
+    * ``agent_announcement_tenant_work_ref_idx`` --
+      ``(tenant_id, work_ref)``. Drives the exact-match ``work_ref``
+      filter, mirroring :class:`AgentRun`'s
+      ``agent_run_tenant_work_ref_idx``.
+    """
+
+    __tablename__ = "agent_announcement"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    principal_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    activity: Mapped[str] = mapped_column(Text, nullable=False)
+    target: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    scope: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    targets: Mapped[list[str]] = mapped_column(
+        _PORTABLE_ARRAY,
+        nullable=False,
+        default=list,
+    )
+    phase: Mapped[str] = mapped_column(Text, nullable=False)
+    planned_op_class: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    ttl_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    work_ref: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(), nullable=True, default=None)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+
+
 class WebSession(Base):
     """One row per active BFF (Backend-for-Frontend) operator session.
 
     Initiative #337 (G10.0 Frontend chassis), Task #864 (T3). The
     operator-console is locked to the BFF custody shape per decision
-    #11 (``docs/planning/v0.2-decisions.md``): the browser holds an
+    #11 (``docs/decisions/locked-decisions.md``): the browser holds an
     opaque session-cookie value (the row's ``id``), the real OAuth
     access + refresh tokens live encrypted in this row, and every
     authenticated ``/ui/*`` request resolves operator identity by
@@ -5752,5 +5971,487 @@ class RunbookRunStepState(Base):
         sa.CheckConstraint(
             "state IN ('pending', 'in_progress', 'verified', 'failed')",
             name="ck_runbook_run_step_states_state",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sensor — the deterministic check layer's registration substrate
+# (Initiative #2416, Task #2503)
+# ---------------------------------------------------------------------------
+
+
+class SensorCadenceKind(StrEnum):
+    """Closed enum of the two cadence shapes a :class:`Sensor` may carry.
+
+    Initiative #2416 (parent goal #221), Task #2503. One ``sensor`` row
+    carries exactly one cadence, selected by this discriminator; the
+    invariant is enforced by the DB-side ``ck_sensor_cadence_fields``
+    CHECK that pairs each kind with its mandatory column (mirroring
+    :class:`ScheduledTriggerKind`).
+
+    Members:
+
+    * :attr:`INTERVAL` -- fire every ``interval_seconds`` (5..86400). The
+      sub-minute path #2505's interval-tick loop drives.
+    * :attr:`CRON` -- fire on a 5-field ``cron_expr`` in ``timezone``. The
+      >=1-minute path #2505 rides on #804's durable scheduler discipline.
+
+    Closed enum: widening it is a coordinated DB + model change so the
+    enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
+    ``0064``'s frozen tuple cannot drift.
+    """
+
+    INTERVAL = "interval"
+    CRON = "cron"
+
+
+class SensorStatus(StrEnum):
+    """Closed lifecycle status of a :class:`Sensor`.
+
+    ``ScheduledTriggerStatus`` minus the trigger-only terminal states:
+    a sensor is either eligible for evaluation (:attr:`ACTIVE`) or held
+    (:attr:`PAUSED`). This Task never writes ``paused`` -- ``status`` is
+    not accepted at create; #2505 parks a row to ``paused`` (plus a
+    ``status_reason``) when it hits an unparseable persisted cadence, and
+    #2506's rollup derives ``skip`` for paused rows.
+    """
+
+    ACTIVE = "active"
+    PAUSED = "paused"
+
+
+class SensorSeverity(StrEnum):
+    """Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
+
+    The per-sensor cap #2506 applies to the rollup: a ``degraded``-severity
+    sensor whose assertion fails contributes at most ``degraded``, a
+    ``critical`` one contributes ``critical``. The five-state vocabulary
+    itself is declared once in #2504's :data:`CheckState`; this is only
+    the two operator-selectable severities.
+    """
+
+    DEGRADED = "degraded"
+    CRITICAL = "critical"
+
+
+#: Closed ``sensor.cadence_kind`` vocabulary -- derived from
+#: :class:`SensorCadenceKind` so the enum and the DB-layer CHECK cannot
+#: drift. The drift guard in :mod:`tests.test_db_sensor` asserts equality
+#: at unit-test time; migration ``0064`` records its own frozen literal.
+_SENSOR_CADENCE_KINDS: tuple[str, ...] = tuple(k.value for k in SensorCadenceKind)
+
+#: Closed ``sensor.status`` vocabulary -- lock-step with :class:`SensorStatus`.
+_SENSOR_STATUSES: tuple[str, ...] = tuple(s.value for s in SensorStatus)
+
+#: Closed ``sensor.severity`` vocabulary -- lock-step with :class:`SensorSeverity`.
+_SENSOR_SEVERITIES: tuple[str, ...] = tuple(s.value for s in SensorSeverity)
+
+#: Closed ``sensor.last_state`` vocabulary -- the five-state check
+#: vocabulary declared once in #2504's :data:`CheckState`. ``db.models``
+#: does NOT re-declare it (no ``SensorState`` enum); ``last_state``'s
+#: CHECK is populated from ``CheckState``'s members and drift-guarded
+#: against them in :mod:`tests.test_db_sensor`.
+_SENSOR_LAST_STATES: tuple[str, ...] = get_args(CheckState)
+
+#: Discriminated-union invariant for the cadence union: exactly one of
+#: ``interval_seconds`` / ``cron_expr`` carries the semantics, the other
+#: is NULL. Portable ``(cadence_kind = '...' AND col IS NOT NULL AND
+#: other IS NULL)`` form -- no dialect-specific syntax. Migration
+#: ``0064`` records the same predicate as a frozen snapshot; the drift
+#: guard in :mod:`tests.test_db_sensor` asserts equality against this
+#: constant.
+_SENSOR_CADENCE_FIELDS_CHECK: str = (
+    "("
+    "(cadence_kind = 'interval' AND interval_seconds IS NOT NULL "
+    "AND cron_expr IS NULL) OR "
+    "(cadence_kind = 'cron' AND cron_expr IS NOT NULL "
+    "AND interval_seconds IS NULL)"
+    ")"
+)
+
+
+class Sensor(Base):
+    """One row per deterministic check the check layer evaluates.
+
+    Initiative #2416 (parent goal #221), Task #2503. The first persisted
+    entity of the check layer: a Sensor pins an ``(op + args + assertion
+    + cadence + severity)`` tuple that #2505's runner evaluates on a
+    schedule and #2506's Dashboard rolls up. Modelled on
+    :class:`ScheduledTrigger` (the durable-row mould) but a deliberately
+    separate table -- ``ScheduledTrigger.agent_definition_id`` is
+    ``NOT NULL`` with a real FK, so the trigger row structurally cannot
+    carry an op-based check.
+
+    Single-table cadence union
+    --------------------------
+
+    ``cadence_kind`` discriminates ``interval_seconds`` (the sub-minute
+    interval-tick path) from ``cron_expr`` + ``timezone`` (the >=1-minute
+    cron path). A DB-side ``CHECK`` (``ck_sensor_cadence_fields``)
+    enforces the invariant -- the right column populated, the other
+    NULL -- exactly as ``ck_scheduled_trigger_kind_fields`` does for the
+    trigger. ``next_fire_at`` is materialised at create for both kinds so
+    #2505's claim query (``status='active' AND next_fire_at <= now``) is
+    uniform; the composite partial index ``sensor_due_idx`` drives it.
+
+    Latest-state projection (not a results table)
+    ---------------------------------------------
+
+    Sensor results live as a projection ON the row -- ``last_state`` /
+    ``last_value`` / ``last_evidence`` / ``last_evaluated_at`` /
+    ``state_since`` -- the in-repo precedent #2327's scheduler skip-state
+    set. #2506's rollup and ``for:`` hold-time hysteresis need only the
+    current state and how long it has held (``state_since``), never
+    history; a results table would demand retention/pruning, speculative
+    until an operator asks for history. The named write path is one
+    repository function
+    (:func:`~meho_backplane.checks.repository.record_sensor_result`).
+
+    Storage-only
+    ------------
+
+    The model carries no transition logic (the discipline
+    :class:`ScheduledTrigger` / :class:`AgentRun` follow). The admin
+    service (:class:`~meho_backplane.checks.service.SensorAdminService`)
+    owns create/list/get/delete; #2505's runner owns claim/advance/park
+    and the ``record_sensor_result`` write; #2506 consumes the
+    projection.
+    """
+
+    __tablename__ = "sensor"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+    # Real REFERENCES tenant(id) FK -- clean-slate table, mould parity
+    # with ScheduledTrigger. An orphan sensor for a typo'd tenant id
+    # surfaces as IntegrityError at insert.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Operator-facing handle -- Sensors are first-class and referenced by
+    # Dashboards (#2506), so the name is unique per tenant (the
+    # ``sensor_tenant_name_idx`` unique index below).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Op identity: ``connector_id`` is parsed into (product, version,
+    # impl_id) and, with ``op_id``, resolves the EndpointDescriptor whose
+    # ``safety_level`` the create-time guard reads. Stored verbatim so
+    # #2505 dispatches the same op the operator registered.
+    connector_id: Mapped[str] = mapped_column(Text, nullable=False)
+    op_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # Portable dispatch target (a target UUID / descriptor the op is
+    # scoped to). ``none_as_null=True`` keeps SQL NULL distinct from the
+    # JSON literal ``'null'`` -- the discipline the trigger's
+    # ``event_filter`` uses.
+    target: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # Op params, NOT NULL default ``{}`` (an op with no extra params
+    # carries an empty dict, never NULL).
+    params: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+        default=dict,
+    )
+    # The assertion spec, NOT NULL. Validated at the wire by parsing into
+    # #2504's ``AssertionSpec`` (a bad path / comparator is a 422 at
+    # create); stored as the serialised dict. #2505 feeds it the op-result
+    # payload; #2506 renders the outcome.
+    assertion: Mapped[dict[str, object]] = mapped_column(
+        _PORTABLE_JSON,
+        nullable=False,
+    )
+    # Lifecycle status. Default ``active`` on insert; #2505 parks a row to
+    # ``paused`` (with a ``status_reason``). The runner only evaluates
+    # ``active`` rows.
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=SensorStatus.ACTIVE.value,
+    )
+    # Machine tag for why a row was parked -- written by #2505 when it
+    # parks a row with an unparseable persisted cadence. NULL on a healthy
+    # row.
+    status_reason: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    # Cadence discriminator -- exactly one of ``interval_seconds`` /
+    # ``cron_expr`` populated; the DB-side ``ck_sensor_cadence_fields``
+    # CHECK enforces the invariant.
+    cadence_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    interval_seconds: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        default=None,
+    )
+    cron_expr: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Per-sensor IANA timezone name for cron evaluation. Defaults to
+    # ``UTC`` (the same backstop the trigger's ``timezone`` uses).
+    timezone: Mapped[str] = mapped_column(Text, nullable=False, default="UTC")
+    # Materialised next-fire timestamp #2505's claim query scans. Set at
+    # create for both cadence kinds; indexed (with ``status``) via the
+    # partial ``sensor_due_idx``.
+    next_fire_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Worst rollup state a failing assertion may drive (#2506 caps the
+    # rollup at this). Default ``critical``.
+    severity: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default=SensorSeverity.CRITICAL.value,
+    )
+    # ``for:`` hold-time hysteresis input (#2506). Seconds a failing state
+    # must persist before it counts; NOT NULL default 0. Stored here
+    # because it is per-sensor configuration exactly like ``severity``.
+    for_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    # Latest-state projection (Decision D). ``last_state`` carries the
+    # five-state vocabulary #2504's ``CheckState`` declares (default
+    # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
+    # when the state changes so #2506's ``for:`` hysteresis can read how
+    # long the current state has held.
+    last_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="unknown",
+    )
+    # The observed scalar the comparator judged (``AssertionOutcome.value``
+    # is a JSON scalar, not a dict), or NULL when unknown.
+    last_value: Mapped[object | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    last_evidence: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    last_evaluated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    state_since: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        default=None,
+    )
+    # Identity ``sub`` #2505's runner dispatches under -- the sensor
+    # analogue of the trigger's ``__scheduler__`` sentinel.
+    identity_sub: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="__sensor__",
+    )
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # #2505's claim query scans ``WHERE status='active' ORDER BY
+        # next_fire_at``. Composite b-tree on (status, next_fire_at),
+        # partial on PG to only carry the rows the runner claims.
+        Index(
+            "sensor_due_idx",
+            "status",
+            "next_fire_at",
+            postgresql_using="btree",
+            postgresql_where=sa.text("status = 'active'"),
+        ),
+        # Tenant-scoped list (admin surface).
+        Index(
+            "sensor_tenant_idx",
+            "tenant_id",
+            "cadence_kind",
+            postgresql_using="btree",
+        ),
+        # Sensors are referenced by name from Dashboards (#2506); the name
+        # is unique within a tenant.
+        Index(
+            "sensor_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        sa.CheckConstraint(
+            _ck_in("cadence_kind", _SENSOR_CADENCE_KINDS),
+            name="ck_sensor_cadence_kind",
+        ),
+        sa.CheckConstraint(
+            _ck_in("status", _SENSOR_STATUSES),
+            name="ck_sensor_status",
+        ),
+        sa.CheckConstraint(
+            _ck_in("severity", _SENSOR_SEVERITIES),
+            name="ck_sensor_severity",
+        ),
+        # ``last_state`` over exactly #2504's ``CheckState`` members. The
+        # drift guard asserts this value set equals ``CheckState``.
+        sa.CheckConstraint(
+            _ck_in("last_state", _SENSOR_LAST_STATES),
+            name="ck_sensor_last_state",
+        ),
+        # Cadence discriminated-union invariant -- see
+        # :data:`_SENSOR_CADENCE_FIELDS_CHECK`.
+        sa.CheckConstraint(
+            _SENSOR_CADENCE_FIELDS_CHECK,
+            name="ck_sensor_cadence_fields",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dashboard -- named composition of Sensors with a five-state worst-of rollup
+# (Initiative #2416, Task #2506)
+# ---------------------------------------------------------------------------
+
+
+#: Closed ``check_dashboards.last_rollup_state`` vocabulary -- the five-state
+#: check vocabulary declared once in #2504's :data:`CheckState`. ``db.models``
+#: does NOT re-declare it; the memo column's CHECK is populated from
+#: ``CheckState``'s members, the same discipline ``sensor.last_state`` follows.
+_CHECK_DASHBOARD_ROLLUP_STATES: tuple[str, ...] = get_args(CheckState)
+
+
+class CheckDashboard(Base):
+    """One named, tenant-scoped composition of Sensors (#2506).
+
+    A Dashboard references member Sensors many-to-many through the
+    :class:`CheckDashboardSensor` association table (Sensors are defined once
+    by #2503 and referenced by many Dashboards). The serving rollup -- the
+    five-state worst-of fold over the members' latest-state projection -- is
+    **evaluated on read** (decision on #2506;
+    :mod:`meho_backplane.checks.rollup`), never materialised on this row.
+
+    ``last_rollup_state`` is a transition-detection memo shipped UNWRITTEN by
+    this Task: #2507's hook at #2505's persist seam is its only writer, and
+    this Task's read path never touches it. It exists now so the S5 (#2507)
+    green->non-green edge detector has a column to compare against without a
+    later migration.
+
+    Storage-only -- no rollup logic on the model (the discipline
+    :class:`Sensor` / :class:`ScheduledTrigger` follow). The admin service
+    (:class:`~meho_backplane.checks.dashboard_service.CheckDashboardAdminService`)
+    owns create / list / get / delete and computes the rollup on read.
+    """
+
+    __tablename__ = "check_dashboards"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    # Real REFERENCES tenant(id) FK -- clean-slate table, mould parity with
+    # Sensor / ScheduledTrigger. An orphan dashboard for a typo'd tenant id
+    # surfaces as IntegrityError at insert.
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("tenant.id"),
+        nullable=False,
+    )
+    # Operator-facing handle -- unique per tenant (the
+    # ``check_dashboard_tenant_name_idx`` unique index below).
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Transition-detection memo (#2507). Shipped unwritten by this Task; NULL
+    # until #2507's hook maintains it. The CHECK admits NULL plus the
+    # five-state vocabulary.
+    last_rollup_state: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(UTC),
+        onupdate=lambda: datetime.now(UTC),
+    )
+
+    __table_args__ = (
+        # Tenant-scoped list (admin surface).
+        Index(
+            "check_dashboard_tenant_idx",
+            "tenant_id",
+            postgresql_using="btree",
+        ),
+        # A Dashboard name is unique within a tenant (operator-facing handle).
+        Index(
+            "check_dashboard_tenant_name_idx",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_using="btree",
+        ),
+        # ``last_rollup_state`` over exactly #2504's ``CheckState`` members;
+        # NULL is admitted (the memo is unwritten until #2507).
+        sa.CheckConstraint(
+            _ck_in("last_rollup_state", _CHECK_DASHBOARD_ROLLUP_STATES),
+            name="ck_check_dashboards_last_rollup_state",
+        ),
+    )
+
+
+class CheckDashboardSensor(Base):
+    """Association row joining a :class:`CheckDashboard` to a member :class:`Sensor`.
+
+    The first pure many-to-many association table in the schema (no prior
+    ``secondary`` / ``sa.Table`` exists). Composite PK
+    ``(dashboard_id, sensor_id)`` is the natural join key; both columns are
+    real FKs with ``ondelete="CASCADE"`` (the :class:`RunbookRunStepState`
+    mould) so deleting a Dashboard or a Sensor removes only the memberships,
+    never the other side. Membership is set at Dashboard-create only -- there
+    is no PUT; an "edit" is delete + recreate (the trigger-immutability
+    posture).
+    """
+
+    __tablename__ = "check_dashboard_sensors"
+
+    dashboard_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("check_dashboards.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+    sensor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("sensor.id", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False,
+    )
+
+    __table_args__ = (
+        # Reverse lookup "which Dashboards reference this Sensor" + the index
+        # PG wants behind the ``sensor_id`` FK's cascade.
+        Index(
+            "check_dashboard_sensors_sensor_idx",
+            "sensor_id",
+            postgresql_using="btree",
         ),
     )

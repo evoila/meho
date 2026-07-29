@@ -616,7 +616,7 @@ in-process (same in-process-audit binding the REST routes get).
 | `GET` | `/ui/approvals/badge` | Live **pending** count for the app-shell bell. Always `status='pending'` — it counts actionable work, not history. |
 | `GET` | `/ui/approvals` | Content-negotiated. A normal navigation (no `HX-Request`) → the **full-page console**: status tabs (Pending / Approved / Rejected / Expired / All), a `work_ref` filter, and the decision-history list. The bell's `hx-get` (`HX-Request: true`) → the existing pending **panel** modal fragment (unchanged). (G10.8-T #1827) |
 | `GET` | `/ui/approvals/list` | Decision-history partial — the HTMX swap target for the status tabs / `work_ref` filter / "Load more" offset pager. Reuses `list_pending(status=…, work_ref=…, offset=…)`; `tab=all` passes `status=None`. Pages with a real offset, not the badge's 50-row glance cap. (G10.8-T #1827) |
-| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). |
+| `GET` | `/ui/approvals/{id}` | Request-detail modal. A pending row offers Approve/Deny; a **decided** row renders read-only with a decision banner ("Approved/Rejected by X at T"). The `proposed_effect` envelope renders **structurally** (#2447), not as raw JSON (below). |
 | `POST` | `/ui/approvals/{id}/approve` | Approve in-process + re-dispatch the parked op + fail-open broadcast. |
 | `POST` | `/ui/approvals/{id}/reject` | Reject in-process + broadcast; the op never runs. |
 
@@ -639,6 +639,28 @@ of the open Pending tab without a reload. The decision **reason** lives on
 the `audit_log` decision row, not the `ApprovalRequest` row, so the
 history view shows who/when (`reviewed_by` / `decided_at`) but not the
 free-text reason (an `audit_log` read deferred to a follow-up).
+
+### Structured `proposed_effect` render in the modal (#2447)
+
+`approvals/_modal.html` renders the parked `proposed_effect` envelope
+**structurally** rather than as one opaque JSON `<pre>`: a `safety_level`
+badge (mirroring the ops-launcher `safety_badge` mold — error for
+`dangerous`, warning for `caution`) + an `op_class` chip in the header;
+a `role="alert"` warning banner when `write_capability_warning` is set
+(#2331); an error banner when `preview_unavailable` is true, carrying
+`preview_error` (#1628); a reason-keyed notice when `preview_populated`
+is false (`credential_write_redacted` → elevated-risk redaction copy,
+`connector_did_not_populate` → a neutral "no preview" note, #2332); and a
+key-value table of the operation-specific fields (the bespoke `preview`,
+else the generic redaction-safe `params_echo`, #1856). The full envelope
+stays available behind a default-closed `Show raw JSON` `<details>`. The
+render is **generic** — no per-`op_id` branching; op semantics already
+live in the server-side preview builders (`operations/_preview.py`), so
+the modal just projects whatever keys the dispatcher stamped. Every key
+is read via `.get` on the real dict, so a missing key degrades cleanly
+under `StrictUndefined`. Template-only: no route, projection, or schema
+change (`render.project_request_to_view` already passes `proposed_effect`
+through verbatim).
 
 ## Broadcast events (T5)
 

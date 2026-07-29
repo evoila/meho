@@ -16,7 +16,7 @@ Copyright (c) 2026 evoila Group
 
 MEHO ships two layers of operating instructions; they meet a local
 session from different angles, and the split is locked by
-[decision #5](../../planning/v0.2-decisions.md) of v0.2 planning:
+[decision #5](../../decisions/locked-decisions.md) of v0.2 planning:
 
 * **Layer 1 — server-side tenant conventions.** Database-backed
   rules an admin curates per tenant (`meho conventions list/show/
@@ -357,7 +357,7 @@ template will lead the change.
 * Template: [`CLAUDE.md`](./CLAUDE.md) in this directory.
 * Directory README: [`README.md`](./README.md).
 * Decision #5 (Layer 2 ship):
-  [`docs/planning/v0.2-decisions.md`](../../planning/v0.2-decisions.md).
+  [`docs/decisions/locked-decisions.md`](../../decisions/locked-decisions.md).
 * Parent Initiative:
   [G7.1 #229](https://github.com/evoila/meho/issues/229).
 * MCP client setup (the realm-side + client-side wire-up the

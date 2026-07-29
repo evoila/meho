@@ -24,9 +24,33 @@ from meho_backplane.runner.wire import RunnerResult
 
 __all__ = [
     "get_assignment_row",
+    "get_stale_markers",
     "ingest_results",
     "upsert_assignment_row",
 ]
+
+
+async def get_stale_markers(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+) -> dict[str, datetime | None]:
+    """Return ``{runner_name: stale_at}`` for every assignment row of a tenant.
+
+    One assignment row exists per ``(tenant_id, runner_name)`` (unique index),
+    so the map has one entry per runner that has ever been assigned work. A
+    non-``None`` ``stale_at`` is the #2501 dead-man flip marker (the central
+    sweeper declared the runner's workloads unknown); ``None`` is fresh. A
+    runner with no assignment row is simply absent from the map — the caller
+    treats "absent" as "never assigned, not stale". Read-only; the caller owns
+    the (read-only) transaction.
+    """
+    result = await session.execute(
+        select(RunnerAssignmentRow.runner_name, RunnerAssignmentRow.stale_at).where(
+            RunnerAssignmentRow.tenant_id == tenant_id
+        )
+    )
+    return dict(result.tuples().all())
 
 
 async def get_assignment_row(

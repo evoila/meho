@@ -5,13 +5,13 @@ Copyright (c) 2026 evoila Group
 
 # Migrating the consumer's `kb/` to MEHO — operator runbook
 
-> Operator-facing runbook for the G4.1 knowledge-base surface. Architecture sits in [`docs/architecture/kb.md`](../architecture/kb.md); this doc is the cookbook the operator follows to point MEHO at the consumer's `kb/`, verify ingestion, run the ≥1-month overlap, and retire the in-repo copy. Implements [decision #2](../planning/v0.2-decisions.md): "one-shot import + 1-month overlap; retire when daily use shifts."
+> Operator-facing runbook for the G4.1 knowledge-base surface. Architecture sits in [`docs/architecture/kb.md`](../architecture/kb.md); this doc is the cookbook the operator follows to point MEHO at the consumer's `kb/`, verify ingestion, run the ≥1-month overlap, and retire the in-repo copy. Implements [decision #2](../decisions/locked-decisions.md): "one-shot import + 1-month overlap; retire when daily use shifts."
 
 ## Why this matters
 
 - The consumer's [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc) repo carries a `kb/` directory — the team's distilled vendor knowledge (vCenter / NSX / Vault / Keycloak / k8s / Argo / Harbor / general; ~44 entries at the time of writing, and growing).
 - Today every operator's Claude session relies on the repo being cloned and `grep kb/`. New knowledge reaches the team only via PR review + clone. **Two operators landing the same kb entry independently is a real failure mode.**
-- Per [decision #2](../planning/v0.2-decisions.md): MEHO ingests the corpus once; the repo `kb/` stays live as the fallback for ≥1 month; the in-repo copy retires only when `meho kb search` is in daily use and the team agrees. There is no auto-retirement — the retire decision is an explicit operator call backed by the G4.3 eval.
+- Per [decision #2](../decisions/locked-decisions.md): MEHO ingests the corpus once; the repo `kb/` stays live as the fallback for ≥1 month; the in-repo copy retires only when `meho kb search` is in daily use and the team agrees. There is no auto-retirement — the retire decision is an explicit operator call backed by the G4.3 eval.
 
 The entry count is a moving target — the canary acceptance test asserts the body-hash idempotency property, not a fixed cardinality. Treat "44" below as "however many `*.md` files the consumer's `kb/` currently holds".
 
@@ -145,6 +145,6 @@ Ephemeral session notes do **not** belong in the kb — those go in `add_to_memo
 
 - [`docs/architecture/kb.md`](../architecture/kb.md) — the architecture companion: module shape, `KbService` method map, the four surfaces, RBAC matrix.
 - [Initiative #331 G4.1](https://github.com/evoila/meho/issues/331) — scope + definition of done.
-- [decision #2](../planning/v0.2-decisions.md) — one-shot import + 1-month overlap.
+- [decision #2](../decisions/locked-decisions.md) — one-shot import + 1-month overlap.
 - [Initiative #373 G4.3](https://github.com/evoila/meho/issues/373) — retrieval migration tooling (eval + retire-checklist) that operationalises the retire decision.
 - [`docs/cross-repo/README.md`](./README.md) — the index of cross-repo coordination specs and operator runbooks this doc is listed in.

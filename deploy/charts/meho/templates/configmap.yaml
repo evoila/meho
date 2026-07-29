@@ -47,6 +47,17 @@ data:
   # actionable public-client error rather than silently misusing
   # `KEYCLOAK_AUDIENCE` (the confidential resource-server id).
   KEYCLOAK_CLI_CLIENT_ID: {{ .Values.config.keycloakCliClientId | quote }}
+  # #2594 (Goal #336) — public client_id of the confidential `meho-web`
+  # client the operator-console browser BFF login runs its OAuth 2.1
+  # authorization-code grant against. Unconditionally emitted so the
+  # env-var contract stays stable; the console gate
+  # (`meho_backplane.features._ui_surface_block`) needs this AND the two
+  # `uiConsole` secrets (`UI_KEYCLOAK_CLIENT_SECRET` /
+  # `UI_SESSION_ENCRYPTION_KEY`, wired via secretKeyRef in the Deployment)
+  # non-empty, so an empty value here keeps the console cleanly disabled
+  # (`503 ui_oauth_not_configured`) without touching `/api/*` or the CLI's
+  # `KEYCLOAK_CLI_CLIENT_ID` device-code flow.
+  UI_KEYCLOAK_CLIENT_ID: {{ .Values.config.uiKeycloakClientId | quote }}
   KEYCLOAK_JWKS_CACHE_TTL_SECONDS: {{ .Values.config.keycloakJwksCacheTtlSeconds | quote }}
   KEYCLOAK_JWT_LEEWAY_SECONDS: {{ .Values.config.keycloakJwtLeewaySeconds | quote }}
   # Emitted only for a Vault-backend install (Initiative #2227). A
@@ -116,6 +127,17 @@ data:
   # literals. See `deploy/charts/meho/values.yaml`
   # (`config.targetSsrfAllowlist`) and `docs/codebase/target-ssrf-guard.md`.
   MEHO_TARGET_SSRF_ALLOWLIST: {{ .Values.config.targetSsrfAllowlist | quote }}
+  # Initiative #2405 net.* diagnostics probe allowlist — the INVERTED
+  # sibling of the SSRF guard above: allow-only-what-is-listed, so the
+  # default `""` denies every probe (the connector is inert until an
+  # operator opts a range in). Read per probe from the environment by
+  # `backend/src/meho_backplane/connectors/net/allowlist.py`
+  # (`PROBE_ALLOWLIST_ENV`) — NOT via settings.py. Rendered
+  # unconditionally: the default `""` keeps the connector fail-closed.
+  # Comma-separated CIDRs / bare IPs / hostname literals. See
+  # `deploy/charts/meho/values.yaml` (`netdiag.probeAllowlist`) and
+  # `docs/codebase/connectors-net-diagnostics.md`.
+  MEHO_NETDIAG_PROBE_ALLOWLIST: {{ .Values.netdiag.probeAllowlist | quote }}
   # Async ingest-job watchdog budget (#2318, hardens #2275). #2275
   # time-boxes each background OpenAPI-ingest job in `asyncio.timeout(...)`
   # so a wedged pipeline can't sit at `status=running` until a pod restart;
@@ -182,3 +204,11 @@ data:
   TOPOLOGY_HISTORY_RETENTION_DAYS: {{ .Values.topology.historyRetentionDays | quote }}
   TOPOLOGY_HISTORY_PRUNE_INTERVAL_SECONDS: {{ .Values.topology.historyPruneIntervalSeconds | quote }}
   TOPOLOGY_HISTORY_PRUNE_ENABLED: {{ .Values.topology.historyPruneEnabled | quote }}
+  # Broadcast v2 T2 (#2547) — durable-announcement retention knobs. The
+  # env-var names are the backplane's contract
+  # (`backend/src/meho_backplane/settings.py`). `retentionDays: 0` is the
+  # keep-forever sentinel; `pruneEnabled: false` skips starting the
+  # in-process prune loop entirely.
+  BROADCAST_ANNOUNCEMENT_RETENTION_DAYS: {{ .Values.broadcastAnnouncement.retentionDays | quote }}
+  BROADCAST_ANNOUNCEMENT_PRUNE_INTERVAL_SECONDS: {{ .Values.broadcastAnnouncement.pruneIntervalSeconds | quote }}
+  BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED: {{ .Values.broadcastAnnouncement.pruneEnabled | quote }}

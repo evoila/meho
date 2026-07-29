@@ -863,6 +863,90 @@ func TestSummariseEvent(t *testing.T) {
 	}
 }
 
+// TestHumanLine_Announcement — an agent-authored announcement frame
+// (kind == "agent_announcement", carrying none of the op fields) decodes
+// without error (#2549: the CLI tolerates the new frame kind) and renders
+// a legible line with the "announce" marker, the phase, and the activity.
+func TestHumanLine_Announcement(t *testing.T) {
+	target := "cluster-x"
+	cases := []struct {
+		name     string
+		event    broadcastEvent
+		wantSubs []string
+	}{
+		{
+			name: "kind discriminator with target",
+			event: broadcastEvent{
+				Kind:         "agent_announcement",
+				TS:           time.Date(2026, 5, 13, 14, 23, 1, 0, time.UTC),
+				PrincipalSub: "agent-bot",
+				Phase:        "start",
+				Activity:     "rotating tokens on cluster X",
+				Target:       &target,
+			},
+			wantSubs: []string{"announce", "start", "rotating tokens on cluster X", "target=cluster-x"},
+		},
+		{
+			name: "event_kind alias, targets list, default phase",
+			event: broadcastEvent{
+				EventKind:    "agent_announcement",
+				TS:           time.Date(2026, 5, 13, 14, 23, 1, 0, time.UTC),
+				PrincipalSub: "agent-bot",
+				Activity:     "investigating latency",
+				Targets:      []string{"kube-a", "kube-b"},
+			},
+			wantSubs: []string{"announce", "update", "investigating latency", "kube-a, kube-b"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			data, err := json.Marshal(c.event)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			got, err := humanLine(string(data))
+			if err != nil {
+				t.Fatalf("humanLine: %v", err)
+			}
+			if !strings.HasPrefix(got, "2026-05-13T14:23:01Z") {
+				t.Errorf("line %q missing RFC3339 timestamp prefix", got)
+			}
+			for _, sub := range c.wantSubs {
+				if !strings.Contains(got, sub) {
+					t.Errorf("line %q missing %q", got, sub)
+				}
+			}
+		})
+	}
+}
+
+// TestAnnouncementTargets — the target attribution joiner across the
+// single “target“ and the “targets[]“ list.
+func TestAnnouncementTargets(t *testing.T) {
+	single := "cluster-x"
+	cases := []struct {
+		name  string
+		event broadcastEvent
+		want  string
+	}{
+		{name: "none", event: broadcastEvent{}, want: ""},
+		{name: "single only", event: broadcastEvent{Target: &single}, want: "cluster-x"},
+		{name: "list only", event: broadcastEvent{Targets: []string{"a", "b"}}, want: "a, b"},
+		{
+			name:  "single plus list",
+			event: broadcastEvent{Target: &single, Targets: []string{"a", "b"}},
+			want:  "cluster-x, a, b",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := announcementTargets(c.event); got != c.want {
+				t.Errorf("announcementTargets = %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 // client returns an http.Client that hits the fake feed without
 // going through the OS-level routing table — needed when the test
 // runs inside a Docker container where the httptest URL points to

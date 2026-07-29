@@ -51,26 +51,20 @@
 
     {# ----- Step id + type ----- #}
     <div class="flex flex-wrap gap-4">
-      <label class="form-control flex-1 min-w-48">
-        <div class="label py-0">
-          <span class="label-text font-medium">Step id</span>
-          <span class="label-text-alt opacity-60">lowercase, hyphens, unique</span>
-        </div>
-        <input type="text" class="input input-bordered input-sm font-mono"
+      <label class="flex flex-col gap-1 flex-1 min-w-48">
+        <span class="text-sm font-medium">Step id</span>
+        <input type="text" class="input input-bordered input-sm font-mono w-full"
                x-model="step.id"
                pattern="[a-z][a-z0-9\-]{0,63}"
                placeholder="drain-node"
                autocomplete="off"
                x-bind:aria-label="'Step ' + (idx + 1) + ' id'" />
-        <div class="label py-0" x-show="stepIdError(idx)">
-          <span class="label-text-alt text-error" x-text="stepIdError(idx)"></span>
-        </div>
+        <span class="text-xs opacity-60">lowercase, hyphens, unique</span>
+        <span class="text-xs text-error" x-show="stepIdError(idx)" x-text="stepIdError(idx)"></span>
       </label>
-      <label class="form-control min-w-48">
-        <div class="label py-0">
-          <span class="label-text font-medium">Type</span>
-        </div>
-        <select class="select select-bordered select-sm" x-model="step.type"
+      <label class="flex flex-col gap-1 min-w-48">
+        <span class="text-sm font-medium">Type</span>
+        <select class="select select-bordered select-sm w-full" x-model="step.type"
                 x-bind:aria-label="'Step ' + (idx + 1) + ' type'">
           <option value="manual">manual</option>
           <option value="operation_call">operation_call</option>
@@ -79,33 +73,29 @@
     </div>
 
     {# ----- Step title ----- #}
-    <label class="form-control">
-      <div class="label py-0"><span class="label-text font-medium">Title</span></div>
-      <input type="text" class="input input-bordered input-sm"
+    <label class="flex flex-col gap-1">
+      <span class="text-sm font-medium">Title</span>
+      <input type="text" class="input input-bordered input-sm w-full"
              x-model="step.title" placeholder="Drain the node" autocomplete="off"
              x-bind:aria-label="'Step ' + (idx + 1) + ' title'" />
     </label>
 
     {# ----- operation_call: op_id + params ----- #}
     <div x-show="step.type === 'operation_call'" x-cloak class="space-y-3">
-      <label class="form-control">
-        <div class="label py-0">
-          <span class="label-text font-medium">Operation id</span>
-          <span class="label-text-alt opacity-60">registry op_id (free text)</span>
-        </div>
-        <input type="text" class="input input-bordered input-sm font-mono"
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Operation id</span>
+        <input type="text" class="input input-bordered input-sm font-mono w-full"
                x-model="step.op_id" placeholder="vmware.composite.vm.create"
                autocomplete="off"
                x-bind:aria-label="'Step ' + (idx + 1) + ' operation id'" />
+        <span class="text-xs opacity-60">registry op_id (free text)</span>
       </label>
-      <label class="form-control">
-        <div class="label py-0">
-          <span class="label-text font-medium">Params (JSON)</span>
-          <span class="label-text-alt opacity-60">${run.target} / ${run.params.X} only</span>
-        </div>
-        <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="3"
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Params (JSON)</span>
+        <textarea class="textarea textarea-bordered textarea-sm font-mono w-full" rows="3"
                   x-model="step.params" placeholder="{}"
                   x-bind:aria-label="'Step ' + (idx + 1) + ' params'"></textarea>
+        <span class="text-xs opacity-60">${run.target} / ${run.params.X} only</span>
       </label>
     </div>
 
@@ -140,8 +130,8 @@
     <div class="border-base-300 border-t pt-3 space-y-3">
       <div class="flex flex-wrap items-end gap-4">
         <p class="text-xs font-semibold uppercase tracking-wide opacity-60">Verify</p>
-        <label class="form-control min-w-48">
-          <select class="select select-bordered select-sm" x-model="step.verify.type"
+        <label class="flex flex-col gap-1 min-w-48">
+          <select class="select select-bordered select-sm w-full" x-model="step.verify.type"
                   x-bind:aria-label="'Step ' + (idx + 1) + ' verify type'">
             <option value="confirm">confirm</option>
             <option value="operation_call">operation_call</option>
@@ -150,38 +140,34 @@
       </div>
 
       {# confirm: a single prompt #}
-      <label class="form-control" x-show="step.verify.type === 'confirm'">
-        <div class="label py-0"><span class="label-text font-medium">Prompt</span></div>
-        <input type="text" class="input input-bordered input-sm"
+      <label class="flex flex-col gap-1" x-show="step.verify.type === 'confirm'">
+        <span class="text-sm font-medium">Prompt</span>
+        <input type="text" class="input input-bordered input-sm w-full"
                x-model="step.verify.prompt" placeholder="Node drained?" autocomplete="off"
                x-bind:aria-label="'Step ' + (idx + 1) + ' verify prompt'" />
       </label>
 
       {# operation_call: op_id + params + expect #}
       <div x-show="step.verify.type === 'operation_call'" x-cloak class="space-y-3">
-        <label class="form-control">
-          <div class="label py-0"><span class="label-text font-medium">Operation id</span></div>
-          <input type="text" class="input input-bordered input-sm font-mono"
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Operation id</span>
+          <input type="text" class="input input-bordered input-sm font-mono w-full"
                  x-model="step.verify.op_id" placeholder="vmware.cert.status"
                  autocomplete="off"
                  x-bind:aria-label="'Step ' + (idx + 1) + ' verify operation id'" />
         </label>
-        <label class="form-control">
-          <div class="label py-0">
-            <span class="label-text font-medium">Params (JSON)</span>
-          </div>
-          <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="2"
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Params (JSON)</span>
+          <textarea class="textarea textarea-bordered textarea-sm font-mono w-full" rows="2"
                     x-model="step.verify.params" placeholder="{}"
                     x-bind:aria-label="'Step ' + (idx + 1) + ' verify params'"></textarea>
         </label>
-        <label class="form-control">
-          <div class="label py-0">
-            <span class="label-text font-medium">Expect (JSON)</span>
-            <span class="label-text-alt opacity-60">structural-equality match</span>
-          </div>
-          <textarea class="textarea textarea-bordered textarea-sm font-mono" rows="2"
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Expect (JSON)</span>
+          <textarea class="textarea textarea-bordered textarea-sm font-mono w-full" rows="2"
                     x-model="step.verify.expect" placeholder="{}"
                     x-bind:aria-label="'Step ' + (idx + 1) + ' verify expect'"></textarea>
+          <span class="text-xs opacity-60">structural-equality match</span>
         </label>
       </div>
     </div>

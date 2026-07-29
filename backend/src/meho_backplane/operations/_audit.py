@@ -48,6 +48,7 @@ from meho_backplane.operations._errors import status_code_for_result
 
 __all__ = [
     "AgentRunAuditMeta",
+    "BroadcastLineage",
     "agent_run_audit_meta_var",
     "agent_session_id_var",
     "audit_and_broadcast_safe",
@@ -55,6 +56,8 @@ __all__ = [
     "policy_decision_var",
     "publish_broadcast",
     "resolve_agent_session_id",
+    "resolve_broadcast_lineage",
+    "reveal_secret_var",
     "run_id_var",
     "step_id_var",
     "work_ref_var",
@@ -184,6 +187,24 @@ policy_decision_var: ContextVar[str | None] = ContextVar(
 )
 
 
+#: ContextVar carrying the ``reveal_secret`` opt-in for a ``credential_read``
+#: dispatch (#2467). Bound in
+#: :func:`~meho_backplane.operations.dispatcher.dispatch` with a
+#: token/finally reset scoping it to the dispatch -- the same
+#: bound-at-a-boundary / read-at-the-write-call-site discipline as
+#: :data:`policy_decision_var`. Read by :func:`_build_audit_payload`, which
+#: stamps ``payload["reveal_secret"]`` so "which credential reads returned a
+#: raw value vs. the default key-name-scrubbed response" is queryable on the
+#: audit row. ``True`` = caller opted into the raw value; ``False`` = the
+#: default scrubbed response was returned; ``None`` (the value for every
+#: non-credential_read dispatch, and for pre-gate usage errors) leaves the
+#: key absent.
+reveal_secret_var: ContextVar[bool | None] = ContextVar(
+    "reveal_secret",
+    default=None,
+)
+
+
 def resolve_agent_session_id() -> uuid.UUID | None:
     """Resolve the effective session id for audit lineage on the current task.
 
@@ -225,6 +246,43 @@ def resolve_agent_session_id() -> uuid.UUID | None:
     except ValueError:
         _log.warning("audit_lineage_malformed_mcp_session_id", value=raw)
         return None
+
+
+@dataclass(frozen=True, slots=True)
+class BroadcastLineage:
+    """The publish-site lineage keys projected onto a broadcast event.
+
+    A single read of the three contextvars the sibling audit-row writer
+    (:func:`write_audit_row`) already consumes, packaged so every
+    :class:`~meho_backplane.broadcast.events.BroadcastEvent` construction
+    site projects the same actor / session / work_ref lineage the durable
+    ``audit_log`` row records for the same operation. Frozen so the value
+    handed to a construction site cannot drift between read and use.
+    """
+
+    actor_sub: str | None
+    agent_session_id: uuid.UUID | None
+    work_ref: str | None
+
+
+def resolve_broadcast_lineage() -> BroadcastLineage:
+    """Read the current task's lineage contextvars for a broadcast event.
+
+    Mirrors :func:`write_audit_row`'s three reads so the real-time
+    broadcast carries the same lineage the audit row does: the RFC 8693
+    actor (:func:`~meho_backplane.auth.delegation.resolve_actor_sub`), the
+    agent-run session (:data:`agent_session_id_var`), and the external
+    change-ticket reference (:data:`work_ref_var`). All three default to
+    ``None`` outside a delegated / agent-run / work-ref-bound context —
+    the correct value for a direct human request, which is why a
+    delegated agent's work now broadcasts under ``actor_sub`` = the agent
+    while ``principal_sub`` stays the human.
+    """
+    return BroadcastLineage(
+        actor_sub=resolve_actor_sub(),
+        agent_session_id=agent_session_id_var.get(),
+        work_ref=work_ref_var.get(),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,14 +436,37 @@ def _build_audit_payload(
         # a UUID-as-str, ``total_rows`` an int, ``sample_rows_returned``
         # an int) so the dict merges into the JSON payload verbatim.
         payload.update(handle_metadata)
-    # G11.4-T5 #1074 -- agent-run attribution. The session id mirror in
-    # the JSON payload is for the broadcast-event surface (consumers
-    # parse ``payload``); the canonical lineage key lives in the real
-    # ``audit_log.agent_session_id`` column (migration ``0014`` /
-    # G8.2-T1 #1009), written by :func:`write_audit_row`. ``model`` /
-    # ``provider`` / ``cost`` carry only in the payload -- the
-    # ``agent_run`` row holds the durable copy; this snapshot is the
-    # per-row attribution slice.
+    # Contextvar-bound lineage mirrors (agent-run attribution, runbook
+    # correlation, credential_read reveal choice) for the broadcast-event
+    # surface; the canonical values live in dedicated ``audit_log`` columns.
+    _apply_contextvar_lineage_mirrors(payload)
+    # Handler-bound extras last so a handler can intentionally override
+    # a default (e.g. a future per-op result_status override); the
+    # default keys are documented + load-bearing for audit consumers,
+    # so this layering is the explicit knob, not an accidental coupling.
+    payload.update(_resolve_audit_extras_from_contextvars())
+    return payload
+
+
+def _apply_contextvar_lineage_mirrors(payload: dict[str, Any]) -> None:
+    """Mirror the dispatch's contextvar-bound lineage keys into *payload*.
+
+    The canonical values live in dedicated ``audit_log`` columns (written
+    by :func:`write_audit_row`); these JSON-payload mirrors exist for the
+    broadcast-event surface, whose consumers parse ``payload`` rather than
+    the columns. Each key is present only when its contextvar is bound:
+
+    * agent-run attribution (G11.4-T5 #1074) -- ``agent_session_id`` plus
+      the ``model`` / ``provider`` / ``cost`` from the active
+      :class:`AgentRunAuditMeta` snapshot (the ``agent_run`` row holds the
+      durable copy; this is the per-row attribution slice);
+    * runbook correlation (G12.1-T2 #1294) -- ``run_id`` / ``step_id``,
+      ``None`` outside a runbook step execution;
+    * credential_read reveal choice (#2467) -- ``reveal_secret`` (bool),
+      bound only for a credential_read dispatch (``True`` = the caller
+      opted into the raw value, ``False`` = the default key-name-scrubbed
+      response), so the key stays absent for every other op.
+    """
     agent_session_id = agent_session_id_var.get()
     if agent_session_id is not None:
         payload["agent_session_id"] = str(agent_session_id)
@@ -402,23 +483,15 @@ def _build_audit_payload(
             # example) through verbatim. JSON-incompatible shapes are
             # the meta producer's responsibility, not this layer's.
             payload["agent_cost"] = str(meta.cost) if isinstance(meta.cost, Decimal) else meta.cost
-    # G12.1-T2 #1294 -- runbook correlation. The run_id / step_id mirrors in
-    # the JSON payload serve the broadcast-event surface (consumers parse
-    # ``payload``); the canonical columns live on ``audit_log.run_id`` /
-    # ``audit_log.step_id`` (migration ``0034`` / G12.1-T1 #1292), written
-    # by :func:`write_audit_row`. ``None`` outside a runbook step execution.
     run_id = run_id_var.get()
     if run_id is not None:
         payload["run_id"] = str(run_id)
     step_id = step_id_var.get()
     if step_id is not None:
         payload["step_id"] = step_id
-    # Handler-bound extras last so a handler can intentionally override
-    # a default (e.g. a future per-op result_status override); the
-    # default keys are documented + load-bearing for audit consumers,
-    # so this layering is the explicit knob, not an accidental coupling.
-    payload.update(_resolve_audit_extras_from_contextvars())
-    return payload
+    reveal_secret = reveal_secret_var.get()
+    if reveal_secret is not None:
+        payload["reveal_secret"] = reveal_secret
 
 
 def _resolve_target_id(target: Any) -> uuid.UUID | None:
@@ -574,6 +647,7 @@ async def publish_broadcast(
     )
     raw_target_name = getattr(target, "name", None) if target is not None else None
     target_name = raw_target_name if isinstance(raw_target_name, str) else None
+    lineage = resolve_broadcast_lineage()
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=datetime.now(UTC),
@@ -586,6 +660,9 @@ async def publish_broadcast(
         result_status=result_status,
         audit_id=audit_id,
         payload=payload,
+        actor_sub=lineage.actor_sub,
+        agent_session_id=lineage.agent_session_id,
+        work_ref=lineage.work_ref,
     )
     await publish_event(event)
 

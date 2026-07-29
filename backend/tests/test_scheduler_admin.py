@@ -1153,6 +1153,86 @@ async def test_mcp_create_rejects_event_trigger() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_create_cross_tenant_denied_for_non_platform_admin() -> None:
+    """A tenant-admin of A passing tenant_id=B via MCP is refused (cross-tenant IDOR).
+
+    meho.scheduler.create requires tenant_admin, so gating cross-tenant on
+    tenant_admin *rank* would be dead code -- any tenant-admin could schedule a
+    trigger into any tenant. Crossing the tenant boundary is a platform-level
+    capability; the MCP handler now enforces the SAME shared authz seam the REST
+    route uses (``authorize_tenant_scope``, the #1638 IDOR primitive), so a
+    non-platform tenant-admin is refused with
+    ``cross_tenant_requires_platform_admin`` and nothing is written to B.
+    """
+    from meho_backplane.mcp.server import McpInvalidParamsError
+    from meho_backplane.mcp.tools.scheduler import _create_handler  # type: ignore[attr-defined]
+
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_B, name="mcp-cross-bot")
+    operator = Operator(
+        sub="a-admin",
+        raw_jwt="dummy",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+    )
+    with pytest.raises(McpInvalidParamsError, match="cross_tenant_requires_platform_admin"):
+        await _create_handler(
+            operator,
+            {
+                "kind": "cron",
+                "agent_definition_id": str(def_id),
+                "cron_expr": "*/5 * * * *",
+                "inputs": {"prompt": "scheduled run"},
+                "tenant_id": str(_TENANT_B),
+            },
+        )
+    # And nothing was written into tenant B.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        rows = (
+            (
+                await session.execute(
+                    select(ScheduledTrigger).where(ScheduledTrigger.tenant_id == _TENANT_B)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_mcp_create_cross_tenant_allowed_for_platform_admin() -> None:
+    """A platform-admin may create a scheduled trigger under another tenant via MCP."""
+    from meho_backplane.mcp.tools.scheduler import _create_handler  # type: ignore[attr-defined]
+
+    def_id = await _seed_agent_definition(tenant_id=_TENANT_B, name="mcp-cross-ok-bot")
+    operator = Operator(
+        sub="platform-op",
+        raw_jwt="dummy",
+        tenant_id=_TENANT_A,
+        tenant_role=TenantRole.TENANT_ADMIN,
+        platform_admin=True,
+    )
+    result = await _create_handler(
+        operator,
+        {
+            "kind": "cron",
+            "agent_definition_id": str(def_id),
+            "cron_expr": "*/5 * * * *",
+            "inputs": {"prompt": "scheduled run"},
+            "tenant_id": str(_TENANT_B),
+        },
+    )
+    created_id = uuid.UUID(result["trigger_id"])
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(select(ScheduledTrigger).where(ScheduledTrigger.id == created_id))
+        ).scalar_one()
+    assert row.tenant_id == _TENANT_B
+
+
+@pytest.mark.asyncio
 async def test_mcp_cancel_returns_not_found_for_cross_tenant() -> None:
     """meho.scheduler.cancel against a cross-tenant id surfaces as not found."""
     from meho_backplane.mcp.server import McpInvalidParamsError

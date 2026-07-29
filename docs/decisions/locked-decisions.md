@@ -1,24 +1,26 @@
-# v0.2 Strategic Decisions
+# MEHO locked architecture decisions
 
-Captured during the v0.2 planning pass on 2026-05-12. These decisions are
-load-bearing for every Initiative under Goals [#214](https://github.com/evoila/meho/issues/214) (G3 connector parity), [#215](https://github.com/evoila/meho/issues/215) (G4 knowledge), [#216](https://github.com/evoila/meho/issues/216) (G5 memory), [#217](https://github.com/evoila/meho/issues/217) (G6 broadcast), [#218](https://github.com/evoila/meho/issues/218) (G7 conventions), [#219](https://github.com/evoila/meho/issues/219) (G8 audit query), [#220](https://github.com/evoila/meho/issues/220) (G9 topology + targets), and the foundational [#221](https://github.com/evoila/meho/issues/221) (G0 substrate).
+**MEHO's foundational decision register.** These are live, load-bearing
+architecture decisions that the codebase actively enforces — they are cited by
+~84 places across the backend source, four Alembic migrations, tests, and docs.
 
-Decisions stay live until contradicted by a new captured decision; do not
+> **On the numbering and the dates.** The register was first captured in a
+> planning pass on **2026-05-12** (it was previously titled "v0.2 Strategic
+> Decisions" and lived at `docs/planning/v0.2-decisions.md`). That origin is
+> historical — **the decisions themselves are not.** The `#N` numbering is
+> **load-bearing and stable**: code, migration docstrings, and docs cite these
+> by number (e.g. "decision #3"), so numbers are never reused or renumbered.
+> The v0.2-era planning scaffolding (release sequencing, issue-filing status)
+> was stripped when the register was rehomed here; what remains is the decisions
+> and the protocol for changing them.
+
+**Decisions stay live until contradicted by a new captured decision**; do not
 re-litigate without surfacing a `## Reopening discussion` block here first.
 
----
-
-## Decision context: the hidden Goal #221 (G0)
-
-Before any v0.2 feature work, four (then five) structural gaps in the v0.1 chassis must close:
-
-- **No tenancy** in JWT validation or audit_log scoping.
-- **No connector base** — Vault + Keycloak are bespoke modules with no shared ABC.
-- **No targets-as-data** — consumer's `targets.yaml` is file-on-disk, client-resolved.
-- **No retrieval substrate** — pgvector + fastembed for G4 (kb) and G5 (memory) share one pipeline.
-- **No MCP server front** — added late after decision #6 below flipped MCP from "deferred" to "in-scope for v0.2".
-
-Filed as Goal [#221](https://github.com/evoila/meho/issues/221) with 5 Initiatives: [#222](https://github.com/evoila/meho/issues/222) (tenant), [#223](https://github.com/evoila/meho/issues/223) (connector base), [#224](https://github.com/evoila/meho/issues/224) (targets-as-data), [#225](https://github.com/evoila/meho/issues/225) (retrieval substrate), [#226](https://github.com/evoila/meho/issues/226) (MCP bootstrap).
+New, self-contained decisions taken since this register are filed **one per
+file** in this directory (see `pgvector-superuser-prerequisite.md`,
+`shipped-spec-provenance.md`, `jsonflux-license.md`). This file remains the
+register for the foundational set, because its `#N` numbering is load-bearing.
 
 ---
 
@@ -221,42 +223,6 @@ Two transport options were evaluated for the GCP REST connector (G3.7-T4, #845):
 **Org-policy encoding:** SA JSON key fields (`private_key`, `private_key_id`, `client_email`, `client_id`, `auth_uri`, `token_uri`, `auth_provider_x509_cert_url`, `client_x509_cert_url`) are checked by `_gate_sa_key_refusal()` on every `auth_headers()` call. Any match raises `ValueError` with the target name and offending fields.
 
 **Recorded:** 2026-05-22 (G3.7-T4 #845).
-
----
-
-## Sequencing summary
-
-| Phase | Duration | Tracks | Initiatives shipping |
-|---|---|---|---|
-| Phase 0 | ~4 weeks | sequential (G0.1 first; then 4 parallel) | #222 → #223 + #224 + #225 + #226 |
-| Phase 1 | ~6-8 weeks | 3 parallel | #227 (G3.1) ∥ #228 (G6.1) ∥ #229 (G7.1) |
-| Phase 2 | ~3-4 weeks | fan-in | G3.2/3 + G4.1 + G5.1 + G8.1 (Initiatives to be filed when approaching) |
-| Phase 3 | ~2-3 weeks | fan-in | G3 tier-3/4 + G9 full topology (Initiatives to be filed when approaching) |
-
-**Total: ~28 Initiatives across 8 Goals → ~130-160 Tasks for v0.2.** Adjusted up from a ~100-150 Task estimate based on three aggressive decisions (3 tracks, full G9, MCP-in-v0.2).
-
----
-
-## Filed under G0 (foundational substrate)
-
-- [#221](https://github.com/evoila/meho/issues/221) Goal G0 — foundational substrate
-- [#222](https://github.com/evoila/meho/issues/222) Initiative G0.1 — Tenant model (effort: medium)
-- [#223](https://github.com/evoila/meho/issues/223) Initiative G0.2 — Connector base + registry (effort: large)
-- [#224](https://github.com/evoila/meho/issues/224) Initiative G0.3 — Targets-as-data (effort: medium)
-- [#225](https://github.com/evoila/meho/issues/225) Initiative G0.4 — Retrieval substrate (effort: medium)
-- [#226](https://github.com/evoila/meho/issues/226) Initiative G0.5 — MCP server bootstrap (effort: large)
-
-## Filed under Phase-1 tracks
-
-- [#227](https://github.com/evoila/meho/issues/227) Initiative G3.1 — vSphere tier-1 connector (Track A; effort: large)
-- [#228](https://github.com/evoila/meho/issues/228) Initiative G6.1 — SSE feed core (Track B; effort: medium)
-- [#229](https://github.com/evoila/meho/issues/229) Initiative G7.1 — Tenant conventions + Layer 2 starter (Track C; effort: medium)
-
-## Not yet filed (drafted when each Phase approaches)
-
-Phase 2 candidates (numbering updated 2026-05-14 — G3.2 K8s renumbered, G4.2 closed/superseded): G3.2 K8s, G3.3 Vault op surface, G3.4 bind9, G3.5 tier-2 batch (NSX + SDDC + Harbor greenfield), ~~G4.2 docs sidecars (closed, superseded by G0.6 + G0.7)~~, G4.1 kb migration, G4.3 migration tooling, G5.1 memory storage + verbs, G5.2 auto-expiry + tenant-promotion, G5.3 laptop-local migration UX, G8.1 audit query core, G8.2 audit replay, G6.2 Slack mirror, G7.2 session preamble assembler polish, G6.3 PII opt-in/opt-out, **plus the new G0.6 + G0.7 substrate Initiatives that gate every generic-ingested connector**. (Per the architectural correction in §7 above, "MCP-tool-parity Tasks" no longer make sense — agent surface is meta-tools, not per-op tools.)
-
-Phase 3 candidates: G3.5/6 tier-3 (VCF mgmt plane + standalone), G3.7 tier-4 Holodeck, G9.1 graph schema + auto-discovery + 3 verbs, G9.2 curated cross-system edges + annotation flow, G9.3 discovery audit log → graph history.
 
 ---
 

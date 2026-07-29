@@ -17,7 +17,7 @@ import (
 	"github.com/evoila/meho/cli/internal/output"
 )
 
-// listEntry mirrors all 15 fields of the backend ConnectorListItem
+// listEntry mirrors all 17 fields of the backend ConnectorListItem
 // Pydantic model (operations/ingest/api_schemas.py): one row per
 // listed connector with parsed coordinates + tenant scope +
 // per-status group counts + the operation rollup — `operation_count`
@@ -74,6 +74,16 @@ type listEntry struct {
 	NextStep              *nextStep `json:"next_step"`
 	Kind                  string    `json:"kind"`
 	Dispatchable          bool      `json:"dispatchable"`
+	// Scope + ShadowedByTenantScope disambiguate scope twins (#2474):
+	// `connector_id` encodes only `(impl_id, version)`, so a connector
+	// ingested once built-in (`tenant_id IS NULL`) and once tenant-scoped
+	// renders the same id twice. `scope` is the named projection of
+	// `tenant_id` ("builtin"/"tenant"); `shadowed_by_tenant_scope` marks a
+	// built-in row whose id also appears on a tenant-scoped twin that
+	// dispatch resolves first — so `--json` consumers can tell which twin
+	// `call_operation` hits and count unique connectors.
+	Scope                 string `json:"scope"`
+	ShadowedByTenantScope bool   `json:"shadowed_by_tenant_scope"`
 }
 
 // nextStep mirrors the backend NextStep Pydantic model (same module):
@@ -93,7 +103,7 @@ type nextStep struct {
 // §2 unified `{"items": [...], "next_cursor": <str|null>}` envelope the
 // list endpoint returns (#2338 breaking pass — converged from the
 // v0.8.0 `{"connectors": [...]}` shape). The hand-typed `listEntry`
-// carries the full 15-field row (see its doc); `next_cursor` is always
+// carries the full 17-field row (see its doc); `next_cursor` is always
 // null today (the listing is unpaginated) but decoded so a future
 // keyset-paginated build lands without a CLI change.
 type connectorListEnvelope struct {
@@ -252,6 +262,13 @@ func printListTable(w io.Writer, status string, r *connectorListEnvelope) {
 		tenant := "(built-in)"
 		if c.TenantID != nil && *c.TenantID != "" {
 			tenant = *c.TenantID
+		} else if c.ShadowedByTenantScope {
+			// A built-in row whose connector_id also appears on a
+			// tenant-scoped twin that dispatch resolves first (#2474).
+			// Naming it in the tenant column tells the operator this row
+			// is not the one `call_operation` hits; the exact scope pair
+			// rides `--json` as `scope` + `shadowed_by_tenant_scope`.
+			tenant = "(shadowed)"
 		}
 		fmt.Fprintf(w, "%-32s %-10s %-23s %-10s %5d %5d\n",
 			truncate(c.ConnectorID, 32),

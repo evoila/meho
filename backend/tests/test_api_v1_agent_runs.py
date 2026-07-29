@@ -210,6 +210,9 @@ async def test_async_run_returns_handle_then_poll(monkeypatch: pytest.MonkeyPatc
     assert body["run_id"] == handle
     assert body["status"] == "succeeded"
     assert body["output"] == {"text": "async result"}
+    # The status face carries the agent back-link (#2472).
+    assert body["agent_name"] == "triage"
+    assert body["agent_definition_id"] is not None
 
 
 @pytest.mark.asyncio
@@ -273,11 +276,46 @@ async def test_list_runs_filters_by_work_ref_from_header(client: TestClient) -> 
         rows = filtered.json()
         assert [row["run_id"] for row in rows] == [tagged_run_id]
         assert rows[0]["work_ref"] == "gh:evoila/meho#11"
+        # The run is traceable to its agent on the REST list row (#2472).
+        assert rows[0]["agent_name"] == "triage"
+        assert rows[0]["agent_definition_id"] is not None
 
         # No filter returns both runs.
         unfiltered = client.get("/api/v1/agents/runs", headers=headers)
         assert unfiltered.status_code == 200, unfiltered.text
         assert len(unfiltered.json()) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_runs_filters_by_agent_name(client: TestClient) -> None:
+    """?agent_name narrows to that agent; an unknown name yields [] (#2472)."""
+    await _seed_definition(name="triage")
+    await _seed_definition(name="planner")
+    _install_invoker("done")
+    key = make_rsa_keypair("kid-agent-name")
+    headers = {"Authorization": f"Bearer {_token(key)}"}
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        triage = client.post("/api/v1/agents/triage/run", json={"input": "go"}, headers=headers)
+        assert triage.status_code == 200, triage.text
+        triage_run_id = triage.json()["run_id"]
+        planner = client.post("/api/v1/agents/planner/run", json={"input": "go"}, headers=headers)
+        assert planner.status_code == 200, planner.text
+
+        filtered = client.get(
+            "/api/v1/agents/runs", params={"agent_name": "triage"}, headers=headers
+        )
+        assert filtered.status_code == 200, filtered.text
+        rows = filtered.json()
+        assert [row["run_id"] for row in rows] == [triage_run_id]
+        assert rows[0]["agent_name"] == "triage"
+
+        # An unknown name is an empty list, not a 4xx.
+        unknown = client.get(
+            "/api/v1/agents/runs", params={"agent_name": "no-such-agent"}, headers=headers
+        )
+        assert unknown.status_code == 200, unknown.text
+        assert unknown.json() == []
 
 
 @pytest.mark.asyncio

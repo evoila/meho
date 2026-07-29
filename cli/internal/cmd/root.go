@@ -24,6 +24,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/broadcast"
 	"github.com/evoila/meho/cli/internal/cmd/connector"
 	"github.com/evoila/meho/cli/internal/cmd/conventions"
+	"github.com/evoila/meho/cli/internal/cmd/dashboard"
 	"github.com/evoila/meho/cli/internal/cmd/docs"
 	"github.com/evoila/meho/cli/internal/cmd/gcloud"
 	"github.com/evoila/meho/cli/internal/cmd/harbor"
@@ -43,6 +44,7 @@ import (
 	"github.com/evoila/meho/cli/internal/cmd/scheduler"
 	sddcmanager "github.com/evoila/meho/cli/internal/cmd/sddc-manager"
 	"github.com/evoila/meho/cli/internal/cmd/secret"
+	"github.com/evoila/meho/cli/internal/cmd/sensor"
 	"github.com/evoila/meho/cli/internal/cmd/targets"
 	"github.com/evoila/meho/cli/internal/cmd/topology"
 	"github.com/evoila/meho/cli/internal/cmd/vault"
@@ -265,6 +267,29 @@ func newRootCmd() *cobra.Command {
 	// act cross-tenant. Registered before registerDynamicSubcommands so
 	// the backplane manifest cannot shadow the built-in `scheduler` parent.
 	root.AddCommand(scheduler.NewRootCmd())
+
+	// I2416-T2503 -- deterministic-check sensor admin verbs (list / create /
+	// delete) for Initiative #2416. Wraps the Sensor REST surface
+	// (/api/v1/sensors routes). list is operator-level; create and delete
+	// require tenant_admin. The op a sensor references must be
+	// safety_level='safe' (a caution/dangerous op is refused at create).
+	// Tenant scoping is enforced server-side via the JWT; platform_admin
+	// callers may use --tenant to act cross-tenant. Registered before
+	// registerDynamicSubcommands so the backplane manifest cannot shadow the
+	// built-in `sensor` parent.
+	root.AddCommand(sensor.NewRootCmd())
+
+	// I2416-T2590 -- deterministic-check dashboard admin verbs (list / show /
+	// create / delete) for Initiative #2416. Wraps the Dashboard REST surface
+	// (/api/v1/checks/dashboards routes), closing the raw-curl composition
+	// gap: a dashboard folds member Sensors into a single rolled-up
+	// "is everything OK?" answer. list/show are operator-level; create and
+	// delete require tenant_admin. There is no edit verb by design ("edit" is
+	// delete + recreate, the trigger-immutability posture). Tenant scoping is
+	// enforced server-side via the JWT; platform_admin callers may use
+	// --tenant to act cross-tenant. Registered before registerDynamicSubcommands
+	// so the backplane manifest cannot shadow the built-in `dashboard` parent.
+	root.AddCommand(dashboard.NewRootCmd())
 
 	// G3.1-T7 (#511) -- vmware-rest-9.0 operator alias verbs for
 	// Initiative #227. The verb tree pre-bakes connector_id=

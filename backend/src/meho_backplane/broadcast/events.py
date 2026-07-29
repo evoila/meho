@@ -12,7 +12,7 @@ downstream consumer relies on.
 
 PII discipline lives in :func:`classify_op` + :func:`redact_payload`.
 The classifier is policy-locked by decision #3 in
-``docs/planning/v0.2-decisions.md`` — credential reads and audit-query
+``docs/decisions/locked-decisions.md`` — credential reads and audit-query
 responses broadcast aggregate-only by default; everything else
 broadcasts in full. Per-op opt-in to flip a sensitive class to full
 detail is a G6.3 surface; T2 ships the conservative default.
@@ -47,7 +47,7 @@ Why aggregate-only-by-default for the sensitive classes:
 References
 ----------
 
-* Decision #3 — ``docs/planning/v0.2-decisions.md``.
+* Decision #3 — ``docs/decisions/locked-decisions.md``.
 * MCP audit shape (G0.5-T5, the in-tree precedent for similar
   redaction discipline) —
   :func:`meho_backplane.mcp.audit.write_mcp_audit_row`.
@@ -72,6 +72,7 @@ __all__ = [
     "classify_op",
     "redact_payload",
     "scrub_broadcast_params",
+    "scrub_secret_named_values",
 ]
 
 
@@ -333,6 +334,28 @@ class BroadcastEvent(BaseModel):
     #: ``audit_query`` classes — the redaction contract is upstream of
     #: this field.
     payload: dict[str, Any] = Field(default_factory=dict)
+    #: RFC 8693 actor (the acting agent) when the operation ran under a
+    #: user-initiated agent delegation, ``None`` for a direct human
+    #: request or an autonomous (self-authenticated) agent run. Projected
+    #: at publish time from the same
+    #: :func:`~meho_backplane.auth.delegation.resolve_actor_sub` the
+    #: sibling ``audit_log`` writer reads, so a feed reader can tell a
+    #: delegated agent's work (``actor_sub`` = agent, ``principal_sub`` =
+    #: human) from the human's own. Server-derived and trusted — no
+    #: untrusted-prose envelope applies.
+    actor_sub: str | None = None
+    #: Agent-run session id when the operation was dispatched from inside
+    #: an agent loop (the run id doubles as the session id), ``None``
+    #: otherwise. Groups every operation a single run produced —
+    #: projected from :data:`~meho_backplane.operations._audit.agent_session_id_var`,
+    #: the same contextvar the ``audit_log.agent_session_id`` column reads.
+    agent_session_id: UUID | None = None
+    #: External change-ticket reference (a GitHub issue, Jira key, CR id)
+    #: correlating the operation to the out-of-band record that authorised
+    #: it, ``None`` when unbound. Projected from
+    #: :data:`~meho_backplane.operations._audit.work_ref_var`, the same
+    #: contextvar the ``audit_log.work_ref`` column reads.
+    work_ref: str | None = None
 
 
 # code-quality-allow: flat order-significant op-id classifier; length is the
@@ -531,7 +554,7 @@ def redact_payload(
 
     *detail* is the G6.3-T2 (#379) extension. When ``None`` (the
     pre-G6.3 default), the function falls back to decision #3 of
-    ``docs/planning/v0.2-decisions.md`` -- aggregate for sensitive
+    ``docs/decisions/locked-decisions.md`` -- aggregate for sensitive
     classes (``credential_read`` / ``credential_mint`` /
     ``credential_write`` / ``audit_query``), full for everything else.
     When ``"aggregate"`` or ``"full"`` is passed
@@ -709,6 +732,32 @@ def _scrub_secret_named_keys(node: Any) -> tuple[Any, bool]:
             found = found or child_found
         return items, found
     return node, False
+
+
+def scrub_secret_named_values(node: Any) -> tuple[Any, bool]:
+    """Key-name-aware secret scrub for a caller-bound dispatch response.
+
+    Public entry to :func:`_scrub_secret_named_keys` (the same walk the
+    broadcast params scrub uses). Returns ``(scrubbed, secret_detected)``:
+    every mapping entry whose key is secret-shaped (``password``,
+    ``client_secret``, ``sessionToken``, ...) has its value subtree
+    replaced with :data:`_REDACTED_PARAM`.
+
+    The connector-boundary redaction engine (``dispatcher.py`` step 7a)
+    matches only *labelled* secret shapes inside string leaves, so a
+    ``credential_read`` response like ``{"data": {"password": "..."}}``
+    passes through it verbatim. The dispatcher runs this scrub on the
+    caller-bound response of a ``credential_read``-classified op by
+    default (#2467) so the raw value never reaches the ``call_operation``
+    caller / agent transcript; ``params.reveal_secret=true`` opts out.
+    The audit row keeps the raw result regardless (the raw payload is
+    captured before this scrub runs), mirroring the #2172 secret-handler
+    posture. Unlike :func:`scrub_broadcast_params` this does **not** run
+    the Tier-1 engine pass -- the boundary middleware already applied it
+    to the response, so this layer is only the structured-dict
+    key-name complement.
+    """
+    return _scrub_secret_named_keys(node)
 
 
 def scrub_broadcast_params(params: dict[str, Any]) -> tuple[dict[str, Any], bool]:

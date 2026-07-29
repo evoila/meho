@@ -15,7 +15,7 @@ Source: `backend/src/meho_backplane/connectors/gcloud/`.
 
 **Transport decision:** Option B — HttpConnector + `google-auth` ADC +
 impersonated service-account credentials. Recorded as decision #12 in
-`docs/planning/v0.2-decisions.md`. Option A (SubprocessConnector wrapping
+`docs/decisions/locked-decisions.md`. Option A (SubprocessConnector wrapping
 `gcloud` CLI) was rejected.
 
 **Org-policy constraint:** `constraints/iam.disableServiceAccountKeyCreation`
@@ -287,7 +287,7 @@ real `GcloudConnector` against a live project.
 
 ## References
 
-- Decision #12: `docs/planning/v0.2-decisions.md` (gcloud transport = B).
+- Decision #12: `docs/decisions/locked-decisions.md` (gcloud transport = B).
 - google-auth impersonated_credentials:
   https://google-auth.readthedocs.io/en/master/reference/google.auth.impersonated_credentials.html
 - GCP Cloud Resource Manager REST:

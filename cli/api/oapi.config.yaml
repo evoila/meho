@@ -27,6 +27,21 @@ generate:
   # delegates to and stays exported so future ops can drop down a
   # layer when they need streaming responses or custom decoding.
   client: true
+compatibility:
+  # Force DETERMINISTIC prefixed enum-constant names (e.g.
+  # SensorStatusActive, UsageEndpointApiV1RetrieveUsageGetParamsSurfaceAll)
+  # regardless of the cross-enum value-collision landscape. oapi-codegen
+  # v2.5.0 otherwise prefixes an enum value only when it collides with a
+  # value in another enum, leaving it bare otherwise — so adding an
+  # unrelated enum elsewhere in the spec (e.g. #2503's sensor enums)
+  # changes which values collide and can silently flip a previously-bare
+  # constant to prefixed (or vice-versa), breaking hand-written references
+  # (usage.go's UsageEndpoint…ParamsSurface* constants). Pinning
+  # always-prefix makes the generated constant names stable across spec
+  # growth. `compatibility` is a top-level oapi-codegen key (sibling of
+  # `output-options`), not nested under it. See
+  # .claude/auto/state/pr-2559-go-diagnosis.md.
+  always-prefix-enum-values: true
 output-options:
   # Skip pruning the unused schemas — the spec is small (six paths
   # in v0.1) and pruning forces a regeneration churn each time a

@@ -35,7 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.agents.grant_schemas import AgentGrantCreate, GrantVerdict
 from meho_backplane.agents.grants import AgentGrantService, GrantValidationError
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Tenant
+from meho_backplane.db.models import AgentPrincipal, Tenant
 from meho_backplane.settings import get_settings
 
 
@@ -55,6 +55,29 @@ async def _seed_tenant(session: AsyncSession, slug: str) -> uuid.UUID:
     session.add(Tenant(id=tenant_id, slug=slug, name=f"Tenant {slug}"))
     await session.commit()
     return tenant_id
+
+
+async def _register_principals(tenant_id: uuid.UUID, *client_ids: str) -> None:
+    """Register agent principals so grants for these subs are enforceable.
+
+    ``AgentGrantService.grant`` rejects a ``principal_sub`` that names no
+    non-revoked ``AgentPrincipal.keycloak_client_id`` in the tenant (#2489),
+    so every happy-path grant test registers its principal(s) first —
+    ``principal_sub`` *is* the agent's ``agent:<name>`` client-id handle.
+    """
+    async with get_sessionmaker()() as session:
+        for client_id in client_ids:
+            session.add(
+                AgentPrincipal(
+                    tenant_id=tenant_id,
+                    name=f"seed-{uuid.uuid4().hex[:12]}",
+                    keycloak_client_id=client_id,
+                    keycloak_internal_id=str(uuid.uuid4()),
+                    owner_sub="seed-owner",
+                    created_by_sub="seed-owner",
+                )
+            )
+        await session.commit()
 
 
 def _grant_body(
@@ -98,6 +121,7 @@ async def test_grant_create_list_get_revoke() -> None:
     """Create -> list -> get -> revoke round-trip on one grant."""
     async with get_sessionmaker()() as session:
         tenant_id = await _seed_tenant(session, "grant-cycle")
+    await _register_principals(tenant_id, "agent-abc")
     service = AgentGrantService()
 
     body = _grant_body(
@@ -146,6 +170,7 @@ async def test_elevation_visible_when_active() -> None:
     """A grant with a future expires_at appears in active list."""
     async with get_sessionmaker()() as session:
         tenant_id = await _seed_tenant(session, "elev-active")
+    await _register_principals(tenant_id, "agent-elev")
     service = AgentGrantService()
 
     future = datetime.now(UTC) + timedelta(hours=2)
@@ -311,11 +336,14 @@ async def test_cross_tenant_isolation() -> None:
         tenant_a = await _seed_tenant(session, "ct-a")
     async with get_sessionmaker()() as session:
         tenant_b = await _seed_tenant(session, "ct-b")
+    # keycloak_client_id is globally unique, so each tenant's agent
+    # principal carries a distinct client-id handle (its principal_sub).
+    await _register_principals(tenant_a, "sub-a")
+    await _register_principals(tenant_b, "sub-b")
 
     service = AgentGrantService()
-    body = _grant_body(principal_sub="shared-sub", op_pattern="*")
-    await service.grant(tenant_a, "admin-a", body)
-    await service.grant(tenant_b, "admin-b", body)
+    await service.grant(tenant_a, "admin-a", _grant_body(principal_sub="sub-a", op_pattern="*"))
+    await service.grant(tenant_b, "admin-b", _grant_body(principal_sub="sub-b", op_pattern="*"))
 
     a_grants = await service.list_(tenant_a)
     b_grants = await service.list_(tenant_b)
@@ -332,6 +360,7 @@ async def test_cross_tenant_revoke_returns_false() -> None:
         tenant_a = await _seed_tenant(session, "cr-a")
     async with get_sessionmaker()() as session:
         tenant_b = await _seed_tenant(session, "cr-b")
+    await _register_principals(tenant_a, "a-agent")
 
     service = AgentGrantService()
     body = _grant_body(principal_sub="a-agent")
@@ -390,6 +419,7 @@ async def test_wildcard_and_none_target_scope_accepted() -> None:
     """
     async with get_sessionmaker()() as session:
         tenant_id = await _seed_tenant(session, "val-wild")
+    await _register_principals(tenant_id, "sub")
     service = AgentGrantService()
 
     # Distinct op_patterns per case: None and "*" both normalize to "*",
@@ -410,6 +440,7 @@ async def test_uuid_target_scope_accepted() -> None:
     """A valid UUID string for target_scope is accepted."""
     async with get_sessionmaker()() as session:
         tenant_id = await _seed_tenant(session, "val-uuid")
+    await _register_principals(tenant_id, "sub")
     service = AgentGrantService()
     target_uuid = str(uuid.uuid4())
     body = AgentGrantCreate(
@@ -432,6 +463,7 @@ async def test_duplicate_grant_raises_validation_error() -> None:
     """
     async with get_sessionmaker()() as session:
         tenant_id = await _seed_tenant(session, "val-dup")
+    await _register_principals(tenant_id, "dup-agent")
     service = AgentGrantService()
     body = AgentGrantCreate(
         principal_sub="dup-agent",
@@ -441,6 +473,52 @@ async def test_duplicate_grant_raises_validation_error() -> None:
     )
     await service.grant(tenant_id, "admin", body)
     with pytest.raises(GrantValidationError, match="already exists"):
+        await service.grant(tenant_id, "admin", body)
+
+
+@pytest.mark.asyncio
+async def test_unregistered_principal_sub_rejected() -> None:
+    """A grant for a sub that names no agent principal is rejected (#2489).
+
+    Grants are consulted only for ``principal_kind=agent`` tokens, which
+    belong to registered agent principals. A ``principal_sub`` matching no
+    non-revoked ``AgentPrincipal.keycloak_client_id`` in the tenant can
+    never be evaluated, so the create is refused with a message naming the
+    enforcement scope (MCP ``-32602`` / REST 422 at the boundary).
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "val-unregistered")
+    service = AgentGrantService()
+    body = _grant_body(principal_sub="never-registered-sub", op_pattern="*")
+    with pytest.raises(GrantValidationError, match="principal_kind=agent"):
+        await service.grant(tenant_id, "admin", body)
+
+
+@pytest.mark.asyncio
+async def test_revoked_principal_sub_rejected() -> None:
+    """A grant for a *revoked* agent principal is rejected (#2489).
+
+    A pulled kill switch means the principal can no longer mint tokens, so
+    a fresh grant for it would be inert — refuse it, naming the reason.
+    """
+    async with get_sessionmaker()() as session:
+        tenant_id = await _seed_tenant(session, "val-revoked")
+    async with get_sessionmaker()() as session:
+        session.add(
+            AgentPrincipal(
+                tenant_id=tenant_id,
+                name="dead-bot",
+                keycloak_client_id="agent:dead-bot",
+                keycloak_internal_id=str(uuid.uuid4()),
+                owner_sub="seed-owner",
+                created_by_sub="seed-owner",
+                revoked=True,
+            )
+        )
+        await session.commit()
+    service = AgentGrantService()
+    body = _grant_body(principal_sub="agent:dead-bot", op_pattern="*")
+    with pytest.raises(GrantValidationError, match="reason=revoked"):
         await service.grant(tenant_id, "admin", body)
 
 
@@ -454,6 +532,7 @@ async def test_list_multiple_principals() -> None:
     """list_ without principal_sub returns all grants; with it filters."""
     async with get_sessionmaker()() as session:
         tenant_id = await _seed_tenant(session, "multi-list")
+    await _register_principals(tenant_id, "p1", "p2")
     service = AgentGrantService()
 
     await service.grant(tenant_id, "admin", _grant_body(principal_sub="p1"))

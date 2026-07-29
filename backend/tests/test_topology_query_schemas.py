@@ -37,6 +37,7 @@ def _node(name: str, *, depth: int = 0, properties: dict | None = None) -> Topol
         id=uuid4(),
         kind="vm",
         name=name,
+        source="auto",
         properties=properties if properties is not None else {},
         depth=depth,
         via_edge_kind=None,
@@ -88,6 +89,42 @@ def test_node_properties_serialises_back_to_plain_mutable_structures() -> None:
     parsed = json.loads(node.model_dump_json())
     assert parsed["properties"] == {"outer": {"inner": 1}, "items": [1, {"x": 2}]}
     assert parsed["via_edge_kind"] is None
+    # #2538 chain provenance: always serialised, defaulting to null so
+    # a consumer can rely on the keys existing on every node.
+    assert parsed["parent_node_id"] is None
+    assert parsed["via_edge_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# #2538 — chain provenance fields (parent_node_id / via_edge_id)
+# ---------------------------------------------------------------------------
+
+
+def test_node_provenance_fields_default_to_none() -> None:
+    """Pre-#2538 constructors (no provenance kwargs) stay valid."""
+    node = _node("vm1")
+    assert node.parent_node_id is None
+    assert node.via_edge_id is None
+
+
+def test_node_provenance_fields_round_trip() -> None:
+    parent = uuid4()
+    edge = uuid4()
+    node = TopologyNode(
+        id=uuid4(),
+        kind="vm",
+        name="vm1",
+        source="auto",
+        depth=1,
+        via_edge_kind="runs-on",
+        parent_node_id=parent,
+        via_edge_id=edge,
+    )
+    assert node.parent_node_id == parent
+    assert node.via_edge_id == edge
+    parsed = json.loads(node.model_dump_json())
+    assert parsed["parent_node_id"] == str(parent)
+    assert parsed["via_edge_id"] == str(edge)
 
 
 # ---------------------------------------------------------------------------

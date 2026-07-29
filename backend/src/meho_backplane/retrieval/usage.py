@@ -30,7 +30,7 @@ emitting events.
 Why audit_log and not a separate metrics pipeline
 -------------------------------------------------
 
-Decision #2 of ``docs/planning/v0.2-decisions.md`` (the retire-decision
+Decision #2 of ``docs/decisions/locked-decisions.md`` (the retire-decision
 criteria) and Goal #215's DoD line both hinge on **the same audited
 operations every other meta-tool already emits**. A separate metrics
 pipeline would drift from the canonical record on partial failures

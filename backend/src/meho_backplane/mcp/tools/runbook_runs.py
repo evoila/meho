@@ -182,6 +182,22 @@ def _parse_run_id(tool: str, raw: Any) -> uuid.UUID:
         raise _to_invalid_params(tool, ValueError(f"invalid run_id: {raw!r}")) from exc
 
 
+def _mirror_run_status(payload: dict[str, Any]) -> dict[str, Any]:
+    """Mirror a run summary's native ``state`` response key as ``status``.
+
+    The ``RunSummary`` row model is REST-shared and mirrors the
+    ``runbook_runs.state`` DB column, so neither side can be renamed; the
+    ``meho.runbook.list_runs`` filter stays ``status`` (the surface-wide
+    ``*.list.status`` name pinned by §14.6). The MCP handler therefore
+    mirrors the value at the wire boundary: every run-summary row carries
+    ``status`` — the same vocabulary the ``status`` filter accepts —
+    alongside the model's native ``state`` (equal values).
+    """
+    if "state" in payload:
+        payload["status"] = payload["state"]
+    return payload
+
+
 # ---------------------------------------------------------------------------
 # Tool descriptions (the load-bearing UX)
 # ---------------------------------------------------------------------------
@@ -309,7 +325,10 @@ _LIST_DESCRIPTION: Final[str] = (
     "before considering meho.runbook.reassign.\n\n"
     "Returns RunSummary entries -- run-level state plus the current "
     "step's state (current_step_state: in_progress / failed), no step "
-    "contents. current_step_state='failed' means the step's verify did "
+    "contents. Each row carries its run-level state under both `state` "
+    "(model-native) and `status` (the same vocabulary the `status` "
+    "filter accepts), equal values. current_step_state='failed' means "
+    "the step's verify did "
     "not pass (answer no/escalate, or a mismatched operation_call "
     "result); the only forward path for that run is meho.runbook.abort. "
     "To see the current step body of an in-progress run you OWN, call "
@@ -555,7 +574,7 @@ async def _list_runs_handler(
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
         raise _to_invalid_params("meho.runbook.list_runs", exc) from exc
-    return {"runs": [summary.model_dump(mode="json") for summary in summaries]}
+    return {"runs": [_mirror_run_status(summary.model_dump(mode="json")) for summary in summaries]}
 
 
 # ---------------------------------------------------------------------------

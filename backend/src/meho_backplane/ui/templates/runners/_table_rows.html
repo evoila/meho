@@ -1,0 +1,71 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Satellite-runner fleet table-rows fragment (Task #2589).
+
+  Rendered in two contexts:
+    * As a partial ``{% include %}``d by ``list.html`` on the initial
+      full-page render.
+    * As the standalone fragment ``GET /ui/runners`` returns when the
+      ``HX-Request`` header is set (the 30s auto-refresh poll). HTMX
+      outerHTML-swaps it into the existing ``#runners-table-body`` element.
+
+  The ``Last seen`` / ``Created`` columns render a relative string ("3 h ago")
+  with a tooltip carrying the full ISO timestamp. Pure server-side via the
+  ``_rel`` macro; no JS, no client date library. Liveness is server-derived
+  (revoked / dead-man ``unknown`` / live) -- never recomputed here.
+-#}
+{% macro _rel(ts) -%}
+  {%- set ago = (now_utc - ts).total_seconds() | int -%}
+  {%- if ago < 60 -%}just now
+  {%- elif ago < 3600 -%}{{ (ago // 60) }} min ago
+  {%- elif ago < 86400 -%}{{ (ago // 3600) }} h ago
+  {%- elif ago < 604800 -%}{{ (ago // 86400) }} d ago
+  {%- else -%}{{ ts.strftime("%Y-%m-%d") }}
+  {%- endif -%}
+{%- endmacro %}
+<tbody id="runners-table-body">
+  {% if rows %}
+    {% for row in rows %}
+      <tr data-runner-name="{{ row.name }}">
+        <td class="font-medium">{{ row.name }}</td>
+        <td>
+          <span class="badge {{ row.liveness_badge }} badge-sm">{{ row.liveness_state }}</span>
+        </td>
+        <td>
+          {% if row.stale and row.stale_at %}
+            <span class="text-xs opacity-70" title="dead-man flip at {{ row.stale_at.isoformat() }}">
+              stale since {{ _rel(row.stale_at) }}
+            </span>
+          {% elif row.last_seen_at %}
+            <span class="text-xs" title="{{ row.last_seen_at.isoformat() }}">{{ _rel(row.last_seen_at) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+        <td class="text-xs">
+          {% if row.revoked %}
+            <span class="badge badge-neutral badge-sm">revoked</span>
+          {% else %}
+            <span class="opacity-60">no</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if row.created_at %}
+            <span class="text-xs" title="{{ row.created_at.isoformat() }}">{{ _rel(row.created_at) }}</span>
+          {% else %}
+            <span class="opacity-40">—</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  {% else %}
+    <tr>
+      <td colspan="5" class="text-center text-sm opacity-60 py-6">
+        No runners registered yet. Register one via
+        <code>meho runner-principal register &lt;name&gt;</code>.
+      </td>
+    </tr>
+  {% endif %}
+</tbody>

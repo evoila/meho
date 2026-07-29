@@ -35,7 +35,7 @@ from meho_backplane.agent.invocation import AgentInvoker, reset_agent_invoker_fo
 from meho_backplane.agent.run import PydanticAgentRun
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AgentDefinition, Tenant
+from meho_backplane.db.models import AgentDefinition, AgentRun, Tenant
 from tests.mcp_test_fixtures import (
     client_with_operator,  # noqa: F401 — pytest-discovered fixture
     isolated_registry,  # noqa: F401 — pytest-discovered autouse fixture
@@ -139,13 +139,34 @@ async def test_run_then_poll_round_trip(
     body = _result_dict(run)
     assert body["status"] == "succeeded"
     assert body["output"] == {"text": "triaged via mcp"}
-    handle = body["run_id"]
+    run_id = body["run_id"]
 
-    status = _call(client, "meho.agents.run_status", {"handle": handle}, rpc_id=2)
+    # Canonical: poll with the `run_id` the run row returned (#2471) —
+    # exercises the anyOf schema gate through the real dispatcher.
+    status = _call(client, "meho.agents.run_status", {"run_id": run_id}, rpc_id=2)
     status_body = _result_dict(status)
-    assert status_body["run_id"] == handle
+    assert status_body["run_id"] == run_id
     assert status_body["status"] == "succeeded"
     assert status_body["output"] == {"text": "triaged via mcp"}
+    # The run is traceable to its agent on the status face (#2472).
+    assert status_body["agent_name"] == "triage"
+    assert status_body["agent_definition_id"] is not None
+
+    # Deprecated alias: `handle` still resolves for pre-#2471 callers.
+    via_alias = _call(client, "meho.agents.run_status", {"handle": run_id}, rpc_id=3)
+    assert _result_dict(via_alias)["run_id"] == run_id
+
+    # Both aliases supplied -> -32602 naming both.
+    both = _call(
+        client,
+        "meho.agents.run_status",
+        {"run_id": run_id, "handle": run_id},
+        rpc_id=4,
+    )
+    both_body = both.json()
+    assert "error" in both_body
+    assert "run_id" in both_body["error"]["message"]
+    assert "handle" in both_body["error"]["message"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -167,6 +188,70 @@ async def test_list_runs_returns_tenant_runs(
     # work_ref is surfaced on the list row (None here -- no header bound).
     assert body["runs"][0]["work_ref"] is None
     assert body["runs"][0]["status"] == "succeeded"
+    # The run is traceable to its agent on the list face (#2472).
+    assert body["runs"][0]["agent_name"] == "triage"
+    assert body["runs"][0]["agent_definition_id"] is not None
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_list_runs_filters_by_agent_name(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """agent_name narrows to that agent; an unknown name yields [] (#2472)."""
+    client, op = client_with_operator
+    await _seed_definition(tenant_id=op.tenant_id, name="triage")
+    await _seed_definition(tenant_id=op.tenant_id, name="planner")
+    _install_invoker("done")
+
+    triage_run = _call(client, "meho.agents.run", {"name": "triage", "input": "go"})
+    triage_handle = _result_dict(triage_run)["run_id"]
+    _call(client, "meho.agents.run", {"name": "planner", "input": "go"}, rpc_id=2)
+
+    only_triage = _result_dict(
+        _call(client, "meho.agents.list_runs", {"agent_name": "triage"}, rpc_id=3)
+    )
+    assert [r["run_id"] for r in only_triage["runs"]] == [triage_handle]
+    assert only_triage["runs"][0]["agent_name"] == "triage"
+
+    # An unknown name is not an error (-32602); it is an empty list.
+    unknown = _result_dict(
+        _call(client, "meho.agents.list_runs", {"agent_name": "no-such-agent"}, rpc_id=4)
+    )
+    assert unknown["runs"] == []
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
+async def test_list_runs_null_agent_name_for_dangling_definition(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A run whose definition was deleted lists with agent_name null, no 500 (#2472)."""
+    client, op = client_with_operator
+    await _seed_definition(tenant_id=op.tenant_id, name="triage")
+    _install_invoker("done")
+
+    run = _call(client, "meho.agents.run", {"name": "triage", "input": "go"})
+    handle = _result_dict(run)["run_id"]
+
+    # Delete the definition after the run -- the run row's agent_definition_id
+    # is a soft-FK, so it now dangles.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        definition = await session.get(
+            AgentDefinition,
+            (await session.get(AgentRun, UUID(handle))).agent_definition_id,
+        )
+        await session.delete(definition)
+        await session.commit()
+
+    listed = _result_dict(_call(client, "meho.agents.list_runs", {}, rpc_id=2))
+    assert [r["run_id"] for r in listed["runs"]] == [handle]
+    assert listed["runs"][0]["agent_name"] is None
+    assert listed["runs"][0]["agent_definition_id"] is not None
+
+    status = _result_dict(_call(client, "meho.agents.run_status", {"handle": handle}, rpc_id=3))
+    assert status["agent_name"] is None
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)

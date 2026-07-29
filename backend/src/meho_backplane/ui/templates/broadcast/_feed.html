@@ -137,7 +137,7 @@
     aria-live="polite"
     {% if wall %}x-ref="list"{% endif %}
   >
-    <template x-for="ev in visibleEvents" :key="ev.event_id">
+    <template x-for="ev in visibleEvents" :key="rowKey(ev)">
       {% include "broadcast/_event_row.html" %}
     </template>
   </ul>

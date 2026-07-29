@@ -44,7 +44,7 @@ Both bodies are intentionally short (under ~200 chars each) so the per-entry tok
 
 ## Decision #4 partition (still load-bearing)
 
-[Decision #4](../planning/v0.2-decisions.md#4-g7-server-side-partition--operational-rules-only) draws the partition between content that migrates to server-side tenant conventions (Layer 1) and content that stays in the consuming application's own repository (Layer 2). The principle: **operational rules** bind any session against the tenant regardless of where it runs (Slack agent, MCP client, CLI on a different machine); **repo-internal rules** apply only to repo work and have a filesystem of their own.
+[Decision #4](../decisions/locked-decisions.md#4-g7-server-side-partition--operational-rules-only) draws the partition between content that migrates to server-side tenant conventions (Layer 1) and content that stays in the consuming application's own repository (Layer 2). The principle: **operational rules** bind any session against the tenant regardless of where it runs (Slack agent, MCP client, CLI on a different machine); **repo-internal rules** apply only to repo work and have a filesystem of their own.
 
 This partition is unchanged by [#1137](https://github.com/evoila/meho/issues/1137). What changed is **what content the public OSS repo ships as its baked-in seed**:
 
@@ -145,5 +145,5 @@ This guidance is unchanged from before #1137: amending an existing seed migratio
 - Supersede task: [#1137](https://github.com/evoila/meho/issues/1137) (G0.13-T7 generalize seed, move rdc-internal to consumer-side).
 - Companion docs:
   - [`docs/codebase/tenant_conventions.md`](../codebase/tenant_conventions.md) -- schema + API + ORM detail.
-  - [`docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md) -- decision #4 (the G7 server-side partition).
+  - [`docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md) -- decision #4 (the G7 server-side partition).
 - Prior-art data migration: [`backend/alembic/versions/0011_backfill_operation_group_when_to_use.py`](../../backend/alembic/versions/0011_backfill_operation_group_when_to_use.py) -- the self-contained `sa.table` shim discipline both seed migrations mirror.

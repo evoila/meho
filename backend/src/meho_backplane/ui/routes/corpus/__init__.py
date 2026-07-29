@@ -56,6 +56,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from meho_backplane.ui.routes.corpus.chunk_detail import build_corpus_chunk_detail_router
 from meho_backplane.ui.routes.corpus.collections import build_corpus_collections_router
 from meho_backplane.ui.routes.corpus.detail import build_corpus_collection_detail_router
 from meho_backplane.ui.routes.corpus.routes import build_corpus_search_router
@@ -81,5 +82,10 @@ def build_corpus_router() -> APIRouter:
     router = APIRouter()
     router.include_router(build_corpus_collections_router())
     router.include_router(build_corpus_collection_detail_router())
+    # The chunk-detail route carries a literal ``chunks`` segment
+    # (``/ui/corpus/chunks/{collection_key}/{chunk_id}``, #2462) that never
+    # collides with the search / collections paths, so its include order is not
+    # load-bearing.
+    router.include_router(build_corpus_chunk_detail_router())
     router.include_router(build_corpus_search_router())
     return router

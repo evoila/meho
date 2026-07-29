@@ -28,7 +28,7 @@ point is deliberately **not** called. The connector advertises an explicit
 pattern :mod:`meho_backplane.connectors.harbor` established.
 
 Decision #12 (transport = B: HttpConnector + google-auth impersonation)
-is recorded in ``docs/planning/v0.2-decisions.md``.
+is recorded in ``docs/decisions/locked-decisions.md``.
 """
 
 from meho_backplane.connectors.gcloud.connector import GcloudConnector

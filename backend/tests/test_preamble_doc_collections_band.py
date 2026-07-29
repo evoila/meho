@@ -37,6 +37,7 @@ from meho_backplane.conventions.preamble import (
     BLOCK_END as CONVENTIONS_BLOCK_END,
 )
 from meho_backplane.conventions.preamble import (
+    BROADCAST_BLOCK_START,
     assemble_preamble,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -345,7 +346,10 @@ async def test_catalogue_band_present_without_conventions() -> None:
         _SUB,
         capabilities=frozenset({_DOCS, _cap("vmware")}),
     )
-    # No conventions band; the catalogue band stands alone.
+    # No conventions band. Since G6.5-T6 (#2546) the always-on
+    # broadcast-discipline band leads the preamble, so the catalogue
+    # band follows it and closes the text (it is the last band here).
     assert CONVENTIONS_BLOCK_END not in result.text
-    assert result.text.startswith(BLOCK_START)
+    assert result.text.startswith(BROADCAST_BLOCK_START)
+    assert BLOCK_START in result.text  # catalogue band present
     assert result.text.endswith(BLOCK_END)

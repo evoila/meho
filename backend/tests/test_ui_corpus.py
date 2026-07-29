@@ -39,6 +39,7 @@ Suite shape:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from collections.abc import Iterator
 from datetime import timedelta
@@ -79,7 +80,8 @@ from meho_backplane.ui.csrf import (
 )
 from meho_backplane.ui.paths import static_root_dir
 from meho_backplane.ui.routes import build_router as build_ui_router
-from meho_backplane.ui.templating import reset_templating_for_testing
+from meho_backplane.ui.routes.corpus.routes import _cited_chunks
+from meho_backplane.ui.templating import get_templates, reset_templating_for_testing
 from tests.conftest import DEFAULT_AUDIENCE, DEFAULT_ISSUER
 
 # ---------------------------------------------------------------------------
@@ -251,6 +253,7 @@ def _chunk(
     *,
     chunk_id: str = "c-1",
     document_id: str = "vsphere-guide",
+    title: str | None = None,
     content: str = "Snapshots quiesce the guest before capture.",
     source_url: str | None = "https://docs.vmware.test/snapshots",
     score: float | None = 0.87,
@@ -260,6 +263,7 @@ def _chunk(
     return DocsChunk(
         chunk_id=chunk_id,
         document_id=document_id,
+        title=title,
         content=content,
         source_url=source_url,
         score=score,
@@ -328,6 +332,13 @@ def test_corpus_index_renders_page_and_collections() -> None:
     assert CSRF_COOKIE_NAME in response.cookies
     assert "X-CSRF-Token" in body
     assert 'hx-post="/ui/corpus/search"' in body
+    # In-flight feedback on the Go button (#2459): spinner indicator + submit
+    # disable, with the disinherit guard so neither leaks to a child request.
+    assert 'hx-indicator="#corpus-search-spinner"' in body
+    assert 'hx-disabled-elt="find button[type=submit]"' in body
+    assert 'hx-disinherit="hx-disabled-elt hx-indicator"' in body
+    assert 'id="corpus-search-spinner"' in body
+    assert "htmx-indicator loading loading-spinner" in body
 
 
 def test_corpus_index_default_selects_sole_collection() -> None:
@@ -507,6 +518,191 @@ def test_corpus_search_renders_cited_chunks() -> None:
     assert "0.873" in body
     # 2 cited chunks heading.
     assert "2 cited chunks" in body
+    # #2475: with no upstream title, the card header falls back to the
+    # document_id (today's behaviour, unchanged).
+    assert "vsphere-snapshots" in body
+
+
+def test_corpus_search_card_header_prefers_upstream_title() -> None:
+    """An upstream chunk title becomes the card header, not the raw id (#2475).
+
+    The ``/ui/corpus`` card header renders the resolved ``link.label``; once a
+    title flows through the projection the existing title-first label chain
+    prefers it, so the header reads human-legibly instead of by numeric
+    document_id / filename (the #2461 symptom).
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
+    )
+    result = DocsSearchResult(
+        chunks=[
+            _chunk(
+                chunk_id="c-1",
+                document_id="vsphere-snapshots",
+                title="Quiescing VM Snapshots",
+                content="Snapshots quiesce the guest before capture.",
+                source_url="https://docs.vmware.test/snapshots",
+                score=0.873,
+            ),
+        ]
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_SEARCH_DOCS, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "snapshot quiesce"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # The human title is the link text; the raw document_id is not the header.
+    assert "Quiescing VM Snapshots" in body
+    assert ">vsphere-snapshots<" not in body
+
+
+def _render_results(**context: object) -> str:
+    """Render the ``corpus/_results.html`` partial directly with *context*.
+
+    Drives the shared ``chunk_cards`` macro without the HTTP / JWT harness so a
+    card-rendering contract can be asserted straight at the Jinja partial.
+    """
+    template = get_templates().env.get_template("corpus/_results.html")
+    return template.render(**context)
+
+
+def _retrieve_context(cited: list[dict[str, object]]) -> dict[str, object]:
+    """The retrieve branch: a plain cited-chunk list (``cited`` only)."""
+    return {"cited": cited, "query": "host maintenance", "searched": True}
+
+
+def _ask_context(cited: list[dict[str, object]]) -> dict[str, object]:
+    """The ask branch: a grounded ``answer`` followed by the same cited cards."""
+    return {
+        "cited": cited,
+        "answer": "Enter maintenance mode before host patching.",
+        "query": "host maintenance",
+    }
+
+
+@pytest.mark.parametrize("context_for", [_retrieve_context, _ask_context])
+def test_card_title_headlines_and_demotes_document_id_to_badge(
+    context_for: object,
+) -> None:
+    """An upstream title heads the card; the document id is demoted to a badge.
+
+    Both render branches share the ``chunk_cards`` macro, so one parametrized
+    contract covers the retrieve path (``cited`` only) and the ask path
+    (``answer`` + ``cited``): the human title is the clickable ``<h3>`` anchor
+    text and the opaque numeric id (``393092``) moves into the metadata badge
+    row rather than remaining the headline (#2461).
+    """
+    chunk = _chunk(
+        chunk_id="c-1",
+        document_id="393092",
+        title="vSphere host maintenance mode",
+        content="Enter maintenance mode before host patching.",
+        source_url="https://docs.vmware.test/maintenance",
+        score=0.91,
+    )
+    cited = _cited_chunks([chunk])
+
+    html = _render_results(**context_for(cited))  # type: ignore[operator]
+
+    # The human title is the clickable heading anchor text.
+    assert ">vSphere host maintenance mode</a>" in html
+    # The numeric id is demoted into a "Document id" metadata badge, not the
+    # heading -- assert it sits inside the badge span, not the <h3> anchor.
+    assert re.search(
+        r'title="Document id"[^>]*>\s*393092\s*</span>',
+        html,
+    ), html
+    assert ">393092</a>" not in html
+
+
+@pytest.mark.parametrize("context_for", [_retrieve_context, _ask_context])
+def test_card_title_absent_falls_back_to_document_id_heading(
+    context_for: object,
+) -> None:
+    """With no upstream title the id remains the heading (no regression, #2461).
+
+    When the corpus supplies no title, the label chain falls back to the
+    document id, so it stays the heading -- and it must NOT be duplicated into
+    the demotion badge (which only fires when a title displaced it).
+    """
+    chunk = _chunk(
+        chunk_id="c-1",
+        document_id="393092",
+        title=None,
+        content="Enter maintenance mode before host patching.",
+        source_url="https://docs.vmware.test/maintenance",
+        score=0.91,
+    )
+    cited = _cited_chunks([chunk])
+
+    html = _render_results(**context_for(cited))  # type: ignore[operator]
+
+    # The id is the heading anchor text (existing fallback behaviour).
+    assert ">393092</a>" in html
+    # No demotion badge -- the id is not repeated as metadata when it is the
+    # heading.
+    assert 'title="Document id"' not in html
+
+
+def test_corpus_search_clamps_chunk_content_with_expand_toggle() -> None:
+    """Each cited chunk's content is clamped to a snippet with an expand toggle (#2456).
+
+    Acceptance criterion: cited chunks render as comparable snippet cards so ten
+    hits fit one screen; each card exposes an expand-on-click affordance
+    revealing the full content. The clamp is a static ``line-clamp-3`` that the
+    ``expanded`` binding removes on click.
+    """
+    _seed_tenant(_TENANT_A, "tenant-a")
+    _seed_collection(collection_key="vmware")
+    session_id = _seed_session_sync(tenant_id=_TENANT_A)
+    csrf = _csrf_token(session_id)
+    operator = _operator(
+        tenant_id=_TENANT_A,
+        capabilities=frozenset({"meho-docs", "meho-docs:vmware"}),
+    )
+    result = DocsSearchResult(
+        chunks=[_chunk(chunk_id=f"c-{i}", content=f"Chunk body {i}.") for i in range(10)]
+    )
+
+    with respx.mock(assert_all_called=False):
+        client = _authenticated_client(session_id)
+        client.cookies.set(CSRF_COOKIE_NAME, csrf)
+        with (
+            patch(_RESOLVE_OPERATOR, new_callable=AsyncMock, return_value=operator),
+            patch(_SEARCH_DOCS, new_callable=AsyncMock, return_value=result),
+        ):
+            response = client.post(
+                "/ui/corpus/search",
+                data={"collection": "vmware", "q": "snapshot quiesce"},
+                headers={CSRF_HEADER_NAME: csrf},
+            )
+
+    assert response.status_code == 200, response.text
+    body = response.text
+    # One clamped snippet + one expand toggle per cited chunk (all ten).
+    assert body.count("whitespace-pre-wrap line-clamp-3") == 10
+    assert body.count('x-data="{ expanded: false, clamped: false }"') == 10
+    assert body.count("expanded = !expanded") == 10
+    # The clamp is removed on expand, and the toggle labels both directions.
+    assert "{ 'line-clamp-3': !expanded }" in body
+    assert "Show more" in body
+    assert "Show less" in body
 
 
 def test_corpus_search_resolves_gs_kb_source_to_canonical_link() -> None:

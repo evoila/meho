@@ -2685,3 +2685,91 @@ def test_create_target_secret_ref_gate_noop_when_guard_disabled(
         )
     assert response.status_code == 201
     assert response.json()["secret_ref"] == "secret/meho/unguarded"
+
+
+def test_create_target_accepts_gsm_secret_ref_on_gsm_backend(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CREDENTIAL_BACKEND=gsm`` — a ``gsm:`` secret_ref registers cleanly.
+
+    #2585 (Initiative #2592): the tenant-scope gate enforces a Vault KV
+    path convention, so it must not fire on a GSM deploy where refs
+    resolve through GCP Secret Manager. A ``gsm:<project>/<secret>#field``
+    ref is stored verbatim — no ``VAULT_KV_TENANT_SCOPE_PREFIX=""``
+    ``extraEnv`` workaround required (``deploy/values-examples/values-gsm-example.yaml``).
+    """
+    monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    get_settings.cache_clear()
+    gsm_ref = "gsm:my-gcp-project/vcf-logs#password"
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "vcf-logs-gsm",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": gsm_ref,
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["secret_ref"] == gsm_ref
+
+
+@pytest.mark.asyncio
+async def test_update_target_accepts_gsm_secret_ref_on_gsm_backend(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CREDENTIAL_BACKEND=gsm`` — PATCH to a ``gsm:`` secret_ref is honoured.
+
+    #2585: the PATCH call site runs the same tenant-scope gate as POST, so
+    it must likewise pass through a GSM-backed ref untouched.
+    """
+    monkeypatch.setenv("CREDENTIAL_BACKEND", "gsm")
+    get_settings.cache_clear()
+    gsm_ref = "gsm:my-gcp-project/patched#password"
+    key = make_rsa_keypair("kid-A")
+    await _insert_target(name="patched-gsm", product="ssh", host="10.0.0.9", secret_ref=None)
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.patch(
+            "/api/v1/targets/patched-gsm",
+            json={"secret_ref": gsm_ref},
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 200
+    assert response.json()["secret_ref"] == gsm_ref
+
+
+def test_create_target_gsm_scheme_ref_bypasses_gate_on_vault_backend(
+    client: TestClient,
+) -> None:
+    """A ``gsm:`` scheme ref resolves to GSM even on a Vault-default deploy.
+
+    #2585: the gate's applicability tracks the backend the ref *resolves
+    to* (via ``split_credential_ref``), not the deploy default. A
+    per-target ``gsm:`` override is a GSM credential regardless of
+    ``credential_backend``, so the Vault tenant-subtree convention does
+    not apply and the ref is stored verbatim — the guard stays fully
+    intact for schemeless / ``vault:`` refs (covered above).
+    """
+    gsm_ref = "gsm:my-gcp-project/override#password"
+    key = make_rsa_keypair("kid-A")
+    with respx.mock as mock_router:
+        mock_discovery_and_jwks(mock_router, public_jwks(key))
+        response = client.post(
+            "/api/v1/targets",
+            json={
+                "name": "vault-deploy-gsm-override",
+                "product": "ssh",
+                "host": "10.0.0.5",
+                "secret_ref": gsm_ref,
+            },
+            headers={"Authorization": f"Bearer {_admin_token(key)}"},
+        )
+    assert response.status_code == 201
+    assert response.json()["secret_ref"] == gsm_ref

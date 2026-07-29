@@ -105,6 +105,7 @@ from meho_backplane.mcp.registry import (
     role_at_least,
 )
 from meho_backplane.mcp.server import McpInvalidParamsError, register_method
+from meho_backplane.operations._audit import resolve_broadcast_lineage
 
 __all__ = [
     "handle_resources_list",
@@ -825,6 +826,7 @@ async def _publish_mcp_event(
     into the audit row's payload *before* the audit write commits.
     """
     result_status = _classify_mcp_status(status_code)
+    lineage = resolve_broadcast_lineage()
     event = BroadcastEvent(
         event_id=uuid.uuid4(),
         ts=datetime.now(UTC),
@@ -836,6 +838,9 @@ async def _publish_mcp_event(
         result_status=result_status,
         audit_id=audit_id,
         payload=redact_payload(op_class, audit_payload, result_status, detail=detail),
+        actor_sub=lineage.actor_sub,
+        agent_session_id=lineage.agent_session_id,
+        work_ref=lineage.work_ref,
     )
     # publish_event is itself fail-open; the wrap here is belt-and-
     # suspenders against an exception in BroadcastEvent construction

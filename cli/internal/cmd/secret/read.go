@@ -137,10 +137,15 @@ func runRead(
 		return output.RenderError(cmd.ErrOrStderr(), classifyBackplaneError(err), false)
 	}
 
-	// Same params `meho vault kv read` sends: mount + path. The field is
-	// extracted client-side, so it never crosses the wire and is not part
-	// of the audit row.
-	params := map[string]any{"mount": mount, "path": path}
+	// mount + path, plus reveal_secret: this verb's whole contract is to
+	// pipe the raw credential value onward, so it opts out of the
+	// dispatcher's default credential_read response scrub (#2467). Without
+	// it the backplane returns a key-name-scrubbed envelope and --field
+	// would extract the redaction sentinel instead of the secret. The
+	// dispatcher strips reveal_secret before validating against the op
+	// schema and stamps the reveal on the audit row (the field name is
+	// still extracted client-side, so it never crosses the wire).
+	params := map[string]any{"mount": mount, "path": path, "reveal_secret": true}
 	r, err := vaultConn.Call(cmd.Context(), backplaneURL, opKVRead, targetName, params)
 	if err != nil {
 		return renderRequestError(cmd, backplaneURL, err, false)

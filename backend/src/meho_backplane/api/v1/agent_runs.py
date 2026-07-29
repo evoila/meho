@@ -162,6 +162,8 @@ class AgentRunStatusResponse(BaseModel):
     model: str | None
     output: dict[str, object] | None
     error: str | None
+    agent_definition_id: uuid.UUID | None
+    agent_name: str | None
 
 
 class AgentRunSummaryResponse(BaseModel):
@@ -184,6 +186,8 @@ class AgentRunSummaryResponse(BaseModel):
     model: str | None
     turns: int
     work_ref: str | None
+    agent_definition_id: uuid.UUID | None
+    agent_name: str | None
     created_at: datetime
     started_at: datetime | None
     ended_at: datetime | None
@@ -256,6 +260,8 @@ def _summary_response(summary: AgentRunSummary) -> AgentRunSummaryResponse:
         model=summary.model,
         turns=summary.turns,
         work_ref=summary.work_ref,
+        agent_definition_id=summary.agent_definition_id,
+        agent_name=summary.agent_name,
         created_at=summary.created_at,
         started_at=summary.started_at,
         ended_at=summary.ended_at,
@@ -327,6 +333,14 @@ async def list_runs(
             "succeeded / failed / cancelled). Omit for every state."
         ),
     ),
+    agent_name: str | None = Query(
+        default=None,
+        description=(
+            "Filter by agent definition name (exact match) — the runs "
+            "produced by agent X (#2472). An unknown name returns an empty "
+            "list, not an error. Omit for no agent filter."
+        ),
+    ),
     limit: int = Query(
         default=100,
         ge=1,
@@ -345,7 +359,9 @@ async def list_runs(
     Tenant-isolated server-side via the JWT — cross-tenant runs are
     invisible. ``?work_ref=gh:evoila/meho#11`` narrows to runs under one
     change ticket (exact match); ``?status=running`` narrows to one
-    lifecycle state. Returns ``created_at DESC``.
+    lifecycle state; ``?agent_name=triage`` narrows to runs produced by
+    that agent definition (an unknown name yields an empty list). Returns
+    ``created_at DESC``.
     """
     structlog.contextvars.bind_contextvars(
         audit_op_id="agent.list_runs",
@@ -356,6 +372,7 @@ async def list_runs(
         operator,
         work_ref=work_ref,
         status=status,
+        agent_name=agent_name,
         limit=limit,
         offset=offset,
     )
@@ -392,6 +409,8 @@ async def get_run_status(
         model=view.model,
         output=view.output,
         error=view.error,
+        agent_definition_id=view.agent_definition_id,
+        agent_name=view.agent_name,
     )
 
 

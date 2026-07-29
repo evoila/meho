@@ -203,12 +203,16 @@ async def test_full_lifecycle_round_trip(client: TestClient) -> None:
         assert body["keycloak_internal_id"] == _KC_INTERNAL_ID
         assert body["revoked"] is False
         assert body["created_by_sub"] == "op-admin"
+        # last_seen_at is additive (#2589): the central-clock liveness marker
+        # rides every accessor response, populated by the ORM server-default.
+        assert body["last_seen_at"] is not None
 
         listed = client.get("/api/v1/runner-principals", headers=headers)
         assert listed.status_code == 200
         principals = listed.json()["principals"]
         assert len(principals) == 1
         assert principals[0]["name"] == "edge-runner"
+        assert principals[0]["last_seen_at"] is not None
 
         shown = client.get("/api/v1/runner-principals/edge-runner", headers=headers)
         assert shown.status_code == 200
@@ -596,6 +600,59 @@ async def test_register_rolls_back_keycloak_client_when_secret_fetch_fails(
     mock_client.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
     mock_client.disable_client.assert_not_awaited()
     # ... and no DB row was written.
+    assert await _fetch_principals(_TENANT_A) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token_invalid", [False, True])
+async def test_register_vault_write_failure_detail_splits_on_token_validity(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, token_invalid: bool
+) -> None:
+    """The 502 detail names the remediation the broker actually diagnosed (#2652).
+
+    Same contract as the agent-principal register route: the broker runs
+    ``lookup-self`` on the write-failure path and stamps the disposition
+    on the exception; a dead token gets the three-clause re-mint detail,
+    a live token denied by policy keeps the bare code verbatim.
+    """
+    await _seed_tenants()
+    key = make_rsa_keypair("kid-vault-disposition")
+    factory = _mock_kc_ok()
+    mock_client = factory.return_value
+
+    from meho_backplane.scheduler.vault_credentials import (
+        SCHEDULER_VAULT_TOKEN_INVALID_DETAIL,
+        SchedulerVaultBrokerError,
+    )
+
+    async def _failing_write(identity_ref: str, client_secret: str) -> str:
+        raise SchedulerVaultBrokerError("vault denied", token_invalid=token_invalid)
+
+    monkeypatch.setattr("meho_backplane.auth.runner_principals.write_agent_secret", _failing_write)
+
+    with (
+        patch(
+            "meho_backplane.auth.runner_principals.KeycloakAdminClient.from_settings",
+            factory,
+        ),
+        respx.mock as r,
+    ):
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.post(
+            "/api/v1/runner-principals",
+            json={"name": "vault-disposition-runner"},
+            headers={"Authorization": f"Bearer {_token(key)}"},
+        )
+
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    if token_invalid:
+        assert detail == SCHEDULER_VAULT_TOKEN_INVALID_DETAIL, detail
+        assert "policy must grant" not in detail, detail
+    else:
+        assert detail == "scheduler_vault_write_error", detail
+    # The failed credential write still rolls the Keycloak client back.
+    mock_client.delete_client.assert_awaited_once_with(_KC_INTERNAL_ID)
     assert await _fetch_principals(_TENANT_A) == []
 
 

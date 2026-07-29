@@ -40,7 +40,15 @@ Three optional query parameters apply **after** the XREAD pull:
   :attr:`BroadcastEvent.target_name`.
 
 All three default to "no filter" — an unfiltered feed yields every
-event the operator's tenant produces.
+event the operator's tenant produces, of either kind: audit-driven
+:class:`BroadcastEvent` operations AND agent-authored
+:class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`
+announcements (G6.4-T2 #1092 / #2549). Filtering delegates to
+:func:`~meho_backplane.broadcast.history.event_matches`, so an
+``op_class`` filter narrows to operations only (an announcement carries
+no operation classification), while ``principal`` / ``target`` match both
+kinds (``target`` against an announcement's ``target`` or any of its
+``targets``).
 
 Replay
 ======
@@ -157,10 +165,10 @@ from redis.exceptions import RedisError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
 from meho_backplane.broadcast import (
-    BroadcastEvent,
     get_broadcast_blocking_client,
     get_broadcast_client,
 )
+from meho_backplane.broadcast.history import event_matches, select_event_model
 
 __all__ = ["router"]
 
@@ -497,29 +505,6 @@ def _format_event(entry_id: str, raw_event_json: str) -> str:
     return f"event: broadcast\ndata: {raw_event_json}\nid: {entry_id}\n\n"
 
 
-def _passes_filter(
-    event: BroadcastEvent,
-    op_class: str | None,
-    principal: str | None,
-    target: str | None,
-) -> bool:
-    """Return ``True`` iff the event matches every non-None filter.
-
-    None means "no filter on this field". Exact-match semantics — no
-    substring or pattern matching today; G6.3 may revisit if operator
-    feedback flags the gap. ``target_name`` is nullable on
-    :class:`BroadcastEvent`; an event with ``target_name=None`` and
-    a non-None *target* filter never passes (the operator asked for
-    a specific target; an event with no target attribution doesn't
-    qualify).
-    """
-    if op_class is not None and event.op_class != op_class:
-        return False
-    if principal is not None and event.principal_sub != principal:
-        return False
-    return not (target is not None and event.target_name != target)
-
-
 def _resolve_cursor(
     last_event_id_header: str | None,
     since: str | None,
@@ -552,24 +537,49 @@ def _process_entries(
 ) -> Iterator[tuple[str, str]]:
     """Yield ``(entry_id, sse_frame)`` for every entry that passes the filter.
 
+    Two event kinds share the per-tenant stream (G6.4-T2 #1092): the
+    audit-driven :class:`~meho_backplane.broadcast.events.BroadcastEvent`
+    (one per audited operation) and the agent-authored
+    :class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`
+    (one per ``meho.broadcast.announce`` call). The wire discriminator is
+    the top-level ``kind`` field; :func:`select_event_model` picks the model
+    class to validate against so an announcement flows to SSE consumers as a
+    first-class ``event: broadcast`` frame instead of being skipped as
+    malformed (the pre-#2549 behaviour, which only ever validated
+    :class:`BroadcastEvent` and dropped announcements on the resulting
+    :class:`pydantic.ValidationError`).
+
     Handles three skip paths inline:
 
     * Unknown field shape (entry XADD'd without an ``event`` field) —
-      log + skip. T3's publisher is currently the only writer; this
+      log + skip. The publisher is currently the only writer; this
       branch is the safety net against a future Slack-mirror /
       downstream tool writing alternate field shapes onto the same
       stream key.
-    * Malformed JSON in the ``event`` field — log + skip rather than
-      tearing the subscriber down. A T3 bug or stream-key collision
-      with a foreign writer surfaces here as a logged warning, not a
-      500.
+    * Malformed JSON in the ``event`` field, or a genuinely invalid
+      payload of either kind — log + skip rather than tearing the
+      subscriber down. A publisher bug or stream-key collision with a
+      foreign writer surfaces here as a logged warning, not a 500.
     * Filter rejection — silently drop (the operator's filter is
-      working as intended).
+      working as intended). Filtering delegates to
+      :func:`~meho_backplane.broadcast.history.event_matches` so the
+      SSE edge and the XRANGE read helpers narrow with identical
+      semantics: an ``op_class`` filter never matches an announcement
+      (it carries no operation classification), a ``target`` filter
+      matches a :class:`BroadcastEvent`'s ``target_name`` or an
+      announcement's ``target`` / any of its ``targets``, and
+      ``principal`` matches both kinds' ``principal_sub``.
+
+    The surviving entry's raw wire JSON is emitted verbatim (never
+    re-serialised) so the frame is byte-faithful to the stream. The
+    untrusted-prose envelope (:func:`dump_event_wire`) is an LLM-facing
+    re-serve concern applied by the MCP/history read surfaces, not by
+    this transport; SSE consumers (the browser feed's ``x-text``
+    bindings, ``meho status --watch``) HTML-escape / render the
+    agent-authored free text on their side.
 
     Lifted out of :func:`_feed_generator` so the main loop's
     cognitive complexity stays under the SonarCloud S3776 ceiling.
-    The helper itself is a single ``for``-loop with three
-    ``continue`` arms.
     """
     for entry_id, fields in items:
         raw_event_json = fields.get("event")
@@ -581,8 +591,16 @@ def _process_entries(
                 fields=list(fields.keys()),
             )
             continue
+        model_cls = select_event_model(raw_event_json)
+        if model_cls is None:
+            _log.warning(
+                "feed_skipped_malformed_event",
+                stream_key=stream_key,
+                entry_id=entry_id,
+            )
+            continue
         try:
-            event = BroadcastEvent.model_validate_json(raw_event_json)
+            event = model_cls.model_validate_json(raw_event_json)
         except ValidationError:
             _log.warning(
                 "feed_skipped_malformed_event",
@@ -590,7 +608,12 @@ def _process_entries(
                 entry_id=entry_id,
             )
             continue
-        if not _passes_filter(event, op_class, principal, target):
+        if not event_matches(
+            event,
+            op_class=op_class,
+            principal=principal,
+            target=target,
+        ):
             continue
         yield entry_id, _format_event(entry_id, raw_event_json)
 

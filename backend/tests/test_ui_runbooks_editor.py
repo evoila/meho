@@ -391,6 +391,11 @@ def test_editor_new_admin_renders_200() -> None:
     assert "codemirror-bundle.min.js" in body
     # CSRF cookie set on render.
     assert CSRF_COOKIE_NAME in response.cookies
+    # #177: the editor form (editor.html + the _step_fields.html partial it
+    # includes) is migrated off dead daisyUI-v4 classes, which compile to
+    # zero rules in v5 and broke the label-over-input column.
+    assert "form-control" not in body
+    assert "label-text" not in body
 
 
 def test_editor_new_operator_forbidden_403() -> None:

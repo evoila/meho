@@ -556,7 +556,7 @@ replay. The load-test acceptance for the chaos case ships in
   [`backend/src/meho_backplane/mcp/tools/broadcast.py`](../../backend/src/meho_backplane/mcp/tools/broadcast.py).
 * CLI verb:
   [`cli/internal/cmd/status_watch.go`](../../cli/internal/cmd/status_watch.go).
-* Decision #3 (PII defaults): `docs/planning/v0.2-decisions.md`.
+* Decision #3 (PII defaults): `docs/decisions/locked-decisions.md`.
 * Valkey Streams reference: <https://valkey.io/topics/streams-intro/>
 * MCP 2025-06-18 Resources spec:
   <https://modelcontextprotocol.io/specification/2025-06-18/server/resources>

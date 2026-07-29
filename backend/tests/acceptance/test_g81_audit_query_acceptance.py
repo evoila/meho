@@ -24,7 +24,7 @@ Coverage matrix (mirrors the 8 scenarios in the issue body #469):
    older than the cursor — no duplicates, no skips. New rows are
    visible only on a fresh page-1 call.
 3. **Aggregate-only broadcast** (decision #3, ``docs/planning/
-   v0.2-decisions.md``) — issuing a ``query_audit`` call publishes
+   locked-decisions.md``) — issuing a ``query_audit`` call publishes
    one ``BroadcastEvent`` to ``meho:feed:{tenant_id}`` whose
    ``payload`` is exactly ``{op_class, result_status, row_count}``.
    The filter contents (``principal``, ``op_id``, ``target``) NEVER

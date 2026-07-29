@@ -241,7 +241,15 @@ register_mcp_tool(
             '"evoila-distilled"}` returns only curated entries, '
             "excluding vendor sidecars). Values must be JSON scalars; "
             "missing keys exclude rows (containment semantics). "
-            "Limit defaults to 10; cap is 50 (substrate-enforced)."
+            "Limit defaults to 10; cap is 50 (substrate-enforced). "
+            "Surface-name note: every non-MCP MEHO surface calls this "
+            "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
+            "(`GET`/`POST /api/v1/kb`, `GET`/`DELETE /api/v1/kb/{slug}`), "
+            "the CLI verb is `meho kb`, the console is `/ui/kb`. There is "
+            "no `/api/v1/knowledge` route (it 404s). There is also no MCP "
+            "delete tool: clean up entries via `DELETE /api/v1/kb/{slug}` "
+            "(returns 204, tenant_admin) or `meho kb delete` — deletion is "
+            "REST/CLI-only."
         ),
         inputSchema={
             "type": "object",
@@ -307,7 +315,15 @@ register_mcp_tool(
             "body — the same-slug re-add updates in place via the "
             "body-hash short-circuit). "
             "Do NOT use this for ephemeral session notes — those belong "
-            "in `add_to_memory` (G5). The kb is durable team knowledge."
+            "in `add_to_memory` (G5). The kb is durable team knowledge. "
+            "Surface-name note: every non-MCP MEHO surface calls this "
+            "substrate `kb`, not `knowledge` — REST is `/api/v1/kb` "
+            "(`GET`/`POST /api/v1/kb`, `GET`/`DELETE /api/v1/kb/{slug}`), "
+            "the CLI verb is `meho kb`, the console is `/ui/kb`. There is "
+            "no `/api/v1/knowledge` route (it 404s). To DELETE an entry "
+            "there is no MCP tool: use `DELETE /api/v1/kb/{slug}` (returns "
+            "204, tenant_admin) or `meho kb delete` — deletion is "
+            "REST/CLI-only."
         ),
         inputSchema={
             "type": "object",

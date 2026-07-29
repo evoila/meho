@@ -22,12 +22,14 @@ import (
 //
 // Role: operator. Lists the tenant's agent runs via GET /api/v1/agents/runs,
 // newest first. Filters: --work-ref (exact-match external change-ticket
-// reference, work_ref I3-T2 #1662) and --status. Tenant-isolated
-// server-side via the JWT — only the caller's tenant's runs are visible.
+// reference, work_ref I3-T2 #1662), --status, and --agent-name (exact-match
+// agent definition name, #2472). Tenant-isolated server-side via the JWT —
+// only the caller's tenant's runs are visible.
 func newRunListCmd() *cobra.Command {
 	var (
 		workRef           string
 		statusFilter      string
+		agentName         string
 		limit             int
 		offset            int
 		jsonOut           bool
@@ -41,8 +43,9 @@ func newRunListCmd() *cobra.Command {
 			"--work-ref (exact-match change-ticket reference, e.g. " +
 			"gh:evoila/meho#11), --status (pending / running / " +
 			"awaiting_approval / succeeded / failed / cancelled), " +
-			"--limit (1..500, server default 100), --offset (rows to " +
-			"skip for paging, default 0). Runs are " +
+			"--agent-name (exact-match agent definition name — an unknown " +
+			"name returns an empty list), --limit (1..500, server default " +
+			"100), --offset (rows to skip for paging, default 0). Runs are " +
 			"tenant-isolated server-side — only your tenant's runs " +
 			"appear. --json emits the raw list for scripting.",
 		Args:          cobra.NoArgs,
@@ -52,6 +55,7 @@ func newRunListCmd() *cobra.Command {
 			return runRunList(cmd, runListOptions{
 				WorkRef:           workRef,
 				Status:            statusFilter,
+				AgentName:         agentName,
 				Limit:             limit,
 				Offset:            offset,
 				JSONOut:           jsonOut,
@@ -63,6 +67,8 @@ func newRunListCmd() *cobra.Command {
 		"filter by external change-ticket reference (exact match, e.g. gh:evoila/meho#11)")
 	cmd.Flags().StringVar(&statusFilter, "status", "",
 		"filter by lifecycle status: pending, running, awaiting_approval, succeeded, failed, or cancelled")
+	cmd.Flags().StringVar(&agentName, "agent-name", "",
+		"filter by agent definition name (exact match); an unknown name returns an empty list")
 	cmd.Flags().IntVar(&limit, "limit", 0,
 		"max runs per page (1..500, server default 100 when omitted)")
 	cmd.Flags().IntVar(&offset, "offset", 0,
@@ -77,6 +83,7 @@ func newRunListCmd() *cobra.Command {
 type runListOptions struct {
 	WorkRef           string
 	Status            string
+	AgentName         string
 	Limit             int
 	Offset            int
 	JSONOut           bool
@@ -115,6 +122,10 @@ func listRunsParams(opts runListOptions) *api.ListRunsApiV1AgentsRunsGetParams {
 		s := api.AgentRunStatus(opts.Status)
 		params.Status = &s
 	}
+	if opts.AgentName != "" {
+		an := opts.AgentName
+		params.AgentName = &an
+	}
 	if opts.Limit > 0 {
 		l := opts.Limit
 		params.Limit = &l
@@ -147,16 +158,21 @@ func printRunList(w io.Writer, runs *[]api.AgentRunSummaryResponse) {
 		fmt.Fprintln(w, "no agent runs")
 		return
 	}
-	fmt.Fprintf(w, "%-36s  %-18s  %-12s  %-24s  %s\n",
-		"RUN ID", "STATUS", "TRIGGER", "CREATED", "WORK_REF")
+	fmt.Fprintf(w, "%-36s  %-18s  %-20s  %-12s  %-24s  %s\n",
+		"RUN ID", "STATUS", "AGENT", "TRIGGER", "CREATED", "WORK_REF")
 	for _, r := range *runs {
 		workRef := "-"
 		if r.WorkRef != nil && *r.WorkRef != "" {
 			workRef = *r.WorkRef
 		}
-		fmt.Fprintf(w, "%-36s  %-18s  %-12s  %-24s  %s\n",
+		agentName := "-"
+		if r.AgentName != nil && *r.AgentName != "" {
+			agentName = *r.AgentName
+		}
+		fmt.Fprintf(w, "%-36s  %-18s  %-20s  %-12s  %-24s  %s\n",
 			r.RunId.String(),
 			string(r.Status),
+			agentName,
 			r.Trigger,
 			r.CreatedAt.UTC().Format("2006-01-02T15:04:05Z"),
 			workRef,

@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import (
+    AgentPermission,
     ApprovalRequest,
     ApprovalRequestStatus,
     EndpointDescriptor,
@@ -164,6 +165,70 @@ async def test_dangerous_subop_denied_for_agent_without_grant(
     # No pending row: a deny is not a park.
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0
+
+
+async def _seed_needs_approval_grant(op_pattern: str) -> None:
+    """Insert one ``needs-approval`` grant for the test operator's sub."""
+    async with get_sessionmaker()() as s:
+        s.add(
+            AgentPermission(
+                tenant_id=_TENANT_ID,
+                principal_sub="ops-operator-sub",
+                op_pattern=op_pattern,
+                verdict="needs-approval",
+                created_by_sub="admin",
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_needs_approval_grant_parks_agent_but_not_user(session: AsyncSession) -> None:
+    """A grant gates the agent-kind dispatch only; a user-kind one is untouched.
+
+    Pins the ``principal_kind=agent``-only enforcement scope (#2489): a
+    ``needs-approval`` grant on a ``safe`` op (whose no-grant default is
+    ``auto-execute``) parks the **agent** principal's dispatch, but the
+    identical grant has **zero** effect on a ``user`` principal's dispatch
+    of the same op — the non-agent branch never loads an
+    ``agent_permission`` row (G11.2-T3). If the grant leaked into the
+    user branch, the user dispatch would park too and this test would
+    fail — exactly the misdiagnosed "grant on my own sub does not gate me"
+    dogfood report, held as a contract.
+    """
+    op_id = "GET:/vcenter/vm"
+    await _seed_needs_approval_grant(op_pattern="GET:/vcenter/*")
+
+    # Agent-kind principal: the grant is consulted → the dispatch parks.
+    agent_result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.AGENT),
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        safety_level="safe",
+        requires_approval=False,
+        target=None,
+        params={"filter.names": ["vm-under-test"]},
+    )
+    assert agent_result is not None
+    assert agent_result.status == "awaiting_approval"
+
+    # User-kind principal: the grant is NOT consulted → the safe op
+    # auto-executes (the seam returns None), and no approval row is written
+    # for it.
+    user_result = await enforce_subop_policy(
+        operator=_operator(principal_kind=PrincipalKind.USER),
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        safety_level="safe",
+        requires_approval=False,
+        target=None,
+        params={"filter.names": ["vm-under-test"]},
+    )
+    assert user_result is None
+
+    # Exactly one pending row — from the agent dispatch, never the user one.
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 1
 
 
 @pytest.mark.asyncio

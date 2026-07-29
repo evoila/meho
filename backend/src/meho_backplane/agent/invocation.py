@@ -84,6 +84,7 @@ from typing import Final
 
 import structlog
 from pydantic import SecretStr
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.agent.invoke import current_agent_run_id_var
 from meho_backplane.agent.run import (
@@ -203,6 +204,15 @@ class AgentRunStatusView:
     model: str | None
     output: dict[str, object] | None
     error: str | None
+    #: Soft-FK to the ``agent_definition`` row that produced this run
+    #: (``None`` for an ad-hoc run with no definition). The run's agent
+    #: identity back-link, carried so every read face can answer "which
+    #: agent did this" (#2472).
+    agent_definition_id: uuid.UUID | None = None
+    #: The producing definition's name, resolved read-time from
+    #: :attr:`agent_definition_id`. ``None`` for an ad-hoc run and for a
+    #: dangling soft-FK (the definition was deleted after the run).
+    agent_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +238,14 @@ class AgentRunSummary:
     created_at: datetime
     started_at: datetime | None
     ended_at: datetime | None
+    #: Soft-FK to the ``agent_definition`` row that produced this run
+    #: (``None`` for an ad-hoc run). The scannable agent back-link the
+    #: run list surfaces render + filter on (#2472).
+    agent_definition_id: uuid.UUID | None = None
+    #: The producing definition's name, resolved read-time from
+    #: :attr:`agent_definition_id`. ``None`` for an ad-hoc run and for a
+    #: dangling soft-FK (the definition was deleted after the run).
+    agent_name: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1309,7 +1327,10 @@ class AgentInvoker:
             row = await run_lifecycle.get_run(session, run_id)
             if row is None or row.tenant_id != operator.tenant_id:
                 raise AgentRunNotFoundError(run_id)
-            return _row_to_view(row)
+            agent_name = await _resolve_run_agent_name(
+                session, tenant_id=operator.tenant_id, row=row
+            )
+            return _row_to_view(row, agent_name=agent_name)
 
     async def cancel(self, operator: Operator, run_id: uuid.UUID) -> AgentRunSummary:
         """Cancel a non-terminal run the operator's tenant owns.
@@ -1357,7 +1378,10 @@ class AgentInvoker:
                 raise AgentRunNotFoundError(run_id)
             cancelled = await run_lifecycle.cancel_run(session, run_id, operator=operator)
             await session.commit()
-            return _row_to_summary(cancelled)
+            agent_name = await _resolve_run_agent_name(
+                session, tenant_id=operator.tenant_id, row=cancelled
+            )
+            return _row_to_summary(cancelled, agent_name=agent_name)
 
     async def list_runs(
         self,
@@ -1365,6 +1389,7 @@ class AgentInvoker:
         *,
         work_ref: str | None = None,
         status: AgentRunStatus | None = None,
+        agent_name: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[AgentRunSummary]:
@@ -1373,21 +1398,53 @@ class AgentInvoker:
         Reads the durable ``agent_run`` rows, tenant-isolated to the
         operator's tenant. ``work_ref`` (when not ``None``) narrows to
         runs whose external change-ticket reference matches exactly;
-        ``status`` (when not ``None``) narrows to one lifecycle state.
-        The slice is bounded server-side -- the operation clamps the page
-        size -- so a single call never scans an unbounded table.
+        ``status`` (when not ``None``) narrows to one lifecycle state;
+        ``agent_name`` (when not ``None``) narrows to runs produced by
+        that agent definition. An ``agent_name`` that matches no
+        definition in the tenant yields an empty list rather than an
+        error, so the filter cannot probe definition existence beyond
+        what the list already reveals (#2472). Each row's ``agent_name``
+        is resolved read-time from its ``agent_definition_id`` in one
+        batched lookup. The slice is bounded server-side -- the operation
+        clamps the page size -- so a single call never scans an unbounded
+        table.
         """
         sessionmaker = get_sessionmaker()
         async with sessionmaker() as session:
+            agent_definition_id: uuid.UUID | None = None
+            if agent_name is not None:
+                agent_definition_id = await run_lifecycle.resolve_agent_definition_id(
+                    session, tenant_id=operator.tenant_id, name=agent_name
+                )
+                if agent_definition_id is None:
+                    return []
             rows = await run_lifecycle.list_runs(
                 session,
                 tenant_id=operator.tenant_id,
                 work_ref=work_ref,
                 status=status,
+                agent_definition_id=agent_definition_id,
                 limit=limit,
                 offset=offset,
             )
-            return [_row_to_summary(r) for r in rows]
+            names = await run_lifecycle.resolve_agent_names(
+                session,
+                tenant_id=operator.tenant_id,
+                definition_ids=[
+                    r.agent_definition_id for r in rows if r.agent_definition_id is not None
+                ],
+            )
+            return [
+                _row_to_summary(
+                    r,
+                    agent_name=(
+                        names.get(r.agent_definition_id)
+                        if r.agent_definition_id is not None
+                        else None
+                    ),
+                )
+                for r in rows
+            ]
 
     async def stream_events(
         self,
@@ -1603,8 +1660,36 @@ async def _finalize_child_run(
     )
 
 
-def _row_to_view(row: AgentRunRow) -> AgentRunStatusView:
-    """Project an ``agent_run`` row onto the poll-time view."""
+async def _resolve_run_agent_name(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    row: AgentRunRow,
+) -> str | None:
+    """Resolve one run row's producing-agent name (``None`` if unresolvable).
+
+    Read-time back-link for the single-row surfaces (poll / cancel): an
+    ad-hoc run (no ``agent_definition_id``) short-circuits to ``None``
+    without a query; otherwise the name is looked up tenant-scoped, so a
+    dangling soft-FK (definition deleted after the run) also yields
+    ``None``.
+    """
+    if row.agent_definition_id is None:
+        return None
+    names = await run_lifecycle.resolve_agent_names(
+        session, tenant_id=tenant_id, definition_ids=[row.agent_definition_id]
+    )
+    return names.get(row.agent_definition_id)
+
+
+def _row_to_view(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRunStatusView:
+    """Project an ``agent_run`` row onto the poll-time view.
+
+    *agent_name* is the producing definition's name, resolved read-time by
+    the caller from the row's ``agent_definition_id`` (``None`` for an
+    ad-hoc run or a dangling soft-FK); the id itself is read straight off
+    the row.
+    """
     return AgentRunStatusView(
         run_id=row.id,
         status=AgentRunStatus(row.status),
@@ -1613,11 +1698,19 @@ def _row_to_view(row: AgentRunRow) -> AgentRunStatusView:
         model=row.model,
         output=row.output,
         error=row.error,
+        agent_definition_id=row.agent_definition_id,
+        agent_name=agent_name,
     )
 
 
-def _row_to_summary(row: AgentRunRow) -> AgentRunSummary:
-    """Project an ``agent_run`` row onto the list-row summary (no output blob)."""
+def _row_to_summary(row: AgentRunRow, *, agent_name: str | None = None) -> AgentRunSummary:
+    """Project an ``agent_run`` row onto the list-row summary (no output blob).
+
+    *agent_name* is the producing definition's name, resolved read-time by
+    the caller from the row's ``agent_definition_id`` (``None`` for an
+    ad-hoc run or a dangling soft-FK); the id itself is read straight off
+    the row.
+    """
     return AgentRunSummary(
         run_id=row.id,
         status=AgentRunStatus(row.status),
@@ -1630,6 +1723,8 @@ def _row_to_summary(row: AgentRunRow) -> AgentRunSummary:
         created_at=row.created_at,
         started_at=row.started_at,
         ended_at=row.ended_at,
+        agent_definition_id=row.agent_definition_id,
+        agent_name=agent_name,
     )
 
 

@@ -500,7 +500,7 @@ migrating.
 - Initiative: [#320 G3.2 `k8s-1.x` typed op surface](https://github.com/evoila/meho/issues/320); Goal [#214](https://github.com/evoila/meho/issues/214) (G3 connector parity).
 - Tasks that shipped this surface: [#321](https://github.com/evoila/meho/issues/321) (T1 skeleton + `k8s.about`), [#322](https://github.com/evoila/meho/issues/322) (T2 inventory), [#323](https://github.com/evoila/meho/issues/323) (T3 workload), [#324](https://github.com/evoila/meho/issues/324) (T4 network/config/events), [#325](https://github.com/evoila/meho/issues/325) (T5 logs), [#326](https://github.com/evoila/meho/issues/326) (T6 CLI verbs + k3d E2E + this doc).
 - Engineering companion: [`docs/codebase/connectors-kubernetes.md`](../codebase/connectors-kubernetes.md), [`docs/codebase/kubernetes-connector.md`](../codebase/kubernetes-connector.md).
-- Locked decision: [#8 in `docs/planning/v0.2-decisions.md`](../planning/v0.2-decisions.md) — `kubernetes_asyncio` library, single-impl `(k8s, 1.x, k8s)` triple.
+- Locked decision: [#8 in `docs/decisions/locked-decisions.md`](../decisions/locked-decisions.md) — `kubernetes_asyncio` library, single-impl `(k8s, 1.x, k8s)` triple.
 - Federation-chain setup (kubeconfig-in-Vault prerequisite): [`vault-provisioning.md`](./vault-provisioning.md).
 - Broadcast feed onboarding: [`broadcast-onboarding.md`](./broadcast-onboarding.md). Audit query: [`audit-query.md`](./audit-query.md).
 - Op handlers: [`backend/src/meho_backplane/connectors/kubernetes/`](../../backend/src/meho_backplane/connectors/kubernetes/). CLI verbs: [`cli/internal/cmd/k8s/`](../../cli/internal/cmd/k8s/).

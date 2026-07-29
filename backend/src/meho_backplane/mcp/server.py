@@ -95,6 +95,7 @@ from meho_backplane.mcp.schemas import (
     METHOD_NOT_FOUND,
     PARSE_ERROR,
     PROTOCOL_VERSION,
+    RATE_LIMITED,
     InitializeRequest,
     InitializeResponse,
     JsonRpcError,
@@ -109,6 +110,7 @@ __all__ = [
     "RESOURCES_SUBSCRIBE_ENABLED",
     "McpInternalError",
     "McpInvalidParamsError",
+    "McpRateLimitedError",
     "mcp_session_id_capture_mode",
     "register_method",
     "router",
@@ -262,6 +264,39 @@ class McpInternalError(Exception):
         self.data = data
 
 
+class McpRateLimitedError(Exception):
+    """Handler-side sentinel mapped to JSON-RPC ``RATE_LIMITED`` (``-32000``).
+
+    Raised by a handler when a request is refused by a per-principal
+    rate limit -- the JSON-RPC analogue of HTTP 429. The dispatcher
+    catches it distinctly from :class:`McpInvalidParamsError` and
+    :class:`McpInternalError` so the wire response carries the
+    implementation-defined server-error code ``-32000`` (spec §5.1's
+    ``-32000..-32099`` reserved range) rather than mislabelling a
+    rate-limit as invalid params (the caller's params are well-formed)
+    or an internal error (the server is healthy and deliberately
+    refusing).
+
+    The first consumer is ``meho.broadcast.announce`` (G6.5-T6 #2546):
+    the announce handler translates
+    :class:`~meho_backplane.broadcast.rate_limit.AnnounceRateLimitError`
+    into this sentinel, passing ``data={limit, window_seconds,
+    retry_after_seconds}`` so the calling agent can back off precisely.
+    Keeping the broadcast layer's domain error separate from this MCP
+    sentinel mirrors the ``InvalidSinceError`` seam -- the broadcast
+    package never imports the MCP error vocabulary.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.data = data
+
+
 # ---------------------------------------------------------------------------
 # Built-in lifecycle handlers
 # ---------------------------------------------------------------------------
@@ -347,11 +382,10 @@ async def _initialize(
 
     # G7.1-T4 (#316): assemble the operator's tenant session preamble
     # from ``kind='operational'`` conventions and ship it as
-    # ``instructions`` per MCP 2025-06-18 §Initialization. An empty
-    # tenant returns ``("", [])``; the empty-string text falls through
-    # to ``None`` below so the wire serializer drops the field rather
-    # than emitting a literal empty string (which would still count as
-    # a non-null ``instructions`` value to a spec-conforming client).
+    # ``instructions`` per MCP 2025-06-18 §Initialization. Since G6.5-T6
+    # (#2546) every preamble carries the static broadcast-discipline
+    # band, so ``instructions`` is always populated (the ``or None``
+    # below stays as a defensive belt for the theoretical empty case).
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
     # function-local import per ``initialize`` call is negligible (the
@@ -954,6 +988,17 @@ async def _dispatch_to_handler(
             )
             return Response(status_code=202)
         return _error_response(jrpc.id, INVALID_PARAMS, str(exc), data=exc.data)
+    except McpRateLimitedError as exc:
+        # A handler-classified rate-limit refusal: the JSON-RPC analogue
+        # of HTTP 429. Surface the ``-32000`` implementation-defined
+        # server-error code with the structured ``error.data`` (limit /
+        # window / retry-after) so the caller can back off precisely.
+        # A rejected announce is a fail-loud refusal, so the notification
+        # arm never applies (announce is a request, not a notification).
+        _log.warning("mcp_rate_limited", method=jrpc.method, error=str(exc))
+        if is_notification:
+            return Response(status_code=202)
+        return _error_response(jrpc.id, RATE_LIMITED, str(exc), data=exc.data)
     except McpInternalError as exc:
         # A handler-classified server-side fault: keep the -32603 code but
         # surface its structured ``error.data`` + verbatim message (the

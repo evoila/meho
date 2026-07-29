@@ -392,12 +392,14 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
 ) -> None:
     """tools/call meho.topology.annotate {...} → curated row + 1 audit + 1 broadcast.
 
-    The dispatcher writes its own audit row at
+    Three audit axes since #2537: the MCP dispatcher writes its row at
     ``/mcp/tools/call/meho.topology.annotate`` (the per-MCP-call axis),
-    and ``annotate_edge`` writes a second row keyed
-    ``op_id='topology.annotate'`` (the service-level axis). The
-    issue's "one audit row + one broadcast event" applies to the
-    service emission — verified here.
+    the operations dispatcher writes a ``method='DISPATCH'`` row keyed
+    ``path='topology.annotate'`` (the policy-gated dispatch axis, new
+    in #2537), and ``annotate_edge`` writes the service-level row
+    (``method='ANNOTATE'``, same path). The issue's "one audit row +
+    one broadcast event" applies to the service emission — verified
+    here per ``(path, method)`` pair.
     """
     client, _op = client_with_operator
     await _seed_node(kind="principal", name="k8s-sa-foo")
@@ -426,6 +428,9 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
     assert payload["kind"] == "authenticates-via"
     assert payload["source"] == "curated"
     assert payload["conflicts"] == []
+    # #2539: superseded is now an additive return key; empty on a pair
+    # no probe covers (no competing auto edge to displace).
+    assert payload["superseded"] == []
     assert uuid.UUID(payload["edge_id"])  # valid UUID
 
     # One curated row in the tenant — the service primitive owns the upsert.
@@ -456,15 +461,72 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
     assert edges[0].source == "curated"
     assert edges[0].properties["note"] == "canonical k8s SA → Vault role"
 
-    # Exactly one service-level audit row + one MCP dispatcher row.
-    service_rows = [a for a in audits if a.path == "topology.annotate"]
+    # Exactly one service-level audit row, one policy-gated dispatch
+    # row (#2537), and one MCP dispatcher row.
+    service_rows = [a for a in audits if a.path == "topology.annotate" and a.method == "ANNOTATE"]
+    gate_rows = [a for a in audits if a.path == "topology.annotate" and a.method == "DISPATCH"]
     dispatcher_rows = [a for a in audits if a.path == "/mcp/tools/call/meho.topology.annotate"]
     assert len(service_rows) == 1
-    assert service_rows[0].method == "ANNOTATE"
+    assert len(gate_rows) == 1
     assert len(dispatcher_rows) == 1
 
     # Exactly one broadcast event (the service-level emission).
     assert publish_mock.await_count == 1
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+async def test_annotate_return_superseded_matches_audit_payload(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _seeded_tenant: None,
+) -> None:
+    """#2539: the annotate return's ``superseded`` equals the audit payload's list.
+
+    Seed an ``source='auto'`` edge (A depends-on B), then assert a
+    curated edge over the same ``from`` + same ``kind`` to a *different*
+    endpoint (A depends-on C). The §6 same-kind/different-endpoint scan
+    stamps ``superseded_by`` on the auto edge and records its id on the
+    shared audit / broadcast payload. The tool return now surfaces that
+    same list — the acceptance criterion asserts they are equal.
+    """
+    client, _op = client_with_operator
+    a_id = await _seed_node(kind="service", name="svc-a")
+    b_id = await _seed_node(kind="database", name="db-b")
+    await _seed_node(kind="database", name="db-c")
+    auto_edge_id = await _seed_auto_edge(from_id=a_id, to_id=b_id, kind="depends-on")
+
+    with patch(_PUBLISH_PATCH, new=AsyncMock()):
+        response = _annotate_call(
+            client,
+            60,
+            {"from_name": "svc-a", "kind": "depends-on", "to_name": "db-c"},
+        )
+
+    body = response.json()
+    assert body["result"]["isError"] is False, body
+    payload = json.loads(body["result"]["content"][0]["text"])
+    # The curated assertion displaced exactly the seeded auto edge.
+    assert payload["superseded"] == [str(auto_edge_id)]
+
+    # ... and that list is byte-identical to the one on the service's
+    # audit payload (the ids already existed there pre-#2539 — this task
+    # only surfaced them on the return).
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        from sqlalchemy import select
+
+        service_row = (
+            (
+                await session.execute(
+                    select(AuditLog).where(
+                        AuditLog.path == "topology.annotate",
+                        AuditLog.method == "ANNOTATE",
+                    )
+                )
+            )
+            .scalars()
+            .one()
+        )
+    assert service_row.payload["superseded"] == payload["superseded"]
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
@@ -528,21 +590,55 @@ async def test_annotate_is_idempotent_on_repeat(
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
-def test_annotate_rejects_unknown_kind_at_schema_layer(
+def test_annotate_rejects_malformed_kind_at_schema_layer(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """A made-up `kind` value fails the inputSchema enum (-32602)."""
+    """A malformed `kind` slug fails the inputSchema pattern (-32602).
+
+    T1 #2534: the schema constrains by slug shape, not membership —
+    an uppercase / punctuated kind is rejected before the handler
+    runs, while a well-formed novel kind passes (covered by
+    ``test_annotate_accepts_novel_kind``).
+    """
     client, _op = client_with_operator
     response = _annotate_call(
         client,
         30,
         {
             "from_name": "a",
-            "kind": "made-up-kind",
+            "kind": "Made Up Kind!",
             "to_name": "b",
         },
     )
     assert response.json()["error"]["code"] == INVALID_PARAMS
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
+async def test_annotate_accepts_novel_kind(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    _seeded_tenant: None,
+) -> None:
+    """A novel edge kind (`resolves-to`) annotates end-to-end (T1 #2534)."""
+    client, _op = client_with_operator
+    await _seed_node(kind="dns-record", name="www.example.com")
+    await _seed_node(kind="service", name="frontend")
+
+    with patch(_PUBLISH_PATCH, new=AsyncMock()):
+        response = _annotate_call(
+            client,
+            33,
+            {
+                "from_name": "www.example.com",
+                "kind": "resolves-to",
+                "to_name": "frontend",
+            },
+        )
+
+    body = response.json()
+    assert body["result"]["isError"] is False
+    payload = json.loads(body["result"]["content"][0]["text"])
+    assert payload["kind"] == "resolves-to"
+    assert payload["source"] == "curated"
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.TENANT_ADMIN], indirect=True)
@@ -1032,36 +1128,34 @@ def test_annotate_description_scopes_auto_kind_warning_to_actual_conflict() -> N
 
 
 def test_annotate_description_matches_actual_response_shape() -> None:
-    """The annotate description must not advertise response fields the handler
-    does not populate (B1 regression on PR #654).
+    """The annotate description must advertise exactly the response fields
+    the handler populates (B1 regression on PR #654).
 
-    The handler returns ``edge_id / from / to / kind / source / conflicts``;
-    earlier iterations also claimed ``superseded: [<auto-edge-id>...]`` on
-    the response shape, but ``annotate_edge`` only stamps that on the
-    auto-edge ``properties`` and on the audit/broadcast payload — it
-    never surfaces it on the return value. Description-vs-impl drift
-    here is load-bearing for an LLM agent reading the description as
-    the API contract.
+    Since #2539 the handler returns ``edge_id / from / to / kind /
+    source / conflicts / superseded`` — ``superseded`` is now an additive
+    return key surfacing the auto edges the assertion displaced (the ids
+    already computed on the audit/broadcast payload; MCP authoring parity
+    with the REST/CLI fronts). Description-vs-impl drift here is
+    load-bearing for an LLM agent reading the description as the API
+    contract.
     """
     entry = get_tool("meho.topology.annotate")
     assert entry is not None
     defn = entry[0]
     desc = defn.description
-    declared = set(defn.outputSchema.get("properties", {}).keys())
+    # Since #2537 the outputSchema is a oneOf tagged union: the executed
+    # domain shape (first branch) or the awaiting_approval envelope for
+    # a parked agent-principal write (second branch).
+    executed_shape, parked_shape = defn.outputSchema["oneOf"]
+    declared = set(executed_shape.get("properties", {}).keys())
     # outputSchema is the canonical contract — anything the description
     # *names* as a response key must be in it.
-    assert declared == {"edge_id", "from", "to", "kind", "source", "conflicts"}
+    assert declared == {"edge_id", "from", "to", "kind", "source", "conflicts", "superseded"}
+    assert parked_shape["properties"]["status"] == {"const": "awaiting_approval"}
     # Belt-and-suspenders: the literal "Returns `{...}`" clause names
-    # only the keys above.
+    # the keys above, including the new `superseded` list.
     assert "Returns `{edge_id, from:" in desc
-    # `superseded` is the substrate-side §6 marker
-    # (`properties.superseded_by` on the displaced auto-edge row +
-    # audit payload field), never a response key on this tool. The
-    # description may *mention*
-    # the mechanism in parenthetical guidance but must not advertise it
-    # as a returned key.
-    assert "superseded: [<auto-edge-id>...]" not in desc
-    assert "superseded_by" in desc  # parenthetical reference to the substrate mechanism remains
+    assert "superseded: [<edge-id>...]" in desc
 
 
 def test_unannotate_description_names_auto_refusal() -> None:

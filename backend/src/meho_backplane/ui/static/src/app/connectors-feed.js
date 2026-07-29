@@ -76,6 +76,17 @@ document.addEventListener("alpine:init", () => {
       } catch {
         return;
       }
+      // #2549: the shared ``/ui/broadcast/stream`` now also carries
+      // agent-authored announcements. This card is the target's audit
+      // recent-ops list; an announcement has no ``op_id`` / ``payload``
+      // method/path, so drop it here (it renders on the broadcast feed /
+      // history instead) rather than projecting a blank operation row.
+      if (
+        frame &&
+        (frame.kind === "agent_announcement" || frame.event_kind === "agent_announcement")
+      ) {
+        return;
+      }
       // Project the BroadcastEvent wire shape into the row shape the
       // template renders. Missing fields render as empty -- never
       // throw.
@@ -95,6 +106,40 @@ document.addEventListener("alpine:init", () => {
       if (this.events.length > this.cap) {
         this.events.length = this.cap;
       }
+    },
+
+    // Render an ISO-8601 ``occurred_at`` as the console-standard
+    // ``YYYY-MM-DD HH:MM UTC`` (audit timestamps are UTC). Falls back to
+    // the raw string on an unparseable value so a malformed frame never
+    // blanks the row (mirrors ``broadcast-feed.js``'s ``formatTs``).
+    //
+    // ``occurred_at`` is UTC, but a suffix-less value (SQLite returns the
+    // ``DateTime(timezone=True)`` column without a ``+00:00`` offset) would
+    // be parsed as *local* time by ``new Date`` and then mislabelled by the
+    // ``getUTC*`` calls below in a non-UTC browser. Append ``Z`` when no
+    // timezone designator is present so the instant is always read as UTC.
+    formatTs(ts) {
+      if (!ts) {
+        return ts;
+      }
+      const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(ts);
+      const d = new Date(hasTz ? ts : ts + "Z");
+      if (isNaN(d.getTime())) {
+        return ts;
+      }
+      const pad = (n) => String(n).padStart(2, "0");
+      return (
+        d.getUTCFullYear() +
+        "-" +
+        pad(d.getUTCMonth() + 1) +
+        "-" +
+        pad(d.getUTCDate()) +
+        " " +
+        pad(d.getUTCHours()) +
+        ":" +
+        pad(d.getUTCMinutes()) +
+        " UTC"
+      );
     },
   }));
 });

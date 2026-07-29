@@ -26,7 +26,7 @@ deployment-wide default keeps the pre-existing ``vault.kv.read``
 
 Credential-sensitivity classification: ``vault.kv.read`` and
 ``vault.kv.list`` are ``credential_read`` per locked decision #3
-(docs/planning/v0.2-decisions.md). The classifier the G6 broadcast
+(docs/decisions/locked-decisions.md). The classifier the G6 broadcast
 publisher reads is op-id-based — :func:`meho_backplane.broadcast.\
 events.classify_op` consults the ``_CREDENTIAL_READ_OPS`` allowlist,
 which already contains both op-ids. The shipped G0.6 substrate has no

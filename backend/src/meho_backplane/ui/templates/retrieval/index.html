@@ -35,6 +35,8 @@
     query           -- str: current query (empty on first render)
     source          -- str: current source filter (empty on first render)
     kind            -- str: current kind filter (empty on first render)
+    source_options  -- tuple[str]: distinct retrieval-visible sources (datalist)
+    kind_options    -- tuple[str]: distinct retrieval-visible kinds (datalist)
     limit           -- int: current limit selection
     limit_options   -- tuple[int]: the limit selector's options
     hits            -- list[RetrievalHit]: empty on first render
@@ -116,14 +118,15 @@
           hx-target="#retrieval-diagnostics-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-diagnostics-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="space-y-3"
           role="search"
           aria-label="Run a retrieval diagnostics query"
         >
-          <label class="form-control w-full">
-            <div class="label">
-              <span class="label-text">Query</span>
-            </div>
+          <label class="flex flex-col gap-1 w-full">
+            <span class="text-sm font-medium">Query</span>
             <textarea
               name="query"
               rows="2"
@@ -136,40 +139,56 @@
             >{{ query }}</textarea>
           </label>
           <div class="flex flex-col gap-3 sm:flex-row sm:items-end">
-            <label class="form-control w-full sm:w-48">
-              <div class="label">
-                <span class="label-text">Source <span class="opacity-50">(optional)</span></span>
-              </div>
+            <label class="flex flex-col gap-1 w-full sm:w-48">
+              <span class="text-sm font-medium">Source <span class="opacity-50">(optional)</span></span>
+              {#- Source datalist (#2458): the tenant's distinct retrieval-visible
+                  source namespaces, enumerated by a SELECT DISTINCT over the
+                  ``documents`` table. ``list=`` keeps the input free-typing (kinds
+                  are free-form by design) while offering the real values, so an
+                  operator no longer guesses a namespace that silently returns 0
+                  hits. Empty on the initial render when the corpus is empty. -#}
               <input
                 type="text"
                 name="source"
                 value="{{ source }}"
                 maxlength="64"
+                list="retrieval-source-options"
                 placeholder="e.g. kb, memory"
                 class="input input-bordered w-full"
                 aria-label="Source filter"
+                aria-describedby="retrieval-source-help"
                 autocomplete="off"
               />
+              <datalist id="retrieval-source-options">
+                {% for option in source_options %}
+                  <option value="{{ option }}"></option>
+                {% endfor %}
+              </datalist>
             </label>
-            <label class="form-control w-full sm:w-48">
-              <div class="label">
-                <span class="label-text">Kind <span class="opacity-50">(optional)</span></span>
-              </div>
+            <label class="flex flex-col gap-1 w-full sm:w-48">
+              <span class="text-sm font-medium">Kind <span class="opacity-50">(optional)</span></span>
+              {#- Kind datalist (#2458): the tenant's distinct retrieval-visible
+                  kinds from the same SELECT DISTINCT; a user-scoped memory kind
+                  another principal owns is excluded (own-principal scoped). -#}
               <input
                 type="text"
                 name="kind"
                 value="{{ kind }}"
                 maxlength="64"
+                list="retrieval-kind-options"
                 placeholder="e.g. kb-entry"
                 class="input input-bordered w-full"
                 aria-label="Kind filter"
                 autocomplete="off"
               />
+              <datalist id="retrieval-kind-options">
+                {% for option in kind_options %}
+                  <option value="{{ option }}"></option>
+                {% endfor %}
+              </datalist>
             </label>
-            <label class="form-control w-full sm:w-32">
-              <div class="label">
-                <span class="label-text">Limit</span>
-              </div>
+            <label class="flex flex-col gap-1 w-full sm:w-32">
+              <span class="text-sm font-medium">Limit</span>
               <select
                 name="limit"
                 class="select select-bordered w-full"
@@ -184,7 +203,27 @@
               {{ icon("search") }}
               Run
             </button>
+            {#- In-flight feedback (#2459): the form's hx-indicator toggles this
+                spinner's visibility while the request is in flight and
+                hx-disabled-elt disables the submit button; hx-disinherit keeps
+                both off any descendant htmx request in the results region. -#}
+            <span
+              id="retrieval-diagnostics-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+              aria-label="Running the diagnostics query"
+            ></span>
           </div>
+          {#- Source helper, full-width below the controls row (#169). Lived
+              inside the narrow ``sm:w-48`` Source column as a daisyUI-v4
+              ``label-text-alt``; that class is dead in v5 so the block flowed
+              inline and overlapped the adjacent controls. As a full-width note
+              it can no longer collide; the Source input references it via
+              ``aria-describedby``. -#}
+          <p id="retrieval-source-help" class="text-xs opacity-60">
+            Retrieval sources only. Docs-corpus collections are a separate
+            substrate &mdash; search them on
+            <a href="/ui/corpus" class="link">/ui/corpus</a>, not here.
+          </p>
         </form>
       </div>
     </div>
@@ -210,10 +249,8 @@
           class="flex flex-col gap-3 sm:flex-row sm:items-end"
           aria-label="Run a retrieval usage report"
         >
-          <label class="form-control w-full sm:w-48">
-            <div class="label">
-              <span class="label-text">Lookback window</span>
-            </div>
+          <label class="flex flex-col gap-1 w-full sm:w-48">
+            <span class="text-sm font-medium">Lookback window</span>
             <input
               type="text"
               name="since"
@@ -255,6 +292,9 @@
           hx-target="#retrieval-eval-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-eval-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="flex flex-wrap items-center justify-between gap-3"
           aria-label="Run the retrieval eval corpus"
         >
@@ -267,6 +307,13 @@
             {{ icon("gauge") }}
             Run eval
           </button>
+          {#- In-flight feedback (#2459): eval runs are multi-second; the spinner
+              shows progress and the submit button disables while in flight. -#}
+          <span
+            id="retrieval-eval-spinner"
+            class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+            aria-label="Running the eval corpus"
+          ></span>
         </form>
       </div>
     </div>
@@ -294,6 +341,9 @@
           hx-target="#retrieval-retire-results"
           hx-swap="outerHTML"
           hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'
+          hx-indicator="#retrieval-retire-spinner"
+          hx-disabled-elt="find button[type=submit]"
+          hx-disinherit="hx-disabled-elt hx-indicator"
           class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between"
           aria-label="Run the retire-decision checklist"
         >
@@ -308,10 +358,8 @@
                   never sees this field, so the form they can submit carries no
                   ``tenant_filter`` and they stay own-tenant scoped. A forged
                   cross-tenant value still hits the backend 403. -#}
-              <label class="form-control w-full sm:w-80">
-                <div class="label">
-                  <span class="label-text">Tenant filter <span class="opacity-50">(platform admin)</span></span>
-                </div>
+              <label class="flex flex-col gap-1 w-full sm:w-80">
+                <span class="text-sm font-medium">Tenant filter <span class="opacity-50">(platform admin)</span></span>
                 <input
                   type="text"
                   name="tenant_filter"
@@ -328,6 +376,13 @@
               {{ icon("shield-check") }}
               Run checklist
             </button>
+            {#- In-flight feedback (#2459): checklist runs scan every surface; the
+                spinner shows progress and the submit button disables in flight. -#}
+            <span
+              id="retrieval-retire-spinner"
+              class="htmx-indicator loading loading-spinner loading-sm text-primary self-center"
+              aria-label="Running the retire checklist"
+            ></span>
           </div>
         </form>
       </div>

@@ -29,23 +29,24 @@ on:
       - '**/package.json'
       - '**/package-lock.json'
       - '.github/workflows/dependency-license-check.yml'
+  # NO `paths:` filter here — deliberately. `Python License Check` and
+  # `NPM License Check` are *required* status checks in branch
+  # protection, and GitHub leaves a required context Pending forever
+  # when its whole workflow is skipped by a path filter, which blocks
+  # the merge with no way to satisfy it. The narrowing moved to the
+  # `changes` job + job-level `if:` below, because a job skipped by its
+  # own `if:` reports **Success** and does satisfy the required check.
+  # This is exactly the shape ci.yml adopted in #2140 and documents at
+  # its own `changes` job; this workflow was never converted, so every
+  # PR that did not touch a manifest was structurally unmergeable.
   pull_request:
     branches: [main]
-    paths:
-      - '**/pyproject.toml'
-      - '**/package.json'
-      - '**/package-lock.json'
-      - '.github/workflows/dependency-license-check.yml'
   # Fires when a PR enters the GitHub merge queue. Required so the
-  # `Python License Check` and `NPM License Check` status contexts —
-  # required checks in branch protection — report against the
-  # synthesised merge commit, not just the PR head. Bare `merge_group:`
-  # is intentional: the `merge_group` event does not support `paths:`
-  # filtering (GitHub docs only allow `types:`), so the license jobs
-  # run on every queue admission. The `hashFiles()` guards on each
-  # step already make the jobs no-op when manifests are unchanged, so
-  # the redundant runs are cheap. Same rationale as ci.yml's
-  # merge_group trigger (#769).
+  # `Python License Check` and `NPM License Check` status contexts
+  # report against the synthesised merge commit, not just the PR head.
+  # The `changes` job emits `manifests=true` on every non-PR event, so
+  # the license jobs run on every queue admission. Same rationale as
+  # ci.yml's merge_group trigger (#769).
   merge_group:
   workflow_dispatch:
 
@@ -63,16 +64,69 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    name: Detect manifest changes
+    # Emits `manifests=true` when a PR touches a dependency manifest, so
+    # the two required license jobs run only then. On push / merge_group
+    # / workflow_dispatch it emits `true` unconditionally, so the
+    # required checks are never left Pending on a non-PR event.
+    #
+    # This carries the narrowing that used to live in `on.pull_request.
+    # paths`. See the comment on that trigger above for why the filter
+    # cannot stay there for a *required* check.
+    runs-on: meho-runners-ci
+    timeout-minutes: 5
+    outputs:
+      manifests: ${{ steps.detect.outputs.manifests }}
+    steps:
+      - name: Checkout
+        # fetch-depth: 0 so the PR base commit is present for the
+        # three-dot diff below (the default shallow fetch would not
+        # reach the merge-base).
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Detect manifest changes
+        id: detect
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "non-PR event (${{ github.event_name }}) -> manifests=true"
+            echo "manifests=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          # Same file set the `on.pull_request.paths` filter used to
+          # name: any Python or npm dependency manifest, plus this
+          # workflow itself (so a change to the allow-list is always
+          # validated against the real dependency graph).
+          changed="$(git diff --name-only "${base}"...HEAD)"
+          if printf '%s\n' "${changed}" | grep -qE '(^|/)(pyproject\.toml|package\.json|package-lock\.json)$|^\.github/workflows/dependency-license-check\.yml$'; then
+            echo "manifest change detected -> manifests=true"
+            echo "manifests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no manifest change -> manifests=false"
+            echo "manifests=false" >> "$GITHUB_OUTPUT"
+          fi
+
   python-licenses:
     name: Python License Check
+    needs: changes
+    if: needs.changes.outputs.manifests == 'true'
     runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         if: hashFiles('**/pyproject.toml') != ''
         with:
-          python-version: "3.13"
+          # Must track the ``requires-python`` floor in backend/pyproject.toml.
+          # The "Install project deps" step below runs a real
+          # ``pip install -e ./backend``, so an interpreter older than the
+          # floor fails resolution outright — the migration to 3.14 hit
+          # exactly that: ``Package 'meho-backplane' requires a different
+          # Python: 3.13.14 not in '>=3.14'``. Bump both together.
+          python-version: "3.14"
       - name: Install pip-licenses
         if: hashFiles('**/pyproject.toml') != ''
         # 5.5.5 reads PEP 639 ``License-Expression`` metadata; 5.0.0 did
@@ -186,11 +240,13 @@ jobs:
 
   npm-licenses:
     name: NPM License Check
+    needs: changes
+    if: needs.changes.outputs.manifests == 'true'
     runs-on: meho-runners-ci
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         if: hashFiles('**/package-lock.json') != ''
         with:
           node-version: "20"

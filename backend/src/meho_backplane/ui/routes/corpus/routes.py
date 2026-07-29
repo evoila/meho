@@ -70,6 +70,7 @@ gates which collections are listed and searchable.
 from __future__ import annotations
 
 from typing import Final
+from urllib.parse import quote
 
 import structlog
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
@@ -111,7 +112,11 @@ from meho_backplane.ui.auth.refresh import (
 from meho_backplane.ui.csrf import CSRF_COOKIE_NAME, mint_csrf_token, verify_csrf_token
 from meho_backplane.ui.templating import get_templates
 
-__all__ = ["build_corpus_search_router", "corpus_ask_fallback_context"]
+__all__ = [
+    "build_corpus_search_router",
+    "corpus_ask_fallback_context",
+    "internal_chunk_ref",
+]
 
 log = structlog.get_logger(__name__)
 
@@ -139,6 +144,13 @@ _SEARCH_LIMIT: Final[int] = 10
 #: a malformed ``mode`` form field degrades to the safe retrieve-only path.
 _MODE_SEARCH: Final[str] = "search"
 _MODE_ASK: Final[str] = "ask"
+
+#: The MEHO backend-agnostic citation-ref scheme prefix (#132). A citation
+#: whose source has no derivable public URL carries a
+#: ``meho://docs/<collection>/<chunk_id>`` ref (minted by
+#: ``normalize_source_ref``); the console turns such a ref into an internal
+#: cited-source detail link so the citation is never a dead end (#2462).
+_MEHO_DOCS_REF_PREFIX: Final[str] = "meho://docs/"
 
 #: Module-level ``Depends`` closure for the operator-session gate. Built
 #: once (rather than inline) to satisfy ruff B008, matching the convention
@@ -480,24 +492,78 @@ async def _render_corpus_index(
     return response
 
 
+def internal_chunk_ref(collection_key: str, chunk_id: str) -> str:
+    """Return the stable ``meho://docs/<collection>/<chunk_id>`` reference.
+
+    The display form of a citation with no public URL -- the same shape
+    :func:`~meho_backplane.docs_search.normalize_source_ref` mints on the wire
+    (#132). Reconstructed here (not imported from the resolver's private scheme
+    constant) so the chunk-detail page can show the operator the stable
+    reference the citation carried.
+    """
+    return f"{_MEHO_DOCS_REF_PREFIX}{collection_key}/{chunk_id}"
+
+
+def _internal_chunk_href(source_url: str | None) -> str | None:
+    """Derive the internal cited-source detail href for a ``meho://`` ref (#2462).
+
+    A citation whose normalized ``source_url`` is a
+    ``meho://docs/<collection>/<chunk_id>`` ref (#132) has no public URL, so the
+    card cannot render an outbound link -- yet the operator must still be able
+    to open the cited source. This maps the ref to the internal
+    ``/ui/corpus/chunks/<collection>/<chunk_id>`` detail route so the citation is
+    never a dead end. A non-``meho://`` source (an already-clickable public URL,
+    or ``None``) returns ``None``:
+    :func:`~meho_backplane.docs_search.resolve_citation_link` already gives those
+    a clickable outbound link or a genuine no-source label, so no internal href
+    is derived and the by-design outbound behaviour (#1919 AC 2) is untouched.
+
+    Kept in the UI layer (not in ``citation_links``) so no ``/ui`` route leaks
+    into the shared resolver's MCP / REST citation payload.
+    """
+    if not source_url or not source_url.startswith(_MEHO_DOCS_REF_PREFIX):
+        return None
+    rest = source_url[len(_MEHO_DOCS_REF_PREFIX) :]
+    collection, sep, chunk_id = rest.partition("/")
+    if not sep or not collection or not chunk_id:
+        return None
+    # ``collection`` is a single ref segment (no slash); ``chunk_id`` may carry
+    # a slash, captured by the route's ``:path`` converter, so keep '/' safe.
+    return f"/ui/corpus/chunks/{quote(collection, safe='')}/{quote(chunk_id, safe='/')}"
+
+
 def _cited_chunks(chunks: list[DocsChunk]) -> list[dict[str, object]]:
-    """Pair each cited chunk with its resolved navigable link (#1919).
+    """Pair each cited chunk with its resolved link + internal view-source href.
 
     Each chunk's ``source_url`` is, for the GCS-backed vendor corpus, a raw
     ``gs://`` object path a browser cannot open -- rendering it as an ``href``
     yields a dead link. :func:`~meho_backplane.docs_search.resolve_citation_link`
     maps it to a :class:`~meho_backplane.docs_search.CitationLink`: a navigable
     canonical URL (KB -> ``knowledge.broadcom.com``, ``http(s)`` ->
-    pass-through) + a human ``label``, or a non-clickable label for an
-    unrecognised / community source -- **never** a ``gs://`` href. The template
-    branches on ``link.clickable``. The same resolver backs the MCP
-    ``ask_docs`` payload, so the UI and the answer payload link citations
-    identically.
+    pass-through) + a human ``label``, or a non-clickable label for a source
+    that normalizes to an opaque ``meho://`` ref -- **never** a ``gs://`` href.
+
+    For a ``meho://``-ref citation (no public URL) this also derives a
+    ``view_href`` (:func:`_internal_chunk_href`) pointing at the internal
+    cited-source detail route, so the template renders a *consistent* view-source
+    affordance: a public-URL citation keeps its outbound link (#1919 AC 2), a
+    ``meho://``-ref citation click-throughs to an internal detail view (#2462),
+    and a genuine no-source citation stays plain text. ``view_href`` is
+    **always** a key (``None`` when not applicable) so the StrictUndefined
+    template never trips on a missing attribute.
+
+    This is the single seam every citation render flows through -- the retrieve
+    path, the ask success path, and the ask fail-open path all call it -- so the
+    Retrieve and Ask modes render the identical affordance for the identical
+    doc (parity, #2462).
     """
     return [
         {
             "chunk": chunk,
-            "link": resolve_citation_link(chunk.source_url, document_id=chunk.document_id),
+            "link": resolve_citation_link(
+                chunk.source_url, title=chunk.title, document_id=chunk.document_id
+            ),
+            "view_href": _internal_chunk_href(chunk.source_url),
         }
         for chunk in chunks
     ]

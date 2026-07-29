@@ -17,7 +17,7 @@ The substrate operationalises three contracts:
 
 - **CLAUDE.md postulate 7** — every authenticated dispatch writes one audit row, append-only, before the response yields back. G8.1 ships the read surface that turns those rows into investigation answers.
 - **CLAUDE.md postulate 5** — the agent surface is a narrow waist. Operators get five CLI verbs (per-shape conveniences); agents get one MCP tool (`query_audit`). The conveniences collapse into filter combinations on the same substrate handler.
-- **Decision #3** ([v0.2-decisions.md](../planning/v0.2-decisions.md)) — `query_audit` is privacy-sensitive: a free-text broadcast of "operator X queried for principal Y on target Z" would leak the investigation intent. The G6.1 sensitivity classifier renders every `op_class="audit_query"` event as aggregate-only `{op_id, result_status, row_count}`; filter contents stay local to the operator.
+- **Decision #3** ([locked-decisions.md](../decisions/locked-decisions.md)) — `query_audit` is privacy-sensitive: a free-text broadcast of "operator X queried for principal Y on target Z" would leak the investigation intent. The G6.1 sensitivity classifier renders every `op_class="audit_query"` event as aggregate-only `{op_id, result_status, row_count}`; filter contents stay local to the operator.
 
 ## Module shape
 
@@ -141,5 +141,5 @@ The convention is closed-set on the *channel* axis (HTTP / MCP / INTERNAL is the
 - Schema: [`db/models.py`](../../backend/src/meho_backplane/db/models.py) (`AuditLog`, `Target`).
 - Migrations: [`alembic/versions/0001_create_audit_log.py`](../../backend/alembic/versions/0001_create_audit_log.py), [`0002_create_tenant_and_audit_tenant_id.py`](../../backend/alembic/versions/0002_create_tenant_and_audit_tenant_id.py), [`0004_create_targets_and_audit_target_id.py`](../../backend/alembic/versions/0004_create_targets_and_audit_target_id.py), [`0006_add_audit_log_parent_audit_id.py`](../../backend/alembic/versions/0006_add_audit_log_parent_audit_id.py).
 - Sibling Initiative: [G8.2 #377](https://github.com/evoila/meho/issues/377) (audit replay).
-- Decision: [`v0.2-decisions.md` decision #3](../planning/v0.2-decisions.md) (PII defaults / aggregate-only audit broadcasts).
+- Decision: [`locked-decisions.md` decision #3](../decisions/locked-decisions.md) (PII defaults / aggregate-only audit broadcasts).
 - Consumer needs: §G8 of [`consumer-needs.md`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc/blob/main/docs/meho-coordination/consumer-needs.md) L214-234.

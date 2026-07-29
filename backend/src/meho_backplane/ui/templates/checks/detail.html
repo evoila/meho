@@ -1,0 +1,108 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Checks Dashboard detail (Task #2506). The Dashboard's rolled-up five-state
+  badge plus the member table: each member Sensor with its raw + effective
+  state, the *pending* marker (a failing state still held by the ``for:``
+  window), the held-since instant, the severity cap, and the last observed
+  value / evidence. Read-only.
+-#}
+{% extends "base.html" %}
+
+{% block page_title %}{{ dashboard.name }} &middot; Checks &middot; MEHO Operator Console{% endblock %}
+
+{% block content %}
+<section class="space-y-6">
+  <header class="flex flex-wrap items-start justify-between gap-4">
+    <div class="space-y-1">
+      <a href="/ui/checks" class="text-xs opacity-60 hover:underline">&larr; All dashboards</a>
+      <h1 class="text-2xl font-semibold">{{ dashboard.name }}</h1>
+      {% if dashboard.description %}
+        <p class="text-sm opacity-70">{{ dashboard.description }}</p>
+      {% endif %}
+      <p class="text-xs opacity-50">
+        Created by {{ dashboard.created_by_sub }}
+        {% if dashboard.created_at %}&middot; {{ dashboard.created_at.strftime("%Y-%m-%d %H:%M UTC") }}{% endif %}
+      </p>
+    </div>
+    <div class="text-right">
+      <div class="text-xs uppercase opacity-50">Rollup</div>
+      <span class="badge {{ dashboard.state_badge }} badge-lg">{{ dashboard.state }}</span>
+      <div class="text-xs opacity-50 mt-1">{{ dashboard.member_count }} member(s)</div>
+    </div>
+  </header>
+
+  {# ---------- Member table ---------- #}
+  <div class="overflow-x-auto rounded-box border border-base-300 bg-base-100">
+    <table class="table table-sm">
+      <thead>
+        <tr>
+          <th>Sensor</th>
+          <th>Raw</th>
+          <th>Effective</th>
+          <th>Since</th>
+          <th>Severity</th>
+          <th><code>for:</code></th>
+          <th>Last value</th>
+          <th>Evidence</th>
+        </tr>
+      </thead>
+      <tbody id="checks-member-body">
+        {% if dashboard.members %}
+          {% for m in dashboard.members %}
+            <tr data-sensor-id="{{ m.sensor_id }}">
+              <td>
+                <div class="font-medium">{{ m.name }}</div>
+                <div class="font-mono text-xs opacity-60">{{ m.connector_id }} &middot; {{ m.op_id }}</div>
+                {% if m.status == "paused" %}
+                  <span class="badge badge-outline badge-xs">paused</span>
+                {% endif %}
+              </td>
+              <td><span class="badge {{ m.raw_state_badge }} badge-sm">{{ m.raw_state }}</span></td>
+              <td>
+                <span class="badge {{ m.effective_state_badge }} badge-sm">{{ m.effective_state }}</span>
+                {% if m.pending %}
+                  <span class="badge badge-warning badge-xs" title="Failing, but held by the for: window">pending</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if m.state_since %}
+                  <span class="text-xs" title="{{ m.state_since.isoformat() }}">{{ m.state_since.strftime("%Y-%m-%d %H:%M UTC") }}</span>
+                {% else %}
+                  <span class="opacity-40">—</span>
+                {% endif %}
+              </td>
+              <td class="text-xs">{{ m.severity }}</td>
+              <td class="text-xs">{{ m.for_seconds }}s</td>
+              <td class="font-mono text-xs">
+                {% if m.last_value is none %}
+                  <span class="opacity-40">—</span>
+                {% else %}
+                  {{ m.last_value }}
+                {% endif %}
+              </td>
+              <td>
+                {% if m.last_evidence %}
+                  <details class="text-xs">
+                    <summary class="cursor-pointer opacity-70">view</summary>
+                    <pre class="mt-1 whitespace-pre-wrap break-all">{{ m.last_evidence | tojson(indent=2) }}</pre>
+                  </details>
+                {% else %}
+                  <span class="opacity-40">—</span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+        {% else %}
+          <tr>
+            <td colspan="8" class="text-center text-sm opacity-60 py-6">
+              This dashboard has no member sensors.
+            </td>
+          </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

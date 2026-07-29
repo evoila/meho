@@ -224,6 +224,8 @@ import httpx
 import hvac.exceptions
 
 from meho_backplane.auth.operator import Operator
+from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
+from meho_backplane.broadcast.history import build_target_activity_advisory
 from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
@@ -237,6 +239,7 @@ from meho_backplane.operations._audit import (
     audit_and_broadcast_safe,
     parent_audit_id_var,
     policy_decision_var,
+    reveal_secret_var,
 )
 from meho_backplane.operations._branches import (
     dispatch_composite,
@@ -627,6 +630,7 @@ async def _execute_and_audit(
     params: dict[str, Any],
     params_hash: str,
     started: float,
+    scrub_response: bool = False,
 ) -> OperationResult:
     """Run the source_kind branch, redact, reduce, audit, broadcast, return.
 
@@ -699,6 +703,7 @@ async def _execute_and_audit(
         audit_id=audit_id,
         redaction=redaction,
         started=started,
+        scrub_response=scrub_response,
     )
 
 
@@ -713,13 +718,27 @@ async def _reduce_and_audit_success(
     audit_id: uuid.UUID,
     redaction: RedactionMiddlewareResult,
     started: float,
+    scrub_response: bool = False,
 ) -> OperationResult:
     """Run the reducer on the redacted payload, write the success-path
     audit row, and wrap the reduced summary into the final
     :class:`OperationResult`. Extracted from :func:`_execute_and_audit`
     so the orchestrator stays under the code-quality function-size cap
     and the redaction/reduce/audit ordering stays the only thing this
-    helper expresses."""
+    helper expresses.
+
+    *scrub_response* (#2467) key-name-scrubs the caller-bound response of a
+    ``credential_read``-classified op (``vault.kv.read`` et al.) unless the
+    caller passed ``params.reveal_secret=true``. Only the redacted
+    (reducer / caller) copy is scrubbed; ``redaction.raw`` -- captured
+    before this point and written to the audit row -- keeps the raw secret,
+    mirroring the #2172 secret-handler posture. The connector-boundary
+    engine matched only labelled string leaves, so a ``{"password": "..."}``
+    dict value reached here intact; :func:`scrub_secret_named_values`
+    replaces it with the redaction sentinel."""
+    if scrub_response:
+        scrubbed_redacted, _ = scrub_secret_named_values(redaction.redacted)
+        redaction = redaction.model_copy(update={"redacted": scrubbed_redacted})
     serialised_manifest = manifest_to_audit_payload(redaction.manifest)
     reduced = await _reduce_or_error(
         op_id=op_id,
@@ -753,7 +772,12 @@ async def _reduce_and_audit_success(
         redaction_policy_id=redaction.policy_id,
         handle_metadata=_handle_metadata_for_audit(handle),
     )
-    return wrap_ok_result(op_id, summary, duration_ms, handle)
+    advisory = await build_target_activity_advisory(
+        operator,
+        op_id=descriptor.op_id,
+        target_name=getattr(target, "name", None),
+    )
+    return wrap_ok_result(op_id, summary, duration_ms, handle, extras=advisory)
 
 
 async def _run_branch_with_error_handling(
@@ -1917,6 +1941,19 @@ async def dispatch(
     gate is the only authorization path for an ordinary dispatch.
     """
     started = time.monotonic()
+    # #2467 -- ``reveal_secret`` is a MEHO dispatch control, not a connector
+    # op param. Strip it before hashing / schema validation / handler
+    # forwarding: a ``credential_read``-classified response is key-name
+    # scrubbed by default so the raw secret never reaches the caller / agent
+    # transcript, and returning the raw value requires this explicit opt-in
+    # (stamped on the audit row). Stripping keeps the flag off the op's
+    # ``additionalProperties: false`` schema, out of the handler's params,
+    # and out of ``params_hash`` -- so a scrubbed read and its reveal share
+    # one hash (the reveal choice is recorded separately on the audit row).
+    reveal_secret = bool(params.get("reveal_secret"))
+    if "reveal_secret" in params:
+        params = {key: value for key, value in params.items() if key != "reveal_secret"}
+    credential_read = classify_op(op_id) == "credential_read"
     params_hash = compute_params_hash(params)
     product, version, impl_id = parse_connector_id(connector_id)
 
@@ -1956,6 +1993,12 @@ async def dispatch(
     # child ``dispatch`` rebinds the var, and clears it for the next dispatch
     # reusing this task.
     _verdict_token = policy_decision_var.set(None)
+    # #2467 -- stamp the reveal choice on the credential_read audit row.
+    # Bound only for a credential_read op (True/False = raw / scrubbed
+    # response); every other dispatch binds ``None`` so the key stays absent.
+    # Same token/finally reset discipline as ``policy_decision_var`` so a
+    # composite parent's value is restored after a child dispatch rebinds it.
+    _reveal_token = reveal_secret_var.set(reveal_secret if credential_read else None)
     try:
         if not _approved:
             # G11.2-T3: async, three-state verdict (auto-execute / needs-approval
@@ -2069,6 +2112,11 @@ async def dispatch(
             params=params,
             params_hash=params_hash,
             started=started,
+            # #2467 -- scrub the caller-bound response of a credential_read
+            # op unless the caller opted into the raw value. The audit row
+            # keeps the raw result either way.
+            scrub_response=credential_read and not reveal_secret,
         )
     finally:
         policy_decision_var.reset(_verdict_token)
+        reveal_secret_var.reset(_reveal_token)

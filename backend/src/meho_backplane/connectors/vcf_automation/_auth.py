@@ -110,6 +110,8 @@ async def vcfa_provider_login(
     client: httpx.AsyncClient,
     creds: dict[str, str],
     target: VcfAutomationTargetLike,
+    *,
+    request_extensions: dict[str, Any] | None = None,
 ) -> str:
     """POST the provider session-create endpoint and return the JWT.
 
@@ -119,6 +121,11 @@ async def vcfa_provider_login(
     the JWT is returned to the caller (which then writes the cache
     under the per-plane lock). Absence of the header on a 2xx response
     raises :exc:`RuntimeError` rather than caching an empty token.
+
+    ``request_extensions`` (evoila/meho#2398) carries the caller's
+    ``HttpConnector._request_extensions(target)`` so the login handshake
+    honours a target's ``tls_server_name`` SNI / cert-verify override;
+    ``None`` normalises to an empty dict (byte-identical when unset).
     """
     username, password = _require_username_password(creds, target.name, "provider")
     provider_username = getattr(target, "provider_username", None)
@@ -129,6 +136,7 @@ async def vcfa_provider_login(
             PROVIDER_SESSION_PATH,
             auth=(basic_user, password),
             headers={"Accept": PROVIDER_CLOUDAPI_ACCEPT},
+            extensions=request_extensions or {},
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:
@@ -162,6 +170,8 @@ async def tenant_login(
     client: httpx.AsyncClient,
     creds: dict[str, str],
     target: VcfAutomationTargetLike,
+    *,
+    request_extensions: dict[str, Any] | None = None,
 ) -> str:
     """POST the tenant login endpoint and return the bearer token.
 
@@ -170,6 +180,11 @@ async def tenant_login(
     field when ``target.domain`` is set. The response body is
     ``{"token": "..."}``. Missing / empty ``token`` field on a 2xx
     response raises :exc:`RuntimeError`.
+
+    ``request_extensions`` (evoila/meho#2398) carries the caller's
+    ``HttpConnector._request_extensions(target)`` so the login handshake
+    honours a target's ``tls_server_name`` SNI / cert-verify override;
+    ``None`` normalises to an empty dict (byte-identical when unset).
     """
     username, password = _require_username_password(creds, target.name, "tenant")
     body: dict[str, str] = {"username": username, "password": password}
@@ -181,6 +196,7 @@ async def tenant_login(
             TENANT_SESSION_PATH,
             json=body,
             headers={"Accept": TENANT_ACCEPT, "Content-Type": TENANT_ACCEPT},
+            extensions=request_extensions or {},
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as exc:

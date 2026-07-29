@@ -18,8 +18,10 @@ Coverage matrix (Task #595 acceptance criteria):
   ``source='auto'`` row raises :class:`AutoEdgeDeletionError`.
 * **Selector validation** — both / neither / partial triple raises
   :class:`UnannotateSelectorError`.
-* **Kind validation** — non-enum ``kind`` raises
-  :class:`InvalidEdgeKindError` *before* any DB write.
+* **Kind validation** — a malformed kind slug raises
+  :class:`InvalidEdgeKindError` *before* any DB write; a well-formed
+  novel slug (``resolves-to``) annotates cleanly (T1 #2534's open
+  vocabulary).
 * **Tenant boundary** — a tenant-A annotate cannot reference a
   tenant-B node (``NodeNotFoundError``).
 * **Audit + broadcast** — every annotate / unannotate writes exactly
@@ -498,8 +500,14 @@ async def test_promoted_edge_survives_subsequent_refresh() -> None:
 
 
 @pytest.mark.asyncio
-async def test_annotate_rejects_unknown_kind() -> None:
-    """A kind outside :class:`GraphEdgeKind` raises before any DB write."""
+@pytest.mark.parametrize("bad_kind", ["DNS Record!", "a" * 64])
+async def test_annotate_rejects_malformed_kind(bad_kind: str) -> None:
+    """A malformed kind slug raises before any DB write.
+
+    T1 #2534: rejection is by slug shape (pattern + length), not
+    membership. The error message names the pattern and echoes the
+    well-known kinds as suggestions.
+    """
     tenant_id = await _seed_tenant()
     await _seed_node(tenant_id, kind="principal", name="foo")
     await _seed_node(tenant_id, kind="vault-role", name="bar")
@@ -507,14 +515,18 @@ async def test_annotate_rejects_unknown_kind() -> None:
     sessionmaker = get_sessionmaker()
     with patch(_PUBLISH, new=AsyncMock()):
         async with sessionmaker() as session:
-            with pytest.raises(InvalidEdgeKindError):
+            with pytest.raises(InvalidEdgeKindError) as excinfo:
                 await annotate_edge(
                     session,
                     _operator(tenant_id),
                     NodeRef("foo", "principal"),
-                    "made-up-kind",
+                    bad_kind,
                     NodeRef("bar", "vault-role"),
                 )
+
+    message = str(excinfo.value)
+    assert "[a-z0-9]" in message
+    assert "authenticates-via" in message
 
     # No edge was written.
     async with sessionmaker() as session:
@@ -524,6 +536,37 @@ async def test_annotate_rejects_unknown_kind() -> None:
             .all()
         )
     assert rows == []
+
+
+@pytest.mark.asyncio
+async def test_annotate_accepts_novel_kind() -> None:
+    """A well-formed novel kind (``resolves-to``) annotates end-to-end.
+
+    The T1 #2534 acceptance case: an edge kind outside the old closed
+    ten-member vocabulary flows through validation, insert, and
+    round-trip without a migration.
+    """
+    tenant_id = await _seed_tenant()
+    await _seed_node(tenant_id, kind="dns-record", name="www.example.com")
+    await _seed_node(tenant_id, kind="service", name="frontend")
+
+    sessionmaker = get_sessionmaker()
+    with patch(_PUBLISH, new=AsyncMock()):
+        async with sessionmaker() as session:
+            edge = await annotate_edge(
+                session,
+                _operator(tenant_id),
+                NodeRef("www.example.com", "dns-record"),
+                "resolves-to",
+                NodeRef("frontend", "service"),
+            )
+
+    assert edge.kind == "resolves-to"
+    assert edge.source == "curated"
+
+    async with sessionmaker() as session:
+        row = (await session.execute(select(GraphEdge).where(GraphEdge.id == edge.id))).scalar_one()
+    assert row.kind == "resolves-to"
 
 
 # ---------------------------------------------------------------------------

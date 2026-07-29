@@ -68,6 +68,17 @@ type importDoc struct {
 // the descriptor. The server enforces their mutual exclusivity
 // (`verify_tls=false` ⊕ `tls_ca_pin`) and PEM validation with a 422,
 // which the import path surfaces via the existing error handling.
+//
+// #2002 amendment: `tls_server_name` is the third first-class TLS
+// column (per-target SNI / cert-verification hostname, decoupled from
+// `host`). It belongs in the same bucket for the same reason —
+// spilling it into `extras` leaves the typed column NULL, so dispatch
+// keeps deriving the SNI from `host` and an appliance reached by IP
+// with an FQDN-only SAN fails verification with
+// `connector_tls_verify_failed` even though the descriptor named the
+// right hostname. The column composes with `verify_tls` / `tls_ca_pin`
+// (no mutual-exclusion validator); the server caps it at 512 chars and
+// returns 422 on overflow, which the import path already surfaces.
 var knownTopLevel = map[string]struct{}{
 	"aliases":           {},
 	"auth_model":        {},
@@ -81,6 +92,7 @@ var knownTopLevel = map[string]struct{}{
 	"product":           {},
 	"secret_ref":        {},
 	"tls_ca_pin":        {},
+	"tls_server_name":   {},
 	"verify_tls":        {},
 	"vpn_required":      {},
 }
@@ -179,7 +191,8 @@ func newImportCmd() *cobra.Command {
 			"Mapping rules. Top-level columns recognised on the API's " +
 			"TargetCreate / TargetUpdate models are mapped 1:1: name, aliases, " +
 			"product, host, port, fqdn, secret_ref, auth_model, vpn_required, " +
-			"notes, preferred_impl_id, verify_tls, tls_ca_pin. Any other field " +
+			"notes, preferred_impl_id, verify_tls, tls_ca_pin, tls_server_name. " +
+			"Any other field " +
 			"is spilled into the `extras` JSONB column. `fingerprint` is " +
 			"server-managed and skipped with a warning if present in the YAML " +
 			"(the probe verb is the only legitimate writer).\n\n" +

@@ -121,7 +121,14 @@
             const raw = el.value.trim();
             if (!raw) { return; }
             try {
-              el.value = JSON.stringify(JSON.parse(raw), null, 2);
+              const parsed = JSON.parse(raw);
+              /* Params must be a JSON object; leave arrays / scalars /
+                 null exactly as typed so the server surfaces the error
+                 rather than us tidying invalid input into place. */
+              if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                return;
+              }
+              el.value = JSON.stringify(parsed, null, 2);
             } catch (e) {
               /* invalid JSON: leave as typed; the server validates it */
             }

@@ -41,7 +41,7 @@
 
 {%- macro error_for(field) -%}
   {%- if errors and field in errors -%}
-    <span class="label-text-alt text-error" role="alert" data-error-for="{{ field }}">
+    <span class="text-xs text-error" role="alert" data-error-for="{{ field }}">
       {{ errors[field] }}
     </span>
   {%- endif -%}
@@ -51,8 +51,8 @@
   {%- if errors and field in errors -%}{{ base }}{%- endif -%}
 {%- endmacro -%}
 
-<label class="form-control">
-  <span class="label-text">Name</span>
+<label class="flex flex-col gap-1">
+  <span class="text-sm font-medium">Name</span>
   <input
     type="text"
     name="name"
@@ -61,12 +61,12 @@
     maxlength="200"
     value="{{ field_value('name') }}"
     {% if mode == "edit" %}readonly{% endif %}
-    class="input input-bordered input-sm font-mono {{ error_class('name', 'input-error') }}"
+    class="input input-bordered input-sm font-mono w-full {{ error_class('name', 'input-error') }}"
     aria-label="Target name"
     {% if mode == "edit" %}aria-describedby="target-name-immutable-hint"{% endif %}
   />
   {% if mode == "edit" %}
-    <span id="target-name-immutable-hint" class="text-xs opacity-60 mt-1">
+    <span id="target-name-immutable-hint" class="text-xs opacity-60">
       Name is immutable. To rename, delete and re-create the target.
     </span>
   {% endif %}
@@ -74,12 +74,12 @@
 </label>
 
 <div class="grid gap-3 md:grid-cols-2">
-  <label class="form-control">
-    <span class="label-text">Product</span>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Product</span>
     <select
       name="product"
       required
-      class="select select-bordered select-sm {{ error_class('product', 'select-error') }}"
+      class="select select-bordered select-sm w-full {{ error_class('product', 'select-error') }}"
       aria-label="Connector product"
     >
       <option value="" disabled {% if not field_value('product') %}selected{% endif %}>
@@ -94,12 +94,12 @@
     {{ error_for('product') }}
   </label>
 
-  <label class="form-control">
-    <span class="label-text">Auth model</span>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Auth model</span>
     <select
       name="auth_model"
       required
-      class="select select-bordered select-sm {{ error_class('auth_model', 'select-error') }}"
+      class="select select-bordered select-sm w-full {{ error_class('auth_model', 'select-error') }}"
       aria-label="Auth model"
     >
       {%- set selected_auth = field_value('auth_model') or 'shared_service_account' -%}
@@ -114,8 +114,8 @@
 </div>
 
 <div class="grid gap-3 md:grid-cols-2">
-  <label class="form-control">
-    <span class="label-text">Host</span>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Host</span>
     <input
       type="text"
       name="host"
@@ -123,22 +123,22 @@
       minlength="1"
       maxlength="512"
       value="{{ field_value('host') }}"
-      class="input input-bordered input-sm font-mono {{ error_class('host', 'input-error') }}"
+      class="input input-bordered input-sm font-mono w-full {{ error_class('host', 'input-error') }}"
       aria-label="Host"
       placeholder="host.example.internal"
     />
     {{ error_for('host') }}
   </label>
 
-  <label class="form-control">
-    <span class="label-text">Port <span class="opacity-60">(optional)</span></span>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Port <span class="opacity-60">(optional)</span></span>
     <input
       type="number"
       name="port"
       min="1"
       max="65535"
       value="{{ field_value('port') }}"
-      class="input input-bordered input-sm {{ error_class('port', 'input-error') }}"
+      class="input input-bordered input-sm w-full {{ error_class('port', 'input-error') }}"
       aria-label="Port"
       placeholder="1-65535"
     />
@@ -146,44 +146,46 @@
   </label>
 </div>
 
-<label class="form-control">
-  <span class="label-text">Secret ref <span class="opacity-60">(optional)</span></span>
-  <input
-    type="text"
-    name="secret_ref"
-    maxlength="1024"
-    value="{{ field_value('secret_ref') }}"
-    class="input input-bordered input-sm font-mono {{ error_class('secret_ref', 'input-error') }}"
-    aria-label="Secret reference"
-    placeholder="secret/data/targets/&lt;name&gt;"
-    aria-describedby="target-secret-ref-hint"
-  />
-  <span id="target-secret-ref-hint" class="text-xs opacity-60 mt-1">
-    Vault path the connector reads credentials from.
-  </span>
-  {{ error_for('secret_ref') }}
-</label>
+<div class="grid gap-3 md:grid-cols-2">
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Secret ref <span class="opacity-60">(optional)</span></span>
+    <input
+      type="text"
+      name="secret_ref"
+      maxlength="1024"
+      value="{{ field_value('secret_ref') }}"
+      class="input input-bordered input-sm font-mono w-full {{ error_class('secret_ref', 'input-error') }}"
+      aria-label="Secret reference"
+      placeholder="secret/data/targets/&lt;name&gt;"
+      aria-describedby="target-secret-ref-hint"
+    />
+    <span id="target-secret-ref-hint" class="text-xs opacity-60">
+      Vault path the connector reads credentials from.
+    </span>
+    {{ error_for('secret_ref') }}
+  </label>
 
-<label class="form-control">
-  <span class="label-text">Aliases <span class="opacity-60">(comma-separated, optional)</span></span>
-  <input
-    type="text"
-    name="aliases"
-    maxlength="2048"
-    value="{{ field_value('aliases') }}"
-    class="input input-bordered input-sm {{ error_class('aliases', 'input-error') }}"
-    aria-label="Aliases"
-    placeholder="prod-cluster, primary"
-  />
-  {{ error_for('aliases') }}
-</label>
+  <label class="flex flex-col gap-1">
+    <span class="text-sm font-medium">Aliases <span class="opacity-60">(comma-separated, optional)</span></span>
+    <input
+      type="text"
+      name="aliases"
+      maxlength="2048"
+      value="{{ field_value('aliases') }}"
+      class="input input-bordered input-sm w-full {{ error_class('aliases', 'input-error') }}"
+      aria-label="Aliases"
+      placeholder="prod-cluster, primary"
+    />
+    {{ error_for('aliases') }}
+  </label>
+</div>
 
-<label class="form-control">
-  <span class="label-text">Notes <span class="opacity-60">(optional)</span></span>
+<label class="flex flex-col gap-1">
+  <span class="text-sm font-medium">Notes <span class="opacity-60">(optional)</span></span>
   <textarea
     name="notes"
     maxlength="8192"
-    class="textarea textarea-bordered min-h-[6rem] text-sm {{ error_class('notes', 'textarea-error') }}"
+    class="textarea textarea-bordered min-h-[6rem] w-full text-sm {{ error_class('notes', 'textarea-error') }}"
     aria-label="Notes"
     placeholder="Free-form operator notes."
   >{{ field_value('notes') }}</textarea>
@@ -199,5 +201,5 @@
     class="checkbox checkbox-sm"
     aria-label="VPN required"
   />
-  <span class="label-text">VPN required</span>
+  <span class="text-sm font-medium">VPN required</span>
 </label>

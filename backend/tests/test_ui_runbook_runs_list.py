@@ -639,6 +639,11 @@ def test_start_modal_renders_with_published_picker() -> None:
     # Published slug offered; draft slug withheld from the picker.
     assert '<option value="drain-node">' in body
     assert '<option value="draft-only">' not in body
+    # #176: form migrated off dead daisyUI-v4 classes, and the Params
+    # textarea carries the client-side JSON format-on-blur handler.
+    assert "form-control" not in body
+    assert "label-text" not in body
+    assert 'x-on:blur="formatParams($event.target)"' in body
 
 
 def test_start_modal_refreshes_csrf_cookie_matching_form_header() -> None:

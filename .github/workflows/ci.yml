@@ -136,7 +136,7 @@ jobs:
         # fetch-depth: 0 so the PR base commit is present for the
         # three-dot diff below (the default shallow fetch would not
         # reach the merge-base).
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
       - name: Detect migration-related changes
@@ -195,6 +195,12 @@ jobs:
     # the existing branch-protection required check stays satisfied.
     timeout-minutes: 25
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       # Route testcontainers pulls through the in-cluster Harbor proxy
       # cache (claude-rdc-hetzner-dc#463; project `dockerhub-proxy` public,
       # anonymous consumer auth, wired into runner DinD via
@@ -230,7 +236,7 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Docker Hub login (for testcontainers pulls)
         # Pulls inside the DinD daemon (testcontainers PostgresContainer
@@ -247,7 +253,21 @@ jobs:
         # vault custody — see meho-internal#74 for the regression
         # context this addresses. Long-term, the in-cluster proxy
         # cache from claude-rdc-hetzner-dc#463 retires this step.
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        #
+        # The `if:` guard is what keeps Dependabot PRs green. A
+        # Dependabot-triggered run reads the *Dependabot* secret store,
+        # not the Actions one, so `secrets.DOCKERHUB_USERNAME` is empty
+        # there — and `docker/login-action` hard-fails with "Username and
+        # password required" instead of no-opping, which failed this job
+        # (and every other job carrying this step) on all ~18 open
+        # Dependabot PRs. Skipping the login is safe: every image above
+        # resolves through the harbor.evba.lab proxy cache, so an
+        # unauthenticated run still pulls — it only gives up the Docker
+        # Hub rate-limit headroom the login buys. Mirroring
+        # DOCKERHUB_USERNAME / DOCKERHUB_TOKEN into the repo's Dependabot
+        # secrets restores that headroom and makes this guard a no-op.
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -260,7 +280,7 @@ jobs:
         # same lockfile are near-instant. version unset -> latest, which
         # is fine because uv ships a strict resolver and the lockfile
         # pins every transitive dep.
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
           enable-cache: true
 
@@ -550,6 +570,12 @@ jobs:
     timeout-minutes: 50
     continue-on-error: true
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
@@ -561,16 +587,19 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Docker Hub login (for testcontainers pulls)
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        # Empty-secret guard — see the python-tests job's login step for
+        # why Dependabot runs need it.
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
           enable-cache: true
 
@@ -696,6 +725,12 @@ jobs:
     runs-on: meho-runners-ci
     timeout-minutes: 60
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       MEHO_TEST_PGVECTOR_IMAGE: harbor.evba.lab/dockerhub-proxy/pgvector/pgvector:pg16
       MEHO_TEST_VALKEY_IMAGE: harbor.evba.lab/dockerhub-proxy/valkey/valkey:8
       # vcsim release-tag pin — see the comment on the first
@@ -728,20 +763,26 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Docker Hub login (for testcontainers pulls)
         # Same rationale as python-lint-test's login step — the
         # integration subtree is the heaviest testcontainers consumer
         # (pgvector/valkey/k3d/vcsim), so authenticated pulls are
         # load-bearing here in particular.
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        # Empty-secret guard — see the python-tests job's login step for
+        # why Dependabot runs need it. This job pulls the most images, so
+        # it is the likeliest to feel the lost rate-limit headroom; that
+        # is an argument for mirroring the Dependabot secrets, not for
+        # letting the step hard-fail.
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
           enable-cache: true
 
@@ -787,6 +828,12 @@ jobs:
     runs-on: meho-runners-ci
     timeout-minutes: 30
     env:
+      # Surfaced as a job-level env var purely so the Docker Hub login
+      # step can test it in an `if:`. The `secrets` context is NOT
+      # available in a step-level `if:` (GitHub's context-availability
+      # table allows it in `with:` / `env:` / `run:` only), so reading
+      # the secret through `env` is what makes the guard evaluatable.
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       # The 3 forward-compat rollback tests spin up pgvector via
       # testcontainers; route the pull through the Harbor proxy cache like
       # the sibling jobs (never `:latest`).
@@ -797,18 +844,21 @@ jobs:
         working-directory: backend
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Docker Hub login (for testcontainers pulls)
         # Authenticated pulls avoid the shared-NAT Docker Hub anonymous
         # rate limit when the rollback tests spin up pgvector/pgvector:pg16.
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0  # v4.4.0
+        # Empty-secret guard — see the python-tests job's login step for
+        # why Dependabot runs need it.
+        if: env.DOCKERHUB_USERNAME != ''
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
           enable-cache: true
 
@@ -826,14 +876,14 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Go
         # Same version + cache shape as cli-release.yml so a single
         # supply-chain audit covers both. cache-dependency-path keys
         # the Go module cache off cli/go.sum, the only Go module in
         # the tree today.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           # Tracks `cli/go.mod`'s `go 1.25.8` directive. golangci-lint
           # invokes `go/packages` which honors the go.mod-required Go
@@ -976,7 +1026,7 @@ jobs:
         # persist-credentials: false — this job only does a read-only
         # checkout + a working-tree `git diff`; it never pushes, so it
         # has no need for the checkout token persisted in local git config.
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -984,7 +1034,7 @@ jobs:
         # `make generate` runs the pinned oapi-codegen (installed by the
         # Makefile `tools` target) which needs Go. Same version + cache
         # shape as the go-lint-test lane.
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: '1.25'
           cache-dependency-path: cli/go.sum
@@ -1012,7 +1062,7 @@ jobs:
         # `uv run` (cli/api/snapshot-openapi.py imports meho_backplane.main
         # and calls app.openapi()), so the backend env must resolve. Same
         # action + cache shape as the Python lanes.
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990  # v8.3.2
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
         with:
           enable-cache: true
 
@@ -1052,7 +1102,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Install Helm
         # Same version pin as chart.yml's validate + publish jobs so

@@ -148,44 +148,37 @@
     <div class="card bg-base-100 border-base-300 border shadow-sm">
       <div class="card-body space-y-3 py-4">
         {% if mode == "new" %}
-        <label class="form-control">
-          <div class="label py-0">
-            <span class="label-text font-medium">Slug</span>
-            <span class="label-text-alt opacity-60">lowercase, dots/hyphens, required</span>
-          </div>
-          <input type="text" name="slug" class="input input-bordered input-sm font-mono"
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Slug</span>
+          <input type="text" name="slug" class="input input-bordered input-sm font-mono w-full"
                  x-model="slug" pattern="[a-z]([a-z0-9.\-]*[a-z0-9])?"
                  placeholder="rotate-cluster-cert" autocomplete="off" required
                  aria-label="Template slug" />
-          <div class="label py-0" x-show="slugError()">
-            <span class="label-text-alt text-error" x-text="slugError()"></span>
-          </div>
+          <span class="text-xs opacity-60">lowercase, dots/hyphens, required</span>
+          <span class="text-xs text-error" x-show="slugError()" x-text="slugError()"></span>
         </label>
         {% else %}
         {# Slug is locked on edit — the path is the source of truth. #}
         <input type="hidden" name="slug" value="{{ slug }}" />
         {% endif %}
 
-        <label class="form-control">
-          <div class="label py-0"><span class="label-text font-medium">Title</span></div>
-          <input type="text" name="title" class="input input-bordered input-sm"
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Title</span>
+          <input type="text" name="title" class="input input-bordered input-sm w-full"
                  x-model="title" placeholder="Rotate the cluster certificate"
                  autocomplete="off" required aria-label="Template title" />
         </label>
 
-        <label class="form-control">
-          <div class="label py-0"><span class="label-text font-medium">Description</span></div>
-          <textarea name="description" class="textarea textarea-bordered textarea-sm" rows="2"
+        <label class="flex flex-col gap-1">
+          <span class="text-sm font-medium">Description</span>
+          <textarea name="description" class="textarea textarea-bordered textarea-sm w-full" rows="2"
                     x-model="description" placeholder="What this runbook does and when to run it."
                     required aria-label="Template description"></textarea>
         </label>
 
-        <label class="form-control max-w-md">
-          <div class="label py-0">
-            <span class="label-text font-medium">Target kind</span>
-            <span class="label-text-alt opacity-60">optional</span>
-          </div>
-          <input type="text" name="target_kind" class="input input-bordered input-sm font-mono"
+        <label class="flex flex-col gap-1 max-w-md">
+          <span class="text-sm font-medium">Target kind <span class="opacity-60 font-normal">(optional)</span></span>
+          <input type="text" name="target_kind" class="input input-bordered input-sm font-mono w-full"
                  x-model="targetKind" placeholder="vmware.vcenter" autocomplete="off"
                  aria-label="Template target kind" />
         </label>

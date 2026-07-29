@@ -7,8 +7,9 @@ MEHO-hosted agents get the same three broadcast primitives external MCP
 clients already have — announce / recent / watch — so a hosted run is a
 first-class reader and writer on the tenant coordination feed rather than a
 mute participant. The agent front-end does NOT re-implement the tools: it
-reuses the exact ``(schema, handler)`` pairs the MCP surface registered in
-:mod:`meho_backplane.mcp.tools.broadcast`, resolved from the registry via
+reuses the handlers the MCP surface registered in
+:mod:`meho_backplane.mcp.tools.broadcast` verbatim and publishes the same
+wire schema those tools publish, both resolved from the registry via
 :func:`~meho_backplane.mcp.registry.get_tool`. The handlers already carry the
 #2544 structured claims, the #2545 actor/work_ref lineage projection, the
 #2546 announce rate limit, and the untrusted-prose envelope on reads
@@ -62,14 +63,32 @@ _RUN_SCOPED_ANNOUNCE_FIELDS: tuple[str, ...] = ("run_id", "work_ref")
 
 
 def _mcp_broadcast_tool(name: str) -> tuple[dict[str, Any], _MetaToolHandler]:
-    """Return a registered broadcast MCP tool's ``(inputSchema, handler)``.
+    """Return a registered broadcast MCP tool's ``(published schema, handler)``.
 
-    The schema is deep-copied so the agent surface can adapt it (e.g. drop
+    The schema comes from :meth:`~meho_backplane.mcp.registry.ToolDefinition.to_wire`,
+    not from the registered ``inputSchema``. ``to_wire`` strips the top-level
+    ``oneOf`` / ``allOf`` / ``anyOf`` the Anthropic Messages API rejects on a
+    tool's ``input_schema``; a bridged tool that carries one 400s the whole
+    ``tools`` array at model-init, so every hosted run dies before its first
+    turn regardless of what the run itself asked for (#2644 —
+    ``meho.broadcast.watch``'s ``cursor``/``since_cursor`` XOR was the
+    offender). Publishing the wire shape keeps the bridge on the same
+    chokepoint the MCP surface already goes through, so a future bridged tool
+    inherits the guarantee. The registered ``inputSchema`` is untouched and
+    keeps validating in :mod:`meho_backplane.mcp.handlers`; the agent path
+    relies on the handlers' own typed argument checks instead, which
+    ``pydantic_ai.Tool.from_schema`` requires anyway — it does not validate
+    arguments against the advertised schema.
+
+    The result is deep-copied so the agent surface can adapt it (e.g. drop
     the run-scoped announce fields) without mutating the dict the MCP
-    registry still serves to MCP clients. Missing registration is a hard
-    configuration bug — the side-effect import at module top should have
-    registered every broadcast tool — so it fails loud rather than silently
-    dropping the tool from the agent surface.
+    registry still serves to MCP clients. The copy is load-bearing:
+    ``to_wire`` returns the *same* ``inputSchema`` object when there is
+    nothing to strip, which is the case for announce and recent.
+
+    Missing registration is a hard configuration bug — the side-effect import
+    at module top should have registered every broadcast tool — so it fails
+    loud rather than silently dropping the tool from the agent surface.
     """
     entry = get_tool(name)
     if entry is None:  # pragma: no cover - defensive; import registers all three
@@ -78,7 +97,7 @@ def _mcp_broadcast_tool(name: str) -> tuple[dict[str, Any], _MetaToolHandler]:
             "is meho_backplane.mcp.tools.broadcast imported?"
         )
     definition, handler = entry
-    return copy.deepcopy(definition.inputSchema), handler
+    return copy.deepcopy(definition.to_wire()["inputSchema"]), handler
 
 
 def _model_retry_on_mcp_error(handler: _MetaToolHandler) -> _MetaToolHandler:
@@ -174,10 +193,11 @@ def build_broadcast_meta_tools() -> tuple[MetaToolSpec, ...]:
     """Build the three broadcast coordination meta-tools from the MCP tools.
 
     Each entry reuses the MCP handler verbatim (wrapped so handler-side
-    errors reach the model as :class:`ModelRetry`); the read tools reuse the
-    MCP ``inputSchema`` as-is, and announce reuses it minus the run-scoped
-    fields the wrapper injects. ``OPERATOR`` floor matches the MCP tools'
-    ``required_role`` — the same identity gate every broadcast surface uses.
+    errors reach the model as :class:`ModelRetry`); the read tools publish
+    the MCP tool's wire schema as-is, and announce publishes it minus the
+    run-scoped fields the wrapper injects. ``OPERATOR`` floor matches the MCP
+    tools' ``required_role`` — the same identity gate every broadcast surface
+    uses.
     """
     announce_schema, announce_handler = _mcp_broadcast_tool(_MCP_BROADCAST_ANNOUNCE)
     recent_schema, recent_handler = _mcp_broadcast_tool(_MCP_BROADCAST_RECENT)

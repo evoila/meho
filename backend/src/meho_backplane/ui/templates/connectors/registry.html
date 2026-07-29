@@ -75,7 +75,7 @@
     hx-get="/ui/connectors/registry"
     hx-target="#registry-table-body"
     hx-swap="outerHTML"
-    hx-trigger="change from:find select"
+    hx-trigger="change"
     hx-include="closest form"
     hx-push-url="true"
     role="search"
@@ -83,14 +83,14 @@
     onsubmit="return false;"
   >
     <div class="card-body grid gap-3 md:grid-cols-3">
-      <label class="form-control">
-        <span class="label-text">Status</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Status</span>
         {# The ``all`` option is a REAL sentinel value, NOT ``value=""`` --
            the backend enum 422s on an out-of-range value and an empty
            string would make the swap silently no-op. #}
         <select
           name="status"
-          class="select select-bordered select-sm"
+          class="select select-bordered select-sm w-full"
           aria-label="Filter by review status"
         >
           {%- set status_options = [
@@ -106,8 +106,8 @@
           {% endfor %}
         </select>
       </label>
-      <label class="form-control">
-        <span class="label-text">Product</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Product</span>
         {# Same footgun-safe shape: the "all products" option omits the
            ``product`` filter by submitting an empty string, which the
            handler treats as "no narrowing" -- ``product`` is a plain
@@ -115,7 +115,7 @@
            safe here (it maps to ``None``), unlike the status enum. #}
         <select
           name="product"
-          class="select select-bordered select-sm"
+          class="select select-bordered select-sm w-full"
           aria-label="Filter by product"
         >
           <option value="">All products</option>
@@ -126,8 +126,8 @@
           {% endfor %}
         </select>
       </label>
-      <label class="form-control">
-        <span class="label-text">Kind</span>
+      <label class="flex flex-col gap-1">
+        <span class="text-sm font-medium">Kind</span>
         {# Authoring-mode filter (#1980, fed by ConnectorListItem.kind / #1979).
            Same footgun-safe shape as Status: the ``all`` option is a REAL
            sentinel (never ``value=""``) because the ``_KindFilter`` enum 422s
@@ -135,7 +135,7 @@
            in-process (kind is not a backend service argument). #}
         <select
           name="kind"
-          class="select select-bordered select-sm"
+          class="select select-bordered select-sm w-full"
           aria-label="Filter by connector kind"
         >
           {%- set kind_options = [

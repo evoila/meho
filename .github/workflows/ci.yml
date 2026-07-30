@@ -251,21 +251,33 @@ jobs:
         # org-level secrets security-scan.yml uses, provisioned at
         # the evoila org level (visibility `all`) with 1Password
         # vault custody — see meho-internal#74 for the regression
-        # context this addresses. Long-term, the in-cluster proxy
-        # cache from claude-rdc-hetzner-dc#463 retires this step.
+        # context this addresses, and meho-internal
+        # `docs/dockerhub-ci-credential-custody.md` for where the
+        # credential actually lives and how to rotate it (the vault
+        # and item names stay in the internal repo; this one is
+        # public). Long-term, the in-cluster proxy cache from
+        # claude-rdc-hetzner-dc#463 retires this step.
         #
         # The `if:` guard is what keeps Dependabot PRs green. A
         # Dependabot-triggered run reads the *Dependabot* secret store,
         # not the Actions one, so `secrets.DOCKERHUB_USERNAME` is empty
         # there — and `docker/login-action` hard-fails with "Username and
         # password required" instead of no-opping, which failed this job
-        # (and every other job carrying this step) on all ~18 open
+        # (and every other job carrying this step) on all 19 open
         # Dependabot PRs. Skipping the login is safe: every image above
         # resolves through the harbor.evba.lab proxy cache, so an
         # unauthenticated run still pulls — it only gives up the Docker
-        # Hub rate-limit headroom the login buys. Mirroring
-        # DOCKERHUB_USERNAME / DOCKERHUB_TOKEN into the repo's Dependabot
-        # secrets restores that headroom and makes this guard a no-op.
+        # Hub rate-limit headroom the login buys.
+        #
+        # DOCKERHUB_USERNAME / DOCKERHUB_TOKEN have since been mirrored
+        # into the *org-level* Dependabot secret store (visibility
+        # `all`, 2026-07-30), so on a Dependabot run this guard now
+        # evaluates true and the login proceeds as it does anywhere
+        # else. Keep the guard regardless: it is what stops a missing
+        # or rotated secret from hard-failing an entire job instead of
+        # degrading to unauthenticated pulls. If this step starts
+        # *skipping* on Dependabot PRs again, the org Dependabot secret
+        # is gone or expired — check there before touching the workflow.
         if: env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f  # v4.6.0
         with:

@@ -143,14 +143,17 @@ jobs:
         # so it only rebuilds the default: guard on the ref shape.
         run: |
           set -euo pipefail
+          # Require a full vMAJOR.MINOR prefix — a malformed tag (e.g.
+          # `v1-hotfix`) must fail loudly here, not publish a garbage
+          # entry in the public version selector.
           case "${GITHUB_REF_NAME}" in
-            v[0-9]*)
+            v[0-9]*.[0-9]*)
               VERSION=$(printf '%s' "${GITHUB_REF_NAME#v}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
               uv run --project backend --no-sync mike deploy --push --update-aliases "${VERSION}" latest
               uv run --project backend --no-sync mike set-default --push latest
               ;;
             *)
-              echo "Ref '${GITHUB_REF_NAME}' is not a v* tag — nothing to deploy." >&2
+              echo "Ref '${GITHUB_REF_NAME}' is not a vMAJOR.MINOR[.PATCH] tag — nothing to deploy." >&2
               exit 1
               ;;
           esac

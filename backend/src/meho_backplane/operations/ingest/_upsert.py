@@ -43,10 +43,30 @@ from meho_backplane.retrieval.embedding import EmbeddingService
 _SPEC_TAG_PREFIX = "spec:"
 
 __all__ = [
+    "SafetyLevelChange",
     "UpsertContext",
     "build_upsert_context",
     "upsert_one_operation",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyLevelChange:
+    """A persisted row's ``safety_level`` changed on re-ingest (#2702).
+
+    Captured by :func:`upsert_one_operation` before either existing-row
+    update helper overwrites the field, on **both** update paths -- the
+    body hash covers embedding text (summary / description / tags), not
+    safety metadata, so the skip-re-embed branch can carry a safety
+    reclassification just as the re-embed branch can.
+    :func:`~meho_backplane.operations.ingest.register_ingested.register_ingested_operations`
+    joins these against pinned Sensors and surfaces the enriched result
+    on :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
+    """
+
+    op_id: str
+    old_safety_level: str
+    new_safety_level: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,16 +294,41 @@ def _build_new_descriptor(
     )
 
 
+def _capture_safety_change(
+    existing: EndpointDescriptor,
+    ctx: UpsertContext,
+) -> SafetyLevelChange | None:
+    """Record a ``safety_level`` diff before the update helpers overwrite it.
+
+    Runs on both existing-row paths (#2702): the body-hash skip check
+    covers only the embedding text, so a spec that reclassifies an op's
+    safety without touching its summary / description / tags reaches the
+    skip-re-embed branch -- and would previously overwrite the level
+    with no trace anywhere.
+    """
+    if existing.safety_level == ctx.proto.safety_level:
+        return None
+    return SafetyLevelChange(
+        op_id=ctx.proto.op_id,
+        old_safety_level=existing.safety_level,
+        new_safety_level=ctx.proto.safety_level,
+    )
+
+
 async def upsert_one_operation(
     session: AsyncSession,
     ctx: UpsertContext,
     *,
     embedding_service: EmbeddingService | None,
-) -> str:
+) -> tuple[str, SafetyLevelChange | None]:
     """Upsert one :class:`EndpointDescriptor` row from a parser proto.
 
-    Returns one of ``"inserted"`` / ``"updated"`` / ``"skipped"`` so
-    the caller can tally the counts for :class:`IngestionResult`. The
+    Returns ``(action, safety_change)``: *action* is one of
+    ``"inserted"`` / ``"updated"`` / ``"skipped"`` so the caller can
+    tally the counts for :class:`IngestionResult`; *safety_change* is a
+    :class:`SafetyLevelChange` when an existing row's ``safety_level``
+    was overwritten with a different value (#2702), ``None`` otherwise
+    (first-register rows have no previous value to diff against). The
     three branches (skip-re-embed / re-embed / first-register) live
     in dedicated helpers; this function is the orchestrator that
     chooses between them.
@@ -296,6 +341,8 @@ async def upsert_one_operation(
         # clash raises (see the helper for the normalization rationale).
         _check_cross_source_collision(existing, ctx)
 
+        safety_change = _capture_safety_change(existing, ctx)
+
         existing_text = build_embedding_text(
             summary=existing.summary or "",
             description=existing.description or "",
@@ -305,15 +352,15 @@ async def upsert_one_operation(
         if compute_embedding_text_hash(existing_text) == ctx.incoming_hash:
             _apply_skip_reembed(existing, ctx)
             await session.flush()
-            return "skipped"
+            return "skipped", safety_change
 
         embedding = await encode_endpoint_text(ctx.incoming_text, service=embedding_service)
         _apply_reembed_update(existing, ctx, embedding)
         await session.flush()
-        return "updated"
+        return "updated", safety_change
 
     embedding = await encode_endpoint_text(ctx.incoming_text, service=embedding_service)
     descriptor = _build_new_descriptor(ctx, embedding)
     session.add(descriptor)
     await session.flush()
-    return "inserted"
+    return "inserted", None

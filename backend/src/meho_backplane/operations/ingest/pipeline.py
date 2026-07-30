@@ -94,8 +94,10 @@ from meho_backplane.operations.ingest._llm_grouping_internals import (
     build_connector_id,
 )
 from meho_backplane.operations.ingest.api_schemas import (
+    AffectedSensorModel,
     GroupingResultModel,
     IngestionResultModel,
+    SafetyChangeModel,
     SpecSource,
 )
 from meho_backplane.operations.ingest.catalog import (
@@ -121,6 +123,7 @@ from meho_backplane.operations.ingest.openapi import (
 )
 from meho_backplane.operations.ingest.register_ingested import (
     IngestionResult,
+    SafetyChange,
     register_ingested_operations,
 )
 from meho_backplane.operations.ingest.service import ReviewService
@@ -321,6 +324,19 @@ def _check_multi_spec_consistency(
         )
 
 
+def _safety_change_to_model(change: SafetyChange) -> SafetyChangeModel:
+    """Project one dataclass :class:`SafetyChange` into its wire model (#2702)."""
+    return SafetyChangeModel(
+        op_id=change.op_id,
+        old_safety_level=change.old_safety_level,
+        new_safety_level=change.new_safety_level,
+        affected_sensors=[
+            AffectedSensorModel(id=sensor.id, name=sensor.name, tenant_id=sensor.tenant_id)
+            for sensor in change.affected_sensors
+        ],
+    )
+
+
 class IngestionPipelineResult:
     """Bundled result of one :meth:`IngestionPipelineService.ingest` call.
 
@@ -364,6 +380,9 @@ class IngestionPipelineResult:
             skipped_count=self.ingestion.skipped_count,
             connector_registered=self.ingestion.connector_registered,
             operations_grouped=self.ingestion.operations_grouped,
+            safety_changes=[
+                _safety_change_to_model(change) for change in self.ingestion.safety_changes
+            ],
         )
         grouping_model: GroupingResultModel | None = None
         if self.grouping is not None:
@@ -943,6 +962,7 @@ class IngestionPipelineService:
         aggregated_inserted = 0
         aggregated_updated = 0
         aggregated_skipped = 0
+        aggregated_safety_changes: list[SafetyChange] = []
         connector_registered = False
 
         for spec in specs:
@@ -959,6 +979,7 @@ class IngestionPipelineService:
             aggregated_inserted += partial.inserted_count
             aggregated_updated += partial.updated_count
             aggregated_skipped += partial.skipped_count
+            aggregated_safety_changes.extend(partial.safety_changes)
             connector_registered = connector_registered or partial.connector_registered
 
         if execution_profile is not None:
@@ -980,6 +1001,7 @@ class IngestionPipelineService:
             skipped_count=aggregated_skipped,
             connector_registered=connector_registered,
             operations_grouped=False,
+            safety_changes=tuple(aggregated_safety_changes),
         )
 
     async def _register_one_spec(

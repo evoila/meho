@@ -64,6 +64,7 @@ from meho_backplane.connectors.profile import AuthSchemeName
 from meho_backplane.operations.ingest.catalog import _compatibility_pattern_to_specifier
 
 __all__ = [
+    "AffectedSensorModel",
     "ConnectorListItem",
     "ConnectorListResponse",
     "ConnectorScope",
@@ -78,6 +79,7 @@ __all__ = [
     "IngestResponse",
     "IngestionResultModel",
     "NextStep",
+    "SafetyChangeModel",
     "SpecSource",
 ]
 
@@ -465,6 +467,39 @@ class IngestRequest(BaseModel):
         return normalized
 
 
+class AffectedSensorModel(BaseModel):
+    """Pydantic projection of
+    :class:`~meho_backplane.operations.ingest.register_ingested.AffectedSensor`.
+
+    Identity of one Sensor row pinning a reclassified op (#2702) —
+    enough for the operator to find and re-audit it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    id: UUID
+    name: str
+    tenant_id: UUID
+
+
+class SafetyChangeModel(BaseModel):
+    """Pydantic projection of
+    :class:`~meho_backplane.operations.ingest.register_ingested.SafetyChange`.
+
+    One op whose persisted ``safety_level`` a re-ingest overwrote with
+    a different value (#2702), plus every Sensor pinning it — those
+    sensors keep auto-executing the op on schedule under the stale
+    create-time ``safe`` assumption until the operator re-audits them.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    op_id: str
+    old_safety_level: str
+    new_safety_level: str
+    affected_sensors: list[AffectedSensorModel] = Field(default_factory=list)
+
+
 class IngestionResultModel(BaseModel):
     """Pydantic projection of
     :class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.
@@ -473,6 +508,9 @@ class IngestionResultModel(BaseModel):
     can stay framework-agnostic; this model is the wire-format twin
     the routes return. Fields mirror the dataclass one-for-one with
     an extra ``connector_id`` echo for round-trip clarity.
+    ``safety_changes`` (#2702) is additive with an empty-list default,
+    so pre-existing clients see no shape change on ingests that
+    reclassify nothing.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -483,6 +521,7 @@ class IngestionResultModel(BaseModel):
     skipped_count: int
     connector_registered: bool
     operations_grouped: bool
+    safety_changes: list[SafetyChangeModel] = Field(default_factory=list)
 
 
 class GroupingResultModel(BaseModel):

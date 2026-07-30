@@ -600,7 +600,9 @@ def _flaky_upsert_factory(
     real_upsert = _reg.upsert_one_operation
     calls = 0
 
-    async def flaky_upsert(session: AsyncSession, ctx: Any, *, embedding_service: Any) -> str:
+    async def flaky_upsert(
+        session: AsyncSession, ctx: Any, *, embedding_service: Any
+    ) -> tuple[str, Any]:
         nonlocal calls
         calls += 1
         if calls == fail_on_call and (should_fail is None or should_fail()):

@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — feature-maturity registry: the single source of truth (#2674)
+
+- Extend `backend/src/meho_backplane/features.py` into the single
+  source of truth for feature maturity (#2664): `FEATURE_MATURITY`
+  classifies every user-facing feature as **GA / Beta / Experimental**
+  and, on non-GA entries, carries the `target_ga` milestone and the
+  `tracking` issue URL where its road to promotion lives. `/ready`'s
+  existing feature-gate entries now render the merged maturity fields
+  (additive — pre-existing fields are untouched). The classification
+  is the provisional #2664 table, pending clean-room eval round 1;
+  retiering a feature is a one-line registry edit that every labelled
+  surface (MCP #2675, CLI #2676, /ui #2677, docs #2678) will inherit.
+  (#2674)
+
 ### Added — versioned documentation site scaffold (#2670)
 
 - Stand up the published docs site: MkDocs Material sources under

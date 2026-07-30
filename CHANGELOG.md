@@ -90,6 +90,17 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — versioned documentation site scaffold (#2670)
+
+- Stand up the published docs site: MkDocs Material sources under
+  `docs-site/` (six-section navigation skeleton with stub pages; the
+  contributor `docs/` tree is untouched), mike-managed versioning (one
+  docs version per minor, `latest` alias), and a `docs-site.yml`
+  workflow that runs `mkdocs build --strict` on PRs and publishes to
+  GitHub Pages on every `v*` tag — the docs join the image / chart /
+  CLI as the fourth artefact a release tag publishes. README now links
+  the site as the primary documentation entry point. (#2670)
+
 ### Fixed — RKE2 posture reports an unreadable path honestly (#2698)
 
 - Stop `rke2.posture.show` reporting the RKE2 server join token **absent on

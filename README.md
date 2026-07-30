@@ -11,6 +11,11 @@
 **Status:** Released — see the release badge above for the current version.
 The backplane image, Helm chart, and operator CLI are all shipped and cosign-signed.
 
+**Documentation:** <https://evoila.github.io/meho/> — the published,
+versioned docs site (install, client setup, task guides) and the primary
+entry point for operators. It builds from `docs-site/`; the `docs/` tree
+in this repo is separate, contributor-facing material.
+
 ## The problem
 
 AI agents are getting good enough to *do* infrastructure work — roll a

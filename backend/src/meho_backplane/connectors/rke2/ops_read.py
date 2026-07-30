@@ -20,11 +20,38 @@ config surface without ever reading secret material:
 
 All measured paths are fixed constants in this module -- there is **no**
 operator-supplied path parameter, so there is no path-traversal or
-shell-injection surface. The single ``stat`` round-trip reports each
-existing path; paths absent from stdout are reported ``present: false``
-(``stat`` writes a diagnostic to stderr and skips them, which is exactly
-the "file not present" posture signal on an agent node with no server
-token).
+shell-injection surface.
+
+**Every path reports one of three states, never two (#2698).** ``stat``
+exits non-zero and writes to stderr for *both* a missing file (``ENOENT``)
+and a parent directory it cannot traverse (``EACCES``), so reading stdout
+alone cannot tell them apart. Collapsing both to ``present: false`` made
+the op lie in the unsafe direction: on a stock hardened server node the
+``0700 root:root`` ``/var/lib/rancher/rke2/server/`` directory hides a
+join token that *does* exist from a non-root SSH user, and a rotation
+runbook pre-checking with this op was told there was nothing to rotate.
+
+The probe therefore resolves each path individually and reports:
+
+* ``present`` / ``present: true`` -- ``stat`` succeeded; mode + owner/group
+  are real measurements.
+* ``absent`` / ``present: false`` -- ``stat`` failed **and** the parent
+  directory is traversable, so the path genuinely does not exist. This is
+  the "no server token" signal on an agent node.
+* ``unknown`` / ``present: null`` -- the parent directory cannot be
+  traversed (or no verdict came back for the path), so existence is
+  **undetermined**. An honest "could not determine" is strictly more
+  useful to an operator or agent than a confident wrong ``false``.
+
+Traversability is answered by the remote shell's own ``[ -x ]`` test
+rather than by parsing ``stat``'s diagnostic text -- the kernel is asked
+the actual question, so the verdict carries no dependency on coreutils
+message wording or the node's locale. A consequence worth stating: every
+real posture verdict now exits 0, so a **non-zero exit is unambiguously an
+infrastructure failure** (no ``stat`` on the node, broken shell) and
+raises :class:`Rke2PostureProbeError` instead of being silently reported
+as posture -- the same discipline ``ops_snapshot`` applies to its
+precondition guard.
 """
 
 from __future__ import annotations
@@ -42,8 +69,13 @@ __all__ = [
     "POSTURE_CONFIG_PATHS",
     "READ_OPS",
     "RKE2_TOKEN_PATH",
+    "STATUS_ABSENT",
+    "STATUS_PRESENT",
+    "STATUS_UNKNOWN",
+    "Rke2PostureProbeError",
+    "build_posture_probe_command",
     "parse_posture",
-    "parse_stat_output",
+    "parse_posture_probe_output",
     "rke2_posture_show",
 ]
 
@@ -63,6 +95,69 @@ POSTURE_CONFIG_PATHS: tuple[str, ...] = (
 #: token from (Initiative #2172).
 RKE2_TOKEN_PATH: str = "/var/lib/rancher/rke2/server/token"
 
+#: ``stat`` succeeded -- the path exists and its mode/owner/group are real
+#: measurements.
+STATUS_PRESENT: str = "present"
+
+#: ``stat`` failed *and* the parent directory is traversable, so the path
+#: genuinely does not exist (the agent-node "no server token" signal).
+STATUS_ABSENT: str = "absent"
+
+#: Existence is undetermined -- the parent directory cannot be traversed by
+#: the SSH user, or the probe returned no verdict for the path. Never
+#: reported as ``absent`` (#2698).
+STATUS_UNKNOWN: str = "unknown"
+
+#: Per-path probe markers. ``S`` carries a full ``stat`` line; ``A`` and
+#: ``U`` carry only the path.
+_MARKER_STAT: str = "S"
+_MARKER_ABSENT: str = "A"
+_MARKER_UNREADABLE: str = "U"
+
+#: Exit code the probe uses when the node has no ``stat`` binary. Any
+#: non-zero exit is an infrastructure failure, not a posture verdict.
+_PROBE_NO_STAT_EXIT: int = 127
+
+#: The per-path body of the probe, run once per measured path with ``$p``
+#: bound to it. ``stat`` first; on failure the parent directory's
+#: traversability (``[ -x ]`` -- the kernel's own answer, no reliance on
+#: ``stat``'s message wording or the node locale) decides ``absent`` vs
+#: ``unknown``. Kept as its own constant so the ``${p%/*}`` parameter
+#: expansion needs no brace-escaping at the f-string that assembles the
+#: command.
+_PROBE_BODY: str = (
+    "if o=$(stat -c '%n|%a|%U|%G' -- \"$p\" 2>/dev/null); "
+    f"then printf '{_MARKER_STAT}|%s\\n' \"$o\"; "
+    'elif [ -x "${p%/*}" ]; '
+    f"then printf '{_MARKER_ABSENT}|%s\\n' \"$p\"; "
+    f"else printf '{_MARKER_UNREADABLE}|%s\\n' \"$p\"; fi"
+)
+
+
+class Rke2PostureProbeError(RuntimeError):
+    """The posture probe itself failed to run (no ``stat``, broken shell).
+
+    Distinct from any posture verdict: the dispatcher maps it to a
+    ``connector_error`` result (the #986 discipline) so an infrastructure
+    failure is never served as a file-presence answer (#2698).
+    """
+
+
+def build_posture_probe_command(paths: tuple[str, ...]) -> str:
+    """Build the single-round-trip POSIX ``sh`` posture probe for *paths*.
+
+    Emits one marker line per path (see :func:`parse_posture_probe_output`).
+    Every path is ``shlex.quote``d, and the caller passes module constants
+    only -- there is no operator input in the command. The probe exits
+    ``0`` on every real verdict, so a non-zero exit means the probe could
+    not run at all.
+    """
+    quoted = " ".join(shlex.quote(path) for path in paths)
+    return (
+        f"command -v stat >/dev/null 2>&1 || exit {_PROBE_NO_STAT_EXIT}; "
+        f"for p in {quoted}; do {_PROBE_BODY}; done"
+    )
+
 
 def _normalise_mode(raw: str) -> str:
     """Left-pad a ``stat %a`` octal mode to 4 digits (``600`` -> ``0600``).
@@ -78,60 +173,96 @@ def _normalise_mode(raw: str) -> str:
     return stripped
 
 
-def parse_stat_output(stdout: str) -> dict[str, dict[str, str]]:
-    """Parse ``stat -c '%n|%a|%U|%G'`` stdout into a path -> attrs map.
+def parse_posture_probe_output(stdout: str) -> dict[str, dict[str, str | None]]:
+    """Parse the probe's marker lines into a path -> verdict map.
 
-    Each valid line is ``<path>|<octal-mode>|<owner>|<group>``. Lines
-    that do not split into exactly four ``|``-separated fields are
-    skipped (defensive against a stray banner line). Modes are
-    normalised to the 4-digit octal form.
+    Recognised lines are ``S|<path>|<octal-mode>|<owner>|<group>`` (stat
+    succeeded), ``A|<path>`` (absent) and ``U|<path>`` (parent not
+    traversable). Anything else is skipped -- defensive against a stray
+    banner line from a login shell, and a skipped path resolves to
+    ``unknown`` rather than ``absent``. Modes are normalised to the
+    4-digit octal form.
     """
-    result: dict[str, dict[str, str]] = {}
+    result: dict[str, dict[str, str | None]] = {}
     for line in stdout.splitlines():
         stripped = line.strip()
         if not stripped:
             continue
-        parts = stripped.split("|")
-        if len(parts) != 4:
+        marker, sep, rest = stripped.partition("|")
+        if not sep or not rest:
             continue
-        path, mode, owner, group = parts
-        result[path] = {
-            "mode": _normalise_mode(mode),
-            "owner": owner,
-            "group": group,
-        }
+        if marker == _MARKER_STAT:
+            parts = rest.split("|")
+            if len(parts) != 4:
+                continue
+            path, mode, owner, group = parts
+            result[path] = {
+                "status": STATUS_PRESENT,
+                "mode": _normalise_mode(mode),
+                "owner": owner,
+                "group": group,
+            }
+        elif marker in (_MARKER_ABSENT, _MARKER_UNREADABLE):
+            status = STATUS_ABSENT if marker == _MARKER_ABSENT else STATUS_UNKNOWN
+            result[rest] = {"status": status, "mode": None, "owner": None, "group": None}
     return result
 
 
-def _stat_entry(path: str, stat_map: dict[str, dict[str, str]]) -> dict[str, Any]:
-    """Build the per-path posture entry from the parsed ``stat`` map."""
-    info = stat_map.get(path)
-    if info is None:
-        return {"path": path, "present": False, "mode": None, "owner": None, "group": None}
+def _unknown_entry(path: str, detail: str) -> dict[str, Any]:
+    """Build the undetermined-existence entry for *path*."""
     return {
         "path": path,
-        "present": True,
+        "present": None,
+        "status": STATUS_UNKNOWN,
+        "mode": None,
+        "owner": None,
+        "group": None,
+        "detail": detail,
+    }
+
+
+def _stat_entry(path: str, probe_map: dict[str, dict[str, str | None]]) -> dict[str, Any]:
+    """Build the per-path posture entry from the parsed probe verdicts."""
+    info = probe_map.get(path)
+    if info is None:
+        return _unknown_entry(path, "the posture probe returned no verdict for this path")
+    if info["status"] == STATUS_UNKNOWN:
+        parent = path.rpartition("/")[0] or "/"
+        return _unknown_entry(
+            path,
+            f"the SSH user cannot traverse {parent}, so existence is undetermined; "
+            "the path may exist and be unreadable",
+        )
+    present = info["status"] == STATUS_PRESENT
+    return {
+        "path": path,
+        "present": present,
+        "status": info["status"],
         "mode": info["mode"],
         "owner": info["owner"],
         "group": info["group"],
+        "detail": None,
     }
 
 
 def parse_posture(
-    stat_map: dict[str, dict[str, str]],
+    probe_map: dict[str, dict[str, str | None]],
     config_paths: tuple[str, ...],
     token_path: str,
 ) -> dict[str, Any]:
-    """Compose the posture envelope from the parsed ``stat`` map.
+    """Compose the posture envelope from the parsed probe verdicts.
 
-    Returns ``{"config_files": [...], "token": {...}}``. Every config
-    entry and the token entry carry ``present`` plus (when present)
-    ``mode`` / ``owner`` / ``group``. The token entry additionally
-    carries ``redacted: true`` -- the token **value** is never read, only
-    its presence + mode, so no secret material appears in the envelope.
+    Returns ``{"config_files": [...], "token": {...}}``. Every entry
+    carries the same key set -- ``path`` / ``present`` / ``status`` /
+    ``mode`` / ``owner`` / ``group`` / ``detail`` -- so a consumer can
+    rely on one shape per path. ``present`` is ``null`` exactly when
+    ``status`` is ``unknown``, and ``detail`` says why. The token entry
+    additionally carries ``redacted: true`` -- the token **value** is
+    never read, only its presence + mode, so no secret material appears
+    in the envelope.
     """
-    config_files = [_stat_entry(path, stat_map) for path in config_paths]
-    token = _stat_entry(token_path, stat_map)
+    config_files = [_stat_entry(path, probe_map) for path in config_paths]
+    token = _stat_entry(token_path, probe_map)
     token["redacted"] = True
     return {"config_files": config_files, "token": token}
 
@@ -149,17 +280,34 @@ async def rke2_posture_show(
     param is consumed -- the measured paths are code constants, never
     operator input. Transport / auth failures propagate to the dispatcher,
     which maps them to a ``connector_error`` result (the #986 discipline);
-    a merely-absent file surfaces as ``present: false``, not an error.
+    a merely-absent file surfaces as ``present: false``, and a path whose
+    parent the SSH user cannot traverse surfaces as ``present: null`` /
+    ``status: unknown`` -- never as a confident ``false`` (#2698).
+
+    Raises :class:`Rke2PostureProbeError` when the probe exits non-zero.
+    The probe answers every real posture question with exit 0, so -- by
+    the same reasoning ``ops_snapshot`` applies to its precondition guard
+    -- a non-zero exit is a transport / shell / missing-``stat`` failure,
+    and serving it as posture would mislabel an infrastructure failure as
+    a file-presence verdict.
     """
     del params  # declared empty in schema; the measured paths are fixed
     paths = (*POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
-    quoted = " ".join(shlex.quote(path) for path in paths)
-    cmd = f"stat -c '%n|%a|%U|%G' -- {quoted}"
+    cmd = build_posture_probe_command(paths)
     proc = await connector._run_command(target, cmd, operator=operator)
+    exit_status = getattr(proc, "exit_status", None)
+    if exit_status not in (0, None):
+        stderr_raw = getattr(proc, "stderr", "")
+        stderr_txt = stderr_raw.strip()[:400] if isinstance(stderr_raw, str) else ""
+        hint = " (no `stat` on the node)" if exit_status == _PROBE_NO_STAT_EXIT else ""
+        raise Rke2PostureProbeError(
+            f"the RKE2 posture probe failed to run over SSH (exit {exit_status})"
+            f"{hint}: {stderr_txt or 'no stderr'}"
+        )
     stdout_raw = proc.stdout if hasattr(proc, "stdout") else ""
     stdout = stdout_raw if isinstance(stdout_raw, str) else ""
-    stat_map = parse_stat_output(stdout)
-    return parse_posture(stat_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
+    probe_map = parse_posture_probe_output(stdout)
+    return parse_posture(probe_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
 
 
 _RKE2_POSTURE_OP = Rke2Op(
@@ -167,11 +315,16 @@ _RKE2_POSTURE_OP = Rke2Op(
     handler_attr="posture_show",
     summary="Report RKE2 config-file modes + join-token presence (values redacted).",
     description=(
-        "Runs a single ``stat`` over the RKE2 config files under "
-        "``/etc/rancher/rke2/`` (``config.yaml`` and the admin kubeconfig "
-        "``rke2.yaml``) plus the on-disk server join token at "
+        "Runs a single ``stat``-based probe over the RKE2 config files "
+        "under ``/etc/rancher/rke2/`` (``config.yaml`` and the admin "
+        "kubeconfig ``rke2.yaml``) plus the on-disk server join token at "
         "``/var/lib/rancher/rke2/server/token``. Returns each path's "
-        "octal mode + owner/group and a ``present`` flag. The join-token "
+        "octal mode + owner/group and a three-state verdict: ``present``, "
+        "``absent`` (the file really is not there) or ``unknown`` (the "
+        "SSH user cannot traverse the parent directory, so existence is "
+        "undetermined -- typically a stock ``0700 root:root`` "
+        "``/var/lib/rancher/rke2/server/`` reached as a non-root user). "
+        "``unknown`` is never reported as ``absent``. The join-token "
         "entry reports presence + mode ONLY -- the token value is never "
         "read, so no secret material appears in the result. Use it to "
         "audit config-file permission drift (e.g. a world-readable "
@@ -192,12 +345,17 @@ _RKE2_POSTURE_OP = Rke2Op(
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
-                        "present": {"type": "boolean"},
+                        "present": {"type": ["boolean", "null"]},
+                        "status": {
+                            "type": "string",
+                            "enum": [STATUS_PRESENT, STATUS_ABSENT, STATUS_UNKNOWN],
+                        },
                         "mode": {"type": ["string", "null"]},
                         "owner": {"type": ["string", "null"]},
                         "group": {"type": ["string", "null"]},
+                        "detail": {"type": ["string", "null"]},
                     },
-                    "required": ["path", "present"],
+                    "required": ["path", "present", "status"],
                     "additionalProperties": False,
                 },
             },
@@ -205,13 +363,18 @@ _RKE2_POSTURE_OP = Rke2Op(
                 "type": "object",
                 "properties": {
                     "path": {"type": "string"},
-                    "present": {"type": "boolean"},
+                    "present": {"type": ["boolean", "null"]},
+                    "status": {
+                        "type": "string",
+                        "enum": [STATUS_PRESENT, STATUS_ABSENT, STATUS_UNKNOWN],
+                    },
                     "mode": {"type": ["string", "null"]},
                     "owner": {"type": ["string", "null"]},
                     "group": {"type": ["string", "null"]},
+                    "detail": {"type": ["string", "null"]},
                     "redacted": {"type": "boolean"},
                 },
-                "required": ["path", "present", "redacted"],
+                "required": ["path", "present", "status", "redacted"],
                 "additionalProperties": False,
             },
         },
@@ -228,16 +391,26 @@ _RKE2_POSTURE_OP = Rke2Op(
             "permission modes of ``/etc/rancher/rke2/config.yaml`` and "
             "the admin kubeconfig ``rke2.yaml``, and whether the on-disk "
             "server join token exists (with its mode). The token VALUE is "
-            "never read -- only presence + mode. " + SSH_TRANSPORT_NOTE
+            "never read -- only presence + mode. Treat ``status: "
+            "unknown`` as 'not determined', NOT as 'absent': before "
+            "concluding a server node has no join token to rotate, "
+            "re-check under an identity that can traverse "
+            "``/var/lib/rancher/rke2/server/``. " + SSH_TRANSPORT_NOTE
         ),
         "parameter_hints": {},
         "output_shape": (
-            "``{config_files: [{path, present, mode, owner, group}], "
-            "token: {path, present, mode, owner, group, redacted: true}}``."
-            " ``mode`` is the 4-digit octal form (e.g. ``0600``). A path "
-            "that does not exist reports ``present: false`` with null "
-            "mode/owner/group. ``token.redacted`` is always true -- the "
-            "value is never fetched."
+            "``{config_files: [{path, present, status, mode, owner, group, "
+            "detail}], token: {..., redacted: true}}`` -- every entry "
+            "carries the same keys. ``mode`` is the 4-digit octal form "
+            "(e.g. ``0600``). ``status`` is ``present`` (measured), "
+            "``absent`` (``present: false`` -- the path really is not "
+            "there) or ``unknown`` (``present: null`` -- the parent "
+            "directory is not traversable by the SSH user, so existence "
+            "is undetermined; ``detail`` says why). ``present`` is null "
+            "exactly when ``status`` is ``unknown``, so a falsy check on "
+            "``present`` alone CANNOT distinguish absent from "
+            "undetermined -- branch on ``status``. ``token.redacted`` is "
+            "always true -- the value is never fetched."
         ),
     },
 )

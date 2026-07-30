@@ -17,8 +17,12 @@ Acceptance criteria verified (Issue #2221)
   against a registered target returns ``status="ok"`` -- the connector +
   read-posture tier are dispatchable (AC1).
 * The posture result reports config-file modes + the join-token presence
-  with the token **value never present** (redacted); the ``stat`` command
-  is the only transport touched -- no ``cat`` of the token path (AC1/AC3).
+  with the token **value never present** (redacted); the ``stat`` probe is
+  the only transport touched -- no ``cat`` of the token path (AC1/AC3).
+* An undetermined join token (``present: null`` / ``status: unknown``,
+  #2698) survives the full dispatch stack -- the widened tri-state result
+  contract is neither rejected nor coerced by the reducer or the audit
+  write.
 """
 
 from __future__ import annotations
@@ -61,12 +65,16 @@ _CLIENT_PUB = _CLIENT_KEY.convert_to_public()
 
 _OS_RELEASE_FIXTURE = 'NAME="Ubuntu"\nPRETTY_NAME="Ubuntu 22.04.3 LTS"\nID=ubuntu\n'
 _RKE2_VERSION_FIXTURE = "rke2 version v1.29.3+rke2r1 (a1b2c3d)\ngo version go1.21.8\n"
-# stat -c '%n|%a|%U|%G' output: config.yaml + rke2.yaml + on-disk token.
-# The token line carries its MODE only -- the value is never read.
-_STAT_FIXTURE = (
-    "/etc/rancher/rke2/config.yaml|600|root|root\n"
-    "/etc/rancher/rke2/rke2.yaml|600|root|root\n"
-    "/var/lib/rancher/rke2/server/token|600|root|root\n"
+# Posture-probe output on a server node the SSH user can fully read:
+# config.yaml + rke2.yaml + on-disk token, each an ``S`` (stat-succeeded)
+# marker line. The token line carries its MODE only -- the value is never
+# read. The probe's per-path shell semantics (``S`` / ``A`` / ``U``) are
+# covered against a real POSIX shell elsewhere; this fake shell replays
+# recorded bytes, so it asserts the dispatch stack, not the shell.
+_PROBE_FIXTURE = (
+    "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
+    "S|/etc/rancher/rke2/rke2.yaml|600|root|root\n"
+    "S|/var/lib/rancher/rke2/server/token|600|root|root\n"
 )
 # Precondition-guard sentinel for an embedded-etcd server node.
 _SNAPSHOT_GUARD_FIXTURE = "ok\n"
@@ -100,8 +108,9 @@ async def _fake_shell_process_factory(process: Any) -> None:
         response: str | None = _OS_RELEASE_FIXTURE
     elif cmd.startswith("rke2 --version"):
         response = _RKE2_VERSION_FIXTURE
-    elif cmd.startswith("stat -c '%n|%a|%U|%G'"):
-        response = _STAT_FIXTURE
+    elif cmd.startswith("command -v stat"):
+        # rke2.posture.show -- the per-path stat probe (#2698).
+        response = _PROBE_FIXTURE
     elif cmd.startswith("printf 'ACTIVE="):
         # rke2.token.rotate fingerprint preflight: server node, active,
         # patched version (1.29 is above the CVE-fix range).
@@ -349,6 +358,45 @@ async def test_rke2_e2e_posture_show_dispatches_ok_and_redacts(
     # Redaction: no token VALUE anywhere in the dispatch result.
     assert _TOKEN_VALUE_CANARY not in repr(result)
     assert "value" not in token
+
+
+@pytest.mark.asyncio
+async def test_rke2_e2e_posture_show_unknown_token_survives_dispatch(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An undetermined token reaches the caller as null, not false (#2698).
+
+    The reporter's server-A shape: ``rke2.yaml`` stats fine while the token
+    sits behind a ``0700 root:root`` parent. Driven through the full
+    ``call_operation`` stack because ``present: null`` is a widened result
+    contract -- this proves the dispatcher's reducer and the audit write
+    tolerate it rather than rejecting or coercing the tri-state.
+    """
+    del captured_events
+    monkeypatch.setattr(
+        "tests.test_connectors_rke2_e2e._PROBE_FIXTURE",
+        "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
+        "S|/etc/rancher/rke2/rke2.yaml|600|root|root\n"
+        "U|/var/lib/rancher/rke2/server/token\n",
+    )
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": _CONNECTOR_ID,
+            "op_id": "rke2.posture.show",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"rke2.posture.show failed: {result.get('error')}"
+    token = result["result"]["token"]
+    assert token["present"] is None
+    assert token["status"] == "unknown"
+    assert token["detail"]
+    assert token["redacted"] is True
+    assert _TOKEN_VALUE_CANARY not in repr(result)
 
 
 @pytest.mark.asyncio

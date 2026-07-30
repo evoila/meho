@@ -135,7 +135,7 @@ def _vault_secrets() -> Iterator[None]:
         yield
 
 
-def _proc(*, stdout: str = "", stderr: str = "", exit_status: int = 0) -> Any:
+def _proc(*, stdout: str = "", stderr: str = "", exit_status: int | None = 0) -> Any:
     """Construct an ``SSHCompletedProcess``-shaped stub."""
     proc = MagicMock()
     proc.stdout = stdout
@@ -465,6 +465,44 @@ async def test_posture_show_raises_when_probe_cannot_run() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(stdout="", stderr="sh: stat: not found", exit_status=127)
         with pytest.raises(Rke2PostureProbeError, match="no `stat` on the node"):
+            await connector.posture_show(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_posture_show_accepts_complete_output_with_no_exit_status() -> None:
+    """``exit_status=None`` + a verdict per path is a complete run, not a failure.
+
+    ``asyncssh`` reports ``None`` when the peer closed the channel without
+    sending an exit status; some implementations omit it while still
+    delivering full output. The marker protocol gives independent evidence
+    the probe finished, so this must not fail a posture read that worked.
+    """
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_STAT_STDOUT_FULL, exit_status=None)
+        result = await connector.posture_show(_TARGET, {})
+    assert result["token"]["present"] is True
+    assert result["token"]["status"] == STATUS_PRESENT
+
+
+@pytest.mark.asyncio
+async def test_posture_show_raises_on_truncated_output_with_no_exit_status() -> None:
+    """No exit status AND missing verdicts: neither the run nor the paths add up."""
+    connector = Rke2SshConnector()
+    truncated = "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=truncated, exit_status=None)
+        with pytest.raises(Rke2PostureProbeError, match="no exit status reported"):
+            await connector.posture_show(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_posture_show_raises_on_signal_death() -> None:
+    """asyncssh reports -1 when the remote process died on a signal."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_STAT_STDOUT_FULL, exit_status=-1)
+        with pytest.raises(Rke2PostureProbeError, match=r"exit -1"):
             await connector.posture_show(_TARGET, {})
 
 

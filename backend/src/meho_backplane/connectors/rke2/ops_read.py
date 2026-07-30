@@ -51,7 +51,9 @@ real posture verdict now exits 0, so a **non-zero exit is unambiguously an
 infrastructure failure** (no ``stat`` on the node, broken shell) and
 raises :class:`Rke2PostureProbeError` instead of being silently reported
 as posture -- the same discipline ``ops_snapshot`` applies to its
-precondition guard.
+precondition guard. When the peer reports *no* exit status at all, the
+output vouches for the run instead: one marker line per measured path
+means the probe finished, and anything less raises.
 """
 
 from __future__ import annotations
@@ -290,23 +292,38 @@ async def rke2_posture_show(
     -- a non-zero exit is a transport / shell / missing-``stat`` failure,
     and serving it as posture would mislabel an infrastructure failure as
     a file-presence verdict.
+
+    ``exit_status`` is ``None`` when the peer closed the channel without
+    sending an exit status at all (``asyncssh``'s documented third case,
+    alongside an int and ``-1`` for signal death). That is not proof of
+    failure -- some SSH implementations omit ``exit-status`` while still
+    delivering full output -- so completeness of the output decides: the
+    probe emits exactly one marker line per measured path, so a verdict
+    for every path is independent evidence that it ran to completion.
+    Missing verdicts with no exit status to vouch for the run raise,
+    because neither the run nor the paths can be accounted for.
     """
     del params  # declared empty in schema; the measured paths are fixed
     paths = (*POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
     cmd = build_posture_probe_command(paths)
     proc = await connector._run_command(target, cmd, operator=operator)
     exit_status = getattr(proc, "exit_status", None)
-    if exit_status not in (0, None):
+    stdout_raw = proc.stdout if hasattr(proc, "stdout") else ""
+    stdout = stdout_raw if isinstance(stdout_raw, str) else ""
+    probe_map = parse_posture_probe_output(stdout)
+    if exit_status != 0 and not (exit_status is None and probe_map.keys() >= set(paths)):
         stderr_raw = getattr(proc, "stderr", "")
         stderr_txt = stderr_raw.strip()[:400] if isinstance(stderr_raw, str) else ""
         hint = " (no `stat` on the node)" if exit_status == _PROBE_NO_STAT_EXIT else ""
+        if exit_status is None:
+            hint = (
+                " (no exit status reported, and the probe returned no verdict for "
+                f"{len(set(paths) - probe_map.keys())} of {len(paths)} measured paths)"
+            )
         raise Rke2PostureProbeError(
             f"the RKE2 posture probe failed to run over SSH (exit {exit_status})"
             f"{hint}: {stderr_txt or 'no stderr'}"
         )
-    stdout_raw = proc.stdout if hasattr(proc, "stdout") else ""
-    stdout = stdout_raw if isinstance(stdout_raw, str) else ""
-    probe_map = parse_posture_probe_output(stdout)
     return parse_posture(probe_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
 
 

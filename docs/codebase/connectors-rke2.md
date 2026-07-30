@@ -211,6 +211,18 @@ Two properties are load-bearing:
   extended to the read tier — previously the posture handler ignored
   `exit_status` entirely.
 
+`asyncssh` reports `exit_status` as `None` when the peer closed the channel
+without sending one at all (its documented third case, alongside an int and
+`-1` for signal death), so "not zero" and "failed" are not the same test.
+`None` is resolved from the output rather than assumed either way: the probe
+emits exactly one marker line per measured path, so a verdict for every path
+is independent evidence the run completed and the read is served. Missing
+verdicts with no exit status to vouch for the run raise — neither the run
+nor the unaccounted paths can be confirmed. Treating `None` as failure
+outright would break reads against SSH implementations that omit
+`exit-status` while still delivering full output; treating it as success
+outright would re-open the class this fix closes.
+
 A consumer must branch on `status`, not on the falsiness of `present`:
 `null` and `false` are both falsy but mean different things. Every entry
 carries the same key set (`path` / `present` / `status` / `mode` / `owner` /

@@ -19183,6 +19183,32 @@
         "title": "AbortRunResponse",
         "description": "Returned by ``meho.runbook.abort`` -- the terminal-state coordinates."
       },
+      "AffectedSensorModel": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "tenant_id"
+        ],
+        "title": "AffectedSensorModel",
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.AffectedSensor`.\n\nIdentity of one Sensor row pinning a reclassified op (#2702) \u2014\nenough for the operator to find and re-audit it."
+      },
       "AgentDefinitionCreate": {
         "properties": {
           "name": {
@@ -25124,6 +25150,13 @@
           "operations_grouped": {
             "type": "boolean",
             "title": "Operations Grouped"
+          },
+          "safety_changes": {
+            "items": {
+              "$ref": "#/components/schemas/SafetyChangeModel"
+            },
+            "type": "array",
+            "title": "Safety Changes"
           }
         },
         "type": "object",
@@ -25136,7 +25169,7 @@
           "operations_grouped"
         ],
         "title": "IngestionResultModel",
-        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.\n\nThe dataclass lives in :mod:`register_ingested` so the helper\ncan stay framework-agnostic; this model is the wire-format twin\nthe routes return. Fields mirror the dataclass one-for-one with\nan extra ``connector_id`` echo for round-trip clarity."
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.IngestionResult`.\n\nThe dataclass lives in :mod:`register_ingested` so the helper\ncan stay framework-agnostic; this model is the wire-format twin\nthe routes return. Fields mirror the dataclass one-for-one with\nan extra ``connector_id`` echo for round-trip clarity.\n``safety_changes`` (#2702) is additive with an empty-list default,\nso pre-existing clients see no shape change on ingests that\nreclassify nothing."
       },
       "KbEntry": {
         "properties": {
@@ -27277,6 +27310,37 @@
         ],
         "title": "RunnerWorkItem",
         "description": "One centrally-authorized operation for the runner to execute.\n\nCarries the fields the runner needs to resolve and invoke a handler\nentirely locally: the dotted ``handler_ref`` (resolved via\n:func:`~meho_backplane.operations._handler_resolve.import_handler`),\nthe ``(product, version, impl_id)`` registry key used to rebind a\nbound-method handler against its connector instance, the validated\n``params``, the ``safety_level`` the runner re-checks (defence in\ndepth), the principal context, and the resolved target descriptor\n(``None`` for targetless synthetic ops such as ``net.*``)."
+      },
+      "SafetyChangeModel": {
+        "properties": {
+          "op_id": {
+            "type": "string",
+            "title": "Op Id"
+          },
+          "old_safety_level": {
+            "type": "string",
+            "title": "Old Safety Level"
+          },
+          "new_safety_level": {
+            "type": "string",
+            "title": "New Safety Level"
+          },
+          "affected_sensors": {
+            "items": {
+              "$ref": "#/components/schemas/AffectedSensorModel"
+            },
+            "type": "array",
+            "title": "Affected Sensors"
+          }
+        },
+        "type": "object",
+        "required": [
+          "op_id",
+          "old_safety_level",
+          "new_safety_level"
+        ],
+        "title": "SafetyChangeModel",
+        "description": "Pydantic projection of\n:class:`~meho_backplane.operations.ingest.register_ingested.SafetyChange`.\n\nOne op whose persisted ``safety_level`` a re-ingest overwrote with\na different value (#2702), plus every Sensor pinning it \u2014 those\nsensors keep auto-executing the op on schedule under the stale\ncreate-time ``safe`` assumption until the operator re-audits them."
       },
       "ScheduledTriggerCreate": {
         "properties": {

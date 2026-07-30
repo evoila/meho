@@ -658,6 +658,17 @@ type AbortRunResponse struct {
 	State       *string            `json:"state,omitempty"`
 }
 
+// AffectedSensorModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.register_ingested.AffectedSensor`.
+//
+// Identity of one Sensor row pinning a reclassified op (#2702) —
+// enough for the operator to find and re-audit it.
+type AffectedSensorModel struct {
+	Id       openapi_types.UUID `json:"id"`
+	Name     string             `json:"name"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+}
+
 // AgentDefinitionCreate POST body -- the inputs “create“ consumes. Pydantic v2 strict.
 //
 // “extra="forbid"“ rejects unknown fields with 422 (catches a client
@@ -4305,6 +4316,9 @@ type IngestJobStatusResponse struct {
 	// can stay framework-agnostic; this model is the wire-format twin
 	// the routes return. Fields mirror the dataclass one-for-one with
 	// an extra ``connector_id`` echo for round-trip clarity.
+	// ``safety_changes`` (#2702) is additive with an empty-list default,
+	// so pre-existing clients see no shape change on ingests that
+	// reclassify nothing.
 	Ingestion *IngestionResultModel         `json:"ingestion,omitempty"`
 	JobId     openapi_types.UUID            `json:"job_id"`
 	Product   *string                       `json:"product"`
@@ -4450,6 +4464,9 @@ type IngestResponse struct {
 	// can stay framework-agnostic; this model is the wire-format twin
 	// the routes return. Fields mirror the dataclass one-for-one with
 	// an extra ``connector_id`` echo for round-trip clarity.
+	// ``safety_changes`` (#2702) is additive with an empty-list default,
+	// so pre-existing clients see no shape change on ingests that
+	// reclassify nothing.
 	Ingestion IngestionResultModel `json:"ingestion"`
 }
 
@@ -4460,13 +4477,17 @@ type IngestResponse struct {
 // can stay framework-agnostic; this model is the wire-format twin
 // the routes return. Fields mirror the dataclass one-for-one with
 // an extra “connector_id“ echo for round-trip clarity.
+// “safety_changes“ (#2702) is additive with an empty-list default,
+// so pre-existing clients see no shape change on ingests that
+// reclassify nothing.
 type IngestionResultModel struct {
-	ConnectorId         string `json:"connector_id"`
-	ConnectorRegistered bool   `json:"connector_registered"`
-	InsertedCount       int    `json:"inserted_count"`
-	OperationsGrouped   bool   `json:"operations_grouped"`
-	SkippedCount        int    `json:"skipped_count"`
-	UpdatedCount        int    `json:"updated_count"`
+	ConnectorId         string               `json:"connector_id"`
+	ConnectorRegistered bool                 `json:"connector_registered"`
+	InsertedCount       int                  `json:"inserted_count"`
+	OperationsGrouped   bool                 `json:"operations_grouped"`
+	SafetyChanges       *[]SafetyChangeModel `json:"safety_changes,omitempty"`
+	SkippedCount        int                  `json:"skipped_count"`
+	UpdatedCount        int                  `json:"updated_count"`
 }
 
 // KbEntry One kb entry -- mirrors a row in the “documents“ table.
@@ -5722,6 +5743,20 @@ type RunnerWorkItem struct {
 	// would durably persist — a locked no-durable-artifact violation).
 	TargetDescriptor *ResolvedTargetDescriptor `json:"target_descriptor,omitempty"`
 	Version          *string                   `json:"version,omitempty"`
+}
+
+// SafetyChangeModel Pydantic projection of
+// :class:`~meho_backplane.operations.ingest.register_ingested.SafetyChange`.
+//
+// One op whose persisted “safety_level“ a re-ingest overwrote with
+// a different value (#2702), plus every Sensor pinning it — those
+// sensors keep auto-executing the op on schedule under the stale
+// create-time “safe“ assumption until the operator re-audits them.
+type SafetyChangeModel struct {
+	AffectedSensors *[]AffectedSensorModel `json:"affected_sensors,omitempty"`
+	NewSafetyLevel  string                 `json:"new_safety_level"`
+	OldSafetyLevel  string                 `json:"old_safety_level"`
+	OpId            string                 `json:"op_id"`
 }
 
 // ScheduledTriggerCreate Request body for “POST /api/v1/scheduler/triggers“.

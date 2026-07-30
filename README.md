@@ -13,8 +13,8 @@ The backplane image, Helm chart, and operator CLI are all shipped and cosign-sig
 
 **Documentation:** <https://evoila.github.io/meho/> — the published,
 versioned docs site (install, client setup, task guides) and the primary
-entry point for operators. The `docs/` tree in this repo is the
-contributor-facing material behind it.
+entry point for operators. It builds from `docs-site/`; the `docs/` tree
+in this repo is separate, contributor-facing material.
 
 ## The problem
 

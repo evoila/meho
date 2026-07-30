@@ -21,6 +21,10 @@ Coverage matrix (the task's acceptance criteria):
 * A Sensor row pinning ``(connector_id, op_id)`` of a reclassified op
   is listed with its id / name / tenant_id; a sensor pinning an
   *unchanged* op is not listed.
+* Tenant scoping follows the ingest's scope: a tenant-scoped re-ingest
+  lists only the ingesting tenant's sensors (a foreign tenant's sensor
+  on the same ``(connector_id, op_id)`` is absent); a built-in / global
+  re-ingest stays unfiltered and lists every tenant's pinning sensors.
 * One ``ingest_safety_class_changed`` warning fires per change, keyed
   with op_id, old, new, and the affected sensor count.
 
@@ -118,6 +122,8 @@ def _proto(
 async def _register(
     operations: list[EndpointDescriptorProto],
     embedding_service: AsyncMock,
+    *,
+    tenant_id: uuid.UUID | None = None,
 ) -> IngestionResult:
     """One :func:`register_ingested_operations` call under the pinned triple."""
     return await register_ingested_operations(
@@ -126,24 +132,33 @@ async def _register(
         impl_id=_CONNECTOR["impl_id"],
         spec_source="petstore.yaml",
         operations=operations,
+        tenant_id=tenant_id,
         embedding_service=embedding_service,
     )
 
 
-async def _seed_sensor(*, name: str, op_id: str) -> tuple[uuid.UUID, uuid.UUID]:
-    """Insert a tenant + a Sensor pinning ``(_CONNECTOR_ID, op_id)``.
+async def _seed_sensor(
+    *,
+    name: str,
+    op_id: str,
+    tenant_id: uuid.UUID | None = None,
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Insert a Sensor pinning ``(_CONNECTOR_ID, op_id)`` (+ its tenant).
 
-    Returns ``(tenant_id, sensor_id)``. Minimal-viable row per the
+    Returns ``(tenant_id, sensor_id)``. A fresh tenant is created unless
+    *tenant_id* names an existing one. Minimal-viable row per the
     :class:`Sensor` model contract (interval cadence, threshold
     assertion); the fields the surfacing reads are ``connector_id`` +
     ``op_id`` + the identity triple (id / name / tenant_id).
     """
     sessionmaker = get_sessionmaker()
-    tenant_id = uuid.uuid4()
+    create_tenant = tenant_id is None
+    tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
     sensor_id = uuid.uuid4()
     async with sessionmaker() as session:
-        session.add(Tenant(id=tenant_id, slug=f"t-{name}", name=f"Tenant {name}"))
-        await session.flush()
+        if create_tenant:
+            session.add(Tenant(id=tenant_id, slug=f"t-{name}", name=f"Tenant {name}"))
+            await session.flush()
         session.add(
             Sensor(
                 id=sensor_id,
@@ -250,6 +265,60 @@ async def test_safety_change_lists_pinning_sensors_only(
     assert change.op_id == "GET:/pets"
     assert [(s.id, s.name, s.tenant_id) for s in change.affected_sensors] == [
         (sensor_id, "pets-watch", tenant_id),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tenant_scoped_ingest_omits_foreign_tenant_sensors(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A tenant-scoped re-ingest lists only the ingesting tenant's sensors.
+
+    ``connector_id`` carries no tenant component, so a foreign tenant's
+    sensor pins the same ``(connector_id, op_id)`` -- but its descriptors
+    resolve that tenant's own (or the built-in) rows, which a
+    tenant-scoped ingest never touches. Listing it would both leak a
+    foreign sensor identity and report a sensor that was not affected.
+    """
+    tenant_a, sensor_a = await _seed_sensor(name="a-pets-watch", op_id="GET:/pets")
+    await _seed_sensor(name="b-pets-watch", op_id="GET:/pets")
+    await _register([_proto("GET:/pets")], stub_embedding_service, tenant_id=tenant_a)
+
+    result = await _register(
+        [_proto("GET:/pets", safety_level="caution")],
+        stub_embedding_service,
+        tenant_id=tenant_a,
+    )
+
+    [change] = result.safety_changes
+    assert change.op_id == "GET:/pets"
+    assert [(s.id, s.name, s.tenant_id) for s in change.affected_sensors] == [
+        (sensor_a, "a-pets-watch", tenant_a),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_global_ingest_lists_every_tenants_sensors(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A built-in / global re-ingest stays unfiltered across tenants.
+
+    The built-in rows serve every tenant's Sensors, so any tenant's
+    pinning row is affected and must be listed for triage.
+    """
+    await _register([_proto("GET:/pets")], stub_embedding_service)
+    tenant_a, sensor_a = await _seed_sensor(name="a-pets-watch", op_id="GET:/pets")
+    tenant_b, sensor_b = await _seed_sensor(name="b-pets-watch", op_id="GET:/pets")
+
+    result = await _register(
+        [_proto("GET:/pets", safety_level="caution")],
+        stub_embedding_service,
+    )
+
+    [change] = result.safety_changes
+    assert [(s.id, s.name, s.tenant_id) for s in change.affected_sensors] == [
+        (sensor_a, "a-pets-watch", tenant_a),
+        (sensor_b, "b-pets-watch", tenant_b),
     ]
 
 

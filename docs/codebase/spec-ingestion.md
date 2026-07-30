@@ -533,10 +533,15 @@ overwrote with a different value. Both existing-row update paths in
 not safety metadata, so the skip-re-embed branch can carry a
 reclassification too). After the upsert loop,
 `_collect_safety_changes` joins the changed op_ids against `Sensor`
-rows pinning `(connector_id, op_id)` — deliberately **not**
-tenant-filtered, since a built-in connector's rows serve every
-tenant's Sensors — and attaches each pinning sensor's
-id / name / tenant_id as `AffectedSensor` entries. One structlog
+rows pinning `(connector_id, op_id)` and attaches each pinning
+sensor's id / name / tenant_id as `AffectedSensor` entries. The join
+follows the ingest's own tenant scope: a tenant-scoped ingest
+overwrote only that tenant's descriptor rows, so it filters
+`Sensor.tenant_id` to match — other tenants' sensors resolve their
+own or the built-in rows (tenant-wins, `operations/_lookup.py`) and
+listing them would leak foreign sensor identities. Only a built-in /
+global ingest (`tenant_id IS NULL`) is deliberately unfiltered,
+since the built-in rows serve every tenant's Sensors. One structlog
 warning `ingest_safety_class_changed` fires per change (keyed with
 op_id, old, new, affected sensor count). The wire twin
 `SafetyChangeModel` rides `IngestionResultModel.safety_changes`

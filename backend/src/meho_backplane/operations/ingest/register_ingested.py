@@ -118,7 +118,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
@@ -478,29 +478,38 @@ async def _collect_safety_changes(
     One batched ``IN`` query for every reclassified ``op_id`` under the
     operator-facing ``connector_id`` (the inverse of
     :func:`~meho_backplane.operations.ingest.parser.parse_connector_id`,
-    rendered by :func:`build_connector_id`). Deliberately **not** tenant-
-    filtered: a built-in connector's descriptor rows serve every tenant's
-    Sensors, so any tenant's pinning row is affected -- each entry
-    carries its own ``tenant_id`` for triage. Runs inside the register
-    call's open transaction; it's a pure read, so it costs no extra
-    session and sees the just-flushed descriptor state.
+    rendered by :func:`build_connector_id`). Tenant scoping follows the
+    ingest's own scope: a tenant-scoped ingest (``coords.tenant_id``
+    set) overwrote only that tenant's descriptor rows, so the join
+    filters ``Sensor.tenant_id`` to match -- other tenants' sensors
+    resolve their own or the built-in rows (tenant-wins,
+    ``operations/_lookup.py``) and are unaffected; listing them would
+    leak foreign sensor identities over REST / job report / MCP. Only a
+    built-in / global ingest (``coords.tenant_id is None``) stays
+    unfiltered: the built-in rows serve every tenant's Sensors, so any
+    tenant's pinning row is affected -- each entry carries its own
+    ``tenant_id`` for triage. Runs inside the register call's open
+    transaction; it's a pure read, so it costs no extra session and
+    sees the just-flushed descriptor state.
     """
     if not shifts:
         return ()
     connector_id = build_connector_id(coords.product, coords.version, coords.impl_id)
+    conditions: list[ColumnElement[bool]] = [
+        Sensor.connector_id == connector_id,
+        Sensor.op_id.in_([shift.op_id for shift in shifts]),
+    ]
+    if coords.tenant_id is not None:
+        conditions.append(Sensor.tenant_id == coords.tenant_id)
     stmt = (
-        select(Sensor)
-        .where(
-            Sensor.connector_id == connector_id,
-            Sensor.op_id.in_([shift.op_id for shift in shifts]),
-        )
+        select(Sensor.id, Sensor.name, Sensor.tenant_id, Sensor.op_id)
+        .where(*conditions)
         .order_by(Sensor.name, Sensor.id)
     )
-    sensors = (await session.execute(stmt)).scalars().all()
     sensors_by_op: dict[str, list[AffectedSensor]] = {}
-    for sensor in sensors:
-        sensors_by_op.setdefault(sensor.op_id, []).append(
-            AffectedSensor(id=sensor.id, name=sensor.name, tenant_id=sensor.tenant_id)
+    for sensor_id, name, tenant_id, op_id in (await session.execute(stmt)).all():
+        sensors_by_op.setdefault(op_id, []).append(
+            AffectedSensor(id=sensor_id, name=name, tenant_id=tenant_id)
         )
 
     changes: list[SafetyChange] = []

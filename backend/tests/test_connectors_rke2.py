@@ -7,15 +7,21 @@ Coverage matrix (per Task #2221 acceptance criteria):
 
 * :func:`parse_rke2_version` / :func:`parse_os_pretty_name` -- identity
   parsing from ``rke2 --version`` + ``/etc/os-release``.
-* :func:`parse_stat_output` / :func:`parse_posture` -- the posture
-  envelope: config-file modes + owner/group, missing paths reported
-  ``present: false``, and the redacted token entry.
+* :func:`parse_posture_probe_output` / :func:`parse_posture` -- the posture
+  envelope: config-file modes + owner/group, the three-state
+  present/absent/unknown verdict, and the redacted token entry.
+* Posture tri-state (#2698) -- a path whose parent the SSH user cannot
+  traverse reports ``present: null`` / ``status: unknown``, never a
+  confident ``present: false``; a genuinely missing file still reports
+  ``absent``; and a probe that could not run at all raises
+  :class:`Rke2PostureProbeError` instead of being served as posture.
 * Bound-method shims on :class:`Rke2SshConnector` -- ``about`` (identity)
   and ``posture_show`` (posture) run the correct plain-SSH commands and
   return the expected envelope shape.
-* Redaction invariant -- ``posture_show`` issues a single ``stat`` (never
-  a ``cat`` of the token path); the token entry carries ``redacted: true``
-  and no secret material bleeds into the result envelope or logs.
+* Redaction invariant -- ``posture_show`` issues a single ``stat``-based
+  probe (never a ``cat`` of the token path); the token entry carries
+  ``redacted: true`` and no secret material bleeds into the result
+  envelope or logs.
 * ``RKE2_OPS`` registration shape -- 6 ops: two read (``rke2.about`` /
   ``rke2.posture.show``, T1 #2221), three approval-gated write
   (``rke2.token.rotate`` T2 #2429, ``rke2.node.service.restart`` /
@@ -51,8 +57,13 @@ from meho_backplane.connectors.rke2.connector import (
 from meho_backplane.connectors.rke2.ops_read import (
     POSTURE_CONFIG_PATHS,
     RKE2_TOKEN_PATH,
+    STATUS_ABSENT,
+    STATUS_PRESENT,
+    STATUS_UNKNOWN,
+    Rke2PostureProbeError,
+    build_posture_probe_command,
     parse_posture,
-    parse_stat_output,
+    parse_posture_probe_output,
 )
 from meho_backplane.connectors.rke2.ops_snapshot import (
     SNAPSHOT_DEFAULT_DIR,
@@ -124,7 +135,7 @@ def _vault_secrets() -> Iterator[None]:
         yield
 
 
-def _proc(*, stdout: str = "", stderr: str = "", exit_status: int = 0) -> Any:
+def _proc(*, stdout: str = "", stderr: str = "", exit_status: int | None = 0) -> Any:
     """Construct an ``SSHCompletedProcess``-shaped stub."""
     proc = MagicMock()
     proc.stdout = stdout
@@ -160,16 +171,33 @@ def test_parse_os_pretty_name_unquoted_and_absent() -> None:
 
 
 # ---------------------------------------------------------------------------
-# parse_stat_output
+# build_posture_probe_command / parse_posture_probe_output
 # ---------------------------------------------------------------------------
 
 
-def test_parse_stat_output_parses_and_normalises_mode() -> None:
+def test_build_posture_probe_command_covers_paths_and_never_cats() -> None:
+    cmd = build_posture_probe_command((*POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH))
+    for path in (*POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH):
+        assert path in cmd
+    # Reads modes only -- the token VALUE is never fetched.
+    assert "cat" not in cmd
+    # Fails closed when the node has no `stat`, rather than reporting
+    # every path absent (#2698).
+    assert "command -v stat" in cmd
+    assert "exit 127" in cmd
+    # Traversability is answered by the kernel, not by parsing stat's
+    # locale-dependent diagnostic text.
+    assert '[ -x "${p%/*}" ]' in cmd
+
+
+def test_parse_posture_probe_output_parses_and_normalises_mode() -> None:
     stdout = (
-        "/etc/rancher/rke2/config.yaml|600|root|root\n/etc/rancher/rke2/rke2.yaml|644|root|rke2\n"
+        "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
+        "S|/etc/rancher/rke2/rke2.yaml|644|root|rke2\n"
     )
-    parsed = parse_stat_output(stdout)
+    parsed = parse_posture_probe_output(stdout)
     assert parsed["/etc/rancher/rke2/config.yaml"] == {
+        "status": STATUS_PRESENT,
         "mode": "0600",
         "owner": "root",
         "group": "root",
@@ -178,9 +206,17 @@ def test_parse_stat_output_parses_and_normalises_mode() -> None:
     assert parsed["/etc/rancher/rke2/rke2.yaml"]["mode"] == "0644"
 
 
-def test_parse_stat_output_skips_malformed_lines() -> None:
-    stdout = "garbage banner line\n/etc/rancher/rke2/config.yaml|600|root|root\n\n"
-    parsed = parse_stat_output(stdout)
+def test_parse_posture_probe_output_distinguishes_absent_from_unreadable() -> None:
+    stdout = f"A|/etc/rancher/rke2/rke2.yaml\nU|{RKE2_TOKEN_PATH}\n"
+    parsed = parse_posture_probe_output(stdout)
+    assert parsed["/etc/rancher/rke2/rke2.yaml"]["status"] == STATUS_ABSENT
+    assert parsed[RKE2_TOKEN_PATH]["status"] == STATUS_UNKNOWN
+    assert parsed[RKE2_TOKEN_PATH]["mode"] is None
+
+
+def test_parse_posture_probe_output_skips_malformed_lines() -> None:
+    stdout = "garbage banner line\nS|/etc/rancher/rke2/config.yaml|600|root|root\n\nS|truncated\n"
+    parsed = parse_posture_probe_output(stdout)
     assert set(parsed) == {"/etc/rancher/rke2/config.yaml"}
 
 
@@ -189,16 +225,25 @@ def test_parse_stat_output_skips_malformed_lines() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _verdict(status: str, mode: str | None = None) -> dict[str, str | None]:
+    """Build a parsed-probe verdict for *status* the way the probe would."""
+    if status == STATUS_PRESENT:
+        return {"status": status, "mode": mode, "owner": "root", "group": "root"}
+    return {"status": status, "mode": None, "owner": None, "group": None}
+
+
 def test_parse_posture_present_and_redacted_token() -> None:
-    stat_map = {
-        "/etc/rancher/rke2/config.yaml": {"mode": "0600", "owner": "root", "group": "root"},
-        "/etc/rancher/rke2/rke2.yaml": {"mode": "0600", "owner": "root", "group": "root"},
-        RKE2_TOKEN_PATH: {"mode": "0600", "owner": "root", "group": "root"},
+    probe_map = {
+        "/etc/rancher/rke2/config.yaml": _verdict(STATUS_PRESENT, "0600"),
+        "/etc/rancher/rke2/rke2.yaml": _verdict(STATUS_PRESENT, "0600"),
+        RKE2_TOKEN_PATH: _verdict(STATUS_PRESENT, "0600"),
     }
-    posture = parse_posture(stat_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
+    posture = parse_posture(probe_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
     cfg = {c["path"]: c for c in posture["config_files"]}
     assert cfg["/etc/rancher/rke2/config.yaml"]["present"] is True
+    assert cfg["/etc/rancher/rke2/config.yaml"]["status"] == STATUS_PRESENT
     assert cfg["/etc/rancher/rke2/config.yaml"]["mode"] == "0600"
+    assert cfg["/etc/rancher/rke2/config.yaml"]["detail"] is None
     # Token entry is present, carries its mode, and is explicitly redacted.
     token = posture["token"]
     assert token["path"] == RKE2_TOKEN_PATH
@@ -210,19 +255,66 @@ def test_parse_posture_present_and_redacted_token() -> None:
     assert "token" not in {k for c in posture["config_files"] for k in c}
 
 
-def test_parse_posture_missing_paths_report_absent() -> None:
-    # Agent node: no server token, config.yaml only.
-    stat_map = {
-        "/etc/rancher/rke2/config.yaml": {"mode": "0600", "owner": "root", "group": "root"},
+def test_parse_posture_absent_paths_report_absent() -> None:
+    # Agent node: no server token, no admin kubeconfig -- both genuinely
+    # missing, with a traversable parent, so `absent` is the honest answer.
+    probe_map = {
+        "/etc/rancher/rke2/config.yaml": _verdict(STATUS_PRESENT, "0600"),
+        "/etc/rancher/rke2/rke2.yaml": _verdict(STATUS_ABSENT),
+        RKE2_TOKEN_PATH: _verdict(STATUS_ABSENT),
     }
-    posture = parse_posture(stat_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
+    posture = parse_posture(probe_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
     cfg = {c["path"]: c for c in posture["config_files"]}
     assert cfg["/etc/rancher/rke2/rke2.yaml"]["present"] is False
+    assert cfg["/etc/rancher/rke2/rke2.yaml"]["status"] == STATUS_ABSENT
     assert cfg["/etc/rancher/rke2/rke2.yaml"]["mode"] is None
     token = posture["token"]
     assert token["present"] is False
+    assert token["status"] == STATUS_ABSENT
     assert token["mode"] is None
     assert token["redacted"] is True
+
+
+def test_parse_posture_unreadable_parent_is_unknown_not_absent() -> None:
+    """#2698: a 0700 root:root server dir must not read as 'no token'."""
+    probe_map = {
+        "/etc/rancher/rke2/config.yaml": _verdict(STATUS_PRESENT, "0600"),
+        "/etc/rancher/rke2/rke2.yaml": _verdict(STATUS_PRESENT, "0600"),
+        RKE2_TOKEN_PATH: _verdict(STATUS_UNKNOWN),
+    }
+    posture = parse_posture(probe_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
+    token = posture["token"]
+    # The load-bearing assertion: NOT False. A rotation pre-check must not
+    # be able to read this as "nothing to rotate".
+    assert token["present"] is None
+    assert token["status"] == STATUS_UNKNOWN
+    assert token["mode"] is None
+    assert token["redacted"] is True
+    # The detail names the directory the operator has to be able to traverse.
+    assert "/var/lib/rancher/rke2/server" in str(token["detail"])
+
+
+def test_parse_posture_path_with_no_verdict_is_unknown() -> None:
+    """A path the probe never reported on is undetermined, not absent."""
+    posture = parse_posture({}, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
+    for entry in (*posture["config_files"], posture["token"]):
+        assert entry["present"] is None
+        assert entry["status"] == STATUS_UNKNOWN
+        assert entry["detail"]
+
+
+def test_parse_posture_entries_share_one_key_set() -> None:
+    """One envelope shape per path, whatever the verdict."""
+    probe_map = {
+        "/etc/rancher/rke2/config.yaml": _verdict(STATUS_PRESENT, "0600"),
+        "/etc/rancher/rke2/rke2.yaml": _verdict(STATUS_ABSENT),
+        RKE2_TOKEN_PATH: _verdict(STATUS_UNKNOWN),
+    }
+    posture = parse_posture(probe_map, POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH)
+    expected = {"path", "present", "status", "mode", "owner", "group", "detail"}
+    for entry in posture["config_files"]:
+        assert set(entry) == expected
+    assert set(posture["token"]) == expected | {"redacted"}
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +374,9 @@ async def test_about_unreachable_raises_connector_error() -> None:
 
 
 _STAT_STDOUT_FULL = (
-    "/etc/rancher/rke2/config.yaml|600|root|root\n"
-    "/etc/rancher/rke2/rke2.yaml|600|root|root\n"
-    "/var/lib/rancher/rke2/server/token|600|root|root\n"
+    "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
+    "S|/etc/rancher/rke2/rke2.yaml|600|root|root\n"
+    "S|/var/lib/rancher/rke2/server/token|600|root|root\n"
 )
 
 
@@ -294,16 +386,17 @@ async def test_posture_show_returns_redacted_envelope() -> None:
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(stdout=_STAT_STDOUT_FULL)
         result = await connector.posture_show(_TARGET, {})
-    # Single SSH round-trip; the command is a `stat`, never a `cat`.
+    # Single SSH round-trip; the command `stat`s, never `cat`s.
     mock_cmd.assert_awaited_once()
     cmd = mock_cmd.await_args.args[1]
-    assert cmd.startswith("stat -c '%n|%a|%U|%G' --")
+    assert "stat -c '%n|%a|%U|%G' --" in cmd
     assert "cat" not in cmd
     # Every measured path appears as a stat argument.
     for path in (*POSTURE_CONFIG_PATHS, RKE2_TOKEN_PATH):
         assert path in cmd
     # Envelope shape + redaction.
     assert result["token"]["present"] is True
+    assert result["token"]["status"] == STATUS_PRESENT
     assert result["token"]["mode"] == "0600"
     assert result["token"]["redacted"] is True
     cfg = {c["path"]: c for c in result["config_files"]}
@@ -313,15 +406,104 @@ async def test_posture_show_returns_redacted_envelope() -> None:
 @pytest.mark.asyncio
 async def test_posture_show_reports_missing_token_as_absent() -> None:
     connector = Rke2SshConnector()
-    # Agent node: config.yaml only in stat stdout (missing paths omitted).
-    stdout = "/etc/rancher/rke2/config.yaml|640|root|root\n"
+    # Agent node: config.yaml present, the other two genuinely missing
+    # behind a traversable parent.
+    stdout = (
+        "S|/etc/rancher/rke2/config.yaml|640|root|root\n"
+        "A|/etc/rancher/rke2/rke2.yaml\n"
+        f"A|{RKE2_TOKEN_PATH}\n"
+    )
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
         mock_cmd.return_value = _proc(stdout=stdout)
         result = await connector.posture_show(_TARGET, {})
     assert result["token"]["present"] is False
+    assert result["token"]["status"] == STATUS_ABSENT
     assert result["token"]["redacted"] is True
     cfg = {c["path"]: c for c in result["config_files"]}
     assert cfg["/etc/rancher/rke2/rke2.yaml"]["present"] is False
+
+
+@pytest.mark.asyncio
+async def test_posture_show_unreadable_token_dir_reports_unknown() -> None:
+    """#2698 regression: the observed server-A shape must not read 'absent'.
+
+    ``rke2.yaml`` is 0600 root:root and stats fine (the parent is
+    traversable); the token sits behind a 0700 root:root server dir, so its
+    existence is undetermined -- not false.
+    """
+    connector = Rke2SshConnector()
+    stdout = (
+        "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
+        "S|/etc/rancher/rke2/rke2.yaml|600|root|root\n"
+        f"U|{RKE2_TOKEN_PATH}\n"
+    )
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=stdout)
+        result = await connector.posture_show(_TARGET, {})
+    token = result["token"]
+    assert token["present"] is None
+    assert token["status"] == STATUS_UNKNOWN
+    assert token["mode"] is None
+    assert token["redacted"] is True
+    # The config sanity signal still works — this is what isolates the
+    # cause to parent-directory traversal rather than "stat can't see
+    # root-owned files".
+    cfg = {c["path"]: c for c in result["config_files"]}
+    assert cfg["/etc/rancher/rke2/rke2.yaml"]["present"] is True
+    assert cfg["/etc/rancher/rke2/rke2.yaml"]["mode"] == "0600"
+
+
+@pytest.mark.asyncio
+async def test_posture_show_raises_when_probe_cannot_run() -> None:
+    """A non-zero probe exit is an infrastructure failure, never posture.
+
+    Same discipline as the snapshot precondition guard: the probe answers
+    every real verdict with exit 0, so a non-zero exit must not be served
+    as a file-presence answer (#2698).
+    """
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr="sh: stat: not found", exit_status=127)
+        with pytest.raises(Rke2PostureProbeError, match="no `stat` on the node"):
+            await connector.posture_show(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_posture_show_accepts_complete_output_with_no_exit_status() -> None:
+    """``exit_status=None`` + a verdict per path is a complete run, not a failure.
+
+    ``asyncssh`` reports ``None`` when the peer closed the channel without
+    sending an exit status; some implementations omit it while still
+    delivering full output. The marker protocol gives independent evidence
+    the probe finished, so this must not fail a posture read that worked.
+    """
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_STAT_STDOUT_FULL, exit_status=None)
+        result = await connector.posture_show(_TARGET, {})
+    assert result["token"]["present"] is True
+    assert result["token"]["status"] == STATUS_PRESENT
+
+
+@pytest.mark.asyncio
+async def test_posture_show_raises_on_truncated_output_with_no_exit_status() -> None:
+    """No exit status AND missing verdicts: neither the run nor the paths add up."""
+    connector = Rke2SshConnector()
+    truncated = "S|/etc/rancher/rke2/config.yaml|600|root|root\n"
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=truncated, exit_status=None)
+        with pytest.raises(Rke2PostureProbeError, match="no exit status reported"):
+            await connector.posture_show(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_posture_show_raises_on_signal_death() -> None:
+    """asyncssh reports -1 when the remote process died on a signal."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_STAT_STDOUT_FULL, exit_status=-1)
+        with pytest.raises(Rke2PostureProbeError, match=r"exit -1"):
+            await connector.posture_show(_TARGET, {})
 
 
 @pytest.mark.asyncio

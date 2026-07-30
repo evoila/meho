@@ -24,7 +24,9 @@ T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
 - `rke2.posture.show` — the read-only posture tier. `stat`s the RKE2
   config-file modes under `/etc/rancher/rke2/` and the on-disk server
   join-token presence, **with the token value never read** (redacted by
-  construction).
+  construction). Each path carries a three-state verdict —
+  `present` / `absent` / `unknown` (#2698, see
+  [Posture tri-state](#posture-tri-state-2698)).
 
 Both `safety_level="safe"` / `requires_approval=false`.
 
@@ -96,12 +98,14 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   `parse_os_pretty_name` (`PRETTY_NAME` from `/etc/os-release`).
 
 - **Posture handler + parsers** (`ops_read.py`) — `rke2_posture_show`
-  (the async handler), `parse_stat_output` (`stat -c '%n|%a|%U|%G'` stdout
-  → path→attrs map, mode normalised to the 4-digit octal form), and
-  `parse_posture` (composes the `{config_files, token}` envelope; the token
-  entry always carries `redacted: true`). `POSTURE_CONFIG_PATHS` and
-  `RKE2_TOKEN_PATH` are fixed code constants — there is **no** operator path
-  parameter, so no path-traversal / shell-injection surface.
+  (the async handler), `build_posture_probe_command` (assembles the
+  single-round-trip POSIX-`sh` per-path probe), `parse_posture_probe_output`
+  (marker lines → path→verdict map, mode normalised to the 4-digit octal
+  form), and `parse_posture` (composes the `{config_files, token}` envelope;
+  the token entry always carries `redacted: true`). `POSTURE_CONFIG_PATHS`
+  and `RKE2_TOKEN_PATH` are fixed code constants — there is **no** operator
+  path parameter, so no path-traversal / shell-injection surface.
+  `Rke2PostureProbeError` fires when the probe itself could not run.
 
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
@@ -168,10 +172,69 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
 3. **Dispatch** — `POST /api/v1/operations/call` → `call_operation` resolves
    `connector_id="rke2-ssh-1.x"` + the target, runs the policy gate, and
    invokes the bound handler. `about` reuses `fingerprint` and asserts
-   reachability (#986); `posture_show` runs one `stat` round-trip and returns
+   reachability (#986); `posture_show` runs one probe round-trip and returns
    the redacted envelope. Transport/auth failures propagate to the
    dispatcher's `connector_error` branch; a merely-absent file surfaces as
-   `present: false`.
+   `present: false`, and an undeterminable one as `present: null`.
+
+## Posture tri-state (#2698)
+
+`stat` exits non-zero for **both** a missing file (`ENOENT`) and a parent
+directory it cannot traverse (`EACCES`), and writes the distinction only to
+stderr. The original handler read stdout alone, so both collapsed to
+`present: false`. On a stock hardened server node — `0700 root:root` on
+`/var/lib/rancher/rke2/server/`, reached as a non-root SSH user — the op
+therefore reported the join token **absent on a node where it exists**,
+which is the unsafe direction for an op whose stated job is "confirm the
+server token exists before rotating". A rotation runbook pre-checking with
+it was told there was nothing to rotate.
+
+The handler now issues one POSIX-`sh` probe that resolves each path
+individually and emits a marker line per path:
+
+| Marker | `status` | `present` | Meaning |
+| --- | --- | --- | --- |
+| `S\|<path>\|<mode>\|<owner>\|<group>` | `present` | `true` | `stat` succeeded; mode/owner/group are real measurements |
+| `A\|<path>` | `absent` | `false` | `stat` failed **and** the parent is traversable — genuinely not there (the agent-node "no server token" signal) |
+| `U\|<path>` | `unknown` | `null` | the parent cannot be traversed, so existence is undetermined; `detail` names the directory |
+
+Two properties are load-bearing:
+
+- **Traversability is answered by the remote shell's `[ -x ]` test**, not by
+  parsing `stat`'s diagnostic text — the kernel is asked the actual
+  question, so no verdict depends on coreutils message wording or the node's
+  locale.
+- **Every real verdict exits 0**, so a non-zero exit is unambiguously an
+  infrastructure failure (no `stat` on the node, broken shell) and raises
+  `Rke2PostureProbeError` rather than being served as posture. This is the
+  same reasoning `ops_snapshot` applies to its precondition guard, now
+  extended to the read tier — previously the posture handler ignored
+  `exit_status` entirely.
+
+`asyncssh` reports `exit_status` as `None` when the peer closed the channel
+without sending one at all (its documented third case, alongside an int and
+`-1` for signal death), so "not zero" and "failed" are not the same test.
+`None` is resolved from the output rather than assumed either way: the probe
+emits exactly one marker line per measured path, so a verdict for every path
+is independent evidence the run completed and the read is served. Missing
+verdicts with no exit status to vouch for the run raise — neither the run
+nor the unaccounted paths can be confirmed. Treating `None` as failure
+outright would break reads against SSH implementations that omit
+`exit-status` while still delivering full output; treating it as success
+outright would re-open the class this fix closes.
+
+A consumer must branch on `status`, not on the falsiness of `present`:
+`null` and `false` are both falsy but mean different things. Every entry
+carries the same key set (`path` / `present` / `status` / `mode` / `owner` /
+`group` / `detail`, plus `redacted` on the token) so there is one shape per
+path whatever the verdict.
+
+**Deliberately not done:** elevating the read with `sudo` the way
+`rke2.token.rotate` does. It would let the posture tier see inside a
+`0700 root:root` directory, but it makes a sudo credential a soft
+dependency of a *read* op — so the honest-reporting fix lands first and
+alone. Root-authenticated deploys (the common case, per the write tier's
+assumption) already report `present` because `stat` simply succeeds.
 
 ## Auth
 

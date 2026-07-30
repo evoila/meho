@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — RKE2 posture reports an unreadable path honestly (#2698)
+
+- Stop `rke2.posture.show` reporting the RKE2 server join token **absent on
+  a node where it exists** (#2698). `stat` fails identically for a missing
+  file and for a parent directory it cannot traverse, and the handler read
+  only stdout — so on a stock hardened server node (`0700 root:root` on
+  `/var/lib/rancher/rke2/server/`, reached as a non-root SSH user) the op
+  answered `present: false` for a live join token. That is the unsafe
+  direction for the pre-rotation check: a runbook asking "is there a token
+  to rotate?" was told no. Each path now carries a three-state verdict —
+  `present`, `absent` (really not there) or `unknown` (undetermined, with a
+  `detail` naming the directory that must be traversable) — and `present`
+  is `null` rather than `false` whenever the answer is undetermined.
+  **Read the new `status` field, not the falsiness of `present`:** `null`
+  and `false` are both falsy and now mean different things. Root-
+  authenticated deploys are unaffected.
+- Fail the posture op closed when its probe cannot run at all — a node with
+  no `stat` binary or a broken shell now raises instead of reporting every
+  measured path as absent (#2698). The read tier previously ignored the
+  command's exit status entirely; it now applies the same discipline
+  `rke2.etcd-snapshot.save` already applies to its precondition guard.
+
 ### Fixed — background dispatch credential identity (#2642)
 
 - Give the in-process check-runner a **service-principal identity** so

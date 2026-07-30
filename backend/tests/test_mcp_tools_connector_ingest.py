@@ -64,6 +64,7 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.registry import all_connectors_v2, register_connector_v2
 from meho_backplane.mcp.server import McpInvalidParamsError
 from meho_backplane.operations.ingest import (
+    AffectedSensor,
     GroupingResult,
     IngestionPipelineResult,
     IngestionResult,
@@ -71,6 +72,7 @@ from meho_backplane.operations.ingest import (
     InvalidSpecError,
     LlmOutputInvalid,
     OpIdCollision,
+    SafetyChange,
     UncoveredVersionLabel,
     UnsupportedSpecError,
     UpstreamNotSpecError,
@@ -489,8 +491,84 @@ async def test_inline_default_returns_grouping(
     assert payload["ingestion"]["connector_id"] == "vmware-rest-9.0"
     assert payload["grouping"]["groups_created"] == 3
     assert "job_id" not in payload
+    # No safety reclassification → the additive #2702 field serializes
+    # as the backward-compatible empty list, not a missing key.
+    assert payload["ingestion"]["safety_changes"] == []
     [call] = fake.ingest_calls
     assert call["dry_run"] is False
+
+
+async def test_inline_ingest_surfaces_safety_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MCP ingest payload carries the populated ``safety_changes`` field (#2702).
+
+    The pipeline result's dataclass ``SafetyChange`` entries (with their
+    pinning-Sensor identities) must survive the
+    ``to_api_models`` → ``model_dump(mode="json")`` projection the tool
+    returns — UUIDs as strings, sensors as nested objects.
+    """
+    sensor_id = uuid4()
+    tenant_id = uuid4()
+
+    class _ReclassifyingService(_FakeIngestionPipelineService):
+        async def ingest(self, **kwargs: Any) -> IngestionPipelineResult:
+            result = await super().ingest(**kwargs)
+            reclassified = IngestionResult(
+                inserted_count=0,
+                updated_count=0,
+                skipped_count=10,
+                connector_registered=False,
+                operations_grouped=True,
+                safety_changes=(
+                    SafetyChange(
+                        op_id="GET:/vms",
+                        old_safety_level="safe",
+                        new_safety_level="dangerous",
+                        affected_sensors=(
+                            AffectedSensor(
+                                id=sensor_id,
+                                name="vm-count-watch",
+                                tenant_id=tenant_id,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+            return IngestionPipelineResult(
+                connector_id=result.connector_id,
+                ingestion=reclassified,
+                grouping=result.grouping,
+            )
+
+    fake = _ReclassifyingService()
+    monkeypatch.setattr(ci_mod, "IngestionPipelineService", fake)
+    op = build_operator(TenantRole.TENANT_ADMIN)
+
+    payload = await ci_mod._ingest_handler(
+        op,
+        {
+            "product": "vmware",
+            "version": "9.0",
+            "impl_id": "vmware-rest",
+            "specs": [{"uri": "docs:vcenter-9.0/vcenter.yaml"}],
+        },
+    )
+
+    assert payload["ingestion"]["safety_changes"] == [
+        {
+            "op_id": "GET:/vms",
+            "old_safety_level": "safe",
+            "new_safety_level": "dangerous",
+            "affected_sensors": [
+                {
+                    "id": str(sensor_id),
+                    "name": "vm-count-watch",
+                    "tenant_id": str(tenant_id),
+                }
+            ],
+        }
+    ]
 
 
 async def test_inline_content_threads_to_service_verbatim(

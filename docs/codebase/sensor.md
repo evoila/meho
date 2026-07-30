@@ -57,7 +57,14 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
    `sensor_requires_safe_operation`. This is a create-time honesty guard,
    not the security boundary — the dispatch-time policy gate
    (`operations/dispatcher.dispatch`) still runs on every evaluation, so a
-   descriptor re-ingested harder later fails closed at dispatch.
+   descriptor re-ingested harder later fails closed at dispatch. The
+   platform-level half of that trade-off is #2702: a connector re-ingest
+   that overwrites a pinned op's `safety_level` surfaces the diff — with
+   every pinning sensor's id/name/tenant_id — on the ingest result's
+   `safety_changes` field (REST / job report / MCP) and emits an
+   `ingest_safety_class_changed` warning per change, so the operator
+   knows which sensors to re-audit (see
+   `docs/codebase/spec-ingestion.md`, `IngestionResult`).
 4. `create_sensor` inserts the row, materialising `next_fire_at`
    (`now + interval_seconds` for interval; `next_fire_after(cron_expr, …)`
    for cron) so #2505's claim query (`status='active' AND next_fire_at <= now`)

@@ -21,6 +21,7 @@ from meho_backplane.operations.ingest.anthropic_client import (
     build_anthropic_ingest_llm_client,
 )
 from meho_backplane.operations.ingest.api_schemas import (
+    AffectedSensorModel,
     ConnectorListItem,
     ConnectorListResponse,
     ConnectorStatusFilter,
@@ -35,6 +36,7 @@ from meho_backplane.operations.ingest.api_schemas import (
     IngestJobStatusResponse,
     IngestRequest,
     IngestResponse,
+    SafetyChangeModel,
     SpecSource,
 )
 from meho_backplane.operations.ingest.boot_stamp import (
@@ -135,7 +137,9 @@ from meho_backplane.operations.ingest.pipeline import (
     default_llm_client_factory,
 )
 from meho_backplane.operations.ingest.register_ingested import (
+    AffectedSensor,
     IngestionResult,
+    SafetyChange,
     register_ingested_operations,
 )
 from meho_backplane.operations.ingest.schemas import (
@@ -146,6 +150,8 @@ from meho_backplane.operations.ingest.service import ReviewService
 
 __all__ = [
     "DEFAULT_GROUPING_BATCH_SIZE",
+    "AffectedSensor",
+    "AffectedSensorModel",
     "AmbiguousConnectorScopeError",
     "AnthropicMessagesLlmClient",
     "CatalogError",
@@ -196,6 +202,8 @@ __all__ = [
     "OpIdCollision",
     "ProductImplIdMismatch",
     "ReviewService",
+    "SafetyChange",
+    "SafetyChangeModel",
     "SafetyLevel",
     "SpecSource",
     "StructuredJsonLlmClient",

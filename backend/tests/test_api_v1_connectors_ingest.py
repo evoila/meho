@@ -2528,6 +2528,98 @@ paths:
     assert grouping["operations_assigned"] == 2
 
 
+def test_reingest_surfaces_safety_changes_in_response(
+    client: TestClient,
+    tmp_path: Any,
+) -> None:
+    """A re-ingest that reverts an operator's safety edit reports it (#2702).
+
+    End-to-end over the REST surface: ingest → operator PATCHes an op to
+    ``dangerous`` at review → re-ingest re-derives ``safe`` from the
+    verb heuristic and overwrites the edit. The response's additive
+    ``ingestion.safety_changes`` field names the ``(op_id, old, new)``
+    diff; the first ingest (nothing to diff against) serializes the
+    backward-compatible empty list.
+    """
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(
+        """openapi: 3.0.3
+info:
+  title: t
+  version: '1'
+paths:
+  /items:
+    get:
+      summary: list items
+      responses:
+        '200':
+          description: ok
+""",
+    )
+    propose_json = (
+        '[{"group_key": "items", "name": "Items", '
+        '"when_to_use": "Use these operations to manage items."}]'
+    )
+    assign_json = '{"GET:/items": "items"}'
+    set_llm_client_factory(
+        lambda: _StubLlmClient(
+            propose_response=propose_json,
+            assign_response=assign_json,
+        ),
+    )
+
+    tenant_id = uuid.uuid4()
+    key, token = _admin_token(tenant_id=tenant_id)
+    ingest_body: dict[str, Any] = {
+        "product": "reingest",
+        "version": "1.0",
+        "impl_id": "reingest-impl",
+        "specs": [{"uri": None}],  # filled in once the mock URL exists
+        "tenant_id": str(tenant_id),
+        "async": False,
+    }
+    with (
+        respx.mock as mock_router,
+        patch(
+            "meho_backplane.operations.ingest._upsert.encode_endpoint_text",
+            AsyncMock(return_value=[0.25] * 384),
+        ),
+    ):
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        spec_url = _register_spec_at_https(mock_router, spec_path, path="spec-reingest.yaml")
+        ingest_body["specs"] = [{"uri": spec_url}]
+
+        first = client.post(
+            "/api/v1/connectors/ingest",
+            json=ingest_body,
+            headers=_authed(token),
+        )
+        assert first.status_code == 200, first.text
+        assert first.json()["ingestion"]["safety_changes"] == []
+
+        edit = client.patch(
+            "/api/v1/connectors/reingest-impl-1.0/operations/GET:/items",
+            json={"safety_level": "dangerous"},
+            headers=_authed(token),
+        )
+        assert edit.status_code == 200, edit.text
+
+        second = client.post(
+            "/api/v1/connectors/ingest",
+            json=ingest_body,
+            headers=_authed(token),
+        )
+    assert second.status_code == 200, second.text
+    assert second.json()["ingestion"]["safety_changes"] == [
+        {
+            "op_id": "GET:/items",
+            "old_safety_level": "dangerous",
+            "new_safety_level": "safe",
+            "affected_sensors": [],
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_omitted_tenant_id_resolves_global_on_both_surfaces(
     client: TestClient,

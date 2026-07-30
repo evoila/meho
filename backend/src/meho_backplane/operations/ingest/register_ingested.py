@@ -118,10 +118,14 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import Sensor
+from meho_backplane.operations.ingest._llm_grouping_internals import build_connector_id
 from meho_backplane.operations.ingest._upsert import (
+    SafetyLevelChange,
     build_upsert_context,
     upsert_one_operation,
 )
@@ -134,9 +138,46 @@ from meho_backplane.operations.ingest.schemas import EndpointDescriptorProto
 from meho_backplane.retrieval.embedding import EmbeddingService
 
 __all__ = [
+    "AffectedSensor",
     "IngestionResult",
+    "SafetyChange",
     "register_ingested_operations",
 ]
+
+
+@dataclass(frozen=True, slots=True)
+class AffectedSensor:
+    """A Sensor row pinning an op whose ``safety_level`` changed (#2702).
+
+    Identity-only projection (id / name / tenant_id) of
+    :class:`~meho_backplane.db.models.Sensor` -- enough for the
+    operator to find and re-audit the sensor, without dragging the
+    full ORM row into the frozen result.
+    """
+
+    id: UUID
+    name: str
+    tenant_id: UUID
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyChange:
+    """One op whose persisted ``safety_level`` changed on re-ingest (#2702).
+
+    The sensor-enriched twin of
+    :class:`~meho_backplane.operations.ingest._upsert.SafetyLevelChange`:
+    carries the raw ``(op_id, old, new)`` diff plus every Sensor row --
+    any tenant -- pinning ``(connector_id, op_id)``. Those sensors keep
+    auto-executing the op on schedule under the stale create-time
+    ``safe`` assumption (the documented create-time-only trade-off in
+    ``checks/runner.py``), so surfacing them is the report-only half of
+    that platform-level concern.
+    """
+
+    op_id: str
+    old_safety_level: str
+    new_safety_level: str
+    affected_sensors: tuple[AffectedSensor, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +208,12 @@ class IngestionResult:
         Always ``False`` in v0.2 -- the T3 LLM-grouping pass runs
         as a separate step after T2. Present on the result type so
         T3 + T5 can flip it without a schema change.
+    safety_changes:
+        One :class:`SafetyChange` per existing row whose
+        ``safety_level`` was overwritten with a different value by
+        this call (#2702), each carrying the Sensors pinning the
+        reclassified op. Empty on first ingests, dry runs, and
+        re-ingests that leave every op's safety class unchanged.
     """
 
     inserted_count: int
@@ -174,6 +221,7 @@ class IngestionResult:
     skipped_count: int
     connector_registered: bool
     operations_grouped: bool
+    safety_changes: tuple[SafetyChange, ...] = ()
 
 
 def _detect_op_id_collisions(
@@ -231,7 +279,7 @@ async def _run_upsert_loop(
     coords: _BatchCoordinates,
     operations: Sequence[EndpointDescriptorProto],
     embedding_service: EmbeddingService | None,
-) -> dict[str, int]:
+) -> tuple[dict[str, int], tuple[SafetyChange, ...]]:
     """Dispatch to :func:`_register_in_session` with the right session ownership.
 
     When *session* is provided, run the loop against it and defer
@@ -315,7 +363,9 @@ async def register_ingested_operations(
         :class:`IngestionResult` with per-action counts +
         ``connector_registered`` flag (was a new shim registered?) +
         ``operations_grouped`` flag (always ``False`` in v0.2; T3
-        runs grouping next).
+        runs grouping next) + ``safety_changes`` (#2702 — one entry
+        per existing row whose ``safety_level`` this call overwrote
+        with a different value, each naming the Sensors pinning it).
 
     Raises:
         OpIdCollision: Either (a) two operations in *operations* share an
@@ -345,7 +395,7 @@ async def register_ingested_operations(
         impl_id=impl_id,
         spec_source=spec_source,
     )
-    counts = await _run_upsert_loop(
+    counts, safety_changes = await _run_upsert_loop(
         session=session,
         coords=coords,
         operations=operations,
@@ -357,6 +407,7 @@ async def register_ingested_operations(
         skipped_count=counts["skipped"],
         connector_registered=connector_registered,
         operations_grouped=False,
+        safety_changes=safety_changes,
     )
 
 
@@ -415,6 +466,65 @@ def _preflight_and_register_class(
     )
 
 
+async def _collect_safety_changes(
+    session: AsyncSession,
+    *,
+    coords: _BatchCoordinates,
+    shifts: Sequence[SafetyLevelChange],
+    log: structlog.stdlib.BoundLogger,
+) -> tuple[SafetyChange, ...]:
+    """Join per-op safety diffs against pinned Sensors + warn per change (#2702).
+
+    One batched ``IN`` query for every reclassified ``op_id`` under the
+    operator-facing ``connector_id`` (the inverse of
+    :func:`~meho_backplane.operations.ingest.parser.parse_connector_id`,
+    rendered by :func:`build_connector_id`). Deliberately **not** tenant-
+    filtered: a built-in connector's descriptor rows serve every tenant's
+    Sensors, so any tenant's pinning row is affected -- each entry
+    carries its own ``tenant_id`` for triage. Runs inside the register
+    call's open transaction; it's a pure read, so it costs no extra
+    session and sees the just-flushed descriptor state.
+    """
+    if not shifts:
+        return ()
+    connector_id = build_connector_id(coords.product, coords.version, coords.impl_id)
+    stmt = (
+        select(Sensor)
+        .where(
+            Sensor.connector_id == connector_id,
+            Sensor.op_id.in_([shift.op_id for shift in shifts]),
+        )
+        .order_by(Sensor.name, Sensor.id)
+    )
+    sensors = (await session.execute(stmt)).scalars().all()
+    sensors_by_op: dict[str, list[AffectedSensor]] = {}
+    for sensor in sensors:
+        sensors_by_op.setdefault(sensor.op_id, []).append(
+            AffectedSensor(id=sensor.id, name=sensor.name, tenant_id=sensor.tenant_id)
+        )
+
+    changes: list[SafetyChange] = []
+    for shift in shifts:
+        affected = tuple(sensors_by_op.get(shift.op_id, ()))
+        changes.append(
+            SafetyChange(
+                op_id=shift.op_id,
+                old_safety_level=shift.old_safety_level,
+                new_safety_level=shift.new_safety_level,
+                affected_sensors=affected,
+            )
+        )
+        log.warning(
+            "ingest_safety_class_changed",
+            connector_id=connector_id,
+            op_id=shift.op_id,
+            old_safety_level=shift.old_safety_level,
+            new_safety_level=shift.new_safety_level,
+            affected_sensor_count=len(affected),
+        )
+    return tuple(changes)
+
+
 async def _register_in_session(
     session: AsyncSession,
     *,
@@ -422,11 +532,13 @@ async def _register_in_session(
     operations: Sequence[EndpointDescriptorProto],
     embedding_service: EmbeddingService | None,
     commit: bool,
-) -> dict[str, int]:
-    """Upsert every op in *operations* against *session*. Return action counts.
+) -> tuple[dict[str, int], tuple[SafetyChange, ...]]:
+    """Upsert every op in *operations* against *session*.
 
-    Split out from :func:`register_ingested_operations` so the public
-    function can branch on caller-owned-vs-helper-owned session
+    Returns ``(action_counts, safety_changes)``: the per-action tally
+    plus the sensor-enriched ``safety_level`` diffs the batch produced
+    (#2702). Split out from :func:`register_ingested_operations` so the
+    public function can branch on caller-owned-vs-helper-owned session
     without duplicating the loop body. ``commit=True`` commits **once
     after the whole batch**, so a mid-batch crash rolls the session
     back and leaves zero descriptor rows for the spec (#2273);
@@ -435,6 +547,7 @@ async def _register_in_session(
     log = structlog.get_logger(__name__)
     now = datetime.now(UTC)
     counts: dict[str, int] = {"inserted": 0, "updated": 0, "skipped": 0}
+    shifts: list[SafetyLevelChange] = []
 
     for proto in operations:
         ctx = build_upsert_context(
@@ -446,12 +559,14 @@ async def _register_in_session(
             proto=proto,
             now=now,
         )
-        action = await upsert_one_operation(
+        action, safety_shift = await upsert_one_operation(
             session,
             ctx,
             embedding_service=embedding_service,
         )
         counts[action] += 1
+        if safety_shift is not None:
+            shifts.append(safety_shift)
         log.debug(
             "ingested_operation_upserted",
             action=action,
@@ -461,6 +576,13 @@ async def _register_in_session(
             op_id=proto.op_id,
             spec_source=coords.spec_source,
         )
+
+    safety_changes = await _collect_safety_changes(
+        session,
+        coords=coords,
+        shifts=shifts,
+        log=log,
+    )
 
     if commit:
         # One commit per register call (= per spec): the batch is a single
@@ -476,9 +598,10 @@ async def _register_in_session(
         version=coords.version,
         impl_id=coords.impl_id,
         spec_source=coords.spec_source,
+        safety_change_count=len(safety_changes),
         **counts,
     )
-    return counts
+    return counts, safety_changes
 
 
 # Public surface intentionally limited to register_ingested_operations

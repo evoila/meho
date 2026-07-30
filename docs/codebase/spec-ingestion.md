@@ -526,6 +526,27 @@ Carries per-call counts (`inserted_count`, `updated_count`,
 output. `operations_grouped` is always `False` in v0.2 — T3
 flips it after the LLM-grouping pass runs.
 
+`safety_changes` (#2702) is a tuple of frozen `SafetyChange`
+entries — one per **existing** row whose `safety_level` the call
+overwrote with a different value. Both existing-row update paths in
+`_upsert.py` capture the diff (the body hash covers embedding text,
+not safety metadata, so the skip-re-embed branch can carry a
+reclassification too). After the upsert loop,
+`_collect_safety_changes` joins the changed op_ids against `Sensor`
+rows pinning `(connector_id, op_id)` — deliberately **not**
+tenant-filtered, since a built-in connector's rows serve every
+tenant's Sensors — and attaches each pinning sensor's
+id / name / tenant_id as `AffectedSensor` entries. One structlog
+warning `ingest_safety_class_changed` fires per change (keyed with
+op_id, old, new, affected sensor count). The wire twin
+`SafetyChangeModel` rides `IngestionResultModel.safety_changes`
+(additive, `default_factory=list`), so the REST ingest response, the
+async job report, and the MCP `meho.connector.ingest` tool all carry
+it with no breaking shape change. Report-only: nothing is re-gated
+at dispatch and no Sensor is parked — this is the platform-level
+half of the create-time-only trade-off documented in
+`checks/runner.py` (see `docs/codebase/sensor.md`).
+
 ### `GenericRestConnector` (`ingest/connector_registration.py`)
 
 Auto-generated `HttpConnector` subclass synthesised on first ingest

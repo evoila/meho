@@ -54,13 +54,16 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
    `EndpointDescriptor` via `lookup_descriptor` (tenant-scoped, then
    global). No descriptor ⇒ 422 `sensor_operation_not_found`.
 3. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
-   `sensor_requires_safe_operation`. This is a create-time honesty guard,
-   not the security boundary — the dispatch-time policy gate
-   (`operations/dispatcher.dispatch`) still runs on every evaluation, so a
-   descriptor re-ingested harder later fails closed at dispatch. The
-   platform-level half of that trade-off is #2702: a connector re-ingest
+   `sensor_requires_safe_operation`. This is a create-time-only guard:
+   the dispatch-time policy gate (`operations/dispatcher.dispatch`)
+   still runs on every evaluation, but it does **not** re-validate
+   `safety_level` — a descriptor re-ingested to a less-safe level keeps
+   auto-executing on schedule (`checks/runner.py`, "Dispatch
+   identity"). The platform-level half of that trade-off — the
+   reporting/triage mitigation — is #2702: a connector re-ingest
    that overwrites a pinned op's `safety_level` surfaces the diff — with
-   every pinning sensor's id/name/tenant_id — on the ingest result's
+   each affected sensor's id/name/tenant_id, scoped to the ingest's
+   tenant for tenant-scoped ingests — on the ingest result's
    `safety_changes` field (REST / job report / MCP) and emits an
    `ingest_safety_class_changed` warning per change, so the operator
    knows which sensors to re-audit (see

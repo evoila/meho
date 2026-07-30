@@ -99,6 +99,15 @@ _MAX_GAP_CEILING_S = 0.5
 #: after it — a starved loop would tick only a handful of times.
 _MIN_TICKS = 50
 
+#: Heartbeats that must land *inside* the injected 0.3 s parse block for
+#: the offload to count as proven. At the 10 ms cadence an idle runner
+#: delivers ~25-30; a regression (parse back on the loop) delivers 0,
+#: because the loop cannot run at all while the block holds. 5 sits an
+#: order of magnitude below the healthy count and infinitely above the
+#: regression count, so it tolerates a heavily contended runner without
+#: weakening what the test actually detects.
+_MIN_TICKS_DURING_BLOCK = 5
+
 
 def _synth_openapi_spec(op_count: int) -> str:
     """Build a structurally valid OpenAPI 3.1 spec with *op_count* GET ops.
@@ -192,7 +201,7 @@ def _service(monkeypatch: pytest.MonkeyPatch) -> IngestionPipelineService:
     return service
 
 
-async def _run_with_heartbeat(work: Awaitable[Any]) -> tuple[Any, list[float]]:
+async def _run_with_heartbeat(work: Awaitable[Any]) -> tuple[Any, list[tuple[float, float]]]:
     """Await *work* while a heartbeat coroutine measures event-loop gaps.
 
     The heartbeat re-arms an ``asyncio.sleep(interval)`` in a loop and
@@ -201,19 +210,31 @@ async def _run_with_heartbeat(work: Awaitable[Any]) -> tuple[Any, list[float]]:
     stretches the gap spanning it to ~= the block duration, because the
     sleep's callback cannot fire until the loop is free again. The gap
     series is the loop-lag signal the assertions read.
+
+    Returns ``(result, beats)`` where each beat is a
+    ``(wake_time, gap)`` pair. The wake timestamp is what lets a caller
+    attribute a gap to a *specific* window of the run — see
+    :func:`test_blocking_parse_stays_off_the_event_loop`, which needs to
+    distinguish "the loop was frozen while the parse ran" from "the
+    runner was busy at some unrelated point".
+
+    ``time.monotonic()`` rather than ``loop.time()``: the timestamps are
+    compared against marks taken on a ``to_thread`` worker, where there
+    is no running loop to ask. CPython's event loops use
+    ``time.monotonic()`` for ``loop.time()`` anyway, so this is the same
+    clock, just one that is legible from both sides.
     """
     stop = asyncio.Event()
     armed = asyncio.Event()
-    gaps: list[float] = []
+    beats: list[tuple[float, float]] = []
 
     async def _heartbeat() -> None:
-        loop = asyncio.get_running_loop()
         armed.set()
-        prev = loop.time()
+        prev = time.monotonic()
         while not stop.is_set():
             await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
-            now = loop.time()
-            gaps.append(now - prev)
+            now = time.monotonic()
+            beats.append((now, now - prev))
             prev = now
 
     beat = asyncio.create_task(_heartbeat())
@@ -231,7 +252,7 @@ async def _run_with_heartbeat(work: Awaitable[Any]) -> tuple[Any, list[float]]:
     finally:
         stop.set()
         await beat
-    return result, gaps
+    return result, beats
 
 
 @pytest.mark.asyncio
@@ -250,7 +271,7 @@ async def test_nondryrun_large_spec_ingest_keeps_event_loop_responsive(
     service = _service(monkeypatch)
     spec = SpecSource(uri="spec:loadtest-large", content=_synth_openapi_spec(_OP_COUNT))
 
-    result, gaps = await _run_with_heartbeat(
+    result, beats = await _run_with_heartbeat(
         service.ingest(
             product=_PRODUCT,
             version=_VERSION,
@@ -260,6 +281,7 @@ async def test_nondryrun_large_spec_ingest_keeps_event_loop_responsive(
             dry_run=False,
         )
     )
+    gaps = [gap for _wake, gap in beats]
 
     # The full non-dry-run commit landed — every op persisted.
     assert result.ingestion.inserted_count == _OP_COUNT, result.ingestion
@@ -300,10 +322,18 @@ async def test_blocking_parse_stays_off_the_event_loop(
 
     real_parse = _pipeline_mod.parse_openapi_with_provenance
 
+    # Marks bounding the injected block, stamped from whichever context the
+    # parse actually runs in. They convert the assertions below from "was
+    # any gap large?" (which a busy runner can trip on its own) into "was
+    # the loop alive *while the block held*?" — the property under test.
+    block_window: list[float] = []
+
     def _blocking_parse(*args: Any, **kwargs: Any) -> Any:
         # Runs on the ``to_thread`` worker in the real code path; the
         # blocking sleep here therefore must not be visible to the loop.
+        block_window.append(time.monotonic())
         time.sleep(block_s)
+        block_window.append(time.monotonic())
         return real_parse(*args, **kwargs)
 
     monkeypatch.setattr(_pipeline_mod, "parse_openapi_with_provenance", _blocking_parse)
@@ -313,7 +343,7 @@ async def test_blocking_parse_stays_off_the_event_loop(
     # the run and the assertion isolates the parse-offload property.
     spec = SpecSource(uri="spec:loadtest-tiny", content=_synth_openapi_spec(3))
 
-    _result, gaps = await _run_with_heartbeat(
+    _result, beats = await _run_with_heartbeat(
         service.ingest(
             product=_PRODUCT,
             version=_VERSION,
@@ -324,17 +354,39 @@ async def test_blocking_parse_stays_off_the_event_loop(
         )
     )
 
-    worst = max(gaps)
-    assert worst < block_s / 2, (
-        f"event loop stalled for {worst:.3f}s while a {block_s}s parse ran; "
-        "the parse is not being offloaded to a thread (asyncio.to_thread regressed)"
+    assert len(block_window) == 2, "the patched parse did not run exactly once"
+    block_start, block_end = block_window
+
+    # Heartbeats that woke *inside* the block. If the ``to_thread`` hop were
+    # removed the loop would be frozen for the whole block and this would be
+    # empty; offloaded, the 10 ms cadence yields ~25-30.
+    #
+    # This is deliberately a presence-vs-absence signal rather than a
+    # gap-magnitude threshold. The previous assertion (`max(gaps) <
+    # block_s / 2`) inferred the property from how large the worst gap in
+    # the *entire run* was, which conflates two unrelated things: the loop
+    # being blocked by the parse, and the runner simply being busy. On a
+    # saturated CI runner ambient scheduling jitter alone reached 0.174 s
+    # and 1.522 s against that 0.15 s threshold, failing the test while the
+    # offload was working perfectly. Tick count degrades gracefully instead
+    # — a runner 5x slower still delivers ~5 ticks, against 0 for a real
+    # regression.
+    ticks_in_block = [gap for wake, gap in beats if block_start <= wake <= block_end]
+    assert len(ticks_in_block) >= _MIN_TICKS_DURING_BLOCK, (
+        f"only {len(ticks_in_block)} heartbeats landed inside the {block_s}s parse "
+        f"(need >= {_MIN_TICKS_DURING_BLOCK}); the loop was not free while the parse "
+        "ran, so the parse is not being offloaded (asyncio.to_thread regressed)"
     )
-    # The loop ticked repeatedly *while* the block ran — direct evidence the
-    # block was off-loop (a ~0.3 s block at 10 ms cadence yields ~25 ticks).
-    ticks_during_block = sum(1 for g in gaps if g < block_s / 2)
-    assert ticks_during_block >= 15, (
-        f"only {ticks_during_block} responsive ticks during the {block_s}s parse; "
-        "the loop was not free while the parse ran"
+
+    # Belt-and-braces: no single gap *overlapping* the block spanned it. An
+    # on-loop block produces exactly one such gap, >= block_s. Restricting
+    # to overlapping gaps keeps an unrelated stall elsewhere in the run
+    # (register pass, sqlite commit, a noisy neighbour) from failing this.
+    spanning = [gap for wake, gap in beats if wake > block_start and (wake - gap) < block_end]
+    worst_spanning = max(spanning, default=0.0)
+    assert worst_spanning < block_s, (
+        f"a {worst_spanning:.3f}s gap spanned the {block_s}s parse window; "
+        "the loop was frozen for the block's duration (asyncio.to_thread regressed)"
     )
 
 

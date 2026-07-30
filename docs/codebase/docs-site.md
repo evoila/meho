@@ -5,9 +5,10 @@
 MEHO's published documentation site — <https://evoila.github.io/meho/>
 — is built with MkDocs Material from sources under `docs-site/` and
 versioned with [mike](https://github.com/jimporter/mike) on the
-`gh-pages` branch, which GitHub Pages serves. It was scaffolded by
-#2670 (initiative #2663); content migrates in under #2671 (start-here +
-install), #2672 (connect clients), and #2673 (do-real-work guides). The
+`gh-pages` branch, which GitHub Pages serves. The scaffold landed with
+task #2670 (initiative #2663); content migrates in under #2671
+(start-here + install), #2672 (connect clients), and #2673
+(do-real-work guides). The
 generated reference section lands with the #2662 contract snapshots.
 
 The site is the *operator/adopter-facing* documentation. The `docs/`

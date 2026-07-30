@@ -134,6 +134,15 @@ dev = [
     "testcontainers>=4.15.0",
     "types-jsonschema>=4.26.0.20260518",
 ]
+# Docs-site toolchain (#2670). Lives here — not in a separate docs
+# project — so the pins ride the existing uv.lock + Dependabot `uv`
+# ecosystem coverage. Non-default group: neither the Docker image
+# (`--no-dev`) nor a plain `uv sync` installs it; CI's docs job uses
+# `uv sync --locked --only-group docs`.
+docs = [
+    "mkdocs-material>=9.7.7",
+    "mike>=2.2.0",
+]
 
 [build-system]
 requires = ["hatchling"]

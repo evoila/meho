@@ -1,0 +1,79 @@
+# MEHO published documentation site (#2670).
+#
+# Sources live in `docs-site/` — deliberately NOT `docs/`, which is the
+# contributor-facing tree (codebase walkthroughs, ADRs, runbooks) and
+# stays where it is. Selected contributor files can be embedded into
+# site pages without moving them via the `pymdownx.snippets` extension
+# (its `base_path` includes the repo root, so a page can do
+# `--8<-- "docs/deploying.md"` when a sibling task promotes content).
+#
+# Versioning is mike-managed (one docs version per minor, `latest`
+# alias); `.github/workflows/docs-site.yml` deploys on `v*` tag push
+# and runs `mkdocs build --strict` on PRs. `strict: true` below makes
+# every build — including mike's — fail on warnings (broken links,
+# pages missing from nav), so docs rot turns into a red build.
+
+site_name: MEHO
+site_description: >-
+  Governance backplane for AI agents acting on infrastructure —
+  policy-gated, audit-grade, MCP-native.
+site_url: https://evoila.github.io/meho/
+repo_url: https://github.com/evoila/meho
+repo_name: evoila/meho
+edit_uri: edit/main/docs-site/
+docs_dir: docs-site
+copyright: Copyright &copy; 2026 evoila Group — Apache 2.0
+
+strict: true
+
+theme:
+  name: material
+  palette:
+    # Light / dark toggle, following the OS preference on first visit.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.footer
+    - navigation.top
+    - content.code.copy
+    - content.action.edit
+
+nav:
+  - Start here: index.md
+  - Install & operate: install/index.md
+  - Connect clients: clients/index.md
+  - Do real work: guides/index.md
+  - Reference: reference/index.md
+  - Project: project/index.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.snippets:
+      # Repo root first so site pages can embed selected contributor
+      # files (e.g. `docs/deploying.md`) in place, without moving them.
+      base_path:
+        - .
+        - docs-site
+      check_paths: true
+
+plugins:
+  - search
+  - mike
+
+extra:
+  version:
+    # Renders Material's version selector, fed by mike's version index
+    # on the gh-pages branch.
+    provider: mike

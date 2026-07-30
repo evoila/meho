@@ -1,0 +1,156 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+
+# Documentation-site build check + versioned Pages deploy (#2670).
+#
+# Two jobs, two triggers:
+#   PR / merge queue : `mkdocs build --strict` — docs changes carry a
+#                      red/green check like any other change. `strict`
+#                      turns broken links and pages missing from nav
+#                      into build failures, so docs rot cannot land.
+#   push tag v*      : mike publishes the tag's docs under its
+#                      MAJOR.MINOR version (one docs version per minor
+#                      — a patch tag republishes its minor in place)
+#                      and moves the `latest` alias, onto the gh-pages
+#                      branch that GitHub Pages serves. The docs join
+#                      the image / chart / CLI as the fourth artefact a
+#                      `v*` tag publishes (docs/RELEASING.md).
+#
+# One-time setup (mirrors image.yml's GHCR-visibility precedent — a
+# maintainer does this once, CI cannot safely mutate repo settings):
+#   Settings → Pages → Source: "Deploy from a branch" →
+#   Branch: gh-pages / root. The gh-pages branch exists after the
+#   first tag-triggered run. The site then serves at
+#   https://evoila.github.io/meho/.
+#
+# mike's CI requirements (https://github.com/jimporter/mike):
+#   * the gh-pages branch must be fetched locally before deploying —
+#     mike commits the built site onto it;
+#   * a git committer identity must be configured — we use the
+#     github-actions[bot] identity, matching the commits GitHub's own
+#     actions produce.
+#
+# Docs toolchain versions are locked in backend/uv.lock (dependency
+# group `docs`), so Dependabot's existing `uv` ecosystem coverage keeps
+# mkdocs-material + mike current and this workflow reproducible.
+
+name: docs-site
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'mkdocs.yml'
+      - 'docs-site/**'
+      - 'backend/pyproject.toml'
+      - 'backend/uv.lock'
+      - '.github/workflows/docs-site.yml'
+  # Fires when a PR enters the merge queue, so the check can be made
+  # required in branch protection and still report against the
+  # synthesised merge commit. Bare `merge_group:` because the event
+  # does not support `paths:` filtering — same rationale as
+  # readme-version-check.yml (#769). The build is a strict mkdocs run
+  # (~seconds), so the redundant queue runs are negligible.
+  merge_group:
+  push:
+    # Tag-driven deploy only. Docs versions are cut per release, like
+    # the image / chart / CLI artefacts — a main push without a tag has
+    # no version to publish under. Pre-release tags (v1.0.0-rc.1)
+    # deploy under their minor (1.0): the rc docs *are* that minor's
+    # docs in progress.
+    tags: ['v*']
+  workflow_dispatch:
+
+# Read-only by default; the deploy job elevates to the minimum it
+# needs (contents: write, to push the gh-pages branch).
+permissions:
+  contents: read
+
+concurrency:
+  # Event-suffixed group key so pull_request / merge_group / tag runs
+  # don't collide; cancel-in-progress is scoped OFF for merge_group
+  # because a cancelled queue check fails the merge attempt. Same
+  # shape as readme-version-check.yml.
+  group: docs-site-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
+
+jobs:
+  build:
+    name: mkdocs build --strict
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+
+      - name: Install docs toolchain (locked)
+        run: uv sync --locked --only-group docs
+        working-directory: backend
+
+      - name: Build site (strict)
+        # --strict is redundant with `strict: true` in mkdocs.yml but
+        # keeps the gate explicit even if the config line moves.
+        run: uv run --project backend --no-sync mkdocs build --strict
+
+  deploy:
+    name: mike deploy (versioned Pages publish)
+    # Covers the tag push AND a manual workflow_dispatch pointed at a
+    # tag ref (re-publish after a transient failure). A dispatch on a
+    # branch ref only runs the build job above — there is no version
+    # to publish under.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      # Serialise gh-pages pushes across tags — two near-simultaneous
+      # tag pushes would otherwise race mike's branch update. Never
+      # cancel a publish in flight.
+      group: docs-site-gh-pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Fetch gh-pages
+        # mike commits onto the local gh-pages ref. Absent on the very
+        # first deploy — mike then creates it — so guard the fetch on
+        # remote existence rather than swallowing all fetch errors.
+        run: |
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null; then
+            git fetch origin gh-pages --depth=1
+          fi
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+
+      - name: Install docs toolchain (locked)
+        run: uv sync --locked --only-group docs
+        working-directory: backend
+
+      - name: Deploy versioned docs
+        # One docs version per minor: v0.26.3 publishes as "0.26" and
+        # re-points `latest`. `--update-aliases` lets `latest` move
+        # off the previous minor; `set-default latest` (idempotent)
+        # makes the site root redirect to the newest docs.
+        # workflow_dispatch on a non-tag ref has no version to derive,
+        # so it only rebuilds the default: guard on the ref shape.
+        run: |
+          set -euo pipefail
+          case "${GITHUB_REF_NAME}" in
+            v[0-9]*)
+              VERSION=$(printf '%s' "${GITHUB_REF_NAME#v}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
+              uv run --project backend --no-sync mike deploy --push --update-aliases "${VERSION}" latest
+              uv run --project backend --no-sync mike set-default --push latest
+              ;;
+            *)
+              echo "Ref '${GITHUB_REF_NAME}' is not a v* tag — nothing to deploy." >&2
+              exit 1
+              ;;
+          esac

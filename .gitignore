@@ -50,6 +50,11 @@ htmlcov/
 .venv/
 venv/
 
+# mkdocs build output (docs-site scaffold, #2670). Root-anchored so a
+# hypothetical nested `site/` package directory elsewhere stays
+# trackable.
+/site/
+
 # fastembed model snapshot pre-seeded into the backend Docker build context by
 # the chart.yml ``helm-test`` lane (restored from the unit lane's actions/cache
 # entry) so the model-bake layer skips the HuggingFace download (#1623). Only

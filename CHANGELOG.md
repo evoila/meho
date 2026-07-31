@@ -90,6 +90,16 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — maturity badge chips on the operator-console area headers (#2677)
+
+- Every non-GA `/ui` area header now renders a **Beta** / **Experimental**
+  badge chip linking to the feature-maturity index, resolved server-side
+  from the #2674 registry at template render time (one shared Jinja
+  include + a surface→feature mapping in
+  `backend/src/meho_backplane/ui/maturity.py`; no per-template tiers, no
+  new REST surface). GA areas render no chip, and a registry retier
+  changes every chip with zero template edits — the console is now
+  honest about which areas carry a promise. (#2677)
 ### Added — maturity labels on the MCP and REST surfaces (#2675)
 
 - Propagate the #2674 feature-maturity registry to the agent-facing

@@ -73,12 +73,15 @@ in-process — there is deliberately no dedicated REST read surface):
   committed `cli/api/openapi.json` snapshot. `/ui*` tags and
   infrastructure tags (`health`, `version`, `mcp`) are deliberately
   unmapped.
+- **`/ui` area-header badge chips** (#2677) —
+  `meho_backplane.ui.maturity` maps sidebar surfaces onto registry
+  keys and a shared Jinja include renders the chip; see
+  `docs/codebase/ui.md`.
 
-Remaining #2664 surfaces, not yet implemented: the CLI
-command-manifest builder (#2676), the `/ui` badge include (#2677),
-and the docs-site maturity-index generator plus CI drift guard
-(#2678). The drift guard is where today's deliberately-unclassified
-surfaces (runbooks, `meho.status`, the `conventions` REST tag) get
+Remaining #2664 surface, not yet implemented: the docs-site
+maturity-index generator plus CI drift guard (#2678). The drift
+guard is where today's deliberately-unclassified surfaces (runbooks,
+`meho.status`, the `conventions` REST tag) get
 forced into an explicit classification decision.
 
 The CLI's *client* half of #2676 is shipped:

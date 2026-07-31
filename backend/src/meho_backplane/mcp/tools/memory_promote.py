@@ -173,6 +173,7 @@ async def _meho_memory_promote_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="memory_knowledge",
         name=_TOOL_NAME,
         description=(
             "Promote one memory to a strictly broader scope along the "

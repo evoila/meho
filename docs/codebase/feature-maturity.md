@@ -47,13 +47,39 @@ registry, preserving the module's purity contract (pure function over
 a `Settings` snapshot; tests pin this in
 `test_builder_stays_pure_and_does_not_alias_the_registry`).
 
-`/ready` is the only consuming surface shipped so far; it carries the
-merged view for operator tooling. The remaining #2664 surfaces are
-planned consumers, not yet implemented: MCP registration (#2675), the
-CLI command-manifest builder (#2676), the `/ui` badge include (#2677),
-and the docs-site maturity-index generator plus CI drift guard (#2678)
-will all read `FEATURE_MATURITY` in-process — there is deliberately no
-dedicated REST read surface.
+Consuming surfaces shipped so far (all read `FEATURE_MATURITY`
+in-process — there is deliberately no dedicated REST read surface):
+
+- `/ready` — carries the merged view for operator tooling (#2674).
+- **MCP tool descriptions** (#2675) — every
+  `mcp/registry.py::ToolDefinition` declares a required `feature`
+  field (a registry key, or an explicit `None` for
+  deliberately-unclassified surfaces such as `meho.status` and the
+  runbooks family, which the provisional #2664 table does not
+  classify). `register_mcp_tool` prefixes non-GA descriptions with
+  `[beta]` / `[experimental]` at registration time; an unknown key
+  fails validation at construction.
+- **`initialize.instructions`** (#2675) —
+  `mcp/maturity.py::FEATURE_MATURITY_BAND` (a registry-derived static
+  band listing exactly the non-GA features) is appended after the
+  assembled preamble by `mcp/server.py::_session_instructions`. Keys
+  only — no tracking URLs, to honour the #1137 forbidden-token
+  contract.
+- **OpenAPI `x-maturity`** (#2675) —
+  `api/openapi_maturity.py::inject_maturity_extensions` stamps
+  top-level tag entries (mapping in `TAG_FEATURE`) plus per-operation
+  overrides where a tag spans tiers (`PATH_FEATURE_OVERRIDES`; today
+  the `connectors` tag's ingest-pipeline paths). Flows into the
+  committed `cli/api/openapi.json` snapshot. `/ui*` tags and
+  infrastructure tags (`health`, `version`, `mcp`) are deliberately
+  unmapped.
+
+Remaining #2664 surfaces, not yet implemented: the CLI
+command-manifest builder (#2676), the `/ui` badge include (#2677),
+and the docs-site maturity-index generator plus CI drift guard
+(#2678). The drift guard is where today's deliberately-unclassified
+surfaces (runbooks, `meho.status`, the `conventions` REST tag) get
+forced into an explicit classification decision.
 
 The CLI's *client* half of #2676 is shipped:
 `cli/internal/discovery/discovery.go`'s `Command` carries a
@@ -92,3 +118,6 @@ expectations from the registry so a retier never requires a test edit.
 - `backend/tests/test_features.py` — registry contract tests;
   `backend/tests/test_features_doc_consistency.py` — deploy-gate doc
   parity (unchanged by #2674).
+- `backend/tests/test_maturity_propagation.py` — #2675 surface tests;
+  every expectation derives from the registry (a retier never
+  requires a test edit).

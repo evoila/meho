@@ -117,6 +117,7 @@ async def _list_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.list",
         description=(
             "List agent definitions for the operator's tenant "
@@ -158,6 +159,7 @@ async def _show_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.show",
         description=(
             "Fetch one agent definition by name for the operator's "
@@ -224,6 +226,7 @@ async def _create_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.create",
         description=(
             "Create an agent definition for the operator's tenant "
@@ -334,6 +337,7 @@ async def _edit_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.edit",
         description=(
             "Apply a partial update to an agent definition by name "
@@ -404,6 +408,7 @@ async def _delete_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.delete",
         description=(
             "Delete an agent definition by name for the operator's "

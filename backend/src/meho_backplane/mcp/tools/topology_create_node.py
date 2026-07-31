@@ -119,6 +119,7 @@ async def _create_node_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="topology",
         name=_CREATE_NODE_TOOL_NAME,
         description=_CREATE_NODE_DESCRIPTION,
         inputSchema=CREATE_NODE_PARAMETER_SCHEMA,

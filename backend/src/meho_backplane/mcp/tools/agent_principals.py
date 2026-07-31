@@ -110,6 +110,7 @@ async def _list_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agent_principals.list",
         description=(
             "List agent principals registered for the operator's tenant "
@@ -191,6 +192,7 @@ async def _register_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agent_principals.register",
         description=(
             "Register a new agent principal for the operator's tenant "
@@ -275,6 +277,7 @@ async def _revoke_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agent_principals.revoke",
         description=(
             "Revoke an agent principal — kill switch (G11.2-T1 #815). "

@@ -150,6 +150,7 @@ async def _delete_doc_collections_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="doc_collections",
         name=_DELETE_TOOL_NAME,
         description=_DELETE_DOC_COLLECTIONS_DESCRIPTION,
         inputSchema=_DELETE_DOC_COLLECTIONS_INPUT_SCHEMA,

@@ -433,6 +433,7 @@ async def _add_to_memory_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="memory_knowledge",
         name="search_memory",
         description=(
             "Search the operator's accessible memories (own user-scoped "
@@ -499,6 +500,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="memory_knowledge",
         name="add_to_memory",
         description=(
             "Add a new memory entry. Use when you (or the operator "

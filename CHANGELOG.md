@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — maturity labels on the MCP and REST surfaces (#2675)
+
+- Propagate the #2674 feature-maturity registry to the agent-facing
+  surfaces (#2675). MCP tools owned by a non-GA feature now carry a
+  `[beta]` / `[experimental]` prefix in their `tools/list`
+  descriptions (GA tools stay unprefixed) — resolved at registration
+  time from each tool's new `feature` declaration, never hardcoded
+  per tool. `initialize.instructions` gains a compact feature-maturity
+  band listing exactly the registry's non-GA features. The public
+  OpenAPI document (and the committed `cli/api/openapi.json`
+  snapshot) carries `x-maturity` on its tags, with per-operation
+  overrides where a tag spans tiers (the `connectors` tag's
+  spec-ingestion paths). All additive: no tool or route was renamed,
+  and schema shapes are untouched. (#2675)
 ### Added — CLI command manifest carries feature maturity (#2676)
 
 - Teach the CLI's server-driven command manifest the `maturity` field

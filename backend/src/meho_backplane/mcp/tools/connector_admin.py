@@ -418,6 +418,7 @@ async def _delete_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.list",
+        feature="typed_connector_reads",
         description=(
             "List ingested connectors visible to the operator's tenant "
             "(plus built-in / global). Returns per-connector counts — "
@@ -463,6 +464,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.review",
+        feature="connector_ingest",
         description=(
             "Get the full review payload for one connector (groups + "
             "per-group operations + per-op flags). Use after "
@@ -504,6 +506,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.edit_group",
+        feature="connector_ingest",
         description=(
             "Edit one operation group's when_to_use prose or display "
             "name (tenant_admin only). Use after meho.connector.review "
@@ -541,6 +544,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.edit_op",
+        feature="connector_ingest",
         description=(
             "Edit one operation's per-op overrides (tenant_admin only). "
             "Editable fields: custom_description (operator-authored "
@@ -593,6 +597,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.enable",
+        feature="typed_connector_reads",
         description=(
             "Flip every group of a connector to review_status='enabled' "
             "(tenant_admin only). Cascades is_enabled=true to every "
@@ -628,6 +633,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.enable_reads",
+        feature="typed_connector_reads",
         description=(
             "Bulk-enable every read-class operation of a connector in "
             "one pass (tenant_admin only). Flips is_enabled=true on "
@@ -680,6 +686,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.disable",
+        feature="typed_connector_reads",
         description=(
             "Flip every group of a connector to "
             "review_status='disabled' (tenant_admin only). Cascades "
@@ -717,6 +724,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         name="meho.connector.delete",
+        feature="typed_connector_reads",
         description=(
             "Delete one connector (tenant_admin only): remove its "
             "operation_group + endpoint_descriptor rows under the "

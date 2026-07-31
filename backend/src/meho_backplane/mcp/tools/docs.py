@@ -359,6 +359,7 @@ async def _run_search_fanout(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="doc_collections",
         name="search_docs",
         description=(
             "Search a vendor-document collection (product manuals, KB "
@@ -662,6 +663,7 @@ def _citation_payload(chunk: DocsChunk) -> dict[str, Any]:
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="doc_collections",
         name="ask_docs",
         description=(
             "Answer a vendor-reference question with a SYNTHESIZED, CITED "

@@ -81,8 +81,9 @@ Mapping rules the importer applies:
   pin the CA *or* disable verification, never both.
 - Set **`tls_server_name`** whenever you reach an appliance by IP (or
   by an alias) while its certificate only carries the FQDN — without
-  it, dispatch fails TLS verification with an
-  `connector_tls_verify_failed` / "IP address mismatch" class error.
+  it, dispatch fails with `connector_tls_verify_failed`, carrying
+  Python's own *"IP address mismatch"* text inside
+  `extras.exception_message`.
 
 You can leave `secret_ref` out entirely — see the next section.
 
@@ -173,7 +174,7 @@ server-derived default is the Vault layout).
 ## Import and verify
 
 ```bash
-# 1. Preview — classifies every entry CREATE / UPDATE / SKIP, writes nothing:
+# 1. Preview — classifies every entry CREATE / UPDATE, writes nothing:
 meho targets import targets.yaml --dry-run
 
 # 2. Apply. Default mode aborts before any write if a name already exists:
@@ -231,7 +232,7 @@ Real failure modes, with the errors they actually produce:
 | Dispatch fails, `connector_error: VaultCredentialsReadError` — *"…is missing required field '…'"* | The secret exists but doesn't carry the field the connector needs (`username`/`password`, or `kubeconfig` for Kubernetes). | Re-stage the secret with the connector's field names. |
 | Dispatch fails, `connector_vault_forbidden` — Vault answered *permission denied* | Nine times out of ten the secret is staged at the wrong path, **not** a missing grant: the error reads like a policy problem but the ref simply doesn't match where you wrote the secret. The error names the expected path. | `vault kv put` the credential at the expected path. Do **not** widen the backplane's Vault policy — it is deploy-owned and re-applied on upgrade. |
 | Dispatch fails, `connector_auth_failed` (HTTP 401 at session establish) | The credential resolved but the vendor rejected it — usually a password rotated upstream while the store copy lagged. | Re-stage the current credential at the same path, then retry. |
-| Dispatch fails TLS: `connector_tls_verify_failed`, *"IP address mismatch"* | You reach the appliance by IP but its certificate only names the FQDN. | Set `tls_server_name: <cert-fqdn>` on the target and re-import with `--update`. |
+| Dispatch fails TLS: `extras.error_code` is `connector_tls_verify_failed` and `extras.exception_message` contains *"IP address mismatch"* (CPython `ssl` text relayed verbatim, not a MEHO string — MEHO's own summary says the chain "is not trusted") | You reach the appliance by IP but its certificate only names the FQDN. | Set `tls_server_name: <cert-fqdn>` on the target and re-import with `--update`. |
 | Probe shows `reachable: false` / `auth_failed` on a GSM deploy with per-operator Workload Identity Federation | Probes run under a system placeholder identity that cannot complete the per-operator token exchange, so credentialed-target probes cannot read the secret on that configuration. Reachability of *uncredentialed* endpoints still probes fine. | Known limitation — documented in [`docs/deploying.md`](https://github.com/evoila/meho/blob/main/docs/deploying.md); verify credentialed dispatch with a real operation call instead. |
 | Registration accepted, but *every* dispatch fails with a `no_connector` error naming the wrong thing | A `product` no connector implementation actually serves can slip through registration in some cases; the dispatch-time error then misattributes the cause. | Known issue, tracked in [evoila/meho#2701](https://github.com/evoila/meho/issues/2701). Re-check the target's `product` against the connector catalog. |
 

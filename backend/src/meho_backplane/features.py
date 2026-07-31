@@ -42,6 +42,40 @@ The audit-replay entry additionally exposes ``capture_mode`` —
 enforcement, ``"always"`` after. The shape is forward-compatible: T6
 flips this from ``"enforced"`` to ``"always"`` and adds nothing else.
 
+Feature-maturity registry (#2674)
+---------------------------------
+
+This module is also the **single source of truth for feature
+maturity** (#2664): :data:`FEATURE_MATURITY` maps every user-facing
+MEHO feature to its tier — ``ga`` / ``beta`` / ``experimental`` — plus,
+on non-GA entries, the ``target_ga`` milestone and the ``tracking``
+issue URL. Every maturity-labelled surface derives from this one dict.
+``/ready`` — the deploy-gate entries this module already emits merge
+the maturity fields in (see :data:`_READY_ENTRY_FEATURE`) — is the
+only consumer shipped so far; the remaining #2664 surfaces are
+planned, not yet implemented:
+
+* MCP tool-description prefixes + ``initialize.instructions`` summary
+  and the OpenAPI ``x-maturity`` extension (#2675).
+* The CLI command-manifest ``maturity`` field (#2676).
+* The ``/ui`` area-header badge chips (#2677).
+* The generated docs maturity-index page + CI drift guard (#2678).
+
+Those planned consumers **will import this module** (server-side
+render, tool registration, docs build) — deliberately no dedicated
+REST read surface: the smallest thing that serves every #2664
+consumer is the module itself, and ``/ready`` already carries the
+merged view for operator tooling.
+
+Reclassifying a feature (the v0.28 post-eval round, Goal #2661) is a
+one-line data edit in :data:`FEATURE_MATURITY`; no surface-specific
+edits anywhere. The classification encoded here is the **provisional**
+one tabled in #2664, pending clean-room eval round 1 (#2665). Tier
+semantics (#2664 entry criteria): ``ga`` features carry the 1.0
+stability promise; ``beta`` works end-to-end somewhere real with known,
+tracked gaps and may change with deprecation notice; ``experimental``
+may change or vanish and sits outside the 1.0 promise.
+
 The module is **pure** — it reads :class:`~meho_backplane.settings.Settings`
 and returns a plain :class:`dict`. No I/O, no settings cache mutation,
 no environment lookup. Callers that need to test against a synthetic
@@ -61,15 +95,145 @@ References
   diagnostic-values + remediation + doc-reference shape.
 * Sibling: G0.14-T6 (#1147) flips ``audit_replay.capture_mode`` from
   ``"enforced"`` to ``"always"`` once it lands.
+* Maturity program: #2664 (initiative — classification table + entry
+  criteria), #2674 (this registry), #2675-#2678 (surface propagation),
+  Goal #2661 milestone plan (v0.28 reclassification, v1.0.0 GA set).
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal, NotRequired, TypedDict
 
 from meho_backplane.settings import Settings
 
-__all__ = ["build_features_block"]
+__all__ = [
+    "FEATURE_MATURITY",
+    "Maturity",
+    "MaturityInfo",
+    "build_features_block",
+]
+
+Maturity = Literal["ga", "beta", "experimental"]
+
+_TRACKER = "https://github.com/evoila/meho/issues"
+
+
+class MaturityInfo(TypedDict):
+    """One :data:`FEATURE_MATURITY` entry.
+
+    ``target_ga`` and ``tracking`` are present on non-GA entries only
+    (mirroring how ``docs`` is present only where a setup doc exists).
+    ``target_ga`` may be ``None`` on ``experimental`` entries: those sit
+    outside the 1.0 promise (#2664 entry criteria; several are explicit
+    1.0 non-goals in #2661), so advertising a committed milestone would
+    overstate exactly the way this program exists to prevent.
+    """
+
+    maturity: Maturity
+    target_ga: NotRequired[str | None]
+    tracking: NotRequired[str]
+
+
+#: The provisional #2664 classification. Keys are the canonical feature
+#: identifiers every surface (#2675-#2678) maps its tools / routes /
+#: commands / UI areas onto. Renaming a key is a cross-surface break;
+#: retiering one is a one-line edit here and nowhere else.
+#:
+#: ``tracking`` points at the open issue where the feature's road to
+#: promotion is visible today: the concrete gap issue where one exists
+#: (#2668 background-execution credential identity for sensors and the
+#: scheduler, #2667 first-class GSM chart values, #2656 the v0.25.0
+#: hosted-agent-run hardening line), the clean-room eval (#2665) for
+#: beta features whose promotion gate is the eval score itself, and the
+#: 1.0 Goal (#2661, which schedules the v0.28 re-triage) for
+#: experimental features with no committed path.
+FEATURE_MATURITY: dict[str, MaturityInfo] = {
+    # GA-track (provisional): the read/governance/knowledge plane the
+    # 2026-07-21 grounding review found provably working in the field.
+    "audit": {"maturity": "ga"},
+    "memory_knowledge": {"maturity": "ga"},
+    "targets": {"maturity": "ga"},
+    "typed_connector_reads": {"maturity": "ga"},
+    "net_diagnostics": {"maturity": "ga"},
+    "approvals": {"maturity": "ga"},
+    "auth_tenancy": {"maturity": "ga"},
+    # Beta: works end-to-end somewhere real; gaps known and tracked.
+    "sensors": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2668",
+    },
+    "topology": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2665",
+    },
+    "broadcast": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2665",
+    },
+    "scheduler": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2668",
+    },
+    "ui_console": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2665",
+    },
+    "write_surfaces": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2665",
+    },
+    "gsm_backend": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2667",
+    },
+    "satellite_gateway": {
+        "maturity": "beta",
+        "target_ga": "v1.0.0",
+        "tracking": f"{_TRACKER}/2665",
+    },
+    # Experimental: may change or vanish; outside the 1.0 promise.
+    "connector_ingest": {
+        "maturity": "experimental",
+        "target_ga": None,
+        "tracking": f"{_TRACKER}/2661",
+    },
+    "agent_runtime": {
+        "maturity": "experimental",
+        "target_ga": None,
+        "tracking": f"{_TRACKER}/2656",
+    },
+    "doc_collections": {
+        "maturity": "experimental",
+        "target_ga": None,
+        "tracking": f"{_TRACKER}/2661",
+    },
+    "two_world_ops": {
+        "maturity": "experimental",
+        "target_ga": None,
+        "tracking": f"{_TRACKER}/2661",
+    },
+}
+
+#: Which ``/ready`` entry maps to which :data:`FEATURE_MATURITY` key.
+#: The block keys are deploy-gate names (what needs wiring); the
+#: registry keys are feature names (what carries a promise) — they
+#: coincide only for ``agent_runtime``. The ``mcp`` entry is absent by
+#: design: it reports a build-time protocol constant, not a classified
+#: feature — individual MCP tools inherit maturity from their owning
+#: feature at registration time (#2675).
+_READY_ENTRY_FEATURE: dict[str, str] = {
+    "agent_runtime": "agent_runtime",
+    "ui_surface": "ui_console",
+    "audit_replay": "audit",
+    "approval_queue": "approvals",
+}
 
 
 def _agent_runtime_block(settings: Settings) -> dict[str, Any]:
@@ -279,24 +443,40 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     enablement section; renaming one is a wire-compat break for
     operator tooling that reads ``/ready``.
 
+    Every entry with a :data:`_READY_ENTRY_FEATURE` mapping additionally
+    carries the merged :data:`FEATURE_MATURITY` fields (#2674):
+    ``maturity`` always, plus ``target_ga`` / ``tracking`` on non-GA
+    features. The ``mcp`` entry carries none — see
+    :data:`_READY_ENTRY_FEATURE` for why. Additive only: operator
+    tooling keyed on the pre-#2674 fields is unaffected.
+
     Shape (verified by the issue body):
 
     .. code-block:: json
 
         {
-          "agent_runtime":  {"configured": <bool>, "missing_env": [...], "docs": "..."},
-          "ui_surface":     {"configured": <bool>, "missing_env": [...], "docs": "..."},
-          "audit_replay":   {"configured": true,   "capture_mode": "...", "missing_env": []},
+          "agent_runtime":  {"configured": <bool>, "missing_env": [...], "docs": "...",
+                             "maturity": "experimental", "target_ga": null,
+                             "tracking": "https://github.com/evoila/meho/issues/2656"},
+          "ui_surface":     {"configured": <bool>, "missing_env": [...], "docs": "...",
+                             "maturity": "beta", "target_ga": "v1.0.0",
+                             "tracking": "https://github.com/evoila/meho/issues/2665"},
+          "audit_replay":   {"configured": true,   "capture_mode": "...", "missing_env": [],
+                             "maturity": "ga"},
           "approval_queue": {"configured": <bool>, "depends_on": "agent_runtime",
                              "effective_posture": "four_eyes_enforced" |
-                                                  "single_operator_break_glass"},
+                                                  "single_operator_break_glass",
+                             "maturity": "ga"},
           "mcp":            {"configured": true,   "protocol_version": "...", "missing_env": []}
         }
     """
-    return {
+    block: dict[str, dict[str, Any]] = {
         "agent_runtime": _agent_runtime_block(settings),
         "ui_surface": _ui_surface_block(settings),
         "audit_replay": _audit_replay_block(),
         "approval_queue": _approval_queue_block(settings),
         "mcp": _mcp_block(),
     }
+    for entry_name, feature_key in _READY_ENTRY_FEATURE.items():
+        block[entry_name].update(FEATURE_MATURITY[feature_key])
+    return block

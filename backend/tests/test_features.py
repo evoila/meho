@@ -22,15 +22,26 @@ Coverage matrix (G0.14-T7 #1148):
   ``Settings.approval_allow_self_approval``: ``four_eyes_enforced``
   by default, ``single_operator_break_glass`` under the emergency
   ``APPROVAL_ALLOW_SELF_APPROVAL=true`` escape.
+* The feature-maturity registry (#2674) covers the #2664 propagation
+  plan, honours the tier-conditional field contract, merges into the
+  mapped ``/ready`` entries, and never leaks mutable state. Tier
+  values are asserted **structurally only** — reclassification must
+  remain a one-line registry edit.
 """
 
 from __future__ import annotations
 
+import copy
+import re
 from typing import Any
 
 import pytest
 
-from meho_backplane.features import build_features_block
+from meho_backplane.features import (
+    _READY_ENTRY_FEATURE,
+    FEATURE_MATURITY,
+    build_features_block,
+)
 from meho_backplane.settings import Settings
 
 
@@ -330,3 +341,167 @@ def test_every_feature_has_configured_bool(feature: str) -> None:
     """Each entry carries a ``configured: bool`` — the load-bearing field."""
     block = build_features_block(_settings_with())
     assert isinstance(block[feature]["configured"], bool)
+
+
+# ---------------------------------------------------------------------------
+# Feature-maturity registry (#2674)
+# ---------------------------------------------------------------------------
+
+# The /ready-entry → registry-key mapping is a wire contract: #2675-#2678
+# key their surface mappings on the registry names, and operator tooling
+# reads the merged fields off these /ready entries. Pinned here (rather
+# than imported from the module) so remapping an entry is a deliberate
+# two-touch change. Tier values are deliberately NOT pinned anywhere in
+# this file — reclassification must stay a one-line registry edit
+# (#2674 acceptance criterion), so every tier expectation below derives
+# from ``FEATURE_MATURITY`` itself.
+READY_ENTRY_FEATURE_CONTRACT = {
+    "agent_runtime": "agent_runtime",
+    "ui_surface": "ui_console",
+    "audit_replay": "audit",
+    "approval_queue": "approvals",
+}
+
+_ISSUE_URL_RE = re.compile(r"^https://github\.com/evoila/meho/issues/\d+$")
+
+
+def test_ready_entry_mapping_matches_the_contract() -> None:
+    """The module's mapping is the pinned contract, key for key.
+
+    The merge tests below derive their expectations from the mapping's
+    *values*, so a silent remap between value-identical registry
+    entries (``audit``/``approvals`` today; the #2665-tracked beta
+    group) would still pass them. Comparing the dicts directly pins
+    the mapping itself.
+    """
+    assert _READY_ENTRY_FEATURE == READY_ENTRY_FEATURE_CONTRACT
+
+
+def test_maturity_registry_covers_the_2664_classification() -> None:
+    """Every feature in the #2664 propagation plan has a registry entry.
+
+    The key set is the cross-surface contract: MCP tools (#2675), CLI
+    commands (#2676), /ui areas (#2677), and the docs index / drift
+    guard (#2678) all map onto these names. Renaming or dropping a key
+    breaks every consumer at once — this pin catches it at test time.
+    Adding a feature is an additive change here and in the registry.
+    """
+    assert set(FEATURE_MATURITY.keys()) == {
+        # GA-track
+        "audit",
+        "memory_knowledge",
+        "targets",
+        "typed_connector_reads",
+        "net_diagnostics",
+        "approvals",
+        "auth_tenancy",
+        # Beta
+        "sensors",
+        "topology",
+        "broadcast",
+        "scheduler",
+        "ui_console",
+        "write_surfaces",
+        "gsm_backend",
+        "satellite_gateway",
+        # Experimental
+        "connector_ingest",
+        "agent_runtime",
+        "doc_collections",
+        "two_world_ops",
+    }
+
+
+@pytest.mark.parametrize("feature_key", sorted(FEATURE_MATURITY.keys()))
+def test_registry_entry_shape(feature_key: str) -> None:
+    """Each entry honours the tier-conditional field contract.
+
+    * ``maturity`` is one of the three tiers.
+    * GA entries carry **neither** ``target_ga`` nor ``tracking`` —
+      same absent-not-null convention as ``docs`` on the /ready gates.
+    * Non-GA entries carry both: ``tracking`` is a concrete
+      ``evoila/meho`` issue URL (the road-to-promotion pointer #2678
+      renders), ``target_ga`` is a milestone string on beta entries
+      and may be ``None`` only on experimental ones (outside the 1.0
+      promise — no committed milestone to advertise).
+    """
+    entry = FEATURE_MATURITY[feature_key]
+    maturity = entry["maturity"]
+    assert maturity in {"ga", "beta", "experimental"}
+
+    if maturity == "ga":
+        assert "target_ga" not in entry
+        assert "tracking" not in entry
+        return
+
+    assert _ISSUE_URL_RE.match(entry["tracking"]), (
+        f"{feature_key}: tracking must be an evoila/meho issue URL, got {entry.get('tracking')!r}"
+    )
+    assert "target_ga" in entry
+    if maturity == "beta":
+        assert isinstance(entry["target_ga"], str) and entry["target_ga"]
+    else:
+        assert entry["target_ga"] is None or (
+            isinstance(entry["target_ga"], str) and entry["target_ga"]
+        )
+
+
+@pytest.mark.parametrize(
+    ("entry_name", "feature_key"),
+    sorted(READY_ENTRY_FEATURE_CONTRACT.items()),
+)
+def test_ready_entry_merges_registry_maturity_fields(entry_name: str, feature_key: str) -> None:
+    """Each mapped /ready entry renders its feature's maturity fields.
+
+    Expectations derive from the registry, not from hardcoded tiers:
+    retiering a feature must flip this surface with zero test edits.
+    The merge is exactly the registry entry — no extra fields, no
+    dropped fields.
+    """
+    block = build_features_block(_settings_with())
+    entry = block[entry_name]
+    for field, value in FEATURE_MATURITY[feature_key].items():
+        assert entry[field] == value, (
+            f"/ready entry {entry_name!r} renders {field}={entry.get(field)!r}; "
+            f"registry key {feature_key!r} says {value!r}"
+        )
+    if FEATURE_MATURITY[feature_key]["maturity"] == "ga":
+        assert "target_ga" not in entry
+        assert "tracking" not in entry
+
+
+def test_mcp_entry_carries_no_maturity_fields() -> None:
+    """The ``mcp`` entry reports a protocol constant, not a feature.
+
+    Individual MCP tools inherit maturity from their owning feature at
+    registration time (#2675); labelling the transport block itself
+    would double-count. If ``mcp`` ever becomes a classified feature,
+    add it to the registry and the entry mapping together.
+    """
+    block = build_features_block(_settings_with())
+    assert "maturity" not in block["mcp"]
+    assert "target_ga" not in block["mcp"]
+    assert "tracking" not in block["mcp"]
+
+
+def test_builder_stays_pure_and_does_not_alias_the_registry() -> None:
+    """Purity contract: repeatable output, no shared mutable state.
+
+    Two calls over equivalent :class:`Settings` snapshots return equal
+    blocks; mutating a returned entry leaks into neither the registry
+    nor a subsequent call's result. Guards against the tempting
+    ``block[name] = FEATURE_MATURITY[key]``-style aliasing bug — the
+    merge must copy fields into the per-call dict.
+    """
+    registry_snapshot = copy.deepcopy(FEATURE_MATURITY)
+
+    first = build_features_block(_settings_with())
+    second = build_features_block(_settings_with())
+    assert first == second
+
+    first["ui_surface"]["maturity"] = "mutated"
+    first["ui_surface"]["tracking"] = "https://example.invalid"
+
+    assert registry_snapshot == FEATURE_MATURITY
+    third = build_features_block(_settings_with())
+    assert third == second

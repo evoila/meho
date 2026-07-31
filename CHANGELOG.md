@@ -90,6 +90,20 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — CLI command manifest carries feature maturity (#2676)
+
+- Teach the CLI's server-driven command manifest the `maturity` field
+  and render it in help output (#2676): a dynamic command advertised
+  by the backplane as **beta** or **experimental** now shows the
+  matching "(beta)" / "(experimental)" label after its short
+  description in `meho --help`. Additive and skew-safe in both
+  directions — a manifest without the field (backplane predating
+  #2674) and an unrecognized future tier both render unlabelled help.
+  Labels only: invoking a non-GA command is unchanged. The
+  `/api/v1/commands` endpoint itself remains an unshipped
+  coordination point (Goal #11 §5); until a backplane serves it, the
+  CLI's local-only fallback behaves exactly as before. (#2676)
+
 ### Added — feature-maturity registry: the single source of truth (#2674)
 
 - Extend `backend/src/meho_backplane/features.py` into the single

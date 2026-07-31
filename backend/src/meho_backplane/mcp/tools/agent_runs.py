@@ -195,6 +195,7 @@ async def _run_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.run",
         description=(
             "Run a named agent for the operator's tenant (Initiative #802). "
@@ -280,6 +281,7 @@ async def _run_status_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.run_status",
         description=(
             "Poll an agent run's durable status by run_id (Initiative "
@@ -379,6 +381,7 @@ async def _list_runs_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.list_runs",
         description=(
             "List the operator's tenant's agent runs, newest first "

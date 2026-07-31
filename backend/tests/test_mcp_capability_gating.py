@@ -90,6 +90,7 @@ def _operator(
 def test_tool_to_wire_strips_required_capability() -> None:
     """``ToolDefinition.to_wire`` drops ``required_capability`` from the wire."""
     defn = ToolDefinition(
+        feature=None,
         name="docs.search",
         description="Capability-gated docs search",
         inputSchema={"type": "object", "properties": {}},
@@ -120,6 +121,7 @@ def test_resource_template_to_wire_strips_required_capability() -> None:
 def test_required_capability_defaults_to_none() -> None:
     """An undeclared ``required_capability`` defaults to ``None`` (no gate)."""
     defn = ToolDefinition(
+        feature=None,
         name="ungated.tool",
         description="A tool with no capability gate",
         inputSchema={"type": "object", "properties": {}},
@@ -170,6 +172,7 @@ def _register_one_gated_one_ungated() -> None:
 
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="ungated.tool",
             description="Always visible",
             inputSchema={"type": "object", "properties": {}},
@@ -179,6 +182,7 @@ def _register_one_gated_one_ungated() -> None:
     )
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="docs.search",
             description="Gated on the meho-docs capability",
             inputSchema={"type": "object", "properties": {}},
@@ -226,6 +230,7 @@ def test_capability_gate_is_orthogonal_to_role_gate(
 
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="admin.docs",
             description="Admin-only AND meho-docs gated",
             inputSchema={"type": "object", "properties": {}},
@@ -319,6 +324,7 @@ def gated_client(
             # present for this test only; clear at teardown.
             register_mcp_tool(
                 ToolDefinition(
+                    feature=None,
                     name="docs.search",
                     description="Gated on the meho-docs capability",
                     inputSchema={"type": "object", "properties": {}},

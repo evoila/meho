@@ -312,6 +312,7 @@ async def _list_doc_collections_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="doc_collections",
         name="list_doc_collections",
         description=_LIST_DOC_COLLECTIONS_DESCRIPTION,
         inputSchema=_LIST_DOC_COLLECTIONS_INPUT_SCHEMA,

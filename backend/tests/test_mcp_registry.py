@@ -145,6 +145,7 @@ def test_register_mcp_tool_makes_it_callable_via_get_tool() -> None:
         return {"ok": True}
 
     defn = ToolDefinition(
+        feature=None,
         name="test.tool",
         description="A test tool",
         inputSchema={"type": "object", "properties": {}},
@@ -187,6 +188,7 @@ def test_to_wire_strips_top_level_combinators_but_keeps_them_on_input_schema() -
         "anyOf": [{"required": ["kind"]}],
     }
     defn = ToolDefinition(
+        feature=None,
         name="test.combinator",
         description="A tool whose schema carries top-level combinators",
         inputSchema=schema,
@@ -229,6 +231,7 @@ def test_register_mcp_tool_rejects_duplicate() -> None:
         return {}
 
     defn = ToolDefinition(
+        feature=None,
         name="dup.tool",
         description="dup",
         inputSchema={"type": "object"},
@@ -257,6 +260,7 @@ def _register_three_tools_at_varying_roles() -> None:
     ):
         register_mcp_tool(
             ToolDefinition(
+                feature=None,
                 name=name,
                 description=f"Tool requiring {role}",
                 inputSchema={"type": "object", "properties": {}},
@@ -337,6 +341,7 @@ def test_tools_call_dispatches_to_registered_handler(
 
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="test.echo",
             description="Echo arguments back",
             inputSchema={
@@ -411,6 +416,7 @@ def test_tools_call_malformed_arguments_returns_invalid_params(
 
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="test.requires_msg",
             description="A tool whose msg arg is required",
             inputSchema={
@@ -459,6 +465,7 @@ def test_tools_call_forbidden_for_under_privileged_operator(
 
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="ops_only.tool",
             description="Operator-only tool",
             inputSchema={"type": "object", "properties": {}},

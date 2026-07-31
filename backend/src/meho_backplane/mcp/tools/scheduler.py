@@ -158,6 +158,7 @@ async def _list_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="scheduler",
         name="meho.scheduler.list",
         description=(
             "List scheduled triggers for the operator's tenant "
@@ -274,6 +275,7 @@ async def _create_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="scheduler",
         name="meho.scheduler.create",
         description=(
             "Create one scheduled trigger under the operator's tenant "
@@ -415,6 +417,7 @@ async def _cancel_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="scheduler",
         name="meho.scheduler.cancel",
         description=(
             "Cancel one scheduled trigger by id (Initiative #804). "

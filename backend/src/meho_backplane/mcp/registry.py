@@ -71,9 +71,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import structlog
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.features import FEATURE_MATURITY
 
 __all__ = [
     "ResourceHandler",
@@ -219,6 +220,22 @@ class ToolDefinition(BaseModel):
     the connector enable model rather than a packaging/entitlement
     system. ``None`` (the default) means "no capability gate", so every
     existing tool keeps its role-only behaviour.
+
+    ``feature`` (#2675) names the tool's owning entry in
+    :data:`~meho_backplane.features.FEATURE_MATURITY` so
+    :func:`register_mcp_tool` can resolve the tool's maturity tier and
+    prefix non-GA descriptions with ``[beta]`` / ``[experimental]`` at
+    registration time — labels are never hardcoded per tool. The field
+    is **required with no default**: every registration site must either
+    name a registry key (validated — an unknown key raises at
+    construction, loud and pre-traffic like the duplicate-name guard) or
+    pass an explicit ``None``, which declares "this surface is
+    deliberately outside the maturity classification" (the
+    :data:`~meho_backplane.features._READY_ENTRY_FEATURE` ``mcp``-entry
+    precedent — e.g. ``meho.status``, a health mirror, and the runbooks
+    surface, which the provisional #2664 table does not classify).
+    Explicit ``None`` stays greppable for the #2678 drift guard.
+    MEHO-internal: dropped from the wire shape like the RBAC fields.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -226,11 +243,31 @@ class ToolDefinition(BaseModel):
     name: str = Field(min_length=1)
     description: str = Field(min_length=1)
     inputSchema: dict[str, Any]  # noqa: N815 — wire field is camelCase per MCP spec
+    feature: str | None
     title: str | None = None
     outputSchema: dict[str, Any] | None = None  # noqa: N815
     required_role: TenantRole = TenantRole.OPERATOR
     op_class: str = "read"
     required_capability: str | None = None
+
+    @field_validator("feature")
+    @classmethod
+    def _feature_key_known(cls, value: str | None) -> str | None:
+        """Reject feature keys absent from :data:`FEATURE_MATURITY`.
+
+        A typo'd key would otherwise silently resolve to "no maturity
+        label" — exactly the overstatement failure mode the #2664
+        program exists to prevent. ``None`` stays legal as the explicit
+        deliberately-unclassified declaration.
+        """
+        if value is not None and value not in FEATURE_MATURITY:
+            known = ", ".join(sorted(FEATURE_MATURITY))
+            raise ValueError(
+                f"unknown feature key {value!r}; must be one of [{known}] "
+                "or None (deliberately unclassified — see "
+                "meho_backplane.features.FEATURE_MATURITY / #2675)",
+            )
+        return value
 
     def to_wire(self) -> dict[str, Any]:
         """Serialise to the MCP wire shape, dropping MEHO-internal fields.
@@ -336,6 +373,31 @@ _RESOURCES: dict[str, tuple[ResourceTemplateDefinition, ResourceHandler]] = {}
 # ---------------------------------------------------------------------------
 
 
+def _with_maturity_prefix(definition: ToolDefinition) -> ToolDefinition:
+    """Return *definition* with its description carrying the maturity prefix.
+
+    #2675: non-GA tools advertise their tier as a ``[beta]`` /
+    ``[experimental]`` description prefix resolved from
+    :data:`~meho_backplane.features.FEATURE_MATURITY` — never hardcoded
+    per tool, so a registry retier relabels every surface with zero
+    tool-module edits. GA tools and deliberately-unclassified tools
+    (``feature=None``) return unchanged (same object, no copy). The
+    prefix is applied to the *stored* definition rather than in
+    :meth:`ToolDefinition.to_wire` so every description consumer — the
+    ``tools/list`` wire shape and the hosted-agent toolset bridge
+    (:mod:`meho_backplane.agent.toolset`), which reads
+    ``definition.description`` directly — sees one consistent label.
+    """
+    if definition.feature is None:
+        return definition
+    maturity = FEATURE_MATURITY[definition.feature]["maturity"]
+    if maturity == "ga":
+        return definition
+    return definition.model_copy(
+        update={"description": f"[{maturity}] {definition.description}"},
+    )
+
+
 def register_mcp_tool(definition: ToolDefinition, handler: ToolHandler) -> None:
     """Register a tool keyed by :attr:`ToolDefinition.name`.
 
@@ -344,10 +406,14 @@ def register_mcp_tool(definition: ToolDefinition, handler: ToolHandler) -> None:
     :class:`RuntimeError` (not a wire-error) because the registry is
     populated at module-import time; a duplicate is a configuration bug
     the operator must fix before the process accepts traffic.
+
+    The stored definition is the maturity-labelled variant produced by
+    :func:`_with_maturity_prefix` (#2675) — callers pass the plain
+    description; the registry owns the label.
     """
     if definition.name in _TOOLS:
         raise RuntimeError(f"MCP tool already registered: {definition.name!r}")
-    _TOOLS[definition.name] = (definition, handler)
+    _TOOLS[definition.name] = (_with_maturity_prefix(definition), handler)
     _log.info("mcp_tool_registered", name=definition.name)
 
 

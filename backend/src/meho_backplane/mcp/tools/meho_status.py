@@ -59,6 +59,10 @@ async def _meho_status_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        # Deliberately unclassified (#2675): the reference tool mirrors
+        # /api/v1/health — infrastructure, not a classified feature
+        # (the _READY_ENTRY_FEATURE ``mcp``-entry precedent).
+        feature=None,
         name="meho.status",
         description=(
             "Returns the operator's identity (sub, name, email) plus the "

@@ -220,6 +220,7 @@ async def _add_to_knowledge_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="memory_knowledge",
         name="search_knowledge",
         description=(
             "Search the tenant's knowledge base for distilled operator "
@@ -299,6 +300,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="memory_knowledge",
         name="add_to_knowledge",
         description=(
             "Add a new entry to the tenant's knowledge base. Use when "

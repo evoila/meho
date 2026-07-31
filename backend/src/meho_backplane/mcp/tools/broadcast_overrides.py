@@ -147,6 +147,7 @@ async def _list_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="broadcast",
         name="meho.broadcast.overrides.list",
         description=(
             "List broadcast-detail override rules for the operator's "
@@ -219,6 +220,7 @@ async def _set_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="broadcast",
         name="meho.broadcast.overrides.set",
         description=(
             "Create a broadcast-detail override rule for the operator's "
@@ -307,6 +309,7 @@ async def _remove_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="broadcast",
         name="meho.broadcast.overrides.remove",
         description=(
             "Delete a broadcast-detail override rule by id for the "

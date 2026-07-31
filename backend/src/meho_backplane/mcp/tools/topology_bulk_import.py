@@ -171,6 +171,7 @@ async def _bulk_import_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="topology",
         name=_BULK_IMPORT_TOOL_NAME,
         description=_BULK_IMPORT_DESCRIPTION,
         inputSchema=BULK_IMPORT_TOOL_INPUT_SCHEMA,

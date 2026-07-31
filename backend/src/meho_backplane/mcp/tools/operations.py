@@ -160,6 +160,7 @@ async def _preview_operation_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="typed_connector_reads",
         name="list_operation_groups",
         description=(
             "List enabled operation groups for a connector. Each group "
@@ -296,6 +297,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="typed_connector_reads",
         name="search_operations",
         description=(
             "Hybrid BM25 + cosine retrieval over a connector's enabled "
@@ -393,6 +395,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="typed_connector_reads",
         name="call_operation",
         description=(
             "Invoke an operation. Use ONLY after `search_operations` has "
@@ -560,6 +563,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="typed_connector_reads",
         name="preview_operation",
         description=(
             "Preview an operation WITHOUT running it. Resolves the same "

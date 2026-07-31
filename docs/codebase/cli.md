@@ -19,7 +19,12 @@ tarball and `SHA256SUMS` ships with a matching `.cosign.bundle`
 sigstore bundle (signature + Fulcio cert + Rekor proof) under the
 ADR 0006 identity-claim format. Server-driven subcommand discovery
 runs at every startup (empty manifest in v0.1; populated by
-post-Goal-2 backplanes without a CLI binary release).
+post-Goal-2 backplanes without a CLI binary release). Manifest
+commands may carry a `maturity` tier from the backplane's
+feature-maturity registry (#2674); the CLI renders "(beta)" /
+"(experimental)" after the short description in help output, and an
+absent or unrecognized tier renders no label — version skew in
+either direction degrades to unlabelled help (#2676).
 
 The v0.2 substrate adds several statically-registered subcommand
 trees alongside the discovery surface. All follow the same pattern:
@@ -309,8 +314,8 @@ cli/
     │   ├── suggest.go            # G5.3-T2 #609 — SuggestScope table + exported Scope* constants.
     │   └── suggest_test.go       # full mapping table including tenantConfigured branch and unknown-type fallback.
     ├── discovery/
-    │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft.
-    │   └── discovery_test.go  # 200/404/transport/decode + collision tests.
+    │   ├── discovery.go       # /api/v1/commands manifest fetch + cobra graft + maturity help labels (#2676).
+    │   └── discovery_test.go  # 200/404/transport/decode + collision + maturity-label tests.
     ├── output/
     │   ├── format.go          # human + JSON formatters + structured exit codes.
     │   └── format_test.go     # human/JSON/exit-code pinning.

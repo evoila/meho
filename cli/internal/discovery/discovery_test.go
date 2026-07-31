@@ -25,7 +25,8 @@ func TestFetch_HappyPath(t *testing.T) {
             "commands": [
                 {"name": "k8s", "short": "Kubernetes operations",
                  "subcommands": [
-                    {"name": "deployment", "short": "Manage deployments"}
+                    {"name": "deployment", "short": "Manage deployments",
+                     "maturity": "beta"}
                  ]}
             ]
         }`))
@@ -46,6 +47,12 @@ func TestFetch_HappyPath(t *testing.T) {
 	}
 	if len(k8s.Subcommands) != 1 || k8s.Subcommands[0].Name != "deployment" {
 		t.Errorf("expected nested deployment subcommand: %+v", k8s.Subcommands)
+	}
+	if k8s.Maturity != "" {
+		t.Errorf("k8s carries no maturity key, expected empty, got %q", k8s.Maturity)
+	}
+	if k8s.Subcommands[0].Maturity != "beta" {
+		t.Errorf("deployment maturity: got %q, want %q", k8s.Subcommands[0].Maturity, "beta")
 	}
 }
 
@@ -143,6 +150,143 @@ func TestRegister_GraftsCommands(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "Kubernetes operations") {
 		t.Errorf("--help output missing short description:\n%s", stdout.String())
+	}
+}
+
+// TestRegister_MaturitySuffixInHelp is the #2676 round-trip test:
+// a manifest carrying maturity tiers renders "(beta)" /
+// "(experimental)" after the short description in help output, GA
+// and unrecognized tiers render no label, and a label-only short
+// still surfaces for commands whose short is empty.
+func TestRegister_MaturitySuffixInHelp(t *testing.T) {
+	root := &cobra.Command{Use: "meho"}
+	manifest := &CommandManifest{Commands: []Command{
+		{Name: "sensor", Short: "Deterministic-check sensors", Maturity: "beta"},
+		{Name: "ingest", Short: "Spec ingestion", Maturity: "experimental"},
+		{Name: "audit", Short: "Audit queries", Maturity: "ga"},
+		{Name: "future", Short: "From a newer backplane", Maturity: "alpha-preview"},
+		{Name: "bare", Maturity: "beta"},
+		{
+			Name: "topology", Short: "Topology graph",
+			Subcommands: []Command{
+				{Name: "refresh", Short: "Refresh the graph", Maturity: "beta"},
+			},
+		},
+	}}
+	if err := Register(root, manifest); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("--help failed: %v", err)
+	}
+	help := stdout.String()
+	for _, want := range []string{
+		"Deterministic-check sensors (beta)",
+		"Spec ingestion (experimental)",
+	} {
+		if !strings.Contains(help, want) {
+			t.Errorf("--help missing %q:\n%s", want, help)
+		}
+	}
+	for _, unwanted := range []string{
+		"Audit queries (",
+		"From a newer backplane (",
+	} {
+		if strings.Contains(help, unwanted) {
+			t.Errorf("--help shows a maturity label it must not: %q\n%s", unwanted, help)
+		}
+	}
+
+	// Empty short + non-GA tier: the label alone is the short text.
+	var bare *cobra.Command
+	for _, c := range root.Commands() {
+		if c.Name() == "bare" {
+			bare = c
+		}
+	}
+	if bare == nil {
+		t.Fatal("bare subcommand not registered")
+	}
+	if bare.Short != "(beta)" {
+		t.Errorf("bare.Short: got %q, want %q", bare.Short, "(beta)")
+	}
+
+	// Nested subcommands inherit the same rendering via the
+	// recursive buildCommand walk.
+	stdout.Reset()
+	root.SetArgs([]string{"topology", "--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("topology --help failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Refresh the graph (beta)") {
+		t.Errorf("nested subcommand help missing beta label:\n%s", stdout.String())
+	}
+}
+
+// TestMaturity_WireRoundTrip drives the full path — httptest
+// backplane JSON → Fetch → Register → cobra help — for a manifest
+// carrying maturity, proving the wire field and the rendering agree
+// end to end (#2676 acceptance criterion).
+func TestMaturity_WireRoundTrip(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(Endpoint, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+            "commands": [
+                {"name": "sensor", "short": "Deterministic-check sensors",
+                 "maturity": "beta"}
+            ]
+        }`))
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	manifest, err := Fetch(context.Background(), srv.Client(), srv.URL)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	root := &cobra.Command{Use: "meho"}
+	if err := Register(root, manifest); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("--help failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Deterministic-check sensors (beta)") {
+		t.Errorf("--help missing wire-driven beta label:\n%s", stdout.String())
+	}
+}
+
+// TestRegister_NoMaturityNoSuffix pins the other direction of the
+// version skew: a manifest from a backplane that predates the
+// maturity field (#2674 not deployed) renders help output without
+// any label — byte-identical short descriptions.
+func TestRegister_NoMaturityNoSuffix(t *testing.T) {
+	root := &cobra.Command{Use: "meho"}
+	manifest := &CommandManifest{Commands: []Command{
+		{Name: "sensor", Short: "Deterministic-check sensors"},
+	}}
+	if err := Register(root, manifest); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	var stdout bytes.Buffer
+	root.SetOut(&stdout)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("--help failed: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Deterministic-check sensors") {
+		t.Fatalf("--help missing short description:\n%s", stdout.String())
+	}
+	if strings.Contains(stdout.String(), "Deterministic-check sensors (") {
+		t.Errorf("--help shows a label for a maturity-less manifest:\n%s", stdout.String())
 	}
 }
 

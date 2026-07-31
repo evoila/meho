@@ -81,6 +81,19 @@ and the docs-site maturity-index generator plus CI drift guard
 surfaces (runbooks, `meho.status`, the `conventions` REST tag) get
 forced into an explicit classification decision.
 
+The CLI's *client* half of #2676 is shipped:
+`cli/internal/discovery/discovery.go`'s `Command` carries a
+`maturity` field (`"beta"` / `"experimental"`; omitted for GA) and
+`meho --help` renders the matching label after each dynamic command's
+short description — absent or unrecognized tiers render no label, so
+version skew in either direction degrades to unlabelled help. The
+server half stays gated on the `/api/v1/commands` endpoint itself,
+which is an unshipped Goal #11 §5 coordination point: today every
+backplane 404s the manifest fetch and the CLI falls back to its
+local-only command set. When the endpoint lands, its builder resolves
+each advertised command's owning feature from `FEATURE_MATURITY` and
+emits the field the CLI already understands.
+
 ## Dependencies
 
 Stdlib `typing` (`Literal`, `TypedDict`, `NotRequired`) and

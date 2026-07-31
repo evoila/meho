@@ -58,6 +58,14 @@ type Command struct {
 	// Optional in the schema but populated by every realistic
 	// backplane.
 	Short string `json:"short,omitempty"`
+	// Maturity is the owning feature's tier from the backplane's
+	// feature-maturity registry (#2674): "beta" or "experimental".
+	// Omitted for GA commands — absence means "no maturity label",
+	// which also covers older backplanes that predate the field.
+	// Values other than the two known non-GA tiers render no label
+	// either, so a future tier never garbles help output on an
+	// older CLI (#2676).
+	Maturity string `json:"maturity,omitempty"`
 	// Subcommands are nested children. Optional; empty in v0.1.
 	Subcommands []Command `json:"subcommands,omitempty"`
 }
@@ -162,14 +170,38 @@ func Register(rootCmd *cobra.Command, manifest *CommandManifest) error {
 	return nil
 }
 
+// maturitySuffix maps a manifest maturity tier onto the help-text
+// label rendered after the command's short description. Only the
+// two known non-GA tiers produce a label; empty (GA / older
+// backplane) and unrecognized values render nothing, keeping help
+// output stable across version skew in both directions.
+func maturitySuffix(maturity string) string {
+	switch maturity {
+	case "beta":
+		return "(beta)"
+	case "experimental":
+		return "(experimental)"
+	default:
+		return ""
+	}
+}
+
 // buildCommand recursively turns a Command spec into a cobra
 // command. Each leaf RunE is the v0.1 placeholder; non-leaf
 // (sub-bearing) commands have no RunE so cobra prints the
 // subcommand help when invoked without an arg.
 func buildCommand(c Command) *cobra.Command {
+	short := c.Short
+	if suffix := maturitySuffix(c.Maturity); suffix != "" {
+		if short == "" {
+			short = suffix
+		} else {
+			short += " " + suffix
+		}
+	}
 	cmd := &cobra.Command{
 		Use:   c.Name,
-		Short: c.Short,
+		Short: short,
 		// SilenceUsage matches the rest of the CLI — operator errors
 		// shouldn't dump the usage wall.
 		SilenceUsage: true,

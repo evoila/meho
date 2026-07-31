@@ -90,6 +90,26 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — docs-site Do-real-work guides: targets & secrets, first operations, sensors (#2673)
+
+- Land the first three *Do real work* task guides on the published
+  docs site (#2673): **Register targets and secrets** (`targets.yaml`
+  import incl. `tls_server_name`, the per-backend `secret_ref` shapes
+  with the Vault tenant-scope prefix and the GSM ref grammar,
+  probe-green verification, and a failure table built from the real
+  error strings), **Run your first operations** (the
+  discover → groups → search → preview → call ladder worked end to
+  end on the `k8s-1.x` typed connector, result-handle drill-in via
+  `result_query`, and what `safety_level` / `requires_approval` mean
+  at first contact), and **Watch your estate with sensors** (create,
+  dashboard rollup, break-and-triage across the five-state
+  vocabulary, the optional investigator, and the honest per-backend
+  background-credential matrix). Each guide ends with a
+  "what can go wrong here" section sourced from shipped error
+  messages rather than invented FAQs; the guides landing page now
+  sequences them and reserves the approvals & break-glass slot
+  (#2669). (#2673)
+
 ### Added — maturity drift guard in CI + generated maturity-index docs page (#2678)
 
 - Close the #2664 maturity program with its two enforcement pieces

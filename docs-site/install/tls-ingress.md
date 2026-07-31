@@ -95,7 +95,7 @@ runtime trusts only public CAs by default, so internal-CA-signed
 dependencies fail their probes and the symptom is distinctive:
 **`/healthz` is green but `/ready` returns 503**, with the `keycloak`
 entry in its `checks` reading `jwks_fetch_failed: ConnectError` (or the
-credential backend's reading `unreachable: ConnectError`), and an
+credential backend's reading `unreachable: SSLError`), and an
 `--atomic` install rolls itself back.
 
 The fix is mounting a CA bundle and pointing `SSL_CERT_FILE` at it —

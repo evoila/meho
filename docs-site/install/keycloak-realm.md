@@ -180,9 +180,13 @@ the token yourself:
 MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com
 
 # The file holds one entry per backplane; a fresh host has exactly one.
+# JWT payloads are unpadded base64url, so translate the alphabet and
+# re-pad before decoding.
 jq -r '.entries[].access_token' \
   "${XDG_CONFIG_HOME:-$HOME/.config}/meho/credentials.json" \
-  | cut -d. -f2 | base64 -d 2>/dev/null | jq .
+  | cut -d. -f2 | tr '_-' '/+' \
+  | awk '{ n = length % 4; if (n) $0 = $0 substr("===", 1, 4 - n); print }' \
+  | base64 -d | jq .
 ```
 
 When all four pass, return to

@@ -277,7 +277,7 @@ curl -fsS https://meho.example.com/api/v1/auth-config
 
 If `/healthz` is green but `/ready` returns 503 with its `keycloak`
 check reading `jwks_fetch_failed: ConnectError` (or the credential
-backend's check reading `unreachable: ConnectError`), the backplane
+backend's check reading `unreachable: SSLError`), the backplane
 does not trust the certificate that dependency presented — go back to
 [TLS and ingress](tls-ingress.md#the-backplanes-own-trust-internal-ca-bundle).
 

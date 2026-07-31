@@ -227,8 +227,8 @@ identity is the slow part, and it is where the calendar actually goes.
 ## Air-gapped
 
 The no-egress shape: every artefact is mirrored into the estate once,
-signature-verified on the way in, and the platform then runs with no
-internet path at all.
+the MEHO-published ones signature-verified on the way in, and the
+platform then runs with no internet path at all.
 
 ```mermaid
 flowchart TB
@@ -236,7 +236,7 @@ flowchart TB
     src["Published artefacts: backplane image, Helm chart, Valkey image"]
   end
   subgraph estate["Air-gapped estate, no internet egress"]
-    mirror["Local registry mirror (signatures verified at import)"]
+    mirror["Local registry mirror (MEHO artefacts signature-verified at import)"]
     subgraph cluster["Cluster, namespace meho"]
       bp["MEHO backplane (default embedding model baked into the image)"]
       valkey["Valkey broadcast (single replica)"]
@@ -278,10 +278,14 @@ default model.
    from Docker Hub, not from the MEHO registry, and it is the one people
    forget.
 
-All three are cosign keyless-signed, so the mirror import step can
-verify provenance before anything enters the estate; the verification
-commands are in the
+The two MEHO-published artefacts — the backplane image and the Helm
+chart — are cosign keyless-signed, so the mirror import step can verify
+their provenance before they enter the estate; the verification commands
+are in the
 [repository README](https://github.com/evoila/meho#verify-image--chart--cli-signatures).
+The Valkey image is an upstream third-party image from Docker Hub and
+carries no MEHO signature — mirror it under whatever provenance policy
+your registry already applies to third-party base images.
 
 **Cloud-hosted AI clients do not work here, and cannot be made to.**
 A hosted MCP client has to reach your backplane over the public

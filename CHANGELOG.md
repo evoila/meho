@@ -105,12 +105,12 @@ connector-related release-notes line.
   so a satellite-only enclave gets observation and not change
   automation; air-gapped estates cannot use cloud-hosted MCP clients at
   all; per-operator Workload Identity Federation obligates a
-  background-dispatch decision or credentialed sensors silently read
-  nothing; and multi-tenant MSP is labelled a **target shape**, not a
-  field-proven one. Every operational claim cites a public file in this
-  repository, listed in the page's own Sources section. Mermaid
-  rendering is enabled for the site via the documented Material
-  custom-fence config. (#2663)
+  background-dispatch decision or credentialed sensors evaluate
+  `unknown` forever; and multi-tenant MSP is labelled a **target
+  shape**, not a field-proven one. Every operational claim cites a
+  public file in this repository, listed in the page's own Sources
+  section. Mermaid rendering is enabled for the site via the
+  documented Material custom-fence config. (#2663)
 
 ### Added — docs-site Do-real-work guides: targets & secrets, first operations, sensors (#2673)
 

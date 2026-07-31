@@ -360,8 +360,8 @@ narrative in
   rather than the platform service account. But scheduled work — sensor
   evaluations and other callers with no operator behind them — has no
   token to federate. On a cluster without ambient pod identity you must
-  configure the `checkRunner.*` principal, or credentialed sensors read
-  nothing, forever and silently. The full decision matrix is in
+  configure the `checkRunner.*` principal, or credentialed sensors
+  evaluate `unknown` forever. The full decision matrix is in
   [`docs/deploying.md` § Per-operator WIF and background dispatch](https://github.com/evoila/meho/blob/main/docs/deploying.md#per-operator-wif-and-background-dispatch-2642).
 
 The Google Secret Manager backend is a **Beta** feature — see the

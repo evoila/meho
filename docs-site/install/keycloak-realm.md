@@ -163,10 +163,26 @@ curl -fsS https://meho.example.com/api/v1/auth-config | jq .
 # 3. Device-code login completes end to end.
 meho login https://meho.example.com
 
-# 4. A minted token carries the full claim shape. Decode it and check:
-#    aud contains BOTH "meho-backplane" and "https://<backplane-host>/mcp",
-#    and sub, tenant_id, tenant_role, groups are all present.
-meho status --print-token
+# 4. The stored token is accepted end to end.
+meho status
+```
+
+To check the **claim shape** — `aud` contains both `meho-backplane` and
+`https://<backplane-host>/mcp`, and `sub`, `tenant_id`, `tenant_role`,
+`groups` are all present — you need the raw token, and the CLI has no
+verb that prints it. `meho login` stores it in the OS keyring
+(Keychain, Secret Service, Wincred), falling back to a 0600-mode file
+at `$XDG_CONFIG_HOME/meho/credentials.json` on headless hosts. Force
+that file backend with `MEHO_KEYRING_DISABLE=1` when you need to read
+the token yourself:
+
+```bash
+MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com
+
+# The file holds one entry per backplane; a fresh host has exactly one.
+jq -r '.entries[].access_token' \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/meho/credentials.json" \
+  | cut -d. -f2 | base64 -d 2>/dev/null | jq .
 ```
 
 When all four pass, return to

@@ -92,9 +92,11 @@ publicly-trusted certificates.
 The backplane *makes* TLS connections too — to Keycloak (token
 validation), the credential backend, and PostgreSQL. Its Python
 runtime trusts only public CAs by default, so internal-CA-signed
-dependencies fail with `SSLError` and the symptom is distinctive:
-**`/healthz` is green but `/ready` returns 503** with an `ssl_error`
-in its checks, and an `--atomic` install rolls itself back.
+dependencies fail their probes and the symptom is distinctive:
+**`/healthz` is green but `/ready` returns 503**, with the `keycloak`
+entry in its `checks` reading `jwks_fetch_failed: ConnectError` (or the
+credential backend's reading `unreachable: ConnectError`), and an
+`--atomic` install rolls itself back.
 
 The fix is mounting a CA bundle and pointing `SSL_CERT_FILE` at it —
 the chart has first-class hooks:

@@ -17,7 +17,7 @@ need it, and each of those pages sends you back here.
 
 | You bring | Requirements |
 |---|---|
-| **Kubernetes cluster** | Any conformant cluster with an ingress controller (the examples assume ingress-nginx). [Helm](https://helm.sh/) 4 on your workstation. |
+| **Kubernetes cluster** | Any conformant cluster with an ingress controller (the examples assume ingress-nginx). [Helm](https://helm.sh/) 3.8+ on your workstation; Helm 4 recommended — the [upgrades](upgrades.md) page's server-side-apply guidance assumes it. |
 | **PostgreSQL** | A reachable PostgreSQL server with the [pgvector](https://github.com/pgvector/pgvector) extension *available* (installed as a server package — Step 1 covers enabling it). MEHO does not bundle a database. |
 | **Keycloak** | A [Keycloak](https://www.keycloak.org/) you administer, with a realm for MEHO (an existing realm works). Step 4 covers the realm configuration. |
 | **Credential backend** | HashiCorp Vault **or** access to Google Secret Manager. Step 2 helps you choose. |
@@ -275,9 +275,10 @@ curl -fsS https://meho.example.com/api/v1/auth-config
 # → {"keycloak_issuer": "...", "audience": "meho-backplane", "cli_client_id": "meho-cli"}
 ```
 
-If `/healthz` is green but `/ready` reports an `ssl_error`, the
-backplane does not trust the certificate one of its dependencies
-presented — go back to
+If `/healthz` is green but `/ready` returns 503 with its `keycloak`
+check reading `jwks_fetch_failed: ConnectError` (or the credential
+backend's check reading `unreachable: ConnectError`), the backplane
+does not trust the certificate that dependency presented — go back to
 [TLS and ingress](tls-ingress.md#the-backplanes-own-trust-internal-ca-bundle).
 
 ## Step 9 — Install the CLI and log in
@@ -319,9 +320,10 @@ Prove the whole chain end to end:
 
 ```bash
 meho status
-curl -sf -H "Authorization: Bearer $(meho status --print-token)" \
-  https://meho.example.com/api/v1/health
 ```
+
+`meho status` calls `/api/v1/health` with the stored bearer token, so a
+clean result proves the whole chain — CLI, token, ingress, backplane.
 
 If login fails, the symptom almost always maps to a known
 misconfiguration in the realm —

@@ -41,16 +41,20 @@ kind create cluster --name meho-dev
 
 # 3. Install the chart from its OCI artefact, pinning an immutable
 #    image tag (a release tag, or sha-<git-sha> from a green CI run).
+#    The overlay turns ingress off, so the chart has no hostname to
+#    derive the /mcp audience from and refuses to render without one.
+#    The placeholder below satisfies that guard; /mcp stays fail-closed.
 helm install meho-dev oci://ghcr.io/evoila/meho-chart \
   --version <chart-version> \
   -n meho --create-namespace \
   -f https://raw.githubusercontent.com/evoila/meho/main/deploy/values-examples/values-kind.yaml \
-  --set image.tag=<immutable-tag>
+  --set image.tag=<immutable-tag> \
+  --set config.backplaneUrl=http://localhost:8000
 
 # 4. Watch it come up and poke it.
 kubectl wait --for=condition=Ready pod \
-  -l app.kubernetes.io/name=meho -n meho --timeout=2m
-kubectl port-forward -n meho svc/meho-dev-meho 8000:8000 &
+  -l app.kubernetes.io/name=meho -n meho --timeout=6m
+kubectl port-forward -n meho svc/meho-dev 8000:8000 &
 curl localhost:8000/healthz
 ```
 

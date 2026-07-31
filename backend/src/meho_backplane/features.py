@@ -49,21 +49,23 @@ This module is also the **single source of truth for feature
 maturity** (#2664): :data:`FEATURE_MATURITY` maps every user-facing
 MEHO feature to its tier — ``ga`` / ``beta`` / ``experimental`` — plus,
 on non-GA entries, the ``target_ga`` milestone and the ``tracking``
-issue URL. Every maturity-labelled surface derives from this one dict:
+issue URL. Every maturity-labelled surface derives from this one dict.
+``/ready`` — the deploy-gate entries this module already emits merge
+the maturity fields in (see :data:`_READY_ENTRY_FEATURE`) — is the
+only consumer shipped so far; the remaining #2664 surfaces are
+planned, not yet implemented:
 
-* ``/ready`` — the deploy-gate entries this module already emits merge
-  the maturity fields in (see :data:`_READY_ENTRY_FEATURE`).
 * MCP tool-description prefixes + ``initialize.instructions`` summary
   and the OpenAPI ``x-maturity`` extension (#2675).
 * The CLI command-manifest ``maturity`` field (#2676).
 * The ``/ui`` area-header badge chips (#2677).
 * The generated docs maturity-index page + CI drift guard (#2678).
 
-Those consumers **import this module** (server-side render, tool
-registration, docs build) — deliberately no dedicated REST read
-surface: the smallest thing that serves every #2664 consumer is the
-module itself, and ``/ready`` already carries the merged view for
-operator tooling.
+Those planned consumers **will import this module** (server-side
+render, tool registration, docs build) — deliberately no dedicated
+REST read surface: the smallest thing that serves every #2664
+consumer is the module itself, and ``/ready`` already carries the
+merged view for operator tooling.
 
 Reclassifying a feature (the v0.28 post-eval round, Goal #2661) is a
 one-line data edit in :data:`FEATURE_MATURITY`; no surface-specific

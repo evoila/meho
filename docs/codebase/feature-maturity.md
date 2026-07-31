@@ -8,8 +8,8 @@ user-facing MEHO feature to a tier — `ga` / `beta` / `experimental` —
 plus, on non-GA entries, the `target_ga` milestone and the `tracking`
 issue URL. Every surface that shows a maturity label derives from this
 one dict; reclassifying a feature is a one-line data edit here with no
-surface-specific changes anywhere (the v0.28 post-eval round in Goal
-#2661 depends on that property).
+surface-specific changes anywhere (the v0.28 post-eval round in
+Goal #2661 depends on that property).
 
 Tier semantics (#2664 entry criteria): `ga` carries the 1.0 stability
 promise; `beta` works end-to-end somewhere real with known, tracked
@@ -34,8 +34,8 @@ is the **provisional** #2664 table, pending clean-room eval round 1
 - `_READY_ENTRY_FEATURE` — maps the `/ready` features-block entries
   (deploy-gate names) to registry keys (feature names). The `mcp`
   entry is deliberately unmapped: it reports a build-time protocol
-  constant, not a classified feature — MCP tools inherit maturity from
-  their owning feature at registration time (#2675).
+  constant, not a classified feature — MCP tools will inherit maturity
+  from their owning feature at registration time (#2675).
 
 ## Control flow
 
@@ -47,12 +47,13 @@ registry, preserving the module's purity contract (pure function over
 a `Settings` snapshot; tests pin this in
 `test_builder_stays_pure_and_does_not_alias_the_registry`).
 
-Other consumers import the module directly — there is deliberately no
-dedicated REST read surface. `/ready` carries the merged view for
-operator tooling; MCP registration (#2675), the CLI command manifest
-builder (#2676), the `/ui` badge include (#2677), and the docs-site
-maturity-index generator plus CI drift guard (#2678) all read
-`FEATURE_MATURITY` in-process.
+`/ready` is the only consuming surface shipped so far; it carries the
+merged view for operator tooling. The remaining #2664 surfaces are
+planned consumers, not yet implemented: MCP registration (#2675), the
+CLI command-manifest builder (#2676), the `/ui` badge include (#2677),
+and the docs-site maturity-index generator plus CI drift guard (#2678)
+will all read `FEATURE_MATURITY` in-process — there is deliberately no
+dedicated REST read surface.
 
 ## Dependencies
 

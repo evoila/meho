@@ -37,7 +37,11 @@ from typing import Any
 
 import pytest
 
-from meho_backplane.features import FEATURE_MATURITY, build_features_block
+from meho_backplane.features import (
+    _READY_ENTRY_FEATURE,
+    FEATURE_MATURITY,
+    build_features_block,
+)
 from meho_backplane.settings import Settings
 
 
@@ -359,6 +363,18 @@ READY_ENTRY_FEATURE_CONTRACT = {
 }
 
 _ISSUE_URL_RE = re.compile(r"^https://github\.com/evoila/meho/issues/\d+$")
+
+
+def test_ready_entry_mapping_matches_the_contract() -> None:
+    """The module's mapping is the pinned contract, key for key.
+
+    The merge tests below derive their expectations from the mapping's
+    *values*, so a silent remap between value-identical registry
+    entries (``audit``/``approvals`` today; the #2665-tracked beta
+    group) would still pass them. Comparing the dicts directly pins
+    the mapping itself.
+    """
+    assert _READY_ENTRY_FEATURE == READY_ENTRY_FEATURE_CONTRACT
 
 
 def test_maturity_registry_covers_the_2664_classification() -> None:

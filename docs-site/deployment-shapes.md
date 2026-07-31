@@ -78,18 +78,20 @@ This is the same posture in all five shapes, so it is stated once here
 rather than repeated below. Broadcast is a **Beta** feature — see the
 [feature maturity index](reference/maturity.md).
 
-### The chart fails at render time, not at runtime
+### The chart fails fast on invalid values
 
-Configuration is validated by the chart's JSON schema, so a
-mis-configured install fails during `helm template` / `helm install`
+Chart values are validated by the chart's JSON schema, so a
+schema-invalid install fails during `helm template` / `helm install`
 before anything runs. The clearest example: if none of `ingress.host`,
 `config.backplaneUrl`, or `config.mcpResourceUri` resolves, the chart
 refuses to render rather than deploying a silently unusable MCP
-endpoint. That is worth knowing before you start: a mistake in any
-shape below surfaces at install time with a remediation message, not as
-a healthy-looking pod that quietly does nothing.
-([`docs/deploying.md` § Deploy from cold](https://github.com/evoila/meho/blob/main/docs/deploying.md#deploy-from-cold--prerequisites-checklist),
-MCP-audience row.)
+endpoint. What the schema cannot check is everything outside the
+chart — the pgvector extension, database reachability, DNS, CA trust,
+and credential-backend permissions surface at migration or first boot
+instead, row by row in the cold-start checklist.
+([`docs/deploying.md` § Deploy from cold](https://github.com/evoila/meho/blob/main/docs/deploying.md#deploy-from-cold--prerequisites-checklist)
+— the MCP-audience row for the example, the rest of the table for what
+surfaces later.)
 
 ---
 

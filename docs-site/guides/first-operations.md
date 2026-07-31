@@ -9,9 +9,14 @@ call it**. This guide walks that ladder once, end to end, against a
 typed Kubernetes connector — the same flow applies to every connector,
 including ones ingested from an OpenAPI spec.
 
-Every rung exists twice: as an MCP tool (for agents) and as a CLI verb
-(for operators). Both run the same dispatch path — policy, credential
-resolution, result reduction, audit.
+Most rungs exist twice: as an MCP tool (for agents) and as a CLI verb
+(for operators) — preview and `result_query` are MCP/REST-only, as the
+table below shows. Where both surfaces exist they share one backplane
+rather than two implementations. The rung that *dispatches* — `call` —
+runs the full path: policy gate, credential resolution, result
+reduction, audit. Preview deliberately stops short of it: it resolves
+the request and hands it back, skipping the policy gate, sending
+nothing, and writing no audit row.
 
 !!! note "Prerequisites"
 

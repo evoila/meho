@@ -53,7 +53,11 @@ nav:
       - Deployment shapes: deployment-shapes.md
   - Install & operate: install/index.md
   - Connect clients: clients/index.md
-  - Do real work: guides/index.md
+  - Do real work:
+      - guides/index.md
+      - guides/targets-and-secrets.md
+      - guides/first-operations.md
+      - guides/sensors-quickstart.md
   - Reference:
       - reference/index.md
       # Generated from the feature-maturity registry by

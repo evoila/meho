@@ -11,7 +11,7 @@ one:
 | Guide | What you will have at the end |
 |---|---|
 | [Register targets and secrets](targets-and-secrets.md) | Your systems registered as targets, credentials staged in your secret store, and a green probe proving MEHO can reach and identify each one. |
-| [Run your first operations](first-operations.md) | The discover → search → preview → call ladder, exercised end to end against a real target, including how to page large results and what the safety flags mean. |
+| [Run your first operations](first-operations.md) | The discover → groups → search → preview → call ladder, exercised end to end against a real target, including how to page large results and what the safety flags mean. |
 | [Watch your estate with sensors](sensors-quickstart.md) | A sensor evaluating a real check on a schedule, a dashboard rolling it up, and a triage walk of the five-state vocabulary when something breaks. |
 
 ## Coming to this section

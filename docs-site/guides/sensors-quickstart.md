@@ -148,9 +148,9 @@ tools today**.
 
 ## Step 4 — break something and watch
 
-Make one pod unschedulable in the watched cluster — point a
-deployment at a nonexistent image tag, or kill a node if the lab is
-yours to break:
+Push one pod out of `Running` in the watched cluster — point a
+deployment at a nonexistent image tag (it schedules, then sticks in
+`ImagePullBackOff`), or kill a node if the lab is yours to break:
 
 ```bash
 meho operation call k8s-1.x k8s.pod.list \

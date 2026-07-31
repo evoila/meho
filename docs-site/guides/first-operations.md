@@ -23,7 +23,10 @@ nothing, and writing no audit row.
     - A registered, probe-green target —
       [Register targets and secrets](targets-and-secrets.md). The
       examples below use the `lab-rke2` Kubernetes target from that
-      guide.
+      guide. On a GSM deployment with per-operator Workload Identity
+      Federation, credentialed probes report `reachable: false` or
+      `auth_failed` even when the target is fine — work the ladder
+      anyway and let a successful call (Step 4) stand in as the proof.
     - An **operator**-role session. Nothing in this guide needs
       tenant_admin.
 

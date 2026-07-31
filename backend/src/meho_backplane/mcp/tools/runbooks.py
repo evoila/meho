@@ -713,12 +713,14 @@ def _opacity_floor_denial() -> McpInvalidParamsError:
 
 register_mcp_tool(
     definition=ToolDefinition(
-        # Deliberately unclassified (#2675): the provisional #2664
-        # maturity table does not tier the runbooks feature. Applies to
-        # every meho.runbook.* tool in this module and its sibling
-        # runbook_runs.py; the #2678 drift guard forces the
-        # classification decision.
-        feature=None,
+        # Classification decision forced by the #2678 drift guard:
+        # runbooks are curated compositions driven through the run
+        # driver — they dispatch writes, so they follow the
+        # ``write_surfaces`` beta line, matching the /ui area mapping
+        # in :mod:`meho_backplane.ui.maturity`. Applies to every
+        # meho.runbook.* tool in this module and its sibling
+        # runbook_runs.py.
+        feature="write_surfaces",
         name="meho.runbook.draft_template",
         description=_DRAFT_DESCRIPTION,
         inputSchema={
@@ -739,7 +741,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.edit_template",
         description=_EDIT_DESCRIPTION,
         inputSchema={
@@ -760,7 +762,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.publish_template",
         description=_PUBLISH_DESCRIPTION,
         inputSchema={
@@ -781,7 +783,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.deprecate_template",
         description=_DEPRECATE_DESCRIPTION,
         inputSchema={
@@ -802,7 +804,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.discard_template",
         description=_DISCARD_DESCRIPTION,
         inputSchema={
@@ -823,7 +825,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.list_templates",
         description=_LIST_DESCRIPTION,
         inputSchema={
@@ -858,7 +860,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.show_template",
         description=_SHOW_DESCRIPTION,
         inputSchema={

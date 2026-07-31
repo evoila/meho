@@ -584,10 +584,10 @@ async def _list_runs_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        # Deliberately unclassified (#2675): the provisional #2664
-        # maturity table does not tier the runbooks feature (see the
-        # matching note in runbooks.py). Applies to every tool here.
-        feature=None,
+        # Classified via the #2678 drift-guard decision (see the
+        # matching note in runbooks.py): the runbooks family dispatches
+        # writes → ``write_surfaces``. Applies to every tool here.
+        feature="write_surfaces",
         name="meho.runbook.start",
         description=_START_DESCRIPTION,
         inputSchema={
@@ -610,7 +610,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.next",
         description=_NEXT_DESCRIPTION,
         inputSchema={
@@ -639,7 +639,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.abort",
         description=_ABORT_DESCRIPTION,
         inputSchema={
@@ -664,7 +664,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.reassign",
         description=_REASSIGN_DESCRIPTION,
         inputSchema={
@@ -691,7 +691,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        feature=None,
+        feature="write_surfaces",
         name="meho.runbook.list_runs",
         description=_LIST_DESCRIPTION,
         inputSchema={

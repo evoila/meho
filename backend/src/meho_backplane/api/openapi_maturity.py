@@ -27,15 +27,21 @@ Mapping maintenance
 on :class:`~meho_backplane.mcp.registry.ToolDefinition` and of
 :data:`~meho_backplane.features._READY_ENTRY_FEATURE`. Tags absent
 from it are **deliberately unclassified**: infrastructure surfaces
-(``health``, ``version``, ``mcp`` — the transport, whose tools carry
-their own per-tool labels, ``discovery``'s untagged siblings ``/`` and
-``/metrics``) and surfaces the provisional #2664 table does not
-classify (``conventions``, ``runbooks``). The BFF ``/ui*`` tags are
-excluded wholesale — the console's maturity surface is the #2677 badge
-chips, and the #2678 drift guard excludes ``/ui/*`` by prefix until the
-#2662 public/BFF split lands. Values are validated against the registry
-at import so a typo'd key fails at boot, not as a silently missing
-label.
+only (``health``, ``version``, ``mcp`` — the transport, whose tools
+carry their own per-tool labels, ``discovery``'s untagged siblings
+``/`` and ``/metrics``). The BFF ``/ui*`` tags are excluded wholesale
+— the console's maturity surface is the #2677 badge chips, and the
+#2678 drift guard (:mod:`tests.test_maturity_surface_drift`) excludes
+``/ui/*`` by prefix until the #2662 public/BFF split lands. Every
+other tag must map here — the drift guard is red otherwise, naming
+this module as the file to edit. The #2678 decisions for the two tags
+the provisional #2664 table left unclassified: ``conventions`` (the
+preamble knowledge packer) is a face of the memory/knowledge plane →
+``memory_knowledge``; ``runbooks`` drives writes through the run
+driver → ``write_surfaces`` — both matching the /ui area mapping in
+:mod:`meho_backplane.ui.maturity`. Values are validated against the
+registry at import so a typo'd key fails at boot, not as a silently
+missing label.
 """
 
 from __future__ import annotations
@@ -63,6 +69,7 @@ TAG_FEATURE: Final[dict[str, str]] = {
     "checks": "sensors",
     "checks-dashboards": "sensors",
     "connectors": "typed_connector_reads",
+    "conventions": "memory_knowledge",
     "discovery": "auth_tenancy",
     "docs": "doc_collections",
     "feed": "broadcast",
@@ -71,6 +78,7 @@ TAG_FEATURE: Final[dict[str, str]] = {
     "memory": "memory_knowledge",
     "operations": "typed_connector_reads",
     "retrieval": "memory_knowledge",
+    "runbooks": "write_surfaces",
     "runner-principals": "satellite_gateway",
     "scheduler": "scheduler",
     "sensors": "sensors",

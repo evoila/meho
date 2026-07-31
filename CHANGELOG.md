@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — maturity drift guard in CI + generated maturity-index docs page (#2678)
+
+- Close the #2664 maturity program with its two enforcement pieces
+  (#2678). A CI **drift guard**
+  (`backend/tests/test_maturity_surface_drift.py`) asserts every
+  user-facing surface — MCP tool, public REST operation,
+  server-advertised CLI command (a tripwire until `/api/v1/commands`
+  ships), `/ui` area — resolves to a feature-maturity registry entry,
+  so an unlabelled surface is a red build; infrastructure exemptions
+  are closed, rationale-carrying allowlists in the guard itself. The
+  docs site gains a generated **feature-maturity index** page
+  (`docs-site/reference/maturity.md`, rendered from the registry by
+  `backend/scripts/generate_maturity_index.py` with a freshness gate)
+  listing every non-GA feature's target milestone and tracking issue;
+  the `/ui` badge chips now deep-link to each feature's anchor on it.
+  The guard also forced the outstanding classification decisions: the
+  `meho.runbook.*` MCP tools and the `runbooks` REST tag join
+  `write_surfaces` (beta — their descriptions now carry the `[beta]`
+  prefix), the `conventions` REST tag joins `memory_knowledge`, and
+  `meho.status` is explicitly exempt infrastructure. (#2678)
+
 ### Added — maturity badge chips on the operator-console area headers (#2677)
 
 - Every non-GA `/ui` area header now renders a **Beta** / **Experimental**

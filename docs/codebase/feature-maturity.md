@@ -54,11 +54,11 @@ in-process — there is deliberately no dedicated REST read surface):
 - **MCP tool descriptions** (#2675) — every
   `mcp/registry.py::ToolDefinition` declares a required `feature`
   field (a registry key, or an explicit `None` for
-  deliberately-unclassified surfaces such as `meho.status` and the
-  runbooks family, which the provisional #2664 table does not
-  classify). `register_mcp_tool` prefixes non-GA descriptions with
-  `[beta]` / `[experimental]` at registration time; an unknown key
-  fails validation at construction.
+  deliberately-unclassified infrastructure — today only `meho.status`,
+  the `/api/v1/health` mirror; #2678 classified the runbooks family
+  under `write_surfaces`). `register_mcp_tool` prefixes non-GA
+  descriptions with `[beta]` / `[experimental]` at registration time;
+  an unknown key fails validation at construction.
 - **`initialize.instructions`** (#2675) —
   `mcp/maturity.py::FEATURE_MATURITY_BAND` (a registry-derived static
   band listing exactly the non-GA features) is appended after the
@@ -72,17 +72,30 @@ in-process — there is deliberately no dedicated REST read surface):
   the `connectors` tag's ingest-pipeline paths). Flows into the
   committed `cli/api/openapi.json` snapshot. `/ui*` tags and
   infrastructure tags (`health`, `version`, `mcp`) are deliberately
-  unmapped.
+  unmapped; every other tag must map (drift-guarded, see below —
+  #2678 mapped `conventions` → `memory_knowledge` and `runbooks` →
+  `write_surfaces`, both matching the /ui area mapping).
 - **`/ui` area-header badge chips** (#2677) —
   `meho_backplane.ui.maturity` maps sidebar surfaces onto registry
   keys and a shared Jinja include renders the chip; see
   `docs/codebase/ui.md`.
 
-Remaining #2664 surface, not yet implemented: the docs-site
-maturity-index generator plus CI drift guard (#2678). The drift
-guard is where today's deliberately-unclassified surfaces (runbooks,
-`meho.status`, the `conventions` REST tag) get
-forced into an explicit classification decision.
+- **Docs maturity-index page + CI drift guard** (#2678) —
+  `docs-site/reference/maturity.md` is rendered entirely from the
+  registry by `backend/scripts/generate_maturity_index.py` and
+  **committed** (the docs-site CI job installs only the `docs`
+  dependency group and must not import the backend), with a freshness
+  gate in `backend/tests/test_maturity_surface_drift.py` that turns a
+  registry edit without regeneration into a red unit lane — the same
+  committed-derived-artifact shape as `cli/api/openapi.json`. The
+  same module is the **drift guard**: every MCP tool, public REST
+  operation (`/ui*` excluded by prefix until the #2662 public/BFF
+  split), and `/ui` area must resolve to a registry key; deliberate
+  infrastructure exemptions are closed allowlists in the guard with
+  written rationale and staleness checks. The server-advertised CLI
+  command class is a tripwire until `/api/v1/commands` ships (see
+  below). Per-feature page headings are the raw registry keys, so the
+  #2677 badge chips deep-link `…/reference/maturity/#<feature-key>`.
 
 The CLI's *client* half of #2676 is shipped:
 `cli/internal/discovery/discovery.go`'s `Command` carries a
@@ -95,7 +108,11 @@ which is an unshipped Goal #11 §5 coordination point: today every
 backplane 404s the manifest fetch and the CLI falls back to its
 local-only command set. When the endpoint lands, its builder resolves
 each advertised command's owning feature from `FEATURE_MATURITY` and
-emits the field the CLI already understands.
+emits the field the CLI already understands. The endpoint's absence
+is pinned by the #2678 tripwire
+(`test_cli_command_manifest_endpoint_is_still_unshipped`), so the PR
+that ships it must extend the drift guard with a real manifest class
+in the same diff.
 
 ## Dependencies
 
@@ -124,3 +141,8 @@ expectations from the registry so a retier never requires a test edit.
 - `backend/tests/test_maturity_propagation.py` — #2675 surface tests;
   every expectation derives from the registry (a retier never
   requires a test edit).
+- `backend/tests/test_maturity_surface_drift.py` — #2678 drift guard
+  (MCP / REST / CLI-manifest tripwire / UI classes) + the generated
+  maturity-index page's freshness and anchor gates;
+  `backend/tests/test_ui_maturity_badge.py` — #2677 badge chips,
+  including the per-feature anchor deep-link.

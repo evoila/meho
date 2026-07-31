@@ -52,7 +52,12 @@ nav:
   - Install & operate: install/index.md
   - Connect clients: clients/index.md
   - Do real work: guides/index.md
-  - Reference: reference/index.md
+  - Reference:
+      - reference/index.md
+      # Generated from the feature-maturity registry by
+      # backend/scripts/generate_maturity_index.py (#2678); freshness
+      # is enforced by backend/tests/test_maturity_surface_drift.py.
+      - reference/maturity.md
   - Project: project/index.md
 
 markdown_extensions:

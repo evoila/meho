@@ -110,7 +110,10 @@ def test_resolver_derives_tier_from_registry() -> None:
             assert badge["label"] == info["maturity"].capitalize()
             assert badge["target_ga"] == info.get("target_ga")
             assert badge["tracking"] == info.get("tracking")
-            assert badge["href"] == MATURITY_INDEX_URL
+            # #2678: the chip deep-links to the feature's anchor on the
+            # generated maturity-index page (headings are raw registry
+            # keys, preserved verbatim by the toc slugifier).
+            assert badge["href"] == f"{MATURITY_INDEX_URL}#{feature}"
 
 
 def test_resolver_renders_nothing_for_unmapped_surfaces() -> None:
@@ -138,7 +141,7 @@ def test_badge_include_renders_from_registry() -> None:
         expected_class = "badge-info" if tier == "beta" else "badge-warning"
         assert expected_class in html, f"{surface}: wrong tier class"
         assert "badge-soft" in html
-        assert MATURITY_INDEX_URL in html, f"{surface}: index link missing"
+        assert f"{MATURITY_INDEX_URL}#{feature}" in html, f"{surface}: anchored index link missing"
 
 
 def test_retier_propagates_without_template_edits(

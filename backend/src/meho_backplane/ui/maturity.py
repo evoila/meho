@@ -51,9 +51,12 @@ from meho_backplane.features import FEATURE_MATURITY
 __all__ = ["MATURITY_INDEX_URL", "SURFACE_FEATURE", "surface_maturity"]
 
 #: The docs maturity-index page the chip links to. #2678 generates the
-#: page into the MkDocs site's Reference section; until it lands the
-#: URL is an accepted stub target (task acceptance criteria). ``latest``
-#: is the mike alias every tagged deploy re-points.
+#: page (``docs-site/reference/maturity.md``, rendered by
+#: ``backend/scripts/generate_maturity_index.py``) into the MkDocs
+#: site's Reference section; each chip deep-links to its feature's
+#: anchor — the page's per-feature headings are the raw registry keys,
+#: which the toc slugifier preserves verbatim (underscores included).
+#: ``latest`` is the mike alias every tagged deploy re-points.
 MATURITY_INDEX_URL = "https://evoila.github.io/meho/latest/reference/maturity/"
 
 #: Sidebar surface key (``active_surface``, as registered in
@@ -118,5 +121,5 @@ def surface_maturity(surface: str) -> MaturityBadge | None:
         "label": info["maturity"].capitalize(),
         "target_ga": info.get("target_ga"),
         "tracking": info.get("tracking"),
-        "href": MATURITY_INDEX_URL,
+        "href": f"{MATURITY_INDEX_URL}#{feature}",
     }

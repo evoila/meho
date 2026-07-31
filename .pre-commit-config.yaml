@@ -40,7 +40,13 @@ repos:
         # dragonflyoss/helm-charts) and the pre-commit-hooks#420
         # discussion. Without this exclude, any edit to a chart template
         # tries (and fails) to parse Go-template directives as YAML.
-        exclude: ^deploy/charts/.+/templates/.+\.ya?ml$
+        #
+        # mkdocs.yml is excluded for the same class of reason: the
+        # mermaid custom fence uses the `!!python/name:` tag Material
+        # documents, which yaml.safe_load (and therefore check-yaml)
+        # rejects. mkdocs.yml is validated far more strictly by the
+        # `mkdocs build --strict` check in docs-site.yml.
+        exclude: ^(deploy/charts/.+/templates/.+\.ya?ml|mkdocs\.yml)$
       - id: check-json
       - id: check-added-large-files
         args: [--maxkb=500]

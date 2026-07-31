@@ -95,6 +95,11 @@ deploy.
 
 - `mkdocs.yml` is strict: a page not referenced in `nav`, or any
   broken internal link, fails the build. Add new pages to `nav`.
+- Mermaid diagrams render natively via the Material custom-fence
+  config on `pymdownx.superfences` (#2671). That config uses the
+  `!!python/name:` YAML tag, which `yaml.safe_load` rejects —
+  `mkdocs.yml` is therefore excluded from the pre-commit `check-yaml`
+  hook (the strict mkdocs build validates it far harder anyway).
 - The deploy job needs the `workflow`-scoped credential story only at
   *merge* time (the file under `.github/workflows/` requires the
   `workflow` OAuth scope to push).

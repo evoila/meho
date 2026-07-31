@@ -69,6 +69,7 @@ from meho_backplane.features import FEATURE_MATURITY
 from meho_backplane.main import app
 from meho_backplane.mcp.registry import ToolDefinition
 from meho_backplane.ui.maturity import SURFACE_FEATURE
+from meho_backplane.ui.routes.stubs import _SURFACE_STUBS
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -194,9 +195,7 @@ def test_every_public_rest_operation_resolves_to_a_feature(
         if not tags:
             if path not in _REST_UNTAGGED_INFRA_PATHS:
                 unmapped.append(f"{method.upper()} {path} (untagged)")
-        elif not any(tag in TAG_FEATURE for tag in tags) and not all(
-            tag in _REST_INFRA_TAGS for tag in tags
-        ):
+        elif not all(tag in TAG_FEATURE or tag in _REST_INFRA_TAGS for tag in tags):
             unmapped.append(f"{method.upper()} {path} (tags={tags})")
     assert not unmapped, (
         f"public REST operations without a maturity classification: {unmapped}. "
@@ -228,7 +227,9 @@ def test_rest_infra_allowlists_carry_no_stale_entries(
 # ---------------------------------------------------------------------------
 
 
-def test_cli_command_manifest_endpoint_is_still_unshipped() -> None:
+def test_cli_command_manifest_endpoint_is_still_unshipped(
+    openapi_schema: dict[str, Any],
+) -> None:
     """Tripwire: the manifest endpoint must land together with its guard.
 
     ``GET /api/v1/commands`` (the CLI's server-driven discovery
@@ -241,13 +242,15 @@ def test_cli_command_manifest_endpoint_is_still_unshipped() -> None:
     class asserting every advertised command resolves its owning
     feature from FEATURE_MATURITY (the ``maturity`` field the CLI
     already renders, #2676), then retire this test.
+
+    Detection goes through the generated OpenAPI document, not a scan
+    of ``app.routes``: on the locked FastAPI, ``include_router`` is
+    lazy — the included routes never surface in ``app.routes`` — so a
+    route-scan tripwire stays green on the realistic
+    ``app.include_router`` landing, while the OpenAPI paths always
+    carry the new endpoint.
     """
-    manifest_routes = [
-        route.path  # type: ignore[attr-defined]
-        for route in app.routes
-        if getattr(route, "path", "") == "/api/v1/commands"
-    ]
-    assert not manifest_routes, (
+    assert "/api/v1/commands" not in openapi_schema["paths"], (
         "/api/v1/commands has landed: replace this tripwire with a drift "
         "guard asserting every command the manifest advertises resolves to "
         "a FEATURE_MATURITY key (see this test's docstring)."
@@ -260,12 +263,13 @@ def test_cli_command_manifest_endpoint_is_still_unshipped() -> None:
 
 _UI_ROUTES_DIR = _REPO_ROOT / "backend" / "src" / "meho_backplane" / "ui" / "routes"
 
-#: Matches the ``"active_surface": "<key>"`` context entries every /ui
-#: route passes for the sidebar highlight. Literal string values only —
-#: the single dynamic site (``stubs.py``'s ``stub.slug``) draws from
-#: ``_SURFACE_STUBS``, which is empty since every surface shipped its
-#: real router.
-_ACTIVE_SURFACE_RE = re.compile(r'"active_surface":\s*"([^"]+)"')
+#: Matches the ``active_surface`` context entries every /ui route
+#: passes for the sidebar highlight, in both in-tree idioms: the dict
+#: literal (``"active_surface": "kb"``) and the item assignment
+#: (``context["active_surface"] = "audit"``). Literal string values
+#: only — the single dynamic site (``stubs.py``'s ``stub.slug``) draws
+#: from ``_SURFACE_STUBS``, whose emptiness the test below asserts.
+_ACTIVE_SURFACE_RE = re.compile(r'"active_surface"\s*(?::|\]\s*=)\s*"([^"]+)"')
 
 
 def test_every_ui_area_surface_resolves_to_a_feature() -> None:
@@ -276,6 +280,11 @@ def test_every_ui_area_surface_resolves_to_a_feature() -> None:
     catches a new area *route* whose surface key joins neither the
     mapping nor the sidebar.
     """
+    assert not _SURFACE_STUBS, (
+        "stubs.py re-grew dynamic surfaces — extend this guard to cover "
+        "their slugs (they render active_surface=stub.slug, which the "
+        "literal-matching regex cannot see)."
+    )
     surfaces: dict[str, list[str]] = {}
     for source in sorted(_UI_ROUTES_DIR.rglob("*.py")):
         for key in _ACTIVE_SURFACE_RE.findall(source.read_text(encoding="utf-8")):

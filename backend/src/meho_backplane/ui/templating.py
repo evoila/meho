@@ -29,7 +29,10 @@ Configuration decisions:
   rendering an empty string. FastAPI's exception middleware turns the
   500 into a structlog event the operator sees in CI / kubectl logs.
 
-The environment exposes one extra global, ``app_version``, bound from
+The environment also exposes ``surface_maturity`` — the pure
+area-header maturity-chip resolver from :mod:`meho_backplane.ui.maturity`
+(#2677) that ``_maturity_badge.html`` calls at render time — and
+``app_version``, bound from
 :func:`meho_backplane.version.deployed_version_label` so every template
 can show the *deployed* build identity in the footer without each route
 having to pass it explicitly. The label reads the same ``CHART_VERSION``
@@ -58,6 +61,7 @@ from fastapi.templating import Jinja2Templates
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 from starlette.requests import Request
 
+from meho_backplane.ui.maturity import surface_maturity
 from meho_backplane.ui.paths import templates_dir
 from meho_backplane.version import deployed_version_label
 
@@ -106,6 +110,13 @@ def get_jinja_env() -> Environment:
             keep_trailing_newline=True,
         )
         _ENV.globals["app_version"] = deployed_version_label()
+        # Area-header maturity chip resolver (#2677): a pure lookup
+        # over the feature-maturity registry (features.py, #2674),
+        # keyed on the ``active_surface`` the routes already pass.
+        # Bound as a global so ``_maturity_badge.html`` resolves the
+        # tier server-side at render time — no per-route context
+        # threading, no REST round-trip.
+        _ENV.globals["surface_maturity"] = surface_maturity
     return _ENV
 
 

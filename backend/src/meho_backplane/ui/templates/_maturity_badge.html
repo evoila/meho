@@ -1,0 +1,31 @@
+{#-
+  SPDX-License-Identifier: Apache-2.0
+  Copyright (c) 2026 evoila Group
+
+  Maturity badge chip for /ui area headers (#2677). Included inside the
+  area <h1>; renders nothing on GA areas, a linked Beta / Experimental
+  chip otherwise. The tier is resolved server-side at render time by the
+  ``surface_maturity`` Jinja global (ui/maturity.py) from the
+  feature-maturity registry (features.py, #2674) keyed on the
+  ``active_surface`` the rendering route already passes for the sidebar
+  highlight — templates hardcode no tier, so a registry retier changes
+  every chip with zero template edits.
+
+  DaisyUI 5 classes only (the v4-in-v5 trap from the console-polish
+  round): ``badge-soft`` is the v5 style modifier, verified against the
+  vendored static/src/vendor/daisyui.js plugin. The chip links to the
+  docs maturity-index page (#2678 generates it; stub target until then)
+  and carries the tier semantics as a native tooltip via ``title`` —
+  no positioning wrapper inside the flex h1, and the link's purpose
+  stays exposed to assistive tech.
+-#}
+{%- set maturity_badge = surface_maturity(active_surface | default("")) -%}
+{%- if maturity_badge is not none -%}
+<a
+  href="{{ maturity_badge.href }}"
+  target="_blank"
+  rel="noopener"
+  class="badge badge-soft badge-sm font-sans font-medium no-underline {% if maturity_badge.tier == 'beta' %}badge-info{% else %}badge-warning{% endif %}"
+  title="{{ maturity_badge.label }}{% if maturity_badge.target_ga %} — target GA {{ maturity_badge.target_ga }}{% endif %}. See the feature-maturity index."
+>{{ maturity_badge.label }}</a>
+{%- endif -%}

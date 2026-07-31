@@ -47,13 +47,15 @@ registry, preserving the module's purity contract (pure function over
 a `Settings` snapshot; tests pin this in
 `test_builder_stays_pure_and_does_not_alias_the_registry`).
 
-`/ready` is the only consuming surface shipped so far; it carries the
-merged view for operator tooling. The remaining #2664 surfaces are
-planned consumers, not yet implemented: MCP registration (#2675), the
-CLI command-manifest builder (#2676), the `/ui` badge include (#2677),
-and the docs-site maturity-index generator plus CI drift guard (#2678)
-will all read `FEATURE_MATURITY` in-process — there is deliberately no
-dedicated REST read surface.
+Consuming surfaces shipped so far: `/ready` (carries the merged view
+for operator tooling) and the `/ui` area-header badge chips (#2677 —
+`meho_backplane.ui.maturity` maps sidebar surfaces onto registry keys
+and a shared Jinja include renders the chip; see
+`docs/codebase/ui.md`). The remaining #2664 surfaces are planned
+consumers, not yet implemented: MCP registration (#2675), the CLI
+command-manifest builder (#2676), and the docs-site maturity-index
+generator plus CI drift guard (#2678) will all read `FEATURE_MATURITY`
+in-process — there is deliberately no dedicated REST read surface.
 
 ## Dependencies
 

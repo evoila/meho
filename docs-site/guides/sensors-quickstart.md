@@ -103,9 +103,16 @@ meho sensor list
 ```
 
 There is deliberately **no update or pause verb** — a sensor is
-immutable after create ("edit" is delete + recreate), and `paused`
-happens only when the runner itself parks a persistently failing
-sensor.
+immutable after create ("edit" is delete + recreate). Nor is `paused`
+a self-protection you can wait for: the runner parks a sensor **only**
+when its stored cadence (`cron_expr` / `timezone`) no longer parses,
+stamping `status_reason` with `invalid_cadence:<error>`. There is no
+failure counter — a sensor that evaluates `critical` or `unknown`
+forever stays `active` forever. The way to stop one is to delete it:
+
+```bash
+meho sensor delete <uuid>
+```
 
 ## Step 3 — compose a dashboard
 
@@ -238,9 +245,9 @@ is also the sensors feature's road-to-GA tracker.
 | 422 `sensor_operation_not_found` | `(connector_id, op_id)` resolves to nothing — usually a bare product name as `connector_id`. | Use the `<impl_id>-<version>` form (`k8s-1.x`), and an `op_id` from `meho operation search`. |
 | 409 `sensor_name_conflict` | Sensor names are unique per tenant. | Rename or delete the old one. |
 | A plain 422 validation error *before* any of the codes above | Schema validation runs first: the comparator `type` must be one of `threshold` / `equals` / `in` / `bool` / `freshness` (not `gt`/`lt` — those are the threshold's `op`), the cadence must be exactly one of interval (5–86400 s) XOR cron, the assertion is capped at 8 KiB, and a `status` field in the body is rejected. | Fix the spec shape; the error names the field. |
-| Sensor stuck `unknown`, evidence says *"threshold comparator requires a number, found array"* | Your `select.path` points at a list (e.g. `$.rows`), not a scalar. | Select a scalar — `$.total` for list-shaped Kubernetes results — or add an `aggregate` (`count`, `max`, …) to the select. |
+| Sensor stuck `unknown`, evidence says *"selection is not a scalar, found array"* | Your `select.path` points at a list (e.g. `$.rows`), not a scalar. | Select a scalar — `$.total` for list-shaped Kubernetes results — or add an `aggregate` (`count`, `max`, …) to the select. |
 | Target-bound sensor `unknown` forever, dispatch error names a credential read | No background credential identity on this deploy — the table above. | Work [Sensors and your credential backend](#sensors-and-your-credential-backend). |
-| Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — runner down, or evaluations overlapping/parked. | Check the runner's health and the sensor's `status` (a parked sensor shows `paused` → rollup `skip`). |
+| Sensor `unknown` though it was green a minute ago | Staleness: no fresh evaluation past `next_fire_at` + 60 s grace — the runner is down, or the previous evaluation is still in flight and the overlap guard skipped this tick. | Check the runner's health. A *parked* sensor is a different symptom: it shows `paused` and rolls up `skip`, never `unknown`. |
 | Dashboard `unknown` with all members green | The dashboard has zero members — an empty member set rolls up `unknown` by rule. | Add members (delete + recreate the dashboard). |
 | A sensor keeps auto-running an op that is no longer harmless | The safe-only guard is **create-time only**. If a connector re-ingest changes a pinned op's safety class, existing sensors keep firing; the ingest result surfaces exactly which sensors are affected (`safety_changes`, warning `ingest_safety_class_changed`). | Re-audit the named sensors after any re-ingest that touches safety classes; delete the ones that no longer qualify. |
 

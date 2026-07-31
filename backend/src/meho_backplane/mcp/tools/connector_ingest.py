@@ -577,6 +577,7 @@ _INGEST_DESCRIPTION: Final[str] = (
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="connector_ingest",
         name="meho.connector.ingest",
         description=_INGEST_DESCRIPTION,
         inputSchema={
@@ -671,6 +672,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="connector_ingest",
         name="meho.connector.ingest_status",
         description=(
             "Poll the durable status of an async connector-ingest job "

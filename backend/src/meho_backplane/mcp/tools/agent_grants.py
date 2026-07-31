@@ -134,6 +134,7 @@ async def _list_grants_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.grant.list",
         description=(
             "List agent permission grants for the operator's tenant "
@@ -188,6 +189,7 @@ async def _show_grant_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.grant.show",
         description=(
             "Fetch one agent permission grant by id (G11.2-T6). "
@@ -240,6 +242,7 @@ async def _create_grant_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.grant.create",
         description=(
             "Grant a permission to an agent principal (G11.2-T6). "
@@ -318,6 +321,7 @@ async def _elevate_grant_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.grant.elevate",
         description=(
             "Grant a time-bounded elevation to an agent principal (G11.2-T6). "
@@ -390,6 +394,7 @@ async def _revoke_grant_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="agent_runtime",
         name="meho.agents.grant.revoke",
         description=(
             "Revoke (delete) a permission grant by id (G11.2-T6). "

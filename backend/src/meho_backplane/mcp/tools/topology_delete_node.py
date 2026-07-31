@@ -99,6 +99,7 @@ async def _delete_node_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="topology",
         name=_DELETE_NODE_TOOL_NAME,
         description=_DELETE_NODE_DESCRIPTION,
         inputSchema=DELETE_NODE_PARAMETER_SCHEMA,

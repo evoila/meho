@@ -3285,7 +3285,8 @@
               }
             }
           }
-        }
+        },
+        "x-maturity": "experimental"
       }
     },
     "/api/v1/connectors/ingest/jobs/{job_id}": {
@@ -3339,7 +3340,8 @@
               }
             }
           }
-        }
+        },
+        "x-maturity": "experimental"
       }
     },
     "/api/v1/connectors": {
@@ -3512,7 +3514,8 @@
               }
             }
           }
-        }
+        },
+        "x-maturity": "experimental"
       }
     },
     "/api/v1/connectors/{connector_id}/groups/{group_key}": {
@@ -3577,7 +3580,8 @@
               }
             }
           }
-        }
+        },
+        "x-maturity": "experimental"
       }
     },
     "/api/v1/connectors/{connector_id}/operations/{op_id}": {
@@ -3649,7 +3653,8 @@
               }
             }
           }
-        }
+        },
+        "x-maturity": "experimental"
       }
     },
     "/api/v1/connectors/{connector_id}/enable": {
@@ -29900,5 +29905,99 @@
         "description": "Closed enum of sort columns exposed in the URL.\n\nMirrors :data:`meho_backplane.topology.query._NODE_SORT_COLUMNS`\n-- redeclared at the route boundary so an out-of-range value\nfails Pydantic validation (422 with the candidate list in the\nerror context) before the substrate's defensive\n:class:`ValueError` guard runs. The enum's ``str`` mixin keeps\nthe template's ``{{ sort }}`` rendering / ``href`` building\nstable -- ``str(SortColumn.NAME)`` is ``\"name\"`` (not\n``\"_SortColumn.NAME\"``)."
       }
     }
-  }
+  },
+  "tags": [
+    {
+      "name": "agent-grants",
+      "x-maturity": "experimental"
+    },
+    {
+      "name": "agent-principals",
+      "x-maturity": "experimental"
+    },
+    {
+      "name": "agents",
+      "x-maturity": "experimental"
+    },
+    {
+      "name": "approvals",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "audit",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "auth",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "broadcast",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "checks",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "checks-dashboards",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "connectors",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "discovery",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "docs",
+      "x-maturity": "experimental"
+    },
+    {
+      "name": "feed",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "gateway",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "knowledge",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "memory",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "operations",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "retrieval",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "runner-principals",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "scheduler",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "sensors",
+      "x-maturity": "beta"
+    },
+    {
+      "name": "targets",
+      "x-maturity": "ga"
+    },
+    {
+      "name": "topology",
+      "x-maturity": "beta"
+    }
+  ]
 }

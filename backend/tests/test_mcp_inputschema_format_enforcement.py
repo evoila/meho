@@ -94,6 +94,7 @@ def _register_format_probe_tool() -> dict[str, list[dict[str, Any]]]:
 
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="test.format_probe",
             description="Synthetic tool asserting format enforcement",
             inputSchema={

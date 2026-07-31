@@ -115,6 +115,7 @@ async def _list_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="sensors",
         name="meho.sensor.list",
         description=(
             "List sensors for the operator's tenant (Initiative #2416). "
@@ -221,6 +222,7 @@ async def _create_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="sensors",
         name="meho.sensor.create",
         description=(
             "Create one sensor under the operator's tenant (Initiative "
@@ -350,6 +352,7 @@ async def _delete_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="sensors",
         name="meho.sensor.delete",
         description=(
             "Hard-delete one sensor by id (Initiative #2416). Tenant_admin "

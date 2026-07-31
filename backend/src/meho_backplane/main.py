@@ -60,6 +60,7 @@ from meho_backplane.agents import (
     start_grant_expiry_sweeper,
     stop_grant_expiry_sweeper,
 )
+from meho_backplane.api.openapi_maturity import inject_maturity_extensions
 from meho_backplane.api.v1.agent_grants import router as api_v1_agent_grants_router
 from meho_backplane.api.v1.agent_principals import (
     router as api_v1_agent_principals_router,
@@ -1165,6 +1166,10 @@ def build_openapi_schema() -> dict[str, object]:
         separate_input_output_schemas=app.separate_input_output_schemas,
     )
     _inject_target_product_enum(schema)
+    # #2675: stamp x-maturity (registry-resolved) onto the mapped tags
+    # and the spans-tiers path overrides; flows into the committed
+    # cli/api/openapi.json snapshot.
+    inject_maturity_extensions(schema)
     app.openapi_schema = schema
     return schema
 

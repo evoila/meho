@@ -88,6 +88,7 @@ from pydantic import BaseModel, ValidationError
 from meho_backplane import __version__
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
+from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
 from meho_backplane.mcp.schemas import (
     INTERNAL_ERROR,
     INVALID_PARAMS,
@@ -338,54 +339,27 @@ def _log_protocol_version_mismatch(
     )
 
 
-async def _initialize(
-    operator: Operator,
-    params: dict[str, Any] | None,
-) -> InitializeResponse:
-    """Handle the ``initialize`` method per MCP 2025-06-18 §Initialization.
+async def _session_instructions(operator: Operator) -> str | None:
+    """Assemble the ``initialize.instructions`` payload for *operator*.
 
-    Returns a server-info + capabilities envelope, plus -- when the
-    operator's tenant has any ``kind='operational'`` conventions -- the
-    assembled session preamble in the spec-optional ``instructions``
-    field (G7.1-T4 #316). The preamble is built by
-    :func:`meho_backplane.conventions.preamble.assemble_preamble`:
+    G7.1-T4 (#316): the tenant session preamble built by
+    :func:`meho_backplane.conventions.preamble.assemble_preamble` —
     deterministic highest-``priority``-first packing wrapped in a
     delimited lower-trust block; when the packer drops entries to fit
     the token budget, the dropped slugs are logged at WARNING so the
     omission is loud (silent truncation of an operational rule is a
     safety bug per the issue body).
 
-    MEHO supports only :data:`PROTOCOL_VERSION` and always responds
-    with that — spec-compliant on the response side, but
-    indistinguishable from a silent upgrade for a client pinned to an
-    older revision. G0.14-T13 (#1202) closes the observability gap
-    via :func:`_log_protocol_version_mismatch`: a mismatched client
-    revision triggers a structured ``mcp_initialize_protocol_version_mismatch``
-    WARNING, while the response body stays unchanged. Multi-version
-    negotiation behaviour is tracked as explicit follow-up work,
-    gated on concrete operator demand.
+    #2675: the static feature-maturity band is appended after the
+    preamble — the fresh session's first guidance surface must state
+    which features are pre-GA and how the ``[beta]`` /
+    ``[experimental]`` tool-description prefixes relate. Appended here
+    (not inside the preamble assembler) because the label contract is
+    an MCP-surface concern; the conventions write-path feedback
+    consumers of the assembler must not see it. Both bands use the
+    empty-drops-cleanly join convention, so an all-GA registry
+    degrades to the preamble alone.
     """
-    # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
-    # aligned: a missing ``params`` field on the JSON-RPC request and an
-    # explicit empty params object are both equivalent to "no required
-    # fields supplied" for our purposes — :class:`InitializeRequest`'s
-    # validator will then surface a clean INVALID_PARAMS for the
-    # required-but-missing ``protocolVersion``.
-    try:
-        client_request = InitializeRequest.model_validate(params or {})
-    except ValidationError as exc:
-        raise McpInvalidParamsError(
-            f"initialize: {exc.error_count()} validation error(s)",
-        ) from exc
-
-    _log_protocol_version_mismatch(client_request, operator)
-
-    # G7.1-T4 (#316): assemble the operator's tenant session preamble
-    # from ``kind='operational'`` conventions and ship it as
-    # ``instructions`` per MCP 2025-06-18 §Initialization. Since G6.5-T6
-    # (#2546) every preamble carries the static broadcast-discipline
-    # band, so ``instructions`` is always populated (the ``or None``
-    # below stays as a defensive belt for the theoretical empty case).
     # Imported inside the function to break the import cycle (mcp.server
     # → conventions.preamble → db → ... → mcp.server). The cost of one
     # function-local import per ``initialize`` call is negligible (the
@@ -412,6 +386,50 @@ async def _initialize(
             tenant_id=str(operator.tenant_id),
             dropped_slugs=preamble.dropped_slugs,
         )
+    joined = "\n\n".join(band for band in (preamble.text, FEATURE_MATURITY_BAND) if band)
+    # Since G6.5-T6 (#2546) every preamble carries the static
+    # broadcast-discipline band, so the payload is always non-empty;
+    # the ``or None`` stays as a defensive belt for the theoretical
+    # empty case (the wire serializer then drops the field cleanly).
+    return joined or None
+
+
+async def _initialize(
+    operator: Operator,
+    params: dict[str, Any] | None,
+) -> InitializeResponse:
+    """Handle the ``initialize`` method per MCP 2025-06-18 §Initialization.
+
+    Returns a server-info + capabilities envelope, plus the assembled
+    session guidance in the spec-optional ``instructions`` field —
+    the tenant preamble (G7.1-T4 #316) followed by the feature-maturity
+    band (#2675); see :func:`_session_instructions` for the assembly
+    contract.
+
+    MEHO supports only :data:`PROTOCOL_VERSION` and always responds
+    with that — spec-compliant on the response side, but
+    indistinguishable from a silent upgrade for a client pinned to an
+    older revision. G0.14-T13 (#1202) closes the observability gap
+    via :func:`_log_protocol_version_mismatch`: a mismatched client
+    revision triggers a structured ``mcp_initialize_protocol_version_mismatch``
+    WARNING, while the response body stays unchanged. Multi-version
+    negotiation behaviour is tracked as explicit follow-up work,
+    gated on concrete operator demand.
+    """
+    # ``params or {}`` deliberately collapses ``None`` and ``{}``. Spec-
+    # aligned: a missing ``params`` field on the JSON-RPC request and an
+    # explicit empty params object are both equivalent to "no required
+    # fields supplied" for our purposes — :class:`InitializeRequest`'s
+    # validator will then surface a clean INVALID_PARAMS for the
+    # required-but-missing ``protocolVersion``.
+    try:
+        client_request = InitializeRequest.model_validate(params or {})
+    except ValidationError as exc:
+        raise McpInvalidParamsError(
+            f"initialize: {exc.error_count()} validation error(s)",
+        ) from exc
+
+    _log_protocol_version_mismatch(client_request, operator)
 
     # T3 (#248) registers tools/list, tools/call, resources/list,
     # resources/templates/list, resources/read — so the capabilities
@@ -430,7 +448,7 @@ async def _initialize(
             },
         ),
         serverInfo={"name": _SERVER_NAME, "version": __version__},
-        instructions=preamble.text or None,
+        instructions=await _session_instructions(operator),
     )
 
 

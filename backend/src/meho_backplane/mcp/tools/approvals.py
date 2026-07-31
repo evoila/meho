@@ -240,6 +240,7 @@ async def _list_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="approvals",
         name="meho.approvals.list",
         description=(
             "List approval requests for your tenant (G11.2-T5 / #818). "
@@ -323,6 +324,7 @@ async def _get_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="approvals",
         name="meho.approvals.get",
         description=(
             "Inspect a single approval request by id (G11.2-T5 / #818). "
@@ -441,6 +443,7 @@ async def _approve_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="approvals",
         name="meho.approvals.approve",
         description=(
             "Approve a pending approval request (G11.2-T5 / #818; #1503; "
@@ -527,6 +530,7 @@ async def _reject_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="approvals",
         name="meho.approvals.reject",
         description=(
             "Reject a pending approval request (G11.2-T5 / #818). "

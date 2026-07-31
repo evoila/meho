@@ -224,6 +224,7 @@ async def test_tools_call_post_gate_invalid_params_audits_as_denied_not_500(
 
     register_mcp_tool(
         ToolDefinition(
+            feature=None,
             name="test.post_gate_reject",
             description="Raises McpInvalidParamsError after the gates (test only).",
             inputSchema={"type": "object", "properties": {}, "additionalProperties": False},

@@ -231,6 +231,7 @@ async def _create_doc_collections_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="doc_collections",
         name=_CREATE_TOOL_NAME,
         description=_CREATE_DOC_COLLECTIONS_DESCRIPTION,
         inputSchema=_CREATE_DOC_COLLECTIONS_INPUT_SCHEMA,

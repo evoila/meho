@@ -499,6 +499,7 @@ async def _query_audit_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="audit",
         name=_TOOL_NAME,
         description=_TOOL_DESCRIPTION,
         inputSchema=_INPUT_SCHEMA,
@@ -633,6 +634,7 @@ async def _replay_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="audit",
         name=_REPLAY_TOOL_NAME,
         description=_REPLAY_TOOL_DESCRIPTION,
         inputSchema=_REPLAY_INPUT_SCHEMA,

@@ -118,6 +118,7 @@ def _handle_not_found(handle_id: UUID) -> McpInvalidParamsError:
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="typed_connector_reads",
         name="result_query",
         description=(
             "Read rows back from a JSONFlux result handle. After "

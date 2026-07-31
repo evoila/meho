@@ -992,6 +992,7 @@ async def _list_edges_facet(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="topology",
         name=_QUERY_TOPOLOGY_NAME,
         description=_QUERY_TOPOLOGY_DESCRIPTION,
         inputSchema=_QUERY_TOPOLOGY_INPUT_SCHEMA,
@@ -1371,6 +1372,10 @@ async def _list_targets_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        # Registered in the topology family module, but the tool is the
+        # G0.3 targets meta-tool — its maturity follows the ``targets``
+        # registry entry, not Topology v2's.
+        feature="targets",
         name=_LIST_TARGETS_NAME,
         description=_LIST_TARGETS_DESCRIPTION,
         inputSchema=_LIST_TARGETS_INPUT_SCHEMA,
@@ -1639,6 +1644,7 @@ async def _annotate_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="topology",
         name=_ANNOTATE_TOOL_NAME,
         description=_ANNOTATE_DESCRIPTION,
         inputSchema=ANNOTATE_PARAMETER_SCHEMA,
@@ -1700,6 +1706,7 @@ async def _unannotate_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="topology",
         name=_UNANNOTATE_TOOL_NAME,
         description=_UNANNOTATE_DESCRIPTION,
         inputSchema=UNANNOTATE_PARAMETER_SCHEMA,

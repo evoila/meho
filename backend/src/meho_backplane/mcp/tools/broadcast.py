@@ -241,6 +241,7 @@ async def _handler_recent(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="broadcast",
         name="meho.broadcast.recent",
         description=(
             "Read the operator's tenant's recent broadcast events from "
@@ -649,6 +650,7 @@ async def _handler_announce(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="broadcast",
         name="meho.broadcast.announce",
         description=(
             "Publish an agent-authored announcement to the operator's "
@@ -1156,6 +1158,7 @@ async def _handler_watch(
 
 register_mcp_tool(
     definition=ToolDefinition(
+        feature="broadcast",
         name="meho.broadcast.watch",
         description=(
             "Long-poll the operator's tenant broadcast stream for new "

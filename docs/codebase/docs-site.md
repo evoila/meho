@@ -6,10 +6,12 @@ MEHO's published documentation site — <https://evoila.github.io/meho/>
 — is built with MkDocs Material from sources under `docs-site/` and
 versioned with [mike](https://github.com/jimporter/mike) on the
 `gh-pages` branch, which GitHub Pages serves. The scaffold landed with
-task #2670 (initiative #2663); content migrates in under #2671
-(start-here + install), #2672 (connect clients), and #2673
-(do-real-work guides). The
-generated reference section lands with the #2662 contract snapshots.
+task #2670 (initiative #2663). The *Start here* and *Install &
+operate* sections carry real content (#2671: landing page,
+`architecture.md`, and the `install/` trail pages); #2672 (connect
+clients) and #2673 (do-real-work guides) migrate the remaining
+sections. The generated reference section lands with the #2662
+contract snapshots.
 
 The site is the *operator/adopter-facing* documentation. The `docs/`
 tree (this directory's parent) remains the contributor-facing material
@@ -95,6 +97,16 @@ deploy.
 
 - `mkdocs.yml` is strict: a page not referenced in `nav`, or any
   broken internal link, fails the build. Add new pages to `nav`.
+- Mermaid diagrams render natively via the Material custom-fence
+  config on `pymdownx.superfences` (#2671). That config uses the
+  `!!python/name:` YAML tag, which `yaml.safe_load` rejects —
+  `mkdocs.yml` is therefore excluded from the pre-commit `check-yaml`
+  hook (the strict mkdocs build validates it far harder anyway).
+- Cross-page anchor links are not validated by the strict build
+  (only page links are). Heading slugs use the default python-markdown
+  slugify: punctuation (em-dashes, colons, apostrophes) is stripped,
+  whitespace collapses to single `-` — e.g. `## Step 1 — Pre-create…`
+  → `#step-1-pre-create…`, never a double hyphen.
 - The deploy job needs the `workflow`-scoped credential story only at
   *merge* time (the file under `.github/workflows/` requires the
   `workflow` OAuth scope to push).

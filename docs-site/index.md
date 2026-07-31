@@ -1,37 +1,98 @@
 # Start here
 
-MEHO is a governance backplane for AI agents acting on infrastructure —
-policy-gated, audit-grade, MCP-native, Apache 2.0. It sits between MCP
-clients (Claude Desktop, Claude Code, Cursor, custom clients) and the
-infrastructure they operate against, so every operation passes through
-one governed seam: policy, just-in-time credentials, server-side result
-reduction, broadcast, and an immutable audit trail.
+MEHO is a self-hosted governance layer that sits between AI agents and
+the infrastructure they operate. Agents connect over
+[MCP](https://modelcontextprotocol.io/) (the open protocol AI
+assistants use to call tools); operators connect through a CLI and an
+optional browser console. Every action — whether an agent asked for it
+or a human did — passes through one governed path: the caller is
+authenticated, the operation is checked against policy, a short-lived
+backend credential is fetched just in time, the result is reduced to
+what the caller needs, and an immutable audit row records who did what,
+where, and when.
 
-!!! note "This site is under construction"
+MEHO is open source (Apache 2.0) and runs entirely on infrastructure
+you control. There is no hosted service and no phone-home: you deploy
+the backplane into your own Kubernetes cluster, next to your own
+PostgreSQL, Keycloak, and secret store.
 
-    The scaffold you are looking at is live and versioned, but the
-    content is still being migrated. Each section below names what will
-    live there and links the task tracking it.
+## The problem it solves
 
-## What this section will cover
+AI agents are getting good enough to *do* infrastructure work — roll a
+credential, drain a node, restart a service — not just describe it. But
+handing an agent a long-lived admin token and a shell creates an
+un-auditable, over-privileged actor. The moment an agent can act, you
+need the same controls you would demand of any operator: who may do
+what, with credentials that expire, against which systems, with every
+action recorded and reviewable.
 
-Tracked by [evoila/meho#2671](https://github.com/evoila/meho/issues/2671):
+MEHO is that control plane. It governs the *actions*, not the agent:
+you bring your own AI assistant (Claude, Cursor, a custom MCP client —
+anything that speaks MCP), and MEHO decides what it is allowed to do
+and keeps the receipts.
 
-- **What MEHO is** — the problem it solves and what it guarantees.
-- **Reference architecture** — backplane, Keycloak, Postgres + pgvector,
-  Valkey, Vault / Google Secret Manager, targets and connectors, agents
-  via MCP, operators via CLI and UI, satellite gateway.
-- **What 1.0 promises** — the honestly-scoped stability contract.
+## What every operation gets
 
-## The site at a glance
+- **Policy-gated** — operations are authorised against the caller's
+  role and per-target grants before they execute; destructive
+  operations can require explicit human approval.
+- **Credential-federated** — the agent never holds a backend
+  credential. A short-lived identity token is exchanged with your
+  secret store ([Vault or Google Secret
+  Manager](install/credential-backends.md)) for a just-in-time
+  credential per operation.
+- **Server-reduced** — large results are reduced server-side, so the
+  caller sees a compact, relevant view instead of raw firehose output.
+- **Broadcast** — every action is published to a real-time activity
+  feed that other agents and humans can watch.
+- **Audited** — every interaction lands as an immutable audit row in
+  PostgreSQL, attributed to the calling identity.
+- **Tenant-scoped** — every lookup and every credential read is scoped
+  to the caller's tenant.
 
-| Section | What will live there | Tracked by |
-|---|---|---|
-| [Install & operate](install/index.md) | Prerequisites, Helm install, credential backends, Keycloak realm setup, TLS, upgrades | [#2671](https://github.com/evoila/meho/issues/2671) |
-| [Connect clients](clients/index.md) | CLI first, then the MCP client matrix and troubleshooting | [#2672](https://github.com/evoila/meho/issues/2672) |
-| [Do real work](guides/index.md) | Task guides: targets & secrets, first operations, sensors | [#2673](https://github.com/evoila/meho/issues/2673) |
-| [Reference](reference/index.md) | Generated: MCP tools, REST API, CLI, env vars, Helm values, connector catalog | [#2662](https://github.com/evoila/meho/issues/2662) |
-| [Project](project/index.md) | Versioning & deprecation policy, feature maturity, security policy | [#2664](https://github.com/evoila/meho/issues/2664) |
+The [reference architecture](architecture.md) page shows how the pieces
+fit together and which of them you run.
 
-In the meantime, the in-repo material remains the source of truth:
-[github.com/evoila/meho](https://github.com/evoila/meho).
+## What 1.0 promises
+
+MEHO is honest about maturity. Every feature carries an explicit tier —
+**GA**, **Beta**, or **Experimental** — declared once in the codebase
+and propagated to every surface you touch: MCP tool descriptions, the
+REST API document, CLI help, and the browser console. GA features carry
+the 1.0 stability promise; Beta features work end-to-end somewhere real
+but may still change with notice; Experimental features are outside the
+promise entirely.
+
+The [feature maturity index](reference/maturity.md) is generated from
+that registry on every release and lists, for each non-GA feature, the
+milestone it targets and where its road to GA is tracked. If a page on
+this site describes a Beta feature, the caveats you read here are the
+same ones the product itself displays.
+
+## How this site is organised
+
+| Section | What lives there |
+|---|---|
+| **Start here** | This page, plus the [reference architecture](architecture.md). |
+| **[Install & operate](install/index.md)** | The [install trail](install/index.md) — one continuous path from a bare Kubernetes cluster to a running backplane and a successful login — plus [credential backends](install/credential-backends.md), [Keycloak realm setup](install/keycloak-realm.md), [TLS and ingress](install/tls-ingress.md), [upgrades](install/upgrades.md), and a [local quickstart](install/kind-quickstart.md). |
+| **[Connect clients](clients/index.md)** | Connecting the CLI and MCP clients (Claude Desktop, Claude Code, and others) to a running backplane. Content is being migrated — tracked by [evoila/meho#2672](https://github.com/evoila/meho/issues/2672). |
+| **[Do real work](guides/index.md)** | Task guides: register targets and secrets, run first operations, watch your estate. Content is being migrated — tracked by [evoila/meho#2673](https://github.com/evoila/meho/issues/2673). |
+| **[Reference](reference/index.md)** | Generated reference material, starting with the [feature maturity index](reference/maturity.md). |
+| **[Project](project/index.md)** | How the project is run: versioning, security policy, roadmap. |
+
+## Where to start
+
+- **Deploying MEHO for your team?** Follow the
+  [install trail](install/index.md). It assumes a Kubernetes cluster, a
+  PostgreSQL database, and a Keycloak — and takes you from there to a
+  running backplane and a working `meho login`.
+- **Just want to see it run?** The
+  [local kind quickstart](install/kind-quickstart.md) brings the
+  backplane up on your workstation in minutes — with placeholder
+  authentication, clearly labelled.
+- **Backplane already running?** Go to
+  [Connect clients](clients/index.md).
+- **Evaluating?** Read the [reference architecture](architecture.md)
+  and the [feature maturity index](reference/maturity.md) — together
+  they are the honest picture of what MEHO is and how far along each
+  part is.

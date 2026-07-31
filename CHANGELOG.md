@@ -90,6 +90,25 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — docs site: Start here, reference architecture, and the install trail (#2671)
+
+- Fill the docs site's *Start here* and *Install & operate* sections
+  with outsider-readable content (#2671): a rewritten landing page, a
+  reference-architecture page with a rendered component diagram
+  (mermaid, enabled via the Material custom-fence config in
+  `mkdocs.yml`), and a **single continuous install trail** from bare
+  Kubernetes cluster to running backplane and successful `meho login`
+  — including the pgvector superuser prerequisite, the
+  Vault-vs-Google-Secret-Manager decision page with an honest
+  per-backend support matrix for background execution, the promoted
+  Keycloak realm recipe (five mappers, four scopes, the Keycloak-25
+  `basic`/`sub` gotcha), TLS/ingress trust in all four places it
+  matters, upgrade notes (Helm 4 server-side-apply conflicts,
+  forward-only migrations), and the kind quickstart clearly labelled
+  placeholder-auth. `docs/deploying.md` and
+  `deploy/values-examples/README.md` now open with a pointer to the
+  site and stay as the in-repo deep-dives the site links back into.
+
 ### Added — maturity drift guard in CI + generated maturity-index docs page (#2678)
 
 - Close the #2664 maturity program with its two enforcement pieces

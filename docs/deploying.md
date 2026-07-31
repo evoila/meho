@@ -3,6 +3,18 @@
 
 # Deploying and upgrading MEHO
 
+> **Operators: start on the published docs site.** The
+> outsider-readable install path now lives at
+> <https://evoila.github.io/meho/> — the
+> [install trail](https://evoila.github.io/meho/latest/install/),
+> [credential backends](https://evoila.github.io/meho/latest/install/credential-backends/),
+> [Keycloak realm setup](https://evoila.github.io/meho/latest/install/keycloak-realm/),
+> [TLS and ingress](https://evoila.github.io/meho/latest/install/tls-ingress/),
+> and [upgrades](https://evoila.github.io/meho/latest/install/upgrades/)
+> (#2671). This file remains the in-repo deep-dive those pages link
+> back into: chart-internals cross-references, the authoritative
+> version-specific upgrade-notes table, and contributor-facing detail.
+
 Operator-facing guide for installing MEHO from cold and upgrading an
 existing release. It consolidates deploy/upgrade knowledge that was
 previously split across the chart values, the acceptance contracts, and

@@ -5,6 +5,16 @@ Copyright (c) 2026 evoila Group
 
 # values-examples — sanitized chart-values templates
 
+> **Operators: start on the published docs site.** The install path an
+> adopter should follow lives at <https://evoila.github.io/meho/>
+> (#2671) — including the promoted
+> [Keycloak realm recipe](https://evoila.github.io/meho/latest/install/keycloak-realm/)
+> and [TLS trust guidance](https://evoila.github.io/meho/latest/install/tls-ingress/).
+> This README remains the values-level deep-dive the site links back
+> into: ESO sync patterns, the full auth-onramp recipe with the
+> five-wall matrix, CIMD, per-target TLS trust, and the agent-runtime
+> credential wiring.
+
 This directory ships **sanitized example values files** for the MEHO Helm
 chart at [`deploy/charts/meho/`](../charts/meho/). Each file targets a
 specific deployment shape (today: the RDC Hetzner dogfooding lab) and is

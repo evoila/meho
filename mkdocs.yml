@@ -48,8 +48,16 @@ theme:
     - content.action.edit
 
 nav:
-  - Start here: index.md
-  - Install & operate: install/index.md
+  - Start here:
+      - index.md
+      - Reference architecture: architecture.md
+  - Install & operate:
+      - The install trail: install/index.md
+      - Credential backends: install/credential-backends.md
+      - Keycloak realm setup: install/keycloak-realm.md
+      - TLS and ingress: install/tls-ingress.md
+      - Upgrades: install/upgrades.md
+      - Local kind quickstart: install/kind-quickstart.md
   - Connect clients: clients/index.md
   - Do real work: guides/index.md
   - Reference:
@@ -64,7 +72,16 @@ markdown_extensions:
   - admonition
   - toc:
       permalink: true
-  - pymdownx.superfences
+  # The mermaid custom fence is the documented Material way to render
+  # ```mermaid blocks natively (theme-aware, no external JS):
+  # https://squidfunk.github.io/mkdocs-material/reference/diagrams/
+  # The `!!python/name:` tag is mkdocs-specific YAML — see the
+  # check-yaml exclude in .pre-commit-config.yaml.
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.snippets:
       # Repo root first so site pages can embed selected contributor
       # files (e.g. `docs/deploying.md`) in place, without moving them.

@@ -422,8 +422,13 @@ kubectl exec -n meho deployment/meho -- printenv SSL_CERT_FILE REQUESTS_CA_BUNDL
 kubectl exec -n meho deployment/meho -- python -c "import ssl; print(ssl.get_default_verify_paths().cafile)"
 # /ready turns green for vault + keycloak. The image ships no curl or
 # wget, so port-forward rather than exec.
-kubectl port-forward -n meho deployment/meho 8000:8000 >/dev/null &
+kubectl port-forward -n meho deployment/meho 8000:8000 >/dev/null 2>&1 &
 PF=$!
+# Wait for the forward to bind — any HTTP answer counts, including a 503.
+for _ in $(seq 30); do
+  curl -s -o /dev/null http://localhost:8000/ready && break
+  sleep 1
+done
 curl -sS http://localhost:8000/ready | jq '.checks'
 kill "$PF"
 ```
@@ -1419,13 +1424,17 @@ kubectl exec <cluster>-1 -n <ns> -c postgres -- \
 ```
 
 To make it survive a cluster re-bootstrap, declare it at init time on the
-CNPG `Cluster` — `postInitSQL` runs as the bootstrap superuser:
+CNPG `Cluster`. Use `postInitApplicationSQL`, which runs as the bootstrap
+superuser **inside the application database** — its sibling
+`postInitSQL` runs against the `postgres` database instead, so the
+extension would be created in the wrong one and migration `0003` would
+still fail:
 
 ```yaml
 spec:
   bootstrap:
     initdb:
-      postInitSQL:
+      postInitApplicationSQL:
         - "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 

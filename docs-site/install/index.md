@@ -208,11 +208,13 @@ keycloak:
   audience: meho-backplane
 
 networkPolicy:
-  # Leave this off for your first install, then turn it on once the
-  # backplane is green. The CIDRs below are placeholders: if they do not
-  # match where your dependencies actually live, the Pod cannot reach
-  # them and /ready stays red — a failure that looks exactly like a
-  # credential or TLS problem.
+  # Staged deliberately: off for the first install, on once the backplane
+  # is green. The CIDRs below are placeholders, and if they do not match
+  # where your dependencies actually resolve, the Pod cannot reach them
+  # and /ready stays red — a failure that looks exactly like a credential
+  # or TLS problem. To turn it on afterwards: replace all three CIDRs
+  # with the real addresses, set enabled: true, and re-run the same
+  # `helm upgrade` from Step 7.
   enabled: false
   ingressControllerNamespace: ingress-nginx
   # Egress allow-list: the CIDRs your Postgres / Vault / Keycloak
@@ -278,8 +280,16 @@ kubectl -n meho rollout status deploy/meho --timeout=360s
 
 # The runtime image is python:3.14-slim — it ships neither curl nor
 # wget — so reach the Pod with a port-forward instead of `kubectl exec`.
-kubectl -n meho port-forward deploy/meho 8000:8000 >/dev/null &
+kubectl -n meho port-forward deploy/meho 8000:8000 >/dev/null 2>&1 &
 PF=$!
+
+# kubectl binds the local port only after it has dialled the API server,
+# so wait for the forward rather than racing it. Any HTTP answer counts,
+# including the 503 that /ready returns while dependencies are still red.
+for _ in $(seq 30); do
+  curl -s -o /dev/null http://localhost:8000/healthz && break
+  sleep 1
+done
 
 # Liveness endpoint answers.
 curl -fsS http://localhost:8000/healthz

@@ -152,8 +152,15 @@ Verify after install:
 kubectl -n meho exec deploy/meho -- printenv SSL_CERT_FILE REQUESTS_CA_BUNDLE
 
 # The image ships no curl or wget, so port-forward rather than exec.
-kubectl -n meho port-forward deploy/meho 8000:8000 >/dev/null &
+kubectl -n meho port-forward deploy/meho 8000:8000 >/dev/null 2>&1 &
 PF=$!
+
+# Wait for the forward to bind before curling it — any HTTP answer counts.
+for _ in $(seq 30); do
+  curl -s -o /dev/null http://localhost:8000/ready && break
+  sleep 1
+done
+
 curl -sS http://localhost:8000/ready | jq '.checks'
 kill "$PF"
 ```

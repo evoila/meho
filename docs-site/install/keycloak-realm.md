@@ -41,9 +41,16 @@ workstation's **operating-system trust store** before anything else —
 `meho login` and most MCP clients verify TLS against the OS store, not
 against environment variables. Platform commands and the reasons are
 on [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store).
-Verify with `curl -sf https://<backplane-host>/healthz` from a fresh
-shell before continuing — an `x509: certificate signed by unknown
-authority` from `meho login` later means this step was skipped.
+`meho login` contacts **both** hosts, so verify both from a fresh shell
+before continuing:
+
+```bash
+curl -sf https://<backplane-host>/healthz
+curl -sf https://<keycloak-host>/realms/<realm>/.well-known/openid-configuration
+```
+
+An `x509: certificate signed by unknown authority` from `meho login`
+later means one of these two was skipped.
 
 ## Step 2 — Create the public `meho-cli` client
 

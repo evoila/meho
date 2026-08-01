@@ -54,8 +54,15 @@ helm install meho-dev oci://ghcr.io/evoila/meho-chart \
 # 4. Watch it come up and poke it.
 kubectl wait --for=condition=Ready pod \
   -l app.kubernetes.io/name=meho -n meho --timeout=6m
-kubectl port-forward -n meho svc/meho-dev 8000:8000 &
-curl localhost:8000/healthz
+kubectl port-forward -n meho svc/meho-dev 8000:8000 >/dev/null 2>&1 &
+PF=$!
+# Wait for the forward to bind rather than racing it.
+for _ in $(seq 30); do
+  curl -s -o /dev/null http://localhost:8000/healthz && break
+  sleep 1
+done
+curl -fsS http://localhost:8000/healthz
+kill "$PF"
 ```
 
 The overlay disables ingress and NetworkPolicy (kind ships neither by

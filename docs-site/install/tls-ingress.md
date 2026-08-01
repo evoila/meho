@@ -98,8 +98,10 @@ entry in its `checks` reading `jwks_fetch_failed: ConnectError` (or the
 credential backend's reading `unreachable: SSLError`), and an
 `--atomic` install rolls itself back.
 
-The fix is mounting a CA bundle and pointing `SSL_CERT_FILE` at it —
-the chart has first-class hooks:
+The fix is mounting a CA bundle and pointing **two** environment
+variables at it — one is not enough, because the backplane's
+dependencies do not agree on which one to read. The chart has
+first-class hooks:
 
 ```yaml
 extraVolumes:
@@ -114,7 +116,16 @@ extraVolumeMounts:
     readOnly: true
 
 extraEnv:
+  # Read by Python's ssl module: httpx (Keycloak JWKS) and
+  # asyncpg/SQLAlchemy (PostgreSQL).
   - name: SSL_CERT_FILE
+    value: /etc/ssl/extra-certs/ca.crt
+  # Vault is reached through hvac, which drives `requests` — and
+  # requests ignores SSL_CERT_FILE entirely, reading only
+  # REQUESTS_CA_BUNDLE / CURL_CA_BUNDLE. Omit this and the credential
+  # backend's readiness check stays red with `unreachable: SSLError`
+  # however correct SSL_CERT_FILE is.
+  - name: REQUESTS_CA_BUNDLE
     value: /etc/ssl/extra-certs/ca.crt
 ```
 
@@ -126,17 +137,19 @@ a hand-created ConfigMap works if you own rotation.
 
 !!! danger "The bundle must be a union — not just your CA"
 
-    `SSL_CERT_FILE` **replaces** Python's default trust store, it does
-    not extend it. A bundle containing *only* your internal CA breaks
-    every public-CA connection the Pod also makes. Build the bundle as
-    the union of the public roots **and** your CA — trust-manager's
-    `Bundle` resource does exactly this with `useDefaultCAs: true`
-    alongside your CA source.
+    Both variables **replace** the default trust store, they do not
+    extend it. A bundle containing *only* your internal CA breaks every
+    public-CA connection the Pod also makes — via `SSL_CERT_FILE` for
+    httpx and the database drivers, and identically via
+    `REQUESTS_CA_BUNDLE` for anything reached through `requests`. Build
+    the bundle as the union of the public roots **and** your CA —
+    trust-manager's `Bundle` resource does exactly this with
+    `useDefaultCAs: true` alongside your CA source.
 
 Verify after install:
 
 ```bash
-kubectl -n meho exec deploy/meho -- printenv SSL_CERT_FILE
+kubectl -n meho exec deploy/meho -- printenv SSL_CERT_FILE REQUESTS_CA_BUNDLE
 kubectl -n meho exec deploy/meho -- wget -qO- http://localhost:8000/ready
 ```
 

@@ -382,13 +382,19 @@ extraVolumeMounts:
 extraEnv:
   - name: SSL_CERT_FILE
     value: /etc/ssl/extra-certs/ca.crt
+  - name: REQUESTS_CA_BUNDLE
+    value: /etc/ssl/extra-certs/ca.crt
 ```
 
 `SSL_CERT_FILE` is CPython's standard env var
 ([`ssl.get_default_verify_paths`](https://docs.python.org/3/library/ssl.html#ssl.get_default_verify_paths))
-— httpx, hvac, asyncpg, and SQLAlchemy all honour it without code
-changes. Mounting read-only keeps the discipline (the bundle is owned
-by trust-manager, not by anything inside the Pod).
+— httpx, asyncpg, and SQLAlchemy all honour it without code changes.
+**`hvac` does not**: it drives `requests`, which pins
+`certifi.where()` and consults only `REQUESTS_CA_BUNDLE` /
+`CURL_CA_BUNDLE`. Set both to the same path, or the Vault leg of
+`/ready` stays red with `unreachable: SSLError` no matter how correct
+`SSL_CERT_FILE` is. Mounting read-only keeps the discipline (the
+bundle is owned by trust-manager, not by anything inside the Pod).
 
 ### Alternatives if trust-manager isn't deployed
 
@@ -410,8 +416,8 @@ After `helm install`:
 ```bash
 # The mount is present
 kubectl exec -n meho deployment/meho -- ls -l /etc/ssl/extra-certs/ca.crt
-# SSL_CERT_FILE resolves to it
-kubectl exec -n meho deployment/meho -- printenv SSL_CERT_FILE
+# Both variables resolve to it (hvac reads the second one, not the first)
+kubectl exec -n meho deployment/meho -- printenv SSL_CERT_FILE REQUESTS_CA_BUNDLE
 # Python sees it
 kubectl exec -n meho deployment/meho -- python -c "import ssl; print(ssl.get_default_verify_paths().cafile)"
 # /ready turns green for vault + keycloak

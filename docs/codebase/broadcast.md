@@ -158,6 +158,18 @@ Three layers, separated for traceability:
   - `credential_write` (`vault.kv.put`, `vault.auth.userpass.write` /
     `.update_password`, `k8s.secret.create`, G11.7-T1 #1401) —
     **request params** carry the secret; aggregate-only.
+  - `approval` (`approval.*` lifecycle events, G10.7-T3 #1778) — full
+    detail; exists so the approvals console bell can filter the SSE
+    bridge server-side.
+  - `checks` (`checks.transition`, #2720) — full detail; the checks
+    subsystem's own state-change events, published outside the audit
+    path. Matched by an **exact-membership allowlist**
+    (`_CHECK_EVENT_OPS`), not by a `checks.` prefix: the
+    `/api/v1/checks/*` gateway routes already own three op-ids under
+    that prefix (`checks.assignment.put` / `.get`, `checks.results.post`),
+    and because `classify_op` is re-run at render time in the drawers, a
+    prefix branch would relabel their rows — historical ones included.
+    See [`docs/codebase/checks-broadcast.md`](checks-broadcast.md).
   - `other` — full detail.
 
   `credential_read` and `audit_query` are *upgradeable*: a per-call or

@@ -174,6 +174,43 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Op-ids that classify as ``checks`` — the checks subsystem's own
+#: state-change events (#2720), published by
+#: :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
+#: rather than by the audit middleware.
+#:
+#: An explicit allowlist, **not** a ``checks.`` prefix branch. The
+#: ``/api/v1/checks/*`` gateway routes already own three shipped op-ids
+#: under that prefix (``checks.assignment.put`` /
+#: ``checks.assignment.get`` / ``checks.results.post``,
+#: :data:`meho_backplane.api.v1.checks._CHECKS_OP_IDS`).
+#:
+#: What is *not* at risk is what those rows persist. All three routes
+#: bind an explicit ``audit_op_class`` contextvar (``write`` / ``read`` /
+#: ``write``), and
+#: :func:`~meho_backplane.broadcast.overrides.resolve_broadcast_detail`
+#: takes that ``op_class_override`` in preference to this function — the
+#: same value the audit row stores in ``payload["op_class"]``, which is
+#: what ``meho.audit.query`` filters on in SQL. So a prefix branch would
+#: not move a single stored class, and no saved ``op_class=write`` query
+#: would change its results.
+#:
+#: The hazard is on the **read** side. ``classify_op`` is re-run at render
+#: time against the stored op-id by the audit drawer
+#: (:mod:`meho_backplane.ui.routes.audit.routes`) and the broadcast event
+#: drawer (:mod:`meho_backplane.ui.routes.broadcast.event`), where it
+#: supplies the row's displayed class and badge and feeds
+#: :func:`~meho_backplane.ui.routes.broadcast.aggregate_gate.is_aggregate_only`.
+#: A prefix branch would therefore relabel every gateway row as
+#: ``checks`` — retroactively, because that class is derived on read
+#: rather than read back off the row — and would sweep in any future
+#: non-transition ``checks.*`` op-id by construction, diluting the class
+#: whose whole purpose is surfacing rare transition edges.
+#:
+#: The allowlist is the same idiom :data:`_CREDENTIAL_MINT_OPS` uses for
+#: the same reason: an exact pin that beats a broader structural match.
+_CHECK_EVENT_OPS: Final[frozenset[str]] = frozenset({"checks.transition"})
+
 #: Op-id suffixes that imply mutation. Append to this tuple when a new
 #: write-shaped verb spelling lands. ``.put`` is the KV-v2 write verb
 #: (``vault.kv.put`` — G3.3-T1 #545); without it a secret write would
@@ -319,7 +356,13 @@ class BroadcastEvent(BaseModel):
     op_id: str
     #: One of ``"read"`` / ``"write"`` / ``"credential_read"`` /
     #: ``"credential_mint"`` / ``"credential_write"`` / ``"audit_query"``
-    #: / ``"other"``. Derived from :func:`classify_op` at publish time.
+    #: / ``"approval"`` / ``"checks"`` / ``"other"``. Usually derived
+    #: from :func:`classify_op` at publish time — but a route that binds
+    #: the ``audit_op_class`` contextvar overrides it:
+    #: :func:`~meho_backplane.broadcast.overrides.resolve_broadcast_detail`
+    #: takes ``op_class_override`` in preference to :func:`classify_op`,
+    #: and the same value is what the audit row persists under
+    #: ``payload["op_class"]``.
     op_class: str
     #: One of ``"ok"`` / ``"error"`` / ``"denied"``. The handler
     #: produces it; the broadcast publisher does not re-classify.
@@ -406,6 +449,20 @@ def classify_op(op_id: str) -> str:
        ``decision`` / the request id, never secret material), so it
        stays full-detail like ``other`` did -- see
        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`.
+    4c. ``checks`` — the checks subsystem's own state-change events
+       (:data:`_CHECK_EVENT_OPS`; today just ``checks.transition``,
+       emitted by
+       :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`).
+       Its own class for the same reason ``approval`` has one: a feed
+       watcher filters ``op_class=checks`` server-side to follow
+       Dashboard rollup edges without reading every unclassified op.
+       Matched by **exact membership**, not by ``checks.`` prefix — the
+       ``/api/v1/checks/*`` gateway routes already own op-ids under that
+       prefix, and because this function is re-run at render time on the
+       stored op-id, a prefix branch would relabel their rows (historical
+       ones included) in the drawers; see :data:`_CHECK_EVENT_OPS` for
+       the full rationale. Not sensitive (the payload is dashboard id /
+       name / the two states), so it stays full-detail.
     5. ``read`` / ``write`` — HTTP-method-prefixed ingested op IDs
        (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
        map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
@@ -454,6 +511,10 @@ def classify_op(op_id: str) -> str:
     'approval'
     >>> classify_op("approval.approved")
     'approval'
+    >>> classify_op("checks.transition")
+    'checks'
+    >>> classify_op("checks.assignment.put")
+    'write'
     >>> classify_op("GET:/api/v2.0/systeminfo")
     'read'
     >>> classify_op("DELETE:/api/v2.0/projects/myproj/repositories/myrepo")
@@ -481,6 +542,12 @@ def classify_op(op_id: str) -> str:
     # not sensitive, so it stays full-detail like the `other` fall-through.
     if op_id.startswith("approval."):
         return "approval"
+    # Checks-subsystem state-change events (checks.transition), so a feed
+    # watcher can filter op_class=checks for Dashboard rollup edges (#2720).
+    # Exact membership, not a `checks.` prefix: the /api/v1/checks/* gateway
+    # routes own op-ids under that prefix and keep their existing classes.
+    if op_id in _CHECK_EVENT_OPS:
+        return "checks"
     # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo");
     # GET/HEAD are safe reads by HTTP semantics. The synthetic net.* probes
     # (#2406) ride the same arm: every net.* op is a non-mutating

@@ -119,6 +119,31 @@ connector-related release-notes line.
   (`checks_finding_email_failed`) and cannot cost the tenant the
   noise-suppression policy the finding was written to.
   Requires migration `0069`. (#2721)
+### Checks broadcast — transition events on the tenant feed (#2720)
+
+- Every claimed Dashboard rollup edge now publishes one
+  `checks.transition` event to the tenant broadcast feed, in **both**
+  directions — a watcher who saw a Dashboard go `critical` sees it
+  clear. The payload names the Dashboard (id + name) and the
+  `previous → new` states. Events carry a new `checks` op-class, so
+  `meho.broadcast.recent` / `meho.broadcast.watch` with
+  `filter.op_class=checks`, `GET /api/v1/feed?op_class=checks`, and
+  `/ui/broadcast/stream?op_class=checks` all narrow to check state
+  changes server-side — the same shape the approvals console already
+  uses for `approval.*`. Exactly one event per transition across
+  replicas (the existing compare-and-swap claim is the dedupe) and no
+  configurable floor: narrowing a feed is the consumer's job.
+  Publishing is fail-open and leaves the committed state memo, the
+  email notification, and the runner's persist path untouched. A Valkey
+  outage is absorbed by the shared broadcast publisher and stays on its
+  existing feed-wide signals — the `broadcast_publish_failed` warning
+  and the `broadcast_publish_errors_total` counter; alert on those, not
+  on the new `checks_transition_broadcast_failed` warning, which fires
+  only if the event cannot be built before it reaches the publisher.
+  The `/api/v1/checks/*` gateway op-ids (`checks.assignment.put` /
+  `.get`, `checks.results.post`) are untouched and keep the `write` /
+  `read` / `write` classes their routes bind. No migration, no new
+  settings. (#2720)
 
 ### Checks notifications — Dashboard email on state transitions (#2719)
 

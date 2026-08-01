@@ -107,9 +107,17 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 def _reset_investigator() -> Iterator[None]:
     """Clear the invoker singleton + the in-flight task sets per test.
 
-    ``_NOTIFICATIONS`` is drained here too: since #2721 a closed-loop run
-    schedules a finding mail, and leaving that task pending across tests
-    would leak a "Task was destroyed but it is pending" warning.
+    ``_NOTIFICATIONS`` is cleared here too -- *cleared*, not drained: since
+    #2721 a closed-loop run schedules a finding mail, and a task left in the
+    module-global set would otherwise be visible to the next test's
+    ``_await_pending_notifications()`` and its set assertions. Draining is the
+    test's own job: every test that schedules a send awaits
+    ``notify._await_pending_notifications()`` before asserting on the
+    transport. This teardown is synchronous and runs after the function-scoped
+    event loop is closed, so it can neither await the drain seam nor
+    ``cancel()`` a straggler -- cancelling a pending task whose loop is closed
+    raises ``RuntimeError: Event loop is closed``. Mirrors
+    ``test_checks_notify._reset_notifications``.
     """
     yield
     reset_agent_invoker_for_testing(None)
@@ -1076,9 +1084,15 @@ def test_briefing_prompt_cannot_close_its_own_fence() -> None:
     assert briefing.rstrip().endswith("this wiring.")
 
 
-def test_briefing_ignores_an_empty_prompt() -> None:
-    """An empty-string prompt is treated as unset, not as an empty block."""
-    assert inv._build_briefing(_dash(investigator_prompt=""), _group()) == _NO_PROMPT_BRIEFING
+@pytest.mark.parametrize("prompt", ["", " ", "  \n\t ", "\n\n"])
+def test_briefing_ignores_an_effectively_empty_prompt(prompt: str) -> None:
+    """A blank or whitespace-only prompt is treated as unset, not as a block.
+
+    ``_operator_section`` strips the body it quotes, so without stripping at
+    the gate too a prompt like ``" \\n"`` is truthy and renders the
+    "Operator instructions" heading over an empty fence.
+    """
+    assert inv._build_briefing(_dash(investigator_prompt=prompt), _group()) == _NO_PROMPT_BRIEFING
 
 
 @pytest.mark.asyncio

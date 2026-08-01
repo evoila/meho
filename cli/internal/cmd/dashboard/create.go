@@ -210,18 +210,22 @@ func validateNotifyMinState(value string) error {
 // forwarded as an empty (non-nil) sensor_ids so the zero-member rule applies
 // deterministically rather than depending on the field being omitted.
 //
-// notify_min_state is omitted when the flag is unset so the server's default
-// stays the single source of that value; notify_email is omitted when unset
-// so the row keeps notifications off. An unset --notify-email leaves the
-// field nil rather than sending an empty openapi_types.Email, whose
-// MarshalJSON would reject the empty string before the request goes out.
+// notify_min_state is genuinely omitted when the flag is unset -- it is the
+// one optional field whose generated tag carries omitempty -- so the server's
+// default stays the single source of that value and an explicit null can
+// never 422 its defaulted Literal. notify_email and investigator_prompt have
+// no omitempty, so unset means nil means an explicit JSON null on the wire;
+// both are `str | None` server-side, where null and absent read alike, so the
+// row keeps notifications off and keeps the pre-#2721 briefing respectively.
+// An unset --notify-email leaves the field nil rather than sending an empty
+// openapi_types.Email, whose MarshalJSON would reject the empty string before
+// the request goes out.
 //
-// investigator_prompt is likewise omitted when unset, so the row keeps the
-// pre-#2721 briefing. The 4096-character cap is deliberately NOT re-checked
+// investigator_prompt's 4096-character cap is deliberately NOT re-checked
 // here: unlike --notify-min-state's closed vocabulary (a typo the CLI can
 // name precisely), a length bound duplicated client-side drifts silently
-// the moment the server's changes, and the server's 422 already names the
-// field and the limit.
+// the moment the server's cap changes, and the server's 422 already names
+// the field and the limit.
 func buildCreateBody(
 	opts createOptions,
 	sensorIDs []openapi_types.UUID,

@@ -1274,8 +1274,11 @@ def _build_briefing(dashboard: _DashboardSnapshot, group: _CauseGroup) -> str:
     rather than at the very end is the stronger of the two readings of that
     contract: the output schema is server-built too, and keeping it last
     means operator text cannot displace the answer shape the caller-side
-    parse depends on. A ``None`` prompt yields a briefing byte-identical to
-    the pre-#2721 one.
+    parse depends on. A ``None`` -- or blank, or whitespace-only -- prompt
+    yields a briefing byte-identical to the pre-#2721 one: the gate strips
+    before testing, since :func:`_operator_section` strips the body it quotes
+    and an all-blank prompt would otherwise render the heading over an empty
+    fence.
     """
     parts: list[str] = ["## Dashboard", ""]
     parts.append(f"name: {dashboard.name}")
@@ -1296,7 +1299,7 @@ def _build_briefing(dashboard: _DashboardSnapshot, group: _CauseGroup) -> str:
         parts.append(f"  last_value: {member.last_value!r}")
         if member.last_evidence:
             parts.append(f"  evidence: {member.last_evidence!r}")
-    if dashboard.investigator_prompt:
+    if dashboard.investigator_prompt and dashboard.investigator_prompt.strip():
         parts.extend(_operator_section(dashboard.investigator_prompt))
     parts.append("")
     parts.append("## Output")

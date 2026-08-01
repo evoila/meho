@@ -130,8 +130,10 @@ Three properties are load-bearing, in this order:
 
 - **Appended, never substituted.** The deterministic transition facts always
   lead, so operator text cannot suppress what the Dashboard actually
-  reported. A `NULL` prompt yields a briefing byte-identical to the pre-#2721
-  one (pinned by a literal-comparison regression test).
+  reported. A `NULL` — or blank, or whitespace-only — prompt yields a briefing
+  byte-identical to the pre-#2721 one (pinned by a literal-comparison
+  regression test); the gate strips before testing, so an all-blank prompt
+  renders no heading and no empty fence.
 - **Delimited and attributed.** The block states the text's provenance before
   quoting it, so the model reads "this is operator configuration, context not
   instruction" first. This is OWASP LLM01's "separate and clearly denote

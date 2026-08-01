@@ -52,11 +52,15 @@ dispatch identity*, not a subsystem identity.
 Failure posture
 ===============
 
-Fail-open, twice over.
+Fail-open, twice over, and the two halves log in different places.
 :func:`~meho_backplane.broadcast.publisher.publish_event` already swallows
 every Valkey error (at-most-once delivery is the feed's documented
-contract), and this module wraps construction in a second guard so a
-malformed field or an import-time failure cannot reach the caller either.
+contract) and never re-raises, so a transport failure surfaces on its own
+``broadcast_publish_failed`` warning and ``broadcast_publish_errors_total``
+counter, not here. This module wraps the body in a second guard so a
+malformed field or an unexpected lineage failure -- anything *before* the
+publish -- cannot reach the caller either; that is the only thing
+``checks_transition_broadcast_failed`` reports.
 The publish is awaited inline rather than backgrounded: the claim is a
 rare edge, the fast broadcast client pins both its connect and read
 timeouts, and awaiting keeps the publish ordered with the claim that

@@ -166,9 +166,10 @@ Three layers, separated for traceability:
     path. Matched by an **exact-membership allowlist**
     (`_CHECK_EVENT_OPS`), not by a `checks.` prefix: the
     `/api/v1/checks/*` gateway routes already own three op-ids under
-    that prefix (`checks.assignment.put` / `.get`, `checks.results.post`)
-    and keep their `write` / `read` / `other` classes. See
-    [`docs/codebase/checks-broadcast.md`](checks-broadcast.md).
+    that prefix (`checks.assignment.put` / `.get`, `checks.results.post`),
+    and because `classify_op` is re-run at render time in the drawers, a
+    prefix branch would relabel their rows — historical ones included.
+    See [`docs/codebase/checks-broadcast.md`](checks-broadcast.md).
   - `other` — full detail.
 
   `credential_read` and `audit_query` are *upgradeable*: a per-call or

@@ -32,7 +32,7 @@ consumer (`op_class=checks`), not to the producer.
 
 ## Control flow
 
-```
+```text
 runner persists a Sensor result
   → investigate_on_transition(sensor_id, tenant_id)          [never raises]
     → _process_transition
@@ -58,16 +58,30 @@ the event ordered with the claim that caused it.
 `classify_op` maps `checks.transition` to `checks` by **exact
 membership** in `_CHECK_EVENT_OPS`, not by a `checks.` prefix. The prefix
 is already occupied: `/api/v1/checks/*` binds `checks.assignment.put`,
-`checks.assignment.get`, and `checks.results.post` as audit op-ids. A
-prefix branch would
+`checks.assignment.get`, and `checks.results.post` as audit op-ids.
 
-1. split the historical meaning of `audit_log.op_class` at the deploy
-   boundary — rows written before say `write`, rows after say `checks`,
-   so a saved `op_class=write` query silently stops seeing the
-   assignment write; and
-2. fold the runner result-ingest data plane (one call per runner per poll
-   cycle, the subsystem's highest-volume path) into the class whose whole
-   purpose is surfacing rare transition edges.
+What those three rows *persist* is not at risk from a prefix branch.
+Each of the routes also binds an explicit `audit_op_class` contextvar
+(`write` / `read` / `write`), and `resolve_broadcast_detail` in
+`broadcast/overrides.py` takes that `op_class_override` in preference to
+`classify_op`. The same value is what the audit row stores in
+`payload["op_class"]`, and that stored value is what `meho.audit.query`
+filters on in SQL (`audit_query/query.py`). `classify_op` therefore never
+decides the gateway rows' class on the write path, and no saved
+`op_class=write` query would change its results.
+
+The hazard is on the **read** side. `classify_op` is re-run at render
+time against the stored op-id by the audit drawer
+(`ui/routes/audit/routes.py`) and the broadcast event drawer
+(`ui/routes/broadcast/event.py`), supplying the row's displayed class and
+badge and feeding `is_aggregate_only`. A prefix branch would therefore
+
+1. relabel every `/api/v1/checks/*` row in those drawers as `checks` —
+   retroactively, since the class is derived on read rather than read
+   back off the row, so there is no deploy boundary to reason about; and
+2. sweep in any future non-transition `checks.*` op-id by construction,
+   diluting the class whose whole purpose is surfacing rare transition
+   edges.
 
 `checks` is **not** sensitive: it is absent from
 `broadcast/overrides.py::_SENSITIVE_OP_CLASSES`, so events broadcast at
@@ -105,12 +119,23 @@ subsystem identity.
 
 ## Failure posture
 
-Fail-open twice over. `publish_event` already swallows every Valkey error
-(at-most-once delivery is the feed's documented contract), and
-`publish_check_transition_event` wraps construction in a second guard so
-a malformed field cannot reach the caller either. A swallowed failure
-logs `checks_transition_broadcast_failed` at warning with the dashboard
-id and both states.
+Fail-open twice over, and the two halves log in **different** places —
+which is what an operator wiring an alert needs to know.
+
+`publish_event` already swallows every Valkey error (at-most-once
+delivery is the feed's documented contract). It never re-raises, so a
+Valkey outage or a failing `XADD` does **not** reach this module's guard:
+it surfaces on the existing feed-wide signals, the
+`broadcast_publish_failed` warning and the `broadcast_publish_errors_total`
+counter, exactly as it does for every other publisher. Those are what a
+"transitions stopped reaching the feed" alert should watch.
+
+`publish_check_transition_event` wraps the whole body in a second guard
+purely so a failure *before* the publish — an unexpected lineage
+resolution or a `BroadcastEvent` validation error on a malformed field —
+cannot reach the caller either. That guard, and only that guard, logs
+`checks_transition_broadcast_failed` at warning with the dashboard id and
+both states. It is a construction-bug signal, not an outage signal.
 
 The durable truth is the committed `last_rollup_state` memo. A broadcast
 outage must never convert a committed transition into a persist-path
@@ -135,7 +160,11 @@ layers and pinned together by a test rather than shared as a constant.
   The filter vocabulary is single-sourced from `OP_CLASS_ENUM` across the
   broadcast and audit tools, and a transition has no audit row. An
   operator narrowing audit to `checks` gets an empty result; the checks
-  *gateway* rows are under `write` / `read` / `other`.
+  *gateway* rows are stored under `write` / `read` / `write`, the classes
+  their routes bind via `audit_op_class`. (The drawers *display*
+  `classify_op`'s answer instead, which is `write` / `read` / `other` —
+  a pre-existing read-vs-write divergence for any route binding an
+  explicit `audit_op_class`, not something this change introduces.)
 - **No rate limit, digest, or repeat suppression.** A flapping Dashboard
   publishes one event per real edge, matching the notifier's stance
   (#2716 scopes volume control out).

@@ -104,12 +104,16 @@ connector-related release-notes line.
   uses for `approval.*`. Exactly one event per transition across
   replicas (the existing compare-and-swap claim is the dedupe) and no
   configurable floor: narrowing a feed is the consumer's job.
-  Publishing is fail-open — a Valkey outage logs
-  `checks_transition_broadcast_failed` and leaves the committed state
-  memo, the email notification, and the runner's persist path
-  untouched. The `/api/v1/checks/*` gateway op-ids
-  (`checks.assignment.put` / `.get`, `checks.results.post`) keep their
-  existing `write` / `read` / `other` classes. No migration, no new
+  Publishing is fail-open and leaves the committed state memo, the
+  email notification, and the runner's persist path untouched. A Valkey
+  outage is absorbed by the shared broadcast publisher and stays on its
+  existing feed-wide signals — the `broadcast_publish_failed` warning
+  and the `broadcast_publish_errors_total` counter; alert on those, not
+  on the new `checks_transition_broadcast_failed` warning, which fires
+  only if the event cannot be built before it reaches the publisher.
+  The `/api/v1/checks/*` gateway op-ids (`checks.assignment.put` /
+  `.get`, `checks.results.post`) are untouched and keep the `write` /
+  `read` / `write` classes their routes bind. No migration, no new
   settings. (#2720)
 
 ### Checks notifications — Dashboard email on state transitions (#2719)

@@ -321,18 +321,29 @@ class TestClassifyOp:
             ("checks.results.post", "other"),
         ],
     )
-    def test_gateway_checks_op_ids_keep_their_classes(self, op_id: str, expected: str) -> None:
+    def test_gateway_checks_op_ids_are_not_swept_into_checks(
+        self, op_id: str, expected: str
+    ) -> None:
         """The ``/api/v1/checks/*`` op-ids are NOT swept into ``checks``.
 
         Regression guard on the deliberate choice of an exact-membership
-        allowlist over a ``checks.`` prefix branch (#2720). A prefix match
-        would (a) split the historical meaning of ``audit_log.op_class``
-        at the deploy boundary -- rows written before say ``write``,
-        after say ``checks``, so a saved ``op_class=write`` query would
-        silently stop seeing the assignment write -- and (b) fold the
-        runner result-ingest data plane (one call per runner per poll)
-        into the class whose whole purpose is surfacing rare transition
-        edges.
+        allowlist over a ``checks.`` prefix branch (#2720).
+
+        The values pinned here are what :func:`classify_op` returns **in
+        isolation**, which is not the same thing as the class those rows
+        ship with: all three routes bind an explicit ``audit_op_class``
+        (``write`` / ``read`` / ``write``), and both the audit write and
+        the broadcast publish honour that override in preference to
+        ``classify_op`` -- hence ``checks.results.post`` persisting
+        ``write`` while this function says ``other``.
+
+        What the pin protects is the **read** path. ``classify_op`` is
+        re-run at render time on the stored op-id by the audit and
+        broadcast event drawers, where it supplies the displayed class
+        and feeds ``is_aggregate_only``. A prefix branch would relabel
+        every gateway row there -- retroactively, since the class is
+        derived on read -- and would sweep in any future non-transition
+        ``checks.*`` op-id.
         """
         assert classify_op(op_id) == expected
 

@@ -304,8 +304,15 @@ async def test_audit_id_is_the_nil_uuid(monkeypatch: pytest.MonkeyPatch) -> None
 async def test_publisher_failure_is_swallowed_and_logged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A raising publisher never reaches the caller; it logs and returns."""
-    _install_publisher(monkeypatch, exc=RuntimeError("valkey down"))
+    """A raising publish never reaches the caller; it logs and returns.
+
+    The injected failure stands in for what the guard actually covers: a
+    fault *before* the ``XADD``, e.g. lineage resolution or
+    ``BroadcastEvent`` validation. A Valkey outage never gets this far --
+    :func:`~meho_backplane.broadcast.publisher.publish_event` swallows it
+    and logs ``broadcast_publish_failed`` on its own.
+    """
+    _install_publisher(monkeypatch, exc=RuntimeError("event construction failed"))
 
     with capture_logs() as logs:
         await publish_check_transition_event(
@@ -368,16 +375,20 @@ async def test_concurrent_transitions_publish_exactly_one_event(
 
 
 @pytest.mark.asyncio
-async def test_publisher_outage_leaves_the_memo_and_the_mail_intact(
+async def test_broadcast_failure_leaves_the_memo_and_the_mail_intact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A broadcast outage must not fail the persist seam or the notifier.
+    """A failing broadcast must not fail the persist seam or the notifier.
 
     The committed ``last_rollup_state`` memo is the durable truth; the
     feed is the at-most-once real-time view. This is the fail-open
-    contract the whole publish path is built on.
+    contract the whole publish path is built on. Raising at the publish
+    seam is the strongest form of the failure -- a real Valkey outage is
+    weaker still, since
+    :func:`~meho_backplane.broadcast.publisher.publish_event` swallows it
+    before this module's guard ever sees it.
     """
-    _install_publisher(monkeypatch, exc=RuntimeError("valkey down"))
+    _install_publisher(monkeypatch, exc=RuntimeError("broadcast unavailable"))
     mail = _install_transport(monkeypatch)
     monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
     await _seed_tenant()
@@ -396,13 +407,18 @@ async def test_publisher_outage_leaves_the_memo_and_the_mail_intact(
 
 
 @pytest.mark.asyncio
-async def test_no_claim_publishes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A persist that moves no rollup state publishes no event.
+async def test_second_persist_on_an_unchanged_rollup_does_not_republish(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the persist that moves the rollup state publishes.
 
-    The Dashboard is already ``critical`` in the memo, so the
-    compare-and-swap finds nothing to claim. Guards against the publish
-    being wired outside the claim-win branch, which would emit one event
-    per Sensor evaluation instead of one per edge.
+    The Dashboard starts with a NULL memo, so the first
+    ``investigate_on_transition`` wins a real ``ok -> critical`` claim and
+    publishes once. The second call finds the memo already ``critical``,
+    the compare-and-swap claims nothing, and the count must stay at one.
+    Guards against the publish being wired outside the claim-win branch,
+    which would emit one event per Sensor evaluation instead of one per
+    edge.
     """
     fake = _install_publisher(monkeypatch)
     _install_transport(monkeypatch)
@@ -412,7 +428,7 @@ async def test_no_claim_publishes_nothing(monkeypatch: pytest.MonkeyPatch) -> No
     await _seed_dashboard(name="prod-health", sensor_ids=[sid])
 
     await inv.investigate_on_transition(sensor_id=sid, tenant_id=_TENANT)
-    assert len(fake.events) == 1
+    assert len(fake.events) == 1, "the first persist claims the edge and publishes it"
 
     await inv.investigate_on_transition(sensor_id=sid, tenant_id=_TENANT)
     assert len(fake.events) == 1, "a no-op persist must not re-publish the edge"

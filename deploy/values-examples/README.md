@@ -5,6 +5,16 @@ Copyright (c) 2026 evoila Group
 
 # values-examples — sanitized chart-values templates
 
+> **Operators: start on the published docs site.** The install path an
+> adopter should follow lives at <https://evoila.github.io/meho/>
+> (#2671) — including the promoted
+> [Keycloak realm recipe](https://evoila.github.io/meho/latest/install/keycloak-realm/)
+> and [TLS trust guidance](https://evoila.github.io/meho/latest/install/tls-ingress/).
+> This README remains the values-level deep-dive the site links back
+> into: ESO sync patterns, the full auth-onramp recipe with the
+> five-wall matrix, CIMD, per-target TLS trust, and the agent-runtime
+> credential wiring.
+
 This directory ships **sanitized example values files** for the MEHO Helm
 chart at [`deploy/charts/meho/`](../charts/meho/). Each file targets a
 specific deployment shape (today: the RDC Hetzner dogfooding lab) and is
@@ -372,13 +382,19 @@ extraVolumeMounts:
 extraEnv:
   - name: SSL_CERT_FILE
     value: /etc/ssl/extra-certs/ca.crt
+  - name: REQUESTS_CA_BUNDLE
+    value: /etc/ssl/extra-certs/ca.crt
 ```
 
 `SSL_CERT_FILE` is CPython's standard env var
 ([`ssl.get_default_verify_paths`](https://docs.python.org/3/library/ssl.html#ssl.get_default_verify_paths))
-— httpx, hvac, asyncpg, and SQLAlchemy all honour it without code
-changes. Mounting read-only keeps the discipline (the bundle is owned
-by trust-manager, not by anything inside the Pod).
+— httpx, asyncpg, and SQLAlchemy all honour it without code changes.
+**`hvac` does not**: it drives `requests`, which pins
+`certifi.where()` and consults only `REQUESTS_CA_BUNDLE` /
+`CURL_CA_BUNDLE`. Set both to the same path, or the Vault leg of
+`/ready` stays red with `unreachable: SSLError` no matter how correct
+`SSL_CERT_FILE` is. Mounting read-only keeps the discipline (the
+bundle is owned by trust-manager, not by anything inside the Pod).
 
 ### Alternatives if trust-manager isn't deployed
 
@@ -400,15 +416,24 @@ After `helm install`:
 ```bash
 # The mount is present
 kubectl exec -n meho deployment/meho -- ls -l /etc/ssl/extra-certs/ca.crt
-# SSL_CERT_FILE resolves to it
-kubectl exec -n meho deployment/meho -- printenv SSL_CERT_FILE
+# Both variables resolve to it (hvac reads the second one, not the first)
+kubectl exec -n meho deployment/meho -- printenv SSL_CERT_FILE REQUESTS_CA_BUNDLE
 # Python sees it
 kubectl exec -n meho deployment/meho -- python -c "import ssl; print(ssl.get_default_verify_paths().cafile)"
-# /ready turns green for vault + keycloak
-kubectl exec -n meho deployment/meho -- wget -qO- http://localhost:8000/ready | jq '.checks'
+# /ready turns green for vault + keycloak. The image ships no curl or
+# wget, so port-forward rather than exec.
+kubectl port-forward -n meho deployment/meho 8000:8000 >/dev/null 2>&1 &
+PF=$!
+# Wait for the forward to bind — any HTTP answer counts, including a 503.
+for _ in $(seq 30); do
+  curl -s -o /dev/null http://localhost:8000/ready && break
+  sleep 1
+done
+curl -sS http://localhost:8000/ready | jq '.checks'
+kill "$PF"
 ```
 
-If `/ready` still reports `ssl_error` after the mount lands, check the
+If `/ready` still reports `unreachable: SSLError` after the mount lands, check the
 **migration Job's** Pod logs — that Job uses the same bundle. A
 common drift cause: a typo'd ConfigMap name (the mount succeeds but
 the file is empty / wrong).
@@ -1399,13 +1424,17 @@ kubectl exec <cluster>-1 -n <ns> -c postgres -- \
 ```
 
 To make it survive a cluster re-bootstrap, declare it at init time on the
-CNPG `Cluster` — `postInitSQL` runs as the bootstrap superuser:
+CNPG `Cluster`. Use `postInitApplicationSQL`, which runs as the bootstrap
+superuser **inside the application database** — its sibling
+`postInitSQL` runs against the `postgres` database instead, so the
+extension would be created in the wrong one and migration `0003` would
+still fail:
 
 ```yaml
 spec:
   bootstrap:
     initdb:
-      postInitSQL:
+      postInitApplicationSQL:
         - "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 

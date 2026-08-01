@@ -50,8 +50,15 @@ theme:
 nav:
   - Start here:
       - index.md
+      - Reference architecture: architecture.md
       - Deployment shapes: deployment-shapes.md
-  - Install & operate: install/index.md
+  - Install & operate:
+      - The install trail: install/index.md
+      - Credential backends: install/credential-backends.md
+      - Keycloak realm setup: install/keycloak-realm.md
+      - TLS and ingress: install/tls-ingress.md
+      - Upgrades: install/upgrades.md
+      - Local kind quickstart: install/kind-quickstart.md
   - Connect clients: clients/index.md
   - Do real work:
       - guides/index.md

@@ -1321,6 +1321,25 @@ class Settings(BaseModel):
     # ``CHECKS_INVESTIGATOR_AGENT`` / ``CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS``.
     checks_investigator_agent: str = "checks-investigator"
     checks_investigation_poll_timeout_seconds: int = Field(default=600, ge=1, le=86400)
+    # #2717 (Initiative #2716) — mail.* typed connector: one deployment-level
+    # SMTP block shared by the agent-callable ``mail.send`` op and the checks
+    # notifier's ``send_email()`` transport. ``mail_smtp_host`` empty (the
+    # default) leaves the transport unconfigured — every send is refused with
+    # ``reason="smtp_unconfigured"`` (return-failures contract, never an
+    # exception). Port 465 selects implicit TLS (``smtplib.SMTP_SSL``,
+    # RFC 8314); any other port opens plaintext and upgrades via STARTTLS
+    # when ``mail_smtp_starttls`` is set. ``SMTP.login()`` runs only when a
+    # username is configured. ``mail_recipient_allowlist`` is the hard floor
+    # (the ``net.*`` allowlist mould, inverted default): comma-separated full
+    # addresses and/or recipient domains naming the entire permitted
+    # recipient space; empty ⇒ every send refused (the connector is inert).
+    mail_smtp_host: str = Field(default="")
+    mail_smtp_port: int = Field(default=587, gt=0, le=65535)
+    mail_smtp_starttls: bool = True
+    mail_smtp_username: str = Field(default="")
+    mail_smtp_password: str = Field(default="", repr=False)
+    mail_from: str = Field(default="")
+    mail_recipient_allowlist: str = Field(default="")
     # G11.3-T2 #823 / G0.19-T2 #1478 — autonomous-agent credential
     # sourcing for the scheduler. ``run_scheduled`` (G11.2-T2 #1096)
     # wants ``(client_id, client_secret)``; the scheduler resolves
@@ -1881,6 +1900,15 @@ def get_settings() -> Settings:
         checks_investigation_poll_timeout_seconds=int(
             os.environ.get("CHECKS_INVESTIGATION_POLL_TIMEOUT_SECONDS", "600"),
         ),
+        mail_smtp_host=os.environ.get("MAIL_SMTP_HOST", "").strip(),
+        mail_smtp_port=int(os.environ.get("MAIL_SMTP_PORT", "587")),
+        mail_smtp_starttls=parse_bool_env(
+            os.environ.get("MAIL_SMTP_STARTTLS", "true"),
+        ),
+        mail_smtp_username=os.environ.get("MAIL_SMTP_USERNAME", "").strip(),
+        mail_smtp_password=os.environ.get("MAIL_SMTP_PASSWORD", "").strip(),
+        mail_from=os.environ.get("MAIL_FROM", "").strip(),
+        mail_recipient_allowlist=os.environ.get("MAIL_RECIPIENT_ALLOWLIST", ""),
         scheduler_agent_secret_env_pattern=os.environ.get(
             "SCHEDULER_AGENT_SECRET_ENV_PATTERN",
             "MEHO_AGENT_SECRET_{client_id}",

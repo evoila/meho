@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — Mail connector — SMTP send as a typed operation (#2717)
+
+- New synthetic `mail.*` typed connector on the `net.*` mould: one op,
+  `mail.send` (`connector_id` `mail-smtp-1.x`), delivering plain-text
+  email through a deployment-level SMTP block (`MAIL_SMTP_HOST/PORT`,
+  STARTTLS by default, implicit TLS on port 465, optional LOGIN auth
+  that only ever runs on an encrypted channel — stdlib `smtplib`, no
+  new dependency). `MAIL_RECIPIENT_ALLOWLIST`
+  (full addresses and/or domains) is the hard floor: empty ⇒ every
+  send refused (the connector is inert). Registered
+  `safety_level="caution"` + `requires_approval=False`, so operators
+  auto-run it while agent calls ride the policy gate's needs-approval
+  default. Refused/unconfigured/failed sends return
+  `{sent: false, reason}` with `status="ok"` (return-failures
+  contract); the audit row records recipients + subject, never the
+  body. The shared `send_email()` transport is the seam the checks
+  notifier (#2719) reuses. (#2717)
 ### Added — docs site: Start here, reference architecture, and the install trail (#2671)
 
 - Fill the docs site's *Start here* and *Install & operate* sections

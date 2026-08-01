@@ -348,6 +348,50 @@ connector-related release-notes line.
   CLI as the fourth artefact a release tag publishes. README now links
   the site as the primary documentation entry point. (#2670)
 
+### Added — Topology v2: open vocabularies, approval-gated agent authorship, chain-shaped answers (#2533 / #2654)
+
+- Node and edge kind vocabularies are **open**: a novel kind enters the
+  graph through a normal pattern-validated write instead of being
+  rejected by a closed enum (this also retires the `keycloak-realm`
+  drift, where an advertised seedable kind was rejected at runtime).
+- Topology writes by AGENT principals are **approval-gated** through the
+  existing `policy_gate` → `ApprovalRequest` surfaces (REST/CLI/MCP/UI);
+  tenant-admin writes keep today's zero-friction path on every front.
+  Agents also gain a bulk import with dry-run preview and
+  approval-gated apply.
+- Traversal answers are **chain-shaped**: blast-radius results carry
+  `parent_node_id` and `via_edge_id`, so a caller reconstructs which
+  node hangs off which without N follow-up calls.
+- Curated nodes survive populator refresh instead of being overwritten
+  wholesale, and pathfinding no longer degrades in dense meshes.
+
+### Added — safety-class change reporting at connector re-ingest (#2702 / #2709)
+
+- A connector re-ingest that changes an existing op's `safety_level`
+  now reports every change as `(op_id, old, new)` together with the
+  Sensors pinning that op — on the REST ingest response, the async
+  ingest job report, and the MCP `meho.connector.ingest` tool result
+  (additive `safety_changes` field) — and emits one
+  `ingest_safety_class_changed` structlog warning per change. Before
+  this, re-ingest overwrote `safety_level` silently and a Sensor
+  pinning a reclassified op kept auto-executing it under its stale
+  create-time `safe` assumption. Report-only: no migration, no
+  dispatch-path change, no Sensor auto-parking. (#2702 / #2709)
+
+### Changed — backplane runtime: Python 3.12 → 3.14 (#2573)
+
+- The backplane image now runs Python 3.14 (base image, `uv.lock`
+  refresh incl. `py-rust-stemmers` 0.1.8 cp314 wheels, Dockerfile
+  site-packages path resolved from `sysconfig` instead of a hardcoded
+  minor version). Operator-visible TLS note: CA-pinned target contexts
+  explicitly clear the `VERIFY_X509_STRICT` flag that CPython 3.13+
+  turns on by default, **preserving** the documented pinning semantics
+  for self-signed / internal-CA appliance certs (strict mode would
+  reject certs lacking an Authority Key Identifier). Chain and hostname
+  verification are untouched; `VERIFY_X509_PARTIAL_CHAIN` is kept —
+  terminating path validation at the pinned cert is the intent of a
+  pin. (#2573)
+
 ### Fixed — RKE2 posture reports an unreadable path honestly (#2698)
 
 - Stop `rke2.posture.show` reporting the RKE2 server join token **absent on
@@ -533,6 +577,18 @@ connector-related release-notes line.
   unblock. Operators who worked around it with `PATCH
   /api/v1/targets/{name}` can drop the manual step and let the
   repo-tracked `targets.yaml` be the source of truth again.
+
+### Fixed — operator-console polish: retrieval, connector detail & registry, runbooks dialogs
+
+- Six console fixes across the retrieval, connectors, and runbooks
+  views: retrieval Usage Analytics chips are legible and the
+  Diagnostics form no longer overlaps (#169 / #2653); connector detail
+  labels, timestamps, and edit-form layout are tidied (#170 / #2655);
+  the connector ingest modal is migrated off dead daisyUI-v4 form
+  classes (#173 / #2682); the registry Product/Kind filters actually
+  fire (#174 / #2683); the Start-a-Run dialog lays out cleanly and
+  pretty-prints Params JSON (#176 / #2696); the runbooks editor form is
+  migrated off dead daisyUI-v4 classes (#177 / #2697).
 
 ## [0.25.0] - 2026-07-19
 

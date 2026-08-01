@@ -891,10 +891,13 @@ tuple. The v0.8.0 drift was prose-only on `query_audit.op_class`
 (five values, missing `credential_mint`) vs JSON-enum on
 `meho.broadcast.recent`/`watch` (six values). Convention: one
 import, one tuple, one enum on every surface that filters on it.
-Adjacent finding (not in scope here): `tool_call` is a recent
-classify_op return value missing from `OP_CLASS_ENUM`; harmonising
-the broadcast tuple with the dispatcher classifier output is a
-follow-up.
+Issue #2731 completed the harmonisation the other way too: `OP_CLASS_ENUM`
+now spans exactly `classify_op`'s output range (the tuple had omitted
+`credential_write` / `approval`, so both classes were published on
+the feed but rejected with `-32602` at the wire), and
+`backend/tests/test_broadcast_events.py` pins the set equality by
+extracting the classifier's return literals — neither side can gain
+a member alone.
 
 ### §14.2 — Forward-cursor parameter named `cursor` everywhere
 

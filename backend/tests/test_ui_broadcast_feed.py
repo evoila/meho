@@ -51,6 +51,7 @@ from fastapi.testclient import TestClient
 
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.broadcast import (
+    OP_CLASS_ENUM,
     BroadcastEvent,
     get_broadcast_blocking_client,
     get_broadcast_client,
@@ -78,6 +79,7 @@ from meho_backplane.ui.routes import build_router as build_ui_router
 from meho_backplane.ui.routes.broadcast.feed import (
     IN_DOM_ROW_CAP,
     OP_CLASS_BADGE_CLASSES,
+    OP_CLASS_FILTER_OPTIONS,
 )
 from meho_backplane.ui.routes.broadcast.stream import _ui_feed_generator
 from meho_backplane.ui.templating import reset_templating_for_testing
@@ -410,6 +412,28 @@ def test_feed_page_embeds_row_cap_and_badge_palette() -> None:
     for op_class, badge_class in OP_CLASS_BADGE_CLASSES.items():
         assert op_class in body
         assert badge_class in body
+
+
+def test_badge_and_filter_tables_cover_the_full_op_class_enum() -> None:
+    """Both UI lookup tables span exactly ``OP_CLASS_ENUM`` (#2731).
+
+    Before #2731 the two tables omitted ``approval`` /
+    ``credential_write`` / ``checks``: nothing broke — badges fell back
+    to ``badge-ghost`` and the classes stayed reachable by hand-typed
+    query param — but the filter dropdown could not name them. Set
+    equality (not superset) so a class removed from the enum cannot
+    linger as a dead dropdown option or badge entry either.
+    """
+    assert set(OP_CLASS_BADGE_CLASSES) == set(OP_CLASS_ENUM), (
+        f"OP_CLASS_BADGE_CLASSES drifted from OP_CLASS_ENUM: "
+        f"missing={sorted(set(OP_CLASS_ENUM) - set(OP_CLASS_BADGE_CLASSES))}, "
+        f"extra={sorted(set(OP_CLASS_BADGE_CLASSES) - set(OP_CLASS_ENUM))}"
+    )
+    assert set(OP_CLASS_FILTER_OPTIONS) == set(OP_CLASS_ENUM), (
+        f"OP_CLASS_FILTER_OPTIONS drifted from OP_CLASS_ENUM: "
+        f"missing={sorted(set(OP_CLASS_ENUM) - set(OP_CLASS_FILTER_OPTIONS))}, "
+        f"extra={sorted(set(OP_CLASS_FILTER_OPTIONS) - set(OP_CLASS_ENUM))}"
+    )
 
 
 def test_feed_page_carries_aggregate_only_placeholder_logic() -> None:

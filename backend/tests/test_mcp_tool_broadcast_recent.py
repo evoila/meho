@@ -470,6 +470,59 @@ def test_filter_op_class_checks_reaches_the_handler(
     [TenantRole.OPERATOR],
     indirect=True,
 )
+@pytest.mark.parametrize(
+    ("op_class", "op_id"),
+    [
+        ("approval", "approval.pending"),
+        ("credential_write", "vault.kv.put"),
+    ],
+)
+def test_filter_op_class_approval_and_credential_write_reach_the_handler(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    op_class: str,
+    op_id: str,
+) -> None:
+    """The two classes #2731 added to the enum narrow via full ``tools/call``.
+
+    ``approval.*`` events have been on the feed since the approvals work
+    and ``credential_write`` since G11.7-T1, but both were rejected with
+    ``-32602`` at the wire because ``OP_CLASS_ENUM`` omitted them — the
+    dispatcher validates arguments against the advertised ``inputSchema``
+    before the handler runs. Posted as a full ``tools/call`` for the same
+    reason as the ``checks`` test above: the enum is what is under test,
+    and a handler-level call would pass even with the class missing.
+    """
+    client, _op = client_with_operator
+    wanted = _make_event(
+        op_id=op_id,
+        op_class=op_class,
+        payload={"op_class": op_class, "result_status": "ok"},
+    )
+    unrelated = _make_event(op_id="vsphere.vm.list", op_class="read")
+    bc = get_broadcast_client()
+    with patch.object(
+        bc,
+        "xrange",
+        new=AsyncMock(
+            return_value=[
+                _xrange_entry(unrelated, "1747800000000-0"),
+                _xrange_entry(wanted, "1747800001000-0"),
+            ],
+        ),
+    ):
+        resp = post_mcp(
+            client,
+            _tools_call("meho.broadcast.recent", {"filter": {"op_class": op_class}}),
+        )
+    result = _result_dict(resp)
+    assert [e["op_id"] for e in result["events"]] == [op_id]
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
 def test_filter_principal_narrows_result(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:

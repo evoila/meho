@@ -497,6 +497,42 @@ class TestClassifyOp:
         """
         assert classify_op("audit.list") == "audit_query"
 
+    def test_op_class_enum_spans_the_full_classifier_range(self) -> None:
+        """``OP_CLASS_ENUM`` is exactly :func:`classify_op`'s output range (#2731).
+
+        The enum is the filter vocabulary the MCP tools advertise, and the
+        dispatcher's jsonschema validation makes it enforced: a class the
+        classifier emits but the enum omits is publishable yet unfilterable
+        (a ``-32602`` at the wire). That was the shipped state for
+        ``credential_write`` and ``approval``, and ``checks`` (#2720)
+        needed a manual enum edit to become reachable. The classifier's
+        range is extracted from its source (every ``return "<literal>"``),
+        so this fails when either side gains a member alone — no curated
+        op-id corpus to forget to extend.
+        """
+        import ast
+        import inspect
+        import textwrap
+
+        from meho_backplane.broadcast import OP_CLASS_ENUM
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(classify_op)))
+        classifier_range = {
+            node.value.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Return)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        }
+        # Guard the extraction itself: a refactor that stops returning
+        # plain string literals would silently shrink the extracted set.
+        assert classifier_range, "extracted no return literals from classify_op"
+        assert set(OP_CLASS_ENUM) == classifier_range, (
+            f"OP_CLASS_ENUM and classify_op's range drifted: "
+            f"enum-only={sorted(set(OP_CLASS_ENUM) - classifier_range)}, "
+            f"classifier-only={sorted(classifier_range - set(OP_CLASS_ENUM))}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # redact_payload — AC #6, #7, #8 + edge cases

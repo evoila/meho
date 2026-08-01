@@ -251,6 +251,48 @@ def test_tools_call_since_24h_parses_to_tz_aware_datetime(
     [TenantRole.OPERATOR],
     indirect=True,
 )
+@pytest.mark.parametrize("op_class", ["approval", "credential_write"])
+def test_tools_call_op_class_approval_and_credential_write_pass_the_schema(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+    op_class: str,
+) -> None:
+    """The two classes #2731 added to the enum reach the substrate.
+
+    ``query_audit.op_class`` advertises ``enum: [*OP_CLASS_ENUM, None]``
+    and the dispatcher validates every ``tools/call`` against the
+    ``inputSchema`` before the handler runs, so with the old seven-member
+    tuple these two values were a ``-32602`` at the wire. The full
+    JSON-RPC round-trip (not a handler-level call) is what proves the
+    enum widening — the filter itself is plain exact-match plumbing.
+    """
+    client, _op = client_with_operator
+    mock_query = AsyncMock(return_value=_empty_result())
+    with patch(_PATCH_TARGET, new=mock_query):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {
+                    "name": "query_audit",
+                    "arguments": {"op_class": op_class},
+                },
+            },
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert "error" not in body, body
+    assert body["result"]["isError"] is False
+    filters = mock_query.await_args.args[0]
+    assert filters.op_class == op_class
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
 def test_tools_call_tenant_id_taken_from_operator_jwt(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:

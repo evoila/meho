@@ -19,10 +19,15 @@ The gate has three parts:
   ``audit_log`` row. A cross-tenant id resolves to ``None`` identically
   to a non-existent id, so the tenant boundary is opaque (never leaked
   as a 403-vs-404 distinction).
-* :func:`resolve_op_id` -- recover the op id the publisher classified
-  on, falling back to the ``http.{method}:{path}`` heuristic the audit
-  middleware uses, so :func:`~meho_backplane.broadcast.classify_op`
-  yields the same class the broadcast publisher computed.
+* :func:`resolve_op_id` -- recover the op id for the drawer's
+  **read-time** classification via
+  :func:`~meho_backplane.broadcast.classify_op`, falling back to the
+  ``http.{method}:{path}`` heuristic the audit middleware uses. Note
+  the read-time class is not always the persisted one: a route that
+  binds an explicit ``audit_op_class`` contextvar persists that
+  override (honoured over ``classify_op`` by
+  :func:`~meho_backplane.broadcast.overrides.compute_effective_broadcast_detail`),
+  while the drawer re-derives from the op id.
 * :func:`is_aggregate_only` -- the verdict: honour the G6.3 resolver's
   recorded ``payload["broadcast_detail_effective"]`` when present,
   otherwise fall back to op-class membership in
@@ -93,7 +98,7 @@ async def fetch_audit_row(
 
 
 def resolve_op_id(row: AuditLog) -> str:
-    """Recover the op id for the row's sensitivity classification.
+    """Recover the op id for the row's read-time sensitivity classification.
 
     The audit middleware stamps the canonical op id into
     ``payload["op_id"]`` for connector-style routes. When absent
@@ -101,10 +106,17 @@ def resolve_op_id(row: AuditLog) -> str:
     publisher's own heuristic ``http.{method.lower()}:{path}`` -- the
     exact string
     :func:`meho_backplane.audit._resolve_op_id_and_class_override`
-    builds -- so :func:`classify_op` here yields the same class the
-    broadcast publisher computed. The ``:`` separator deliberately
-    avoids a route ending in ``.list`` being misread as a ``read`` verb
-    suffix (the publisher relies on the same guard).
+    builds. The ``:`` separator deliberately avoids a route ending in
+    ``.list`` being misread as a ``read`` verb suffix (the publisher
+    relies on the same guard).
+
+    :func:`classify_op` over this id is the **read-time** classifier
+    only -- it does not determine the persisted ``op_class``. A route
+    that binds an explicit ``audit_op_class`` contextvar (e.g. the
+    ``/api/v1/checks/*`` gateway routes) persists that binding, which
+    :func:`~meho_backplane.broadcast.overrides.compute_effective_broadcast_detail`
+    honours in preference to :func:`classify_op`; for such rows the
+    drawer's re-derived class can differ from the persisted one.
     """
     op_id = row.payload.get("op_id")
     if isinstance(op_id, str) and op_id:

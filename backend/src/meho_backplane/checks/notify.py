@@ -55,16 +55,46 @@ cannot be evaluated is a degradation, matching the Initiative's
 ``skip`` edge never clears the bar **on its own**; ``critical -> skip``
 still mails, because the ``critical`` side does.
 
-Exactly-once, and the flap boundary
-===================================
+Exactly-once, and the flap window
+=================================
 
 One mail per *claimed* edge. The claim is the compare-and-swap, so two
 replicas racing the same edge produce exactly one send with no coordination
-here. What that does **not** bound is a genuinely flapping Dashboard: a
+here. What that alone does not bound is a genuinely flapping Dashboard: a
 member Sensor going stale and back re-crosses ``critical <-> unknown``, and
-each crossing is a real edge, so each mails. There is deliberately no
-rate limit, digest, or repeat-suppression window in this Task (#2716
-scopes those out); the floor knob is the only volume control today.
+each crossing is a real edge. Since #2732 a per-``(tenant, dashboard,
+state)`` suppression window bounds *delivery*: the first crossing into a
+non-green state claims a Valkey ``SET NX EX`` key
+(:func:`_claim_suppression`, the #2718 advisory's idiom) and mails; repeat
+crossings into the **same** state inside the window lose the claim and are
+suppressed (``checks_notify_suppressed``). The window is
+``CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`` (default 30); ``0`` disables
+suppression entirely and short-circuits before any Valkey call, restoring
+the pre-#2732 one-mail-per-edge behaviour.
+
+Three deliberate asymmetries keep the window from ever costing a page:
+
+* **Escalation is never suppressed.** A different state is a different
+  key, so ``degraded -> critical`` mails immediately after a recent
+  ``degraded`` notice.
+* **Recovery is never suppressed, and it resets the windows.** A crossing
+  into a rank-0 state (``ok`` / ``skip``) is exempt from the claim, and
+  it deletes the Dashboard's suppression keys (:func:`_clear_suppression`)
+  -- even when the recovery edge itself sits below the floor -- so the
+  incident *after* an all-clear is a new incident and its first crossing
+  mails, never inherits a half-spent window.
+* **Fail-open.** A Valkey error on claim or clear warn-logs
+  (``checks_notify_suppression_failed``) and the notification is sent --
+  a missed alert is worse than a duplicate.
+
+The window bounds **attempts**, not confirmed deliveries: the key is
+claimed before the send (atomic check-and-claim; claiming after would race
+a slow SMTP session against the next flap edge), so a send that fails
+inside a window is not retried on the next same-state edge. That matches
+the #2719 contract -- at most one notification attempt per claimed
+transition -- and the failure is warn-logged either way. Digests and
+batching remain out of scope (#2716); findings are not flap-suppressed --
+their volume control is the investigator's own fire gate.
 
 Failure posture
 ===============
@@ -108,7 +138,9 @@ from typing import Final, cast
 
 import structlog
 
+from meho_backplane.broadcast.client import get_broadcast_client
 from meho_backplane.connectors.mail.transport import send_email
+from meho_backplane.settings import get_settings
 
 __all__ = [
     "DashboardNotice",
@@ -136,6 +168,15 @@ _NOTIFY_RANK: Final[dict[str, int]] = {
     "degraded": 1,
     "critical": 2,
 }
+
+#: The states a flap-suppression window applies to -- exactly the rank>=1
+#: states of :data:`_NOTIFY_RANK`. A crossing into a rank-0 state (``ok`` /
+#: ``skip``) is a recovery for suppression purposes: it is never claimed
+#: (the all-clear always delivers) and it clears these keys so the next
+#: incident's first crossing mails. Enumerated as a tuple (not derived from
+#: the dict at call time) because :func:`_clear_suppression` deletes one key
+#: per entry and the vocabulary is CHECK-constrained at the database.
+_SUPPRESSIBLE_STATES: Final[tuple[str, ...]] = ("unknown", "degraded", "critical")
 
 #: How many non-green members one mail enumerates. A correlated failure can
 #: redden a whole Dashboard; the recipient needs the shape of the problem,
@@ -203,8 +244,13 @@ class DashboardNotice:
     Built while the ``check_dashboards`` row and its member Sensors are live
     inside the claim transaction, so the background task never touches an
     expired ORM object.
+
+    :attr:`tenant_id` exists for the #2732 suppression key -- the same
+    per-tenant prefix discipline the #2718 advisory key follows, and what
+    keeps the Valkey namespace greppable per tenant.
     """
 
+    tenant_id: uuid.UUID
     dashboard_id: uuid.UUID
     name: str
     previous_state: str
@@ -251,6 +297,76 @@ def _crosses_threshold(previous: str, current: str, min_state: str) -> bool:
     """
     floor = _NOTIFY_RANK.get(min_state, _NOTIFY_RANK["critical"])
     return max(_NOTIFY_RANK.get(previous, 0), _NOTIFY_RANK.get(current, 0)) >= floor
+
+
+def _suppression_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID, state: str) -> str:
+    """Valkey key bounding one ``(tenant, dashboard, state)`` per window (#2732).
+
+    Unlike the #2718 advisory's key there is no caller segment: the
+    notification's audience is the Dashboard's single configured recipient,
+    not whoever happens to dispatch. Every segment is a UUID or a
+    CHECK-constrained vocabulary word, so the ``:`` delimiter cannot alias
+    two keys.
+    """
+    return f"meho:checks:notify:{tenant_id}:{dashboard_id}:{state}"
+
+
+async def _claim_suppression(notice: DashboardNotice, window_seconds: int) -> bool:
+    """Claim this edge's suppression window; ``True`` iff the mail should send.
+
+    One atomic ``SET key 1 NX EX <window-seconds>`` (the #2718 advisory's
+    claim idiom, single key so no pipeline): ``True`` from redis-py 8.0.1's
+    ``parse_set_result`` means the key was absent and this notification owns
+    the window; ``None`` means a same-state notification already claimed it.
+    Claimed **before** the send -- an atomic check-and-claim -- because
+    claiming after would race a slow SMTP session against the next flap
+    edge and let both mail. The window therefore bounds attempts, not
+    confirmed deliveries (see the module docstring).
+
+    Fail-open: any Valkey error warn-logs ``checks_notify_suppression_failed``
+    and returns ``True`` -- a missed alert is worse than a duplicate.
+    """
+    key = _suppression_key(notice.tenant_id, notice.dashboard_id, notice.current_state)
+    try:
+        claimed = await get_broadcast_client().set(key, "1", nx=True, ex=window_seconds)
+    except Exception:
+        _log().warning(
+            "checks_notify_suppression_failed",
+            dashboard_id=str(notice.dashboard_id),
+            phase="claim",
+            exc_info=True,
+        )
+        return True
+    return bool(claimed)
+
+
+async def _clear_suppression(notice: DashboardNotice) -> None:
+    """Drop the Dashboard's suppression keys on a recovery crossing (#2732).
+
+    One ``DEL`` covering every suppressible state, so the incident after an
+    all-clear starts with fresh windows and its first non-green crossing
+    always mails. Runs on any rank-0 crossing -- before the floor gate --
+    because a below-floor recovery (``degraded -> ok`` at the default
+    ``critical`` floor) still ends the incident even though it sends no
+    mail of its own.
+
+    Fail-open like the claim: a Valkey error warn-logs and the notification
+    path continues -- worst case a stale window suppresses one repeat, it
+    never drops the current mail.
+    """
+    keys = [
+        _suppression_key(notice.tenant_id, notice.dashboard_id, state)
+        for state in _SUPPRESSIBLE_STATES
+    ]
+    try:
+        await get_broadcast_client().delete(*keys)
+    except Exception:
+        _log().warning(
+            "checks_notify_suppression_failed",
+            dashboard_id=str(notice.dashboard_id),
+            phase="clear",
+            exc_info=True,
+        )
 
 
 def _single_line(value: str) -> str:
@@ -363,7 +479,14 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
     * ``notify_email`` unset -- notifications are off for this Dashboard
       (the state every pre-#2719 row backfills to);
     * the edge does not reach ``notify_min_state`` (see
-      :func:`_crosses_threshold`).
+      :func:`_crosses_threshold`);
+    * a same-state notification already claimed this edge's flap window
+      (#2732, see :func:`_claim_suppression`; skipped entirely when the
+      window is ``0`` or the crossing is into a rank-0 state).
+
+    A rank-0 crossing (recovery) additionally clears the Dashboard's
+    suppression keys before the floor gate -- the incident is over whether
+    or not the recovery edge itself mails.
 
     Otherwise :func:`_deliver` runs one
     :func:`~meho_backplane.connectors.mail.transport.send_email` call,
@@ -376,6 +499,10 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             dashboard_id=str(notice.dashboard_id),
         )
         return
+    window_minutes = get_settings().checks_notify_suppression_window_minutes
+    suppressible = notice.current_state in _SUPPRESSIBLE_STATES
+    if window_minutes > 0 and not suppressible:
+        await _clear_suppression(notice)
     if not _crosses_threshold(notice.previous_state, notice.current_state, notice.notify_min_state):
         _log().info(
             "checks_notify_skipped_below_threshold",
@@ -383,6 +510,19 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             previous_state=notice.previous_state,
             current_state=notice.current_state,
             notify_min_state=notice.notify_min_state,
+        )
+        return
+    if (
+        window_minutes > 0
+        and suppressible
+        and not await _claim_suppression(notice, window_minutes * 60)
+    ):
+        _log().info(
+            "checks_notify_suppressed",
+            dashboard_id=str(notice.dashboard_id),
+            previous_state=notice.previous_state,
+            current_state=notice.current_state,
+            window_minutes=window_minutes,
         )
         return
     await _deliver(notice, notice.notify_email)
@@ -472,7 +612,12 @@ async def notify_finding(notice: FindingNotice) -> None:
     which is already far narrower than any state floor: a finding exists only
     when the edge worsened into a non-green state with an actively-failing
     member, the correlated cause was novel (not noise-suppressed), no run for
-    it was already in flight, and the budget gate admitted it.
+    it was already in flight, and the budget gate admitted it. #2732 re-put
+    the question and settled on keeping this shape -- the operator-surprise
+    tradeoff (finding mail about a ``degraded`` Dashboard reaching someone on
+    the default ``critical`` floor) is documented in
+    ``docs/codebase/checks-notifications.md``. The same fire gate is why the
+    #2732 flap-suppression window does not apply here either.
     """
     if not notice.recipient:
         _log().info(

@@ -115,16 +115,65 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    that used to live inside the claim now sits at this single site,
    unchanged in meaning: `worsening and non_green` → investigator. Every
    claimed edge → `schedule_dashboard_notification`.
-3. **Threshold + build + send** (`notify_dashboard_transition`). Unset
-   recipient short-circuits; then the rank rule; then one `send_email`.
+3. **Threshold + flap window + build + send**
+   (`notify_dashboard_transition`). Unset recipient short-circuits; a
+   recovery crossing clears the Dashboard's flap windows; then the rank
+   rule; then the #2732 suppression claim (see below); then one
+   `send_email`.
 4. **Outcome logging.** `checks_notify_sent` (info) on delivery;
    `checks_notify_failed` (warning, with the transport's stable reason
    code) on a `sent=False` result or an unexpected exception;
    `checks_notify_skipped_unconfigured` /
-   `checks_notify_skipped_below_threshold` (info) on the two
-   short-circuits. All four are at info or above because a claimed edge
-   is a rare event and "no mail arrived" is a question the log has to be
-   able to answer.
+   `checks_notify_skipped_below_threshold` /
+   `checks_notify_suppressed` (info) on the three short-circuits;
+   `checks_notify_suppression_failed` (warning, `phase` = `claim` or
+   `clear`) when Valkey misbehaves and the fail-open path runs. All are
+   at info or above because a claimed edge is a rare event and "no mail
+   arrived" is a question the log has to be able to answer.
+
+## Flap suppression (#2732)
+
+A member Sensor whose evaluation stops updating derives `unknown`
+(stale grace, `checks/rollup.py`) and returns to its real state when it
+evaluates again, so a Dashboard sitting at `critical` re-crosses
+`critical <-> unknown` — each crossing a genuine claimed edge. Since
+#2732 delivery (not the claim) is bounded by a per-`(tenant, dashboard,
+state)` window:
+
+- **Mechanism.** The first crossing into a non-green state claims a
+  Valkey key — `meho:checks:notify:<tenant>:<dashboard>:<state>`, one
+  atomic `SET NX EX`, the #2718 advisory's idiom (`checks/advisory.py`)
+  minus the caller segment (the audience is the Dashboard's one
+  configured recipient, not whoever dispatches). Repeat crossings into
+  the **same** state inside the window lose the claim and log
+  `checks_notify_suppressed`. The Valkey TTL key *is* the state —
+  nothing durable; a Valkey flush re-arms every window.
+- **Knob.** `CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`, default 30.
+  `0` disables suppression entirely (one mail per claimed edge, the
+  pre-#2732 behaviour) and short-circuits before any Valkey call.
+  Deployment-level, like the SMTP block — not per Dashboard.
+- **Escalation is never suppressed.** A different state is a different
+  key: `degraded → critical` mails immediately after a recent
+  `degraded` notice.
+- **Recovery is never suppressed, and it resets the windows.** A
+  crossing into a rank-0 state (`ok`/`skip`) is exempt from the claim,
+  and it `DEL`s the Dashboard's three suppressible-state keys — even
+  when the recovery edge itself is below the floor and sends nothing
+  (`degraded → ok` at the default `critical` floor). The incident after
+  an all-clear is a new incident; its first crossing always mails.
+- **Fail-open.** Any Valkey error on claim or clear warn-logs
+  `checks_notify_suppression_failed` and the notification is sent. A
+  missed alert is worse than a duplicate.
+- **Attempt-based.** The key is claimed *before* the send (atomic
+  check-and-claim; claiming after would race a slow SMTP session
+  against the next flap edge), so a send that fails inside a window is
+  not retried by the next same-state crossing — the #2719
+  one-attempt-per-claimed-transition contract, per window. The failure
+  is warn-logged either way.
+- **Delivery only.** The memo compare-and-swap, the `checks.transition`
+  broadcast event (#2720), and the investigator's fire gate see every
+  edge, suppressed or not. Finding mail is not flap-suppressed — its
+  volume control is the investigator's fire gate.
 
 ## Message shape
 
@@ -172,6 +221,21 @@ edge worsened into a non-green state with an actively-failing member, the
 correlated cause was novel, no run for it was in flight, and the budget
 gate admitted it.
 
+#2721's review flagged the operator surprise in this and #2732 re-put
+the question; the decision is to **keep the no-floor shape**, and this
+paragraph is its record. The surprise, stated plainly: an operator on
+the default `critical` floor can receive finding mail about a
+`degraded` Dashboard whose transition mail was silent. That is
+intended — the floor tunes *paging* volume on a per-edge signal that
+can fire often, while a finding is a rare, budget-gated diagnosis that
+exists precisely because something worsened; a recipient who configured
+`notify_email` and an investigator wants the diagnosis. Gating it on
+the floor would silently discard completed investigations, and there is
+no separate per-Dashboard knob because no consumer has asked for one.
+For the same fire-gate reason, findings are exempt from the #2732 flap
+window (`test_finding_mail_has_no_state_floor_and_no_flap_window` pins
+both exemptions).
+
 ## Failure posture
 
 Fire-and-forget in two senses:
@@ -211,12 +275,15 @@ from the memo would mean re-mailing every unchanged evaluation.
 
 ## Known issues / boundaries
 
-- **No flap suppression.** One mail per *claimed* edge. A member Sensor
-  going stale and back re-crosses `critical <-> unknown`, and each
-  crossing is a real edge, so each mails. There is deliberately no rate
-  limit, digest, or repeat-suppression window (#2716 scopes those out);
-  the floor knob is the only volume control today. A Sensor that flaps
-  at the runner cadence will mail at the runner cadence.
+- **Suppression bounds repeats, not distinct states.** A Dashboard
+  cycling through *N* distinct non-green states mails once per state
+  per window — the window is per-`(dashboard, state)`, not
+  per-dashboard. Digests, batching, and grouping several Dashboards
+  into one mail remain out of scope (#2716).
+- **The window is attempt-based and ephemeral.** A send that fails
+  inside a window is not retried by the next same-state crossing, and a
+  Valkey flush (or failover to an empty replica) re-arms every window —
+  worst case one extra mail per state, never a dropped one.
 - **One recipient per Dashboard.** No lists, no routing rules, no
   per-Sensor recipients. More when a consumer asks.
 - **Deployment-level SMTP.** One MTA and one allowlist for the whole
@@ -237,10 +304,14 @@ from the memo would mean re-mailing every unchanged evaluation.
 
 ## References
 
-- `backend/src/meho_backplane/checks/notify.py`
+- `backend/src/meho_backplane/checks/notify.py` —
+  `_claim_suppression` / `_clear_suppression` / `_suppression_key` are
+  the #2732 flap-window seam
 - `backend/src/meho_backplane/checks/investigate.py` —
   `_process_transition`, `_claim_dashboard_transition`,
   `_ClaimedTransition`, `_dashboard_notice`, `_finding_notice`
+- `backend/src/meho_backplane/checks/advisory.py` — the `SET NX EX`
+  claim precedent the flap window follows
 - `backend/alembic/versions/0068_add_check_dashboard_notify.py`
 - `backend/tests/test_checks_notify.py`,
   `backend/tests/test_checks_investigate.py` (the finding mail through

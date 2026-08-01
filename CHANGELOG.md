@@ -90,6 +90,23 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — checks advisory: non-green Dashboards surface on dispatch responses (#2718)
+
+- Successful dispatch responses — agent `call_operation` and the
+  operator CLI's `--json` envelope, read ops included — now carry a
+  compact `extras["checks_alert_advisory"]` naming any Dashboard in
+  the caller's tenant whose rollup memo is `degraded`/`critical`, once
+  per (caller, dashboard, state) window (Valkey `SET NX EX` dedupe;
+  `CHECKS_ALERT_ADVISORY_WINDOW_MINUTES`, default 30, `0` disables).
+  At most 10 Dashboards ride one fragment, ordered by name — an
+  awareness nudge, not an audit — and their dedupe claims are staged
+  into one pipelined Valkey round-trip, so a tenant-wide outage adds
+  neither an unbounded read nor a per-Dashboard round-trip to every
+  successful dispatch.
+  Advisory only: fail-open, never gates a dispatch; second extras
+  fragment beside the #2550 target-activity advisory. The CLI's
+  default human render prints `extras` only for non-ok statuses, so
+  operators reach the fragment through `--json` today. (#2718)
 ### Added — Mail connector — SMTP send as a typed operation (#2717)
 
 - New synthetic `mail.*` typed connector on the `net.*` mould: one op,

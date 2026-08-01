@@ -569,3 +569,108 @@ func TestRunCallAwaitingApprovalJSON(t *testing.T) {
 		t.Errorf("json envelope must carry extras.approval_request_id; got %v", decoded["extras"])
 	}
 }
+
+// ---- checks_alert_advisory (#2718) reach on the operator CLI ----
+//
+// The backend attaches extras["checks_alert_advisory"] to SUCCESSFUL
+// dispatch responses (status=ok). These two tests pin what each operator
+// output mode actually does with it, because the two disagree and
+// docs/codebase/checks-advisory.md § "Operator reach" documents the gap:
+// --json passes the envelope through verbatim, while printCallResult
+// returns inside its status=="ok" branch before reaching the extras
+// block, so the default human render drops it. Teaching the human render
+// to print extras on success is a CLI-wide UX change (it would also start
+// printing #2550's target_activity_advisory, and the vendor verbs render
+// through dispatch.Render), so #2718 scoped it out — but the boundary is
+// now asserted rather than assumed, and either half failing means the
+// boundary moved without the doc moving with it.
+
+const checksAdvisoryExtras = `{"checks_alert_advisory":[` +
+	`{"dashboard_id":"d1","name":"prod-health","state":"critical"}]}`
+
+// TestCallJSONCarriesChecksAlertAdvisoryOnOK — with --json, a status=ok
+// envelope round-trips the advisory fragment untouched. This is the
+// operator-reachable path today.
+func TestCallJSONCarriesChecksAlertAdvisoryOnOK(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{
+		Status: "ok", OpID: "vault.kv.read",
+		Result:     json.RawMessage(`{"value":"secret"}`),
+		Extras:     json.RawMessage(checksAdvisoryExtras),
+		DurationMs: 12,
+	})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--target", "rdc-vault", "--json", "--backplane", "https://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status=ok must exit 0; got %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, out.String())
+	}
+	extras, ok := decoded["extras"].(map[string]any)
+	if !ok {
+		t.Fatalf("--json envelope must carry extras on status=ok; got %v", decoded["extras"])
+	}
+	advisory, ok := extras["checks_alert_advisory"].([]any)
+	if !ok || len(advisory) != 1 {
+		t.Fatalf("expected one checks_alert_advisory entry; got %v", extras["checks_alert_advisory"])
+	}
+	entry, ok := advisory[0].(map[string]any)
+	if !ok {
+		t.Fatalf("advisory entry should be an object; got %T", advisory[0])
+	}
+	for k, want := range map[string]string{
+		"dashboard_id": "d1", "name": "prod-health", "state": "critical",
+	} {
+		if entry[k] != want {
+			t.Errorf("advisory entry %s: got %v want %q", k, entry[k], want)
+		}
+	}
+}
+
+// TestCallHumanRenderOmitsExtrasOnOK — without --json the default human
+// render prints the result and returns; extras (advisory included) are
+// printed only for non-ok statuses. Pinning the gap keeps
+// docs/codebase/checks-advisory.md honest: close it and this test tells
+// you the doc's table needs updating.
+func TestCallHumanRenderOmitsExtrasOnOK(t *testing.T) {
+	cr, _ := json.Marshal(CallResult{
+		Status: "ok", OpID: "vault.kv.read",
+		Result:     json.RawMessage(`{"value":"secret"}`),
+		Extras:     json.RawMessage(checksAdvisoryExtras),
+		DurationMs: 12,
+	})
+	f := &fakeOperationsClient{
+		callResponses: []*api.PostCallApiV1OperationsCallPostResponse{
+			{HTTPResponse: makeHTTPResp(200), Body: cr},
+		},
+	}
+	withFakeClient(t, f)
+
+	cmd := newCallCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"vault-1.x", "vault.kv.read", "--target", "rdc-vault", "--backplane", "https://x"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status=ok must exit 0; got %v", err)
+	}
+	if !strings.Contains(out.String(), "status=ok") || !strings.Contains(out.String(), "secret") {
+		t.Fatalf("human render should show the status line + result; got %q", out.String())
+	}
+	if strings.Contains(out.String(), "checks_alert_advisory") {
+		t.Errorf("human render printed extras on status=ok — the CLI gap closed; "+
+			"update docs/codebase/checks-advisory.md § Operator reach and the "+
+			"CHANGELOG bullet, then flip this assertion. Output: %q", out.String())
+	}
+}

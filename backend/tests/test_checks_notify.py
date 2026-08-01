@@ -20,6 +20,11 @@ Initiative #2716 (parent goal #221), Task #2719. Coverage:
   ``investigate_on_transition`` calls on one Dashboard produce exactly one
   send (the compare-and-swap claim is the dedupe), and the recovery edge
   back to ``ok`` produces a second one.
+* **Finding mail (#2721)** -- the second notice kind: verdict / summary /
+  ``run_id`` / recommended action rendering, the unconfigured skip, both
+  failure shapes (refused result and raising transport), header safety on
+  the model-influenced subject, bounding of an unbounded model answer, and
+  the off-the-caller scheduling.
 
 :func:`~meho_backplane.connectors.mail.transport.send_email` is replaced by
 a recording fake in every test, so no SMTP session is opened; the DB layer
@@ -41,8 +46,10 @@ import meho_backplane.checks.investigate as inv
 import meho_backplane.checks.notify as notify
 from meho_backplane.checks.notify import (
     DashboardNotice,
+    FindingNotice,
     NotifyMember,
     notify_dashboard_transition,
+    notify_finding,
 )
 from meho_backplane.connectors.mail.transport import MailSendResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -521,3 +528,164 @@ async def test_investigator_gate_is_unchanged_by_the_notify_hook(
 
     assert fired == [], "the improving edge must not reach the investigator"
     assert len(fake.calls) == 1, "the improving edge must reach the notifier"
+
+
+# ---------------------------------------------------------------------------
+# Finding mail (#2721)
+# ---------------------------------------------------------------------------
+
+
+def _finding(
+    *,
+    verdict: str = "actionable",
+    summary: str = "Datastore ds-01 is 98% full.",
+    evidence: tuple[str, ...] = ("capacity 98%",),
+    action: str | None = "Reclaim thin-provisioned space.",
+    email: str | None = "oncall@example.com",
+    name: str = "prod-health",
+) -> FindingNotice:
+    return FindingNotice(
+        dashboard_id=uuid4(),
+        dashboard_name=name,
+        run_id=uuid4(),
+        verdict=verdict,
+        summary=summary,
+        evidence=evidence,
+        recommended_action=action,
+        recipient=email,
+    )
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_carries_verdict_summary_and_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The mail names the verdict, the summary, the run, and the action."""
+    fake = _install_transport(monkeypatch)
+    notice = _finding()
+
+    await notify_finding(notice)
+
+    assert len(fake.calls) == 1
+    call = fake.calls[0]
+    assert call["to"] == ["oncall@example.com"]
+    assert call["subject"] == "[MEHO] investigation actionable: prod-health"
+    body = call["body"]
+    assert "Datastore ds-01 is 98% full." in body
+    assert str(notice.run_id) in body
+    assert "capacity 98%" in body
+    assert "Reclaim thin-provisioned space." in body
+    # The advisory-only disclaimer rides with the action, not without it.
+    assert "diagnose-only" in body
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_without_action_omits_the_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A benign finding renders no recommended-action section."""
+    fake = _install_transport(monkeypatch)
+
+    await notify_finding(_finding(verdict="benign", action=None))
+
+    body = fake.calls[0]["body"]
+    assert "## Recommended action" not in body
+    assert "## Summary" in body
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_is_skipped_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No recipient -> no send, one structured skip log."""
+    fake = _install_transport(monkeypatch)
+
+    with capture_logs() as logs:
+        await notify_finding(_finding(email=None))
+
+    assert fake.calls == []
+    assert any(e["event"] == "checks_finding_email_skipped_unconfigured" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_refusal_is_logged_with_its_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``sent=False`` transport result surfaces the transport's reason code."""
+    _install_transport(
+        monkeypatch,
+        result=MailSendResult(sent=False, reason="not_in_recipient_allowlist"),
+    )
+
+    with capture_logs() as logs:
+        await notify_finding(_finding())
+
+    failed = [e for e in logs if e["event"] == "checks_finding_email_failed"]
+    assert len(failed) == 1
+    assert failed[0]["reason"] == "not_in_recipient_allowlist"
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising transport is swallowed -- the investigation seam sees nothing."""
+    _install_transport(monkeypatch, exc=RuntimeError("MTA down"))
+
+    with capture_logs() as logs:
+        await notify_finding(_finding())
+
+    failed = [e for e in logs if e["event"] == "checks_finding_email_failed"]
+    assert len(failed) == 1
+    assert failed[0]["reason"] == "unexpected_error"
+
+
+@pytest.mark.asyncio
+async def test_finding_subject_folds_control_characters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A newline-bearing Dashboard name cannot inject an SMTP header."""
+    fake = _install_transport(monkeypatch)
+
+    await notify_finding(_finding(name="prod\r\nBcc: attacker@evil.test"))
+
+    subject = fake.calls[0]["subject"]
+    assert "\r" not in subject and "\n" not in subject
+    assert "Bcc: attacker@evil.test" in subject, "the text survives, folded to one line"
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_bounds_a_runaway_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ChecksFinding`` fields are model output with no schema bound; the mail bounds them."""
+    fake = _install_transport(monkeypatch)
+    evidence = tuple(f"line-{i}" for i in range(notify._MAX_EVIDENCE_LINES + 5))
+
+    await notify_finding(_finding(summary="x" * 12_000, evidence=evidence))
+
+    body = fake.calls[0]["body"]
+    assert "x" * (notify._MAX_FINDING_CHARS + 1) not in body
+    assert body.count("\n- line-") == notify._MAX_EVIDENCE_LINES
+    assert "5 further line(s) not shown." in body
+
+
+@pytest.mark.asyncio
+async def test_finding_send_is_scheduled_off_the_caller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``schedule_finding_notification`` returns before the send completes."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _slow(*, to: list[str], subject: str, body: str) -> MailSendResult:
+        started.set()
+        await release.wait()
+        return MailSendResult(sent=True)
+
+    monkeypatch.setattr(notify, "send_email", _slow)
+
+    notify.schedule_finding_notification(_finding())
+    await started.wait()  # the caller already returned; the send is in flight
+    release.set()
+    await notify._await_pending_notifications()
+
+    assert set() == notify._NOTIFICATIONS or all(t.done() for t in notify._NOTIFICATIONS)

@@ -30,6 +30,7 @@ import respx
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+import meho_backplane.checks.dashboard_schemas as dashboard_schemas
 from meho_backplane.auth.jwt import clear_jwks_cache
 from meho_backplane.auth.operator import TenantRole
 from meho_backplane.checks.dashboard_schemas import DashboardCreate
@@ -589,3 +590,88 @@ async def test_rest_create_rejects_invalid_notify_config(
         assert result.status_code == 422, result.text
         # FastAPI's validation envelope names the offending field.
         assert any(field in entry["loc"] for entry in result.json()["detail"])
+
+
+# ---------------------------------------------------------------------------
+# Investigator prompt (#2721)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rest_create_round_trips_investigator_prompt(client: TestClient) -> None:
+    """The create body's investigator prompt lands on the row and reads back."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    key = make_rsa_keypair("kid-prompt")
+    prompt = "The SAN behind these datastores scrubs at 02:00 UTC; check it first."
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        created = client.post(
+            "/api/v1/checks/dashboards",
+            json={"name": "prompted", "investigator_prompt": prompt},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["investigator_prompt"] == prompt
+
+        dashboard_id = created.json()["id"]
+        detail = client.get(f"/api/v1/checks/dashboards/{dashboard_id}", headers=headers)
+        assert detail.json()["investigator_prompt"] == prompt
+
+        listed = client.get("/api/v1/checks/dashboards", headers=headers)
+        row = next(d for d in listed.json()["dashboards"] if d["id"] == dashboard_id)
+        assert row["investigator_prompt"] == prompt
+
+    async with get_sessionmaker()() as session:
+        persisted = await session.get(CheckDashboard, UUID(dashboard_id))
+        assert persisted is not None
+        assert persisted.investigator_prompt == prompt
+
+
+@pytest.mark.asyncio
+async def test_rest_create_defaults_investigator_prompt_to_null(client: TestClient) -> None:
+    """Omitting the field leaves the pre-#2721 briefing behaviour untouched."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    key = make_rsa_keypair("kid-prompt-default")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        created = client.post(
+            "/api/v1/checks/dashboards",
+            json={"name": "unprompted"},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["investigator_prompt"] is None
+
+
+@pytest.mark.asyncio
+async def test_rest_create_rejects_oversize_investigator_prompt(client: TestClient) -> None:
+    """An over-length prompt is a structured 422, not a silent truncation.
+
+    The envelope names the field, the ``string_too_long`` type, and the limit
+    in ``ctx`` -- everything an operator needs to shorten the prompt.
+    """
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    key = make_rsa_keypair("kid-prompt-oversize")
+    limit = dashboard_schemas._INVESTIGATOR_PROMPT_MAX_LENGTH
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        result = client.post(
+            "/api/v1/checks/dashboards",
+            json={"name": "too-wordy", "investigator_prompt": "x" * (limit + 1)},
+            headers=headers,
+        )
+        assert result.status_code == 422, result.text
+        entry = next(e for e in result.json()["detail"] if "investigator_prompt" in e["loc"])
+        assert entry["type"] == "string_too_long"
+        assert entry["ctx"]["max_length"] == limit
+
+        # The boundary is exactly at the limit, not one short of it.
+        at_limit = client.post(
+            "/api/v1/checks/dashboards",
+            json={"name": "just-wordy-enough", "investigator_prompt": "x" * limit},
+            headers=headers,
+        )
+        assert at_limit.status_code == 201, at_limit.text

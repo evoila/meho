@@ -17,6 +17,9 @@ Initiative #2416 (parent goal #221), Task #2506. Covers:
   default to "off at ``critical``", the floor CHECK admits only the two
   actionable states, and the model / wire-Literal / ``0068`` migration copies
   of that vocabulary agree.
+* **Investigator prompt (#2721)** -- ``investigator_prompt`` defaults NULL
+  (the pre-#2721 briefing), round-trips operator prose verbatim, and carries
+  no DB CHECK: the bound is the wire schema's, by decision.
 """
 
 from __future__ import annotations
@@ -290,3 +293,71 @@ async def test_notify_min_state_check_rejects_out_of_vocabulary() -> None:
         )
         with pytest.raises(IntegrityError):
             await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_investigator_prompt_defaults_to_null() -> None:
+    """A row inserted without an operator prompt keeps the pre-#2721 briefing."""
+    await _seed_tenant()
+    dashboard_id = uuid.uuid4()
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            CheckDashboard(
+                id=dashboard_id,
+                tenant_id=_TENANT,
+                name="defaults-prompt",
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        row = await session.get(CheckDashboard, dashboard_id)
+        assert row is not None
+        assert row.investigator_prompt is None
+
+
+@pytest.mark.asyncio
+async def test_investigator_prompt_round_trips() -> None:
+    """The column stores operator prose verbatim -- newlines and all.
+
+    The briefing quotes the value inside a fence, so the ORM must not
+    normalise it; the only shaping happens at render time.
+    """
+    await _seed_tenant()
+    dashboard_id = uuid.uuid4()
+    prompt = "Line one.\n\nLine two, with 'quotes' and a -- dash."
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            CheckDashboard(
+                id=dashboard_id,
+                tenant_id=_TENANT,
+                name="prompted",
+                investigator_prompt=prompt,
+                created_by_sub="op-admin",
+            )
+        )
+        await session.commit()
+    async with sessionmaker() as session:
+        row = await session.get(CheckDashboard, dashboard_id)
+        assert row is not None
+        assert row.investigator_prompt == prompt
+
+
+def test_investigator_prompt_is_unconstrained_at_the_database() -> None:
+    """No CHECK bounds the prompt -- the wire schema is the single guard.
+
+    A drift guard for the decision recorded in ``0069``'s docstring: the
+    create path is the column's only writer, so the bound lives at the
+    boundary where a violation is a structured 422 naming the limit, not an
+    opaque 500 from a constraint the caller cannot see.
+    """
+    from sqlalchemy import CheckConstraint
+
+    bodies = [
+        str(c.sqltext)
+        for c in CheckDashboard.__table__.constraints
+        if isinstance(c, CheckConstraint)
+    ]
+    assert not any("investigator_prompt" in body for body in bodies)

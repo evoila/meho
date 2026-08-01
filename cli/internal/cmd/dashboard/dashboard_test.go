@@ -211,6 +211,10 @@ func TestBuildCreateBodyMinimal(t *testing.T) {
 	if body.NotifyMinState != nil {
 		t.Errorf("notify_min_state should stay nil when omitted; got %+v", body.NotifyMinState)
 	}
+	// Omitted investigator_prompt keeps the pre-#2721 briefing.
+	if body.InvestigatorPrompt != nil {
+		t.Errorf("investigator_prompt should stay nil when omitted; got %+v", body.InvestigatorPrompt)
+	}
 }
 
 func TestBuildCreateBodyFull(t *testing.T) {
@@ -218,10 +222,11 @@ func TestBuildCreateBodyFull(t *testing.T) {
 	sensorIDs := []openapi_types.UUID{parseStubUUID(t, stubSensorID)}
 	body := buildCreateBody(
 		createOptions{
-			Name:           "prod-health",
-			Description:    "prod glance",
-			NotifyEmail:    "oncall@example.com",
-			NotifyMinState: "degraded",
+			Name:               "prod-health",
+			Description:        "prod glance",
+			NotifyEmail:        "oncall@example.com",
+			NotifyMinState:     "degraded",
+			InvestigatorPrompt: "check the SAN controller first",
 		},
 		sensorIDs, &tenantID,
 	)
@@ -240,6 +245,9 @@ func TestBuildCreateBodyFull(t *testing.T) {
 	}
 	if body.NotifyMinState == nil || string(*body.NotifyMinState) != "degraded" {
 		t.Errorf("notify_min_state not forwarded; got %+v", body.NotifyMinState)
+	}
+	if body.InvestigatorPrompt == nil || *body.InvestigatorPrompt != "check the SAN controller first" {
+		t.Errorf("investigator_prompt not forwarded; got %+v", body.InvestigatorPrompt)
 	}
 }
 
@@ -872,5 +880,38 @@ func TestSanitizeCellNeutralizesControlChars(t *testing.T) {
 	const printable = "prod-health é 名前"
 	if sanitizeCell(printable) != printable {
 		t.Errorf("printable text altered: %q", sanitizeCell(printable))
+	}
+}
+
+func TestPrintDashboardSummaryRendersInvestigatorPrompt(t *testing.T) {
+	d := fakeDashboardDetail(t)
+	prompt := "Line one.\nLine two."
+	d.InvestigatorPrompt = &prompt
+	var buf bytes.Buffer
+	printDashboardSummary(&buf, &d)
+	out := buf.String()
+	for _, want := range []string{"investigator_prompt:", "  Line one.", "  Line two."} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in summary; got %q", want, out)
+		}
+	}
+}
+
+func TestPrintDashboardSummaryOmitsUnsetInvestigatorPrompt(t *testing.T) {
+	d := fakeDashboardDetail(t)
+	d.InvestigatorPrompt = nil
+	var buf bytes.Buffer
+	printDashboardSummary(&buf, &d)
+	if strings.Contains(buf.String(), "investigator_prompt") {
+		t.Errorf("unset prompt must not render a line; got %q", buf.String())
+	}
+}
+
+func TestIndentBlockKeepsLinesAndNeutralizesEscapes(t *testing.T) {
+	// The line breaks the operator wrote survive; every other control
+	// character (here an ANSI colour escape) does not.
+	got := indentBlock("first\r\nsec\x1b[31mond")
+	if got != "  first\n  sec�[31mond" {
+		t.Fatalf("unexpected render: %q", got)
 	}
 }

@@ -97,6 +97,54 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    `(scope, slug)`) with metadata `source` / `verdict` / `re_escalate` /
    `run_id`, so a subsequent red for the same group with `re_escalate=false`
    is suppressed without an LLM call.
+7. **Emailed finding** (#2721, `_finding_notice` →
+   `notify.schedule_finding_notification`). When the Dashboard carries a
+   `notify_email`, the persisted finding is mailed to it: verdict, summary,
+   `run_id`, evidence, and — for an `actionable` verdict only — the
+   recommended action. Ordered strictly after the memory write-back, because
+   the noise-suppression policy is the load-bearing durable effect and the
+   mail is the operator courtesy; scheduled rather than awaited, so a 30 s
+   SMTP session does not sit in front of the next cause group's diagnosis.
+   `notify_finding` never raises (`checks_finding_email_failed` on any
+   failure), so a broken MTA cannot cost the tenant its policy write.
+
+## Operator-supplied briefing context (#2721)
+
+`check_dashboards.investigator_prompt` (migration `0069`, `text` NULL, capped
+at 4096 characters by `DashboardCreate`) is operator prose about what a
+Dashboard means and where to look first. `_build_briefing` renders it in a
+clearly delimited section **between the transition snapshot and the
+`## Output` contract**:
+
+```
+## Dashboard              <- server-built, deterministic
+## Correlated sensors     <- server-built, deterministic
+## Operator instructions for this dashboard
+<<<OPERATOR-PROMPT
+…operator text…
+OPERATOR-PROMPT>>>
+## Output                 <- server-built, the answer contract
+```
+
+Three properties are load-bearing, in this order:
+
+- **Appended, never substituted.** The deterministic transition facts always
+  lead, so operator text cannot suppress what the Dashboard actually
+  reported. A `NULL` prompt yields a briefing byte-identical to the pre-#2721
+  one (pinned by a literal-comparison regression test).
+- **Delimited and attributed.** The block states the text's provenance before
+  quoting it, so the model reads "this is operator configuration, context not
+  instruction" first. This is OWASP LLM01's "separate and clearly denote
+  untrusted content" mitigation, applied to a mixed-provenance prompt.
+- **`## Output` stays last.** The answer contract is server-built too, and
+  keeping it after the operator block means prompt text cannot displace the
+  JSON shape `_parse_finding` depends on. `_fence_safe` neutralises either
+  fence token appearing inside the prompt, so operator text cannot close its
+  own block early and appear to speak as MEHO.
+
+The threat model is *careless*, not adversarial: the column is writable only
+by a `tenant_admin` through the create path, which is why a fixed fence is
+sufficient and a per-briefing nonce is not warranted.
 
 ## Agent-name convention (opt-in per tenant)
 
@@ -134,6 +182,15 @@ This wiring never executes a change op:
 - `investigate.py` imports **no** operations dispatcher and calls no execution
   seam (a unit test asserts `operations.dispatcher` is absent from the module
   source).
+- **The wrapper sends the finding email, not the agent (#2721).** The
+  investigator is given no mail tool and no agent toolset exposes one (a unit
+  test asserts `mail` is absent from every `agent/toolset*.py`). Mail is a
+  side effect of a *deterministic* code path reading a *persisted* finding —
+  not something the model can choose to do, address, or word. An agent that
+  should send ad-hoc mail does so in its own run through `call_operation` on
+  the `mail.*` connector under normal policy; that is a different seam,
+  outside this module, and is exactly why #2717 made the transport a
+  connector operation rather than a private helper.
 - `recommended_action` is persisted as memory text only.
 - Any write op the **agent** attempts is not executed by this wiring: the
   policy gate parks it as a durable `ApprovalRequest`
@@ -163,8 +220,14 @@ principal, so no execution path inherits the role.
   topology has no data).
 - `meho_backplane.memory.service.MemoryService` — the closed-loop suppression
   channel (`remember` upsert on `(scope, slug)`).
-- No DB migration — the `last_rollup_state` memo column is #2506's DDL; this
-  hook is its only writer.
+- `meho_backplane.checks.notify` — the finding mail (#2721). The import is
+  strictly one-directional (`investigate` → `notify`); the notifier projects
+  both notice kinds into its own dataclasses rather than importing
+  `ChecksFinding`, which would be a cycle.
+- Migrations: `0069` adds `investigator_prompt` (#2721). The
+  `last_rollup_state` memo column is #2506's DDL and `notify_email` /
+  `notify_min_state` are `0068`'s (#2719); this hook is the memo's only
+  writer and reads the other three.
 
 ## Known issues / boundaries
 
@@ -231,7 +294,12 @@ principal, so no execution path inherits the role.
 - Initiative #2416 (binding design), Task #2507, parent goal #221. Builds on
   Sensor #2503, assertion evaluator #2504, runner #2505, dashboard/rollup
   #2506. Serial-fan-out-vs-budget-gating decision: #2576 (follow-up from the
-  #2507 review).
+  #2507 review). Operator prompt + emailed finding: Initiative #2716, Task
+  #2721 (on #2717's transport and #2719's `notify_email`).
+- Prompt-injection posture for the appended operator section: OWASP LLM Top 10
+  for LLM Applications, LLM01 Prompt Injection —
+  <https://genai.owasp.org/llmrisk/llm01-prompt-injection/> ("separate and
+  clearly denote untrusted content to limit its influence on user prompts").
 - Mould: `examples/r1-tiered-triage/workflow.py` (harness-persists rationale,
   briefing builder, render/persist shape), `agent.deep-tier-investigator.json`
   (definition payload), `permissions.json` (`*.write` needs-approval).

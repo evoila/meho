@@ -20,19 +20,20 @@ import (
 //
 //	meho dashboard create --name N [--description D]
 //	  [--sensor-id ID ...] [--notify-email A] [--notify-min-state S]
-//	  [--tenant T] [--json] [--backplane <url>]
+//	  [--investigator-prompt P] [--tenant T] [--json] [--backplane <url>]
 //
 // Role: tenant_admin.
 func newCreateCmd() *cobra.Command {
 	var (
-		name              string
-		description       string
-		sensorIDs         []string
-		notifyEmail       string
-		notifyMinState    string
-		tenant            string
-		jsonOut           bool
-		backplaneOverride string
+		name               string
+		description        string
+		sensorIDs          []string
+		notifyEmail        string
+		notifyMinState     string
+		investigatorPrompt string
+		tenant             string
+		jsonOut            bool
+		backplaneOverride  string
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -55,6 +56,13 @@ func newCreateCmd() *cobra.Command {
 			"from critical back to ok sends the all-clear while ok -> " +
 			"degraded stays silent. Both are set at create only, like " +
 			"membership.\n\n" +
+			"--investigator-prompt adds operator context to the briefing the " +
+			"diagnose-only investigator receives when this dashboard goes " +
+			"non-green: what this dashboard means, where to look first, what is " +
+			"known to be noisy. It is appended after the server-built transition " +
+			"snapshot in a clearly delimited section, so the deterministic facts " +
+			"always lead and the prompt cannot replace them. Capped at 4096 " +
+			"characters; a longer one is refused 422.\n\n" +
 			"A foreign / absent --sensor-id is refused 422 sensor_not_found; a " +
 			"duplicate name is refused 409.",
 		Args:          cobra.NoArgs,
@@ -62,14 +70,15 @@ func newCreateCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runCreate(cmd, createOptions{
-				Name:              name,
-				Description:       description,
-				SensorIDs:         sensorIDs,
-				NotifyEmail:       notifyEmail,
-				NotifyMinState:    notifyMinState,
-				Tenant:            tenant,
-				JSONOut:           jsonOut,
-				BackplaneOverride: backplaneOverride,
+				Name:               name,
+				Description:        description,
+				SensorIDs:          sensorIDs,
+				NotifyEmail:        notifyEmail,
+				NotifyMinState:     notifyMinState,
+				InvestigatorPrompt: investigatorPrompt,
+				Tenant:             tenant,
+				JSONOut:            jsonOut,
+				BackplaneOverride:  backplaneOverride,
 			})
 		},
 	}
@@ -81,6 +90,8 @@ func newCreateCmd() *cobra.Command {
 		"address that receives transition mail (unset = notifications off)")
 	cmd.Flags().StringVar(&notifyMinState, "notify-min-state", "",
 		"notification floor: degraded or critical (server default: critical)")
+	cmd.Flags().StringVar(&investigatorPrompt, "investigator-prompt", "",
+		"operator context appended to the investigator's briefing (max 4096 chars)")
 	cmd.Flags().StringVar(&tenant, "tenant", "",
 		"target tenant UUID (platform_admin cross-tenant create)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw DashboardDetail JSON instead of the human summary")
@@ -91,14 +102,15 @@ func newCreateCmd() *cobra.Command {
 }
 
 type createOptions struct {
-	Name              string
-	Description       string
-	SensorIDs         []string
-	NotifyEmail       string
-	NotifyMinState    string
-	Tenant            string
-	JSONOut           bool
-	BackplaneOverride string
+	Name               string
+	Description        string
+	SensorIDs          []string
+	NotifyEmail        string
+	NotifyMinState     string
+	InvestigatorPrompt string
+	Tenant             string
+	JSONOut            bool
+	BackplaneOverride  string
 }
 
 // notifyMinStates is the closed --notify-min-state vocabulary, mirroring the
@@ -203,6 +215,13 @@ func validateNotifyMinState(value string) error {
 // so the row keeps notifications off. An unset --notify-email leaves the
 // field nil rather than sending an empty openapi_types.Email, whose
 // MarshalJSON would reject the empty string before the request goes out.
+//
+// investigator_prompt is likewise omitted when unset, so the row keeps the
+// pre-#2721 briefing. The 4096-character cap is deliberately NOT re-checked
+// here: unlike --notify-min-state's closed vocabulary (a typo the CLI can
+// name precisely), a length bound duplicated client-side drifts silently
+// the moment the server's changes, and the server's 422 already names the
+// field and the limit.
 func buildCreateBody(
 	opts createOptions,
 	sensorIDs []openapi_types.UUID,
@@ -227,6 +246,10 @@ func buildCreateBody(
 	if opts.NotifyMinState != "" {
 		minState := api.DashboardCreateNotifyMinState(opts.NotifyMinState)
 		body.NotifyMinState = &minState
+	}
+	if opts.InvestigatorPrompt != "" {
+		prompt := opts.InvestigatorPrompt
+		body.InvestigatorPrompt = &prompt
 	}
 	return body
 }

@@ -8220,7 +8220,7 @@
           "checks-dashboards"
         ],
         "summary": "Create Dashboard",
-        "description": "Create one Dashboard under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set to a\n*different* tenant the create is cross-tenant and requires\n``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent\nsensor id is 422 ``sensor_not_found``; a duplicate name is 409. The\n#2719 notification config (``notify_email`` / ``notify_min_state``) is\nvalidated by :class:`DashboardCreate`, so a malformed address or an\nout-of-vocabulary floor is FastAPI's own 422 envelope -- never a\ndelivery failure discovered on the first transition.",
+        "description": "Create one Dashboard under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set to a\n*different* tenant the create is cross-tenant and requires\n``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent\nsensor id is 422 ``sensor_not_found``; a duplicate name is 409. The\n#2719 notification config (``notify_email`` / ``notify_min_state``) and\nthe #2721 ``investigator_prompt`` are validated by\n:class:`DashboardCreate`, so a malformed address, an out-of-vocabulary\nfloor, or an over-length prompt is FastAPI's own structured 422 envelope\n(``string_too_long`` with the limit in ``ctx``) -- never a delivery\nfailure discovered on the first transition, and never a silent\ntruncation.",
         "operationId": "create_dashboard_api_v1_checks_dashboards_post",
         "parameters": [
           {
@@ -23517,6 +23517,12 @@
             ],
             "title": "Notify Min State",
             "default": "critical"
+          },
+          "investigator_prompt": {
+            "type": "string",
+            "maxLength": 4096,
+            "nullable": true,
+            "title": "Investigator Prompt"
           }
         },
         "additionalProperties": false,
@@ -23525,7 +23531,7 @@
           "name"
         ],
         "title": "DashboardCreate",
-        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. The address is validated with\npydantic's ``EmailStr`` (``email-validator``), so a malformed one is a\nboundary 422 rather than a delivery failure discovered hours later on the\nfirst transition."
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. The address is validated with\npydantic's ``EmailStr`` (``email-validator``), so a malformed one is a\nboundary 422 rather than a delivery failure discovered hours later on the\nfirst transition.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
       },
       "DashboardDetail": {
         "properties": {
@@ -23588,6 +23594,11 @@
             ],
             "title": "Notify Min State"
           },
+          "investigator_prompt": {
+            "type": "string",
+            "nullable": true,
+            "title": "Investigator Prompt"
+          },
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
@@ -23621,6 +23632,7 @@
           "last_rollup_state",
           "notify_email",
           "notify_min_state",
+          "investigator_prompt",
           "created_by_sub",
           "created_at",
           "updated_at",
@@ -23811,6 +23823,11 @@
             ],
             "title": "Notify Min State"
           },
+          "investigator_prompt": {
+            "type": "string",
+            "nullable": true,
+            "title": "Investigator Prompt"
+          },
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
@@ -23837,6 +23854,7 @@
           "last_rollup_state",
           "notify_email",
           "notify_min_state",
+          "investigator_prompt",
           "created_by_sub",
           "created_at",
           "updated_at"

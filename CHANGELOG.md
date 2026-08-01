@@ -90,6 +90,36 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Checks investigator — operator prompt + emailed findings (#2721)
+
+- A Dashboard can now carry an `investigator_prompt`: operator context
+  about what it means and where to look first, which the diagnose-only
+  investigator receives when the Dashboard goes non-green. It is
+  **appended** after the server-built transition snapshot in a clearly
+  delimited section — the deterministic facts always lead, the required
+  answer shape still has the last word, and an unset prompt leaves the
+  briefing byte-identical to before. Set at create only, on
+  `POST /api/v1/checks/dashboards` and
+  `meho dashboard create --investigator-prompt`; capped at 4096
+  characters, and an over-length one is a structured 422 naming the
+  field and the limit rather than a silent truncation.
+- When that Dashboard also has a `notify_email` (#2719), the
+  investigator's finding is now **emailed** once the run terminates —
+  verdict, summary, `run_id`, evidence, and the recommended action for
+  an `actionable` verdict. The mail is sent by the deterministic
+  wrapper, **not** by the agent: the investigator keeps its
+  diagnose-only, no-dispatcher contract and is given no mail tool, so
+  mail is a side effect of a code path reading a persisted finding, not
+  something the model can choose to do or word. An agent that should
+  send ad-hoc mail still does so through `call_operation` on the
+  `mail.*` connector under normal policy. Delivery reuses #2717's
+  transport (so `MAIL_RECIPIENT_ALLOWLIST` gates it and an empty
+  allowlist keeps it inert), runs off the investigation's cause-group
+  loop, and never raises: a refused or broken send is logged
+  (`checks_finding_email_failed`) and cannot cost the tenant the
+  noise-suppression policy the finding was written to.
+  Requires migration `0069`. (#2721)
+
 ### Checks notifications — Dashboard email on state transitions (#2719)
 
 - A Dashboard can now name an operator to mail when its rollup crosses

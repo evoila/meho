@@ -84,7 +84,14 @@ narrative in the
 ## Day-2 operations beyond upgrades
 
 Backup/restore and observability guides land on this site with MEHO's
-disaster-recovery workstream. Until then: the state that needs backing
-up is the PostgreSQL database (all durable state lives there — see the
+disaster-recovery workstream. Until then: PostgreSQL is MEHO's durable
+*application* store and the thing to back up first (see the
 [reference architecture](../architecture.md#state-postgresql-pgvector));
 the Valkey activity feed is ephemeral by design.
+
+A PostgreSQL restore alone does not rebuild a working deployment. The
+target credentials themselves live in Vault or Google Secret Manager,
+realm and client configuration lives in Keycloak, and your TLS Secrets
+and Helm values live in the cluster and in whatever you keep them under
+version control in. Each needs its own backup or reprovisioning path
+until the full guide lands.

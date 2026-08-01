@@ -46,8 +46,13 @@ has the path shapes.
 ### Google Secret Manager
 
 - `config.credentialBackend: gsm`, plus `gsm.enabled: true` and
-  `gsm.project: <your-project>`. `vault.address` stays **blank** — the
-  chart's schema requires it only for the Vault backend.
+  **both** `gsm.project` and `config.gsmProject` set to your project.
+  They are different keys: the schema validates `gsm.project`, but the
+  backplane reads `GSM_PROJECT`, which the chart renders from
+  `config.gsmProject`. Set only the first and the install validates and
+  then fails every credential read against an empty project.
+  `vault.address` stays **blank** — the chart's schema requires it only
+  for the Vault backend.
 - An ambient Google identity for the Pod: on GKE, Workload Identity
   binding the Kubernetes ServiceAccount to a Google service account
   with `roles/secretmanager.secretAccessor` on MEHO's secrets. There
@@ -87,10 +92,11 @@ Google Secret Manager:
 ```yaml
 config:
   credentialBackend: gsm
+  gsmProject: <your-gcp-project>   # rendered as GSM_PROJECT; the backplane reads this one
   # gsmImpersonateSa: meho-reader@<project>.iam.gserviceaccount.com  # optional
 gsm:
   enabled: true
-  project: <your-gcp-project>
+  project: <your-gcp-project>      # same value; this is the key the schema validates
   # workloadIdentityFederation:
   #   audience: //iam.googleapis.com/projects/.../providers/...   # optional, see above
 ```

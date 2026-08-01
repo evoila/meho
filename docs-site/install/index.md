@@ -112,6 +112,10 @@ Two things bite here if missed:
 
 - The prefix must be `postgresql+asyncpg://`. A bare `postgresql://`
   DSN selects the synchronous driver and fails at connect time.
+- The DSN is a URI, so reserved characters in the user or password
+  (`@ : / ? # [ ] %` and friends) must be **percent-encoded**. Shell
+  quoting protects them from the shell, not from the URI parser; an
+  unencoded `@` in a password silently truncates the host.
 - The key must be `url` — the Deployment reads `DATABASE_URL` from
   exactly that key.
 
@@ -204,14 +208,21 @@ keycloak:
   audience: meho-backplane
 
 networkPolicy:
-  enabled: true
+  # Leave this off for your first install, then turn it on once the
+  # backplane is green. The CIDRs below are placeholders: if they do not
+  # match where your dependencies actually live, the Pod cannot reach
+  # them and /ready stays red — a failure that looks exactly like a
+  # credential or TLS problem.
+  enabled: false
   ingressControllerNamespace: ingress-nginx
   # Egress allow-list: the CIDRs your Postgres / Vault / Keycloak
-  # actually resolve to. Recover with:
+  # actually resolve to. For in-cluster Services, recover them with:
   #   kubectl get endpoints <svc> -n <ns> -o jsonpath='{.subsets[].addresses[].ip}'
-  postgresCIDR: "10.0.1.0/24"
-  vaultCIDR: "10.0.2.0/24"
-  keycloakCIDR: "10.0.3.0/24"
+  # For anything outside the cluster, use the address your DNS name
+  # resolves to.
+  postgresCIDR: "10.0.1.0/24"   # REPLACE
+  vaultCIDR: "10.0.2.0/24"      # REPLACE
+  keycloakCIDR: "10.0.3.0/24"   # REPLACE
 ```
 
 For a **Google Secret Manager** deploy, replace the `vault` block and

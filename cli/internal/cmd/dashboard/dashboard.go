@@ -18,12 +18,14 @@
 //     twin of /ui/checks/{dashboard_id}.
 //   - `meho dashboard create --name <n> [--description <d>]
 //     [--sensor-id <id> ...] [--notify-email <a>] [--notify-min-state <s>]
-//     [--tenant <id>] [--json]` — create one
+//     [--investigator-prompt <p>] [--tenant <id>] [--json]` — create one
 //     dashboard via POST /api/v1/checks/dashboards. Role: tenant_admin. An
 //     empty member set is legal and rolls up `unknown` (the zero-member
 //     rule); a foreign / absent sensor id is refused 422 `sensor_not_found`.
 //     `--notify-email` opts the dashboard into transition mail (#2719);
 //     `--notify-min-state` picks the floor an edge must reach.
+//     `--investigator-prompt` adds operator context to the diagnose-only
+//     investigator's briefing (#2721).
 //   - `meho dashboard delete <dashboard_id> [--tenant <id>] [--json]` —
 //     DELETE /api/v1/checks/dashboards/{id}. Role: tenant_admin.
 //
@@ -338,6 +340,19 @@ func sanitizeCell(s string) string {
 	}, s)
 }
 
+// indentBlock renders multi-line operator prose as an indented block,
+// sanitizing each line individually. It keeps the line breaks the operator
+// wrote (sanitizeCell alone would replace them with the U+FFFD marker it
+// uses for control characters) while still neutralizing every other control
+// character, so a crafted prompt cannot emit terminal escape sequences.
+func indentBlock(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		lines[i] = "  " + sanitizeCell(strings.TrimRight(line, "\r"))
+	}
+	return strings.Join(lines, "\n")
+}
+
 // formatTime renders a *time.Time the way the backend ships it on the wire:
 // ISO 8601 (RFC3339Nano) with sub-second precision when present.
 func formatTime(t *time.Time) string {
@@ -378,6 +393,15 @@ func printDashboardSummary(w io.Writer, d *api.DashboardDetail) {
 	if email := derefString(d.NotifyEmail); email != "" {
 		fmt.Fprintf(w, "%-18s %s\n", "notify_email:", sanitizeCell(email))
 		fmt.Fprintf(w, "%-18s %s\n", "notify_min_state:", string(d.NotifyMinState))
+	}
+	// Investigator prompt (#2721). Multi-line operator prose, so it prints
+	// as its own trailing block rather than a %-18s cell — sanitizeCell
+	// would fold the line breaks the operator wrote. The gate trims before
+	// testing (never for rendering: the operator's own leading indentation
+	// survives) so the CLI agrees with _build_briefing, which treats a
+	// whitespace-only prompt as unset and renders no operator section.
+	if prompt := derefString(d.InvestigatorPrompt); strings.TrimSpace(prompt) != "" {
+		fmt.Fprintf(w, "%-18s\n%s\n", "investigator_prompt:", indentBlock(prompt))
 	}
 	fmt.Fprintf(w, "%-18s %d\n", "member_count:", d.MemberCount)
 	fmt.Fprintf(w, "%-18s %s\n", "created_by:", d.CreatedBySub)

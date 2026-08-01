@@ -1,4 +1,4 @@
-# Dashboard email notifications (`checks/notify.py`)
+# Checks operator email (`checks/notify.py`)
 
 ## Overview
 
@@ -21,6 +21,16 @@ deployment-level `MAIL_RECIPIENT_ALLOWLIST` floor applies here exactly as
 it does to an agent-dispatched `mail.send`. An empty allowlist means the
 notifier is inert — there is no path around the floor.
 
+Since #2721 this module renders a **second notice kind**: the
+investigator's finding, once the run is terminal and its
+noise-suppression policy is persisted. Both kinds share one task set, one
+never-raise posture, and one header-safety fold, so the delivery contract
+is stated once. The distinction that matters is *who sends*: the finding
+mail is sent by this deterministic wrapper, never by the agent — the
+investigator has no mail tool and no agent toolset exposes one. An agent
+that should send ad-hoc mail does so through `call_operation` on the
+`mail.*` connector under normal policy, which is a different seam.
+
 ## Key types
 
 - `notify_dashboard_transition(notice)` — the awaitable that applies the
@@ -39,10 +49,20 @@ notifier is inert — there is no path around the floor.
   module must not import `investigate`, which imports *it*.
 - `_NOTIFY_RANK` — `ok`/`skip` = 0, `unknown`/`degraded` = 1,
   `critical` = 2.
+- `notify_finding(notice)` / `schedule_finding_notification(notice)`
+  (#2721) — the finding-mail twins of the two functions above, with the
+  same never-raise and fire-and-forget contracts.
+- `FindingNotice` — the detached finding: dashboard id + name, `run_id`,
+  verdict, summary, evidence, recommended action, and the resolved
+  recipient. A notifier-owned projection of `ChecksFinding` for the same
+  reason `NotifyMember` is one — importing `investigate` would be a
+  cycle.
 
 ## Configuration (per Dashboard, set at create only)
 
-Two columns on `check_dashboards`, added by migration `0068`:
+Two columns on `check_dashboards`, added by migration `0068`
+(`investigator_prompt`, migration `0069`, belongs to the briefing, not to
+delivery — see `docs/codebase/checks-investigator.md`):
 
 | Column | Type | Meaning |
 |---|---|---|
@@ -124,22 +144,56 @@ The subject therefore folds every control character out of the name, so
 a crafted name cannot inject an SMTP header. The body is a MIME payload,
 not headers, so its fragments need bounding rather than folding.
 
+### The finding mail (#2721)
+
+Subject: `[MEHO] investigation <verdict>: <name>` — verdict first,
+because that is the triage bit a filter rule routes on.
+
+Body: the Dashboard, the verdict, the `run_id`, then `## Summary`,
+`## Evidence`, and `## Recommended action`. Deliberately the same section
+order as the memory entry `_render_finding_body` writes for the same
+finding, so the mail and the memory entry read as one shape, and the
+`run_id` is carried so the recipient can pull the full durable run.
+
+The recommended action rides along **only for an `actionable` verdict** —
+the same gate the memory entry applies — and carries the diagnose-only
+disclaimer with it. Bounds differ from the transition mail because the
+inputs differ: `ChecksFinding.summary` is model output with no schema
+length, so summary and action are truncated at `_MAX_FINDING_CHARS`
+(4000, large enough that the diagnosis survives) and evidence is capped
+at `_MAX_EVIDENCE_LINES` (20) lines each clipped at `_MAX_FIELD_CHARS`.
+
+Gating: the finding mail fires on `notify_email` alone. There is
+deliberately **no** `notify_min_state` check — that floor is defined over
+a transition *edge* (`max(rank(previous), rank(current))`) and a finding
+is not an edge. The volume control is the investigator's own fire gate,
+already far narrower than any state floor: a finding exists only when the
+edge worsened into a non-green state with an actively-failing member, the
+correlated cause was novel, no run for it was in flight, and the budget
+gate admitted it.
+
 ## Failure posture
 
 Fire-and-forget in two senses:
 
-- **Off the persist path.** The send runs as a tracked background task,
-  because the transport bounds one SMTP session at 30 seconds and the
-  check runner awaits `investigate_on_transition` inline in
-  `_persist_outcome`. Strong references live in `_NOTIFICATIONS` so a
-  task cannot be garbage-collected mid-flight;
-  `_await_pending_notifications()` is the deterministic test drain.
+- **Off the caller's path.** The send runs as a tracked background task,
+  because the transport bounds one SMTP session at 30 seconds. For a
+  transition that keeps it off the check runner's persist path (which
+  awaits `investigate_on_transition` inline in `_persist_outcome`); for a
+  finding it keeps it out of the investigator's *serial* cause-group loop,
+  where an inline session would delay the next group's diagnosis, not just
+  its mail. Strong references live in `_NOTIFICATIONS` (one set, both
+  kinds) so a task cannot be garbage-collected mid-flight;
+  `_await_pending_notifications()` is the deterministic test drain for
+  both.
 - **Never raises.** A refusal, an unconfigured SMTP block, a delivery
   failure, or an unexpected exception is logged and swallowed.
   `asyncio.CancelledError` is the deliberate exemption — it propagates,
   so lifespan shutdown tears a tracked task down cleanly. A broken
   MTA cannot convert a committed transition claim into a persist-path
-  failure — contract parity with `investigate_on_transition`.
+  failure — contract parity with `investigate_on_transition` — and a
+  broken MTA cannot cost the tenant the noise-suppression policy write
+  the finding mail is ordered after.
 
 Delivery and the claim are independent: the memo advances whether or not
 the mail lands. That is deliberate — re-deriving "did anyone get told"
@@ -152,7 +206,8 @@ from the memo would mean re-mailing every unchanged evaluation.
 - `meho_backplane.checks.investigate` — imports this module (never the
   reverse) and owns the claim.
 - `check_dashboards.notify_email` / `notify_min_state` — migration
-  `0068`.
+  `0068`. The finding mail reuses `notify_email` as its recipient (no
+  separate column).
 
 ## Known issues / boundaries
 
@@ -169,17 +224,27 @@ from the memo would mean re-mailing every unchanged evaluation.
   therefore name a recipient the allowlist refuses, and learns about it
   only from `checks_notify_failed` in the pod log.
 - **No delivery record.** Nothing durable says a mail was sent; the
-  structlog event is the whole trace. The `checks.transition` broadcast
-  event (#2720) is the queryable record of the edge itself.
+  structlog event is the whole trace (`checks_notify_sent` /
+  `checks_finding_email_sent`). The `checks.transition` broadcast event
+  (#2720) is the queryable record of the edge itself, and the `agent_run`
+  row is the durable record of the finding.
+- **Two mails per incident when both are configured.** A Dashboard with a
+  `notify_email` and an enabled investigator mails the transition
+  immediately and the finding minutes later, when the run terminates.
+  That is the intended shape — the page and the diagnosis are different
+  messages with different latencies — but there is no threading or
+  correlation header tying them together today.
 
 ## References
 
 - `backend/src/meho_backplane/checks/notify.py`
 - `backend/src/meho_backplane/checks/investigate.py` —
   `_process_transition`, `_claim_dashboard_transition`,
-  `_ClaimedTransition`, `_dashboard_notice`
+  `_ClaimedTransition`, `_dashboard_notice`, `_finding_notice`
 - `backend/alembic/versions/0068_add_check_dashboard_notify.py`
 - `backend/tests/test_checks_notify.py`,
+  `backend/tests/test_checks_investigate.py` (the finding mail through
+  the investigation seam),
   `backend/tests/migrations/test_migration_0068_add_check_dashboard_notify.py`
 - `docs/codebase/connectors-mail.md`,
   `docs/codebase/checks-investigator.md`,

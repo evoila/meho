@@ -71,15 +71,17 @@ async def create_dashboard(
     created_by_sub: str,
     notify_email: str | None = None,
     notify_min_state: str = "critical",
+    investigator_prompt: str | None = None,
 ) -> CheckDashboard:
     """Insert a Dashboard row plus one membership row per *sensor_ids*.
 
     *sensor_ids* is trusted to be validated (every id exists under
     *tenant_id*) and de-duplicated by the caller -- this function does not
     re-check, so a duplicate would trip the composite PK. *notify_email* /
-    *notify_min_state* are the #2719 notification config, already validated by
-    the wire schema. Flushes so the row ids are populated within the caller's
-    transaction.
+    *notify_min_state* are the #2719 notification config and
+    *investigator_prompt* the #2721 operator briefing context, all already
+    validated by the wire schema. Flushes so the row ids are populated within
+    the caller's transaction.
     """
     row = CheckDashboard(
         id=uuid.uuid4(),
@@ -88,6 +90,7 @@ async def create_dashboard(
         description=description,
         notify_email=notify_email,
         notify_min_state=notify_min_state,
+        investigator_prompt=investigator_prompt,
         created_by_sub=created_by_sub,
     )
     session.add(row)

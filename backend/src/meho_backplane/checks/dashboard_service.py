@@ -166,6 +166,7 @@ def _to_read(row: CheckDashboard, sensors: Sequence[Sensor], now: datetime) -> D
         last_rollup_state=cast("CheckState | None", row.last_rollup_state),
         notify_email=row.notify_email,
         notify_min_state=cast("NotifyMinState", row.notify_min_state),
+        investigator_prompt=row.investigator_prompt,
         created_by_sub=row.created_by_sub,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -187,6 +188,7 @@ def _to_detail(row: CheckDashboard, sensors: Sequence[Sensor], now: datetime) ->
         last_rollup_state=cast("CheckState | None", row.last_rollup_state),
         notify_email=row.notify_email,
         notify_min_state=cast("NotifyMinState", row.notify_min_state),
+        investigator_prompt=row.investigator_prompt,
         created_by_sub=row.created_by_sub,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -219,8 +221,9 @@ class CheckDashboardAdminService:
         de-duplicates the membership list, inserts the Dashboard + memberships
         in one transaction, and returns the freshly rolled-up detail. The
         #2719 notification config (``notify_email`` / ``notify_min_state``)
-        rides the same create-only posture as membership -- both were already
-        validated by :class:`DashboardCreate` at the boundary.
+        and the #2721 ``investigator_prompt`` ride the same create-only
+        posture as membership -- all were already validated by
+        :class:`DashboardCreate` at the boundary.
 
         Raises:
             SensorNotFoundError: a referenced sensor id is not in the tenant.
@@ -249,6 +252,7 @@ class CheckDashboardAdminService:
                     created_by_sub=created_by_sub,
                     notify_email=payload.notify_email,
                     notify_min_state=payload.notify_min_state,
+                    investigator_prompt=payload.investigator_prompt,
                 )
                 await session.commit()
             except IntegrityError as exc:

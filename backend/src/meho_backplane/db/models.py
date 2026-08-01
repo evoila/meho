@@ -6401,6 +6401,14 @@ class CheckDashboard(Base):
         default="critical",
         server_default="critical",
     )
+    # Operator-authored context appended to the investigator's briefing
+    # (#2721), read by ``checks.investigate._build_briefing``. NULL means the
+    # briefing is built exactly as it was pre-#2721. Length is bounded at the
+    # wire boundary (``dashboard_schemas._INVESTIGATOR_PROMPT_MAX_LENGTH``)
+    # rather than by a CHECK -- the create path is the column's only writer,
+    # and a boundary rejection names the field and its limit where a CHECK
+    # violation would surface as an opaque 500.
+    investigator_prompt: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

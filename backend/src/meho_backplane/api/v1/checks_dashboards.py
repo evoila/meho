@@ -148,10 +148,13 @@ async def create_dashboard(
     *different* tenant the create is cross-tenant and requires
     ``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent
     sensor id is 422 ``sensor_not_found``; a duplicate name is 409. The
-    #2719 notification config (``notify_email`` / ``notify_min_state``) is
-    validated by :class:`DashboardCreate`, so a malformed address or an
-    out-of-vocabulary floor is FastAPI's own 422 envelope -- never a
-    delivery failure discovered on the first transition.
+    #2719 notification config (``notify_email`` / ``notify_min_state``) and
+    the #2721 ``investigator_prompt`` are validated by
+    :class:`DashboardCreate`, so a malformed address, an out-of-vocabulary
+    floor, or an over-length prompt is FastAPI's own structured 422 envelope
+    (``string_too_long`` with the limit in ``ctx``) -- never a delivery
+    failure discovered on the first transition, and never a silent
+    truncation.
     """
     target_tenant = authorize_tenant_scope(operator, body.tenant_id)
     structlog.contextvars.bind_contextvars(

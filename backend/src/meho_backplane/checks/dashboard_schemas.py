@@ -55,6 +55,15 @@ _DESCRIPTION_MAX_LENGTH = 2048
 #: create-time validation fan-out.
 _MAX_MEMBERS = 200
 
+#: Max length of the operator-authored investigator prompt (#2721) -- ~4 KiB,
+#: the bound the column is documented at. Enforced here rather than by a DB
+#: CHECK because this schema is the column's only writer (a Dashboard is
+#: set-at-create-only), and a boundary rejection is a structured 422 naming
+#: the field, its ``string_too_long`` type, and the limit in ``ctx``, where a
+#: CHECK violation would surface as an opaque 500. The bound is in characters,
+#: which is also what the briefing's token budget tracks.
+_INVESTIGATOR_PROMPT_MAX_LENGTH = 4096
+
 
 class DashboardCreate(BaseModel):
     """Request body for ``POST /api/v1/checks/dashboards``.
@@ -74,6 +83,12 @@ class DashboardCreate(BaseModel):
     pydantic's ``EmailStr`` (``email-validator``), so a malformed one is a
     boundary 422 rather than a delivery failure discovered hours later on the
     first transition.
+
+    ``investigator_prompt`` is the #2721 operator context appended to the
+    diagnose-only investigator's briefing. Bounded at
+    ``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422
+    (``string_too_long`` with the limit in ``ctx``) rather than a truncation
+    the operator never learns about.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -87,6 +102,11 @@ class DashboardCreate(BaseModel):
     #: Floor an edge must reach before mail is sent, under
     #: ``ok < degraded < critical`` applied to ``max(previous, current)``.
     notify_min_state: NotifyMinState = "critical"
+    #: Operator context appended after the server-built briefing snapshot;
+    #: ``None`` leaves the briefing exactly as it was pre-#2721.
+    investigator_prompt: str | None = Field(
+        default=None, max_length=_INVESTIGATOR_PROMPT_MAX_LENGTH
+    )
 
 
 class DashboardMemberView(BaseModel):
@@ -152,6 +172,12 @@ class DashboardRead(BaseModel):
     #: a 500 on an unrelated list call.
     notify_email: str | None
     notify_min_state: NotifyMinState
+    #: The #2721 operator context as persisted. Unbounded on the read side for
+    #: the same reason ``notify_email`` is a plain ``str`` here: the value was
+    #: bounded on the way in, and re-validating a stored one on every read
+    #: would turn a row that somehow got past the boundary into a 500 on an
+    #: unrelated list call.
+    investigator_prompt: str | None
     created_by_sub: str
     created_at: datetime
     updated_at: datetime

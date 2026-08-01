@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Per-Dashboard email notification on a claimed rollup transition (#2719).
+"""Operator email for the checks layer: transitions (#2719) and findings (#2721).
 
 Task #2719 under Initiative #2716 (parent goal #221). #2507's transition
 detector (:mod:`meho_backplane.checks.investigate`) already compare-and-swaps
@@ -9,6 +9,28 @@ detector (:mod:`meho_backplane.checks.investigate`) already compare-and-swaps
 safe; until now that claim only ever reached the diagnose-only investigator.
 This module is the second, independent consumer of the same claim: it mails
 the Dashboard's configured recipient.
+
+Two notice kinds, one delivery seam
+===================================
+
+#2721 added the second message this module renders: the investigator's
+:class:`~meho_backplane.checks.investigate.ChecksFinding` once the run is
+terminal and its noise-suppression policy is persisted
+(:class:`FindingNotice` / :func:`schedule_finding_notification`). Both kinds
+share the same background-task set, the same never-raise posture, and the
+same header-safety fold, so the delivery contract is stated once.
+
+The **wrapper** sends the finding mail; the investigator agent has no mail
+tool and is never given one. That is what keeps the diagnose-only contract
+(``investigate.py`` imports no operations dispatcher) intact while still
+putting the finding in front of a human. An agent that should send ad-hoc
+mail does so in its own run via ``call_operation`` on the ``mail.*``
+connector under normal policy -- a different seam entirely.
+
+Both notice kinds project their inputs into module-local dataclasses
+(:class:`NotifyMember`, :class:`FindingNotice`) rather than importing the
+investigator's types. The import must stay one-directional --
+``investigate`` imports *this* module -- so a shared type would be a cycle.
 
 Both edge directions notify
 ===========================
@@ -48,14 +70,18 @@ Failure posture
 ===============
 
 Fire-and-forget, in two senses. The send runs as a tracked background task
-(:func:`schedule_dashboard_notification`) so a 30-second SMTP session
-cannot sit on the check-runner's result-persist path -- the same containment
-shape the investigator uses. And :func:`notify_dashboard_transition` never
-raises: a refused, unconfigured, or failed
-:func:`~meho_backplane.connectors.mail.transport.send_email` is logged as
-``checks_notify_failed`` and swallowed, contract parity with
-``investigate_on_transition``'s never-raise posture. A broken MTA must not
-convert a committed transition claim into a persist-path failure.
+(:func:`schedule_dashboard_notification` /
+:func:`schedule_finding_notification`) so a 30-second SMTP session cannot
+sit on the caller's path -- the check-runner's result-persist path for a
+transition, and the investigator's serial cause-group loop for a finding,
+where an inline send would delay the *next* group's diagnosis by a whole
+SMTP session. And neither :func:`notify_dashboard_transition` nor
+:func:`notify_finding` raises: a refused, unconfigured, or failed
+:func:`~meho_backplane.connectors.mail.transport.send_email` is logged
+(``checks_notify_failed`` / ``checks_finding_email_failed``) and swallowed,
+contract parity with ``investigate_on_transition``'s never-raise posture. A
+broken MTA must not convert a committed transition claim into a persist-path
+failure, nor a persisted finding into a lost noise-suppression policy.
 
 Header safety
 =============
@@ -63,12 +89,14 @@ Header safety
 A Dashboard name is operator-authored free text with no newline constraint
 at the database, and the transport's in-process entry point raises
 :class:`ValueError` on a subject carrying a line break (only the dispatched
-``mail.send`` path gets the single-line parameter screen). The subject
-built here therefore folds every control character out of the name, so a
-crafted name cannot inject an SMTP header. The body is a MIME payload, not
-headers, so its untrusted fragments (member names, last values, evidence)
-need no such fold -- only bounding, which :data:`_MAX_MEMBER_LINES` and
-:data:`_MAX_FIELD_CHARS` provide.
+``mail.send`` path gets the single-line parameter screen). Every subject
+built here therefore folds every control character out of the interpolated
+fragments, so neither a crafted Dashboard name nor a model-authored verdict
+can inject an SMTP header. Bodies are MIME payloads, not headers, so their
+untrusted fragments (member names, last values, evidence, and the finding's
+model-written summary) need no such fold -- only bounding, which
+:data:`_MAX_MEMBER_LINES`, :data:`_MAX_FIELD_CHARS`,
+:data:`_MAX_EVIDENCE_LINES` and :data:`_MAX_FINDING_CHARS` provide.
 """
 
 from __future__ import annotations
@@ -84,9 +112,12 @@ from meho_backplane.connectors.mail.transport import send_email
 
 __all__ = [
     "DashboardNotice",
+    "FindingNotice",
     "NotifyMember",
     "notify_dashboard_transition",
+    "notify_finding",
     "schedule_dashboard_notification",
+    "schedule_finding_notification",
 ]
 
 
@@ -116,10 +147,22 @@ _MAX_MEMBER_LINES: Final[int] = 20
 #: dominating the mail.
 _MAX_FIELD_CHARS: Final[int] = 200
 
-#: Per-process strong references to in-flight notification tasks. ``asyncio``
-#: holds only weak references to bare tasks, so without this set a
-#: fire-and-forget send could be garbage-collected mid-flight (the
-#: ``_INVESTIGATIONS`` rationale in
+#: How many evidence lines one finding mail enumerates (#2721). The finding's
+#: ``evidence`` list is model-authored and carries no schema bound, so the
+#: mail takes the leading lines and says how many it dropped.
+_MAX_EVIDENCE_LINES: Final[int] = 20
+
+#: Character bound on each free-text finding field (summary, recommended
+#: action). Far larger than :data:`_MAX_FIELD_CHARS` because the summary *is*
+#: the message -- clipping a diagnosis to 200 characters would defeat the
+#: mail -- but still bounded: ``ChecksFinding.summary`` is model output with
+#: no upper length, and an SMTP message is not the place to discover that.
+_MAX_FINDING_CHARS: Final[int] = 4000
+
+#: Per-process strong references to in-flight notification tasks -- both
+#: transition and finding sends. ``asyncio`` holds only weak references to
+#: bare tasks, so without this set a fire-and-forget send could be
+#: garbage-collected mid-flight (the ``_INVESTIGATIONS`` rationale in
 #: :mod:`meho_backplane.checks.investigate`). The done-callback discards each
 #: entry on completion so a long-lived worker does not accumulate them.
 _NOTIFICATIONS: set[asyncio.Task[None]] = set()
@@ -171,6 +214,32 @@ class DashboardNotice:
     members: tuple[NotifyMember, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class FindingNotice:
+    """One investigator finding, detached for the background send (#2721).
+
+    A notifier-owned projection of
+    :class:`~meho_backplane.checks.investigate.ChecksFinding` plus the
+    Dashboard context the mail needs, for the same reason
+    :class:`NotifyMember` is one: this module must not import
+    :mod:`meho_backplane.checks.investigate`, which imports *it*.
+
+    :attr:`recipient` is resolved from the Dashboard's ``notify_email`` by
+    the investigator, so an unconfigured Dashboard arrives here as ``None``
+    and short-circuits in :func:`notify_finding` rather than being filtered
+    at the call site -- the skip is then logged in one place.
+    """
+
+    dashboard_id: uuid.UUID
+    dashboard_name: str
+    run_id: uuid.UUID
+    verdict: str
+    summary: str
+    evidence: tuple[str, ...]
+    recommended_action: str | None
+    recipient: str | None
+
+
 def _crosses_threshold(previous: str, current: str, min_state: str) -> bool:
     """Return ``True`` iff this edge reaches the configured notification floor.
 
@@ -195,6 +264,19 @@ def _clip(value: object) -> str:
     if len(text) > _MAX_FIELD_CHARS:
         return text[:_MAX_FIELD_CHARS] + "..."
     return text
+
+
+def _truncate(text: str, limit: int) -> str:
+    """Bound *text* to *limit* characters, preserving its line structure.
+
+    Unlike :func:`_clip` this keeps newlines: a finding summary is prose the
+    model laid out in paragraphs, and collapsing it to one line would make
+    the mail harder to read than the memory entry it mirrors.
+    """
+    stripped = text.rstrip()
+    if len(stripped) > limit:
+        return stripped[:limit] + "..."
+    return stripped
 
 
 def _subject(notice: DashboardNotice) -> str:
@@ -324,11 +406,139 @@ def schedule_dashboard_notification(notice: DashboardNotice) -> None:
     task.add_done_callback(_NOTIFICATIONS.discard)
 
 
+def _finding_subject(notice: FindingNotice) -> str:
+    """Build the single-line subject for a finding mail.
+
+    Leads with the verdict because that is the triage bit: an
+    ``actionable`` finding needs a human now, a ``benign`` one is an FYI the
+    recipient's filter rule can route away.
+    """
+    name = _single_line(notice.dashboard_name)
+    return f"[MEHO] investigation {_single_line(notice.verdict)}: {name}"
+
+
+def _finding_body(notice: FindingNotice) -> str:
+    """Build the plain-text body: verdict header, summary, evidence, action.
+
+    Deliberately the same section order as
+    :func:`~meho_backplane.checks.investigate._render_finding_body` (the
+    memory entry the same finding is written to), so an operator reading the
+    mail and an operator reading the memory entry see one shape. The
+    ``run_id`` is carried so the recipient can pull the full durable run
+    (``meho agent runs get <run_id>``) -- the mail is a summary, the run row
+    is the record.
+    """
+    lines = [
+        f"Dashboard: {notice.dashboard_name}",
+        f"Verdict: {notice.verdict}",
+        f"Run: {notice.run_id}",
+        "",
+        "## Summary",
+        "",
+        _truncate(notice.summary, _MAX_FINDING_CHARS),
+    ]
+    if notice.evidence:
+        shown = notice.evidence[:_MAX_EVIDENCE_LINES]
+        lines.append("")
+        lines.append("## Evidence")
+        lines.append("")
+        lines.extend(f"- {_clip(line)}" for line in shown)
+        if len(notice.evidence) > len(shown):
+            lines.append(f"({len(notice.evidence) - len(shown)} further line(s) not shown.)")
+    if notice.recommended_action:
+        lines.append("")
+        lines.append("## Recommended action")
+        lines.append("")
+        lines.append(_truncate(notice.recommended_action, _MAX_FINDING_CHARS))
+        lines.append("")
+        lines.append(
+            "Advisory text only -- the investigator is diagnose-only and executed "
+            "nothing. Any change op it attempted is parked for operator approval."
+        )
+    return "\n".join(lines) + "\n"
+
+
+async def notify_finding(notice: FindingNotice) -> None:
+    """Mail one persisted investigator finding to the Dashboard's recipient.
+
+    Never raises. Short-circuits when the Dashboard has no ``notify_email``
+    (the state every pre-#2719 row backfills to).
+
+    There is deliberately **no** ``notify_min_state`` gate here.
+    ``notify_min_state`` is a floor on a transition *edge* --
+    ``max(rank(previous), rank(current))``, see :func:`_crosses_threshold` --
+    and a finding is not an edge, so applying it would be a category error.
+    The volume control for findings is the investigator's own fire gate,
+    which is already far narrower than any state floor: a finding exists only
+    when the edge worsened into a non-green state with an actively-failing
+    member, the correlated cause was novel (not noise-suppressed), no run for
+    it was already in flight, and the budget gate admitted it.
+    """
+    if not notice.recipient:
+        _log().info(
+            "checks_finding_email_skipped_unconfigured",
+            dashboard_id=str(notice.dashboard_id),
+            run_id=str(notice.run_id),
+        )
+        return
+    try:
+        result = await send_email(
+            to=[notice.recipient],
+            subject=_finding_subject(notice),
+            body=_finding_body(notice),
+        )
+    except Exception:
+        # Contract: a mail failure never reaches the investigation seam.
+        _log().warning(
+            "checks_finding_email_failed",
+            dashboard_id=str(notice.dashboard_id),
+            run_id=str(notice.run_id),
+            reason="unexpected_error",
+            exc_info=True,
+        )
+        return
+
+    if not result.sent:
+        _log().warning(
+            "checks_finding_email_failed",
+            dashboard_id=str(notice.dashboard_id),
+            run_id=str(notice.run_id),
+            reason=result.reason,
+        )
+        return
+    _log().info(
+        "checks_finding_email_sent",
+        dashboard_id=str(notice.dashboard_id),
+        run_id=str(notice.run_id),
+        verdict=notice.verdict,
+    )
+
+
+def schedule_finding_notification(notice: FindingNotice) -> None:
+    """Spawn the finding send as a tracked fire-and-forget task.
+
+    Keeps the SMTP session off the investigator's serial cause-group loop:
+    ``run_investigation`` awaits each group to a terminal outcome before the
+    next fires (the budget-gate discipline, #2576), so an inline 30-second
+    session would delay the next group's *diagnosis*, not just its mail.
+    :func:`notify_finding` swallows every exception, so the task cannot end
+    in an unretrieved exception; :class:`asyncio.CancelledError` still
+    propagates so lifespan shutdown tears the task down cleanly.
+    """
+    task = asyncio.create_task(
+        notify_finding(notice),
+        name=f"checks-finding-mail-{notice.run_id}",
+    )
+    _NOTIFICATIONS.add(task)
+    task.add_done_callback(_NOTIFICATIONS.discard)
+
+
 async def _await_pending_notifications() -> None:
     """Await all in-flight notification tasks -- a deterministic test seam.
 
     Production spawns sends fire-and-forget; tests drain them before
-    asserting on the transport. Mirrors
+    asserting on the transport. Covers both transition and finding sends
+    (one task set). Mirrors
     :func:`meho_backplane.checks.investigate._await_pending_investigations`.
     """
     pending = [task for task in _NOTIFICATIONS if not task.done()]

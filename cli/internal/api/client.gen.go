@@ -3444,13 +3444,20 @@ type DailyUsageBucketSurface string
 // pydantic's “EmailStr“ (“email-validator“), so a malformed one is a
 // boundary 422 rather than a delivery failure discovered hours later on the
 // first transition.
+//
+// “investigator_prompt“ is the #2721 operator context appended to the
+// diagnose-only investigator's briefing. Bounded at
+// “_INVESTIGATOR_PROMPT_MAX_LENGTH“; oversize is a structured 422
+// (“string_too_long“ with the limit in “ctx“) rather than a truncation
+// the operator never learns about.
 type DashboardCreate struct {
-	Description    *string                        `json:"description"`
-	Name           string                         `json:"name"`
-	NotifyEmail    *openapi_types.Email           `json:"notify_email"`
-	NotifyMinState *DashboardCreateNotifyMinState `json:"notify_min_state,omitempty"`
-	SensorIds      *[]openapi_types.UUID          `json:"sensor_ids,omitempty"`
-	TenantId       *openapi_types.UUID            `json:"tenant_id"`
+	Description        *string                        `json:"description"`
+	InvestigatorPrompt *string                        `json:"investigator_prompt"`
+	Name               string                         `json:"name"`
+	NotifyEmail        *openapi_types.Email           `json:"notify_email"`
+	NotifyMinState     *DashboardCreateNotifyMinState `json:"notify_min_state,omitempty"`
+	SensorIds          *[]openapi_types.UUID          `json:"sensor_ids,omitempty"`
+	TenantId           *openapi_types.UUID            `json:"tenant_id"`
 }
 
 // DashboardCreateNotifyMinState defines model for DashboardCreate.NotifyMinState.
@@ -3461,19 +3468,20 @@ type DashboardCreateNotifyMinState string
 // Extends :class:`DashboardRead` with the per-member breakdown the console
 // detail page + the REST detail expose.
 type DashboardDetail struct {
-	CreatedAt       time.Time                       `json:"created_at"`
-	CreatedBySub    string                          `json:"created_by_sub"`
-	Description     *string                         `json:"description"`
-	Id              openapi_types.UUID              `json:"id"`
-	LastRollupState *DashboardDetailLastRollupState `json:"last_rollup_state"`
-	MemberCount     int                             `json:"member_count"`
-	Members         []DashboardMemberView           `json:"members"`
-	Name            string                          `json:"name"`
-	NotifyEmail     *string                         `json:"notify_email"`
-	NotifyMinState  DashboardDetailNotifyMinState   `json:"notify_min_state"`
-	State           DashboardDetailState            `json:"state"`
-	TenantId        openapi_types.UUID              `json:"tenant_id"`
-	UpdatedAt       time.Time                       `json:"updated_at"`
+	CreatedAt          time.Time                       `json:"created_at"`
+	CreatedBySub       string                          `json:"created_by_sub"`
+	Description        *string                         `json:"description"`
+	Id                 openapi_types.UUID              `json:"id"`
+	InvestigatorPrompt *string                         `json:"investigator_prompt"`
+	LastRollupState    *DashboardDetailLastRollupState `json:"last_rollup_state"`
+	MemberCount        int                             `json:"member_count"`
+	Members            []DashboardMemberView           `json:"members"`
+	Name               string                          `json:"name"`
+	NotifyEmail        *string                         `json:"notify_email"`
+	NotifyMinState     DashboardDetailNotifyMinState   `json:"notify_min_state"`
+	State              DashboardDetailState            `json:"state"`
+	TenantId           openapi_types.UUID              `json:"tenant_id"`
+	UpdatedAt          time.Time                       `json:"updated_at"`
 }
 
 // DashboardDetailLastRollupState defines model for DashboardDetail.LastRollupState.
@@ -3550,18 +3558,19 @@ type DashboardMemberViewRawState string
 // NULL until #2507 writes it). “frozen=True“ so a handler cannot mutate
 // the row after returning it.
 type DashboardRead struct {
-	CreatedAt       time.Time                     `json:"created_at"`
-	CreatedBySub    string                        `json:"created_by_sub"`
-	Description     *string                       `json:"description"`
-	Id              openapi_types.UUID            `json:"id"`
-	LastRollupState *DashboardReadLastRollupState `json:"last_rollup_state"`
-	MemberCount     int                           `json:"member_count"`
-	Name            string                        `json:"name"`
-	NotifyEmail     *string                       `json:"notify_email"`
-	NotifyMinState  DashboardReadNotifyMinState   `json:"notify_min_state"`
-	State           DashboardReadState            `json:"state"`
-	TenantId        openapi_types.UUID            `json:"tenant_id"`
-	UpdatedAt       time.Time                     `json:"updated_at"`
+	CreatedAt          time.Time                     `json:"created_at"`
+	CreatedBySub       string                        `json:"created_by_sub"`
+	Description        *string                       `json:"description"`
+	Id                 openapi_types.UUID            `json:"id"`
+	InvestigatorPrompt *string                       `json:"investigator_prompt"`
+	LastRollupState    *DashboardReadLastRollupState `json:"last_rollup_state"`
+	MemberCount        int                           `json:"member_count"`
+	Name               string                        `json:"name"`
+	NotifyEmail        *string                       `json:"notify_email"`
+	NotifyMinState     DashboardReadNotifyMinState   `json:"notify_min_state"`
+	State              DashboardReadState            `json:"state"`
+	TenantId           openapi_types.UUID            `json:"tenant_id"`
+	UpdatedAt          time.Time                     `json:"updated_at"`
 }
 
 // DashboardReadLastRollupState defines model for DashboardRead.LastRollupState.

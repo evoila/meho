@@ -142,12 +142,27 @@ _XRANGE_END: Final[str] = "+"
 #: filter when chasing a freshly-minted credential (e.g.
 #: ``harbor.robot.create``) or an unmapped HTTP route, which defeats
 #: the filter's purpose.
+#:
+#: ``checks`` (#2720) is the checks subsystem's own state-change class
+#: (``checks.transition``). It is listed because the enum is enforced:
+#: :mod:`meho_backplane.mcp.handlers` validates every tool call against
+#: the advertised ``inputSchema`` with ``jsonschema``, so an op_class
+#: absent from this tuple is a JSON-RPC ``-32602`` before the handler
+#: runs -- the filter would be unreachable from ``meho.broadcast.recent``
+#: / ``.watch``. Unlike the other members it never appears in
+#: ``audit_log.op_class``: the transition event is published outside the
+#: audit path (there is no audited operation behind a rollup edge), so a
+#: ``meho.audit.query`` narrowed to ``checks`` is always empty. The two
+#: tools share this tuple as one taxonomy by design
+#: (``tests/test_mcp_tools_list_shape_conventions.py`` pins them
+#: together).
 OP_CLASS_ENUM: Final[tuple[str, ...]] = (
     "read",
     "write",
     "credential_read",
     "credential_mint",
     "audit_query",
+    "checks",
     "other",
 )
 

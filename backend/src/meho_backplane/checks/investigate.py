@@ -119,6 +119,7 @@ from meho_backplane.agent.run import BudgetExceededError
 from meho_backplane.auth.agent_token import AgentTokenError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks.assertions import CheckState
+from meho_backplane.checks.broadcast import publish_check_transition_event
 from meho_backplane.checks.dashboard_repository import members_by_dashboard
 from meho_backplane.checks.notify import (
     DashboardNotice,
@@ -373,12 +374,14 @@ async def _process_transition(
     back, so two Sensor outcomes landing together on one Dashboard produce exactly
     one of everything downstream.
 
-    A won claim has two independent consumers. A **worsening** transition into
+    A won claim has three independent consumers. A **worsening** transition into
     ``degraded`` / ``critical`` with at least one actively-failing member schedules
     a background investigation (unchanged). **Every** claimed edge, both
     directions, is handed to the #2719 notifier, which applies its own
     ``notify_min_state`` floor -- so a ``critical -> ok`` recovery mails the
-    all-clear without the investigator ever seeing it.
+    all-clear without the investigator ever seeing it -- and published to the
+    tenant broadcast feed as a ``checks.transition`` event (#2720), with no
+    floor at all.
     """
     now = now or datetime.now(UTC)
     sessionmaker = get_sessionmaker()
@@ -397,16 +400,26 @@ async def _process_transition(
             pending.append(claimed)
 
     # Claims committed under the per-(tenant, dashboard) lock; spawn the
-    # expensive work off the runner's persist path. Investigation and
-    # notification are independent consumers of one claim: the investigator
-    # keeps its worsening-and-actively-failing gate, the notifier decides for
-    # itself from the configured floor (both edge directions, #2719).
+    # expensive work off the runner's persist path. Investigation,
+    # notification and broadcast are independent consumers of one claim: the
+    # investigator keeps its worsening-and-actively-failing gate, the notifier
+    # decides for itself from the configured floor (both edge directions,
+    # #2719), and the feed event is unconditional (#2720) -- filtering a feed
+    # is the consumer's job. The publish is awaited (a bounded XADD) while the
+    # two expensive consumers are backgrounded.
     for claim in pending:
         if claim.worsening and claim.non_green:
             _schedule_investigation(
                 tenant_id=tenant_id, dashboard=claim.dashboard, members=claim.non_green
             )
         schedule_dashboard_notification(claim.notice)
+        await publish_check_transition_event(
+            tenant_id=tenant_id,
+            dashboard_id=claim.dashboard.dashboard_id,
+            dashboard_name=claim.dashboard.name,
+            previous_state=claim.dashboard.previous_state,
+            new_state=claim.dashboard.current_state,
+        )
 
 
 async def _claim_dashboard_transition(

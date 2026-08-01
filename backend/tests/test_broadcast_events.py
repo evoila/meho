@@ -302,6 +302,65 @@ class TestClassifyOp:
 
         assert "approval" not in _SENSITIVE_OP_CLASSES
 
+    def test_checks_transition_maps_to_checks(self) -> None:
+        """``checks.transition`` classifies as the dedicated ``checks`` class.
+
+        :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
+        emits this op-id on every claimed Dashboard rollup edge (#2720);
+        the class is what makes ``op_class=checks`` a usable server-side
+        filter on ``meho.broadcast.recent`` / ``.watch`` and the SSE
+        stream.
+        """
+        assert classify_op("checks.transition") == "checks"
+
+    @pytest.mark.parametrize(
+        ("op_id", "expected"),
+        [
+            ("checks.assignment.put", "write"),
+            ("checks.assignment.get", "read"),
+            ("checks.results.post", "other"),
+        ],
+    )
+    def test_gateway_checks_op_ids_are_not_swept_into_checks(
+        self, op_id: str, expected: str
+    ) -> None:
+        """The ``/api/v1/checks/*`` op-ids are NOT swept into ``checks``.
+
+        Regression guard on the deliberate choice of an exact-membership
+        allowlist over a ``checks.`` prefix branch (#2720).
+
+        The values pinned here are what :func:`classify_op` returns **in
+        isolation**, which is not the same thing as the class those rows
+        ship with: all three routes bind an explicit ``audit_op_class``
+        (``write`` / ``read`` / ``write``), and both the audit write and
+        the broadcast publish honour that override in preference to
+        ``classify_op`` -- hence ``checks.results.post`` persisting
+        ``write`` while this function says ``other``.
+
+        What the pin protects is the **read** path. ``classify_op`` is
+        re-run at render time on the stored op-id by the audit and
+        broadcast event drawers, where it supplies the displayed class
+        and feeds ``is_aggregate_only``. A prefix branch would relabel
+        every gateway row there -- retroactively, since the class is
+        derived on read -- and would sweep in any future non-transition
+        ``checks.*`` op-id.
+        """
+        assert classify_op(op_id) == expected
+
+    def test_checks_class_is_not_sensitive(self) -> None:
+        """The ``checks`` class broadcasts full detail (not aggregate-only).
+
+        The transition payload is a Dashboard id, its name, and the two
+        rollup states -- no params, no Sensor values, no evidence. Pins
+        the class out of
+        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`
+        so minting it did not accidentally opt the events into
+        aggregate-only redaction.
+        """
+        from meho_backplane.broadcast.overrides import _SENSITIVE_OP_CLASSES
+
+        assert "checks" not in _SENSITIVE_OP_CLASSES
+
     @pytest.mark.parametrize(
         ("op_id", "expected"),
         [

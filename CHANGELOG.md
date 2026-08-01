@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Security — pyasn1 0.6.4: three HIGH DoS CVEs in ASN.1 parsing
+
+- Bump the transitive `pyasn1` pin from 0.6.3 to 0.6.4, fixing
+  CVE-2026-59884, CVE-2026-59885, and CVE-2026-59886 — three HIGH
+  denial-of-service vulnerabilities via crafted BER input, ASN.1
+  OBJECT IDENTIFIER, and ASN.1 REAL values respectively. `pyasn1`
+  reaches the image through `pyasn1-modules`; no direct MEHO code
+  path parses attacker-supplied ASN.1, but the image scan gate
+  (trivy, CRITICAL/HIGH with fix available) rightly blocks a
+  release carrying it. Caught by the `image.yml` scan on `main`
+  after the 2026-08-01 merges.
+
 ### Checks investigator — operator prompt + emailed findings (#2721)
 
 - A Dashboard can now carry an `investigator_prompt`: operator context

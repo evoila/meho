@@ -109,6 +109,48 @@ connector-related release-notes line.
   `deploy/values-examples/README.md` now open with a pointer to the
   site and stay as the in-repo deep-dives the site links back into.
 
+### Added — docs site: the five named deployment shapes (#2663)
+
+- New **Deployment shapes** page on the docs site
+  (`docs-site/deployment-shapes.md`, under *Start here*): the five ways
+  real estates differ — flat LAN, segmented network with satellite
+  gateways, air-gapped, cloud-native without Vault (Google Secret
+  Manager), and multi-tenant MSP — each with a rendered component
+  diagram, a plain-language "pick this shape when", and the constraints
+  that actually decide the install. One chart, five topologies: the
+  page says so up front and then names what changes (address
+  allowlist, credential backend, tenancy) and what does not. Adopters
+  get the honest edges too: satellite gateways are read-only by design,
+  so a satellite-only enclave gets observation and not change
+  automation; air-gapped estates cannot use cloud-hosted MCP clients at
+  all; per-operator Workload Identity Federation obligates a
+  background-dispatch decision or credentialed sensors evaluate
+  `unknown` forever; and multi-tenant MSP is labelled a **target
+  shape**, not a field-proven one. Every operational claim cites a
+  public file in this repository, listed in the page's own Sources
+  section. Mermaid rendering is enabled for the site via the
+  documented Material custom-fence config. (#2663)
+
+### Added — docs-site Do-real-work guides: targets & secrets, first operations, sensors (#2673)
+
+- Land the first three *Do real work* task guides on the published
+  docs site (#2673): **Register targets and secrets** (`targets.yaml`
+  import incl. `tls_server_name`, the per-backend `secret_ref` shapes
+  with the Vault tenant-scope prefix and the GSM ref grammar,
+  probe-green verification, and a failure table built from the real
+  error strings), **Run your first operations** (the
+  discover → groups → search → preview → call ladder worked end to
+  end on the `k8s-1.x` typed connector, result-handle drill-in via
+  `result_query`, and what `safety_level` / `requires_approval` mean
+  at first contact), and **Watch your estate with sensors** (create,
+  dashboard rollup, break-and-triage across the five-state
+  vocabulary, the optional investigator, and the honest per-backend
+  background-credential matrix). Each guide ends with a
+  "what can go wrong here" section sourced from shipped error
+  messages rather than invented FAQs; the guides landing page now
+  sequences them and reserves the approvals & break-glass slot
+  (#2669). (#2673)
+
 ### Added — maturity drift guard in CI + generated maturity-index docs page (#2678)
 
 - Close the #2664 maturity program with its two enforcement pieces

@@ -150,7 +150,12 @@ Verify after install:
 
 ```bash
 kubectl -n meho exec deploy/meho -- printenv SSL_CERT_FILE REQUESTS_CA_BUNDLE
-kubectl -n meho exec deploy/meho -- wget -qO- http://localhost:8000/ready
+
+# The image ships no curl or wget, so port-forward rather than exec.
+kubectl -n meho port-forward deploy/meho 8000:8000 >/dev/null &
+PF=$!
+curl -sS http://localhost:8000/ready | jq '.checks'
+kill "$PF"
 ```
 
 ## One layer further out: targets with private certificates

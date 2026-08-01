@@ -60,7 +60,10 @@ or declare it at cluster-bootstrap time so it survives re-provisioning:
 spec:
   bootstrap:
     initdb:
-      postInitSQL:
+      # postInitApplicationSQL, not postInitSQL: the latter runs against
+      # the `postgres` database, so the extension would land in the wrong
+      # one. This runs inside the application database MEHO uses.
+      postInitApplicationSQL:
         - "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
@@ -262,12 +265,20 @@ What happens, in order:
 # Rollout completes inside the startup budget.
 kubectl -n meho rollout status deploy/meho --timeout=360s
 
+# The runtime image is python:3.14-slim — it ships neither curl nor
+# wget — so reach the Pod with a port-forward instead of `kubectl exec`.
+kubectl -n meho port-forward deploy/meho 8000:8000 >/dev/null &
+PF=$!
+
 # Liveness endpoint answers.
-kubectl -n meho exec deploy/meho -- wget -qO- http://localhost:8000/healthz
+curl -fsS http://localhost:8000/healthz
 
 # Readiness includes live checks against Postgres, Keycloak, and the
-# credential backend — all must be green.
-kubectl -n meho exec deploy/meho -- wget -qO- http://localhost:8000/ready
+# credential backend — all must be green. It answers 503 until they are,
+# so read the body rather than failing on the status code.
+curl -sS http://localhost:8000/ready | jq .
+
+kill "$PF"
 
 # From outside the cluster, through the Ingress:
 curl -fsS https://meho.example.com/healthz

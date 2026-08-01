@@ -420,11 +420,15 @@ kubectl exec -n meho deployment/meho -- ls -l /etc/ssl/extra-certs/ca.crt
 kubectl exec -n meho deployment/meho -- printenv SSL_CERT_FILE REQUESTS_CA_BUNDLE
 # Python sees it
 kubectl exec -n meho deployment/meho -- python -c "import ssl; print(ssl.get_default_verify_paths().cafile)"
-# /ready turns green for vault + keycloak
-kubectl exec -n meho deployment/meho -- wget -qO- http://localhost:8000/ready | jq '.checks'
+# /ready turns green for vault + keycloak. The image ships no curl or
+# wget, so port-forward rather than exec.
+kubectl port-forward -n meho deployment/meho 8000:8000 >/dev/null &
+PF=$!
+curl -sS http://localhost:8000/ready | jq '.checks'
+kill "$PF"
 ```
 
-If `/ready` still reports `ssl_error` after the mount lands, check the
+If `/ready` still reports `unreachable: SSLError` after the mount lands, check the
 **migration Job's** Pod logs — that Job uses the same bundle. A
 common drift cause: a typo'd ConfigMap name (the mount succeeds but
 the file is empty / wrong).

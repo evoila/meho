@@ -17,10 +17,13 @@
 //     five-state rollup plus every member's raw/effective state — the CLI
 //     twin of /ui/checks/{dashboard_id}.
 //   - `meho dashboard create --name <n> [--description <d>]
-//     [--sensor-id <id> ...] [--tenant <id>] [--json]` — create one
+//     [--sensor-id <id> ...] [--notify-email <a>] [--notify-min-state <s>]
+//     [--tenant <id>] [--json]` — create one
 //     dashboard via POST /api/v1/checks/dashboards. Role: tenant_admin. An
 //     empty member set is legal and rolls up `unknown` (the zero-member
 //     rule); a foreign / absent sensor id is refused 422 `sensor_not_found`.
+//     `--notify-email` opts the dashboard into transition mail (#2719);
+//     `--notify-min-state` picks the floor an edge must reach.
 //   - `meho dashboard delete <dashboard_id> [--tenant <id>] [--json]` —
 //     DELETE /api/v1/checks/dashboards/{id}. Role: tenant_admin.
 //
@@ -368,6 +371,13 @@ func printDashboardSummary(w io.Writer, d *api.DashboardDetail) {
 	fmt.Fprintf(w, "%-18s %s\n", "state:", string(d.State))
 	if d.LastRollupState != nil {
 		fmt.Fprintf(w, "%-18s %s\n", "last_rollup_state:", string(*d.LastRollupState))
+	}
+	// Notification config (#2719). notify_min_state prints only alongside a
+	// configured recipient: without one the floor is inert, and showing it
+	// would read as "notifications are on at this threshold".
+	if email := derefString(d.NotifyEmail); email != "" {
+		fmt.Fprintf(w, "%-18s %s\n", "notify_email:", sanitizeCell(email))
+		fmt.Fprintf(w, "%-18s %s\n", "notify_min_state:", string(d.NotifyMinState))
 	}
 	fmt.Fprintf(w, "%-18s %d\n", "member_count:", d.MemberCount)
 	fmt.Fprintf(w, "%-18s %s\n", "created_by:", d.CreatedBySub)

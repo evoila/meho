@@ -141,6 +141,12 @@ const (
 	DailyUsageBucketSurfaceOperations DailyUsageBucketSurface = "operations"
 )
 
+// Defines values for DashboardCreateNotifyMinState.
+const (
+	DashboardCreateNotifyMinStateCritical DashboardCreateNotifyMinState = "critical"
+	DashboardCreateNotifyMinStateDegraded DashboardCreateNotifyMinState = "degraded"
+)
+
 // Defines values for DashboardDetailLastRollupState.
 const (
 	DashboardDetailLastRollupStateCritical DashboardDetailLastRollupState = "critical"
@@ -148,6 +154,12 @@ const (
 	DashboardDetailLastRollupStateOk       DashboardDetailLastRollupState = "ok"
 	DashboardDetailLastRollupStateSkip     DashboardDetailLastRollupState = "skip"
 	DashboardDetailLastRollupStateUnknown  DashboardDetailLastRollupState = "unknown"
+)
+
+// Defines values for DashboardDetailNotifyMinState.
+const (
+	DashboardDetailNotifyMinStateCritical DashboardDetailNotifyMinState = "critical"
+	DashboardDetailNotifyMinStateDegraded DashboardDetailNotifyMinState = "degraded"
 )
 
 // Defines values for DashboardDetailState.
@@ -184,6 +196,12 @@ const (
 	DashboardReadLastRollupStateOk       DashboardReadLastRollupState = "ok"
 	DashboardReadLastRollupStateSkip     DashboardReadLastRollupState = "skip"
 	DashboardReadLastRollupStateUnknown  DashboardReadLastRollupState = "unknown"
+)
+
+// Defines values for DashboardReadNotifyMinState.
+const (
+	DashboardReadNotifyMinStateCritical DashboardReadNotifyMinState = "critical"
+	DashboardReadNotifyMinStateDegraded DashboardReadNotifyMinState = "degraded"
 )
 
 // Defines values for DashboardReadState.
@@ -3419,12 +3437,24 @@ type DailyUsageBucketSurface string
 //
 // *tenant_id* (optional) lets a platform-admin caller target another
 // tenant; the boundary enforces the RBAC via “authorize_tenant_scope“.
+//
+// “notify_email“ / “notify_min_state“ are the #2719 notification config,
+// set at create only like membership. Omitting “notify_email“ leaves
+// notifications off for this Dashboard. The address is validated with
+// pydantic's “EmailStr“ (“email-validator“), so a malformed one is a
+// boundary 422 rather than a delivery failure discovered hours later on the
+// first transition.
 type DashboardCreate struct {
-	Description *string               `json:"description"`
-	Name        string                `json:"name"`
-	SensorIds   *[]openapi_types.UUID `json:"sensor_ids,omitempty"`
-	TenantId    *openapi_types.UUID   `json:"tenant_id"`
+	Description    *string                        `json:"description"`
+	Name           string                         `json:"name"`
+	NotifyEmail    *openapi_types.Email           `json:"notify_email"`
+	NotifyMinState *DashboardCreateNotifyMinState `json:"notify_min_state,omitempty"`
+	SensorIds      *[]openapi_types.UUID          `json:"sensor_ids,omitempty"`
+	TenantId       *openapi_types.UUID            `json:"tenant_id"`
 }
+
+// DashboardCreateNotifyMinState defines model for DashboardCreate.NotifyMinState.
+type DashboardCreateNotifyMinState string
 
 // DashboardDetail Response shape for “GET /api/v1/checks/dashboards/{id}“.
 //
@@ -3439,6 +3469,8 @@ type DashboardDetail struct {
 	MemberCount     int                             `json:"member_count"`
 	Members         []DashboardMemberView           `json:"members"`
 	Name            string                          `json:"name"`
+	NotifyEmail     *string                         `json:"notify_email"`
+	NotifyMinState  DashboardDetailNotifyMinState   `json:"notify_min_state"`
 	State           DashboardDetailState            `json:"state"`
 	TenantId        openapi_types.UUID              `json:"tenant_id"`
 	UpdatedAt       time.Time                       `json:"updated_at"`
@@ -3446,6 +3478,9 @@ type DashboardDetail struct {
 
 // DashboardDetailLastRollupState defines model for DashboardDetail.LastRollupState.
 type DashboardDetailLastRollupState string
+
+// DashboardDetailNotifyMinState defines model for DashboardDetail.NotifyMinState.
+type DashboardDetailNotifyMinState string
 
 // DashboardDetailState defines model for DashboardDetail.State.
 type DashboardDetailState string
@@ -3522,6 +3557,8 @@ type DashboardRead struct {
 	LastRollupState *DashboardReadLastRollupState `json:"last_rollup_state"`
 	MemberCount     int                           `json:"member_count"`
 	Name            string                        `json:"name"`
+	NotifyEmail     *string                       `json:"notify_email"`
+	NotifyMinState  DashboardReadNotifyMinState   `json:"notify_min_state"`
 	State           DashboardReadState            `json:"state"`
 	TenantId        openapi_types.UUID            `json:"tenant_id"`
 	UpdatedAt       time.Time                     `json:"updated_at"`
@@ -3529,6 +3566,9 @@ type DashboardRead struct {
 
 // DashboardReadLastRollupState defines model for DashboardRead.LastRollupState.
 type DashboardReadLastRollupState string
+
+// DashboardReadNotifyMinState defines model for DashboardRead.NotifyMinState.
+type DashboardReadNotifyMinState string
 
 // DashboardReadState defines model for DashboardRead.State.
 type DashboardReadState string

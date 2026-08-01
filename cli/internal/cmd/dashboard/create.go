@@ -19,7 +19,8 @@ import (
 // newCreateCmd returns the `meho dashboard create` command.
 //
 //	meho dashboard create --name N [--description D]
-//	  [--sensor-id ID ...] [--tenant T] [--json] [--backplane <url>]
+//	  [--sensor-id ID ...] [--notify-email A] [--notify-min-state S]
+//	  [--tenant T] [--json] [--backplane <url>]
 //
 // Role: tenant_admin.
 func newCreateCmd() *cobra.Command {
@@ -27,6 +28,8 @@ func newCreateCmd() *cobra.Command {
 		name              string
 		description       string
 		sensorIDs         []string
+		notifyEmail       string
+		notifyMinState    string
 		tenant            string
 		jsonOut           bool
 		backplaneOverride string
@@ -44,6 +47,14 @@ func newCreateCmd() *cobra.Command {
 			"empty member set is legal and rolls up 'unknown' (the zero-member " +
 			"rule); duplicate ids are de-duplicated server-side. --tenant " +
 			"targets another tenant (platform_admin cross-tenant create).\n\n" +
+			"--notify-email is the single address that receives one mail per " +
+			"rollup transition crossing --notify-min-state; leaving it unset " +
+			"keeps notifications off. --notify-min-state is degraded or " +
+			"critical (default critical): an edge notifies when the worse of " +
+			"its two states reaches the floor, so at 'critical' a recovery " +
+			"from critical back to ok sends the all-clear while ok -> " +
+			"degraded stays silent. Both are set at create only, like " +
+			"membership.\n\n" +
 			"A foreign / absent --sensor-id is refused 422 sensor_not_found; a " +
 			"duplicate name is refused 409.",
 		Args:          cobra.NoArgs,
@@ -54,6 +65,8 @@ func newCreateCmd() *cobra.Command {
 				Name:              name,
 				Description:       description,
 				SensorIDs:         sensorIDs,
+				NotifyEmail:       notifyEmail,
+				NotifyMinState:    notifyMinState,
 				Tenant:            tenant,
 				JSONOut:           jsonOut,
 				BackplaneOverride: backplaneOverride,
@@ -64,6 +77,10 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&description, "description", "", "optional free-form description")
 	cmd.Flags().StringArrayVar(&sensorIDs, "sensor-id", nil,
 		"member sensor UUID (repeatable; empty set rolls up 'unknown')")
+	cmd.Flags().StringVar(&notifyEmail, "notify-email", "",
+		"address that receives transition mail (unset = notifications off)")
+	cmd.Flags().StringVar(&notifyMinState, "notify-min-state", "",
+		"notification floor: degraded or critical (server default: critical)")
 	cmd.Flags().StringVar(&tenant, "tenant", "",
 		"target tenant UUID (platform_admin cross-tenant create)")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit raw DashboardDetail JSON instead of the human summary")
@@ -77,9 +94,20 @@ type createOptions struct {
 	Name              string
 	Description       string
 	SensorIDs         []string
+	NotifyEmail       string
+	NotifyMinState    string
 	Tenant            string
 	JSONOut           bool
 	BackplaneOverride string
+}
+
+// notifyMinStates is the closed --notify-min-state vocabulary, mirroring the
+// server's ck_check_dashboards_notify_min_state CHECK. Validated CLI-side so
+// a typo surfaces locally instead of after a 422 round-trip — the same
+// discipline the --sensor-id UUID parse follows.
+var notifyMinStates = []api.DashboardCreateNotifyMinState{
+	api.DashboardCreateNotifyMinStateDegraded,
+	api.DashboardCreateNotifyMinStateCritical,
 }
 
 func runCreate(cmd *cobra.Command, opts createOptions) error {
@@ -89,6 +117,9 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 				"--sensor-id may be given at most %d times; got %d",
 				maxDashboardMembers, len(opts.SensorIDs))),
 			opts.JSONOut)
+	}
+	if err := validateNotifyMinState(opts.NotifyMinState); err != nil {
+		return output.RenderError(cmd.ErrOrStderr(), output.Unexpected(err.Error()), opts.JSONOut)
 	}
 	// Parse each --sensor-id CLI-side into a typed UUID so a malformed id
 	// surfaces locally rather than after a 422 round-trip.
@@ -146,11 +177,32 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 	return nil
 }
 
+// validateNotifyMinState rejects a --notify-min-state outside the closed
+// server vocabulary. An empty value is legal and means "omit the field", so
+// the server's own default (critical) applies.
+func validateNotifyMinState(value string) error {
+	if value == "" {
+		return nil
+	}
+	for _, allowed := range notifyMinStates {
+		if value == string(allowed) {
+			return nil
+		}
+	}
+	return fmt.Errorf("--notify-min-state must be one of degraded, critical; got %q", value)
+}
+
 // buildCreateBody assembles the typed POST body. Pulled out so the
 // wire-shape rendering (pointer-or-omit semantics for the optional fields)
 // stays unit-testable without an httptest.Server. An empty member slice is
 // forwarded as an empty (non-nil) sensor_ids so the zero-member rule applies
 // deterministically rather than depending on the field being omitted.
+//
+// notify_min_state is omitted when the flag is unset so the server's default
+// stays the single source of that value; notify_email is omitted when unset
+// so the row keeps notifications off. An unset --notify-email leaves the
+// field nil rather than sending an empty openapi_types.Email, whose
+// MarshalJSON would reject the empty string before the request goes out.
 func buildCreateBody(
 	opts createOptions,
 	sensorIDs []openapi_types.UUID,
@@ -167,6 +219,14 @@ func buildCreateBody(
 	}
 	if tenantID != nil {
 		body.TenantId = tenantID
+	}
+	if opts.NotifyEmail != "" {
+		email := openapi_types.Email(opts.NotifyEmail)
+		body.NotifyEmail = &email
+	}
+	if opts.NotifyMinState != "" {
+		minState := api.DashboardCreateNotifyMinState(opts.NotifyMinState)
+		body.NotifyMinState = &minState
 	}
 	return body
 }

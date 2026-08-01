@@ -6340,6 +6340,14 @@ class Sensor(Base):
 _CHECK_DASHBOARD_ROLLUP_STATES: tuple[str, ...] = get_args(CheckState)
 
 
+#: Closed ``check_dashboards.notify_min_state`` vocabulary (#2719) -- the
+#: notification floor an operator may set. Deliberately **not** derived from
+#: :data:`CheckState`: ``ok`` as a floor would mail on every edge, and
+#: ``skip`` / ``unknown`` are not severities a threshold is meaningful at.
+#: Only the two actionable states qualify.
+_CHECK_DASHBOARD_NOTIFY_MIN_STATES: tuple[str, ...] = ("degraded", "critical")
+
+
 class CheckDashboard(Base):
     """One named, tenant-scoped composition of Sensors (#2506).
 
@@ -6381,6 +6389,18 @@ class CheckDashboard(Base):
     # until #2507's hook maintains it. The CHECK admits NULL plus the
     # five-state vocabulary.
     last_rollup_state: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    # Email-notification config (#2719), read by ``checks.notify`` on every
+    # claimed transition. ``notify_email`` NULL means notifications are off
+    # for this Dashboard -- the backfilled state for every pre-#2719 row.
+    # ``notify_min_state`` is the threshold the edge must reach; NOT NULL so
+    # the notifier's rank comparison always reads a concrete state.
+    notify_email: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    notify_min_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="critical",
+        server_default="critical",
+    )
     created_by_sub: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -6414,6 +6434,11 @@ class CheckDashboard(Base):
         sa.CheckConstraint(
             _ck_in("last_rollup_state", _CHECK_DASHBOARD_ROLLUP_STATES),
             name="ck_check_dashboards_last_rollup_state",
+        ),
+        # ``notify_min_state`` over the two actionable states only (#2719).
+        sa.CheckConstraint(
+            _ck_in("notify_min_state", _CHECK_DASHBOARD_NOTIFY_MIN_STATES),
+            name="ck_check_dashboards_notify_min_state",
         ),
     )
 

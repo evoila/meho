@@ -43,6 +43,12 @@ unchanged states just maintain the memo. Every evaluation is processed (not only
 state changes) because a ``for:`` hold expiring flips a Dashboard non-green with
 no sensor-state change; the memo-equality check is the cheap exit.
 
+Since #2719 the won claim has a second, independent consumer:
+:mod:`meho_backplane.checks.notify` mails the Dashboard's configured recipient.
+That consumer acts on **both** edge directions (an operator paged for
+``critical`` needs the all-clear too) and applies its own per-Dashboard floor,
+so the worsening gate described above governs the investigator alone.
+
 Diagnose-only (the CRUX security property)
 ==========================================
 
@@ -114,6 +120,11 @@ from meho_backplane.auth.agent_token import AgentTokenError
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.checks.dashboard_repository import members_by_dashboard
+from meho_backplane.checks.notify import (
+    DashboardNotice,
+    NotifyMember,
+    schedule_dashboard_notification,
+)
 from meho_backplane.checks.rollup import (
     MemberEvaluation,
     MemberState,
@@ -283,6 +294,25 @@ class _DashboardSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class _ClaimedTransition:
+    """One rollup edge this caller won the compare-and-swap for (#2719).
+
+    Returned for **both** edge directions, because the claim has two
+    independent consumers: the investigator (worsening only) and the email
+    notifier (both directions -- an operator paged for ``critical`` needs the
+    all-clear too). :attr:`worsening` carries the direction so the routing in
+    :func:`_process_transition` stays a plain read of the claim rather than a
+    second rank computation, and :attr:`notice` is built inside the claim
+    transaction while the Dashboard row is live.
+    """
+
+    dashboard: _DashboardSnapshot
+    non_green: list[_MemberSnapshot]
+    worsening: bool
+    notice: DashboardNotice
+
+
+@dataclass(frozen=True, slots=True)
 class _CauseGroup:
     """One correlated cause: the Sensors a single investigation covers.
 
@@ -333,16 +363,22 @@ async def _process_transition(
     tenant_id: uuid.UUID,
     now: datetime | None,
 ) -> None:
-    """Recompute affected Dashboards, maintain the memo, spawn investigations.
+    """Recompute affected Dashboards, maintain the memo, route the claim.
 
     For every Dashboard containing *sensor_id*, :func:`_claim_dashboard_transition`
     atomically coalesces concurrent transitions per ``(tenant, dashboard)``: it
     folds the members through #2506's pure rollup against *now*, compares against
     the persisted ``last_rollup_state`` (NULL treated as ``ok``), and
-    compare-and-swaps the memo. A **worsening** transition into ``degraded`` /
-    ``critical`` with at least one actively-failing member schedules a background
-    investigation -- but only for the caller that *won* the swap, so two Sensor
-    outcomes landing together on one Dashboard fire exactly one investigation.
+    compare-and-swaps the memo. Only the caller that *won* the swap gets a claim
+    back, so two Sensor outcomes landing together on one Dashboard produce exactly
+    one of everything downstream.
+
+    A won claim has two independent consumers. A **worsening** transition into
+    ``degraded`` / ``critical`` with at least one actively-failing member schedules
+    a background investigation (unchanged). **Every** claimed edge, both
+    directions, is handed to the #2719 notifier, which applies its own
+    ``notify_min_state`` floor -- so a ``critical -> ok`` recovery mails the
+    all-clear without the investigator ever seeing it.
     """
     now = now or datetime.now(UTC)
     sessionmaker = get_sessionmaker()
@@ -352,7 +388,7 @@ async def _process_transition(
     if not dashboard_ids:
         return
 
-    pending: list[tuple[_DashboardSnapshot, list[_MemberSnapshot]]] = []
+    pending: list[_ClaimedTransition] = []
     for dashboard_id in dashboard_ids:
         claimed = await _claim_dashboard_transition(
             sessionmaker, tenant_id=tenant_id, dashboard_id=dashboard_id, now=now
@@ -361,11 +397,16 @@ async def _process_transition(
             pending.append(claimed)
 
     # Claims committed under the per-(tenant, dashboard) lock; spawn the
-    # expensive work off the runner's persist path.
-    for dashboard_snapshot, non_green in pending:
-        _schedule_investigation(
-            tenant_id=tenant_id, dashboard=dashboard_snapshot, members=non_green
-        )
+    # expensive work off the runner's persist path. Investigation and
+    # notification are independent consumers of one claim: the investigator
+    # keeps its worsening-and-actively-failing gate, the notifier decides for
+    # itself from the configured floor (both edge directions, #2719).
+    for claim in pending:
+        if claim.worsening and claim.non_green:
+            _schedule_investigation(
+                tenant_id=tenant_id, dashboard=claim.dashboard, members=claim.non_green
+            )
+        schedule_dashboard_notification(claim.notice)
 
 
 async def _claim_dashboard_transition(
@@ -374,8 +415,8 @@ async def _claim_dashboard_transition(
     tenant_id: uuid.UUID,
     dashboard_id: uuid.UUID,
     now: datetime,
-) -> tuple[_DashboardSnapshot, list[_MemberSnapshot]] | None:
-    """Atomically claim one Dashboard's worsening transition; ``None`` if not owned.
+) -> _ClaimedTransition | None:
+    """Atomically claim one Dashboard's rollup transition; ``None`` if not owned.
 
     Serialises concurrent evaluations of the same ``(tenant, dashboard)`` behind a
     transaction-scoped Postgres advisory lock (auto-released at commit; a no-op on
@@ -383,14 +424,18 @@ async def _claim_dashboard_transition(
     fold sees a settled, committed view, then compare-and-swaps the
     ``last_rollup_state`` memo in a single conditional ``UPDATE``. Only the caller
     whose swap actually moved the memo (:func:`_claim_rollup_transition` returns
-    ``True``) owns the transition and returns the briefing snapshot; a concurrent
-    caller that lost the swap returns ``None``. So exactly one investigation is
-    scheduled per green->non-green edge, correlated over the full membership --
-    both the duplicate-run and partial-correlation races the memo-then-check
-    sequence used to admit (#2575).
+    ``True``) owns the transition; a concurrent caller that lost the swap returns
+    ``None``. So exactly one investigation is scheduled per green->non-green edge,
+    correlated over the full membership -- both the duplicate-run and
+    partial-correlation races the memo-then-check sequence used to admit (#2575).
 
-    The snapshots are detached while the ORM rows are live (before commit) because
-    the backgrounded investigation opens its own sessions.
+    The claim is returned for **both** edge directions (#2719); the worsening
+    filter that used to live here now sits at the single routing site in
+    :func:`_process_transition`, unchanged in meaning.
+
+    The snapshots are detached while the ORM rows are live (before commit)
+    because the backgrounded investigation opens its own sessions and the
+    backgrounded notification opens none at all.
     """
     async with sessionmaker() as session:
         await _lock_dashboard_transition(
@@ -421,11 +466,17 @@ async def _claim_dashboard_transition(
             claimed = await _claim_rollup_transition(
                 session, dashboard_id, expected=previous_memo, new=current
             )
+        notice = _dashboard_notice(dashboard, dashboard_snapshot, non_green)
         await session.commit()
 
-    if worsening and claimed and non_green:
-        return dashboard_snapshot, non_green
-    return None
+    if not claimed:
+        return None
+    return _ClaimedTransition(
+        dashboard=dashboard_snapshot,
+        non_green=non_green,
+        worsening=worsening,
+        notice=notice,
+    )
 
 
 def _dashboard_transition_lock_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID) -> int:
@@ -555,6 +606,37 @@ def _dashboard_snapshot(
         slug=_slugify(dashboard.name),
         previous_state=previous,
         current_state=current,
+    )
+
+
+def _dashboard_notice(
+    dashboard: CheckDashboard,
+    snapshot: _DashboardSnapshot,
+    non_green: list[_MemberSnapshot],
+) -> DashboardNotice:
+    """Detach the claim into the notifier's input (#2719).
+
+    Built inside the claim transaction, while the ``check_dashboards`` row is
+    still live, because the recipient config (``notify_email`` /
+    ``notify_min_state``) lives on that row and the send runs on a background
+    task with no session of its own.
+    """
+    return DashboardNotice(
+        dashboard_id=snapshot.dashboard_id,
+        name=snapshot.name,
+        previous_state=snapshot.previous_state,
+        current_state=snapshot.current_state,
+        notify_email=dashboard.notify_email,
+        notify_min_state=dashboard.notify_min_state,
+        members=tuple(
+            NotifyMember(
+                name=m.name,
+                effective_state=m.effective_state,
+                last_value=m.last_value,
+                last_evidence=m.last_evidence,
+            )
+            for m in non_green
+        ),
     )
 
 

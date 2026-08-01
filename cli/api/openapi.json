@@ -8220,7 +8220,7 @@
           "checks-dashboards"
         ],
         "summary": "Create Dashboard",
-        "description": "Create one Dashboard under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set to a\n*different* tenant the create is cross-tenant and requires\n``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent\nsensor id is 422 ``sensor_not_found``; a duplicate name is 409.",
+        "description": "Create one Dashboard under the operator's tenant.\n\n``tenant_admin`` only. ``body.tenant_id`` is optional: when set to a\n*different* tenant the create is cross-tenant and requires\n``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent\nsensor id is 422 ``sensor_not_found``; a duplicate name is 409. The\n#2719 notification config (``notify_email`` / ``notify_min_state``) is\nvalidated by :class:`DashboardCreate`, so a malformed address or an\nout-of-vocabulary floor is FastAPI's own 422 envelope -- never a\ndelivery failure discovered on the first transition.",
         "operationId": "create_dashboard_api_v1_checks_dashboards_post",
         "parameters": [
           {
@@ -23502,6 +23502,21 @@
             "format": "uuid",
             "nullable": true,
             "title": "Tenant Id"
+          },
+          "notify_email": {
+            "type": "string",
+            "format": "email",
+            "nullable": true,
+            "title": "Notify Email"
+          },
+          "notify_min_state": {
+            "type": "string",
+            "enum": [
+              "degraded",
+              "critical"
+            ],
+            "title": "Notify Min State",
+            "default": "critical"
           }
         },
         "additionalProperties": false,
@@ -23510,7 +23525,7 @@
           "name"
         ],
         "title": "DashboardCreate",
-        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``."
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. The address is validated with\npydantic's ``EmailStr`` (``email-validator``), so a malformed one is a\nboundary 422 rather than a delivery failure discovered hours later on the\nfirst transition."
       },
       "DashboardDetail": {
         "properties": {
@@ -23560,6 +23575,19 @@
             "nullable": true,
             "title": "Last Rollup State"
           },
+          "notify_email": {
+            "type": "string",
+            "nullable": true,
+            "title": "Notify Email"
+          },
+          "notify_min_state": {
+            "type": "string",
+            "enum": [
+              "degraded",
+              "critical"
+            ],
+            "title": "Notify Min State"
+          },
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
@@ -23591,6 +23619,8 @@
           "member_count",
           "state",
           "last_rollup_state",
+          "notify_email",
+          "notify_min_state",
           "created_by_sub",
           "created_at",
           "updated_at",
@@ -23768,6 +23798,19 @@
             "nullable": true,
             "title": "Last Rollup State"
           },
+          "notify_email": {
+            "type": "string",
+            "nullable": true,
+            "title": "Notify Email"
+          },
+          "notify_min_state": {
+            "type": "string",
+            "enum": [
+              "degraded",
+              "critical"
+            ],
+            "title": "Notify Min State"
+          },
           "created_by_sub": {
             "type": "string",
             "title": "Created By Sub"
@@ -23792,6 +23835,8 @@
           "member_count",
           "state",
           "last_rollup_state",
+          "notify_email",
+          "notify_min_state",
           "created_by_sub",
           "created_at",
           "updated_at"

@@ -20,9 +20,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import SensorSeverity, SensorStatus
@@ -33,7 +33,14 @@ __all__ = [
     "DashboardListResponse",
     "DashboardMemberView",
     "DashboardRead",
+    "NotifyMinState",
 ]
+
+#: The notification floor an operator may set on a Dashboard (#2719) -- the
+#: wire twin of ``db.models._CHECK_DASHBOARD_NOTIFY_MIN_STATES``. Only the two
+#: actionable states: ``ok`` as a floor would mail on every edge, and
+#: ``skip`` / ``unknown`` are not severities a threshold is meaningful at.
+NotifyMinState = Literal["degraded", "critical"]
 
 #: Max length of an operator-supplied Dashboard name (mirrors the Sensor cap).
 _NAME_MAX_LENGTH = 128
@@ -60,6 +67,13 @@ class DashboardCreate(BaseModel):
 
     *tenant_id* (optional) lets a platform-admin caller target another
     tenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.
+
+    ``notify_email`` / ``notify_min_state`` are the #2719 notification config,
+    set at create only like membership. Omitting ``notify_email`` leaves
+    notifications off for this Dashboard. The address is validated with
+    pydantic's ``EmailStr`` (``email-validator``), so a malformed one is a
+    boundary 422 rather than a delivery failure discovered hours later on the
+    first transition.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -68,6 +82,11 @@ class DashboardCreate(BaseModel):
     description: str | None = Field(default=None, max_length=_DESCRIPTION_MAX_LENGTH)
     sensor_ids: list[uuid.UUID] = Field(default_factory=list, max_length=_MAX_MEMBERS)
     tenant_id: uuid.UUID | None = None
+    #: Single recipient for transition mail; ``None`` disables notification.
+    notify_email: EmailStr | None = None
+    #: Floor an edge must reach before mail is sent, under
+    #: ``ok < degraded < critical`` applied to ``max(previous, current)``.
+    notify_min_state: NotifyMinState = "critical"
 
 
 class DashboardMemberView(BaseModel):
@@ -126,6 +145,13 @@ class DashboardRead(BaseModel):
     state: CheckState
     #: The transition-detection memo column (#2507); NULL until then.
     last_rollup_state: CheckState | None
+    #: The #2719 notification config as persisted. ``notify_email`` is typed
+    #: ``str`` rather than ``EmailStr`` on the read side deliberately: the
+    #: address was validated on the way in, and re-validating a stored value
+    #: on every read would turn a row that somehow got past the boundary into
+    #: a 500 on an unrelated list call.
+    notify_email: str | None
+    notify_min_state: NotifyMinState
     created_by_sub: str
     created_at: datetime
     updated_at: datetime

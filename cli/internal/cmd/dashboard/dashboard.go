@@ -396,8 +396,11 @@ func printDashboardSummary(w io.Writer, d *api.DashboardDetail) {
 	}
 	// Investigator prompt (#2721). Multi-line operator prose, so it prints
 	// as its own trailing block rather than a %-18s cell — sanitizeCell
-	// would fold the line breaks the operator wrote.
-	if prompt := derefString(d.InvestigatorPrompt); prompt != "" {
+	// would fold the line breaks the operator wrote. The gate trims before
+	// testing (never for rendering: the operator's own leading indentation
+	// survives) so the CLI agrees with _build_briefing, which treats a
+	// whitespace-only prompt as unset and renders no operator section.
+	if prompt := derefString(d.InvestigatorPrompt); strings.TrimSpace(prompt) != "" {
 		fmt.Fprintf(w, "%-18s\n%s\n", "investigator_prompt:", indentBlock(prompt))
 	}
 	fmt.Fprintf(w, "%-18s %d\n", "member_count:", d.MemberCount)

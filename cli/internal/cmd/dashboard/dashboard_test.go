@@ -907,6 +907,35 @@ func TestPrintDashboardSummaryOmitsUnsetInvestigatorPrompt(t *testing.T) {
 	}
 }
 
+// A whitespace-only prompt is persisted but the briefing treats it as unset
+// (_build_briefing strips before its gate), so the read surface must agree —
+// otherwise the CLI advertises operator context the investigator never sees.
+func TestPrintDashboardSummaryOmitsWhitespaceOnlyInvestigatorPrompt(t *testing.T) {
+	for _, prompt := range []string{"", " ", "  \n\t ", "\n\n"} {
+		d := fakeDashboardDetail(t)
+		p := prompt
+		d.InvestigatorPrompt = &p
+		var buf bytes.Buffer
+		printDashboardSummary(&buf, &d)
+		if strings.Contains(buf.String(), "investigator_prompt") {
+			t.Errorf("blank prompt %q must not render a line; got %q", prompt, buf.String())
+		}
+	}
+}
+
+// Leading indentation the operator wrote survives: the trim gates, it does
+// not rewrite what is rendered.
+func TestPrintDashboardSummaryKeepsOperatorIndentation(t *testing.T) {
+	d := fakeDashboardDetail(t)
+	prompt := "  indented first line"
+	d.InvestigatorPrompt = &prompt
+	var buf bytes.Buffer
+	printDashboardSummary(&buf, &d)
+	if !strings.Contains(buf.String(), "    indented first line") {
+		t.Errorf("operator indentation must survive the gate; got %q", buf.String())
+	}
+}
+
 func TestIndentBlockKeepsLinesAndNeutralizesEscapes(t *testing.T) {
 	// The line breaks the operator wrote survive; every other control
 	// character (here an ANSI colour escape) does not.

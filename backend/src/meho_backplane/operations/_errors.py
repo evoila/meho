@@ -1494,8 +1494,8 @@ def wrap_ok_result(
 
     *extras* carries envelope-extension fields the dispatcher computes on
     the success path -- currently the dispatch-time target-activity
-    advisory (#2550). ``None`` leaves the frozen model's ``{}`` default
-    intact.
+    advisory (#2550) and the checks-alert advisory (#2718). ``None``
+    leaves the frozen model's ``{}`` default intact.
     """
     if payload is None or isinstance(payload, (dict, list)):
         result_value: dict[str, Any] | list[Any] | None = payload

@@ -1066,6 +1066,14 @@ class Settings(BaseModel):
     #: ``extras["target_activity_advisory"]`` on its response. ``0``
     #: disables the feature entirely (no stream read on any dispatch).
     dispatch_activity_advisory_window_minutes: int = Field(default=30, ge=0)
+    #: Dedupe window (minutes) for the dispatch-time checks-alert
+    #: advisory (#2718). A successful dispatch by a caller whose tenant
+    #: has a Dashboard with a ``degraded``/``critical``
+    #: ``last_rollup_state`` memo carries a compact
+    #: ``extras["checks_alert_advisory"]`` once per (caller, dashboard,
+    #: state) window. ``0`` disables the feature entirely (no DB read on
+    #: any dispatch).
+    checks_alert_advisory_window_minutes: int = Field(default=30, ge=0)
     # Broadcast v2 T2 (#2547) -- durable-announcement retention prune
     # knobs. ``days=0`` is the keep-forever opt-out sentinel;
     # ``enabled=False`` skips starting the background task entirely
@@ -1722,6 +1730,9 @@ def get_settings() -> Settings:
         ),
         dispatch_activity_advisory_window_minutes=int(
             os.environ.get("DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES", "30"),
+        ),
+        checks_alert_advisory_window_minutes=int(
+            os.environ.get("CHECKS_ALERT_ADVISORY_WINDOW_MINUTES", "30"),
         ),
         broadcast_announcement_retention_days=int(
             os.environ.get("BROADCAST_ANNOUNCEMENT_RETENTION_DAYS", "90"),

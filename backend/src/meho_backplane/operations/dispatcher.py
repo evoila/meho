@@ -226,6 +226,7 @@ import hvac.exceptions
 from meho_backplane.auth.operator import Operator
 from meho_backplane.broadcast.events import classify_op, scrub_secret_named_values
 from meho_backplane.broadcast.history import build_target_activity_advisory
+from meho_backplane.checks.advisory import build_checks_alert_advisory
 from meho_backplane.connectors import (
     OperationResult,
     ResolutionLabel,
@@ -772,12 +773,23 @@ async def _reduce_and_audit_success(
         redaction_policy_id=redaction.policy_id,
         handle_metadata=_handle_metadata_for_audit(handle),
     )
-    advisory = await build_target_activity_advisory(
+    activity_advisory = await build_target_activity_advisory(
         operator,
         op_id=descriptor.op_id,
         target_name=getattr(target, "name", None),
     )
-    return wrap_ok_result(op_id, summary, duration_ms, handle, extras=advisory)
+    # Second extras fragment beside #2550: the checks-alert advisory
+    # (#2718) applies to ALL op classes (its builder documents why) and
+    # is deduped per (caller, dashboard, state); distinct keys, so a
+    # plain merge can never clobber either fragment.
+    checks_advisory = await build_checks_alert_advisory(operator)
+    return wrap_ok_result(
+        op_id,
+        summary,
+        duration_ms,
+        handle,
+        extras={**activity_advisory, **checks_advisory},
+    )
 
 
 async def _run_branch_with_error_handling(

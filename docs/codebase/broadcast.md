@@ -388,6 +388,12 @@ Design contract:
 - **Disable knob.** `DISPATCH_ACTIVITY_ADVISORY_WINDOW_MINUTES` (default
   `30`, `0` = off) gates the whole feature.
 
+A second, independent extras fragment — `checks_alert_advisory`
+(#2718, built in `checks/advisory.py`, deduped per caller via Valkey
+`SET NX EX`, applied to **all** op classes) — merges beside this one at
+the same dispatcher success path; see
+[`docs/codebase/checks-advisory.md`](checks-advisory.md).
+
 ## Durable announcements (#2547)
 
 The Valkey stream is the hot real-time path but not durable: it is

@@ -174,6 +174,31 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Op-ids that classify as ``checks`` — the checks subsystem's own
+#: state-change events (#2720), published by
+#: :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
+#: rather than by the audit middleware.
+#:
+#: An explicit allowlist, **not** a ``checks.`` prefix branch, for two
+#: reasons. The ``/api/v1/checks/*`` gateway routes already own three
+#: shipped op-ids under that prefix (``checks.assignment.put`` /
+#: ``checks.assignment.get`` / ``checks.results.post``,
+#: :data:`meho_backplane.api.v1.checks._CHECKS_OP_IDS`), so:
+#:
+#: 1. A prefix branch would reclassify them out of ``write`` / ``read`` /
+#:    ``other``, splitting the historical meaning of ``audit_log.op_class``
+#:    at the deploy boundary and silently dropping the assignment write
+#:    out of any saved ``op_class=write`` query.
+#: 2. ``checks.results.post`` is the runner result-ingest data plane — one
+#:    call per runner per poll cycle, the highest-volume path in the
+#:    subsystem. Folding it into ``checks`` would bury the rare transition
+#:    edges this class exists to surface, defeating the
+#:    ``op_class=checks`` filter before it shipped.
+#:
+#: The allowlist is the same idiom :data:`_CREDENTIAL_MINT_OPS` uses for
+#: the same reason: an exact pin that beats a broader structural match.
+_CHECK_EVENT_OPS: Final[frozenset[str]] = frozenset({"checks.transition"})
+
 #: Op-id suffixes that imply mutation. Append to this tuple when a new
 #: write-shaped verb spelling lands. ``.put`` is the KV-v2 write verb
 #: (``vault.kv.put`` — G3.3-T1 #545); without it a secret write would
@@ -406,6 +431,19 @@ def classify_op(op_id: str) -> str:
        ``decision`` / the request id, never secret material), so it
        stays full-detail like ``other`` did -- see
        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`.
+    4c. ``checks`` — the checks subsystem's own state-change events
+       (:data:`_CHECK_EVENT_OPS`; today just ``checks.transition``,
+       emitted by
+       :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`).
+       Its own class for the same reason ``approval`` has one: a feed
+       watcher filters ``op_class=checks`` server-side to follow
+       Dashboard rollup edges without reading every unclassified op.
+       Matched by **exact membership**, not by ``checks.`` prefix — the
+       ``/api/v1/checks/*`` gateway routes already own op-ids under that
+       prefix and must keep their ``write`` / ``read`` / ``other``
+       classes; see :data:`_CHECK_EVENT_OPS` for the full rationale.
+       Not sensitive (the payload is dashboard id / name / the two
+       states), so it stays full-detail.
     5. ``read`` / ``write`` — HTTP-method-prefixed ingested op IDs
        (e.g. ``GET:/api/v2.0/systeminfo``). ``GET:`` and ``HEAD:``
        map to ``read``; ``POST:``, ``PUT:``, ``PATCH:``, ``DELETE:``
@@ -454,6 +492,10 @@ def classify_op(op_id: str) -> str:
     'approval'
     >>> classify_op("approval.approved")
     'approval'
+    >>> classify_op("checks.transition")
+    'checks'
+    >>> classify_op("checks.assignment.put")
+    'write'
     >>> classify_op("GET:/api/v2.0/systeminfo")
     'read'
     >>> classify_op("DELETE:/api/v2.0/projects/myproj/repositories/myrepo")
@@ -481,6 +523,12 @@ def classify_op(op_id: str) -> str:
     # not sensitive, so it stays full-detail like the `other` fall-through.
     if op_id.startswith("approval."):
         return "approval"
+    # Checks-subsystem state-change events (checks.transition), so a feed
+    # watcher can filter op_class=checks for Dashboard rollup edges (#2720).
+    # Exact membership, not a `checks.` prefix: the /api/v1/checks/* gateway
+    # routes own op-ids under that prefix and keep their existing classes.
+    if op_id in _CHECK_EVENT_OPS:
+        return "checks"
     # Ingested ops use HTTP-method prefixes (e.g. "GET:/api/v2.0/systeminfo");
     # GET/HEAD are safe reads by HTTP semantics. The synthetic net.* probes
     # (#2406) ride the same arm: every net.* op is a non-mutating

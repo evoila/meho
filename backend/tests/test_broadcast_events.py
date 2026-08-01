@@ -302,6 +302,54 @@ class TestClassifyOp:
 
         assert "approval" not in _SENSITIVE_OP_CLASSES
 
+    def test_checks_transition_maps_to_checks(self) -> None:
+        """``checks.transition`` classifies as the dedicated ``checks`` class.
+
+        :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
+        emits this op-id on every claimed Dashboard rollup edge (#2720);
+        the class is what makes ``op_class=checks`` a usable server-side
+        filter on ``meho.broadcast.recent`` / ``.watch`` and the SSE
+        stream.
+        """
+        assert classify_op("checks.transition") == "checks"
+
+    @pytest.mark.parametrize(
+        ("op_id", "expected"),
+        [
+            ("checks.assignment.put", "write"),
+            ("checks.assignment.get", "read"),
+            ("checks.results.post", "other"),
+        ],
+    )
+    def test_gateway_checks_op_ids_keep_their_classes(self, op_id: str, expected: str) -> None:
+        """The ``/api/v1/checks/*`` op-ids are NOT swept into ``checks``.
+
+        Regression guard on the deliberate choice of an exact-membership
+        allowlist over a ``checks.`` prefix branch (#2720). A prefix match
+        would (a) split the historical meaning of ``audit_log.op_class``
+        at the deploy boundary -- rows written before say ``write``,
+        after say ``checks``, so a saved ``op_class=write`` query would
+        silently stop seeing the assignment write -- and (b) fold the
+        runner result-ingest data plane (one call per runner per poll)
+        into the class whose whole purpose is surfacing rare transition
+        edges.
+        """
+        assert classify_op(op_id) == expected
+
+    def test_checks_class_is_not_sensitive(self) -> None:
+        """The ``checks`` class broadcasts full detail (not aggregate-only).
+
+        The transition payload is a Dashboard id, its name, and the two
+        rollup states -- no params, no Sensor values, no evidence. Pins
+        the class out of
+        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`
+        so minting it did not accidentally opt the events into
+        aggregate-only redaction.
+        """
+        from meho_backplane.broadcast.overrides import _SENSITIVE_OP_CLASSES
+
+        assert "checks" not in _SENSITIVE_OP_CLASSES
+
     @pytest.mark.parametrize(
         ("op_id", "expected"),
         [

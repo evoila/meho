@@ -416,6 +416,60 @@ def test_filter_op_class_narrows_result(
     [TenantRole.OPERATOR],
     indirect=True,
 )
+def test_filter_op_class_checks_reaches_the_handler(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """``filter.op_class="checks"`` narrows to ``checks.transition`` (#2720).
+
+    Posted as a full ``tools/call`` on purpose. The dispatcher validates
+    arguments against the advertised ``inputSchema`` with ``jsonschema``,
+    and ``filter.op_class`` carries an ``enum`` sourced from
+    :data:`~meho_backplane.broadcast.history.OP_CLASS_ENUM` -- so this
+    round-trip is what proves the class is reachable from the agent
+    surface at all, not merely that :func:`event_matches` compares
+    strings. A handler-level call would pass even with the class missing
+    from the enum.
+    """
+    client, _op = client_with_operator
+    transition = _make_event(
+        op_id="checks.transition",
+        op_class="checks",
+        principal_sub="__checks__",
+        payload={
+            "op_class": "checks",
+            "result_status": "ok",
+            "dashboard_id": "11111111-1111-1111-1111-111111111111",
+            "dashboard_name": "prod-health",
+            "previous_state": "ok",
+            "new_state": "critical",
+        },
+    )
+    unrelated = _make_event(op_id="vsphere.vm.list", op_class="read")
+    bc = get_broadcast_client()
+    with patch.object(
+        bc,
+        "xrange",
+        new=AsyncMock(
+            return_value=[
+                _xrange_entry(unrelated, "1747800000000-0"),
+                _xrange_entry(transition, "1747800001000-0"),
+            ],
+        ),
+    ):
+        resp = post_mcp(
+            client,
+            _tools_call("meho.broadcast.recent", {"filter": {"op_class": "checks"}}),
+        )
+    result = _result_dict(resp)
+    assert [e["op_id"] for e in result["events"]] == ["checks.transition"]
+    assert result["events"][0]["payload"]["new_state"] == "critical"
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
 def test_filter_principal_narrows_result(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:

@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Checks broadcast — transition events on the tenant feed (#2720)
+
+- Every claimed Dashboard rollup edge now publishes one
+  `checks.transition` event to the tenant broadcast feed, in **both**
+  directions — a watcher who saw a Dashboard go `critical` sees it
+  clear. The payload names the Dashboard (id + name) and the
+  `previous → new` states. Events carry a new `checks` op-class, so
+  `meho.broadcast.recent` / `meho.broadcast.watch` with
+  `filter.op_class=checks`, `GET /api/v1/feed?op_class=checks`, and
+  `/ui/broadcast/stream?op_class=checks` all narrow to check state
+  changes server-side — the same shape the approvals console already
+  uses for `approval.*`. Exactly one event per transition across
+  replicas (the existing compare-and-swap claim is the dedupe) and no
+  configurable floor: narrowing a feed is the consumer's job.
+  Publishing is fail-open — a Valkey outage logs
+  `checks_transition_broadcast_failed` and leaves the committed state
+  memo, the email notification, and the runner's persist path
+  untouched. The `/api/v1/checks/*` gateway op-ids
+  (`checks.assignment.put` / `.get`, `checks.results.post`) keep their
+  existing `write` / `read` / `other` classes. No migration, no new
+  settings. (#2720)
+
 ### Checks notifications — Dashboard email on state transitions (#2719)
 
 - A Dashboard can now name an operator to mail when its rollup crosses

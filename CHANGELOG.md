@@ -104,8 +104,9 @@ connector-related release-notes line.
   `ok → degraded` stays silent — the same posture as Alertmanager's
   `send_resolved`. The mail names the Dashboard, the `previous → new`
   edge, and each non-green member with its last value and evidence.
-  Exactly one mail per transition across replicas (the existing
-  compare-and-swap claim is the dedupe), delivered through the #2717
+  At most one notification attempt per claimed transition across
+  replicas (the existing compare-and-swap claim is the dedupe; a
+  failed send is not retried), delivered through the #2717
   `mail.*` transport, so `MAIL_RECIPIENT_ALLOWLIST` gates it and an
   empty allowlist keeps it inert. Sends run off the check-runner's
   persist path and never fail it: a refused or broken SMTP session is

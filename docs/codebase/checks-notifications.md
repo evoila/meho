@@ -25,7 +25,9 @@ notifier is inert — there is no path around the floor.
 
 - `notify_dashboard_transition(notice)` — the awaitable that applies the
   threshold rule, builds the message, and calls the transport. **Never
-  raises.**
+  raises** an ordinary exception; `asyncio.CancelledError` is a
+  `BaseException`, so it still propagates and a tracked task can be
+  cancelled at shutdown.
 - `schedule_dashboard_notification(notice)` — spawns the above as a
   tracked fire-and-forget `asyncio.Task`. What `investigate.py` calls.
 - `DashboardNotice` — the detached input: dashboard id, name, the
@@ -78,8 +80,9 @@ default floor of `critical`:
 | `ok -> unknown` | no | `unknown` ranks with `degraded` |
 | `critical -> skip` | yes | the `critical` side, not the `skip` side |
 
-At `notify_min_state='degraded'` the `degraded` rows above flip to yes;
-`skip` never clears the bar on its own at any floor.
+At `notify_min_state='degraded'` every `no` row above flips to yes —
+including `ok -> unknown`, since `unknown` shares rank 1 with
+`degraded`. `skip` never clears the bar on its own at any floor.
 
 ## Control flow
 
@@ -132,7 +135,9 @@ Fire-and-forget in two senses:
   task cannot be garbage-collected mid-flight;
   `_await_pending_notifications()` is the deterministic test drain.
 - **Never raises.** A refusal, an unconfigured SMTP block, a delivery
-  failure, or an unexpected exception is logged and swallowed. A broken
+  failure, or an unexpected exception is logged and swallowed.
+  `asyncio.CancelledError` is the deliberate exemption — it propagates,
+  so lifespan shutdown tears a tracked task down cleanly. A broken
   MTA cannot convert a committed transition claim into a persist-path
   failure — contract parity with `investigate_on_transition`.
 

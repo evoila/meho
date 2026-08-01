@@ -203,13 +203,26 @@ func TestBuildCreateBodyMinimal(t *testing.T) {
 	if body.TenantId != nil {
 		t.Errorf("tenant_id should stay nil when omitted; got %+v", body.TenantId)
 	}
+	// Both notification fields stay omitted so the row keeps notifications
+	// off and the server's own notify_min_state default applies.
+	if body.NotifyEmail != nil {
+		t.Errorf("notify_email should stay nil when omitted; got %+v", body.NotifyEmail)
+	}
+	if body.NotifyMinState != nil {
+		t.Errorf("notify_min_state should stay nil when omitted; got %+v", body.NotifyMinState)
+	}
 }
 
 func TestBuildCreateBodyFull(t *testing.T) {
 	tenantID := parseStubUUID(t, stubOtherTenant)
 	sensorIDs := []openapi_types.UUID{parseStubUUID(t, stubSensorID)}
 	body := buildCreateBody(
-		createOptions{Name: "prod-health", Description: "prod glance"},
+		createOptions{
+			Name:           "prod-health",
+			Description:    "prod glance",
+			NotifyEmail:    "oncall@example.com",
+			NotifyMinState: "degraded",
+		},
 		sensorIDs, &tenantID,
 	)
 	if body.Description == nil || *body.Description != "prod glance" {
@@ -221,6 +234,36 @@ func TestBuildCreateBodyFull(t *testing.T) {
 	}
 	if body.TenantId == nil || body.TenantId.String() != stubOtherTenant {
 		t.Errorf("tenant_id not forwarded; got %+v", body.TenantId)
+	}
+	if body.NotifyEmail == nil || string(*body.NotifyEmail) != "oncall@example.com" {
+		t.Errorf("notify_email not forwarded; got %+v", body.NotifyEmail)
+	}
+	if body.NotifyMinState == nil || string(*body.NotifyMinState) != "degraded" {
+		t.Errorf("notify_min_state not forwarded; got %+v", body.NotifyMinState)
+	}
+}
+
+func TestValidateNotifyMinState(t *testing.T) {
+	for _, ok := range []string{"", "degraded", "critical"} {
+		if err := validateNotifyMinState(ok); err != nil {
+			t.Errorf("validateNotifyMinState(%q) = %v; want nil", ok, err)
+		}
+	}
+	for _, bad := range []string{"ok", "warn", "CRITICAL", "unknown"} {
+		if err := validateNotifyMinState(bad); err == nil {
+			t.Errorf("validateNotifyMinState(%q) = nil; want an error", bad)
+		}
+	}
+}
+
+func TestRunCreateRejectsInvalidNotifyMinState(t *testing.T) {
+	cmd, _, stderr := newRunCmd(t)
+	err := runCreate(cmd, createOptions{Name: "prod-health", NotifyMinState: "warn"})
+	if err == nil {
+		t.Fatalf("expected an error for an out-of-vocabulary --notify-min-state")
+	}
+	if !strings.Contains(stderr.String(), "notify-min-state") {
+		t.Errorf("expected the flag name in the refusal; got %q", stderr.String())
 	}
 }
 
@@ -794,6 +837,25 @@ func TestPrintDashboardSummaryHasAllKeys(t *testing.T) {
 	printDashboardSummary(&buf, &d)
 	out := buf.String()
 	for _, want := range []string{"id:", "tenant_id:", "name:", "state:", "member_count:", "created_at:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in summary; got %q", want, out)
+		}
+	}
+	// No recipient configured -> neither notification line renders.
+	if strings.Contains(out, "notify_") {
+		t.Errorf("unconfigured dashboard must not render notify lines; got %q", out)
+	}
+}
+
+func TestPrintDashboardSummaryRendersNotifyConfig(t *testing.T) {
+	d := fakeDashboardDetail(t)
+	email := "oncall@example.com"
+	d.NotifyEmail = &email
+	d.NotifyMinState = api.DashboardDetailNotifyMinState("degraded")
+	var buf bytes.Buffer
+	printDashboardSummary(&buf, &d)
+	out := buf.String()
+	for _, want := range []string{"notify_email:", "oncall@example.com", "notify_min_state:", "degraded"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("expected %q in summary; got %q", want, out)
 		}

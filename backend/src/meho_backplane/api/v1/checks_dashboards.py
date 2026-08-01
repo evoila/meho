@@ -147,7 +147,11 @@ async def create_dashboard(
     ``tenant_admin`` only. ``body.tenant_id`` is optional: when set to a
     *different* tenant the create is cross-tenant and requires
     ``platform_admin`` (via ``authorize_tenant_scope``). A foreign / absent
-    sensor id is 422 ``sensor_not_found``; a duplicate name is 409.
+    sensor id is 422 ``sensor_not_found``; a duplicate name is 409. The
+    #2719 notification config (``notify_email`` / ``notify_min_state``) is
+    validated by :class:`DashboardCreate`, so a malformed address or an
+    out-of-vocabulary floor is FastAPI's own 422 envelope -- never a
+    delivery failure discovered on the first transition.
     """
     target_tenant = authorize_tenant_scope(operator, body.tenant_id)
     structlog.contextvars.bind_contextvars(

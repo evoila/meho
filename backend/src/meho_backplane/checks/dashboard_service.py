@@ -56,6 +56,7 @@ from meho_backplane.checks.dashboard_schemas import (
     DashboardDetail,
     DashboardMemberView,
     DashboardRead,
+    NotifyMinState,
 )
 from meho_backplane.checks.rollup import (
     MemberEvaluation,
@@ -163,6 +164,8 @@ def _to_read(row: CheckDashboard, sensors: Sequence[Sensor], now: datetime) -> D
         member_count=len(sensors),
         state=state,
         last_rollup_state=cast("CheckState | None", row.last_rollup_state),
+        notify_email=row.notify_email,
+        notify_min_state=cast("NotifyMinState", row.notify_min_state),
         created_by_sub=row.created_by_sub,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -182,6 +185,8 @@ def _to_detail(row: CheckDashboard, sensors: Sequence[Sensor], now: datetime) ->
         member_count=len(sensors),
         state=state,
         last_rollup_state=cast("CheckState | None", row.last_rollup_state),
+        notify_email=row.notify_email,
+        notify_min_state=cast("NotifyMinState", row.notify_min_state),
         created_by_sub=row.created_by_sub,
         created_at=row.created_at,
         updated_at=row.updated_at,
@@ -212,7 +217,10 @@ class CheckDashboardAdminService:
         Validates every ``payload.sensor_ids`` entry against the tenant's
         Sensors (a foreign / absent id -> :class:`SensorNotFoundError`),
         de-duplicates the membership list, inserts the Dashboard + memberships
-        in one transaction, and returns the freshly rolled-up detail.
+        in one transaction, and returns the freshly rolled-up detail. The
+        #2719 notification config (``notify_email`` / ``notify_min_state``)
+        rides the same create-only posture as membership -- both were already
+        validated by :class:`DashboardCreate` at the boundary.
 
         Raises:
             SensorNotFoundError: a referenced sensor id is not in the tenant.
@@ -239,6 +247,8 @@ class CheckDashboardAdminService:
                     description=payload.description,
                     sensor_ids=deduped,
                     created_by_sub=created_by_sub,
+                    notify_email=payload.notify_email,
+                    notify_min_state=payload.notify_min_state,
                 )
                 await session.commit()
             except IntegrityError as exc:

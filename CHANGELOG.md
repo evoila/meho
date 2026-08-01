@@ -90,6 +90,29 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Checks notifications — Dashboard email on state transitions (#2719)
+
+- A Dashboard can now name an operator to mail when its rollup crosses
+  a state edge. Two new create-time fields — `notify_email` (unset ⇒
+  notifications off, the state every existing Dashboard keeps) and
+  `notify_min_state` (`degraded` or `critical`, default `critical`) —
+  land on `POST /api/v1/checks/dashboards`, on the detail/list reads,
+  and on `meho dashboard create --notify-email --notify-min-state`.
+  **Recovery is notified too**: an edge mails when the worse of its two
+  states reaches the floor, so at `critical` a Dashboard falling to
+  `critical` pages and its return to `ok` sends the all-clear, while
+  `ok → degraded` stays silent — the same posture as Alertmanager's
+  `send_resolved`. The mail names the Dashboard, the `previous → new`
+  edge, and each non-green member with its last value and evidence.
+  Exactly one mail per transition across replicas (the existing
+  compare-and-swap claim is the dedupe), delivered through the #2717
+  `mail.*` transport, so `MAIL_RECIPIENT_ALLOWLIST` gates it and an
+  empty allowlist keeps it inert. Sends run off the check-runner's
+  persist path and never fail it: a refused or broken SMTP session is
+  logged (`checks_notify_failed`) and swallowed. The diagnose-only
+  investigator's worsening-only fire conditions are unchanged.
+  Requires migration `0068`. (#2719)
+
 ### Added — checks advisory: non-green Dashboards surface on dispatch responses (#2718)
 
 - Successful dispatch responses — agent `call_operation` and the

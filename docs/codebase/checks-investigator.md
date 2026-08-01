@@ -54,6 +54,15 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    processed (not only state changes) because a `for:` hold expiring flips a
    Dashboard non-green with no sensor-state change; the memo-equality check is
    the cheap exit.
+
+   Since #2719 the claim is returned for **both** edge directions and the
+   worsening filter sits one level up, at the single routing site in
+   `_process_transition` — unchanged in meaning for the investigator. The
+   improving edge is returned because the email notifier
+   (`docs/codebase/checks-notifications.md`) consumes it, not discarded
+   because the investigator does not. The two consumers are independent:
+   the notifier applies its own per-Dashboard `notify_min_state` floor and
+   never reaches this module's correlation, suppression, or agent path.
 2. **Correlation** (`_correlate`). Each non-green member maps to its topology
    anchor via its registered target's name (`kind="target"`), and
    `topology.query.find_dependencies` returns the forward closure. Members

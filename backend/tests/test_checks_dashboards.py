@@ -497,3 +497,95 @@ async def test_rest_last_rollup_state_stays_null(client: TestClient) -> None:
         row = await session.get(CheckDashboard, UUID(dashboard_id))
         assert row is not None
         assert row.last_rollup_state is None
+
+
+# ---------------------------------------------------------------------------
+# Notification config (#2719)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rest_create_round_trips_notify_config(client: TestClient) -> None:
+    """The create body's notification config lands on the row and reads back."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    sid = await _seed_sensor(name="notify-sensor", last_state="ok")
+    key = make_rsa_keypair("kid-notify")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        created = client.post(
+            "/api/v1/checks/dashboards",
+            json={
+                "name": "notified",
+                "sensor_ids": [str(sid)],
+                "notify_email": "oncall@example.com",
+                "notify_min_state": "degraded",
+            },
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["notify_email"] == "oncall@example.com"
+        assert created.json()["notify_min_state"] == "degraded"
+
+        dashboard_id = created.json()["id"]
+        detail = client.get(f"/api/v1/checks/dashboards/{dashboard_id}", headers=headers)
+        assert detail.json()["notify_email"] == "oncall@example.com"
+        assert detail.json()["notify_min_state"] == "degraded"
+
+        listed = client.get("/api/v1/checks/dashboards", headers=headers)
+        row = next(d for d in listed.json()["dashboards"] if d["id"] == dashboard_id)
+        assert row["notify_email"] == "oncall@example.com"
+        assert row["notify_min_state"] == "degraded"
+
+    async with get_sessionmaker()() as session:
+        persisted = await session.get(CheckDashboard, UUID(dashboard_id))
+        assert persisted is not None
+        assert persisted.notify_email == "oncall@example.com"
+        assert persisted.notify_min_state == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_rest_create_defaults_notify_off_at_critical(client: TestClient) -> None:
+    """Omitting both fields leaves notifications off at the ``critical`` floor."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    key = make_rsa_keypair("kid-notify-default")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        created = client.post(
+            "/api/v1/checks/dashboards",
+            json={"name": "quiet"},
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["notify_email"] is None
+        assert created.json()["notify_min_state"] == "critical"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        pytest.param("notify_email", "not-an-address", id="malformed-email"),
+        pytest.param("notify_email", "oncall@", id="empty-domain"),
+        pytest.param("notify_min_state", "ok", id="floor-outside-vocabulary"),
+        pytest.param("notify_min_state", "warn", id="floor-not-a-state"),
+    ],
+)
+async def test_rest_create_rejects_invalid_notify_config(
+    client: TestClient, field: str, value: str
+) -> None:
+    """A malformed address or an out-of-vocabulary floor is a boundary 422."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    key = make_rsa_keypair("kid-notify-invalid")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        result = client.post(
+            "/api/v1/checks/dashboards",
+            json={"name": f"bad-{field}-{value}", field: value},
+            headers=headers,
+        )
+        assert result.status_code == 422, result.text
+        # FastAPI's validation envelope names the offending field.
+        assert any(field in entry["loc"] for entry in result.json()["detail"])

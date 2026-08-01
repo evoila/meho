@@ -21,11 +21,16 @@ Two consumers share one implementation:
 
 - **Dispatch** — agents and operators reach `mail.send` through the
   normal `call_operation` path (policy + audit + broadcast).
-- **Direct import** — the checks notifier (#2719) imports
-  `transport.send_email()` and calls it in-process.
+- **Direct import** — the checks notifier (#2719,
+  `meho_backplane.checks.notify`) imports `transport.send_email()` and
+  calls it in-process on every claimed Dashboard rollup transition that
+  crosses the Dashboard's configured floor. See
+  `docs/codebase/checks-notifications.md`.
 
 Both run the identical recipient-allowlist floor and return-failures
-contract, because both are the same function.
+contract, because both are the same function. An empty
+`MAIL_RECIPIENT_ALLOWLIST` therefore makes Dashboard notification inert
+too, not just agent-initiated sends.
 
 ## Key types
 
@@ -133,7 +138,10 @@ assignment it would raise `ValueError` and surface as a
 `connector_error`. The screen is the schema, so it covers every
 dispatched call but not the direct-import path — an in-process caller
 such as the #2719 notifier is responsible for composing a single-line
-subject.
+subject. The checks notifier does exactly that: it folds every control
+character out of the operator-authored Dashboard name before building
+its subject (`checks/notify.py::_single_line`, see
+`docs/codebase/checks-notifications.md`).
 
 Malformed allowlist entries raise loudly at parse time rather than
 being silently kept: whitespace, more than one `@`, an empty local part

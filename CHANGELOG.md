@@ -90,7 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Security — pyasn1 0.6.4: three HIGH DoS CVEs in ASN.1 parsing
+## [0.26.0] - 2026-08-02
+
+This release closes the **G0.37 v0.25.0 ops-feedback cycle** (#2656 —
+agent-run schema publish, GSM-WIF background dispatch, CLI TLS import
+parity, scheduler-token diagnostics, safety-class re-ingest reporting)
+and lands the first three pillars of the **Road to v1.0.0** (#2661): the
+published documentation site (scaffold, install trail, deployment
+shapes, Do-real-work guides), the **feature-maturity program** (#2664 —
+GA/Beta/Experimental labels sourced from one registry across MCP, REST,
+CLI, UI, and docs, with a CI drift guard), and the **checks alerting
+delivery** chain (mail connector, dashboard email with flap
+suppression, transition broadcast events, investigator prompt +
+emailed findings). Also in: Topology v2 (open vocabularies,
+approval-gated agent authorship, chain-shaped blast-radius answers),
+the Python 3.14 runtime migration, a pyasn1 security bump, and six
+operator-console polish fixes.
 
 - Bump the transitive `pyasn1` pin from 0.6.3 to 0.6.4, fixing
   CVE-2026-59884, CVE-2026-59885, and CVE-2026-59886 — three HIGH
@@ -102,7 +117,7 @@ connector-related release-notes line.
   release carrying it. Caught by the `image.yml` scan on `main`
   after the 2026-08-01 merges.
 
-### Changed — op_class filter vocabulary widened to the full classifier range (#2731)
+### Changed — op_class filter vocabulary widened to the full classifier range (#2731 / #2736)
 
 - The `op_class` filter enum that `meho.broadcast.recent`,
   `meho.broadcast.watch`, and `query_audit` advertise in their
@@ -201,7 +216,7 @@ connector-related release-notes line.
   investigator's worsening-only fire conditions are unchanged.
   Requires migration `0068`. (#2719)
 
-### Added — checks notifications: flap suppression window (#2732)
+### Added — checks notifications: flap suppression window (#2732 / #2737)
 
 - Dashboard transition email now carries a per-(dashboard, state)
   **flap-suppression window**: the first crossing into a non-green
@@ -544,7 +559,7 @@ connector-related release-notes line.
   placeholder is a fixed non-secret sentinel and the connectors degrade to
   `reachable=false` / `auth_failed`; changing the selection is out of scope
   here.
-### Fixed — CI merge gates no longer block every PR
+### Fixed — CI merge gates no longer block every PR (#2704)
 
 - Two independent CI misconfigurations made most open PRs structurally
   unmergeable, and both are fixed here. **First**, `Python License Check`

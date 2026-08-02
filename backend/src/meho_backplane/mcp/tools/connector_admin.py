@@ -560,7 +560,7 @@ register_mcp_tool(
             "STICKS: a subsequent meho_connector_enable will NOT "
             "clobber the operator's per-op disable. Do not use this "
             "to flip whole-connector state — pair with "
-            "meho_connector_enable / .disable for that."
+            "meho_connector_enable / meho_connector_disable for that."
         ),
         inputSchema={
             "type": "object",

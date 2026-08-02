@@ -5,7 +5,9 @@ Copyright (c) 2026 evoila Group
 
 # MCP client setup — operator-side requirements
 
-> Operator-facing recipe for wiring an MCP client (Claude.ai Custom Connector, MCP Inspector, Cline, Continue) to a running MEHO backplane. The MCP server itself is part of MEHO's backplane (architecture in [`docs/architecture/mcp.md`](../architecture/mcp.md)); this doc is the realm-side + client-side configuration the operator runs to connect to it.
+> Operator-facing recipe for wiring an MCP client (MCP Inspector, Cline, Continue, Claude Code, or Claude Desktop via the `mcp-remote` stdio shim) to a running MEHO backplane. The MCP server itself is part of MEHO's backplane (architecture in [`docs/architecture/mcp.md`](../architecture/mcp.md)); this doc is the realm-side + client-side configuration the operator runs to connect to it.
+>
+> **MEHO is internal-only — never publicly exposed.** The backplane is a governance backplane for internal infrastructure and is deployed VPN-internal / behind an internal CA **by design**; it must **never** be placed on public DNS or a public ingress, not even a short-lived or sacrificial copy. This rules out the **remote** claude.ai / Claude Desktop *Custom Connector*, whose connector backend runs in **Anthropic's cloud** and therefore requires the backplane to be publicly reachable to fetch its RFC 9728 metadata — a requirement MEHO deliberately does not meet. Every client in this doc connects **from a machine already on the internal network / VPN**: MCP Inspector, Cline, Continue, and Claude Code (HTTP MCP with loopback PKCE) connect directly; **Claude Desktop** connects through a local `mcp-remote` stdio→HTTP shim (Step 3). Do **not** expose the backplane to make the remote Custom Connector work.
 
 ## Why this doc exists
 
@@ -86,15 +88,27 @@ A future-proof alternative is to make this client a *Dynamic Client Registration
 
 MEHO speaks Streamable HTTP at `/mcp`, not stdio. This matters because Claude Desktop's local `claude_desktop_config.json` shape (the `mcpServers` + `command: "npx"` config) is for *stdio* MCP servers spawned as subprocesses. Remote HTTPS MCP servers like MEHO use a different setup path per client:
 
-### Claude.ai Custom Connector (recommended)
+### Claude Desktop — via the `mcp-remote` stdio shim (recommended for Desktop)
 
-[Claude.ai → Settings → Connectors → Add custom connector](https://modelcontextprotocol.io/docs/develop/connect-remote-servers). Paste the server URL when prompted:
+Claude Desktop's remote "Custom Connector" is brokered through Anthropic's cloud and requires a **publicly reachable** backplane — which MEHO, being internal-only, never is (see the callout at the top of this doc). Desktop instead reaches an internal MEHO through a **local stdio→HTTP shim** that runs on the operator's own VPN-connected machine. Configure it as a local MCP server in `claude_desktop_config.json`:
 
-```text
-https://meho.example.com/mcp
+```json
+{
+  "mcpServers": {
+    "meho": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://meho.internal.example/mcp"],
+      "env": { "NODE_EXTRA_CA_CERTS": "/path/to/internal-ca.pem" }
+    }
+  }
+}
 ```
 
-Claude.ai resolves the URL, fetches the RFC 9728 protected-resource metadata document at `https://meho.example.com/.well-known/oauth-protected-resource`, discovers the Keycloak authorization server URL, and launches the OAuth 2.1 + PKCE flow against it. Complete the device-code prompt; the connector lands in the active state and MEHO's tools appear in the conversation toolbar.
+`mcp-remote` runs the OAuth 2.1 + PKCE flow against the internal Keycloak (or presents a Bearer token supplied out-of-band via `meho login --print-token`) and forwards Streamable-HTTP calls to `/mcp`. `NODE_EXTRA_CA_CERTS` is only needed when the deploy uses an internal CA (see [`deploy/values-examples/README.md` § Internal-CA trust bundle](../../deploy/values-examples/README.md#internal-ca-trust-bundle-extravolumes--extraenv)). Because the shim runs on a machine already on the VPN, nothing about the backplane is publicly exposed.
+
+### Claude.ai / Claude Desktop remote Custom Connector — not applicable
+
+The remote Custom Connector path (paste a `/mcp` URL into claude.ai → Settings → Connectors) requires the backplane to be publicly reachable, because Anthropic's cloud fetches the RFC 9728 metadata and runs the OAuth handshake. **MEHO is internal-only and must not be publicly exposed, so this path does not apply.** Use the `mcp-remote` shim above, or one of the internal-network clients below.
 
 ### MCP Inspector CLI (debug / smoke)
 
@@ -171,8 +185,8 @@ If any of these don't appear, walk the troubleshooting section.
 
 The response carries `WWW-Authenticate: Bearer resource_metadata="https://meho.example.com/.well-known/oauth-protected-resource"`. The client is supposed to fetch that URL to discover the authorization server. If it doesn't reach OAuth:
 
-- Check the `resource_metadata` URL is publicly reachable from where the client runs. Claude.ai's connector backend runs in Anthropic's cloud; a backplane behind a private network or self-signed TLS won't be reachable. Expose the backplane via a public ingress or a tunnel (Cloudflare, ngrok) for the Custom Connector flow.
-- Confirm `BACKPLANE_URL` in the backplane's ConfigMap resolves to the public hostname. If `BACKPLANE_URL` is wrong, `resource_metadata` points at the wrong host.
+- Confirm the client runs on a host that can reach the `resource_metadata` URL over the **internal network / VPN** — MEHO is internal-only, so the client (or its `mcp-remote` shim) must sit on the same private network as the backplane. **Do not** expose the backplane via a public ingress or tunnel to satisfy a client: the cloud-brokered claude.ai / Claude Desktop remote Custom Connector cannot reach an internal backplane by design, and MEHO must never be publicly exposed — use the `mcp-remote` stdio shim (Step 3) or an internal-network client (Step 6) instead.
+- Confirm `BACKPLANE_URL` in the backplane's ConfigMap resolves to the internal hostname clients reach it by. If `BACKPLANE_URL` is wrong, `resource_metadata` points at the wrong host.
 
 ### Token rejected at the MCP server (401)
 
@@ -221,12 +235,14 @@ The MCP audit writer fails closed: an unauditable call returns JSON-RPC `INTERNA
 
 | Client | Surface | Setup |
 |---|---|---|
-| [Claude.ai Custom Connector](https://modelcontextprotocol.io/docs/develop/connect-remote-servers) | Web (claude.ai) + Desktop (synced via account) | UI: paste `/mcp` URL, complete OAuth |
+| Claude Desktop (via [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) shim) | Desktop, on a VPN-connected machine | `claude_desktop_config.json` local stdio server running `npx mcp-remote https://<internal-host>/mcp` (Step 3) |
 | [MCP Inspector](https://github.com/modelcontextprotocol/inspector) | CLI + browser-based debug UI | `npx @modelcontextprotocol/inspector --cli <url> --transport http --header "Authorization: Bearer $TOKEN"` |
 | [Cline](https://github.com/cline/cline) | VS Code extension | `mcp.json` with `{ "url": "...", "transport": "http" }`; OAuth handled per-extension docs |
 | [Continue](https://github.com/continuedev/continue) | VS Code + JetBrains extensions | Similar `mcp.json` shape; see the extension's docs for the auth flow |
 
-MEHO is spec-conformant; any MCP-2025-06-18 Streamable-HTTP client with OAuth 2.1 + PKCE support should work. If a specific client breaks against MEHO, file an issue at [`evoila/meho`](https://github.com/evoila/meho/issues) with the client name + version, the MCP exchange (request + response), and the realm's token introspection output.
+> The remote claude.ai / Claude Desktop *Custom Connector* is deliberately absent from this table: it is cloud-brokered and needs a publicly reachable backplane, which MEHO — internal-only by design — never is. Reach Desktop through the `mcp-remote` shim row above.
+
+MEHO is spec-conformant; any MCP-2025-06-18 Streamable-HTTP client with OAuth 2.1 + PKCE support should work, **provided it runs on a machine that can reach the internal backplane over the VPN**. If a specific client breaks against MEHO, file an issue at [`evoila/meho`](https://github.com/evoila/meho/issues) with the client name + version, the MCP exchange (request + response), and the realm's token introspection output.
 
 ## References
 

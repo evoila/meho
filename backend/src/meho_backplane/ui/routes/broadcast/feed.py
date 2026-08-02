@@ -48,7 +48,8 @@ The event-row badge colour is keyed on the event's ``op_class`` via
 vocabulary (:func:`meho_backplane.broadcast.classify_op`) to DaisyUI
 badge variants, serialised into the page as JSON the Alpine row-builder
 reads. :data:`OP_CLASS_FILTER_OPTIONS` is the same vocabulary surfaced
-as the filter dropdown's options (``All`` plus the six classes).
+as the filter dropdown's options (``All`` plus every
+:data:`~meho_backplane.broadcast.OP_CLASS_ENUM` member).
 
 Tenant scoping
 ==============
@@ -73,6 +74,7 @@ from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from meho_backplane.broadcast import OP_CLASS_ENUM
 from meho_backplane.db.engine import get_raw_session
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.ui.auth.middleware import UISessionContext, require_ui_session
@@ -95,37 +97,38 @@ IN_DOM_ROW_CAP: Final[int] = 1000
 
 #: Map from the closed ``op_class`` vocabulary
 #: (:func:`meho_backplane.broadcast.classify_op`) to DaisyUI badge
-#: variant classes. ``credential_read`` / ``credential_mint`` /
-#: ``audit_query`` -- the sensitive, aggregate-only classes per decision
-#: #3 -- get the warning palette so an operator scanning the feed reads
-#: the sensitivity at a glance; ``write`` is accent (mutation), ``read``
-#: is the neutral ghost, ``other`` falls back to ghost too. A class not
-#: in this map falls back to ``badge-ghost`` in the row builder.
+#: variant classes, covering every :data:`OP_CLASS_ENUM` member
+#: (``tests/test_ui_broadcast_feed.py`` pins the coverage). The
+#: secret-material and audit classes -- ``credential_read`` /
+#: ``credential_write`` / ``credential_mint`` -- get the warning
+#: palette so an operator scanning the feed reads the sensitivity at a
+#: glance; ``audit_query`` and the ``approval`` lifecycle events are
+#: informational (info); ``checks`` state transitions are primary so a
+#: rollup edge stands out from the op traffic around it; ``write`` is
+#: accent (mutation), ``read`` is the neutral ghost, ``other`` falls
+#: back to ghost too. A class not in this map falls back to
+#: ``badge-ghost`` in the row builder.
 OP_CLASS_BADGE_CLASSES: Final[dict[str, str]] = {
     "read": "badge-ghost",
     "write": "badge-accent",
     "credential_read": "badge-warning",
+    "credential_write": "badge-warning",
     "credential_mint": "badge-warning",
     "audit_query": "badge-info",
+    "approval": "badge-info",
+    "checks": "badge-primary",
     "other": "badge-ghost",
 }
 
-#: The op_class filter dropdown options (work item #3). The empty string
-#: is the "All" sentinel -- it maps to *no* ``op_class`` query parameter
-#: on the stream so every class streams. The rest are the closed
-#: vocabulary keys of :data:`OP_CLASS_BADGE_CLASSES`, surfaced in the
-#: order the Initiative #338 work-item #3 lists them (read / write /
-#: credential_read / audit_query / other) plus ``credential_mint``,
-#: which shares the same sensitive (aggregate-only) treatment and would
-#: otherwise be unfilterable.
-OP_CLASS_FILTER_OPTIONS: Final[tuple[str, ...]] = (
-    "read",
-    "write",
-    "credential_read",
-    "credential_mint",
-    "audit_query",
-    "other",
-)
+#: The op_class filter dropdown options (work item #3): the full closed
+#: vocabulary, single-sourced from :data:`OP_CLASS_ENUM` so the console
+#: can name every class the classifier emits and the two surfaces
+#: cannot drift (#2731 -- the previous literal tuple omitted
+#: ``credential_write`` / ``approval`` / ``checks``, leaving them
+#: reachable only by hand-typed query param). The empty string "All"
+#: sentinel is template-side -- it maps to *no* ``op_class`` query
+#: parameter on the stream so every class streams.
+OP_CLASS_FILTER_OPTIONS: Final[tuple[str, ...]] = OP_CLASS_ENUM
 
 #: Max targets surfaced in the filter dropdown. The dropdown is an
 #: eyeball-scan filter, not a paginated browser (operators with denser

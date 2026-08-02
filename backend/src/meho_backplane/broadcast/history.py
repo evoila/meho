@@ -135,33 +135,44 @@ DEFAULT_WINDOW_MINUTES: Final[int] = 30
 #: :mod:`~meho_backplane.api.v1.feed`.
 _XRANGE_END: Final[str] = "+"
 
-#: Allowed ``op_class`` filter values. The four values the issue body
-#: example listed (``read|write|credential_read|audit_query``) plus
-#: ``credential_mint`` and ``other`` -- :func:`classify_op` emits those
-#: too. Restricting to the four would force the caller to omit the
-#: filter when chasing a freshly-minted credential (e.g.
-#: ``harbor.robot.create``) or an unmapped HTTP route, which defeats
-#: the filter's purpose.
+#: Allowed ``op_class`` filter values -- exactly the classes
+#: :func:`classify_op` can return, no more and no fewer
+#: (``tests/test_broadcast_events.py`` pins the set equality, so a
+#: class cannot be added to one side without the other). The tuple is
+#: enforced, not cosmetic: :mod:`meho_backplane.mcp.handlers` validates
+#: every tool call against the advertised ``inputSchema`` with
+#: ``jsonschema``, so an op_class absent from here is a JSON-RPC
+#: ``-32602`` before the handler runs -- the class would be published
+#: on the feed but unreachable from ``meho.broadcast.recent`` /
+#: ``.watch`` / ``query_audit`` (#2731 closed that gap for
+#: ``credential_write`` and ``approval``).
 #:
-#: ``checks`` (#2720) is the checks subsystem's own state-change class
-#: (``checks.transition``). It is listed because the enum is enforced:
-#: :mod:`meho_backplane.mcp.handlers` validates every tool call against
-#: the advertised ``inputSchema`` with ``jsonschema``, so an op_class
-#: absent from this tuple is a JSON-RPC ``-32602`` before the handler
-#: runs -- the filter would be unreachable from ``meho.broadcast.recent``
-#: / ``.watch``. Unlike the other members it never appears in
-#: ``audit_log.op_class``: the transition event is published outside the
-#: audit path (there is no audited operation behind a rollup edge), so a
-#: ``meho.audit.query`` narrowed to ``checks`` is always empty. The two
-#: tools share this tuple as one taxonomy by design
-#: (``tests/test_mcp_tools_list_shape_conventions.py`` pins them
-#: together).
+#: Two members never appear as a *persisted* ``payload["op_class"]``,
+#: so a ``query_audit`` narrowed to them is always empty:
+#:
+#: * ``checks`` (#2720) -- the ``checks.transition`` event is published
+#:   outside the audit path (there is no audited operation behind a
+#:   rollup edge).
+#: * ``approval`` -- no audit row persists
+#:   ``payload["op_class"] == "approval"``: the approval REST routes
+#:   bind ``audit_op_class`` to ``read`` / ``write``
+#:   (``api/v1/approvals.py``), and the queue's own request/decision
+#:   rows persist no ``op_class`` key at all. (Drawers still *display*
+#:   ``approval`` for those routes' ``approval.*`` op-ids -- the
+#:   read-time classifier -- but ``query_audit`` filters on the
+#:   persisted key.)
+#:
+#: The broadcast and audit tools share this tuple as one taxonomy by
+#: design (``tests/test_mcp_tools_list_shape_conventions.py`` §14.1
+#: pins them together).
 OP_CLASS_ENUM: Final[tuple[str, ...]] = (
     "read",
     "write",
     "credential_read",
+    "credential_write",
     "credential_mint",
     "audit_query",
+    "approval",
     "checks",
     "other",
 )

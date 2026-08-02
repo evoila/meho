@@ -168,11 +168,11 @@ layers and pinned together by a test rather than shared as a constant.
 - **No rate limit, digest, or repeat suppression.** A flapping Dashboard
   publishes one event per real edge, matching the notifier's stance
   (#2716 scopes volume control out).
-- **The UI feed palette and filter dropdown do not list `checks`.**
-  `OP_CLASS_BADGE_CLASSES` / `OP_CLASS_FILTER_OPTIONS` in
-  `ui/routes/broadcast/feed.py` also omit `approval` and
-  `credential_write`; unlisted classes fall back to `badge-ghost` and
-  remain reachable via an explicit `op_class` query parameter.
+- ~~**The UI feed palette and filter dropdown do not list `checks`.**~~
+  Resolved by #2731: `OP_CLASS_BADGE_CLASSES` covers every
+  `OP_CLASS_ENUM` member (`checks` badges as `badge-primary`) and
+  `OP_CLASS_FILTER_OPTIONS` is now single-sourced from `OP_CLASS_ENUM`;
+  a test pins both tables to the enum.
 - **No event-outbox routing and no durable event table.** The Valkey
   stream plus its retention window is the carrier, exactly as for
   `approval.*` (the outbox matcher is a no-op pending #826).

@@ -181,16 +181,15 @@ WORK_REF_MAX_CHARS: Final[int] = 256
 TTL_MIN_MINUTES: Final[int] = 1
 TTL_MAX_MINUTES: Final[int] = 1440
 
-#: The op-class an agent may *declare* it is about to run. Spans the
-#: full :func:`meho_backplane.broadcast.events.classify_op` output
-#: taxonomy -- deliberately wider than the recent/watch read-filter
-#: :data:`meho_backplane.broadcast.history.OP_CLASS_ENUM` (which omits
-#: ``credential_write`` / ``approval``): a *declaration* must be able to
-#: name the sensitive write classes precisely because those are the
-#: highest-crossfire operations to warn peers about, whereas the read
-#: filter narrows already-classified :class:`BroadcastEvent` rows. The
-#: value is trusted structured metadata (a bounded enum, not prose), so
-#: it is served UNWRAPPED.
+#: The op-class an agent may *declare* it is about to run: the
+#: :func:`meho_backplane.broadcast.events.classify_op` output taxonomy
+#: minus ``checks`` -- an agent never *plans* a ``checks``-class op
+#: because the only member (``checks.transition``) is system-emitted on
+#: a Dashboard rollup edge, not dispatched. The read-filter
+#: :data:`meho_backplane.broadcast.history.OP_CLASS_ENUM` spans the full
+#: taxonomy including ``checks`` (#2731), so the two enums differ by
+#: exactly that member. The value is trusted structured metadata (a
+#: bounded enum, not prose), so it is served UNWRAPPED.
 PlannedOpClass = Literal[
     "read",
     "write",

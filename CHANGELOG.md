@@ -102,6 +102,26 @@ connector-related release-notes line.
   release carrying it. Caught by the `image.yml` scan on `main`
   after the 2026-08-01 merges.
 
+### Changed — op_class filter vocabulary widened to the full classifier range (#2731)
+
+- The `op_class` filter enum that `meho.broadcast.recent`,
+  `meho.broadcast.watch`, and `query_audit` advertise in their
+  `inputSchema` now spans **every** class the classifier can emit:
+  `credential_write` and `approval` join the previous seven values.
+  Additive but user-visible: filtering on either class used to be
+  rejected at the wire with `-32602` (the dispatcher validates
+  arguments against the advertised schema before the handler runs)
+  even though `approval.*` and `credential_write` events were already
+  on the feed; a schema-driven client that mirrors the enum sees two
+  new values. A test now pins the enum to the classifier's output
+  range so neither side can gain a class alone. The operator console's
+  feed dropdown and badge palette cover the full vocabulary too
+  (previously `approval` / `credential_write` / `checks` were
+  unlisted and reachable only by hand-typed query parameter). Note
+  `query_audit` narrowed to `approval` or `checks` always returns
+  empty — those classes exist only as broadcast events, not audit
+  rows. No migration, no new settings. (#2731)
+
 ### Checks investigator — operator prompt + emailed findings (#2721)
 
 - A Dashboard can now carry an `investigator_prompt`: operator context

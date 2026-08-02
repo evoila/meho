@@ -19,8 +19,8 @@ catalog beyond its current scope (vendor-spec discovery, not policy
 configuration).
 
 T4's existing :meth:`ReviewService.edit_op` is the production per-op
-override path (exposed through the MCP tool ``meho_connector_review.
-edit_op`` and the REST surface ``PATCH /api/v1/connectors/{id}/ops/
+override path (exposed through the MCP tool
+``meho_connector_edit_op`` and the REST surface ``PATCH /api/v1/connectors/{id}/ops/
 {op_id}``); it's what an operator would use to flip per-op flags
 at review time. The script wraps the same DB write the service does
 (no schema bypass, identical column updates) and adds an audit row

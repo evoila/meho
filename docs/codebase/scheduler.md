@@ -310,7 +310,7 @@ permanently-broken trigger:
 
 The state is surfaced everywhere the row is read: `ScheduledTriggerRead`
 carries the three fields, so `GET /api/v1/scheduler/triggers`,
-`meho_scheduler_list` / `.show` (MCP), `meho scheduler list` (a `SKIPS`
+`meho_scheduler_list` (MCP), `meho scheduler list` (a `SKIPS`
 column), and the operator console (a warning badge on the list row + a
 skip block on the detail page) all agree with the pod-log WARNs. This is
 the same read-surface projection pattern `last_fired_at` / `next_fire_at`

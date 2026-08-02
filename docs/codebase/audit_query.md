@@ -367,15 +367,18 @@ streaming body for a partial response. The cap (`_REPLAY_MAX_ROWS =
 10_000`) matches T4 so operators see the same boundary on both
 surfaces.
 
-### `meho.audit.` broadcast-classifier arm
+### `meho_audit_` broadcast-classifier arm
 
 The MCP broadcast path derives `op_class` from `classify_op(op_id)`
 with the **tool name verbatim** — it does not honor
-`ToolDefinition.op_class`. `classify_op` therefore grew a
-`meho.audit.` prefix arm next to the existing `audit.` arm: without
-it, `meho_audit_replay` (prefix `meho.audit.`) would fall through to
-`other` and broadcast its full `ReplayNode` tree instead of the
-aggregate-only view. (The literal tool name `query_audit` has the same
+`ToolDefinition.op_class`. `classify_op` therefore carries a
+`meho_audit_` prefix arm next to the existing `audit.` arm: without
+it, `meho_audit_replay` would fall through to `other` and broadcast
+its full `ReplayNode` tree instead of the aggregate-only view. (The
+arm was originally the dotted `meho.audit.` prefix for the pre-#2745
+tool name `meho.audit.replay`; the dotted arm is retained because
+`classify_op` re-runs at render time on stored op-ids, so historical
+rows keep their class.) (The literal tool name `query_audit` has the same
 MCP-path classification gap today — a pre-existing G8.1 concern, out
 of scope for #377.)
 

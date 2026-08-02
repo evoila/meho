@@ -589,7 +589,7 @@ approve / reject with a free-form reason.
 ### Operator path — MCP
 
 The MCP tool surface exposes
-`meho_approvals_list`, `meho.approvals.show`,
+`meho_approvals_list`, `meho_approvals_get`,
 `meho_approvals_approve`, `meho_approvals_reject` for
 agent-driven approval workflows (a senior operator's agent
 approving a junior operator's agent's request). Same shape as

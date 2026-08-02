@@ -137,7 +137,7 @@ if the policy team decides the 4-value vocabulary is insufficient.
 
 * Annotating the other ~40 GitHub write ops — operators enable +
   annotate further ops via the standard G0.7 review state machine
-  (`meho_connector_review.edit_op`) as they need them.
+  (`meho_connector_edit_op`) as they need them.
 * Per-target approval thresholds (e.g. "approve `gh.pr.merge` on
   internal repos automatically, require approval on external
   repos") — per-tenant policy work, not in scope for this Task.

@@ -57,7 +57,7 @@ audit-driven :class:`BroadcastEvent` or the agent-authored
 Entries XADD'd with an unknown field shape, or whose ``event`` field
 doesn't parse as either model, are logged and skipped inside the
 helper — the same safety net as the SSE generator at
-:mod:`meho_backplane.api.v1.feed` and the ``meho.broadcast.recent``
+:mod:`meho_backplane.api.v1.feed` and the ``meho_broadcast_recent``
 tool.
 
 Untrusted agent-authored free text

@@ -65,8 +65,8 @@ operator (or an agent, before recommending a destructive op) can ask
   `topology.refresh` and `targets discover` are operator CLI verbs,
   not agent tools (`meho topology refresh|dependents|dependencies|path`,
   `meho targets discover` under `cli/internal/cmd/`).
-- **Curated-edge MCP tools** (`meho.topology.annotate` /
-  `meho.topology.unannotate`, both `tenant_admin` only) — admin
+- **Curated-edge MCP tools** (`meho_topology_annotate` /
+  `meho_topology_unannotate`, both `tenant_admin` only) — admin
   meta-tools in the `meho.*` namespace exposing the write half of
   the G9.2 surface. Not on the daily ~17 meta-tool agent surface;
   an `operator`-role session never sees them in `tools/list`.
@@ -170,7 +170,7 @@ the verb is supposed to make safer.
 
 **Six curated-only kinds** — operator-asserted via
 `meho topology annotate` (CLI), `POST /api/v1/topology/edges` (REST),
-or `meho.topology.annotate` (MCP, `tenant_admin` only). These cross
+or `meho_topology_annotate` (MCP, `tenant_admin` only). These cross
 connector boundaries (a Kubernetes ServiceAccount authenticating
 against a Vault role, a service depending on a database in a
 different product) and cannot be derived from any single probe.
@@ -267,8 +267,8 @@ Each is a sibling of the others; none is a thin wrapper.
   `kind`, `source`, `from`, `to`, `conflicts`, `limit`, `offset`
   query params; `limit` defaults to 200 with a hard ceiling of
   1000 mirroring the substrate cap.
-- **MCP** — `meho.topology.annotate` and
-  `meho.topology.unannotate` live in the `meho.*` admin namespace
+- **MCP** — `meho_topology_annotate` and
+  `meho_topology_unannotate` live in the `meho.*` admin namespace
   (tenant_admin only, not on the daily ~17 meta-tool surface). The
   read facet is `query_topology { kind: "edges", ... }` on the
   existing operator-role parametric tool — same primitive, the

@@ -18,14 +18,14 @@ guard asserts each exempted surface still exists), so exemptions cannot
 outlive the surface they excuse. The #2678 decisions that emptied the
 previous "deliberately unclassified" set:
 
-* the ``meho.runbook.*`` MCP tools and the ``runbooks`` REST tag →
+* the ``meho_runbook_*`` MCP tools and the ``runbooks`` REST tag →
   ``write_surfaces`` (curated compositions driven through the run
   driver dispatch writes — the same call :mod:`meho_backplane.ui.maturity`
   already made for the ``/ui`` runbooks area);
 * the ``conventions`` REST tag → ``memory_knowledge`` (the preamble
   knowledge packer is a face of the memory/knowledge plane, matching
   the ``/ui`` conventions area);
-* ``meho.status`` stays unclassified **explicitly**: it mirrors
+* ``meho_status`` stays unclassified **explicitly**: it mirrors
   ``/api/v1/health`` — infrastructure, the same posture as the
   ``health`` / ``version`` / ``mcp`` REST tags and the
   ``_READY_ENTRY_FEATURE`` ``mcp`` entry.
@@ -77,10 +77,10 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 # Closed infrastructure allowlists — every entry carries its rationale.
 # ---------------------------------------------------------------------------
 
-#: MCP tools that deliberately carry ``feature=None``. ``meho.status``
+#: MCP tools that deliberately carry ``feature=None``. ``meho_status``
 #: mirrors ``/api/v1/health`` wire-identically — infrastructure, not a
 #: classified feature (the ``_READY_ENTRY_FEATURE`` ``mcp`` precedent).
-_MCP_INFRA_TOOLS = frozenset({"meho.status"})
+_MCP_INFRA_TOOLS = frozenset({"meho_status"})
 
 #: REST tags that never map to a feature: deploy/runtime visibility
 #: (``health``: /healthz, /ready, /api/v1/health; ``version``) and the

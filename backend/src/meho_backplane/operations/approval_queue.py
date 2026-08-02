@@ -1168,7 +1168,7 @@ async def _load_for_tenant(
 
 # ---------------------------------------------------------------------------
 # G11.2-T5 (#818) read helpers for the operator surfaces (REST GET /{id},
-# MCP `meho.approvals.list` / `.get`, CLI `meho approvals list / show`).
+# MCP `meho_approvals_list` / `.get`, CLI `meho approvals list / show`).
 # ---------------------------------------------------------------------------
 
 
@@ -1212,7 +1212,7 @@ async def get_request(
     """Fetch one approval request by id, tenant-isolated.
 
     G11.2-T5 (#818) — drives ``GET /api/v1/approvals/{id}``,
-    ``meho.approvals.get``, and ``meho approvals show``. Raises
+    ``meho_approvals_get``, and ``meho approvals show``. Raises
     :class:`ApprovalNotFoundError` for missing rows or cross-tenant
     access (indistinguishable to the caller).
     """

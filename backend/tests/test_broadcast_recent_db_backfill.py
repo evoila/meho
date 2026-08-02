@@ -12,7 +12,7 @@ Broadcast v2 Initiative #2543, Task #2547 (T2). Two contracts:
 
 * **Recent archive backfill.** When the requested window reaches before
   the stream's oldest surviving entry (or the stream is empty -- the
-  Valkey-restart / ``FLUSHALL`` shape), ``meho.broadcast.recent`` reads
+  Valkey-restart / ``FLUSHALL`` shape), ``meho_broadcast_recent`` reads
   the announcements that lived in that gap back from the DB, deduped
   against the stream page by ``event_id`` and bounded by the page limit.
 

@@ -263,9 +263,9 @@ manage their own sub-principals:
 
 | Tool | Role | Description |
 |------|------|-------------|
-| `meho.agent_principals.list` | operator | List active principals |
-| `meho.agent_principals.register` | tenant_admin | Register a new principal |
-| `meho.agent_principals.revoke` | tenant_admin | Revoke (kill switch) |
+| `meho_agent_principals_list` | operator | List active principals |
+| `meho_agent_principals_register` | tenant_admin | Register a new principal |
+| `meho_agent_principals_revoke` | tenant_admin | Revoke (kill switch) |
 
 ## Troubleshooting
 

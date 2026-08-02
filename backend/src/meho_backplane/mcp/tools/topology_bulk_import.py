@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``meho.topology.bulk_import`` — batch curated-edge authoring for agents.
+"""``meho_topology_bulk_import`` — batch curated-edge authoring for agents.
 
 Task #2539 (Initiative #2533). Gives the agent surface the
 propose→plan→apply loop humans already have on the REST / CLI / console
 bulk-import fronts. Before this tool an agent seeding a cross-system
-inventory looped single ``meho.topology.annotate`` calls with no
+inventory looped single ``meho_topology_annotate`` calls with no
 pre-apply plan and no way to approve the batch in one shot.
 
 Two behaviours on one tool, split on ``dry_run``:
@@ -76,14 +76,14 @@ from meho_backplane.topology.bulk_import import (
 __all__: list[str] = []
 
 
-_BULK_IMPORT_TOOL_NAME: Final[str] = "meho.topology.bulk_import"
+_BULK_IMPORT_TOOL_NAME: Final[str] = "meho_topology_bulk_import"
 
 
 _BULK_IMPORT_DESCRIPTION: Final[str] = (
     "Batch-assert curated `graph_edge` rows in one atomic pass "
     "(tenant_admin only). The agent-surface equivalent of the REST / "
     "CLI / console bulk import: seed a whole cross-system inventory "
-    "declaratively instead of looping single `meho.topology.annotate` "
+    "declaratively instead of looping single `meho_topology_annotate` "
     "calls. Each row is one annotate's params — `{from_name, kind, "
     "to_name, from_node_kind?, to_node_kind?, note?, evidence_url?}` — "
     f"and a batch is 1 to {BULK_IMPORT_MAX_EDGES} rows. Tenant-scoped "
@@ -91,7 +91,7 @@ _BULK_IMPORT_DESCRIPTION: Final[str] = (
     "REQUIRES: both endpoints of every row must already exist as "
     "`graph_node` rows in the tenant. A row naming a missing endpoint "
     "fails validation; seed endpoints first with "
-    "`meho.topology.create_node`.\n\n"
+    "`meho_topology_create_node`.\n\n"
     "PROPOSE THEN APPLY:\n"
     "  1. `dry_run: true` (the DEFAULT) returns the per-row plan "
     "(`action` is `create` / `update` / `conflict`) and writes "
@@ -144,7 +144,7 @@ async def _bulk_import_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Route a ``meho.topology.bulk_import`` call: dry-run direct, apply gated.
+    """Route a ``meho_topology_bulk_import`` call: dry-run direct, apply gated.
 
     ``dry_run`` defaults to true (see the inputSchema). The free dry-run
     calls the service directly; the gated apply dispatches the

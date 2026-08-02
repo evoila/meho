@@ -377,7 +377,7 @@ async def list_runs(
     """Page through agent runs in *tenant_id*, newest first.
 
     The read substrate for the agent-run list surface (work_ref I3-T2
-    #1662) -- ``GET /api/v1/agents/runs``, ``meho.agents.list_runs``, and
+    #1662) -- ``GET /api/v1/agents/runs``, ``meho_agents_list_runs``, and
     ``meho agent run-list``. Tenant-isolated by the WHERE clause:
     cross-tenant rows are invisible, so the list cannot leak another
     tenant's runs.

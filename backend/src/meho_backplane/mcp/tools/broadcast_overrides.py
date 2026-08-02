@@ -3,15 +3,15 @@
 
 """Admin MCP tools for the broadcast-override CRUD surface.
 
-G6.3-T5 (#382) — three ``meho.broadcast.overrides.*`` tools that
+G6.3-T5 (#382) — three ``meho_broadcast_overrides_*`` tools that
 mirror the T4 (#381) REST surface (``/api/v1/broadcast/overrides``)
 onto the MCP transport:
 
-* ``meho.broadcast.overrides.list`` — list the operator's tenant's
+* ``meho_broadcast_overrides_list`` — list the operator's tenant's
   rules. Optional ``op_id_pattern`` arg (exact match).
-* ``meho.broadcast.overrides.set`` — create a rule. Args mirror
+* ``meho_broadcast_overrides_set`` — create a rule. Args mirror
   T4's :class:`BroadcastOverrideCreate` Pydantic model.
-* ``meho.broadcast.overrides.remove`` — delete a rule by id.
+* ``meho_broadcast_overrides_remove`` — delete a rule by id.
 
 All three are ``tenant_admin``-required. RBAC enforcement happens at
 two layers: the registry filter (``required_role=TENANT_ADMIN``
@@ -35,7 +35,7 @@ and translates the result into the MCP wire shape:
 * List → ``{"overrides": [<row dict>, ...]}``.
 * Set → ``{"override_id": <uuid str>, "override": <row dict>}``. The
   top-level ``override_id`` mirrors the ``override_id`` argument of
-  ``meho.broadcast.overrides.remove`` so an agent can round-trip
+  ``meho_broadcast_overrides_remove`` so an agent can round-trip
   set → remove with a single read off the response (G0.9.1-T7,
   #779). The nested ``override`` envelope is preserved so v0.3.1
   clients reading ``.override.id`` keep working — additive shape,
@@ -61,7 +61,7 @@ MCP audit middleware reads these on the response side, so a
 mutation MCP call produces an audit row + broadcast event identical
 in shape to the REST call's row (modulo ``method="MCP"`` vs
 ``"POST"``/``"DELETE"`` and the synthetic
-``/mcp/tools/call/meho.broadcast.overrides.set`` path).
+``/mcp/tools/call/meho_broadcast_overrides_set`` path).
 """
 
 from __future__ import annotations
@@ -124,7 +124,7 @@ def _http_to_mcp(exc: HTTPException) -> McpInvalidParamsError:
 
 
 # ---------------------------------------------------------------------------
-# meho.broadcast.overrides.list
+# meho_broadcast_overrides_list
 # ---------------------------------------------------------------------------
 
 
@@ -148,7 +148,7 @@ async def _list_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
-        name="meho.broadcast.overrides.list",
+        name="meho_broadcast_overrides_list",
         description=(
             "List broadcast-detail override rules for the operator's "
             "tenant (Initiative #376). Tenant-admin only. Optional "
@@ -178,7 +178,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.broadcast.overrides.set
+# meho_broadcast_overrides_set
 # ---------------------------------------------------------------------------
 
 
@@ -206,7 +206,7 @@ async def _set_handler(
             raise _http_to_mcp(exc) from exc
         override_dict = _row_to_dict(row)
         # Top-level ``override_id`` mirrors the ``override_id`` arg shape
-        # ``meho.broadcast.overrides.remove`` consumes, so an agent can
+        # ``meho_broadcast_overrides_remove`` consumes, so an agent can
         # round-trip set -> remove using a single read off the set
         # response (G0.9.1-T7, #779). The nested ``override`` envelope
         # is preserved so existing clients that read ``.override.id`` /
@@ -221,7 +221,7 @@ async def _set_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
-        name="meho.broadcast.overrides.set",
+        name="meho_broadcast_overrides_set",
         description=(
             "Create a broadcast-detail override rule for the operator's "
             "tenant (Initiative #376). Tenant-admin only. op_id_pattern "
@@ -233,7 +233,7 @@ register_mcp_tool(
             "'broadcast_override_already_exists'. "
             "Response shape: {override_id, override: {...}}. The "
             "top-level override_id matches the override_id argument of "
-            "meho.broadcast.overrides.remove, so set -> remove round-"
+            "meho_broadcast_overrides_remove, so set -> remove round-"
             "trips with a single read off the response (G0.9.1-T7, #779)."
         ),
         inputSchema={
@@ -279,7 +279,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.broadcast.overrides.remove
+# meho_broadcast_overrides_remove
 # ---------------------------------------------------------------------------
 
 
@@ -310,7 +310,7 @@ async def _remove_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
-        name="meho.broadcast.overrides.remove",
+        name="meho_broadcast_overrides_remove",
         description=(
             "Delete a broadcast-detail override rule by id for the "
             "operator's tenant (Initiative #376). Tenant-admin only. "

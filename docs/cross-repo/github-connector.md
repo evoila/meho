@@ -383,7 +383,7 @@ See
 [`connector-ingestion.md` § "`op_id` carries `:` and `/`"](./connector-ingestion.md#op_id-carries--and-)
 for the convention.
 
-Each edit writes a `meho.connector.edit_op` audit row in the same
+Each edit writes a `meho_connector_edit_op` audit row in the same
 transaction as the column update, so audit replay can reconstruct
 exactly which operator annotated which op at which time.
 
@@ -589,8 +589,8 @@ approve / reject with a free-form reason.
 ### Operator path — MCP
 
 The MCP tool surface exposes
-`meho.approvals.list`, `meho.approvals.show`,
-`meho.approvals.approve`, `meho.approvals.reject` for
+`meho_approvals_list`, `meho.approvals.show`,
+`meho_approvals_approve`, `meho_approvals_reject` for
 agent-driven approval workflows (a senior operator's agent
 approving a junior operator's agent's request). Same shape as
 the CLI verbs; the agent runs them under operator identity.
@@ -980,7 +980,7 @@ log — the same pattern every meho agent runtime uses.
 - Target row layout: [`./targets-yaml.md`](./targets-yaml.md) — `name`, `aliases`, `product`, `host`, `secret_ref`, `auth_model` column conventions
 - Per-target Vault read policy: [`./connector-vault-policy.md`](./connector-vault-policy.md) — the ACL templating contract every per-target secret read flows through
 - Audit query CLI: [`../codebase/audit_query.md`](../codebase/audit_query.md) — `meho audit query` flags, output shape, RBAC notes
-- Operator-console approvals surface: [`../codebase/approvals.md`](../codebase/approvals.md) — `/ui/approvals` rendering, `meho.approvals.*` MCP tools
+- Operator-console approvals surface: [`../codebase/approvals.md`](../codebase/approvals.md) — `/ui/approvals` rendering, `meho_approvals_*` MCP tools
 - Post-deploy enablement: [`docs/RELEASING.md` § 6a](../RELEASING.md) — the release checklist's gated-features section cross-references this runbook
 - Error-message-shape convention: [`docs/codebase/error-message-shape.md`](../codebase/error-message-shape.md) — T11 stable-code error envelope
 - GitHub REST API documentation: <https://docs.github.com/en/rest>

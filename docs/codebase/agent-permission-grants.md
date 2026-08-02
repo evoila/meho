@@ -96,7 +96,7 @@ Mirrors the G5.2 memory-expiry sweeper pattern verbatim.
 
 ## MCP surface
 
-Five tools under `meho.agents.grant.*`: `list`, `show`, `create`, `elevate`, `revoke`. Registered via `register_mcp_tool` (auto-discovered by `eager_import_mcp_modules`).
+Five tools under `meho_agents_grant_*`: `list`, `show`, `create`, `elevate`, `revoke`. Registered via `register_mcp_tool` (auto-discovered by `eager_import_mcp_modules`).
 
 ## CLI surface
 

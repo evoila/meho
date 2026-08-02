@@ -240,7 +240,7 @@ def test_wire_rate_limited_surfaces_as_minus_32000(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.announce",
+                "name": "meho_broadcast_announce",
                 "arguments": {"activity": "looping"},
             },
         },

@@ -114,7 +114,7 @@ rejection later.
 `POST /api/v1/agents` → `create_agent` (tenant_admin gate, audit
 contextvars bound) → `AgentDefinitionService.create` → insert + flush.
 A unique-index violation is narrowed to `AgentDefinitionExistsError`
-and rendered as 409 `agent_already_exists`. The MCP `meho.agents.create`
+and rendered as 409 `agent_already_exists`. The MCP `meho_agents_create`
 tool and the `meho agent create` CLI verb dispatch through the same
 service method.
 

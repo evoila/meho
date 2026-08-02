@@ -270,7 +270,7 @@ document.addEventListener("alpine:init", () => {
     },
 
     // True when the event is an agent-authored announcement
-    // (``meho.broadcast.announce``) rather than an audit-driven
+    // (``meho_broadcast_announce``) rather than an audit-driven
     // operation. Two event kinds now share the stream (G6.4-T2 / #2549);
     // the row partial branches on this so an announcement renders its
     // agent-authored variant (phase chip + quoted activity + the #2544

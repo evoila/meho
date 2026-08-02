@@ -861,7 +861,7 @@ class ReviewService:
         same 404 conflation every other method uses); when a label maps
         to **both** a tenant row and a built-in row,
         :class:`AmbiguousConnectorScopeError` is raised rather than silently
-        flipping one. Exactly **one** ``meho.connector.enable_reads``
+        flipping one. Exactly **one** ``meho_connector_enable_reads``
         audit row is written, carrying ``ops_enabled_count``, and only
         when at least one op actually flipped: a re-run once the reads
         are enabled matches no rows, writes no audit row, and returns
@@ -1007,7 +1007,7 @@ class ReviewService:
         live only under a scope the caller did not name all raise
         :class:`ConnectorNotFoundError` — the same 404 conflation every
         other connector route uses. Exactly one
-        ``meho.connector.delete`` audit row commits atomically with the
+        ``meho_connector_delete`` audit row commits atomically with the
         row deletes; the registry pop runs strictly after the commit so
         a failed transaction never leaves the process-local registry
         ahead of the database. A connector that still had enabled

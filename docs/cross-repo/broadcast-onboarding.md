@@ -36,9 +36,9 @@ Every transport reads the same per-tenant stream. Pick by use case:
 | `meho status --watch` CLI | Terminal-resident operator triage | G6.1-T5 (#311) |
 | `GET /api/v1/feed` SSE | Custom dashboards, browser-side viewers, scripts that need live push | G6.1-T4 (#310) |
 | `meho://tenant/{tenant_id}/feed` MCP resource | LLM clients (Claude, MCP-aware agents) that poll a snapshot | G6.1-T6 (this task) |
-| `meho.broadcast.recent` MCP tool | LLM clients that need filter / since / cursor pagination over the same stream | G6.4-T1 (#1091) |
-| `meho.broadcast.announce` MCP tool | Agents publishing intent / progress / completion narratives that other operators can read | G6.4-T2 (#1092) |
-| `meho.broadcast.watch` MCP tool | LLM clients that need long-poll "wait for the next batch" without an SSE socket | G6.4-T3 (#1093) |
+| `meho_broadcast_recent` MCP tool | LLM clients that need filter / since / cursor pagination over the same stream | G6.4-T1 (#1091) |
+| `meho_broadcast_announce` MCP tool | Agents publishing intent / progress / completion narratives that other operators can read | G6.4-T2 (#1092) |
+| `meho_broadcast_watch` MCP tool | LLM clients that need long-poll "wait for the next batch" without an SSE socket | G6.4-T3 (#1093) |
 
 The Slack mirror (G6.2 #333) and any future web admin UI subscribe
 the same way — XREAD against the per-tenant stream key.
@@ -128,17 +128,17 @@ Cross-tenant reads (`meho://tenant/<someone-else>/feed`) reject
 with JSON-RPC `INVALID_PARAMS` (-32602). The bound `tenant_id` must
 match the operator's JWT-derived tenant.
 
-## MCP tool: `meho.broadcast.recent`
+## MCP tool: `meho_broadcast_recent`
 
 The agent-facing read surface. Where `meho://tenant/{id}/feed`
 returns the last 50 events in chronological order with no filter or
-cursor control, `meho.broadcast.recent` is a JSON-RPC `tools/call`
+cursor control, `meho_broadcast_recent` is a JSON-RPC `tools/call`
 that accepts a `since` cursor, optional filters, and a tunable
 page size:
 
 ```json
 {
-  "name": "meho.broadcast.recent",
+  "name": "meho_broadcast_recent",
   "arguments": {
     "since": "2026-05-25T10:00:00Z",
     "filter": {"op_class": "write", "principal": "op-alice"},
@@ -191,7 +191,7 @@ Pagination contract:
 let cursor = null;
 while (true) {
   const args = cursor ? {since: cursor, limit: 100} : {limit: 100};
-  const {events, next_cursor} = await callTool("meho.broadcast.recent", args);
+  const {events, next_cursor} = await callTool("meho_broadcast_recent", args);
   for (const e of events) handle(e);
   if (next_cursor === null) break;  // reached the live tail
   cursor = next_cursor;
@@ -211,10 +211,10 @@ in the first place". RBAC: `operator` role minimum (same as the SSE
 feed); `read_only` operators do not see the tool on `tools/list`
 and a direct call rejects with `forbidden`.
 
-## MCP tool: `meho.broadcast.announce`
+## MCP tool: `meho_broadcast_announce`
 
 The agent-facing **write** surface — distinct from
-`meho.broadcast.recent` (which reads), this tool publishes an
+`meho_broadcast_recent` (which reads), this tool publishes an
 agent-authored narrative event so other operators in the tenant can
 see what an agent is about to do, currently working on, or just
 finished. The Layer-2 starter template (`docs/examples/consumer-onboarding/CLAUDE.md`)
@@ -224,7 +224,7 @@ entry, periodic `update` announcements during long work, and a
 
 ```json
 {
-  "name": "meho.broadcast.announce",
+  "name": "meho_broadcast_announce",
   "arguments": {
     "activity": "investigating cluster X latency",
     "target": "prod-vc-1",
@@ -241,7 +241,7 @@ Response shape:
 ```
 
 The `event_id` is the Valkey stream entry id; it round-trips through
-`meho.broadcast.recent`'s `since` cursor for verification or follow-up
+`meho_broadcast_recent`'s `since` cursor for verification or follow-up
 reads.
 
 Arguments:
@@ -257,12 +257,12 @@ Arguments:
   `completion`. Picks the label on the
   `broadcast_agent_announcements_total{phase}` Prometheus counter.
 
-The published event surfaces back through `meho.broadcast.recent` with
+The published event surfaces back through `meho_broadcast_recent` with
 `event_kind: "agent_announcement"` and the agent-authored fields
 intact. No `op_id` / `op_class` / `audit_id` on the event — those are
 audit-row fields, and an announcement is not an audit derivative (the
 chassis `AuditMiddleware` still writes an audit row for the
-`meho.broadcast.announce` tools/call invocation itself; that row is
+`meho_broadcast_announce` tools/call invocation itself; that row is
 distinct from the announcement content on the stream).
 
 ### Trust boundary (LOAD-BEARING)
@@ -277,7 +277,7 @@ surface treats them as **untrusted**:
   sanitisation chain.
 * **Slack mirror** (G6.2): plain-text mode, no rich formatting.
 * **LLM consumption** (other agents reading via
-  `meho.broadcast.recent`): the calling agent MUST NOT treat another
+  `meho_broadcast_recent`): the calling agent MUST NOT treat another
   agent's `activity` as policy / system input. This is the same
   isolation contract the G7.1 preamble assembler enforces with its
   `<<TENANT_CONVENTIONS ... END_TENANT_CONVENTIONS>>` wrapper around
@@ -286,7 +286,7 @@ surface treats them as **untrusted**:
 
 ### Fail-loud publish (distinct from audit-driven publisher)
 
-`meho.broadcast.announce` is **fail-loud**. Where the audit-driven
+`meho_broadcast_announce` is **fail-loud**. Where the audit-driven
 publisher swallows Valkey errors silently (the audit row is canonical;
 a missed broadcast is acceptable degradation), the announce publisher
 raises on any Valkey failure and the dispatcher surfaces it as
@@ -299,18 +299,18 @@ Tenant scoping is **structural**: the input schema has no `tenant_id`
 argument; the announcement always writes to the operator's own tenant
 stream. RBAC: `operator` role minimum.
 
-## MCP tool: `meho.broadcast.watch`
+## MCP tool: `meho_broadcast_watch`
 
 The long-poll equivalent of "subscribe to the feed" for clients that
-don't speak SSE. Where `meho.broadcast.recent` returns whatever's
-already on the stream past `since`, `meho.broadcast.watch` uses Valkey
+don't speak SSE. Where `meho_broadcast_recent` returns whatever's
+already on the stream past `since`, `meho_broadcast_watch` uses Valkey
 `XREAD BLOCK <timeout_ms>` to **wait** for new entries past
 `since_cursor` and returns them as soon as they arrive — or returns
 empty when the block window expires.
 
 ```json
 {
-  "name": "meho.broadcast.watch",
+  "name": "meho_broadcast_watch",
   "arguments": {
     "since_cursor": "1747800099000-0",
     "filter": {"op_class": "write"},
@@ -354,10 +354,10 @@ The caller re-polls with the same cursor.
 Arguments:
 
 * `since_cursor` (**required**) — Valkey stream cursor (`1747800000000-0`).
-  Obtain the initial value from `meho.broadcast.recent`'s `next_cursor`;
+  Obtain the initial value from `meho_broadcast_recent`'s `next_cursor`;
   from that point forward the watch loop feeds itself.
 * `filter.op_class` / `filter.principal` / `filter.target` — same
-  semantics as `meho.broadcast.recent`. Filtered-out entries still
+  semantics as `meho_broadcast_recent`. Filtered-out entries still
   advance the cursor so the walk progresses even on busy-but-filtered
   tenants.
 * `timeout_ms` — integer in `[100, 30000]`, default `10000` (10s).
@@ -371,13 +371,13 @@ discipline:
 
 ```javascript
 let {events: initial, next_cursor: cursor} = await callTool(
-  "meho.broadcast.recent", {limit: 100}
+  "meho_broadcast_recent", {limit: 100}
 );
 for (const e of initial) handle(e);
 
 while (running) {
   const {events, next_cursor} = await callTool(
-    "meho.broadcast.watch",
+    "meho_broadcast_watch",
     {since_cursor: cursor, timeout_ms: 10000}
   );
   for (const e of events) handle(e);
@@ -385,7 +385,7 @@ while (running) {
 }
 ```
 
-Tenant scoping is **structural** (identical to `meho.broadcast.recent`):
+Tenant scoping is **structural** (identical to `meho_broadcast_recent`):
 the input schema has no `tenant_id` argument; the stream key is
 derived exclusively from `operator.tenant_id`. RBAC: `operator` role
 minimum.

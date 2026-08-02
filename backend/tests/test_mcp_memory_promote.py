@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the ``meho.memory.promote`` admin MCP meta-tool (G5.2-T4, #626).
+"""Tests for the ``meho_memory_promote`` admin MCP meta-tool (G5.2-T4, #626).
 
 Covers the acceptance criteria the issue body names for the MCP twin
 of ``POST /api/v1/memory/{scope}/{slug}/promote``:
 
-* ``meho.memory.promote`` is registered in the ``meho.*`` namespace
+* ``meho_memory_promote`` is registered in the ``meho.*`` namespace
   with ``required_role=TENANT_ADMIN``.
 * Visible in ``tools/list`` ONLY for a ``tenant_admin`` session;
   hidden for a plain ``operator`` (and read_only) session.
 * Input schema mirrors the HTTP route body (``source_scope`` /
   ``slug`` / ``to`` / ``move`` / ``target_name``) with
   ``additionalProperties: false`` and 2020-12 JSON Schema shape.
-* ``tools/call meho.memory.promote`` returns the target row JSON when
+* ``tools/call meho_memory_promote`` returns the target row JSON when
   the operator is admin and the promotion is legal.
 * Non-admin dispatch (via call-time re-check) returns
   ``-32601 method_not_found`` (the registry hides the tool from
@@ -53,7 +53,7 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-_TOOL_NAME = "meho.memory.promote"
+_TOOL_NAME = "meho_memory_promote"
 
 
 @pytest.fixture
@@ -123,7 +123,7 @@ async def _insert_user_memory_for_operator(
 def test_tools_list_exposes_promote_for_tenant_admin(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: ``meho.memory.promote`` appears in ``tools/list`` for a tenant_admin."""
+    """AC: ``meho_memory_promote`` appears in ``tools/list`` for a tenant_admin."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -143,7 +143,7 @@ def test_tools_list_exposes_promote_for_tenant_admin(
 def test_tools_list_hides_promote_from_operator(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: ``meho.memory.promote`` is HIDDEN from non-admin sessions.
+    """AC: ``meho_memory_promote`` is HIDDEN from non-admin sessions.
 
     The agent's daily memory surface is search_memory + add_to_memory;
     the promote meta-tool is admin-only and must not appear in
@@ -168,7 +168,7 @@ def test_tools_list_hides_promote_from_operator(
 def test_tools_list_hides_promote_from_read_only(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: ``meho.memory.promote`` is hidden from read_only sessions too."""
+    """AC: ``meho_memory_promote`` is hidden from read_only sessions too."""
     client, _op = client_with_operator
     response = post_mcp(
         client,

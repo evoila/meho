@@ -1,6 +1,6 @@
 {
   "allowed": [
-    "meho.broadcast.recent",
+    "meho_broadcast_recent",
     "add_to_memory",
     "search_memory"
   ]

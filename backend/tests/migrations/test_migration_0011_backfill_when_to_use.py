@@ -25,7 +25,7 @@ Five named cases cover the migration's contract:
   does *not* start with the template prefix is left untouched, even
   when the ``(product, version, impl_id, group_key)`` matches a
   curated entry. Operator edits made via
-  ``meho.connector.edit_group`` survive the upgrade.
+  ``meho_connector_edit_group`` survive the upgrade.
 * **Tenant-scoped row -> preserved.** A row with
   ``tenant_id IS NOT NULL`` is left untouched even when the
   ``when_to_use`` matches the template prefix -- the migration only
@@ -281,7 +281,7 @@ def test_operator_edited_row_is_preserved(
     """Operator-edited row -> unchanged across upgrade.
 
     The contract the issue calls out explicitly: rows touched by
-    ``meho.connector.edit_group`` must survive the upgrade verbatim.
+    ``meho_connector_edit_group`` must survive the upgrade verbatim.
     The migration's predicate is "starts with the template prefix",
     so any prose written by an operator (which never starts with
     those three words) is left alone. Even when the row's natural

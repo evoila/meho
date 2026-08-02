@@ -580,7 +580,7 @@ async def test_post_audit_row_carries_override_diff(client: TestClient) -> None:
     ]
     assert len(post_rows) == 1
     payload = post_rows[0].payload
-    assert payload["op_id"] == "meho.broadcast.overrides.set"
+    assert payload["op_id"] == "meho_broadcast_overrides_set"
     assert payload["op_class"] == "write"
     assert payload["override_op"] == "set"
     assert payload["override_id"] == override_id
@@ -609,7 +609,7 @@ async def test_delete_audit_row_carries_override_diff(client: TestClient) -> Non
     delete_rows = [row for row in rows if row.method == "DELETE"]
     assert len(delete_rows) == 1
     payload = delete_rows[0].payload
-    assert payload["op_id"] == "meho.broadcast.overrides.remove"
+    assert payload["op_id"] == "meho_broadcast_overrides_remove"
     assert payload["op_class"] == "write"
     assert payload["override_op"] == "remove"
     assert payload["override_id"] == override_id

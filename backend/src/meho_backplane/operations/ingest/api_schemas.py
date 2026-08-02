@@ -177,7 +177,7 @@ class IngestRequest(BaseModel):
     the field is omitted or explicitly ``null`` — targets the
     built-in / global scope (``tenant_id IS NULL``), the same
     omit-equals-global semantics the MCP sibling
-    ``meho.connector.ingest`` documents. The operator's own tenant
+    ``meho_connector_ingest`` documents. The operator's own tenant
     UUID targets their tenant-curated namespace; any other UUID is
     rejected with a synchronous 403 on both the sync and async
     branches by :meth:`IngestionPipelineService.authorize_scope`
@@ -214,7 +214,7 @@ class IngestRequest(BaseModel):
             "Write scope for the ingested connector rows. Omit or pass "
             "null to ingest under the built-in / global scope "
             "(tenant_id IS NULL) — the same omit-equals-global "
-            "semantics as the MCP tool meho.connector.ingest "
+            "semantics as the MCP tool meho_connector_ingest "
             "(tenant_admin only). Pass your own tenant UUID for a "
             "tenant-scoped ingest; another tenant's UUID is rejected "
             "with 403."
@@ -554,7 +554,7 @@ class IngestResponse(BaseModel):
     path bound, and the service-level helpers
     (:func:`register_ingested_operations`, :func:`run_llm_grouping`)
     write their own per-call rows under
-    ``meho.connector.llm_grouping`` etc.
+    ``meho_connector_llm_grouping`` etc.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -707,7 +707,7 @@ class ConnectorListItem(BaseModel):
     field is the subset. Kept additive (rather than renaming the
     total to ``total_operation_count``) so existing consumers of
     ``operation_count`` -- the CLI's ``listEntry`` decode shape and
-    every ``meho.connector.list`` client -- keep working unchanged.
+    every ``meho_connector_list`` client -- keep working unchanged.
     Mind the axis difference between the two ``enabled_*`` fields:
     ``enabled_group_count`` buckets groups by *review_status*, while
     ``enabled_operation_count`` counts the per-op ``is_enabled`` bit

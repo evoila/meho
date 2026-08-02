@@ -688,7 +688,7 @@ async def test_mcp_approve_redispatches_run_bound_move_when_claim_free(
 ) -> None:
     """MCP by-id approve re-dispatches a run-bound approval on a free claim (#2293).
 
-    The MCP ``meho.approvals.approve`` twin of the ``/decide`` waiter-gone
+    The MCP ``meho_approvals_approve`` twin of the ``/decide`` waiter-gone
     fallback: the run_id-is-not-None skip is gone, so the approve wins the
     free exactly-one-resumer claim and executes the move once, returning the
     outcome under ``dispatch``.

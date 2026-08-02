@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Error-mapping tests for ``meho.agent_principals.register`` MCP tool.
+"""Error-mapping tests for ``meho_agent_principals_register`` MCP tool.
 
 The register handler (:mod:`meho_backplane.mcp.tools.agent_principals`)
 mints the Keycloak client secret into Vault via
@@ -22,7 +22,7 @@ handler regressed it (a backend-isolation review miss when #1489 bolted
 the Vault write onto ``register``).
 
 This file pins the contract at the **wire** level: a ``tools/call``
-against ``meho.agent_principals.register`` whose Vault write raises
+against ``meho_agent_principals_register`` whose Vault write raises
 ``SchedulerVaultBrokerError`` returns ``-32602`` (invalid params) with a
 descriptive, secret-free message — mirroring
 ``test_api_v1_agent_principals.py``'s REST equivalent.
@@ -62,7 +62,7 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-_REGISTER_TOOL = "meho.agent_principals.register"
+_REGISTER_TOOL = "meho_agent_principals_register"
 
 #: A secret value the handler must never echo back in the error message.
 #: write_agent_secret would receive this; if any leg leaked it into the

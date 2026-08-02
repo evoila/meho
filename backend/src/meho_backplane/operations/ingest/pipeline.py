@@ -731,7 +731,7 @@ class IngestionPipelineService:
 
         Enforcing it **here** — at the one service-layer chokepoint every
         ingest entry point traverses (the REST route, the
-        ``meho.connector.ingest`` MCP tool, the CLI verb) — is what makes
+        ``meho_connector_ingest`` MCP tool, the CLI verb) — is what makes
         every caller fail closed identically. The earlier shape guarded
         only the REST boundary, so the MCP tool persisted a divergent
         product whose ``impl_id`` was already served by a hand-coded
@@ -1083,7 +1083,7 @@ class IngestionPipelineService:
         :meth:`ReviewService.record_profile_stamp` seam. Returns ``True`` when
         a new profiled class was registered, ``False`` on the idempotent
         no-op (the triple is already served by a stamped / hand-coded class).
-        The stamp writes a ``meho.connector.profile_stamp`` audit row under
+        The stamp writes a ``meho_connector_profile_stamp`` audit row under
         the ingesting operator and never enables an op (#1971).
         """
         connector_class = synthesise_profiled_class(

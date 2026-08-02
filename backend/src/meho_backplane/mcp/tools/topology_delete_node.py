@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``meho.topology.delete_node`` — guarded hard-delete of a manual seed.
+"""``meho_topology_delete_node`` — guarded hard-delete of a manual seed.
 
 Task #2485 (Initiative #2494, G0.32). The delete counterpart to
 :mod:`meho_backplane.mcp.tools.topology_create_node`: seeding a
@@ -45,7 +45,7 @@ from meho_backplane.mcp.tools.topology import dispatch_topology_write, with_park
 __all__: list[str] = []
 
 
-_DELETE_NODE_TOOL_NAME: Final[str] = "meho.topology.delete_node"
+_DELETE_NODE_TOOL_NAME: Final[str] = "meho_topology_delete_node"
 
 
 _DELETE_NODE_DESCRIPTION: Final[str] = (
@@ -58,7 +58,7 @@ _DELETE_NODE_DESCRIPTION: Final[str] = (
     "residue you seeded by hand that no longer belongs (soft-deleted "
     "nodes stay reachable in traversals, so a manual delete is the only "
     "way to remove one). Get the `node_id` from `query_topology` or from "
-    "the `meho.topology.create_node` response.\n\n"
+    "the `meho_topology_create_node` response.\n\n"
     "REFUSES (returns -32602):\n"
     "  - `probe_owned_node` — the node is probe-derived "
     "(`source='auto'`) or bound to a registered target: refresh "
@@ -66,7 +66,7 @@ _DELETE_NODE_DESCRIPTION: Final[str] = (
     "manually-seeded nodes (`source='curated'`, target-unbound) are "
     "deletable.\n"
     "  - `node_has_edges` — the node still has live edges. Remove them "
-    "first with `meho.topology.unannotate` (the error lists the blocking "
+    "first with `meho_topology_unannotate` (the error lists the blocking "
     "edge ids); a bare delete would drop curated edges without their "
     "history tombstones.\n\n"
     "Returns `{node_id, kind, name}` (the pre-delete identity). A second "
@@ -83,7 +83,7 @@ async def _delete_node_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Route a ``meho.topology.delete_node`` call through the dispatcher (#2485).
+    """Route a ``meho_topology_delete_node`` call through the dispatcher (#2485).
 
     :func:`~meho_backplane.mcp.tools.topology.dispatch_topology_write`
     owns the policy gate (agents park, humans execute), the typed-op

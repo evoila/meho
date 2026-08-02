@@ -6,7 +6,7 @@
 Broadcast v2 Initiative #2543, Task #2547 (T2). The
 :class:`~meho_backplane.db.models.AgentAnnouncement` table
 (migration ``0067``) is the durable archive of every agent-authored
-announcement -- one append-only row per ``meho.broadcast.announce`` call.
+announcement -- one append-only row per ``meho_broadcast_announce`` call.
 Without a retention policy it grows unbounded: a fleet of announce-happy
 agents adds rows every coordination cycle, indefinitely.
 

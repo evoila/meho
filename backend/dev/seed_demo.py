@@ -101,7 +101,7 @@ OP_TEMPLATES: tuple[tuple[str, str, str, str | None, dict[str, object]], ...] = 
     ("harbor.robot.create", "POST", "/api/v1/operations/call", None,
      {"project": "meho", "name": "ci-pull"}),
     ("audit.query", "POST", "/mcp", None, {"since": "-24h", "op_class": "write"}),
-    ("meho.broadcast.announce", "POST", "/mcp", None,
+    ("meho_broadcast_announce", "POST", "/mcp", None,
      {"activity": "draining esx-fra1-02 for firmware update", "scope": "tenant"}),
     ("hetzner.server.reset", "POST", "/api/v1/operations/call", "hrobot-fra",
      {"server_number": 2104923, "type": "hw"}),

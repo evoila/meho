@@ -173,7 +173,7 @@ def isolated_registry() -> Iterator[None]:
     runs. The G4.1-T3 kb meta-tools (``mcp.tools.knowledge``) and the
     matching ``meho://kb/{slug}`` resource (``mcp.resources.kb``) join
     the list for the same reason. The G0.9.1-T6 manual-seed admin tool
-    (``mcp.tools.topology_create_node`` -- ``meho.topology.create_node``)
+    (``mcp.tools.topology_create_node`` -- ``meho_topology_create_node``)
     lives in a separate module so the older
     ``mcp.tools.topology`` file does not grow further past the
     600-line code-quality guidance; it joins the reload list
@@ -238,7 +238,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(result_query)
     importlib.reload(connector_admin)
     # G3.5-T2 (#1531): the connector-ingest MCP tools
-    # (``meho.connector.ingest`` + ``meho.connector.ingest_status``) split
+    # (``meho_connector_ingest`` + ``meho_connector_ingest_status``) split
     # out of ``connector_admin`` into their own module; they join the
     # reload list for the same reason every other tool module does -- the
     # autouse ``clear_registries()`` above would otherwise leave them
@@ -247,7 +247,7 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(connector_ingest)
     importlib.reload(audit)
     importlib.reload(broadcast_overrides)
-    # G6.4-T1 (#1091): meho.broadcast.recent (agent-facing read of recent
+    # G6.4-T1 (#1091): meho_broadcast_recent (agent-facing read of recent
     # broadcast events). T2 (announce, #1092) and T3 (watch, #1093) will
     # land additional tools in this module; the single reload covers all
     # three because they share one file by design.
@@ -284,13 +284,13 @@ def isolated_registry() -> Iterator[None]:
     importlib.reload(topology)
     importlib.reload(topology_create_node)
     # #2485: the guarded node hard-delete tool
-    # (``meho.topology.delete_node``) lives in its own module (mirroring
+    # (``meho_topology_delete_node``) lives in its own module (mirroring
     # topology_create_node) so ``mcp.tools.topology`` does not grow past
     # the 600-line guidance; it joins the reload list for the same reason
     # every other tool module does.
     importlib.reload(topology_delete_node)
     # #2539: the batch curated-edge authoring tool
-    # (``meho.topology.bulk_import``) lives in its own module (mirroring
+    # (``meho_topology_bulk_import``) lives in its own module (mirroring
     # topology_create_node) so ``mcp.tools.topology`` does not grow past
     # the 600-line guidance; it joins the reload list for the same reason
     # every other tool module does -- the autouse ``clear_registries()``
@@ -298,14 +298,14 @@ def isolated_registry() -> Iterator[None]:
     # imports this fixture after the first one runs in the process.
     importlib.reload(topology_bulk_import)
     # G12.2-T4 (#1298): the runbook template MCP tools
-    # (``meho.runbook.*_template`` x 6) join the reload list for the same
+    # (``meho_runbook_*_template`` x 6) join the reload list for the same
     # reason every other tool module does -- the autouse
     # ``clear_registries()`` above would otherwise leave them
     # unregistered in any test file that imports this fixture after
     # the first one runs in the process.
     importlib.reload(runbooks)
     # G12.3-T6 (#1313): the runbook *run* MCP tools
-    # (``meho.runbook.start`` / ``.next`` / ``.abort`` / ``.reassign`` /
+    # (``meho_runbook_start`` / ``.next`` / ``.abort`` / ``.reassign`` /
     # ``.list_runs``) join the reload list for the same reason as the
     # template-side module above. The five tools are imported but unused
     # here -- pytest collects them via the side-effect
@@ -319,11 +319,11 @@ def isolated_registry() -> Iterator[None]:
     # unregistered in any test file that imports this fixture after the
     # first one runs in the process.
     importlib.reload(agents)
-    # G11.1-T4 (#811): the agent invocation MCP tools (meho.agents.run +
-    # meho.agents.run_status) join the reload list for the same reason.
+    # G11.1-T4 (#811): the agent invocation MCP tools (meho_agents_run +
+    # meho_agents_run_status) join the reload list for the same reason.
     importlib.reload(agent_runs)
     # G11.2-T5 (#818) approvals + T6 (#819) agent grants: the MCP tool
-    # modules (``meho.approvals.*`` and ``meho.agents.grant.*``) join
+    # modules (``meho_approvals_*`` and ``meho_agents_grant_*``) join
     # the reload list for the same reason every other tool module
     # does -- the autouse ``clear_registries()`` above would otherwise
     # leave them unregistered in any test file that imports this
@@ -332,7 +332,7 @@ def isolated_registry() -> Iterator[None]:
     # exercise ``tools/list`` filter + ``tools/call`` re-check gates.
     importlib.reload(agent_grants)
     # G11.2-T1 (#815): the agent-principal lifecycle MCP tools
-    # (``meho.agent_principals.{list,register,revoke}``) join the reload
+    # (``meho_agent_principals_{list,register,revoke}``) join the reload
     # list for the same reason every other tool module does -- the autouse
     # ``clear_registries()`` above would otherwise leave them unregistered
     # in any test file that imports this fixture after the first one runs

@@ -68,7 +68,7 @@ Vault install takes the unchanged ``vault.kv.read`` path
 through the credential-backend seam (:func:`_probe_backend_federation`).
 Either way the response shape is identical — the ``vault`` field carries
 whichever backend's federation status — so the CLI ``meho status`` and
-the ``meho.status`` MCP tool render a GSM install exactly as they render
+the ``meho_status`` MCP tool render a GSM install exactly as they render
 a Vault one. The ``gsm`` probe reads under MEHO's own deployment identity
 (SA-direct, #2230), so its probe secret is reachable without the
 per-operator Vault tenant-scope exemption in
@@ -472,7 +472,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
     Lifted out of :func:`authenticated_health` so the MCP reference tool
-    ``meho.status`` (G0.5-T4) can return the same federation-proof status
+    ``meho_status`` (G0.5-T4) can return the same federation-proof status
     bundle without re-implementing the Vault + DB probe chain. The route
     handler is now a thin wrapper around this helper plus the
     :class:`Operator` dependency the FastAPI router supplies; the MCP

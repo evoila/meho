@@ -103,9 +103,9 @@ router = APIRouter(prefix="/api/v1/broadcast/overrides", tags=["broadcast"])
 #: :func:`~meho_backplane.audit._publish_broadcast_event`. Set/remove
 #: use distinct op_ids so ``meho audit query`` can filter to "rule
 #: mutations" vs reads.
-_OP_ID_LIST: Final[str] = "meho.broadcast.overrides.list"
-_OP_ID_SET: Final[str] = "meho.broadcast.overrides.set"
-_OP_ID_REMOVE: Final[str] = "meho.broadcast.overrides.remove"
+_OP_ID_LIST: Final[str] = "meho_broadcast_overrides_list"
+_OP_ID_SET: Final[str] = "meho_broadcast_overrides_set"
+_OP_ID_REMOVE: Final[str] = "meho_broadcast_overrides_remove"
 
 
 #: Characters that suggest regex syntax. A pattern containing any of
@@ -254,7 +254,7 @@ def _bind_remove_audit(*, override_id: uuid.UUID) -> None:
 # ---------------------------------------------------------------------------
 #
 # Extracted from the route handlers so the G6.3-T5 admin MCP tools
-# (``meho.broadcast.overrides.list|set|remove``) can call into the same
+# (``meho_broadcast_overrides_list|set|remove``) can call into the same
 # code path in-process. The route handlers below are thin wrappers
 # around these; the MCP tools call them with a transient session +
 # concrete :class:`Operator`. Same RBAC (every call site is gated by

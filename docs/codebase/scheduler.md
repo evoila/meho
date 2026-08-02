@@ -310,7 +310,7 @@ permanently-broken trigger:
 
 The state is surfaced everywhere the row is read: `ScheduledTriggerRead`
 carries the three fields, so `GET /api/v1/scheduler/triggers`,
-`meho.scheduler.list` / `.show` (MCP), `meho scheduler list` (a `SKIPS`
+`meho_scheduler_list` / `.show` (MCP), `meho scheduler list` (a `SKIPS`
 column), and the operator console (a warning badge on the list row + a
 skip block on the detail page) all agree with the pod-log WARNs. This is
 the same read-surface projection pattern `last_fired_at` / `next_fire_at`
@@ -544,10 +544,10 @@ each translate transport-shaped arguments into service calls.
 
 | Verb | REST | MCP | CLI | UI | Role |
 |---|---|---|---|---|---|
-| Create | `POST /api/v1/scheduler/triggers` | `meho.scheduler.create` | `meho scheduler create` | `POST /ui/scheduler/create` | `tenant_admin` |
-| List | `GET /api/v1/scheduler/triggers` | `meho.scheduler.list` | `meho scheduler list` | `GET /ui/scheduler` | `operator` |
+| Create | `POST /api/v1/scheduler/triggers` | `meho_scheduler_create` | `meho scheduler create` | `POST /ui/scheduler/create` | `tenant_admin` |
+| List | `GET /api/v1/scheduler/triggers` | `meho_scheduler_list` | `meho scheduler list` | `GET /ui/scheduler` | `operator` |
 | Detail | `GET /api/v1/scheduler/triggers` (filtered) | — | — | `GET /ui/scheduler/{id}` | `operator` |
-| Cancel | `DELETE /api/v1/scheduler/triggers/{id}` | `meho.scheduler.cancel` | `meho scheduler cancel <id>` | `POST /ui/scheduler/{id}/cancel` | `tenant_admin` |
+| Cancel | `DELETE /api/v1/scheduler/triggers/{id}` | `meho_scheduler_cancel` | `meho scheduler cancel <id>` | `POST /ui/scheduler/{id}/cancel` | `tenant_admin` |
 
 The discriminated-union validator on `ScheduledTriggerCreate` enforces
 exactly one of `cron_expr` / `fire_at` / `event_filter` per kind. An

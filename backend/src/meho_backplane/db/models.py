@@ -2572,7 +2572,7 @@ class AgentAnnouncement(Base):
 
     Broadcast v2 Initiative #2543, Task #2547 (T2). The durable home for
     the coordination *intent* an agent publishes via
-    ``meho.broadcast.announce``. Until this table, an announcement lived
+    ``meho_broadcast_announce``. Until this table, an announcement lived
     only on the count-trimmed per-tenant Valkey stream
     (``BROADCAST_MAXLEN`` = 10000) which the broadcast subchart runs with
     persistence disabled (``save ""`` / ``appendonly no``) -- so a Valkey
@@ -2580,7 +2580,7 @@ class AgentAnnouncement(Base):
     coordination ("does this conflict with what agent A said yesterday?")
     had no substrate. This row is that substrate: the stream stays the
     hot real-time path, this table is the archive
-    (``meho.broadcast.recent`` backfills from here when the requested
+    (``meho_broadcast_recent`` backfills from here when the requested
     window predates the stream's oldest surviving entry).
 
     Append-only by contract: the application never issues an UPDATE

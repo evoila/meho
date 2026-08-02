@@ -59,7 +59,7 @@ The session id is the `Mcp-Session-Id` header the MCP client established on its 
 meho audit replay <session-id> [--json] [--max-depth N] [--backplane <url>]
 ```
 
-> **RBAC: `tenant_admin` required (#1843).** Replaying an *arbitrary* `<session-id>` reconstructs another principal's full session trace — the same privileged forensic act that the MCP [`meho.audit.replay`](#mehoauditreplay-tenant_admin-cross-session) tool gates at `tenant_admin`. The REST route (and so this CLI verb) therefore also requires `tenant_admin`: a `read_only` or `operator` JWT gets `403`. This keeps the REST/CLI surface no more permissive than MCP. The flat query verbs (`meho audit query` / `who-touched` / `by-work-ref` / `my-recent` / `show`) stay at `operator` — and an operator can still replay *their own* session via the MCP `query_audit` `shape="tree"` path. (The 403 is orthogonal to the cross-tenant boundary below, which is always enforced from the JWT.)
+> **RBAC: `tenant_admin` required (#1843).** Replaying an *arbitrary* `<session-id>` reconstructs another principal's full session trace — the same privileged forensic act that the MCP [`meho_audit_replay`](#mehoauditreplay-tenant_admin-cross-session) tool gates at `tenant_admin`. The REST route (and so this CLI verb) therefore also requires `tenant_admin`: a `read_only` or `operator` JWT gets `403`. This keeps the REST/CLI surface no more permissive than MCP. The flat query verbs (`meho audit query` / `who-touched` / `by-work-ref` / `my-recent` / `show`) stay at `operator` — and an operator can still replay *their own* session via the MCP `query_audit` `shape="tree"` path. (The 403 is orthogonal to the cross-tenant boundary below, which is always enforced from the JWT.)
 
 `<session-id>` is required and must be a UUID — the CLI validates it client-side before any network call, so a typo returns `replay requires a valid UUID <session-id>; "<value>" is not a UUID` immediately rather than after a round-trip.
 
@@ -134,7 +134,7 @@ There are two MCP entry points for replay, split by role and scope. The split is
 | Tool | Role | Scope | Shape |
 |---|---|---|---|
 | `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count}` |
-| `meho.audit.replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count}` |
+| `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count}` |
 
 ### `query_audit` with `shape:"tree"` (operator, self-session-only)
 
@@ -152,13 +152,13 @@ The narrow-waist [`query_audit`](./audit-query.md#mcp-agent-surface) tool grows 
 
 The tree path is strictly self-session: `agent_session_id` must be present **and** equal to the caller's own bound MCP session id. Any other value — or absence — is rejected with JSON-RPC `-32602`. This is intentionally stricter than the flat path (which already returns other in-tenant principals' rows): an operator can replay their own trace, but replaying another session needs the admin tool.
 
-### `meho.audit.replay` (tenant_admin, cross-session)
+### `meho_audit_replay` (tenant_admin, cross-session)
 
-`meho.audit.replay` is the `tenant_admin` escalation for replaying **any** session in the tenant — the forensic-investigation tool:
+`meho_audit_replay` is the `tenant_admin` escalation for replaying **any** session in the tenant — the forensic-investigation tool:
 
 ```json
 {
-  "name": "meho.audit.replay",
+  "name": "meho_audit_replay",
   "arguments": {
     "session_id": "<the session to investigate>",
     "max_depth": 20
@@ -171,7 +171,7 @@ The tree path is strictly self-session: `agent_session_id` must be present **and
 ### When to use which
 
 - **Replaying your own run** (an agent debugging its own trace) → `query_audit` with `shape:"tree"`. Operator role, no escalation.
-- **Investigating someone else's session** (an admin reviewing what an agent did after the fact) → `meho.audit.replay`. Requires `tenant_admin`.
+- **Investigating someone else's session** (an admin reviewing what an agent did after the fact) → `meho_audit_replay`. Requires `tenant_admin`.
 - **A flat filtered list rather than the tree** → `query_audit` with the default `shape:"flat"` (or omit `shape`) and the `agent_session_id` filter — the MCP equivalent of `meho audit query --session-id`.
 
 Both tree paths reject an over-cap session with `-32602` (`session_too_large`) — the MCP analogue of the CLI/REST 413, since the MCP transport has no streaming body for a partial response.
@@ -280,7 +280,7 @@ Replay is tenant-scoped exactly like every other audit surface — there is **no
 - A `session_id` that belongs to another tenant — or one that does not exist — yields `root=[]` / `row_count=0`, **never a 404**. A foreign session is indistinguishable from an empty one, so existence never leaks across tenants (the same non-leakage posture `meho audit show` takes for cross-tenant audit ids).
 - The `tenant_id` in the echoed envelope is a confirmation of the boundary the replay ran under, not a value the caller chose.
 
-To replay another tenant's session you need a `tenant_admin` JWT for that tenant (#1843) — there is no cross-tenant capability, and replay is `tenant_admin`-gated on every surface (REST/CLI and the MCP `meho.audit.replay` tool alike).
+To replay another tenant's session you need a `tenant_admin` JWT for that tenant (#1843) — there is no cross-tenant capability, and replay is `tenant_admin`-gated on every surface (REST/CLI and the MCP `meho_audit_replay` tool alike).
 
 ### The 10000-row cap
 

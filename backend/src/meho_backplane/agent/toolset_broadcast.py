@@ -35,7 +35,7 @@ from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.server import McpInvalidParamsError, McpRateLimitedError
 
 # Imported for its registration side effect: importing the module runs the
-# ``register_mcp_tool`` calls for ``meho.broadcast.{announce,recent,watch}``,
+# ``register_mcp_tool`` calls for ``meho_broadcast_{announce,recent,watch}``,
 # so :func:`get_tool` can resolve their (schema, handler) pairs below.
 from meho_backplane.mcp.tools import broadcast as _broadcast_mcp_tools  # noqa: F401
 from meho_backplane.operations._audit import work_ref_var
@@ -43,17 +43,17 @@ from meho_backplane.operations._audit import work_ref_var
 __all__ = ["build_broadcast_meta_tools"]
 
 
-#: Agent-facing tool names. Underscore convention (matching the dispatch
-#: tools) rather than the MCP ``meho.broadcast.*`` dotted names, so a
+#: Agent-facing tool names. Bare underscore convention (matching the
+#: dispatch tools) rather than the ``meho_``-prefixed MCP names, so a
 #: definition author's ``meta_tools`` allow-list reads uniformly.
 _BROADCAST_ANNOUNCE = "broadcast_announce"
 _BROADCAST_RECENT = "broadcast_recent"
 _BROADCAST_WATCH = "broadcast_watch"
 
 #: The MCP tools whose registered (schema, handler) the bridge reuses.
-_MCP_BROADCAST_ANNOUNCE = "meho.broadcast.announce"
-_MCP_BROADCAST_RECENT = "meho.broadcast.recent"
-_MCP_BROADCAST_WATCH = "meho.broadcast.watch"
+_MCP_BROADCAST_ANNOUNCE = "meho_broadcast_announce"
+_MCP_BROADCAST_RECENT = "meho_broadcast_recent"
+_MCP_BROADCAST_WATCH = "meho_broadcast_watch"
 
 #: Announce arguments the run supplies for itself from the run context, so
 #: they are stripped from the model-facing schema: the run knows its own id
@@ -71,7 +71,7 @@ def _mcp_broadcast_tool(name: str) -> tuple[dict[str, Any], _MetaToolHandler]:
     tool's ``input_schema``; a bridged tool that carries one 400s the whole
     ``tools`` array at model-init, so every hosted run dies before its first
     turn regardless of what the run itself asked for (#2644 —
-    ``meho.broadcast.watch``'s ``cursor``/``since_cursor`` XOR was the
+    ``meho_broadcast_watch``'s ``cursor``/``since_cursor`` XOR was the
     offender). Publishing the wire shape keeps the bridge on the same
     chokepoint the MCP surface already goes through, so a future bridged tool
     inherits the guarantee. The registered ``inputSchema`` is untouched and

@@ -22,7 +22,7 @@ regression guard: :meth:`~meho_backplane.mcp.registry.ToolDefinition.to_wire`
 has stripped top-level combinators since #905, so the only way to reintroduce
 one is to bypass ``to_wire`` — which is exactly what the agent bridge did
 until #2644 (it deep-copied the *registered* ``inputSchema``, republishing
-``meho.broadcast.watch``'s ``cursor``/``since_cursor`` XOR and killing every
+``meho_broadcast_watch``'s ``cursor``/``since_cursor`` XOR and killing every
 hosted Anthropic run at model-init with ``turns: 0``).
 
 **Registered schemas are deliberately out of scope.** Eight registered
@@ -43,6 +43,7 @@ capability-gated tools an unprovisioned operator never sees.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from meho_backplane.agent.meta_tool import MetaToolSpec
@@ -157,4 +158,48 @@ def test_default_toolset_assembles_only_publishable_schemas() -> None:
     }
     assert offenders == {}, (
         f"the default agent tool list carries schemas the Messages API rejects: {offenders}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool *names* — the second Anthropic-client conformance axis (#2745)
+# ---------------------------------------------------------------------------
+
+#: The Anthropic tool-name constraint (Messages API ``tools[].name``).
+#: Claude's frontend (claude.ai / Claude Desktop) enforces the same pattern
+#: on every remote-MCP tool name and rejects the ENTIRE toolset when a single
+#: name fails — the #2666 smoke test saw a fully authenticated connector
+#: whose chats surfaced zero tools because 62 dotted ``meho.*`` names failed
+#: validation. #2745 renamed them to underscore-only names; this sweep makes
+#: the constraint machine-checked so a future tool registration can never
+#: reintroduce the failure class.
+_TOOL_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def test_mcp_tool_names_match_anthropic_pattern() -> None:
+    """Every registered MCP tool name satisfies ``^[a-zA-Z0-9_-]{1,64}$``.
+
+    All-or-nothing on the client side: one invalid name withholds the whole
+    connector toolset from every conversation, so this guard is per-name but
+    the blast radius of a regression is the full surface.
+    """
+    offenders = [
+        defn.name for defn in _registered_tools() if not _TOOL_NAME_PATTERN.match(defn.name)
+    ]
+    assert offenders == [], (
+        "MCP tool names violate the Anthropic tool-name pattern "
+        f"^[a-zA-Z0-9_-]{{1,64}}$ (one offender hides ALL tools from "
+        f"Claude Desktop / claude.ai chats): {offenders}"
+    )
+
+
+def test_agent_meta_tool_names_match_anthropic_pattern() -> None:
+    """Every agent meta-tool name satisfies the same constraint.
+
+    The hosted-agent surface hands these names to the Messages API
+    ``tools[].name`` field directly, which documents the identical pattern.
+    """
+    offenders = [spec.name for spec in _agent_catalog() if not _TOOL_NAME_PATTERN.match(spec.name)]
+    assert offenders == [], (
+        f"agent meta-tool names violate the Anthropic tool-name pattern: {offenders}"
     )

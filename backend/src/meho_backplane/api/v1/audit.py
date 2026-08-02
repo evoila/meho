@@ -52,10 +52,10 @@ audit-surface identity:
 
 * ``audit_op_id`` — the four query routes write under
   ``"meho.audit.query"`` (regardless of which one the operator hit);
-  the replay route writes under ``"meho.audit.replay"``. Operators
+  the replay route writes under ``"meho_audit_replay"``. Operators
   querying ``audit_log`` for "everyone who used the audit-query
   surface" filter on ``payload->>'op_id' = 'meho.audit.query'``, and
-  on ``'meho.audit.replay'`` for replay usage.
+  on ``'meho_audit_replay'`` for replay usage.
 * ``audit_op_class = "audit_query"`` — bound by *every* route
   (including replay). It flips the broadcast event into aggregate-only
   mode per :func:`~meho_backplane.broadcast.events.classify_op`
@@ -88,7 +88,7 @@ The **cross-session replay** route
 session trace — a privileged forensic act. It requires ``tenant_admin``
 (#1843): ``read_only`` and ``operator`` get 403; ``tenant_admin`` gets
 200. This aligns the REST surface with the MCP posture, where
-cross-session replay is the ``tenant_admin``-gated ``meho.audit.replay``
+cross-session replay is the ``tenant_admin``-gated ``meho_audit_replay``
 tool (the operator-level ``query_audit`` ``shape="tree"`` path replays
 *only your own* session). Before #1843 the REST route gated cross-session
 replay at ``operator``, making the web/CLI surface more permissive than
@@ -154,7 +154,7 @@ _require_operator = Depends(require_role(TenantRole.OPERATOR))
 #: RBAC gate for the cross-session replay route (#1843). Replaying an
 #: *arbitrary* ``session_id`` exposes another principal's full session
 #: trace, so it is a ``tenant_admin`` forensic act — matching the MCP
-#: ``meho.audit.replay`` tool and ``docs/cross-repo/audit-replay.md``.
+#: ``meho_audit_replay`` tool and ``docs/cross-repo/audit-replay.md``.
 #: The operator-level paths above stay self-/flat-scoped.
 _require_tenant_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 
@@ -170,7 +170,7 @@ _AUDIT_QUERY_OP_ID: Final[str] = "meho.audit.query"
 #: from flat-query usage in ``audit_log``; it shares the same
 #: ``op_class="audit_query"`` so the broadcast event stays aggregate-
 #: only (no ``ReplayNode`` tree in the SSE / Slack payload).
-_AUDIT_REPLAY_OP_ID: Final[str] = "meho.audit.replay"
+_AUDIT_REPLAY_OP_ID: Final[str] = "meho_audit_replay"
 
 #: Hard cap on the number of anchor rows a single replay may carry. A
 #: session above this returns 413 from the route's count-first guard
@@ -437,7 +437,7 @@ async def replay(
     *arbitrary* ``session_id`` and reconstructs another principal's full
     session trace — a privileged forensic act, not self-service. It
     therefore gates at ``tenant_admin`` (``read_only`` / ``operator`` →
-    403), matching the MCP ``meho.audit.replay`` tool and
+    403), matching the MCP ``meho_audit_replay`` tool and
     ``docs/cross-repo/audit-replay.md``. An operator replaying *their
     own* session uses the MCP ``query_audit`` ``shape="tree"`` path
     instead (operator-level, self-session-only). Cross-tenant isolation

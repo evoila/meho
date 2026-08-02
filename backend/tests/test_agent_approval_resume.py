@@ -17,7 +17,7 @@ Covers the four acceptance criteria the issue body specifies:
    decision.
 4. The test below pauses an agent run → operator approves via the
    :func:`~meho_backplane.operations.approval_queue.approve_request` /
-   ``broadcast_publish_event`` path the ``/decide`` and MCP ``meho.approvals.*``
+   ``broadcast_publish_event`` path the ``/decide`` and MCP ``meho_approvals_*``
    handlers use (**not** the REST ``/approve+params`` re-dispatch express lane)
    → the agent run resumes and the op executes with the correct audit shape.
 
@@ -358,7 +358,7 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
        ``awaiting_approval`` with an ``approval_request_id``.
     3. Operator flips the row to ``approved`` (the
        :func:`~meho_backplane.operations.approval_queue.approve_request`
-       call the ``/decide`` route + MCP ``meho.approvals.approve`` use —
+       call the ``/decide`` route + MCP ``meho_approvals_approve`` use —
        NOT the REST ``/approve+params`` re-dispatch express lane).
     4. The broadcast publishes ``approval.approved`` for the request.
     5. The agent's wait observes the event and the wrapper re-invokes
@@ -460,7 +460,7 @@ async def test_resume_re_dispatches_on_approval_via_decide_path(
     approval_request_id = uuid.UUID(first.extras["approval_request_id"])
 
     # Step 2: a distinct human operator approves via the operator-decision
-    # path. This is the path /decide (REST) and meho.approvals.approve
+    # path. This is the path /decide (REST) and meho_approvals_approve
     # (MCP) take -- the ``approve_request`` call by id alone, **without**
     # the params re-dispatch the legacy REST /approve+params route does.
     # The reviewer must differ from the agent requester (self-approval

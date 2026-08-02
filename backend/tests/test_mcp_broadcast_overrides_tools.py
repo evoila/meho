@@ -5,12 +5,12 @@
 
 Coverage matrix (Task #382 acceptance criteria):
 
-* All three tools (``meho.broadcast.overrides.list/set/remove``) are
+* All three tools (``meho_broadcast_overrides_list/set/remove``) are
   registered with ``required_role=TENANT_ADMIN`` -- visible in
   ``tools/list`` only for tenant_admin operators.
 * ``operator``-role JWTs see ``tools/list`` without the three tools
   (registry filter), AND a direct ``tools/call`` against
-  ``meho.broadcast.overrides.set`` is rejected by the dispatcher's
+  ``meho_broadcast_overrides_set`` is rejected by the dispatcher's
   call-time re-check.
 * Tenant-admin happy paths: list / set / remove round-trip in-process
   through the T4 ``*_impl`` functions, producing the same DB rows the
@@ -104,7 +104,7 @@ async def _override_rows() -> list[BroadcastOverride]:
 def test_tools_list_exposes_three_override_tools_to_admin(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """Tenant-admin sees all three ``meho.broadcast.overrides.*`` tools."""
+    """Tenant-admin sees all three ``meho_broadcast_overrides_*`` tools."""
     client, _op = client_with_operator
     resp = post_mcp(
         client,
@@ -113,9 +113,9 @@ def test_tools_list_exposes_three_override_tools_to_admin(
     assert resp.status_code == 200
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.overrides.list" in names
-    assert "meho.broadcast.overrides.set" in names
-    assert "meho.broadcast.overrides.remove" in names
+    assert "meho_broadcast_overrides_list" in names
+    assert "meho_broadcast_overrides_set" in names
+    assert "meho_broadcast_overrides_remove" in names
 
 
 @pytest.mark.parametrize(
@@ -140,9 +140,9 @@ def test_tools_list_hides_override_tools_from_non_admin(
     assert resp.status_code == 200
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.overrides.list" not in names
-    assert "meho.broadcast.overrides.set" not in names
-    assert "meho.broadcast.overrides.remove" not in names
+    assert "meho_broadcast_overrides_list" not in names
+    assert "meho_broadcast_overrides_set" not in names
+    assert "meho_broadcast_overrides_remove" not in names
 
 
 @pytest.mark.parametrize(
@@ -170,7 +170,7 @@ def test_non_admin_tools_call_set_is_rejected(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {
                     "op_id_pattern": "vault.kv.*",
                     "detail": "aggregate",
@@ -209,7 +209,7 @@ async def test_set_creates_row_returns_override_dict(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {
                     "op_id_pattern": "k8s.configmap.info",
                     "scope_field": "namespace",
@@ -226,7 +226,7 @@ async def test_set_creates_row_returns_override_dict(
     assert override["detail"] == "aggregate"
     assert uuid.UUID(override["id"])
     # G0.9.1-T7 (#779): top-level ``override_id`` mirrors the
-    # ``meho.broadcast.overrides.remove`` arg shape so an agent can
+    # ``meho_broadcast_overrides_remove`` arg shape so an agent can
     # round-trip set -> remove with a single read off the response.
     assert result["override_id"] == override["id"]
     rows = await _override_rows()
@@ -253,7 +253,7 @@ async def test_list_returns_own_tenant_rows(
                 "id": 1,
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.broadcast.overrides.set",
+                    "name": "meho_broadcast_overrides_set",
                     "arguments": {"op_id_pattern": pattern, "detail": "aggregate"},
                 },
             },
@@ -266,7 +266,7 @@ async def test_list_returns_own_tenant_rows(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.list",
+                "name": "meho_broadcast_overrides_list",
                 "arguments": {},
             },
         },
@@ -294,7 +294,7 @@ async def test_remove_deletes_row(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {"op_id_pattern": "vault.kv.*", "detail": "aggregate"},
             },
         },
@@ -308,7 +308,7 @@ async def test_remove_deletes_row(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.remove",
+                "name": "meho_broadcast_overrides_remove",
                 "arguments": {"override_id": override_id},
             },
         },
@@ -335,7 +335,7 @@ async def test_set_remove_round_trip_uses_top_level_override_id(
     response at the same path ``.remove`` consumes -- the sibling-verb
     asymmetry the consumer feedback flagged. The handler returns the
     id under top-level ``override_id`` (mirroring the ``override_id``
-    argument of ``meho.broadcast.overrides.remove``); the nested
+    argument of ``meho_broadcast_overrides_remove``); the nested
     ``override`` envelope is preserved for backwards compatibility
     with v0.3.1 clients that read ``.override.id``.
     """
@@ -347,7 +347,7 @@ async def test_set_remove_round_trip_uses_top_level_override_id(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {"op_id_pattern": "k8s.pod.*", "detail": "aggregate"},
             },
         },
@@ -362,7 +362,7 @@ async def test_set_remove_round_trip_uses_top_level_override_id(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.remove",
+                "name": "meho_broadcast_overrides_remove",
                 "arguments": {"override_id": create_result["override_id"]},
             },
         },
@@ -398,7 +398,7 @@ def test_set_duplicate_maps_to_invalid_params_409(
         "id": 1,
         "method": "tools/call",
         "params": {
-            "name": "meho.broadcast.overrides.set",
+            "name": "meho_broadcast_overrides_set",
             "arguments": {
                 "op_id_pattern": "k8s.configmap.info",
                 "scope_field": "namespace",
@@ -431,7 +431,7 @@ def test_remove_unknown_id_maps_to_invalid_params_404(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.remove",
+                "name": "meho_broadcast_overrides_remove",
                 "arguments": {"override_id": str(uuid.uuid4())},
             },
         },
@@ -459,7 +459,7 @@ def test_set_regex_chars_rejected_by_pydantic(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {
                     "op_id_pattern": "vault\\.kv\\..+",
                     "detail": "aggregate",
@@ -488,7 +488,7 @@ def test_remove_with_malformed_uuid_rejected(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.remove",
+                "name": "meho_broadcast_overrides_remove",
                 "arguments": {"override_id": "not-a-uuid"},
             },
         },
@@ -515,7 +515,7 @@ async def test_set_via_mcp_writes_audit_row_with_override_diff(
 ) -> None:
     """The MCP set tool produces the same audit-row diff as the REST POST.
 
-    Specifically: ``audit_log.payload`` carries ``op_id=meho.broadcast.overrides.set``,
+    Specifically: ``audit_log.payload`` carries ``op_id=meho_broadcast_overrides_set``,
     ``op_class=write``, and the override-diff fragment
     (``override_op="set"`` / ``override_id`` / ``override_pattern`` /
     ``override_detail``) -- the contextvar binding in
@@ -530,7 +530,7 @@ async def test_set_via_mcp_writes_audit_row_with_override_diff(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {"op_id_pattern": "vault.kv.*", "detail": "full"},
             },
         },
@@ -539,15 +539,15 @@ async def test_set_via_mcp_writes_audit_row_with_override_diff(
     override_id = _result_dict(resp)["override"]["id"]
     rows = await _audit_rows()
     # The MCP envelope writes one row with ``method="MCP"`` and path
-    # ``/mcp/tools/call/meho.broadcast.overrides.set``.
+    # ``/mcp/tools/call/meho_broadcast_overrides_set``.
     mcp_rows = [
         r
         for r in rows
-        if r.method == "MCP" and r.path == "/mcp/tools/call/meho.broadcast.overrides.set"
+        if r.method == "MCP" and r.path == "/mcp/tools/call/meho_broadcast_overrides_set"
     ]
     assert len(mcp_rows) == 1
     payload = mcp_rows[0].payload
-    assert payload["op_id"] == "meho.broadcast.overrides.set"
+    assert payload["op_id"] == "meho_broadcast_overrides_set"
     assert payload["op_class"] == "write"
     assert payload["override_op"] == "set"
     assert payload["override_id"] == override_id
@@ -600,7 +600,7 @@ async def test_list_returns_only_own_tenant_rows(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.list",
+                "name": "meho_broadcast_overrides_list",
                 "arguments": {},
             },
         },
@@ -648,7 +648,7 @@ async def test_set_via_mcp_invalidates_tenant_override_cache(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {
                     "op_id_pattern": "vault.kv.*",
                     "detail": "aggregate",
@@ -697,7 +697,7 @@ async def test_remove_via_mcp_invalidates_tenant_override_cache(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {"op_id_pattern": "audit.*", "detail": "aggregate"},
             },
         },
@@ -722,7 +722,7 @@ async def test_remove_via_mcp_invalidates_tenant_override_cache(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.remove",
+                "name": "meho_broadcast_overrides_remove",
                 "arguments": {"override_id": override_id},
             },
         },
@@ -769,7 +769,7 @@ def test_set_half_set_scope_pair_rejected(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.broadcast.overrides.set",
+                "name": "meho_broadcast_overrides_set",
                 "arguments": {
                     "op_id_pattern": "k8s.configmap.info",
                     "scope_field": "namespace",
@@ -820,9 +820,9 @@ def test_input_schemas_are_strict_draft_2020_12(
     )
     tools = {t["name"]: t for t in resp.json()["result"]["tools"]}
     for name in (
-        "meho.broadcast.overrides.list",
-        "meho.broadcast.overrides.set",
-        "meho.broadcast.overrides.remove",
+        "meho_broadcast_overrides_list",
+        "meho_broadcast_overrides_set",
+        "meho_broadcast_overrides_remove",
     ):
         schema = tools[name]["inputSchema"]
         assert schema["type"] == "object"

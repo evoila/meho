@@ -10,7 +10,7 @@
   session reconstructs another principal's full session trace -- a privileged
   forensic act -- so this is the one audit surface that is admin-only on read,
   matching the REST replay route's ``tenant_admin`` gate and the MCP
-  ``meho.audit.replay`` posture.
+  ``meho_audit_replay`` posture.
 
   Context variables:
     session_id -- str: the session id that was requested (echoed back)

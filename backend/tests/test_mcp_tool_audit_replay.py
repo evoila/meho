@@ -5,7 +5,7 @@
 
 Two surfaces, one substrate (T3 :func:`replay_session`):
 
-* ``meho.audit.replay`` — a ``tenant_admin`` cross-session forensic
+* ``meho_audit_replay`` — a ``tenant_admin`` cross-session forensic
   replay meta-tool. RBAC gate, tenant scoping, count-first 10k guard,
   and tree shape.
 * ``query_audit`` with ``shape="tree"`` — an ``operator`` self-session
@@ -86,7 +86,7 @@ def _two_level_tree() -> list[ReplayNode]:
 
 
 # ---------------------------------------------------------------------------
-# meho.audit.replay — registration + RBAC
+# meho_audit_replay — registration + RBAC
 # ---------------------------------------------------------------------------
 
 
@@ -97,7 +97,7 @@ def test_replay_tool_registered_as_tenant_admin_audit_query() -> None:
     contract, and (via the matching ``meho.audit.`` arm in
     :func:`classify_op`) the MCP broadcast path's aggregate-only redaction.
     """
-    entry = get_tool("meho.audit.replay")
+    entry = get_tool("meho_audit_replay")
     assert entry is not None
     defn, _handler = entry
     assert defn.op_class == "audit_query"
@@ -112,11 +112,11 @@ def test_replay_tool_registered_as_tenant_admin_audit_query() -> None:
 def test_replay_tool_in_tools_list_for_admin(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``tenant_admin`` sees ``meho.audit.replay`` in the catalogue."""
+    """``tenant_admin`` sees ``meho_audit_replay`` in the catalogue."""
     client, _op = client_with_operator
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.audit.replay" in names
+    assert "meho_audit_replay" in names
 
 
 @pytest.mark.parametrize(
@@ -131,7 +131,7 @@ def test_replay_tool_hidden_from_operator_tools_list(
     client, _op = client_with_operator
     response = post_mcp(client, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.audit.replay" not in names
+    assert "meho_audit_replay" not in names
 
 
 @pytest.mark.parametrize(
@@ -153,7 +153,7 @@ def test_replay_tool_forbidden_for_non_admin(
                 "id": 3,
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": _SESSION_ID},
                 },
             },
@@ -165,7 +165,7 @@ def test_replay_tool_forbidden_for_non_admin(
 
 
 # ---------------------------------------------------------------------------
-# meho.audit.replay — happy path + tenant scoping
+# meho_audit_replay — happy path + tenant scoping
 # ---------------------------------------------------------------------------
 
 
@@ -189,7 +189,7 @@ def test_replay_admin_returns_tree_envelope(
                 "id": 10,
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": _SESSION_ID},
                 },
             },
@@ -235,7 +235,7 @@ def test_replay_admin_tenant_scope_from_jwt_not_args(
                 "id": 11,
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": _OTHER_SESSION_ID},
                 },
             },
@@ -267,7 +267,7 @@ def test_replay_admin_max_depth_passed_through(
                 "id": 12,
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": _SESSION_ID, "max_depth": 5},
                 },
             },
@@ -281,7 +281,7 @@ def test_replay_admin_max_depth_passed_through(
                 "id": 13,
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": _SESSION_ID},
                 },
             },
@@ -313,7 +313,7 @@ def test_replay_admin_session_too_large_returns_invalid_params(
                 "id": 14,
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": _SESSION_ID},
                 },
             },
@@ -340,7 +340,7 @@ def test_replay_admin_requires_session_id(
             "jsonrpc": "2.0",
             "id": 15,
             "method": "tools/call",
-            "params": {"name": "meho.audit.replay", "arguments": {}},
+            "params": {"name": "meho_audit_replay", "arguments": {}},
         },
     )
     assert response.json()["error"]["code"] == INVALID_PARAMS
@@ -363,7 +363,7 @@ def test_replay_admin_rejects_additional_properties(
             "id": 16,
             "method": "tools/call",
             "params": {
-                "name": "meho.audit.replay",
+                "name": "meho_audit_replay",
                 "arguments": {
                     "session_id": _SESSION_ID,
                     "tenant_id": "11111111-1111-1111-1111-111111111111",

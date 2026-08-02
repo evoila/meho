@@ -9,7 +9,7 @@ inserts :class:`~meho_backplane.db.models.GraphNode` rows — it runs from
 the CLI verb ``meho topology refresh <target>`` and writes auto-derived
 nodes. There is **no MCP entry point** to create a node directly, so a
 fresh tenant (zero nodes; no probe has run yet) cannot reach a working
-topology state via MCP: ``meho.topology.annotate`` requires both
+topology state via MCP: ``meho_topology_annotate`` requires both
 endpoints to already exist as ``graph_node`` rows and surfaces
 ``NodeNotFoundError`` ("no graph_node matched name 'rdc-vault' in this
 tenant") with no in-tool remediation.

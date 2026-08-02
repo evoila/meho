@@ -134,7 +134,7 @@ Splits the unassigned-op set into batches of `batch_size` (default `50`). Each b
 llm_call_count = 1 + ceil(op_count / batch_size)
 ```
 
-One Pass-1 call plus `ceil(N / batch_size)` Pass-2 calls. For vCenter's `vcenter.yaml` (~1,275 ops at `batch_size=50`) that's `1 + 26 = 27` calls per fresh ingest. The audit row T3 writes (`meho.connector.llm_grouping`) records the actual count for cost tracking.
+One Pass-1 call plus `ceil(N / batch_size)` Pass-2 calls. For vCenter's `vcenter.yaml` (~1,275 ops at `batch_size=50`) that's `1 + 26 = 27` calls per fresh ingest. The audit row T3 writes (`meho_connector_llm_grouping`) records the actual count for cost tracking.
 
 ### Two distinct system prompts
 
@@ -188,7 +188,7 @@ Operator edits routed through `ReviewService.edit_op(...)` set columns the parse
 | `requires_approval` | Forces `status='pending'` on dispatch + an explicit operator approval before execution. Orthogonal to `safety_level`. |
 | `is_enabled` | Re-enable / disable a single op without flipping the whole connector. |
 
-`ReviewService.edit_group(...)` mirrors the same shape for the group's `name` and `when_to_use` hint. Each edit writes a single `meho.connector.edit_op` / `meho.connector.edit_group` audit row in the same transaction as the column update. Operator-edit audit emission means [G8 audit replay](https://github.com/evoila/meho/issues/218) can reconstruct exactly which operator polished which group's `when_to_use` at which time.
+`ReviewService.edit_group(...)` mirrors the same shape for the group's `name` and `when_to_use` hint. Each edit writes a single `meho_connector_edit_op` / `meho_connector_edit_group` audit row in the same transaction as the column update. Operator-edit audit emission means [G8 audit replay](https://github.com/evoila/meho/issues/218) can reconstruct exactly which operator polished which group's `when_to_use` at which time.
 
 ### PATCH semantics
 
@@ -200,12 +200,12 @@ Every transition writes exactly one `audit_log` row with an `op_id` from the `me
 
 | Action | `op_id` | Op-class |
 |---|---|---|
-| `ingest()` | `meho.connector.ingest` | write |
-| `edit_group()` | `meho.connector.edit_group` | write |
-| `edit_op()` | `meho.connector.edit_op` | write |
-| `enable_connector()` | `meho.connector.enable` | write |
-| `disable_connector()` | `meho.connector.disable` | write |
-| `run_llm_grouping()` | `meho.connector.llm_grouping` | write |
+| `ingest()` | `meho_connector_ingest` | write |
+| `edit_group()` | `meho_connector_edit_group` | write |
+| `edit_op()` | `meho_connector_edit_op` | write |
+| `enable_connector()` | `meho_connector_enable` | write |
+| `disable_connector()` | `meho_connector_disable` | write |
+| `run_llm_grouping()` | `meho_connector_llm_grouping` | write |
 
 Read paths (`list_ingested_connectors`, `get_review_payload`) follow the chassis convention of not emitting an audit row — list queries are too noisy to audit per-call. The G8 audit-replay surface reconstructs the connector's review history by walking the write-side rows.
 
@@ -253,13 +253,13 @@ Defined in [`mcp/tools/connector_admin.py`](../../backend/src/meho_backplane/mcp
 
 | Tool | `required_role` | Wraps |
 |---|---|---|
-| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` |
-| `meho.connector.list` | `operator` | `list_ingested_connectors()` |
-| `meho.connector.review` | `operator` | `ReviewService.get_review_payload()` |
-| `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
-| `meho.connector.edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
-| `meho.connector.enable` | `tenant_admin` | `ReviewService.enable_connector()` |
-| `meho.connector.disable` | `tenant_admin` | `ReviewService.disable_connector()` |
+| `meho_connector_ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` |
+| `meho_connector_list` | `operator` | `list_ingested_connectors()` |
+| `meho_connector_review` | `operator` | `ReviewService.get_review_payload()` |
+| `meho_connector_edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
+| `meho_connector_edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
+| `meho_connector_enable` | `tenant_admin` | `ReviewService.enable_connector()` |
+| `meho_connector_disable` | `tenant_admin` | `ReviewService.disable_connector()` |
 
 These are **administrative** MCP tools per [CLAUDE.md](../../CLAUDE.md)'s "What MEHO is NOT" note — distinct from the agent-surface meta-tools. The registry's `all_tools_for(operator)` filter hides them from `tools/list` for operators whose role doesn't meet `required_role`, and the `handle_tools_call` dispatcher re-checks the rank at invocation so a client that guesses a hidden tool name is still rejected.
 

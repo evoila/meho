@@ -21,7 +21,7 @@ the dispatcher routes to with ``connector_instance=None`` /
 ``target=None`` — the graph is tenant-scoped state, not a probed target.
 
 Why these ops exist as dispatchable descriptors at all: routing the MCP
-write fronts (``meho.topology.annotate`` / ``.create_node`` /
+write fronts (``meho_topology_annotate`` / ``.create_node`` /
 ``.unannotate``) through :func:`~meho_backplane.operations.dispatch`
 puts them behind :func:`~meho_backplane.operations._validate.policy_gate`
 — the single seam where an AGENT principal's ``caution``-level write

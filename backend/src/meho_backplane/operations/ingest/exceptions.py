@@ -328,7 +328,7 @@ class OpIdCollision(ValueError):  # noqa: N818 -- Task #403 API contract pins th
           both remedies: re-run under the **original** spec URI (a
           same-URI re-ingest updates the rows in place instead of
           colliding), or clear the stranded rows with the
-          ``meho.connector.delete`` MCP tool (omit ``tenant_id`` for the
+          ``meho_connector_delete`` MCP tool (omit ``tenant_id`` for the
           built-in/global scope) and retry.
         * **Within-batch** -- two ops in one spec share an ``op_id``;
           the spec itself has to change (rename one op or split it) since
@@ -339,7 +339,7 @@ class OpIdCollision(ValueError):  # noqa: N818 -- Task #403 API contract pins th
                 "Re-run the ingest with the original spec URI -- a same-URI "
                 "re-ingest updates the persisted rows in place instead of "
                 "colliding. If the rows are debris from a crashed ingest, "
-                "clear them first with the meho.connector.delete MCP tool "
+                "clear them first with the meho_connector_delete MCP tool "
                 "(omit tenant_id for the built-in/global scope), then retry."
             )
         return (
@@ -723,7 +723,7 @@ class ProductImplIdMismatch(ValueError):  # noqa: N818 -- the mismatch *is* the 
     Raised at the single service-layer chokepoint
     :meth:`~meho_backplane.operations.ingest.IngestionPipelineService.ingest`
     **before any DB write or spec fetch**, so every ingest entry point —
-    the REST route, the ``meho.connector.ingest`` MCP tool, and the CLI
+    the REST route, the ``meho_connector_ingest`` MCP tool, and the CLI
     verb — fails closed identically rather than only the REST boundary
     (the gap that #1816's registration hard-fail missed on the
     hand-coded-deferral path). The REST route maps it onto HTTP 422 and

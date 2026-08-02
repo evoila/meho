@@ -196,7 +196,7 @@ ordinary `source_kind="ingested"` `endpoint_descriptor` rows via G0.7 spec
 ingestion and stay browsable as profiled-dispatch breadth. They are enabled
 through the **generic review flow** — `ReviewService.enable_reads(connector_id,
 tenant_id=...)` (REST `POST /api/v1/connectors/{connector_id}/enable-reads`, MCP
-`meho.connector.enable_reads`).
+`meho_connector_enable_reads`).
 
 The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
 `SDDC_CORE_OPS` / `SDDC_CORE_GROUPS` / `SDDC_PATH_RULES` constants and the

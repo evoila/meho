@@ -220,8 +220,8 @@ _META_TOOL_CATALOG: tuple[MetaToolSpec, ...] = (
 META_TOOL_NAMES: frozenset[str] = frozenset(spec.name for spec in _META_TOOL_CATALOG)
 
 #: Meta-tools that can *execute a runbook*. Empty on purpose (#2077):
-#: runbook execution (``meho.runbook.start`` / ``meho.runbook.next`` /
-#: ``meho.runbook.abort``) is an **operator** MCP surface, not part of the
+#: runbook execution (``meho_runbook_start`` / ``meho_runbook_next`` /
+#: ``meho_runbook_abort``) is an **operator** MCP surface, not part of the
 #: agent meta-tool catalog — runbook steps are confirm-gated by design
 #: ("Only the human operator can answer — do not auto-confirm on the
 #: human's behalf"), so an autonomous loop cannot legitimately complete

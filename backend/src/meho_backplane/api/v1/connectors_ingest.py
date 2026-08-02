@@ -339,7 +339,7 @@ def get_llm_client_factory() -> LlmClientFactory:
     The HTTP route consumes it as a FastAPI dependency
     (``Depends(get_llm_client_factory)``) so tests can also override via
     :attr:`FastAPI.dependency_overrides` when convenient; the non-HTTP
-    ingest siblings (the ``meho.connector.ingest`` admin MCP tool) call
+    ingest siblings (the ``meho_connector_ingest`` admin MCP tool) call
     it directly so they share the same lifespan-wired factory the route
     sees, rather than pinning the fail-closed default.
     """
@@ -461,7 +461,7 @@ async def ingest_endpoint(
 
     Tenant scoping (#2085, superseding the #1699 divergence): the
     body's optional ``tenant_id`` selects the write scope with the
-    MCP sibling ``meho.connector.ingest``'s semantics — omitted /
+    MCP sibling ``meho_connector_ingest``'s semantics — omitted /
     ``null`` → built-in / global (``tenant_id IS NULL``), own tenant
     UUID → tenant-curated, any other UUID → **synchronous 403 on
     both branches** (#2208) via the eager route-level
@@ -1396,7 +1396,7 @@ async def edit_group_endpoint(
     """Edit a group's ``when_to_use`` / ``name`` overrides.
 
     At least one of the two body fields must be set; an empty body
-    yields 400. Writes one ``meho.connector.edit_group`` audit row
+    yields 400. Writes one ``meho_connector_edit_group`` audit row
     via the service layer. Returns 204 on success.
     """
     service = ReviewService(operator)
@@ -1435,7 +1435,7 @@ async def edit_op_endpoint(
 
     At least one of ``custom_description`` / ``safety_level`` /
     ``requires_approval`` / ``is_enabled`` must be set; an empty
-    body yields 400. Writes one ``meho.connector.edit_op`` audit
+    body yields 400. Writes one ``meho_connector_edit_op`` audit
     row. Returns 200 with an :class:`EditOpResponse` on success.
 
     G0.23-T4 (#1630) promoted the route from 204 No Content to 200
@@ -1556,12 +1556,12 @@ async def enable_reads_endpoint(
     (the #1135 global fallback, not a 404) and a label that maps to
     **both** a tenant row and a built-in row → 409
     ``connector_scope_ambiguous`` with the candidate list instead of a
-    silent flip (G0.26-T1 #1801). One ``meho.connector.enable_reads``
+    silent flip (G0.26-T1 #1801). One ``meho_connector_enable_reads``
     audit row is written when at least one op flips.
 
     Tenant scoping (#1699 contract): no ``tenant_id`` parameter — the
     scope is always the calling operator's tenant from the JWT. The
-    MCP sibling ``meho.connector.enable_reads`` accepts an optional
+    MCP sibling ``meho_connector_enable_reads`` accepts an optional
     ``tenant_id`` for the built-in / global scope (tenant_admin only).
 
     The optional ``prefer=tenant|builtin`` query param (G0.26-T? #2029)
@@ -1641,7 +1641,7 @@ async def delete_endpoint(
     aborted ingests leave behind, and for removing an unwanted
     ingested connector outright. Removes the connector's
     ``endpoint_descriptor`` + ``operation_group`` rows and writes one
-    ``meho.connector.delete`` audit row in the same transaction; when
+    ``meho_connector_delete`` audit row in the same transaction; when
     no rows remain for the triple under any scope, the
     auto-registered ``GenericRestConnector`` shim is also popped from
     the v2 registry (hand-coded connector classes are never
@@ -1652,7 +1652,7 @@ async def delete_endpoint(
     ``tenant_id`` parameter — the delete scope is always the calling
     operator's tenant from the JWT. Built-in / global connectors
     (``tenant_id IS NULL`` rows) are deleted via the MCP sibling
-    ``meho.connector.delete`` with ``tenant_id`` omitted
+    ``meho_connector_delete`` with ``tenant_id`` omitted
     (tenant_admin only). Unknown ids, cross-tenant probes, and rows
     visible only under a scope this route cannot name all collapse
     into the same 404 the other connector routes use; a repeat

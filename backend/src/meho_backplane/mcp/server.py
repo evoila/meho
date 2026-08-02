@@ -181,7 +181,7 @@ def register_method(name: str, handler: _McpHandler) -> None:
     pattern. T3 (#248) builds the per-tool registry on top of this:
     ``register_mcp_tool`` registers handlers under ``tools/*`` method
     names and supplies its own RBAC / scope filter; T4 (#249) populates
-    the table with the first reference tool ``meho.status``.
+    the table with the first reference tool ``meho_status``.
 
     Raises :class:`RuntimeError` on duplicate name — handlers should be
     registered exactly once per process, at import time. The error
@@ -278,7 +278,7 @@ class McpRateLimitedError(Exception):
     or an internal error (the server is healthy and deliberately
     refusing).
 
-    The first consumer is ``meho.broadcast.announce`` (G6.5-T6 #2546):
+    The first consumer is ``meho_broadcast_announce`` (G6.5-T6 #2546):
     the announce handler translates
     :class:`~meho_backplane.broadcast.rate_limit.AnnounceRateLimitError`
     into this sentinel, passing ``data={limit, window_seconds,

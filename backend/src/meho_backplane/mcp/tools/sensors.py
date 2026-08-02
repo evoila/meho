@@ -4,13 +4,13 @@
 """Admin MCP tools for the Sensor CRUD surface (#2503).
 
 Task #2503 under Initiative #2416 (parent goal #221) -- three
-``meho.sensor.*`` tools that mirror the REST surface (``/api/v1/sensors``)
+``meho_sensor_*`` tools that mirror the REST surface (``/api/v1/sensors``)
 onto the MCP transport:
 
-* ``meho.sensor.list`` -- list the operator's tenant's sensors (with
+* ``meho_sensor_list`` -- list the operator's tenant's sensors (with
   optional status / cadence filters). Role: ``operator``.
-* ``meho.sensor.create`` -- create a sensor. Role: ``tenant_admin``.
-* ``meho.sensor.delete`` -- hard-delete a sensor by id. Role:
+* ``meho_sensor_create`` -- create a sensor. Role: ``tenant_admin``.
+* ``meho_sensor_delete`` -- hard-delete a sensor by id. Role:
   ``tenant_admin``.
 
 Three verbs (rather than one parametric tool) so an MCP client's
@@ -81,7 +81,7 @@ def _require_sensor_id(arguments: dict[str, Any]) -> uuid.UUID:
 
 
 # ---------------------------------------------------------------------------
-# meho.sensor.list
+# meho_sensor_list
 # ---------------------------------------------------------------------------
 
 
@@ -116,7 +116,7 @@ async def _list_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
-        name="meho.sensor.list",
+        name="meho_sensor_list",
         description=(
             "List sensors for the operator's tenant (Initiative #2416). "
             "Operator-level read. Returns {sensors: [sensor, ...]} sorted "
@@ -164,7 +164,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.sensor.create
+# meho_sensor_create
 # ---------------------------------------------------------------------------
 
 
@@ -223,7 +223,7 @@ async def _create_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
-        name="meho.sensor.create",
+        name="meho_sensor_create",
         description=(
             "Create one sensor under the operator's tenant (Initiative "
             "#2416). Tenant_admin only. A sensor pins an (op + args + "
@@ -329,7 +329,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.sensor.delete
+# meho_sensor_delete
 # ---------------------------------------------------------------------------
 
 
@@ -353,7 +353,7 @@ async def _delete_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="sensors",
-        name="meho.sensor.delete",
+        name="meho_sensor_delete",
         description=(
             "Hard-delete one sensor by id (Initiative #2416). Tenant_admin "
             "only. Removes the row (no tombstone). Cross-tenant / absent id "

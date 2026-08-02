@@ -237,7 +237,7 @@ the wider NSX catalog land as ordinary `source_kind="ingested"`
 Enablement is generic: the operator enables the reads through the review flow
 — `ReviewService.enable_reads(connector_id, tenant_id=...)` (REST
 `POST /api/v1/connectors/{connector_id}/enable-reads`, MCP
-`meho.connector.enable_reads`). Ingested ops land under the
+`meho_connector_enable_reads`). Ingested ops land under the
 **operator-supplied** `version` label, so a VCF-9 spec ingested as
 `version="9.1.0.0"` produces `connector_id="nsx-rest-9.1.0.0"` rather than the
 class pin's `nsx-rest-9.0` (#1530); the operator passes the `connector_id` the

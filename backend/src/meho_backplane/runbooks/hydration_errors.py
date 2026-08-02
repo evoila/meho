@@ -3,7 +3,7 @@
 
 """Shared structured-error envelope for a runbook-template hydration failure.
 
-``meho.runbook.show_template`` (REST and MCP) re-validates the stored
+``meho_runbook_show_template`` (REST and MCP) re-validates the stored
 ``runbook_templates.steps`` JSONB back through
 :class:`~meho_backplane.runbooks.schemas.RunbookTemplateBody` on every
 read (:func:`~meho_backplane.runbooks.service._steps_from_storage`). A row
@@ -97,7 +97,7 @@ def build_template_body_validation_detail(
         f"the template schema (an empty or whitespace-only step body predating "
         f"the v0.20.0 non-empty-body requirement is the known cause). Apply "
         f"Alembic migration 0054 to backfill legacy rows, or re-save the body "
-        f"via meho.runbook.edit_template / PATCH /api/v1/runbooks/templates/{slug}. "
+        f"via meho_runbook_edit_template / PATCH /api/v1/runbooks/templates/{slug}. "
         f"See {_DOCS_REF}."
     )
     return {

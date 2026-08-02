@@ -252,7 +252,7 @@ INVALID_PARAMS: int = -32602
 INTERNAL_ERROR: int = -32603
 
 #: Implementation-defined server error: a request was rejected by a
-#: per-principal rate limit (G6.5-T6 #2546, ``meho.broadcast.announce``).
+#: per-principal rate limit (G6.5-T6 #2546, ``meho_broadcast_announce``).
 #: JSON-RPC §5.1 reserves ``-32000..-32099`` for "implementation-defined
 #: server-errors"; this is the analogue of HTTP 429. Distinct from
 #: :data:`INVALID_PARAMS` (the params are well-formed; the caller is

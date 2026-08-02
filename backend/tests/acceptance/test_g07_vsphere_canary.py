@@ -1021,7 +1021,7 @@ async def test_canary_connector_is_enabled_after_review(
 async def test_canary_edit_group_writes_audit_row(
     ingested_canary: _CanaryIngestState,
 ) -> None:
-    """The ``edit_group`` call during ingest emits one ``meho.connector.edit_group`` audit row."""
+    """The ``edit_group`` call during ingest emits one ``meho_connector_edit_group`` audit row."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         # The chassis audit_log shape (lifted from the T4 unit suite):
@@ -1029,7 +1029,7 @@ async def test_canary_edit_group_writes_audit_row(
         # connector_id + group_key + fields_updated.
         stmt = select(AuditLog).where(
             AuditLog.operator_sub == _CANARY_OPERATOR_SUB,
-            AuditLog.path == "meho.connector.edit_group",
+            AuditLog.path == "meho_connector_edit_group",
         )
         result = await session.execute(stmt)
         rows = list(result.scalars().all())

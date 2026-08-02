@@ -397,7 +397,7 @@ class Settings(BaseModel):
         on every publish; T1 only carries the knob.
     broadcast_announce_rate_per_minute:
         Per-``(tenant, principal)`` fixed-window cap on
-        ``meho.broadcast.announce`` writes, enforced before the publish
+        ``meho_broadcast_announce`` writes, enforced before the publish
         (G6.5-T6 #2546). Protects the count-trimmed tenant stream
         (``BROADCAST_MAXLEN`` = 10000) from a single looping principal
         evicting the whole tenant's coordination window. Default 10 per

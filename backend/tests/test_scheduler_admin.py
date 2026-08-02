@@ -21,7 +21,7 @@ Coverage matrix:
   already-cancelled trigger is a no-op (success); cancelling a
   terminal-fired one-off returns 409 (idiomatically, ``False`` at
   service layer).
-* **MCP tools** -- the three ``meho.scheduler.*`` tools are
+* **MCP tools** -- the three ``meho_scheduler_*`` tools are
   registered, dispatch correctly, and inherit the audit contextvars.
 
 The tests run on the SQLite-backed engine from
@@ -1065,19 +1065,19 @@ async def test_rest_audit_row_is_written_on_create(client: TestClient) -> None:
 
 
 def test_mcp_tools_registered() -> None:
-    """The three meho.scheduler.* tools are registered."""
+    """The three meho_scheduler_* tools are registered."""
     # Importing the module triggers register_mcp_tool at module load.
     from meho_backplane.mcp.tools import scheduler as _scheduler_tools
 
     assert _scheduler_tools is not None
-    assert get_tool("meho.scheduler.list") is not None
-    assert get_tool("meho.scheduler.create") is not None
-    assert get_tool("meho.scheduler.cancel") is not None
+    assert get_tool("meho_scheduler_list") is not None
+    assert get_tool("meho_scheduler_create") is not None
+    assert get_tool("meho_scheduler_cancel") is not None
 
 
 @pytest.mark.asyncio
 async def test_mcp_create_dispatches_to_service() -> None:
-    """meho.scheduler.create calls the service and returns trigger_id."""
+    """meho_scheduler_create calls the service and returns trigger_id."""
     from meho_backplane.mcp.tools.scheduler import _create_handler  # type: ignore[attr-defined]
 
     def_id = await _seed_agent_definition(tenant_id=_TENANT_A, name="mcp-bot")
@@ -1102,7 +1102,7 @@ async def test_mcp_create_dispatches_to_service() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_create_rejects_cron_without_inputs() -> None:
-    """meho.scheduler.create surfaces the input-less-cron 422 as invalid-params (#2244)."""
+    """meho_scheduler_create surfaces the input-less-cron 422 as invalid-params (#2244)."""
     from meho_backplane.mcp.server import McpInvalidParamsError
     from meho_backplane.mcp.tools.scheduler import _create_handler  # type: ignore[attr-defined]
 
@@ -1126,7 +1126,7 @@ async def test_mcp_create_rejects_cron_without_inputs() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_create_rejects_event_trigger() -> None:
-    """meho.scheduler.create refuses kind=event as invalid-params (#2325).
+    """meho_scheduler_create refuses kind=event as invalid-params (#2325).
 
     Same 'event_triggers_not_implemented' code the REST route surfaces;
     kind=event stays refused until #826 wires the matcher.
@@ -1156,7 +1156,7 @@ async def test_mcp_create_rejects_event_trigger() -> None:
 async def test_mcp_create_cross_tenant_denied_for_non_platform_admin() -> None:
     """A tenant-admin of A passing tenant_id=B via MCP is refused (cross-tenant IDOR).
 
-    meho.scheduler.create requires tenant_admin, so gating cross-tenant on
+    meho_scheduler_create requires tenant_admin, so gating cross-tenant on
     tenant_admin *rank* would be dead code -- any tenant-admin could schedule a
     trigger into any tenant. Crossing the tenant boundary is a platform-level
     capability; the MCP handler now enforces the SAME shared authz seam the REST
@@ -1234,7 +1234,7 @@ async def test_mcp_create_cross_tenant_allowed_for_platform_admin() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_cancel_returns_not_found_for_cross_tenant() -> None:
-    """meho.scheduler.cancel against a cross-tenant id surfaces as not found."""
+    """meho_scheduler_cancel against a cross-tenant id surfaces as not found."""
     from meho_backplane.mcp.server import McpInvalidParamsError
     from meho_backplane.mcp.tools.scheduler import _cancel_handler  # type: ignore[attr-defined]
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``meho.memory.promote`` -- admin-only memory promotion meta-tool (G5.2-T4).
+"""``meho_memory_promote`` -- admin-only memory promotion meta-tool (G5.2-T4).
 
 The MCP twin of ``POST /api/v1/memory/{scope}/{slug}/promote`` (T4 #626).
 Lives in the **admin namespace** (``meho.*``) and is registered with
@@ -43,9 +43,9 @@ operator can tell which failure mode tripped:
 
 * :class:`InvalidPromotionStepError` -- the
   ``(source, target)`` pair isn't in the ladder.
-  Message: ``meho.memory.promote: <helper-message>``.
+  Message: ``meho_memory_promote: <helper-message>``.
 * :class:`PermissionDeniedError` -- legal step, wrong role.
-  Message: ``meho.memory.promote: insufficient_promotion_authority``.
+  Message: ``meho_memory_promote: insufficient_promotion_authority``.
 * :class:`NotImplementedError` -- per-target ACL gap (G0.3 #224
   unshipped). Surfaces as :class:`McpInvalidParamsError` so the
   operator sees a clear error rather than an opaque INTERNAL_ERROR.
@@ -90,7 +90,7 @@ __all__: list[str] = []
 #: meta-tool (CLAUDE.md postulate 5) rather than a vendor verb; the
 #: ``.memory.promote`` suffix mirrors the audit row's
 #: ``audit_op_id="memory.promote"`` for forensic correlation.
-_TOOL_NAME: Final[str] = "meho.memory.promote"
+_TOOL_NAME: Final[str] = "meho_memory_promote"
 
 #: Op-class string -- promotion is a write (inserts a target row and
 #: optionally deletes the source). Consumed by the MCP dispatcher's

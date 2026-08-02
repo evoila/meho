@@ -3,11 +3,11 @@
 
 """Ingest-pipeline MCP tools for the connector admin surface.
 
-Two tools under the ``meho.connector.*`` namespace that drive the
+Two tools under the ``meho_connector_*`` namespace that drive the
 spec-ingestion pipeline + its async job offload:
 
-* ``meho.connector.ingest`` — run the ingest pipeline. **tenant_admin**.
-* ``meho.connector.ingest_status`` — poll an async ingest job. **operator**.
+* ``meho_connector_ingest`` — run the ingest pipeline. **tenant_admin**.
+* ``meho_connector_ingest_status`` — poll an async ingest job. **operator**.
 
 The review / edit / state-machine tools (``list`` / ``review`` /
 ``edit_group`` / ``edit_op`` / ``enable`` / ``disable``) live in the
@@ -36,7 +36,7 @@ drives. With ``async=true`` (and ``dry_run=false``) the handler creates
 a job row, fires the pipeline off the request via
 :func:`asyncio.create_task`, and returns an
 :class:`~meho_backplane.operations.ingest.IngestJobHandle` immediately;
-the agent polls ``meho.connector.ingest_status`` to completion. A run
+the agent polls ``meho_connector_ingest_status`` to completion. A run
 started over MCP is poll-able over the REST
 ``GET /api/v1/connectors/ingest/jobs/{job_id}`` endpoint and vice versa
 — the shared registry is the single source of truth, the same
@@ -76,7 +76,7 @@ already attached the detail). These are only catchable on the
 **inline** path — the async path has already returned a handle by the
 time the pipeline raises, so a failure there flips the job to
 ``failed`` and the diagnostic surfaces via ``error`` / ``error_class``
-on the ``meho.connector.ingest_status`` response (same trade-off the
+on the ``meho_connector_ingest_status`` response (same trade-off the
 REST async path makes). A missing / cross-tenant job id on the poll
 tool surfaces as ``-32602`` ``ingest_job_not_found``.
 
@@ -151,7 +151,7 @@ _background_tasks: set[asyncio.Task[None]] = set()
 
 
 # ---------------------------------------------------------------------------
-# meho.connector.ingest
+# meho_connector_ingest
 # ---------------------------------------------------------------------------
 
 
@@ -456,7 +456,7 @@ def _track_background_task(task: asyncio.Task[None]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# meho.connector.ingest_status
+# meho_connector_ingest_status
 # ---------------------------------------------------------------------------
 
 
@@ -539,7 +539,7 @@ _INGEST_DESCRIPTION: Final[str] = (
     "into the endpoint_descriptor table, and runs the LLM-summarised "
     "grouping pass. The connector lands in 'staged' state — operators "
     "must review groups + per-op flags and then call "
-    "meho.connector.enable before the connector's operations become "
+    "meho_connector_enable before the connector's operations become "
     "dispatchable. "
     "Use when adding a new vendor surface (product=vmware version=9.0 "
     "impl_id=vmware-rest specs=[...]); supports merging multiple specs "
@@ -552,7 +552,7 @@ _INGEST_DESCRIPTION: Final[str] = (
     "to have the backplane fetch uri under the https guard. "
     "For a real-world vendor spec set async=true to get a job handle "
     "back immediately (the parse+register+grouping pass blocks past the "
-    "tool-call timeout otherwise); then poll meho.connector.ingest_status "
+    "tool-call timeout otherwise); then poll meho_connector_ingest_status "
     "with the returned job_id until status is 'succeeded' or 'failed'. "
     "dry_run=true validates specs without writing and always returns "
     "inline (async is ignored). "
@@ -578,7 +578,7 @@ _INGEST_DESCRIPTION: Final[str] = (
 register_mcp_tool(
     definition=ToolDefinition(
         feature="connector_ingest",
-        name="meho.connector.ingest",
+        name="meho_connector_ingest",
         description=_INGEST_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -653,7 +653,7 @@ register_mcp_tool(
                         "for the full parse + register + grouping pass. "
                         "Required for real-world vendor specs, which "
                         "block past the agent's tool-call deadline when "
-                        "run inline. Poll meho.connector.ingest_status "
+                        "run inline. Poll meho_connector_ingest_status "
                         "with the returned job_id. Ignored when "
                         "dry_run=true (the parse-only path stays inline)."
                     ),
@@ -673,11 +673,11 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="connector_ingest",
-        name="meho.connector.ingest_status",
+        name="meho_connector_ingest_status",
         description=(
             "Poll the durable status of an async connector-ingest job "
             "by handle (operator-level). Use after a "
-            "meho.connector.ingest call made with async=true returned a "
+            "meho_connector_ingest call made with async=true returned a "
             "job_id — call this repeatedly until status is 'succeeded' "
             "(carries the final ingestion + grouping counts so you can "
             "confirm the connector populated) or 'failed' (carries "
@@ -698,7 +698,7 @@ register_mcp_tool(
                     "type": "string",
                     "minLength": 1,
                     "description": (
-                        "The job handle (a UUID) returned by an async meho.connector.ingest call."
+                        "The job handle (a UUID) returned by an async meho_connector_ingest call."
                     ),
                 },
             },

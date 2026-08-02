@@ -1037,7 +1037,7 @@ async def test_principal_name_surfaced_from_payload(session: AsyncSession) -> No
         session,
         tenant_id=tenant_id,
         occurred_at=datetime(2026, 5, 14, 0, 0, 2, tzinfo=UTC),
-        payload={"op_id": "meho.status", "principal_name": "Damir Topic"},
+        payload={"op_id": "meho_status", "principal_name": "Damir Topic"},
     )
     await session.commit()
 

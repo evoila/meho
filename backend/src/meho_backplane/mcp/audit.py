@@ -187,7 +187,7 @@ async def write_mcp_audit_row(
     keys win on collision (``op_id`` / ``op_class`` / ``params_hash``
     / ``broadcast_detail_*`` are load-bearing identity and must not
     be overwritten by stale contextvars from an earlier call on the
-    same task). #710's ``meho.broadcast.overrides.set`` (REST + MCP
+    same task). #710's ``meho_broadcast_overrides_set`` (REST + MCP
     parity) is the v0.2 caller; future MCP meta-tools that bind
     ``audit_*`` contextvars inherit the same surfacing automatically.
 

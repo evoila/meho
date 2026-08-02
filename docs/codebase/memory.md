@@ -7,7 +7,7 @@
 
 The memory service is the persistent, RBAC-gated key-value layer that
 backs both the REST surface (`/api/v1/memory/...`) and the MCP meta-
-tools (`add_to_memory`, `search_memory`, `meho.memory.promote`, plus
+tools (`add_to_memory`, `search_memory`, `meho_memory_promote`, plus
 the resource template `meho://memory/{scope}/{slug}`). All memory
 rows are stored in the shared `documents` table under
 `source = 'memory'` — the same table that backs `kb` and any future

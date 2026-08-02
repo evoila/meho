@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``meho.broadcast.recent`` (G6.4-T1, #1091).
+"""Behavioural tests for ``meho_broadcast_recent`` (G6.4-T1, #1091).
 
 Acceptance-criteria coverage:
 
-* ``meho.broadcast.recent`` is registered and visible on ``tools/list``
+* ``meho_broadcast_recent`` is registered and visible on ``tools/list``
   for an ``operator`` JWT; hidden from ``read_only``.
 * Default 30m window when ``since`` is omitted; explicit ``since``
   honoured for both ISO-8601 and Valkey-cursor shapes.
@@ -167,15 +167,15 @@ def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[
 def test_tools_list_exposes_recent_for_operator(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``operator`` role sees ``meho.broadcast.recent`` on tools/list."""
+    """``operator`` role sees ``meho_broadcast_recent`` on tools/list."""
     client, _op = client_with_operator
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert resp.status_code == 200
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.recent" in names
+    assert "meho_broadcast_recent" in names
     # MEHO-internal RBAC fields stripped from the wire shape.
-    recent_def = next(t for t in body["result"]["tools"] if t["name"] == "meho.broadcast.recent")
+    recent_def = next(t for t in body["result"]["tools"] if t["name"] == "meho_broadcast_recent")
     assert "required_role" not in recent_def
     assert "op_class" not in recent_def
     # Schema contract surfaces on the wire.
@@ -201,7 +201,7 @@ def test_tools_list_hides_recent_from_read_only(
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.recent" not in names
+    assert "meho_broadcast_recent" not in names
 
 
 def test_read_only_tools_call_recent_is_rejected(
@@ -214,7 +214,7 @@ def test_read_only_tools_call_recent_is_rejected(
     gate against a client that knows the name and posts anyway.
     """
     client, _op = client_with_operator  # default fixture role is READ_ONLY
-    resp = post_mcp(client, _tools_call("meho.broadcast.recent", {}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -239,7 +239,7 @@ def test_default_since_uses_30_minute_window(
     before_ms = int(time.time() * 1000)
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(client, _tools_call("meho.broadcast.recent", {}))
+        post_mcp(client, _tools_call("meho_broadcast_recent", {}))
     after_ms = int(time.time() * 1000)
 
     xr.assert_awaited_once()
@@ -266,7 +266,7 @@ def test_since_iso8601_normalised_to_bare_ms(
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
         post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {"since": "2026-05-25T10:00:00Z"}),
+            _tools_call("meho_broadcast_recent", {"since": "2026-05-25T10:00:00Z"}),
         )
     kwargs = xr.await_args.kwargs
     expected_ms = int(datetime(2026, 5, 25, 10, 0, tzinfo=UTC).timestamp() * 1000)
@@ -292,7 +292,7 @@ def test_since_cursor_form_becomes_exclusive_lower_bound(
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
         post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {"since": "1747800000000-0"}),
+            _tools_call("meho_broadcast_recent", {"since": "1747800000000-0"}),
         )
     kwargs = xr.await_args.kwargs
     assert kwargs["min"] == "(1747800000000-0"
@@ -338,7 +338,7 @@ def test_invalid_cursor_returns_invalid_params_labelled_cursor(
     def message_for(arg: str) -> str:
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {arg: bad}),
+            _tools_call("meho_broadcast_recent", {arg: bad}),
         )
         body = resp.json()
         assert "error" in body
@@ -404,7 +404,7 @@ def test_filter_op_class_narrows_result(
     ):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {"filter": {"op_class": "write"}}),
+            _tools_call("meho_broadcast_recent", {"filter": {"op_class": "write"}}),
         )
     result = _result_dict(resp)
     op_ids = [e["op_id"] for e in result["events"]]
@@ -458,7 +458,7 @@ def test_filter_op_class_checks_reaches_the_handler(
     ):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {"filter": {"op_class": "checks"}}),
+            _tools_call("meho_broadcast_recent", {"filter": {"op_class": "checks"}}),
         )
     result = _result_dict(resp)
     assert [e["op_id"] for e in result["events"]] == ["checks.transition"]
@@ -512,7 +512,7 @@ def test_filter_op_class_approval_and_credential_write_reach_the_handler(
     ):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {"filter": {"op_class": op_class}}),
+            _tools_call("meho_broadcast_recent", {"filter": {"op_class": op_class}}),
         )
     result = _result_dict(resp)
     assert [e["op_id"] for e in result["events"]] == [op_id]
@@ -543,7 +543,7 @@ def test_filter_principal_narrows_result(
     ):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {"filter": {"principal": "op-alice"}}),
+            _tools_call("meho_broadcast_recent", {"filter": {"principal": "op-alice"}}),
         )
     result = _result_dict(resp)
     principals = [e["principal_sub"] for e in result["events"]]
@@ -584,7 +584,7 @@ def test_filter_target_narrows_result(
     ):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.recent", {"filter": {"target": "prod-vc-1"}}),
+            _tools_call("meho_broadcast_recent", {"filter": {"target": "prod-vc-1"}}),
         )
     result = _result_dict(resp)
     targets = [e["target_name"] for e in result["events"]]
@@ -608,7 +608,7 @@ def test_explicit_limit_propagates_to_xrange_count(
     client, _op = client_with_operator
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(client, _tools_call("meho.broadcast.recent", {"limit": 250}))
+        post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": 250}))
     assert xr.await_args.kwargs["count"] == 250
 
 
@@ -634,7 +634,7 @@ def test_out_of_range_limit_returns_invalid_params(
     embedded in the message.
     """
     client, _op = client_with_operator
-    resp = post_mcp(client, _tools_call("meho.broadcast.recent", {"limit": bad_limit}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": bad_limit}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -650,7 +650,7 @@ def test_non_integer_limit_returns_invalid_params(
 ) -> None:
     """``limit`` of the wrong JSON type rejects with -32602."""
     client, _op = client_with_operator
-    resp = post_mcp(client, _tools_call("meho.broadcast.recent", {"limit": "100"}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": "100"}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -679,7 +679,7 @@ def test_stream_key_derived_from_operator_tenant_id(
     client, op = client_with_operator
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])) as xr:
-        post_mcp(client, _tools_call("meho.broadcast.recent", {}))
+        post_mcp(client, _tools_call("meho_broadcast_recent", {}))
     assert xr.await_args.args[0] == f"meho:feed:{op.tenant_id}"
 
 
@@ -742,7 +742,7 @@ def test_next_cursor_is_last_fetched_entry_id_when_page_full(
     ]
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=entries)):
-        resp = post_mcp(client, _tools_call("meho.broadcast.recent", {"limit": 3}))
+        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": 3}))
     result = _result_dict(resp)
     assert result["next_cursor"] == "1747800000002-0"
 
@@ -764,7 +764,7 @@ def test_next_cursor_is_null_when_short_page(
     entries = [_xrange_entry(_make_event(), "1747800000000-0")]
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=entries)):
-        resp = post_mcp(client, _tools_call("meho.broadcast.recent", {"limit": 10}))
+        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {"limit": 10}))
     result = _result_dict(resp)
     assert result["next_cursor"] is None
 
@@ -781,7 +781,7 @@ def test_empty_stream_returns_empty_events_null_cursor(
     client, _op = client_with_operator
     bc = get_broadcast_client()
     with patch.object(bc, "xrange", new=AsyncMock(return_value=[])):
-        resp = post_mcp(client, _tools_call("meho.broadcast.recent", {}))
+        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
     result = _result_dict(resp)
     assert result == {"events": [], "next_cursor": None}
 
@@ -810,7 +810,7 @@ def test_event_dict_carries_stream_entry_id_and_event_fields(
         "xrange",
         new=AsyncMock(return_value=[_xrange_entry(event, "1747800000000-0")]),
     ):
-        resp = post_mcp(client, _tools_call("meho.broadcast.recent", {}))
+        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
     result = _result_dict(resp)
     assert len(result["events"]) == 1
     e = result["events"][0]
@@ -856,7 +856,7 @@ def test_credential_read_payload_surfaces_aggregate_only(
         "xrange",
         new=AsyncMock(return_value=[_xrange_entry(event, "1747800000000-0")]),
     ):
-        resp = post_mcp(client, _tools_call("meho.broadcast.recent", {}))
+        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
     result = _result_dict(resp)
     assert result["events"][0]["payload"] == aggregate_payload
     # And no path / key / value leak from any earlier-rendered shape.
@@ -880,7 +880,7 @@ def test_audit_query_payload_surfaces_aggregate_with_row_count(
         "row_count": 17,
     }
     event = _make_event(
-        op_id="meho.audit.replay",
+        op_id="meho_audit_replay",
         op_class="audit_query",
         payload=aggregate_payload,
     )
@@ -890,7 +890,7 @@ def test_audit_query_payload_surfaces_aggregate_with_row_count(
         "xrange",
         new=AsyncMock(return_value=[_xrange_entry(event, "1747800000000-0")]),
     ):
-        resp = post_mcp(client, _tools_call("meho.broadcast.recent", {}))
+        resp = post_mcp(client, _tools_call("meho_broadcast_recent", {}))
     result = _result_dict(resp)
     assert result["events"][0]["payload"] == aggregate_payload
 
@@ -947,7 +947,7 @@ def test_filter_with_unknown_sub_key_rejected(
     client, _op = client_with_operator
     resp = post_mcp(
         client,
-        _tools_call("meho.broadcast.recent", {"filter": {"unknown": "value"}}),
+        _tools_call("meho_broadcast_recent", {"filter": {"unknown": "value"}}),
     )
     body = resp.json()
     assert "error" in body
@@ -966,7 +966,7 @@ def test_filter_op_class_outside_enum_rejected(
     client, _op = client_with_operator
     resp = post_mcp(
         client,
-        _tools_call("meho.broadcast.recent", {"filter": {"op_class": "made_up"}}),
+        _tools_call("meho_broadcast_recent", {"filter": {"op_class": "made_up"}}),
     )
     body = resp.json()
     assert "error" in body

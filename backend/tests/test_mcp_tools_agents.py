@@ -5,11 +5,11 @@
 
 Coverage matrix (Task #809 acceptance criteria):
 
-* Registration: the two read tools (``meho.agents.list`` /
-  ``meho.agents.show``) are ``operator``-visible; the three write tools
+* Registration: the two read tools (``meho_agents_list`` /
+  ``meho_agents_show``) are ``operator``-visible; the three write tools
   (``create`` / ``edit`` / ``delete``) are ``tenant_admin``-only.
 * RBAC re-check: an ``operator`` direct ``tools/call`` against
-  ``meho.agents.create`` is rejected by the dispatcher's call-time
+  ``meho_agents_create`` is rejected by the dispatcher's call-time
   gate (Invalid Params + "forbidden").
 * Tenant-admin happy path: create -> list -> show -> edit -> delete
   round-trips in-process through the service, producing the same DB
@@ -115,11 +115,11 @@ def test_admin_sees_all_five_tools(
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in resp.json()["result"]["tools"]}
     for tool in (
-        "meho.agents.list",
-        "meho.agents.show",
-        "meho.agents.create",
-        "meho.agents.edit",
-        "meho.agents.delete",
+        "meho_agents_list",
+        "meho_agents_show",
+        "meho_agents_create",
+        "meho_agents_edit",
+        "meho_agents_delete",
     ):
         assert tool in names
 
@@ -132,11 +132,11 @@ def test_operator_sees_only_read_tools(
     client, _op = client_with_operator
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in resp.json()["result"]["tools"]}
-    assert "meho.agents.list" in names
-    assert "meho.agents.show" in names
-    assert "meho.agents.create" not in names
-    assert "meho.agents.edit" not in names
-    assert "meho.agents.delete" not in names
+    assert "meho_agents_list" in names
+    assert "meho_agents_show" in names
+    assert "meho_agents_create" not in names
+    assert "meho_agents_edit" not in names
+    assert "meho_agents_delete" not in names
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -145,7 +145,7 @@ def test_operator_create_call_is_rejected(
 ) -> None:
     """A direct ``tools/call`` to a write tool from an operator is rejected."""
     client, _op = client_with_operator
-    resp = _call(client, "meho.agents.create", _CREATE_ARGS)
+    resp = _call(client, "meho_agents_create", _CREATE_ARGS)
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -169,28 +169,28 @@ async def test_full_crud_round_trip(
     await _seed_principal("incident-triage")
 
     # Create.
-    created = _result_dict(_call(client, "meho.agents.create", _CREATE_ARGS))
+    created = _result_dict(_call(client, "meho_agents_create", _CREATE_ARGS))
     assert created["name"] == "incident-triage"
     assert uuid.UUID(created["agent"]["id"])
     assert created["agent"]["model_tier"] == "deep"
 
     # List.
-    listed = _result_dict(_call(client, "meho.agents.list", {}))
+    listed = _result_dict(_call(client, "meho_agents_list", {}))
     assert [a["name"] for a in listed["agents"]] == ["incident-triage"]
 
     # Show.
-    shown = _result_dict(_call(client, "meho.agents.show", {"name": "incident-triage"}))
+    shown = _result_dict(_call(client, "meho_agents_show", {"name": "incident-triage"}))
     assert shown["agent"]["turn_budget"] == 25
 
     # Edit (partial).
     edited = _result_dict(
-        _call(client, "meho.agents.edit", {"name": "incident-triage", "enabled": False})
+        _call(client, "meho_agents_edit", {"name": "incident-triage", "enabled": False})
     )
     assert edited["agent"]["enabled"] is False
     assert edited["agent"]["model_tier"] == "deep"  # unchanged
 
     # Delete.
-    removed = _result_dict(_call(client, "meho.agents.delete", {"name": "incident-triage"}))
+    removed = _result_dict(_call(client, "meho_agents_delete", {"name": "incident-triage"}))
     assert removed["removed"] is True
     assert await _agent_rows() == []
 
@@ -208,9 +208,9 @@ async def test_duplicate_create_maps_to_invalid_params(
 ) -> None:
     client, _op = client_with_operator
     await _seed_principal("incident-triage")
-    first = _call(client, "meho.agents.create", _CREATE_ARGS)
+    first = _call(client, "meho_agents_create", _CREATE_ARGS)
     assert "error" not in first.json()
-    dup = _call(client, "meho.agents.create", _CREATE_ARGS, rpc_id=2)
+    dup = _call(client, "meho_agents_create", _CREATE_ARGS, rpc_id=2)
     body = dup.json()
     assert body["error"]["code"] == INVALID_PARAMS
     assert "agent_already_exists" in body["error"]["message"]
@@ -222,7 +222,7 @@ def test_show_missing_maps_to_invalid_params(
     seeded_operator_tenant: None,  # noqa: F811
 ) -> None:
     client, _op = client_with_operator
-    resp = _call(client, "meho.agents.show", {"name": "nope"})
+    resp = _call(client, "meho_agents_show", {"name": "nope"})
     body = resp.json()
     assert body["error"]["code"] == INVALID_PARAMS
     assert "agent_not_found" in body["error"]["message"]
@@ -235,7 +235,7 @@ def test_create_validation_maps_to_invalid_params(
 ) -> None:
     """An out-of-range turn budget surfaces as Invalid Params (Pydantic re-validation)."""
     client, _op = client_with_operator
-    resp = _call(client, "meho.agents.create", {**_CREATE_ARGS, "turn_budget": 99999})
+    resp = _call(client, "meho_agents_create", {**_CREATE_ARGS, "turn_budget": 99999})
     body = resp.json()
     assert body["error"]["code"] == INVALID_PARAMS
 
@@ -257,7 +257,7 @@ async def test_create_unknown_identity_ref_maps_to_invalid_params(
     # no match in the registry.
     resp = _call(
         client,
-        "meho.agents.create",
+        "meho_agents_create",
         {**_CREATE_ARGS, "name": "orphan", "identity_ref": "agent:does-not-exist"},
     )
     body = resp.json()
@@ -276,11 +276,11 @@ async def test_edit_unknown_identity_ref_maps_to_invalid_params(
     """edit that swaps identity_ref to an unknown value → INVALID_PARAMS."""
     client, _op = client_with_operator
     await _seed_principal("incident-triage")
-    created = _call(client, "meho.agents.create", _CREATE_ARGS)
+    created = _call(client, "meho_agents_create", _CREATE_ARGS)
     assert "error" not in created.json()
     resp = _call(
         client,
-        "meho.agents.edit",
+        "meho_agents_edit",
         {"name": "incident-triage", "identity_ref": "agent:nonexistent"},
     )
     body = resp.json()

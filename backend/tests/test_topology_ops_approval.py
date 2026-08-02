@@ -24,7 +24,7 @@ loop on the real dispatcher + approval queue:
   (``dns-record`` — the #2534 + #2537 composition).
 * **Humans stay immediate** — a human tenant_admin dispatch (and the
   MCP front handler) executes with no ApprovalRequest row created.
-* **MCP front translation** — the ``meho.topology.*`` handlers return
+* **MCP front translation** — the ``meho_topology_*`` handlers return
   the executed domain shape for humans and the structured
   ``awaiting_approval`` envelope for agents.
 * **Audit provenance** — topology write audit rows now stamp

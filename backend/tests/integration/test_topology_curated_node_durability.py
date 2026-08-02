@@ -5,7 +5,7 @@
 
 The end-to-end acceptance path for Task #2536: an operator seeds a
 node via :func:`~meho_backplane.topology.nodes.create_or_get_node`
-(the MCP ``meho.topology.create_node`` substrate), then a connector
+(the MCP ``meho_topology_create_node`` substrate), then a connector
 refresh whose snapshot **re-asserts the same** ``(kind, name)`` runs,
 then one whose snapshot **drops** it:
 

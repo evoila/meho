@@ -54,7 +54,7 @@ in-process — there is deliberately no dedicated REST read surface):
 - **MCP tool descriptions** (#2675) — every
   `mcp/registry.py::ToolDefinition` declares a required `feature`
   field (a registry key, or an explicit `None` for
-  deliberately-unclassified infrastructure — today only `meho.status`,
+  deliberately-unclassified infrastructure — today only `meho_status`,
   the `/api/v1/health` mirror; #2678 classified the runbooks family
   under `write_surfaces`). `register_mcp_tool` prefixes non-GA
   descriptions with `[beta]` / `[experimental]` at registration time;

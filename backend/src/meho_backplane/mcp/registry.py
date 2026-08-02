@@ -176,7 +176,7 @@ def capability_satisfied(
 #: array, a single offender poisons *every* call in that session, not
 #: just its own. MEHO uses top-level ``allOf`` (``query_topology``'s
 #: per-``kind`` conditional required-args) and ``oneOf``
-#: (``meho.topology.unannotate``'s XOR selector) for *server-side*
+#: (``meho_topology_unannotate``'s XOR selector) for *server-side*
 #: jsonschema validation in :mod:`~meho_backplane.mcp.handlers`; those
 #: stay on ``inputSchema`` and keep validating. Only the wire copy
 #: published via :meth:`ToolDefinition.to_wire` drops them. Nested
@@ -232,7 +232,7 @@ class ToolDefinition(BaseModel):
     pass an explicit ``None``, which declares "this surface is
     deliberately outside the maturity classification" (the
     :data:`~meho_backplane.features._READY_ENTRY_FEATURE` ``mcp``-entry
-    precedent — e.g. ``meho.status``, a health mirror, and the runbooks
+    precedent — e.g. ``meho_status``, a health mirror, and the runbooks
     surface, which the provisional #2664 table does not classify).
     Explicit ``None`` stays greppable for the #2678 drift guard.
     MEHO-internal: dropped from the wire shape like the RBAC fields.

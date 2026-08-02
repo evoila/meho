@@ -364,7 +364,7 @@ async def test_pause_approve_resume_execute_cycle(
        wrapped ``call_operation`` tool → asserts ``status="awaiting_approval"``
        with a fresh ``approval_request_id``. This is the **request flow** (§2).
     4. Operator flips the row to ``approved`` via ``approve_request`` — the
-       service-layer function REST ``/decide``, MCP ``meho.approvals.approve``,
+       service-layer function REST ``/decide``, MCP ``meho_approvals_approve``,
        and CLI ``meho approvals approve`` all call. This is the **response
        flow** (§3).
     5. The broadcast publishes ``approval.approved``; stub Valkey so the wait

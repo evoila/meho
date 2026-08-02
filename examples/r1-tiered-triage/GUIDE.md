@@ -210,7 +210,7 @@ The [`permissions.json`](./permissions.json) file documents four
 `AgentPermission` rows that wire the RBAC posture for
 `call_operation` dispatch:
 
-- Cheap tier: read `meho.broadcast.recent` (the triage signal source).
+- Cheap tier: read `meho_broadcast_recent` (the triage signal source).
 - Deep tier: read across `*.read` / `*.list` op patterns;
   `*.write` patterns route through the operator-approval gate
   (the R2 approval-gate pattern in [PR #1243](https://github.com/evoila/meho/pull/1243) covers that flow in detail).
@@ -283,7 +283,7 @@ Verify the grants landed by listing them for the cheap tier:
 meho agent grant list --principal "$CHEAP_SUB" --json | \
   jq '.grants[] | {op_pattern, target_scope, verdict}'
 # expect (one row):
-#   {op_pattern: "meho.broadcast.recent", target_scope: "*", verdict: "auto-execute"}
+#   {op_pattern: "meho_broadcast_recent", target_scope: "*", verdict: "auto-execute"}
 ```
 
 The cheap tier holds no `meho.invoke_agent` grant by design — see

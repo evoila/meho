@@ -7,14 +7,14 @@ G6.4 Initiative (#1090) ships three agent-facing MCP tools that mirror
 the four-step ``broadcast discipline`` documented in the Layer-2
 consumer-onboarding template (PR #1028 / Initiative #229 G7.1):
 
-* T1 (#1091, this module) -- ``meho.broadcast.recent``: read the last
+* T1 (#1091, this module) -- ``meho_broadcast_recent``: read the last
   N events from ``meho:feed:{tenant_id}`` with optional time-window
   and filter narrowing. Returns ``{events, next_cursor}``; the cursor
   round-trips back as ``since`` to walk forward without overlap or
   gaps.
-* T2 (#1092, follow-on) -- ``meho.broadcast.announce``: agent-authored
+* T2 (#1092, follow-on) -- ``meho_broadcast_announce``: agent-authored
   intent / completion publish.
-* T3 (#1093, follow-on) -- ``meho.broadcast.watch``: long-poll batch
+* T3 (#1093, follow-on) -- ``meho_broadcast_watch``: long-poll batch
   read (caller passes ``since_cursor``, server returns ``{events,
   next_cursor}`` capped at N events).
 
@@ -119,7 +119,7 @@ _log = structlog.get_logger(__name__)
 
 
 # ===========================================================================
-# === meho.broadcast.recent ===
+# === meho_broadcast_recent ===
 # ===========================================================================
 
 
@@ -179,7 +179,7 @@ async def _handler_recent(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """``meho.broadcast.recent`` handler.
+    """``meho_broadcast_recent`` handler.
 
     Parses the wire arguments, delegates to
     :func:`~meho_backplane.broadcast.history.list_recent_events_strict`
@@ -242,13 +242,13 @@ async def _handler_recent(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
-        name="meho.broadcast.recent",
+        name="meho_broadcast_recent",
         description=(
             "Read the operator's tenant's recent broadcast events from "
             "meho:feed:{tenant_id} (Initiative #1090, Task #1091). "
             "Returns {events, next_cursor}. Each event row carries "
             "'cursor' -- its Valkey stream entry id, usable as this "
-            "tool's (or meho.broadcast.watch's) 'cursor' arg -- plus "
+            "tool's (or meho_broadcast_watch's) 'cursor' arg -- plus "
             "'id' as a legacy alias of the same stream cursor (NOT "
             "the event's UUID; that is 'event_id' on operation rows). "
             "Default window is the last "
@@ -388,12 +388,12 @@ register_mcp_tool(
 
 
 # ===========================================================================
-# === end meho.broadcast.recent ===
+# === end meho_broadcast_recent ===
 # ===========================================================================
 
 
 # ===========================================================================
-# === meho.broadcast.announce ===
+# === meho_broadcast_announce ===
 # ===========================================================================
 
 
@@ -490,7 +490,7 @@ async def _publish_agent_announcement_impl(
 ) -> dict[str, Any]:
     """Build + publish one :class:`AgentAnnouncementEvent`, return the ack.
 
-    Internal helper for ``meho.broadcast.announce``. Kept separate from
+    Internal helper for ``meho_broadcast_announce``. Kept separate from
     :func:`_handler_announce` so the construction-and-publish seam is
     importable by tests that want to bypass the wire-side argument
     plumbing (e.g. cross-tenant isolation assertions that operate on
@@ -561,7 +561,7 @@ async def _handler_announce(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """``meho.broadcast.announce`` handler.
+    """``meho_broadcast_announce`` handler.
 
     Validates the wire arguments belt-and-suspenders (the dispatcher's
     JSON-Schema validator runs first, but the per-field re-checks here
@@ -651,7 +651,7 @@ async def _handler_announce(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
-        name="meho.broadcast.announce",
+        name="meho_broadcast_announce",
         description=(
             "Publish an agent-authored announcement to the operator's "
             "tenant broadcast stream (Initiative #1090, Task #1092). "
@@ -663,7 +663,7 @@ register_mcp_tool(
             "events use, distinguished by kind='agent_announcement' "
             "(audit-driven events carry kind='operation' per "
             "docs/codebase/api-shape-conventions.md §6); other "
-            "operators read it back via meho.broadcast.recent. "
+            "operators read it back via meho_broadcast_recent. "
             "'activity' is mandatory (1..500 chars), 'target' and "
             "'scope' are optional free-form attribution, 'phase' is "
             "one of 'start' / 'update' / 'completion' (default "
@@ -689,14 +689,14 @@ register_mcp_tool(
             "operator's own tenant stream. The announcement is persisted "
             "to a durable agent_announcement DB row so it survives a "
             "Valkey restart and the stream's ~24h trim window; "
-            "meho.broadcast.recent backfills from that archive when the "
+            "meho_broadcast_recent backfills from that archive when the "
             "requested window predates the stream's oldest surviving "
             "entry. Returns {event_id, cursor} plus any declared claim "
             "fields echoed back. 'event_id' is the real per-announcement "
             "UUID (equal to the durable row's id; it round-trips as the "
             "event's 'event_id' on recent/watch reads); 'cursor' is the "
             "Valkey stream entry id, self-labelled to round-trip through "
-            "meho.broadcast.recent/watch's 'cursor' arg for verification. "
+            "meho_broadcast_recent/watch's 'cursor' arg for verification. "
             "The two are distinct values (#2479 / #2547). Announces are "
             "rate-limited per principal (default 10 per minute); "
             "exceeding the limit returns a -32000 error naming the "
@@ -827,11 +827,11 @@ register_mcp_tool(
 
 
 # ===========================================================================
-# === end meho.broadcast.announce ===
+# === end meho_broadcast_announce ===
 # ===========================================================================
 
 # ===========================================================================
-# === meho.broadcast.watch ===
+# === meho_broadcast_watch ===
 # ===========================================================================
 
 #: Default ``XREAD BLOCK`` window when the caller omits ``timeout_ms``. 10s
@@ -1108,7 +1108,7 @@ async def _handler_watch(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """``meho.broadcast.watch`` handler.
+    """``meho_broadcast_watch`` handler.
 
     Parses the wire arguments, then delegates to :func:`_watch_events_impl`.
     The dispatcher's JSON-Schema validator catches the coarse shape errors
@@ -1159,7 +1159,7 @@ async def _handler_watch(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="broadcast",
-        name="meho.broadcast.watch",
+        name="meho_broadcast_watch",
         description=(
             "Long-poll the operator's tenant broadcast stream for new "
             "events past 'cursor' (Initiative #1090, Task #1093). "
@@ -1169,7 +1169,7 @@ register_mcp_tool(
             "so the cap is a hard backpressure boundary, not a hint). "
             "Returns {events, next_cursor}. Each event row carries "
             "'cursor' -- its Valkey stream entry id, usable as this "
-            "tool's (or meho.broadcast.recent's) 'cursor' arg -- plus "
+            "tool's (or meho_broadcast_recent's) 'cursor' arg -- plus "
             "'id' as a legacy alias of the same stream cursor (NOT "
             "the event's UUID; that is 'event_id' on operation rows). "
             "When no events arrive within "
@@ -1180,7 +1180,7 @@ register_mcp_tool(
             "progresses. Designed for the agent-side discipline loop: "
             "'broadcast_watch -> process -> broadcast_watch with new "
             "cursor'. Obtain the initial 'cursor' from "
-            "'meho.broadcast.recent's 'next_cursor'. 'since_cursor' is "
+            "'meho_broadcast_recent's 'next_cursor'. 'since_cursor' is "
             "accepted as a deprecated alias for 'cursor' (v0.8.0 wire "
             "shape) and is mutually exclusive with it. The 'filter' "
             "object narrows by exact-match op_class / principal "
@@ -1208,7 +1208,7 @@ register_mcp_tool(
                         "Valkey stream cursor ('1747800000000-0'). "
                         "Required (either as `cursor` or via the "
                         "deprecated `since_cursor` alias). Obtain "
-                        "initial value from `meho.broadcast.recent`'s "
+                        "initial value from `meho_broadcast_recent`'s "
                         "`next_cursor`. XREAD reads entries strictly "
                         "past this cursor. Canonical name; matches "
                         "the `cursor` parameter on `query_audit` / "
@@ -1324,5 +1324,5 @@ register_mcp_tool(
 
 
 # ===========================================================================
-# === end meho.broadcast.watch ===
+# === end meho_broadcast_watch ===
 # ===========================================================================

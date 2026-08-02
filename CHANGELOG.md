@@ -90,6 +90,109 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING: all 62 dotted `meho.*` MCP tool names renamed to
+  underscore-only names** (`meho.broadcast.watch` →
+  `meho_broadcast_watch`) so every published tool name matches the
+  Anthropic tool-name pattern `^[a-zA-Z0-9_-]{1,64}$` (#2745).
+  Claude's frontend (claude.ai / Claude Desktop) validates every
+  remote-MCP tool name against that pattern and rejects the **entire**
+  toolset all-or-nothing — one dotted name and a fully connected,
+  fully authenticated MEHO connector surfaces zero tools in every
+  conversation (discovered live by the #2666 Claude Desktop smoke
+  test; same conformance family as the #2644 top-level `anyOf` fix).
+  MCP has no tool-alias mechanism, so this is a hard rename:
+  - **Consumers must update** pinned tool names in `.mcp.json`
+    permission lists, skills, and scripts. The mechanical rule is
+    dots → underscores; the 17 already-flat narrow-waist agent tools
+    (`call_operation`, `search_operations`, `query_audit`,
+    `search_knowledge`, …) are unchanged.
+  - **Audit / broadcast identity follows the rename**: rows written
+    from these tools now carry the underscore `op_id` / path
+    (`/mcp/tools/call/meho_sensor_list`), and the two ingest-service
+    audit op_ids `meho.connector.llm_grouping` /
+    `meho.connector.profile_stamp` are likewise now
+    `meho_connector_llm_grouping` / `meho_connector_profile_stamp`.
+    Historical rows keep their dotted identity (audit is
+    append-only); `classify_op` retains the dotted arms so stored
+    rows re-render with unchanged sensitivity classes, and gains
+    mirrored underscore arms so the renamed tools keep their exact
+    broadcast classes (`meho_audit_replay` stays aggregate-only
+    `audit_query`, `meho_sensor_list` stays `read`, …). Canonical
+    audit-only op_ids that were never tool names (`meho.audit.query`,
+    `meho.docs.*`, `sensor.list`, `approval.*`, …) are unchanged.
+  - A registry-wide conformance test now pins the pattern for every
+    published MCP tool name and agent meta-tool name, so this failure
+    class is machine-checked from here on.
+
+  Full rename table (old → new):
+
+  | Old (dotted) | New |
+  |---|---|
+  | `meho.agent_principals.list` | `meho_agent_principals_list` |
+  | `meho.agent_principals.register` | `meho_agent_principals_register` |
+  | `meho.agent_principals.revoke` | `meho_agent_principals_revoke` |
+  | `meho.agents.create` | `meho_agents_create` |
+  | `meho.agents.delete` | `meho_agents_delete` |
+  | `meho.agents.edit` | `meho_agents_edit` |
+  | `meho.agents.grant.create` | `meho_agents_grant_create` |
+  | `meho.agents.grant.elevate` | `meho_agents_grant_elevate` |
+  | `meho.agents.grant.list` | `meho_agents_grant_list` |
+  | `meho.agents.grant.revoke` | `meho_agents_grant_revoke` |
+  | `meho.agents.grant.show` | `meho_agents_grant_show` |
+  | `meho.agents.list` | `meho_agents_list` |
+  | `meho.agents.list_runs` | `meho_agents_list_runs` |
+  | `meho.agents.run` | `meho_agents_run` |
+  | `meho.agents.run_status` | `meho_agents_run_status` |
+  | `meho.agents.show` | `meho_agents_show` |
+  | `meho.approvals.approve` | `meho_approvals_approve` |
+  | `meho.approvals.get` | `meho_approvals_get` |
+  | `meho.approvals.list` | `meho_approvals_list` |
+  | `meho.approvals.reject` | `meho_approvals_reject` |
+  | `meho.audit.replay` | `meho_audit_replay` |
+  | `meho.broadcast.announce` | `meho_broadcast_announce` |
+  | `meho.broadcast.overrides.list` | `meho_broadcast_overrides_list` |
+  | `meho.broadcast.overrides.remove` | `meho_broadcast_overrides_remove` |
+  | `meho.broadcast.overrides.set` | `meho_broadcast_overrides_set` |
+  | `meho.broadcast.recent` | `meho_broadcast_recent` |
+  | `meho.broadcast.watch` | `meho_broadcast_watch` |
+  | `meho.connector.delete` | `meho_connector_delete` |
+  | `meho.connector.disable` | `meho_connector_disable` |
+  | `meho.connector.edit_group` | `meho_connector_edit_group` |
+  | `meho.connector.edit_op` | `meho_connector_edit_op` |
+  | `meho.connector.enable` | `meho_connector_enable` |
+  | `meho.connector.enable_reads` | `meho_connector_enable_reads` |
+  | `meho.connector.ingest` | `meho_connector_ingest` |
+  | `meho.connector.ingest_status` | `meho_connector_ingest_status` |
+  | `meho.connector.list` | `meho_connector_list` |
+  | `meho.connector.review` | `meho_connector_review` |
+  | `meho.memory.promote` | `meho_memory_promote` |
+  | `meho.runbook.abort` | `meho_runbook_abort` |
+  | `meho.runbook.deprecate_template` | `meho_runbook_deprecate_template` |
+  | `meho.runbook.discard_template` | `meho_runbook_discard_template` |
+  | `meho.runbook.draft_template` | `meho_runbook_draft_template` |
+  | `meho.runbook.edit_template` | `meho_runbook_edit_template` |
+  | `meho.runbook.list_runs` | `meho_runbook_list_runs` |
+  | `meho.runbook.list_templates` | `meho_runbook_list_templates` |
+  | `meho.runbook.next` | `meho_runbook_next` |
+  | `meho.runbook.publish_template` | `meho_runbook_publish_template` |
+  | `meho.runbook.reassign` | `meho_runbook_reassign` |
+  | `meho.runbook.show_template` | `meho_runbook_show_template` |
+  | `meho.runbook.start` | `meho_runbook_start` |
+  | `meho.scheduler.cancel` | `meho_scheduler_cancel` |
+  | `meho.scheduler.create` | `meho_scheduler_create` |
+  | `meho.scheduler.list` | `meho_scheduler_list` |
+  | `meho.sensor.create` | `meho_sensor_create` |
+  | `meho.sensor.delete` | `meho_sensor_delete` |
+  | `meho.sensor.list` | `meho_sensor_list` |
+  | `meho.status` | `meho_status` |
+  | `meho.topology.annotate` | `meho_topology_annotate` |
+  | `meho.topology.bulk_import` | `meho_topology_bulk_import` |
+  | `meho.topology.create_node` | `meho_topology_create_node` |
+  | `meho.topology.delete_node` | `meho_topology_delete_node` |
+  | `meho.topology.unannotate` | `meho_topology_unannotate` |
+
 ## [0.26.0] - 2026-08-02
 
 This release closes the **G0.37 v0.25.0 ops-feedback cycle** (#2656 —

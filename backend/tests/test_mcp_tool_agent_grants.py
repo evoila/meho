@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Negative RBAC tests for ``meho.agents.grant.*`` MCP tools.
+"""Negative RBAC tests for ``meho_agents_grant_*`` MCP tools.
 
 G11.2-T6 (#819) registers five agent-grant MCP tools, each declared
 with ``required_role=TenantRole.TENANT_ADMIN`` on the
@@ -22,7 +22,7 @@ both gates by calling
 :class:`~meho_backplane.agents.grants.AgentGrantService` directly.
 This file closes the gap by asserting:
 
-* An ``operator`` role does NOT see any ``meho.agents.grant.*`` tool
+* An ``operator`` role does NOT see any ``meho_agents_grant_*`` tool
   in the ``tools/list`` response (list-time filter intact).
 * An ``operator`` direct ``tools/call`` against each tool name
   returns the dispatcher's structured rejection — JSON-RPC
@@ -51,18 +51,18 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-#: Every ``meho.agents.grant.*`` tool registered by
+#: Every ``meho_agents_grant_*`` tool registered by
 #: :mod:`meho_backplane.mcp.tools.agent_grants`. The list pins the wire
 #: names so a rename surfaces as a test break (test_mcp_tool_agent_grants
 #: misses the tool) rather than as a silent coverage gap. Paired with the
 #: ``required_role=TENANT_ADMIN`` declaration on each
 #: :class:`~meho_backplane.mcp.registry.ToolDefinition`.
 _GRANT_TOOL_NAMES: tuple[str, ...] = (
-    "meho.agents.grant.list",
-    "meho.agents.grant.show",
-    "meho.agents.grant.create",
-    "meho.agents.grant.elevate",
-    "meho.agents.grant.revoke",
+    "meho_agents_grant_list",
+    "meho_agents_grant_show",
+    "meho_agents_grant_create",
+    "meho_agents_grant_elevate",
+    "meho_agents_grant_revoke",
 )
 
 
@@ -84,7 +84,7 @@ def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[
 def test_tools_list_hides_grant_tools_from_operator(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``operator`` role does NOT see ``meho.agents.grant.*`` on ``tools/list``.
+    """``operator`` role does NOT see ``meho_agents_grant_*`` on ``tools/list``.
 
     The first of two RBAC gates: the list-time filter in
     :func:`~meho_backplane.mcp.registry.all_tools_for` hides
@@ -98,7 +98,7 @@ def test_tools_list_hides_grant_tools_from_operator(
     names = {t["name"] for t in resp.json()["result"]["tools"]}
     visible = names & set(_GRANT_TOOL_NAMES)
     assert visible == set(), (
-        f"operator role should not see any meho.agents.grant.* tool; saw {visible!r}"
+        f"operator role should not see any meho_agents_grant_* tool; saw {visible!r}"
     )
 
 
@@ -134,7 +134,7 @@ def test_operator_tools_call_grant_is_rejected_with_forbidden(
     [TenantRole.TENANT_ADMIN],
     indirect=True,
 )
-@pytest.mark.parametrize("tool_name", ["meho.agents.grant.create", "meho.agents.grant.elevate"])
+@pytest.mark.parametrize("tool_name", ["meho_agents_grant_create", "meho_agents_grant_elevate"])
 def test_admin_grant_for_unregistered_principal_is_rejected(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     tool_name: str,

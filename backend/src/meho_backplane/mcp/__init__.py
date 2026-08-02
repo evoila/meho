@@ -25,7 +25,7 @@ servers and is explicitly out of scope for MEHO.
   ``jsonschema``-based ``inputSchema`` validation, and the
   :func:`eager_import_mcp_modules` startup hook that auto-discovers
   every module under ``mcp/tools/`` and ``mcp/resources/``. T4 (#249)
-  populates the registries with the reference ``meho.status`` tool and
+  populates the registries with the reference ``meho_status`` tool and
   ``meho://tenant/{tenant_id}/info`` resource.
 
 Public surface

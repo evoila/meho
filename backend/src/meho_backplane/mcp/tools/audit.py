@@ -147,7 +147,7 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
             "enum": [*OP_CLASS_ENUM, None],
             "description": (
                 "Sensitivity classification (exact match). Same vocabulary "
-                "as `meho.broadcast.recent` / `meho.broadcast.watch` so a "
+                "as `meho_broadcast_recent` / `meho_broadcast_watch` so a "
                 "consumer that filters audit on `credential_mint` and the "
                 "broadcast stream on `credential_mint` uses one enum. "
                 "Values: " + ", ".join(f"`{value}`" for value in OP_CLASS_ENUM) + "."
@@ -216,7 +216,7 @@ _INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "present and equal to the caller's own MCP session id; "
                 "any other value (or absence) is rejected with -32602. "
                 "To replay a DIFFERENT session, a tenant_admin uses the "
-                "`meho.audit.replay` tool."
+                "`meho_audit_replay` tool."
             ),
         },
         "limit": {
@@ -267,7 +267,7 @@ _TOOL_DESCRIPTION: Final[str] = (
     "`agent_session_id=<your own session id>` to reconstruct the full "
     "parent/child trace of your own agent session instead of a flat list. "
     "The tree path is self-session-only; replaying another session needs "
-    "the tenant_admin `meho.audit.replay` tool."
+    "the tenant_admin `meho_audit_replay` tool."
 )
 
 
@@ -320,7 +320,7 @@ async def _build_replay_response(
 ) -> dict[str, Any]:
     """Count-guard, reconstruct, and JSON-serialise one session's replay tree.
 
-    Shared by the ``meho.audit.replay`` admin tool and the
+    Shared by the ``meho_audit_replay`` admin tool and the
     ``query_audit`` ``shape="tree"`` self-session branch. Opens a
     transient session, applies the :data:`_REPLAY_MAX_ROWS` count-first
     guard (surfaced as a JSON-RPC ``-32602`` with the
@@ -381,7 +381,7 @@ def _resolve_self_session_id(arguments: dict[str, Any]) -> uuid.UUID:
     intentionally STRICTER than ``query_audit``'s flat path, which
     already returns other in-tenant principals' rows: cross-session
     forensic replay is reserved for the ``tenant_admin``-gated
-    ``meho.audit.replay`` tool, so the operator-role tree path is locked
+    ``meho_audit_replay`` tool, so the operator-role tree path is locked
     to "replay your own trace". Two conditions must hold:
 
     1. ``agent_session_id`` is present in the arguments. Absence → -32602.
@@ -455,7 +455,7 @@ async def _query_audit_handler(
     :class:`AuditQueryFilters` is constructed on the flat path. The tree
     path uses the substrate's default depth cap — ``query_audit`` does
     not expose a ``max_depth`` knob (that belongs to the dedicated
-    ``meho.audit.replay`` admin tool).
+    ``meho_audit_replay`` admin tool).
     """
     materialized: dict[str, Any] = dict(arguments)
     shape = materialized.pop("shape", None)
@@ -533,11 +533,11 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.audit.replay — tenant_admin cross-session forensic replay
+# meho_audit_replay — tenant_admin cross-session forensic replay
 # ---------------------------------------------------------------------------
 
 
-_REPLAY_TOOL_NAME: Final[str] = "meho.audit.replay"
+_REPLAY_TOOL_NAME: Final[str] = "meho_audit_replay"
 
 
 _REPLAY_INPUT_SCHEMA: Final[dict[str, Any]] = {
@@ -602,7 +602,7 @@ async def _replay_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Dispatch a ``meho.audit.replay`` admin call through the T3 substrate.
+    """Dispatch a ``meho_audit_replay`` admin call through the T3 substrate.
 
     The dispatcher has jsonschema-validated *arguments* (``session_id``
     present + UUID-shaped, ``max_depth`` an in-range integer when given)

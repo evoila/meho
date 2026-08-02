@@ -52,7 +52,7 @@ both are now invalid) became unreadable:
 
 - `GET /api/v1/runbooks/templates/{slug}` returned a bare `text/plain`
   500 (no route handler caught `ValidationError`).
-- `meho.runbook.show_template` returned an opaque JSON-RPC `-32603
+- `meho_runbook_show_template` returned an opaque JSON-RPC `-32603
   "internal error: ValidationError"` (the dispatcher catch-all discarded
   the detail).
 - **Wider blast radius:** `list_runs` hydrates every listed run's pinned

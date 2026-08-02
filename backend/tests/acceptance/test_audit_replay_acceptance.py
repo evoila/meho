@@ -30,7 +30,7 @@ Coverage matrix (the five #1015 integration scenarios + unit edges)
 1. **Multi-level session tree.** Seed root → child → grandchild + a
    sibling root (all sharing ``agent_session_id``, linked by
    ``parent_audit_id``). The substrate, the REST route, and the MCP
-   ``meho.audit.replay`` tool all reconstruct the same tree: correct
+   ``meho_audit_replay`` tool all reconstruct the same tree: correct
    nesting, each branch ``occurred_at``-ascending, roots chronological.
 2. **Tenant isolation.** Tenant-A and tenant-B each own a session under
    the **same** ``agent_session_id`` UUID. Tenant-A's replay (REST + MCP)
@@ -175,7 +175,7 @@ def _build_audit_acceptance_app() -> FastAPI:
 
     ``AuditMiddleware`` inner, ``RequestContextMiddleware`` outer — the
     production ordering. ``eager_import_mcp_modules`` pre-registers every
-    MCP tool so ``tools/list`` and ``tools/call`` see ``meho.audit.replay``.
+    MCP tool so ``tools/list`` and ``tools/call`` see ``meho_audit_replay``.
     """
     eager_import_mcp_modules()
     app = FastAPI()
@@ -444,7 +444,7 @@ async def test_scenario_1_mcp_replay_returns_multi_level_tree(
     async_pg_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The MCP ``meho.audit.replay`` admin tool returns the same tree as REST."""
+    """The MCP ``meho_audit_replay`` admin tool returns the same tree as REST."""
     _mcp_admin_env(monkeypatch)
     agent_session_id = uuid.uuid4()
     async with await _session_for_url(async_pg_url) as session:
@@ -473,7 +473,7 @@ async def test_scenario_1_mcp_replay_returns_multi_level_tree(
                 token_admin,
                 method="tools/call",
                 params={
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": str(agent_session_id)},
                 },
             )
@@ -590,7 +590,7 @@ async def test_scenario_2_mcp_tenant_isolation_same_session_id(
                 token_admin,
                 method="tools/call",
                 params={
-                    "name": "meho.audit.replay",
+                    "name": "meho_audit_replay",
                     "arguments": {"session_id": str(shared_session_id)},
                 },
             )
@@ -928,7 +928,7 @@ async def test_scenario_5_replay_broadcast_is_aggregate_only(
 ) -> None:
     """The REST replay route's broadcast carries no ReplayNode/tree payload.
 
-    Decision #3: invoking ``meho.audit.replay`` emits one BroadcastEvent
+    Decision #3: invoking ``meho_audit_replay`` emits one BroadcastEvent
     whose payload is exactly ``{op_class, result_status, row_count}`` — never
     the replayed tree or any per-node audit content. Reads back from the
     real Valkey stream the middleware published to.
@@ -959,7 +959,7 @@ async def test_scenario_5_replay_broadcast_is_aggregate_only(
     event = await _read_broadcast_event_for_tenant(valkey_url, TENANT_A_ID)
     assert event is not None, "no BroadcastEvent landed in Valkey within the 30s window"
     # Distinct replay op_id, aggregate-only class.
-    assert event.op_id == "meho.audit.replay"
+    assert event.op_id == "meho_audit_replay"
     assert event.op_class == "audit_query"
     # Exact key set — no `root`, no `children`, no per-node audit content.
     assert set(event.payload.keys()) == {"op_class", "result_status", "row_count"}, (
@@ -1007,7 +1007,7 @@ async def test_scenario_5_over_cap_rejection_broadcast_is_aggregate_only(
 
     event = await _read_broadcast_event_for_tenant(valkey_url, TENANT_A_ID)
     assert event is not None, "no BroadcastEvent landed for the 413-rejected replay"
-    assert event.op_id == "meho.audit.replay"
+    assert event.op_id == "meho_audit_replay"
     assert event.op_class == "audit_query"
     assert set(event.payload.keys()) == {"op_class", "result_status", "row_count"}
     assert event.payload["row_count"] == REPLAY_ROW_CAP + 1

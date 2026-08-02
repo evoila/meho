@@ -17,7 +17,7 @@ expectations:
 * :func:`get_broadcast_blocking_client` — the "blocking" client.
   ``socket_timeout`` pinned at :data:`BROADCAST_BLOCKING_SOCKET_TIMEOUT_SECONDS`
   (35 s — the SSE ``XREAD BLOCK`` window plus a 5 s buffer). Used for
-  long-poll readers (SSE feed, UI SSE bridge, ``meho.broadcast.watch``
+  long-poll readers (SSE feed, UI SSE bridge, ``meho_broadcast_watch``
   MCP tool, agent approval wait). A quiet stream returns ``None`` from
   ``XREAD`` after BLOCK expires (the natural keepalive path); only a
   *genuine* transport failure — socket dead longer than the BLOCK +
@@ -97,7 +97,7 @@ _BROADCAST_FAST_TIMEOUT_SECONDS: Final[float] = 5.0
 #: quiet stream returns ``None`` (natural keepalive) instead of raising
 #: ``redis.TimeoutError`` from inside the BLOCK call. The SSE feed
 #: (:mod:`meho_backplane.api.v1.feed`) pins ``_XREAD_BLOCK_MS = 30_000``
-#: and the ``meho.broadcast.watch`` MCP tool
+#: and the ``meho_broadcast_watch`` MCP tool
 #: (:mod:`meho_backplane.mcp.tools.broadcast`) caps ``timeout_ms`` at
 #: ``_WATCH_MAX_TIMEOUT_MS = 30_000``; 30 s + 5 s buffer = 35 s. The
 #: buffer absorbs event-loop scheduling jitter, redis-py's BLOCK
@@ -167,7 +167,7 @@ def get_broadcast_blocking_client() -> redis.Redis:
 
     Callers: the SSE feed (:mod:`meho_backplane.api.v1.feed`), the UI
     SSE bridge (:mod:`meho_backplane.ui.routes.broadcast.stream`), the
-    ``meho.broadcast.watch`` MCP tool
+    ``meho_broadcast_watch`` MCP tool
     (:mod:`meho_backplane.mcp.tools.broadcast`), and the agent approval
     wait loop (:mod:`meho_backplane.agent.approval_wait`). Non-blocking
     operations (``PING``, ``XADD``, ``XRANGE``, ``XREVRANGE``) stay on

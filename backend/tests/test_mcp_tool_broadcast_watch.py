@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``meho.broadcast.watch`` (G6.4-T3, #1093).
+"""Behavioural tests for ``meho_broadcast_watch`` (G6.4-T3, #1093).
 
 Acceptance-criteria coverage:
 
-* ``meho.broadcast.watch`` is registered and visible on ``tools/list``
+* ``meho_broadcast_watch`` is registered and visible on ``tools/list``
   for an ``operator`` JWT; hidden from ``read_only``.
 * ``since_cursor`` is required at the schema layer -- missing surfaces as
   JSON-RPC ``-32602`` Invalid Params.
@@ -188,15 +188,15 @@ def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[
 def test_tools_list_exposes_watch_for_operator(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``operator`` role sees ``meho.broadcast.watch`` on tools/list."""
+    """``operator`` role sees ``meho_broadcast_watch`` on tools/list."""
     client, _op = client_with_operator
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert resp.status_code == 200
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.watch" in names
+    assert "meho_broadcast_watch" in names
     # MEHO-internal RBAC fields stripped from the wire shape.
-    watch_def = next(t for t in body["result"]["tools"] if t["name"] == "meho.broadcast.watch")
+    watch_def = next(t for t in body["result"]["tools"] if t["name"] == "meho_broadcast_watch")
     assert "required_role" not in watch_def
     assert "op_class" not in watch_def
     # Schema contract surfaces on the wire.
@@ -234,7 +234,7 @@ def test_tools_list_hides_watch_from_read_only(
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.watch" not in names
+    assert "meho_broadcast_watch" not in names
 
 
 def test_read_only_tools_call_watch_is_rejected(
@@ -247,7 +247,7 @@ def test_read_only_tools_call_watch_is_rejected(
     gate against a client that knows the name and posts anyway.
     """
     client, _op = client_with_operator  # default fixture role is READ_ONLY
-    resp = post_mcp(client, _tools_call("meho.broadcast.watch", {"since_cursor": _SINCE_FIXTURE}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_watch", {"since_cursor": _SINCE_FIXTURE}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -274,7 +274,7 @@ def test_missing_since_cursor_rejects_with_invalid_params(
     error is INVALID_PARAMS.
     """
     client, _op = client_with_operator
-    resp = post_mcp(client, _tools_call("meho.broadcast.watch", {}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_watch", {}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -290,7 +290,7 @@ def test_empty_since_cursor_rejects_with_invalid_params(
 ) -> None:
     """An empty ``since_cursor`` rejects -- the schema's ``minLength: 1`` guards it."""
     client, _op = client_with_operator
-    resp = post_mcp(client, _tools_call("meho.broadcast.watch", {"since_cursor": ""}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_watch", {"since_cursor": ""}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -380,7 +380,7 @@ def test_out_of_range_timeout_ms_returns_invalid_params(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.watch",
+            "meho_broadcast_watch",
             {"since_cursor": _SINCE_FIXTURE, "timeout_ms": bad_timeout},
         ),
     )
@@ -402,7 +402,7 @@ def test_non_integer_timeout_ms_returns_invalid_params(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.watch",
+            "meho_broadcast_watch",
             {"since_cursor": _SINCE_FIXTURE, "timeout_ms": "5000"},
         ),
     )
@@ -465,7 +465,7 @@ def test_xread_timeout_none_returns_empty_with_unchanged_cursor(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.watch",
+                "meho_broadcast_watch",
                 {"since_cursor": _SINCE_FIXTURE, "timeout_ms": 200},
             ),
         )
@@ -494,7 +494,7 @@ def test_xread_empty_list_returns_empty_with_unchanged_cursor(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.watch",
+                "meho_broadcast_watch",
                 {"since_cursor": _SINCE_FIXTURE},
             ),
         )
@@ -534,7 +534,7 @@ def test_new_events_returned_with_advanced_cursor(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.watch",
+                "meho_broadcast_watch",
                 {"since_cursor": _SINCE_FIXTURE},
             ),
         )
@@ -580,7 +580,7 @@ def test_cursor_advances_past_filtered_out_entries(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.watch",
+                "meho_broadcast_watch",
                 {
                     "since_cursor": _SINCE_FIXTURE,
                     "filter": {"op_class": "credential_read"},  # matches nothing
@@ -619,7 +619,7 @@ def test_filter_op_class_narrows_result(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.watch",
+                "meho_broadcast_watch",
                 {"since_cursor": _SINCE_FIXTURE, "filter": {"op_class": "write"}},
             ),
         )
@@ -650,7 +650,7 @@ def test_filter_principal_narrows_result(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.watch",
+                "meho_broadcast_watch",
                 {"since_cursor": _SINCE_FIXTURE, "filter": {"principal": "op-alice"}},
             ),
         )
@@ -693,7 +693,7 @@ def test_filter_target_narrows_result(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.watch",
+                "meho_broadcast_watch",
                 {"since_cursor": _SINCE_FIXTURE, "filter": {"target": "prod-vc-1"}},
             ),
         )
@@ -727,7 +727,7 @@ def test_stream_key_derived_from_operator_tenant_id(
     with patch.object(bc, "xread", new=AsyncMock(return_value=None)) as xr:
         post_mcp(
             client,
-            _tools_call("meho.broadcast.watch", {"since_cursor": _SINCE_FIXTURE}),
+            _tools_call("meho_broadcast_watch", {"since_cursor": _SINCE_FIXTURE}),
         )
     streams_arg = xr.await_args.args[0]
     expected_key = f"meho:feed:{op.tenant_id}"
@@ -859,7 +859,7 @@ def test_credential_read_payload_surfaces_aggregate_only(
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.watch", {"since_cursor": _SINCE_FIXTURE}),
+            _tools_call("meho_broadcast_watch", {"since_cursor": _SINCE_FIXTURE}),
         )
     result = _result_dict(resp)
     assert result["events"][0]["payload"] == aggregate_payload
@@ -885,7 +885,7 @@ def test_audit_query_payload_surfaces_aggregate_with_row_count(
         "row_count": 17,
     }
     event = _make_event(
-        op_id="meho.audit.replay",
+        op_id="meho_audit_replay",
         op_class="audit_query",
         payload=aggregate_payload,
     )
@@ -894,7 +894,7 @@ def test_audit_query_payload_surfaces_aggregate_with_row_count(
     with patch.object(bc, "xread", new=AsyncMock(return_value=envelope)):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.watch", {"since_cursor": _SINCE_FIXTURE}),
+            _tools_call("meho_broadcast_watch", {"since_cursor": _SINCE_FIXTURE}),
         )
     result = _result_dict(resp)
     assert result["events"][0]["payload"] == aggregate_payload
@@ -967,7 +967,7 @@ def test_filter_with_unknown_sub_key_rejected(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.watch",
+            "meho_broadcast_watch",
             {"since_cursor": _SINCE_FIXTURE, "filter": {"unknown": "value"}},
         ),
     )
@@ -989,7 +989,7 @@ def test_filter_op_class_outside_enum_rejected(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.watch",
+            "meho_broadcast_watch",
             {"since_cursor": _SINCE_FIXTURE, "filter": {"op_class": "made_up"}},
         ),
     )
@@ -1016,7 +1016,7 @@ def test_unknown_top_level_argument_rejected(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.watch",
+            "meho_broadcast_watch",
             {"since_cursor": _SINCE_FIXTURE, "tenant_id": "00000000-0000-0000-0000-000000000bad"},
         ),
     )

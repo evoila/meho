@@ -291,7 +291,7 @@ vCenter variant — owned by the profiled-dispatch wiring
    `group_id=NULL`.
 
 The function commits exactly once at the end of both passes, in the
-same transaction as a single `meho.connector.llm_grouping` audit row
+same transaction as a single `meho_connector_llm_grouping` audit row
 that records `{connector_id, groups_created, operations_assigned,
 operations_unassigned, llm_call_count, batch_size}`. Partial failure
 (LLM output that fails schema validation) raises
@@ -334,15 +334,15 @@ budget:
 
 | Tool | Required role | Wraps |
 |------|---------------|-------|
-| `meho.connector.ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` (+ `IngestJobRegistry` on async) |
-| `meho.connector.ingest_status` | `operator` | `IngestJobRegistry.get()` |
-| `meho.connector.list` | `operator` | `list_ingested_connectors()` |
-| `meho.connector.review` | `operator` | `ReviewService.get_review_payload()` |
-| `meho.connector.edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
-| `meho.connector.edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
-| `meho.connector.enable` | `tenant_admin` | `ReviewService.enable_connector()` |
-| `meho.connector.enable_reads` | `tenant_admin` | `ReviewService.enable_reads()` |
-| `meho.connector.disable` | `tenant_admin` | `ReviewService.disable_connector()` |
+| `meho_connector_ingest` | `tenant_admin` | `IngestionPipelineService.ingest()` (+ `IngestJobRegistry` on async) |
+| `meho_connector_ingest_status` | `operator` | `IngestJobRegistry.get()` |
+| `meho_connector_list` | `operator` | `list_ingested_connectors()` |
+| `meho_connector_review` | `operator` | `ReviewService.get_review_payload()` |
+| `meho_connector_edit_group` | `tenant_admin` | `ReviewService.edit_group()` |
+| `meho_connector_edit_op` | `tenant_admin` | `ReviewService.edit_op()` |
+| `meho_connector_enable` | `tenant_admin` | `ReviewService.enable_connector()` |
+| `meho_connector_enable_reads` | `tenant_admin` | `ReviewService.enable_reads()` |
+| `meho_connector_disable` | `tenant_admin` | `ReviewService.disable_connector()` |
 
 These are administrative tools per CLAUDE.md's "What MEHO is NOT"
 note — distinct from the agent-surface meta-tools (`search_connectors`,
@@ -369,13 +369,13 @@ arguments` key-presence checks so omitted fields never reach
 indistinguishable from an omission with `arguments.get(...)`). Only
 fields the operator explicitly named are forwarded.
 
-**Async offload on the MCP path (G3.5-T2 #1531).** `meho.connector.ingest`
+**Async offload on the MCP path (G3.5-T2 #1531).** `meho_connector_ingest`
 carries the same #1303 async-202 offload the REST route has: with
 `async=true` (and `dry_run=false`) the handler creates a job row in the
 shared `IngestJobRegistry`, fires the pipeline off the request via
 `asyncio.create_task`, and returns an `IngestJobHandle` immediately —
 well inside the agent's tool-call deadline. The agent polls
-`meho.connector.ingest_status` with the returned `job_id` until the
+`meho_connector_ingest_status` with the returned `job_id` until the
 status is `succeeded` (carries the final ingestion + grouping counts),
 `degraded` (the pipeline ran but persisted nothing dispatchable —
 carries the counts **and** `error_class="ingested_not_dispatchable"` +
@@ -386,11 +386,11 @@ the REST `GET /api/v1/connectors/ingest/jobs/{job_id}` endpoint and
 vice versa. `dry_run=true` and `async` unset keep the inline shape —
 the pipeline runs on the request and the full `IngestResponse` returns
 synchronously (no regression for small-spec / CI callers). This
-parallels the `meho.agents.run` + `meho.agents.run_status` async
+parallels the `meho_agents_run` + `meho_agents_run_status` async
 precedent (#811).
 
 **Inline spec content on the MCP tool (#2326).** Each `specs[*]` entry
-on `meho.connector.ingest` carries a required `uri` (the audit label)
+on `meho_connector_ingest` carries a required `uri` (the audit label)
 and an optional `content` string. When `content` is set the handler
 passes it straight to `SpecSource(uri=…, content=…)`, so the pipeline
 uses the inline bytes verbatim and skips the fetch — the same
@@ -546,7 +546,7 @@ warning `ingest_safety_class_changed` fires per change (keyed with
 op_id, old, new, affected sensor count). The wire twin
 `SafetyChangeModel` rides `IngestionResultModel.safety_changes`
 (additive, `default_factory=list`), so the REST ingest response, the
-async job report, and the MCP `meho.connector.ingest` tool all carry
+async job report, and the MCP `meho_connector_ingest` tool all carry
 it with no breaking shape change. Report-only: nothing is re-gated
 at dispatch and no Sensor is parked — this is the platform-level
 half of the create-time-only trade-off documented in
@@ -584,7 +584,7 @@ Two operator-facing surfaces flag an unreplaced shim:
   subclass. The PATCH `…/operations/{op_id}` route then returns 200
   with `warnings=[{code='unreplaced_auto_shim', connector_class,
   message}]` (it returned 204 before #1630), the
-  `meho.connector.edit_op` MCP tool mirrors the same `warnings`
+  `meho_connector_edit_op` MCP tool mirrors the same `warnings`
   list, and `meho connector edit-op --enable` prints
   `warning (unreplaced_auto_shim): …` to stderr. Advisory only —
   the flag is still set (a shim-backed op may be pre-enabled ahead
@@ -652,7 +652,7 @@ connector_class)` (`ingest/service.py`) is the stamp seam:
 - It does **not** touch any op's `is_enabled` or any group's
   `review_status`. Every ingested op stays `is_enabled=False` /
   `review_status='staged'` exactly as ingested.
-- It writes one `meho.connector.profile_stamp` (`OP_PROFILE_STAMP`) audit
+- It writes one `meho_connector_profile_stamp` (`OP_PROFILE_STAMP`) audit
   row on the **first** stamp; a re-stamp of an already-registered triple
   is idempotent (returns `False`, no duplicate row). Passing a non-profiled
   class (`shim_kind != "profiled"`) raises `TypeError`.
@@ -717,7 +717,7 @@ The selection is exposed on all three surfaces as two optional fields:
 * REST — `IngestRequest.auth_scheme` (+ `auth_secret_fields`) in
   `ingest/api_schemas.py`.
 * MCP — the `auth_scheme` / `auth_secret_fields` properties on the
-  `meho.connector.ingest` tool schema (`mcp/tools/connector_ingest.py`).
+  `meho_connector_ingest` tool schema (`mcp/tools/connector_ingest.py`).
 * CLI — `meho connector ingest --auth-scheme <name> [--auth-secret-field
   <name> ...]` (`cli/internal/cmd/connector/ingest.go`).
 
@@ -945,7 +945,7 @@ default.
 ### Shared error-envelope builders (`ingest/error_envelopes.py`)
 
 The REST route at `POST /api/v1/connectors/ingest` and the MCP
-`meho.connector.ingest` tool both need to surface the typed
+`meho_connector_ingest` tool both need to surface the typed
 `SpecError` siblings as caller-input validation errors carrying
 structured diagnostic detail (expected-vs-received versions, the
 list of advertised `supported_version_range` strings, the detected
@@ -1383,12 +1383,12 @@ signal for ingested ops. The route returns `200` with
 transitions return) so the count of flipped ops rides the wire;
 unlike `enable`, it does **not** move any group's `review_status`
 (it is a per-op flip, so there is no state-machine guard / transition
-409). One `meho.connector.enable_reads` audit row is written when
+409). One `meho_connector_enable_reads` audit row is written when
 at least one op flips; idempotent — a re-run flips nothing, writes
 no audit row, and returns `ops_enabled=0`. The bulk UPDATE lives in
 `bulk_enable_read_ops()` (`ingest/_internals.py`), called by
 `ReviewService.enable_reads()`; the CLI (`meho connector
-enable-reads`) and the MCP tool (`meho.connector.enable_reads`,
+enable-reads`) and the MCP tool (`meho_connector_enable_reads`,
 optional `tenant_id` for the built-in scope) wrap the same service
 method, the single-source discipline the rest of the surface
 follows. Scope resolution shares `_resolve_existing_scope` with the
@@ -1402,7 +1402,7 @@ scope (G0.26-T1 #1801).
 divergence).** Both ingest surfaces resolve the write scope the same
 way: `POST /ingest` (and the `meho connector ingest` CLI verb that
 drives it) accepts an optional body `tenant_id` with the same
-semantics as the MCP tool `meho.connector.ingest`'s argument —
+semantics as the MCP tool `meho_connector_ingest`'s argument —
 omitted or `null` targets the built-in / global scope (`tenant_id IS
 NULL`, tenant_admin only), the operator's own tenant UUID targets
 their tenant-curated namespace, and any other UUID is rejected with
@@ -1615,7 +1615,7 @@ activity:
    network-facing ingest path. `http://`, `file://`, and bare filesystem
    paths are rejected with `InvalidSpecError`. The restriction covers both
    the REST `POST /api/v1/connectors/ingest` and the MCP
-   `meho.connector.ingest` tool, both of which are `TENANT_ADMIN`-gated.
+   `meho_connector_ingest` tool, both of which are `TENANT_ADMIN`-gated.
 
 2. **Pre-connect destination guard (`_assert_fetchable_remote_url`).** Before
    opening any socket, the hostname is resolved with `socket.getaddrinfo`
@@ -1769,7 +1769,7 @@ run_llm_grouping
 │     ├─ llm_client.generate_json   # Pass 2 LLM call
 │     └─ parse_assignment_response  # filter unknown ops + coerce unknown keys
 ├─ _apply_assignments_to_rows   # mutate EndpointDescriptor.group_id
-├─ _write_grouping_audit_row    # meho.connector.llm_grouping
+├─ _write_grouping_audit_row    # meho_connector_llm_grouping
 └─ session.commit               # atomic: groups + assignments + audit
 ```
 
@@ -1911,17 +1911,17 @@ waiting-ingest path renders. With `--wait` it re-attaches the same
 undocumented-status / 401 / 403 / 404 all behave identically across
 the two verbs. A non-UUID `<job-id>` fails fast client-side as
 `unexpected_response`. The verb is the CLI twin of the MCP
-`meho.connector.ingest_status` poll tool (#1531); the `--no-wait`
+`meho_connector_ingest_status` poll tool (#1531); the `--no-wait`
 output and the poll-phase error guidance now name it instead of only
 the raw poll URL.
 
 **The MCP surface shares the offload (G3.5-T2 / #1531).** The
-`meho.connector.ingest` admin MCP tool carries the same async shape:
+`meho_connector_ingest` admin MCP tool carries the same async shape:
 `async=true` (with `dry_run=false`) creates a job in the **same**
 `IngestJobRegistry` (via `get_job_registry()`), fires the pipeline off
 the request with `asyncio.create_task`, and returns an `IngestJobHandle`
 inside the agent's tool-call deadline; the agent polls
-`meho.connector.ingest_status` (which reads the registry through the
+`meho_connector_ingest_status` (which reads the registry through the
 same accessor) until the job is `succeeded` / `failed`. Because both
 surfaces resolve the one process-wide registry, a job started over MCP
 is poll-able over `GET /api/v1/connectors/ingest/jobs/{job_id}` and
@@ -1953,7 +1953,7 @@ Operationally this means non-dry-run ingest of an un-grouped
 connector — whether via the CLI (`meho connector ingest --catalog
 <product>/<version>`), the REST route
 (`POST /api/v1/connectors/ingest`), or the admin MCP tool
-(`meho.connector.ingest`) — **groups successfully on a deploy with
+(`meho_connector_ingest`) — **groups successfully on a deploy with
 `ANTHROPIC_API_KEY` set**. All three surfaces read the same
 lifespan-wired factory: the REST route via the
 `get_llm_client_factory` dependency, the MCP tool by calling
@@ -1988,17 +1988,17 @@ dispatch. The DELETE surface removes it:
   Content`. `tenant_admin` role. Always scoped to the calling
   operator's tenant (the #1699 contract: the route exposes no
   `tenant_id` parameter).
-* **MCP** — `meho.connector.delete(connector_id, tenant_id=None)` →
+* **MCP** — `meho_connector_delete(connector_id, tenant_id=None)` →
   `{ok: true, deleted: {...}, warnings: [...]}`. `tenant_id` omitted
   targets the built-in / global scope (the only path that can remove
-  `tenant_id IS NULL` rows), mirroring `meho.connector.ingest`.
+  `tenant_id IS NULL` rows), mirroring `meho_connector_ingest`.
 
 Both delegate to `ReviewService.delete_connector`
 (`operations/ingest/delete_connector.py` is the engine). Semantics:
 
 * **Row removal, not a status flag.** The scoped
   `endpoint_descriptor` + `operation_group` rows are deleted in one
-  transaction together with one `meho.connector.delete` audit row
+  transaction together with one `meho_connector_delete` audit row
   (group keys, op counts, enabled-op count, deregistration flag — the
   forensic trail). The task's original `review_status='deleted'`
   sketch would have required widening the

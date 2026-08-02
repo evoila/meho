@@ -138,7 +138,7 @@ Source: `backend/src/meho_backplane/connectors/vault/`.
   **Broadcast classification.** All four classify `other` — `.enable` /
   `.tune` are deliberately **not** added to the classifier's
   write-suffix tuple. Adding `.enable` there would reclassify the
-  unrelated `meho.connector.enable` MCP admin tool (whose broadcast
+  unrelated `meho_connector_enable` MCP admin tool (whose broadcast
   op_class is derived from `classify_op` on the tool name) from `other`
   to `write`, an out-of-scope behaviour change. None of these ops carry
   secret material in their params (type, path, lease TTLs,

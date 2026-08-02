@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Negative RBAC tests for ``meho.approvals.*`` MCP tools.
+"""Negative RBAC tests for ``meho_approvals_*`` MCP tools.
 
 G11.2-T5 (#818) registers four approval MCP tools, each declared
 with ``required_role=TenantRole.OPERATOR`` on the
@@ -18,7 +18,7 @@ exercises
 :func:`~meho_backplane.operations.approval_queue.reject_request`
 directly. This file closes the gap by asserting:
 
-* A ``read_only`` role does NOT see any ``meho.approvals.*`` tool in
+* A ``read_only`` role does NOT see any ``meho_approvals_*`` tool in
   the ``tools/list`` response (list-time filter intact).
 * A ``read_only`` direct ``tools/call`` against each tool name
   returns the dispatcher's structured rejection — JSON-RPC
@@ -48,16 +48,16 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-#: Every ``meho.approvals.*`` tool registered by
+#: Every ``meho_approvals_*`` tool registered by
 #: :mod:`meho_backplane.mcp.tools.approvals`. Pinning the wire names
 #: catches both a rename (test breaks for a missing tool) and a new
 #: addition without RBAC review (the matrix below would not exercise
 #: the new tool until added here).
 _APPROVAL_TOOL_NAMES: tuple[str, ...] = (
-    "meho.approvals.list",
-    "meho.approvals.get",
-    "meho.approvals.approve",
-    "meho.approvals.reject",
+    "meho_approvals_list",
+    "meho_approvals_get",
+    "meho_approvals_approve",
+    "meho_approvals_reject",
 )
 
 
@@ -74,7 +74,7 @@ def _tools_call(name: str, arguments: dict[str, Any], call_id: int = 1) -> dict[
 def test_tools_list_hides_approval_tools_from_read_only(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``read_only`` role does NOT see ``meho.approvals.*`` on ``tools/list``.
+    """``read_only`` role does NOT see ``meho_approvals_*`` on ``tools/list``.
 
     Default fixture role is ``read_only``; no parametrize override.
     The list-time filter
@@ -89,7 +89,7 @@ def test_tools_list_hides_approval_tools_from_read_only(
     names = {t["name"] for t in resp.json()["result"]["tools"]}
     visible = names & set(_APPROVAL_TOOL_NAMES)
     assert visible == set(), (
-        f"read_only role should not see any meho.approvals.* tool; saw {visible!r}"
+        f"read_only role should not see any meho_approvals_* tool; saw {visible!r}"
     )
 
 
@@ -126,7 +126,7 @@ def test_self_approval_forbidden_message_carries_break_glass_hint(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``meho.approvals.approve`` self-approval error names ``APPROVAL_ALLOW_SELF_APPROVAL``.
+    """``meho_approvals_approve`` self-approval error names ``APPROVAL_ALLOW_SELF_APPROVAL``.
 
     The role gate passes for ``operator``; the handler then raises
     :class:`SelfApprovalForbiddenError`, whose message already names the
@@ -150,7 +150,7 @@ def test_self_approval_forbidden_message_carries_break_glass_hint(
     client, _op = client_with_operator
     resp = post_mcp(
         client,
-        _tools_call("meho.approvals.approve", {"approval_request_id": str(request_id)}),
+        _tools_call("meho_approvals_approve", {"approval_request_id": str(request_id)}),
     )
     body = resp.json()
     assert "error" in body, body

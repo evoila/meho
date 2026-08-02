@@ -106,7 +106,7 @@ _log = structlog.get_logger(__name__)
 #: rationale. The suggested ``meho connector ingest`` verb drives
 #: ``POST /api/v1/connectors/ingest``, which resolves an omitted / null
 #: body ``tenant_id`` to the built-in / global scope (#2085, matching
-#: the MCP tool ``meho.connector.ingest``'s omit-equals-global
+#: the MCP tool ``meho_connector_ingest``'s omit-equals-global
 #: semantics; tenant_admin only). A tenant-scoped ingest requires the
 #: operator's own tenant UUID in the body's ``tenant_id``. Naming the
 #: split in the hint keeps an operator from populating one namespace and

@@ -6,7 +6,7 @@
 >
 > - **The agent surface is ~17 meta-tools** registered by G0.5 (#226 updated): `search_connectors`, `list_connectors`, `list_operation_groups`, `search_operations`, `call_operation`, `search_knowledge`, `add_to_knowledge`, `search_memory`, `add_to_memory`, `broadcast_recent`, `broadcast_announce`, `broadcast_watch`, `list_targets`, `query_topology`, `query_audit`, `result_query`, `result_aggregate`, `result_export`, `result_describe`.
 > - **No per-vendor MCP tools.** Vendor operations (e.g. vCenter's 3,000+ paths, K8s's 13 typed ops) reach the agent through `call_operation(connector_id, op_id, target?, params)`, backed by the G0.6 dispatcher — see [operations-substrate.md](operations-substrate.md) for the canonical reference (tables, registry v2, dispatcher pipeline, composite recursion, JSONFlux reducer, meta-tools).
-> - **Admin operations** (override management, replay, annotation) use the `meho.*` admin namespace (`meho.broadcast.overrides.set`, `meho.audit.replay`, `meho.topology.annotate`, `meho.memory.promote`), tenant_admin role required, visible in `tools/list` only with admin scope.
+> - **Admin operations** (override management, replay, annotation) use the `meho.*` admin namespace (`meho_broadcast_overrides_set`, `meho_audit_replay`, `meho_topology_annotate`, `meho_memory_promote`), tenant_admin role required, visible in `tools/list` only with admin scope.
 > - **The `_op_map` pattern** described later in this doc is v0.2 transitional. Operations live in G0.6's `endpoint_descriptor` table; typed connectors register via `register_typed_operation()` (driven by `register_typed_op_registrar()` + the lifespan-run registrar list).
 >
 > Read [CLAUDE.md](../../CLAUDE.md) for the canonical surface contract and [operations-substrate.md](operations-substrate.md) for the dispatcher + registry + tables. Treat the body content below as the historical baseline that G0.5 amendment + G0.6 + G0.7 evolved from.
@@ -72,19 +72,19 @@ Added in G12.4 ([Initiative #1199](https://github.com/evoila/meho/issues/1199), 
 <<RUNBOOK_PRIMING — CRITICAL>>
 You are mid-runbook `cert-rotation-vcenter` v3 on step 2/7 (`revoke-old-cert`).
 Follow only the current step. Do not look ahead. Do not improvise. Do not combine steps.
-If the step looks wrong, call meho.runbook.abort and escalate to a senior in chat.
-Use meho.runbook.next to advance once the current step's verify passes.
+If the step looks wrong, call meho_runbook_abort and escalate to a senior in chat.
+Use meho_runbook_next to advance once the current step's verify passes.
 
 <<END_RUNBOOK_PRIMING>>
 ```
 
-**Composition rules.** One block per in-progress run, capped at `MAX_PRIMING_BLOCKS = 5` ([`runbooks/priming.py`](../../backend/src/meho_backplane/runbooks/priming.py)). Operators with `>5` in-progress runs see one summary block (`"You have N in-progress runbook runs … call meho.runbook.list_runs to see them and proceed one at a time."`) instead of per-run blocks — the per-block text would otherwise dominate the preamble. Each per-run block carries the run's `template_slug`, `template_version`, current `step_id`, and `n/total` position, all taken from the [`RunSummary`](../../backend/src/meho_backplane/runbooks/runs_schemas.py) row the run service returns; the delimiters (`BLOCK_START` / `BLOCK_END`) are hard-coded module constants emitted by the wrapper, so a slug that somehow contained the terminator string cannot escape the block (same positional-wrapper discipline the conventions band uses).
+**Composition rules.** One block per in-progress run, capped at `MAX_PRIMING_BLOCKS = 5` ([`runbooks/priming.py`](../../backend/src/meho_backplane/runbooks/priming.py)). Operators with `>5` in-progress runs see one summary block (`"You have N in-progress runbook runs … call meho_runbook_list_runs to see them and proceed one at a time."`) instead of per-run blocks — the per-block text would otherwise dominate the preamble. Each per-run block carries the run's `template_slug`, `template_version`, current `step_id`, and `n/total` position, all taken from the [`RunSummary`](../../backend/src/meho_backplane/runbooks/runs_schemas.py) row the run service returns; the delimiters (`BLOCK_START` / `BLOCK_END`) are hard-coded module constants emitted by the wrapper, so a slug that somehow contained the terminator string cannot escape the block (same positional-wrapper discipline the conventions band uses).
 
 **Empty case is byte-identical.** An operator with no in-progress runs sees the conventions text alone, with no trailing separator and no priming guards — the [`_combine_bands`](../../backend/src/meho_backplane/conventions/preamble.py) helper short-circuits when `priming.text == ""` so the wire shape is unchanged from the pre-T2 (#1316) preamble. The test pin lives at [`backend/tests/test_conventions_preamble.py`](../../backend/tests/test_conventions_preamble.py).
 
 **Regenerated per `initialize`, never cached.** The priming helper queries `runbook_runs` fresh on every handshake. Run state changes between MCP sessions (a senior reassigns a run, the operator advances or aborts one between sessions, a new run is started in the gap) and a cached priming text would lie about the operator's current obligations. The cost is one indexed query against `runbook_runs` per `initialize`; acceptable since `initialize` is once-per-session.
 
-**Priming is a UX hint, not enforcement.** The load-bearing adherence mechanism is the **step opacity contract** owned by the runbook substrate ([G12.3](https://github.com/evoila/meho/issues/1198), see [`docs/architecture/runbooks.md`](runbooks.md) §The opacity contract): `meho.runbook.next` returns the body of exactly one step, and there is no response shape on any surface — schema, function signature, service, transport — that could carry an adjacent or future step. The opacity contract is the floor; priming is how the agent should behave inside the floor. A future bug or regression in the priming text does not weaken opacity — an agent that ignores priming, or that never sees priming because the helper returned `""`, still cannot read step 3 while the run is on step 2, because the substrate has no code path that would surface it. The two layers are independent by design: never document priming as if it were the gate.
+**Priming is a UX hint, not enforcement.** The load-bearing adherence mechanism is the **step opacity contract** owned by the runbook substrate ([G12.3](https://github.com/evoila/meho/issues/1198), see [`docs/architecture/runbooks.md`](runbooks.md) §The opacity contract): `meho_runbook_next` returns the body of exactly one step, and there is no response shape on any surface — schema, function signature, service, transport — that could carry an adjacent or future step. The opacity contract is the floor; priming is how the agent should behave inside the floor. A future bug or regression in the priming text does not weaken opacity — an agent that ignores priming, or that never sees priming because the helper returned `""`, still cannot read step 3 while the run is on step 2, because the substrate has no code path that would surface it. The two layers are independent by design: never document priming as if it were the gate.
 
 Response shapes per the spec's *Sending Messages to the Server* section:
 
@@ -130,7 +130,7 @@ Two parallel registries in [`mcp/registry.py`](../../backend/src/meho_backplane/
 
 ```python
 class ToolDefinition(BaseModel):
-    name: str                # dotted: "meho.status", "vault.kv.read"
+    name: str                # dotted: "meho_status", "vault.kv.read"
     description: str         # agent-facing — LOAD-BEARING for UX
     inputSchema: dict        # JSON Schema 2020-12
     outputSchema: dict | None
@@ -221,7 +221,7 @@ that opens the `fqdn` vhost-override door.
 |---|---|---|
 | `target: "<name>"` (bare string, **preferred forward**) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) (since G0.13-T2 #1132), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`dependents`/`dependencies`), [`query_audit`](../../backend/src/meho_backplane/mcp/tools/audit.py) | Either-shape acceptance reduces agent retries (the consumer's most-cited daily-driver sharp edge at v0.6.0). The handler normalises the bare string to `{name: <string>}` before dispatch, so downstream code sees one canonical form. |
 | `target: {"name": "<name>"}` (object with `name` key) | [`call_operation`](../../backend/src/meho_backplane/mcp/tools/operations.py) | Original shape; still accepted unchanged. Opens the optional `fqdn` field for per-call vhost-override (`vcfa-rest-9.0`-style routing); the bare-string form does not, so callers needing the override stay on the dict. The dispatcher also reserves room here for future selector fields without a breaking schema change. |
-| `from_name`/`to_name`: `"<name>"` (paired strings) | [`meho.topology.annotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`meho.topology.unannotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`path`) | These tools name **two** nodes (a directed edge pair). The two flat fields mirror Python's `(from_, to)` keyword convention (with `from_name` because `from` is a reserved word) and let the JSON Schema layer require both atomically. A nested `{from: {name}, to: {name}}` object would be ceremony for no benefit. The future-`target`-unification work does *not* roll edge tools into a single `target` field; the directed-edge intent is signalled by the field names. |
+| `from_name`/`to_name`: `"<name>"` (paired strings) | [`meho_topology_annotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`meho_topology_unannotate`](../../backend/src/meho_backplane/mcp/tools/topology.py), [`query_topology`](../../backend/src/meho_backplane/mcp/tools/topology.py) (kind=`path`) | These tools name **two** nodes (a directed edge pair). The two flat fields mirror Python's `(from_, to)` keyword convention (with `from_name` because `from` is a reserved word) and let the JSON Schema layer require both atomically. A nested `{from: {name}, to: {name}}` object would be ceremony for no benefit. The future-`target`-unification work does *not* roll edge tools into a single `target` field; the directed-edge intent is signalled by the field names. |
 
 [`list_targets`](../../backend/src/meho_backplane/mcp/tools/topology.py) returns rows that carry a bare `name`; that is the value the caller passes to `call_operation` (either as a bare string or wrapped as `{name: ...}`) or to `query_topology` (as a bare string).
 
@@ -231,7 +231,7 @@ When a new tool needs to reference a target/node by name, pick the shape that ma
 
 1. **Write/dispatch tools that act on one target** (anything like `call_operation`) — **accept the bare-string `target` as the primary shape and document the dict alias.** Either shape is fine; bare-string is preferred for cross-tool consistency. Reserve the dict for the case where forward-compat selector room (e.g. `fqdn`, future `alias_precedence`) is needed.
 2. **Read tools that filter by one target name** (anything like `query_audit`, single-anchor closure queries) — **use the bare-string `target`.** No selector room is needed; keep the schema flat.
-3. **Tools that operate on an edge (two endpoints)** — **use the `from_name`/`to_name` pair.** Match the existing `meho.topology.annotate` schema verbatim so an agent carrying a node-pair through the topology surface can hand the same arguments to the next tool without renaming.
+3. **Tools that operate on an edge (two endpoints)** — **use the `from_name`/`to_name` pair.** Match the existing `meho_topology_annotate` schema verbatim so an agent carrying a node-pair through the topology surface can hand the same arguments to the next tool without renaming.
 
 A future breaking unification (a shared `TargetRef` / `TargetSelector` model that collapses the dict variant entirely) remains a v0.7+ window decision; that decision will cite this section. Until then: **do not introduce a fourth shape**. If you find yourself reaching for one, file an Initiative-level discussion rather than landing it.
 
@@ -304,16 +304,16 @@ npx @modelcontextprotocol/inspector --cli \
   --method tools/list \
   --header "Authorization: Bearer $TOKEN"
 
-# Call meho.status — exercises the full chain.
+# Call meho_status — exercises the full chain.
 npx @modelcontextprotocol/inspector --cli \
   https://meho.example.com/mcp \
   --transport http \
   --method tools/call \
-  --tool-name meho.status \
+  --tool-name meho_status \
   --header "Authorization: Bearer $TOKEN"
 ```
 
-Expected output: `tools/list` shows `meho.status`; `tools/call meho.status` returns the operator-identity bundle from the chassis `/api/v1/health`. A 401 with `WWW-Authenticate: Bearer resource_metadata=...` means the token's `aud` doesn't match `MCP_RESOURCE_URI` — re-check the Keycloak client's `resource` parameter.
+Expected output: `tools/list` shows `meho_status`; `tools/call meho_status` returns the operator-identity bundle from the chassis `/api/v1/health`. A 401 with `WWW-Authenticate: Bearer resource_metadata=...` means the token's `aud` doesn't match `MCP_RESOURCE_URI` — re-check the Keycloak client's `resource` parameter.
 
 ### Claude.ai Custom Connector (the dogfooding path)
 
@@ -323,8 +323,8 @@ Note that the local-`claude_desktop_config.json` shape documented in the Claude 
 
 Verification checklist after the connector is wired:
 
-- The connector card shows MEHO's tools (`meho.status` at minimum in v0.2; product tools as G3-G9 land).
-- A chat that prompts "check that MEHO is reachable" should result in Claude calling `meho.status` and surfacing the bundle.
+- The connector card shows MEHO's tools (`meho_status` at minimum in v0.2; product tools as G3-G9 land).
+- A chat that prompts "check that MEHO is reachable" should result in Claude calling `meho_status` and surfacing the bundle.
 - The audit_log table on the backplane should grow by one row per `tools/call` and `resources/read` — verify with a quick `SELECT method, path, operator_sub, status_code FROM audit_log ORDER BY occurred_at DESC LIMIT 10`.
 
 If Claude renders a connector error rather than the tools, the OAuth handshake failed — the most common cause is the realm's MCP client missing the `resource_metadata` parameter; the second is `BACKPLANE_URL` resolving to a host the Custom Connector backend can't reach (firewall / private DNS). See [`docs/cross-repo/mcp-client-setup.md`](../cross-repo/mcp-client-setup.md) for the Keycloak-side wiring.

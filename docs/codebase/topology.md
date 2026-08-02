@@ -170,20 +170,20 @@ register in `mcp/tools/topology.py` and call `query.py` /
 REST wrappers). G9.2-T7 (#598) widened the parametric tool with the
 `edges` facet (dispatches to `list_edges` — replaces a standalone
 `list_edges` meta-tool) and added the admin-namespace pair
-`meho.topology.annotate` / `meho.topology.unannotate`
+`meho_topology_annotate` / `meho_topology_unannotate`
 (`required_role=TENANT_ADMIN`, `op_class="write"`), visible only
 to a tenant_admin-scoped session. G0.9.1-T6 (#778) added a third
-admin meta-tool `meho.topology.create_node` in
+admin meta-tool `meho_topology_create_node` in
 `mcp/tools/topology_create_node.py` (separate module to keep
 `mcp/tools/topology.py` from accreting further past the 600-line
 guidance; the registry auto-discovers either way) that closes the
 empty-tenant bootstrap gap — same `tenant_admin` / `write` shape as
 the annotate pair. #2539 added a fourth admin meta-tool
-`meho.topology.bulk_import` (own module `mcp/tools/topology_bulk_import.py`,
+`meho_topology_bulk_import` (own module `mcp/tools/topology_bulk_import.py`,
 same separate-module reason) — batch curated-edge authoring for the
 agent surface, closing the MCP half of the propose→plan→apply loop the
 REST / CLI / console bulk-import fronts already had. #2485 added a fifth
-admin meta-tool `meho.topology.delete_node` (own module
+admin meta-tool `meho_topology_delete_node` (own module
 `mcp/tools/topology_delete_node.py`, same separate-module reason) — the
 guarded hard-delete counterpart to `create_node` that removes a
 manually-seeded node by id (same `tenant_admin` / `write` shape).
@@ -212,7 +212,7 @@ JSON-RPC `-32602`. Each gated MCP write therefore produces one extra
 audit row (`method="DISPATCH"`, `path=<op_id>`, with
 `policy_decision`) alongside the service-level row.
 
-`meho.topology.bulk_import` (#2539) is the one two-behaviour tool. Its
+`meho_topology_bulk_import` (#2539) is the one two-behaviour tool. Its
 `dry_run` param splits the path: `dry_run=true` (the default,
 read-shaped) calls `bulk_import_edges(dry_run=True)` **directly** — no
 dispatch, no gate — so an agent's harmless plan preview never parks; a
@@ -227,7 +227,7 @@ service's all-or-nothing transaction. The 1000-row cap is enforced at
 the tool boundary via the `inputSchema` `maxItems` (mirroring the REST
 `_BULK_IMPORT_MAX_EDGES` guard); like `query_topology`'s inline edge
 list, the plan is returned inline under a hard row cap rather than a
-JSONFlux handle. `meho.topology.annotate`'s return shape gained a
+JSONFlux handle. `meho_topology_annotate`'s return shape gained a
 `superseded` list (#2539): the ids of the auto edges the assertion
 displaced — already stamped on the shared audit / broadcast payload, so
 surfacing them on the return is a shape change, not a new query (the
@@ -1197,7 +1197,7 @@ Load-bearing details:
   from the annotate flow's `node_not_found` because the operator
   action diverges: closure → "register / refresh the target or
   annotate the relationship"; annotate → "seed the endpoint via
-  `meho.topology.create_node`". The OpenAPI spec declares both
+  `meho_topology_create_node`". The OpenAPI spec declares both
   the 404 and 409 shapes on the `dependents` / `dependencies`
   routes via a shared `_CLOSURE_RESPONSES` constant so the
   generated CLI / SDK pick up both error envelopes. Pre-G0.18-T4

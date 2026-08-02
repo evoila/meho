@@ -166,7 +166,7 @@ participant:
 
 These do **not** re-implement the feed. `_build_broadcast_meta_tools` in
 `toolset.py` resolves the `(inputSchema, handler)` pairs the MCP surface
-already registered for `meho.broadcast.{announce,recent,watch}` (via the
+already registered for `meho_broadcast_{announce,recent,watch}` (via the
 registry's `get_tool`) and reuses the handlers verbatim, so the agent's wire
 shape — the #2544 structured claims, the #2545 actor/work_ref lineage, the
 #2546 announce rate limit, and the untrusted-prose envelope
@@ -181,7 +181,7 @@ rather than the registered schema is load-bearing (#2644): `to_wire()` strips
 the top-level `oneOf` / `allOf` / `anyOf` the Anthropic Messages API rejects
 on a tool's `input_schema`, and because that API validates the whole `tools`
 array a single offender 400s the run at model-init with `turns: 0` regardless
-of what the run itself asked for — `meho.broadcast.watch`'s
+of what the run itself asked for — `meho_broadcast_watch`'s
 `cursor` / `since_cursor` XOR was the one that bit. The registered
 `inputSchema` keeps its combinator and keeps validating in `mcp/handlers.py`;
 on the agent path the handlers' own typed argument checks are the guard
@@ -263,8 +263,8 @@ not a raised exception, so an SSE consumer always sees a terminal frame.
   G6 broadcast-feed transport shape). The poll/cancel/events sub-paths are
   two-or-more segments deep so they never collide with the one-segment
   `/{name}` definition-CRUD routes.
-- **MCP** (`mcp/tools/agent_runs.py`): `meho.agents.run` (sync/async via an
-  `async` arg) + `meho.agents.run_status` (poll). SSE is REST-only; an MCP
+- **MCP** (`mcp/tools/agent_runs.py`): `meho_agents_run` (sync/async via an
+  `async` arg) + `meho_agents_run_status` (poll). SSE is REST-only; an MCP
   caller polls. Cancel is REST/CLI-only (no MCP verb). Both drive the same
   `AgentInvoker` singleton, so a run started over MCP is poll-able over REST
   and vice versa.
@@ -303,7 +303,7 @@ a raised exception across the boundary, and never a launched loop.
   `UNEXECUTABLE_RUNBOOK_CLASS`**)** — a prompt (system prompt *or* run
   inputs) that *instructs* the agent to execute a runbook can never be
   satisfied: the agent meta-tool catalog contains **no** runbook-execution
-  tool (`meho.runbook.start` / `meho.runbook.next` are operator MCP tools,
+  tool (`meho_runbook_start` / `meho_runbook_next` are operator MCP tools,
   and confirm-gated steps require a human answer by design). Without the
   guard the loop reached the model with no way to act, took **zero** tool
   calls, and reported `succeeded` with a hallucinated explanation ("the
@@ -440,7 +440,7 @@ When the agent's `call_operation` tool reaches an op with
 than executing. Until #1117 the only path that resumed the run was the REST
 `POST /api/v1/approvals/{id}/approve` endpoint with the original `params` —
 the human-driven express lane that re-dispatches inline. Every other operator
-surface (`/decide`, MCP `meho.approvals.{approve,reject}`, CLI, wall-monitor)
+surface (`/decide`, MCP `meho_approvals_{approve,reject}`, CLI, wall-monitor)
 captures the decision durably and publishes `approval.{approved,rejected}` on
 the broadcast feed, but did **not** re-dispatch. Without an agent-side
 resume substrate, an agent run that bridged a `requires_approval` op via any
@@ -453,7 +453,7 @@ The agent runtime closes that gap with a wrapped `call_operation`. On
 1. **Subscribes** to the per-tenant Valkey stream (`meho:feed:{tenant_id}`)
    via `XREAD BLOCK`, filtered to the request's own `approval_request_id`.
    The wait is in `meho_backplane/agent/approval_wait.py`; the per-tenant
-   stream is the same one the SSE feed and `meho.broadcast.watch` read.
+   stream is the same one the SSE feed and `meho_broadcast_watch` read.
 2. **On approval** — re-invokes the dispatcher with `_approved=True` and the
    original in-memory `params` (passed through `call_operation_with_approval`
    in `operations/meta_tools.py`). The dispatcher's gate-bypass path skips
@@ -985,8 +985,8 @@ the architecture grounding it links back to.
   end (sync 200, async 202 + poll over an httpx ASGI loop for the durability
   contract, SSE frames, RBAC 403, tenant-scoping 404s, disabled 409, durable
   row persisted).
-- `backend/tests/test_mcp_tools_agent_runs.py` (T4) — `meho.agents.run` +
-  `meho.agents.run_status` round-trip, error mapping, and operator-role
+- `backend/tests/test_mcp_tools_agent_runs.py` (T4) — `meho_agents_run` +
+  `meho_agents_run_status` round-trip, error mapping, and operator-role
   visibility.
 - `cli/internal/cmd/agent/run_test.go` (T4) — the `run` / `run-status` /
   `run-events` verbs against an `httptest` server (path builders, sync +

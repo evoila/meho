@@ -196,7 +196,7 @@ counted — "session rows" are defined by the `agent_session_id` anchor.
 
 Every route binds two audit-override contextvars **before** the substrate
 call — `audit_op_class="audit_query"` (always) plus an `audit_op_id`:
-`"meho.audit.query"` for the four query routes and `"meho.audit.replay"`
+`"meho.audit.query"` for the four query routes and `"meho_audit_replay"`
 for the replay route (so operators can tell replay usage apart from
 flat-query usage in `audit_log`). The shared `audit_query` op_class flips
 the broadcast event to aggregate-only (`{op_id, result_status,
@@ -240,7 +240,7 @@ The cross-session **replay** route
 reconstructs another principal's full session trace, a privileged
 forensic act. `read_only` / `operator` → 403; `tenant_admin` → 200. This
 aligns REST with the MCP posture, where cross-session replay is the
-`tenant_admin`-gated `meho.audit.replay` tool — the operator-level
+`tenant_admin`-gated `meho_audit_replay` tool — the operator-level
 `query_audit` `shape="tree"` path replays only the caller's own session.
 Before #1843 the REST route gated replay at `operator`, making the
 web/CLI surface more permissive than MCP and `audit-replay.md`. The
@@ -330,13 +330,13 @@ transport binds from the inbound `Mcp-Session-Id` header (G8.2-T2
 the contextvar unbound after G0.14-T6 #1147 decoupled capture from
 enforcement — there is no synthetic uuid4 fallback for the client to
 match against) — is rejected with `-32602`. Cross-session forensic
-replay is the `tenant_admin`-gated `meho.audit.replay` tool, not this
+replay is the `tenant_admin`-gated `meho_audit_replay` tool, not this
 path.
 
-## `meho.audit.replay` admin tool (G8.2-T6 #1014)
+## `meho_audit_replay` admin tool (G8.2-T6 #1014)
 
 A dedicated `tenant_admin` meta-tool in the `meho.*` admin namespace
-(alongside `meho.broadcast.overrides.*`), registered in the same
+(alongside `meho_broadcast_overrides_*`), registered in the same
 `mcp/tools/audit.py` module. It is the cross-session escalation: an
 admin replays *another* agent's session, where `query_audit`'s
 `shape="tree"` path replays only *your own*.
@@ -373,7 +373,7 @@ The MCP broadcast path derives `op_class` from `classify_op(op_id)`
 with the **tool name verbatim** — it does not honor
 `ToolDefinition.op_class`. `classify_op` therefore grew a
 `meho.audit.` prefix arm next to the existing `audit.` arm: without
-it, `meho.audit.replay` (prefix `meho.audit.`) would fall through to
+it, `meho_audit_replay` (prefix `meho.audit.`) would fall through to
 `other` and broadcast its full `ReplayNode` tree instead of the
 aggregate-only view. (The literal tool name `query_audit` has the same
 MCP-path classification gap today — a pre-existing G8.1 concern, out
@@ -392,7 +392,7 @@ Reverse dependencies:
 * `meho_backplane.api.v1.audit` (T2 #466) — REST router for the four
   consumer-facing routes; dispatches every call through `query_audit`.
 * `meho_backplane.mcp.tools.audit` (T4 #468, extended G8.2-T6 #1014) —
-  the `query_audit` MCP meta-tool plus the `meho.audit.replay` admin
+  the `query_audit` MCP meta-tool plus the `meho_audit_replay` admin
   tool; dispatches flat queries through `query_audit` and replay
   (admin tool + `shape="tree"`) through `replay_session`.
 * T3 #467 (CLI) follows.

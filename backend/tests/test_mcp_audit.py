@@ -5,8 +5,8 @@
 
 Covers every acceptance criterion on issue #250:
 
-* ``tools/call meho.status`` writes exactly one ``audit_log`` row with
-  method=MCP, path=/mcp/tools/call/meho.status, status_code=200,
+* ``tools/call meho_status`` writes exactly one ``audit_log`` row with
+  method=MCP, path=/mcp/tools/call/meho_status, status_code=200,
   payload carries the empty-args params_hash + op_class=read.
 * ``resources/read meho://tenant/<id>/info`` writes exactly one
   ``audit_log`` row with path=/mcp/resources/read/<uri>.
@@ -115,9 +115,9 @@ def test_params_hash_differs_for_distinct_inputs() -> None:
 async def test_tools_call_meho_status_writes_one_mcp_audit_row(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """AC #1: tools/call meho.status writes one ``method="MCP"`` row.
+    """AC #1: tools/call meho_status writes one ``method="MCP"`` row.
 
-    Post-G0.6-T-Refactor-Vault, the ``meho.status`` handler reaches
+    Post-G0.6-T-Refactor-Vault, the ``meho_status`` handler reaches
     :func:`~meho_backplane.api.v1.health.build_health_response` which
     dispatches ``vault.kv.read`` through the G0.6 dispatcher; the
     dispatcher writes its own ``method="DISPATCH"`` audit row for the
@@ -138,7 +138,7 @@ async def test_tools_call_meho_status_writes_one_mcp_audit_row(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
     )
     assert response.status_code == 200
@@ -151,9 +151,9 @@ async def test_tools_call_meho_status_writes_one_mcp_audit_row(
     assert row.operator_sub == op.sub
     assert row.tenant_id == op.tenant_id
     assert row.method == "MCP"
-    assert row.path == "/mcp/tools/call/meho.status"
+    assert row.path == "/mcp/tools/call/meho_status"
     assert row.status_code == 200
-    assert row.payload["op_id"] == "meho.status"
+    assert row.payload["op_id"] == "meho_status"
     assert row.payload["op_class"] == "read"
     assert row.payload["params_hash"] == compute_params_hash({})
 
@@ -308,7 +308,7 @@ async def test_mcp_envelope_does_not_produce_chassis_audit_row(
     Without the path-prefix exclusion in :class:`AuditMiddleware`, the
     middleware would write a row per JSON-RPC POST (wrong granularity)
     AND each MCP handler would write its own row (correct granularity).
-    Post-G0.6-T-Refactor-Vault, the ``meho.status`` handler also routes
+    Post-G0.6-T-Refactor-Vault, the ``meho_status`` handler also routes
     through the G0.6 dispatcher (which writes a per-operation
     ``method="DISPATCH"`` row); the contract this test pins is that
     no *chassis-middleware* row appears for the JSON-RPC POST itself —
@@ -322,7 +322,7 @@ async def test_mcp_envelope_does_not_produce_chassis_audit_row(
             "jsonrpc": "2.0",
             "id": 4,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
     )
     assert response.status_code == 200
@@ -373,7 +373,7 @@ async def test_audit_write_failure_converts_call_to_internal_error(
                 "jsonrpc": "2.0",
                 "id": 5,
                 "method": "tools/call",
-                "params": {"name": "meho.status", "arguments": {}},
+                "params": {"name": "meho_status", "arguments": {}},
             },
         )
 
@@ -456,7 +456,7 @@ async def test_session_header_propagates_to_agent_session_id(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
         headers={"Mcp-Session-Id": str(session_id)},
     )
@@ -488,7 +488,7 @@ async def test_absent_session_header_leaves_agent_session_id_null(
         "jsonrpc": "2.0",
         "id": 1,
         "method": "tools/call",
-        "params": {"name": "meho.status", "arguments": {}},
+        "params": {"name": "meho_status", "arguments": {}},
     }
 
     assert post_mcp(client, envelope).status_code == 200
@@ -520,7 +520,7 @@ async def test_malformed_session_header_leaves_agent_session_id_null(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
         headers={"Mcp-Session-Id": "not-a-uuid"},
     )
@@ -553,7 +553,7 @@ async def test_require_session_id_rejects_missing_header_without_audit_row(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
     )
     assert response.json()["error"]["code"] == INVALID_REQUEST
@@ -579,7 +579,7 @@ async def test_require_session_id_accepts_when_header_present(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
         headers={"Mcp-Session-Id": str(session_id)},
     )
@@ -616,7 +616,7 @@ async def test_require_session_id_with_malformed_header_succeeds_with_null(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
         headers={"Mcp-Session-Id": "not-a-uuid"},
     )
@@ -704,10 +704,10 @@ async def test_principal_name_and_email_merged_from_operator() -> None:
     await write_mcp_audit_row(
         operator=op,
         method="MCP",
-        path="/mcp/tools/call/meho.status",
+        path="/mcp/tools/call/meho_status",
         status_code=200,
         duration_ms=1.0,
-        payload={"op_id": "meho.status", "op_class": "read"},
+        payload={"op_id": "meho_status", "op_class": "read"},
     )
 
     rows = await _audit_rows()
@@ -750,10 +750,10 @@ async def test_operator_without_name_or_email_writes_no_principal_keys() -> None
     await write_mcp_audit_row(
         operator=op,
         method="MCP",
-        path="/mcp/tools/call/meho.status",
+        path="/mcp/tools/call/meho_status",
         status_code=200,
         duration_ms=1.0,
-        payload={"op_id": "meho.status", "op_class": "read"},
+        payload={"op_id": "meho_status", "op_class": "read"},
     )
 
     rows = await _audit_rows()
@@ -789,11 +789,11 @@ async def test_explicit_payload_principal_name_wins_over_operator() -> None:
     await write_mcp_audit_row(
         operator=op,
         method="MCP",
-        path="/mcp/tools/call/meho.status",
+        path="/mcp/tools/call/meho_status",
         status_code=200,
         duration_ms=1.0,
         payload={
-            "op_id": "meho.status",
+            "op_id": "meho_status",
             "op_class": "read",
             "principal_name": "Acting Agent Name",
         },
@@ -875,7 +875,7 @@ async def test_target_id_malformed_contextvar_logs_and_falls_back_to_null() -> N
 async def test_no_target_contextvar_leaves_target_id_null_and_no_name() -> None:
     """A tool that doesn't resolve a target leaves ``target_id`` NULL.
 
-    ``meho.status`` and similar tenant-wide MCP tools never invoke the
+    ``meho_status`` and similar tenant-wide MCP tools never invoke the
     targets resolver, so the contextvar is unbound — the typed column
     must stay NULL (the chassis-era default) and no ``target_name`` key
     should be injected into payload.
@@ -888,10 +888,10 @@ async def test_no_target_contextvar_leaves_target_id_null_and_no_name() -> None:
     await write_mcp_audit_row(
         operator=op,
         method="MCP",
-        path="/mcp/tools/call/meho.status",
+        path="/mcp/tools/call/meho_status",
         status_code=200,
         duration_ms=1.0,
-        payload={"op_id": "meho.status", "op_class": "read"},
+        payload={"op_id": "meho_status", "op_class": "read"},
     )
 
     rows = await _audit_rows()
@@ -991,7 +991,7 @@ async def test_initialize_issued_session_id_round_trips_to_audit_row(
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
         headers={"Mcp-Session-Id": issued_header},
     )

@@ -29,7 +29,7 @@ Coverage:
   (:data:`meho_backplane.mcp.tools._connector_shared._TENANT_ID_PROPERTY`
   — ``format`` applies to strings only, so ``null`` passes the type
   union untouched).
-* Production wiring: ``meho.connector.review`` with a malformed
+* Production wiring: ``meho_connector_review`` with a malformed
   ``tenant_id`` is rejected at the schema gate (``-32602``, message
   names the inputSchema) — previously that value reached
   ``_coerce_tenant_id``'s bare ``UUID(raw)`` re-parse and blew up as
@@ -247,7 +247,7 @@ def test_null_on_nullable_uuid_shape_dispatches(
 def test_connector_review_malformed_tenant_id_is_invalid_params(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """``meho.connector.review`` with a malformed ``tenant_id`` → ``-32602``.
+    """``meho_connector_review`` with a malformed ``tenant_id`` → ``-32602``.
 
     Exercises the real registered tool schema
     (``_TENANT_ID_PROPERTY``'s ``format: uuid``): the schema gate now
@@ -265,7 +265,7 @@ def test_connector_review_malformed_tenant_id_is_invalid_params(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.review",
+                "name": "meho_connector_review",
                 "arguments": {
                     "connector_id": "vault-1.x",
                     "tenant_id": "not-a-uuid",

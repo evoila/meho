@@ -18,7 +18,7 @@ These tests pin the three issue acceptance criteria:
 2. Dispatch against an unreviewed profiled connector is blocked just
    like a staged ingested op (``lookup_descriptor`` hard-filters
    ``is_enabled = TRUE``, so the staged op is invisible to dispatch).
-3. An audit event (``meho.connector.profile_stamp``) is emitted on the
+3. An audit event (``meho_connector_profile_stamp``) is emitted on the
    first stamp, and a re-stamp is idempotent (no duplicate row).
 
 Plus the enable-time advisory (``profiled_but_unreviewed``) that surfaces
@@ -293,7 +293,7 @@ async def test_dispatch_blocked_for_unreviewed_profiled_op_like_staged_op() -> N
 
 @pytest.mark.asyncio
 async def test_first_stamp_emits_audit_event() -> None:
-    """AC3: the first stamp writes one ``meho.connector.profile_stamp`` audit row."""
+    """AC3: the first stamp writes one ``meho_connector_profile_stamp`` audit row."""
     tenant_id = uuid.uuid4()
     await _seed_staged_connector(tenant_id=tenant_id)
     service = ReviewService(_make_operator(tenant_id=tenant_id))

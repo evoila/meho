@@ -8,7 +8,7 @@ the ``list_doc_collections`` test harness:
 
 * **Registration gates** — the tool declares ``tenant_admin`` role,
   ``write`` op_class, and the ``meho-docs`` capability (parity with the
-  REST create route + the ``meho.connector.*`` write-tool precedent).
+  REST create route + the ``meho_connector_*`` write-tool precedent).
 * **Capability gate** — absent from ``tools/list`` for an unprovisioned
   tenant; a direct ``tools/call`` 403s before the handler runs.
 * **Role gate** — a provisioned plain OPERATOR (not tenant_admin) is 403'd.

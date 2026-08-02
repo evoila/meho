@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the ``meho.sensor.*`` MCP tools (#2503).
+"""Tests for the ``meho_sensor_*`` MCP tools (#2503).
 
 Initiative #2416 (parent goal #221), Task #2503. Covers:
 
-* the three ``meho.sensor.*`` tools are registered and appear in a
+* the three ``meho_sensor_*`` tools are registered and appear in a
   ``tools/list`` for a tenant_admin operator;
-* ``meho.sensor.create`` over a safe op dispatches to the service;
-* ``meho.sensor.create`` over a non-safe op surfaces the
+* ``meho_sensor_create`` over a safe op dispatches to the service;
+* ``meho_sensor_create`` over a non-safe op surfaces the
   ``sensor_requires_safe_operation`` code as an invalid-params error;
-* ``meho.sensor.delete`` against a cross-tenant id surfaces as
+* ``meho_sensor_delete`` against a cross-tenant id surfaces as
   ``sensor_not_found``.
 """
 
@@ -104,18 +104,18 @@ async def _seed_descriptor(*, op_id: str, safety_level: str = "safe") -> None:
 
 
 def test_mcp_tools_registered_and_in_tools_list() -> None:
-    """The three meho.sensor.* tools are registered and appear in tools/list."""
+    """The three meho_sensor_* tools are registered and appear in tools/list."""
     assert _sensor_tools is not None
-    for name in ("meho.sensor.list", "meho.sensor.create", "meho.sensor.delete"):
+    for name in ("meho_sensor_list", "meho_sensor_create", "meho_sensor_delete"):
         assert get_tool(name) is not None
 
     listed = {t.name for t in all_tools_for(_admin())}
-    assert {"meho.sensor.list", "meho.sensor.create", "meho.sensor.delete"} <= listed
+    assert {"meho_sensor_list", "meho_sensor_create", "meho_sensor_delete"} <= listed
 
 
 @pytest.mark.asyncio
 async def test_mcp_create_dispatches_to_service() -> None:
-    """meho.sensor.create over a safe op returns the created sensor_id."""
+    """meho_sensor_create over a safe op returns the created sensor_id."""
     await _seed_tenant(_TENANT_A, "tenant-a")
     await _seed_descriptor(op_id=_SAFE_OP, safety_level="safe")
     result = await _sensor_tools._create_handler(
@@ -157,7 +157,7 @@ async def test_mcp_create_over_non_safe_op_surfaces_code() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_delete_cross_tenant_not_found() -> None:
-    """meho.sensor.delete against a cross-tenant id surfaces as sensor_not_found."""
+    """meho_sensor_delete against a cross-tenant id surfaces as sensor_not_found."""
     from meho_backplane.mcp.server import McpInvalidParamsError
 
     await _seed_tenant(_TENANT_A, "tenant-a")

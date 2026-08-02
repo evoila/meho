@@ -235,7 +235,7 @@ MCP (admin meta-tool, `tenant_admin` namespace):
   "jsonrpc": "2.0", "id": 1,
   "method": "tools/call",
   "params": {
-    "name": "meho.broadcast.overrides.set",
+    "name": "meho_broadcast_overrides_set",
     "arguments": {
       "op_id_pattern": "vsphere.vm.*",
       "detail": "aggregate"
@@ -244,7 +244,7 @@ MCP (admin meta-tool, `tenant_admin` namespace):
 }
 ```
 
-The response shape is symmetric with `meho.broadcast.overrides.remove`
+The response shape is symmetric with `meho_broadcast_overrides_remove`
 (v0.3.2 [G0.9.1-T7 #779](https://github.com/evoila/meho/issues/779)) —
 the new rule's id is exposed at top-level `override_id` (matching the
 `remove` arg shape) **and** nested under `override.id` (preserved so
@@ -321,7 +321,7 @@ MCP:
 {
   "jsonrpc": "2.0", "id": 2,
   "method": "tools/call",
-  "params": { "name": "meho.broadcast.overrides.list", "arguments": {} }
+  "params": { "name": "meho_broadcast_overrides_list", "arguments": {} }
 }
 ```
 
@@ -349,7 +349,7 @@ MCP:
   "jsonrpc": "2.0", "id": 3,
   "method": "tools/call",
   "params": {
-    "name": "meho.broadcast.overrides.remove",
+    "name": "meho_broadcast_overrides_remove",
     "arguments": { "override_id": "3a7e0c8c-7b3e-49cb-9b5d-9c1f5a2e3d4e" }
   }
 }
@@ -374,7 +374,7 @@ diff fragment in `payload`:
 ```jsonc
 // payload for a "set" mutation
 {
-  "op_id": "meho.broadcast.overrides.set",
+  "op_id": "meho_broadcast_overrides_set",
   "op_class": "write",
   "override_op": "set",
   "override_id": "<new-rule-uuid>",
@@ -443,16 +443,16 @@ gated:
 
 ```console
 # Discover the admin tool surface (tenant_admin token required to
-# see meho.broadcast.overrides.* in the list).
+# see meho_broadcast_overrides_* in the list).
 $ npx -y @modelcontextprotocol/inspector \
     --cli https://meho.example.com/mcp \
     --transport http \
     --header "Authorization: Bearer $MEHO_TOKEN" \
     --method tools/list | jq '.tools[].name' | grep broadcast.overrides
 
-"meho.broadcast.overrides.list"
-"meho.broadcast.overrides.set"
-"meho.broadcast.overrides.remove"
+"meho_broadcast_overrides_list"
+"meho_broadcast_overrides_set"
+"meho_broadcast_overrides_remove"
 
 # Call list — admin scope. Returns {overrides: [...]}.
 $ npx -y @modelcontextprotocol/inspector \
@@ -460,13 +460,13 @@ $ npx -y @modelcontextprotocol/inspector \
     --transport http \
     --header "Authorization: Bearer $MEHO_TOKEN" \
     --method tools/call \
-    --tool-name meho.broadcast.overrides.list
+    --tool-name meho_broadcast_overrides_list
 ```
 
 A non-admin token (`operator` / `read_only` claim) running the
 same `tools/list` call sees only the agent-surface tools
 (`broadcast_recent` / `_announce` / `_watch`) — the
-`meho.broadcast.overrides.*` namespace is hidden by the
+`meho_broadcast_overrides_*` namespace is hidden by the
 registry-filter layer and the dispatcher rejects a direct call
 with JSON-RPC `-32602` `forbidden:`.
 

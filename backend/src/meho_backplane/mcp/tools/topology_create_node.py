@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``meho.topology.create_node`` — manual seed for the topology graph.
+"""``meho_topology_create_node`` — manual seed for the topology graph.
 
 Initiative #772 (G0.9.1), Task #778 (T6, Signal #14). Closes the
 empty-tenant bootstrap gap: a fresh tenant has zero ``graph_node`` rows
 (no probe has run yet) and the rest of the topology MCP surface
-(``meho.topology.annotate``) requires both endpoints to already exist.
+(``meho_topology_annotate``) requires both endpoints to already exist.
 Before this tool, the only way to create a node was the CLI verb
 ``meho topology refresh <target>``; that is not reachable from an MCP
 session, so an agent driving the bootstrap path hit
@@ -23,7 +23,7 @@ immediately. The typed-op handler forwards to
 :func:`~meho_backplane.topology.nodes.create_or_get_node`; the service
 primitive owns validation / upsert / audit / broadcast — this front
 performs no DB work of its own. The shape mirrors the
-``meho.topology.annotate`` admin tool in
+``meho_topology_annotate`` admin tool in
 :mod:`meho_backplane.mcp.tools.topology` so an operator carries one
 mental model across the topology write surface.
 
@@ -54,7 +54,7 @@ from meho_backplane.mcp.tools.topology import dispatch_topology_write, with_park
 __all__: list[str] = []
 
 
-_CREATE_NODE_TOOL_NAME: Final[str] = "meho.topology.create_node"
+_CREATE_NODE_TOOL_NAME: Final[str] = "meho_topology_create_node"
 
 
 _CREATE_NODE_DESCRIPTION: Final[str] = (
@@ -65,15 +65,15 @@ _CREATE_NODE_DESCRIPTION: Final[str] = (
     "automatically — no `tenant_id` argument (cross-tenant creation is "
     "structurally impossible).\n\n"
     "WHEN TO CALL: a fresh tenant has zero nodes (no probe has run "
-    "yet) and you need to assert a curated edge — `meho.topology."
+    "yet) and you need to assert a curated edge — `meho_topology_"
     "annotate` cannot resolve endpoints that do not yet exist as "
     "`graph_node` rows. Seed both endpoints first, then annotate. "
     "Example bootstrap flow:\n"
-    "  1. `meho.topology.create_node {kind: principal, name: "
+    "  1. `meho_topology_create_node {kind: principal, name: "
     "k8s-sa-prod}`\n"
-    "  2. `meho.topology.create_node {kind: vault-role, name: "
+    "  2. `meho_topology_create_node {kind: vault-role, name: "
     "rdc-vault}`\n"
-    "  3. `meho.topology.annotate {from_name: k8s-sa-prod, kind: "
+    "  3. `meho_topology_annotate {from_name: k8s-sa-prod, kind: "
     "authenticates-via, to_name: rdc-vault}`\n\n"
     "Also useful for curated inner-graph nodes the probes cannot "
     "infer (Vault roles, Keycloak realms, externally-managed "
@@ -103,7 +103,7 @@ async def _create_node_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Route a ``meho.topology.create_node`` call through the dispatcher (#2537).
+    """Route a ``meho_topology_create_node`` call through the dispatcher (#2537).
 
     :func:`~meho_backplane.mcp.tools.topology.dispatch_topology_write`
     owns the policy gate (agents park, humans execute), the typed-op

@@ -16,7 +16,7 @@ helper cannot:
 * **Cross-language consumers.** Future kb / memory CLIs in other
   language stacks consume the HTTP surface; the in-process helper
   is Python-only.
-* **MCP tool surface.** G4 may register ``meho.kb.search`` as an
+* **MCP tool surface.** G4 may register ``meho_kb_search`` as an
   MCP tool that wraps this route (G0.5 deferral -- the MCP
   resource ``meho://retrieve/{query}`` is filed as a v0.2.next
   follow-up).

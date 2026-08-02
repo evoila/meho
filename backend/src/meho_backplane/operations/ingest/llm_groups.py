@@ -27,7 +27,7 @@ calls per ingested connector:
 
 The function persists nothing until both passes complete, then writes
 proposed groups (``review_status='staged'``) + per-op ``group_id``
-assignments + one ``meho.connector.llm_grouping`` audit row in a
+assignments + one ``meho_connector_llm_grouping`` audit row in a
 single transaction. Re-running on a fully-grouped connector is a
 no-op (every op already has ``group_id`` set, no LLM call fires);
 re-running on a partially-grouped connector runs only Pass 2 on the
@@ -538,7 +538,7 @@ async def _write_grouping_audit_row(
     totals: _PhaseTotals,
     config: GroupingConfig,
 ) -> None:
-    """Emit the ``meho.connector.llm_grouping`` audit row for the pass."""
+    """Emit the ``meho_connector_llm_grouping`` audit row for the pass."""
     await write_audit_row(
         session,
         operator_sub=operator_sub,

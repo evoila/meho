@@ -17,7 +17,7 @@ surface the #2664 program requires on REST, mirroring the ``[beta]`` /
   (:data:`PATH_FEATURE_OVERRIDES`): today the ``connectors`` tag, whose
   lifecycle verbs follow ``typed_connector_reads`` (GA) while the
   spec-ingestion pipeline paths follow ``connector_ingest``
-  (experimental) — the same split the MCP ``meho.connector.*`` tools
+  (experimental) — the same split the MCP ``meho_connector_*`` tools
   encode.
 
 Mapping maintenance
@@ -91,7 +91,7 @@ TAG_FEATURE: Final[dict[str, str]] = {
 #: the ``connectors`` tag's spec-ingestion pipeline paths, which follow
 #: ``connector_ingest`` while the tag-level default follows the
 #: lifecycle verbs' ``typed_connector_reads`` — the same per-verb split
-#: the ``meho.connector.*`` MCP tools declare.
+#: the ``meho_connector_*`` MCP tools declare.
 PATH_FEATURE_OVERRIDES: Final[dict[str, str]] = {
     "/api/v1/connectors/ingest": "connector_ingest",
     "/api/v1/connectors/ingest/jobs/{job_id}": "connector_ingest",

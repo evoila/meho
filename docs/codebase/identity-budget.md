@@ -212,7 +212,7 @@ the two for the audit row.
 |---|---|
 | REST `POST /api/v1/agents/{name}/run` | `HTTP 429` with body `{"detail": {"error": "budget_exceeded", "reason": "..."}}` |
 | REST `POST /api/v1/agents/{name}/run/events` | Same `429` *before* the SSE stream opens (via `ensure_runnable`) |
-| MCP `meho.agents.run` | JSON-RPC `-32602` (invalid params) with message `budget_exceeded: <reason>` |
+| MCP `meho_agents_run` | JSON-RPC `-32602` (invalid params) with message `budget_exceeded: <reason>` |
 | Scheduler fire | Logged at `WARN` and the trigger is *not* retried this tick (the cap is the contract) |
 
 ### Why all three windows are checked

@@ -35,7 +35,7 @@ bottom of the file cover the wiring contract:
 * **Operator with 1 in-progress run** -> the priming block appears
   AFTER the conventions block.
 * **Operator with 6 in-progress runs** -> the summary block (one
-  block referring the agent to ``meho.runbook.list_runs``) appears
+  block referring the agent to ``meho_runbook_list_runs``) appears
   instead of per-run blocks.
 * **Call order** -- conventions text appears before priming text in
   the assembled preamble (substring index check).
@@ -180,8 +180,8 @@ async def test_broadcast_discipline_band_present_exactly_once() -> None:
     result = await assemble_preamble(tenant, _NO_RUNS_OPERATOR)
 
     assert result.text.count(BROADCAST_BLOCK_START) == 1
-    assert "meho.broadcast.recent" in result.text
-    assert "meho.broadcast.announce" in result.text
+    assert "meho_broadcast_recent" in result.text
+    assert "meho_broadcast_announce" in result.text
     # The band leads the preamble (coordination protocol frames the work).
     assert result.text.startswith(BROADCAST_BLOCK_START)
 
@@ -612,7 +612,7 @@ async def test_six_in_progress_runs_appends_summary_block() -> None:
 
     G12.4-T2 (#1316) acceptance criterion: "Multi-run case (>5
     in-progress) collapses to a summary block." The summary form
-    refers the agent to ``meho.runbook.list_runs`` and drops per-run
+    refers the agent to ``meho_runbook_list_runs`` and drops per-run
     block content (token-budget discipline at the priming-band
     level).
     """
@@ -637,7 +637,7 @@ async def test_six_in_progress_runs_appends_summary_block() -> None:
     assert result.text.count(PRIMING_BLOCK_END) == 1
     # Summary-form wording -- references the count + the read tool.
     assert "6 in-progress" in result.text
-    assert "meho.runbook.list_runs" in result.text
+    assert "meho_runbook_list_runs" in result.text
     # Per-run block content does NOT leak when the summary form
     # fires (token-budget discipline).
     assert "`drain`" not in result.text

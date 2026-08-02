@@ -724,7 +724,7 @@ def build_bulk_import_rows(rows: list[dict[str, Any]]) -> list[BulkImportRow]:
     :data:`~meho_backplane.connectors.topology.schemas.ANNOTATE_PARAMETER_SCHEMA`):
     ``from_name`` / ``kind`` / ``to_name`` plus the optional
     ``from_node_kind`` / ``to_node_kind`` pins and ``note`` /
-    ``evidence_url``. Shared by the ``meho.topology.bulk_import`` MCP
+    ``evidence_url``. Shared by the ``meho_topology_bulk_import`` MCP
     front (dry-run) and the ``topology.bulk_import`` typed-op handler
     (apply) so the two paths build identical rows from identical input.
     """

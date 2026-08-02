@@ -21,7 +21,7 @@ truth:
   row in the same transaction (the "request" row on create; the
   "decision" row on approve/reject/expire).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
-  (inspect), `meho.approvals.{list,get,approve,reject}` MCP tools, and
+  (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
   `meho approvals {list,show,approve,reject}` CLI verbs. T5 also adds
   the broadcast notifications: each `create_pending_request` /
   `approve_request` / `reject_request` publishes an

@@ -245,7 +245,7 @@ Two molds apply, by where the mismatch sits:
   `_mirror_template_slug` mold. The row carries **both** the native key
   and the qualified name, equal values; the REST surface and shared
   Pydantic model are untouched. #2471 added `_mirror_grant_id` (`id` →
-  `grant_id` on `meho.agents.grant.{list,show,create,elevate}`),
+  `grant_id` on `meho_agents_grant_{list,show,create,elevate}`),
   `_mirror_trigger_id` (`id` → `trigger_id` on `meho_scheduler_list`),
   and `_mirror_run_status` (`state` → `status` on
   `meho_runbook_list_runs` summaries — the filter itself stays `status`

@@ -1051,7 +1051,7 @@ already-codified molds, picked by whether the mismatch is on an
   the qualified name the sibling verb accepts, equal values. The REST
   surface and the shared Pydantic model are untouched. This is the
   `_mirror_template_slug` mold (#1612). #2471 added three more:
-  `meho.agents.grant.{list,show,create,elevate}` rows mirror `id` →
+  `meho_agents_grant_{list,show,create,elevate}` rows mirror `id` →
   `grant_id` (accepted by `grant.show` / `grant.revoke`);
   `meho_scheduler_list` rows mirror `id` → `trigger_id` (accepted by
   `scheduler.cancel`, and the same key `scheduler.create` already

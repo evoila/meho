@@ -368,7 +368,7 @@ under two keys:
   the broadcast event was rendered with.
 
 Plus, every CRUD mutation against a rule writes its own audit row
-with `op_id = meho.broadcast.overrides.{list,set,remove}` and a
+with `op_id = meho_broadcast_overrides_{list,set,remove}` and a
 diff fragment in `payload`:
 
 ```jsonc
@@ -448,7 +448,7 @@ $ npx -y @modelcontextprotocol/inspector \
     --cli https://meho.example.com/mcp \
     --transport http \
     --header "Authorization: Bearer $MEHO_TOKEN" \
-    --method tools/list | jq '.tools[].name' | grep broadcast.overrides
+    --method tools/list | jq '.tools[].name' | grep broadcast_overrides
 
 "meho_broadcast_overrides_list"
 "meho_broadcast_overrides_set"

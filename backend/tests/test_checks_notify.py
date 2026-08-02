@@ -20,6 +20,13 @@ Initiative #2716 (parent goal #221), Task #2719. Coverage:
   ``investigate_on_transition`` calls on one Dashboard produce exactly one
   send (the compare-and-swap claim is the dedupe), and the recovery edge
   back to ``ok`` produces a second one.
+* **Flap suppression (#2732)** -- one delivery per (dashboard, state) per
+  window with re-delivery after expiry, escalation and recovery exempt,
+  recovery resetting the windows (below-floor recovery included), the
+  fail-open Valkey posture on claim and clear, the ``0`` knob
+  short-circuiting before any Valkey call, the attempt-based claim, and
+  the same flap sequence suppressed through the persist seam while the
+  memo keeps advancing.
 * **Finding mail (#2721)** -- the second notice kind: verdict / summary /
   ``run_id`` / recommended action rendering, the unconfigured skip, both
   failure shapes (refused result and raising transport), header safety on
@@ -28,7 +35,11 @@ Initiative #2716 (parent goal #221), Task #2719. Coverage:
 
 :func:`~meho_backplane.connectors.mail.transport.send_email` is replaced by
 a recording fake in every test, so no SMTP session is opened; the DB layer
-is real against the SQLite engine from :mod:`tests.conftest`.
+is real against the SQLite engine from :mod:`tests.conftest`. The Valkey
+client behind the #2732 suppression window is replaced by
+:class:`_FakeSuppressionStore` (autouse) -- real ``SET NX EX`` semantics
+with a manually-advanced TTL clock, so window expiry is driven, not
+simulated by deleting keys -- and no socket ever opens.
 """
 
 from __future__ import annotations
@@ -95,6 +106,71 @@ def _reset_notifications() -> Iterator[None]:
     inv._INVESTIGATIONS.clear()
 
 
+class _FakeSuppressionStore:
+    """Valkey double for the #2732 flap window: ``SET NX EX`` + ``DEL``.
+
+    Models redis-py 8.0.1's awaited command shape (``set(..., nx=True,
+    ex=...)`` returns ``True`` when the key was absent and ``None`` when it
+    already existed -- ``parse_set_result``'s contract; ``delete(*names)``
+    returns the removed count) plus a **manually-advanced TTL clock**, so
+    the window-expiry assertion drives real key expiry through
+    :meth:`advance` instead of deleting keys behind the code's back.
+    """
+
+    def __init__(self) -> None:
+        self.now: float = 0.0
+        self.set_calls: list[tuple[str, int]] = []
+        self.deleted: list[str] = []
+        self.set_exc: Exception | None = None
+        self.delete_exc: Exception | None = None
+        self._store: dict[str, float] = {}
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+    def _purge(self) -> None:
+        self._store = {key: exp for key, exp in self._store.items() if exp > self.now}
+
+    async def set(
+        self, name: str, value: str, *, nx: bool = False, ex: int | None = None
+    ) -> bool | None:
+        if self.set_exc is not None:
+            raise self.set_exc
+        assert nx, "the suppression claim must be NX -- atomic check-and-claim"
+        assert ex is not None and ex > 0, "the suppression claim must carry the window TTL"
+        self.set_calls.append((name, ex))
+        self._purge()
+        if name in self._store:
+            return None
+        self._store[name] = self.now + ex
+        return True
+
+    async def delete(self, *names: str) -> int:
+        if self.delete_exc is not None:
+            raise self.delete_exc
+        self.deleted.extend(names)
+        self._purge()
+        removed = 0
+        for name in names:
+            if self._store.pop(name, None) is not None:
+                removed += 1
+        return removed
+
+
+@pytest.fixture(autouse=True)
+def suppression_store(monkeypatch: pytest.MonkeyPatch) -> _FakeSuppressionStore:
+    """Replace the notifier's Valkey client so no test ever opens a socket.
+
+    Autouse because the suppression window is on by default (30 minutes):
+    without this, every delivering test would attempt a real connection to
+    the settings-default Valkey -- and a developer's local instance would
+    leak claims across tests.
+    """
+    store = _FakeSuppressionStore()
+    monkeypatch.setattr(notify, "get_broadcast_client", lambda: store)
+    return store
+
+
 class _RecordingTransport:
     """Stands in for ``send_email``; records every call, returns a preset."""
 
@@ -132,9 +208,11 @@ def _notice(
     min_state: str = "critical",
     members: tuple[NotifyMember, ...] = (),
     name: str = "prod-health",
+    dashboard_id: UUID | None = None,
 ) -> DashboardNotice:
     return DashboardNotice(
-        dashboard_id=uuid4(),
+        tenant_id=_TENANT,
+        dashboard_id=dashboard_id or uuid4(),
         name=name,
         previous_state=previous,
         current_state=current,
@@ -531,6 +609,246 @@ async def test_investigator_gate_is_unchanged_by_the_notify_hook(
 
 
 # ---------------------------------------------------------------------------
+# Flap suppression (#2732)
+# ---------------------------------------------------------------------------
+
+
+_WINDOW_SECONDS = 30 * 60  # the settings default the fixture leaves in place
+
+
+@pytest.mark.asyncio
+async def test_flap_within_window_delivers_once_per_state(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """``critical <-> unknown`` flapping mails once per distinct state per window.
+
+    The realistic flap shape: a member Sensor going stale and back derives
+    ``unknown`` and returns, so the Dashboard re-crosses the same two states.
+    Each repeat crossing inside the window is suppressed with a structured
+    log; once the window expires the same sequence delivers again.
+    """
+    fake = _install_transport(monkeypatch)
+    dash = uuid4()
+    flap = [
+        ("critical", "unknown"),
+        ("unknown", "critical"),
+        ("critical", "unknown"),
+        ("unknown", "critical"),
+    ]
+
+    with capture_logs() as logs:
+        for previous, current in flap:
+            await notify_dashboard_transition(
+                _notice(previous=previous, current=current, dashboard_id=dash)
+            )
+
+    assert ["-> unknown" in c["subject"] for c in fake.calls] == [True, False]
+    assert len(fake.calls) == 2, "one delivery per distinct state inside the window"
+    suppressed = [e for e in logs if e["event"] == "checks_notify_suppressed"]
+    assert len(suppressed) == 2
+    assert {e["current_state"] for e in suppressed} == {"unknown", "critical"}
+
+    suppression_store.advance(_WINDOW_SECONDS + 1)
+    for previous, current in flap:
+        await notify_dashboard_transition(
+            _notice(previous=previous, current=current, dashboard_id=dash)
+        )
+
+    assert len(fake.calls) == 4, "an expired window delivers the same states again"
+    assert all(ex == _WINDOW_SECONDS for _, ex in suppression_store.set_calls)
+
+
+@pytest.mark.asyncio
+async def test_escalation_is_never_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``critical`` page right after a ``degraded`` notice delivers both."""
+    fake = _install_transport(monkeypatch)
+    dash = uuid4()
+
+    await notify_dashboard_transition(
+        _notice(previous="ok", current="degraded", min_state="degraded", dashboard_id=dash)
+    )
+    await notify_dashboard_transition(
+        _notice(previous="degraded", current="critical", min_state="degraded", dashboard_id=dash)
+    )
+
+    assert len(fake.calls) == 2, "a different state is a different key -- never suppressed"
+    assert "-> degraded" in fake.calls[0]["subject"]
+    assert "-> critical" in fake.calls[1]["subject"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_is_never_suppressed_and_resets_windows(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """The all-clear always delivers, and it ends the incident's windows.
+
+    ``ok -> critical -> ok -> critical -> ok`` inside one window: every edge
+    mails. The second ``critical`` is a *new* incident (the recovery cleared
+    the keys), and the second all-clear is exempt from suppression outright.
+    """
+    fake = _install_transport(monkeypatch)
+    dash = uuid4()
+    for previous, current in [
+        ("ok", "critical"),
+        ("critical", "ok"),
+        ("ok", "critical"),
+        ("critical", "ok"),
+    ]:
+        await notify_dashboard_transition(
+            _notice(previous=previous, current=current, dashboard_id=dash)
+        )
+
+    assert len(fake.calls) == 4, "recovery must deliver and reset the flap windows"
+    assert suppression_store.deleted, "the recovery crossing clears the suppression keys"
+
+
+@pytest.mark.asyncio
+async def test_below_floor_recovery_still_resets_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recovery too quiet to mail still ends the incident.
+
+    At the default ``critical`` floor, ``degraded -> ok`` sends nothing --
+    but the next ``critical`` crossing is a new incident and must page, so
+    the clear runs before the floor gate, not behind it.
+    """
+    fake = _install_transport(monkeypatch)
+    dash = uuid4()
+    for previous, current in [
+        ("ok", "critical"),  # mails, claims the critical window
+        ("critical", "degraded"),  # mails (critical side), claims degraded
+        ("degraded", "ok"),  # below the critical floor: silent, but clears
+        ("ok", "critical"),  # new incident -- must mail again
+    ]:
+        await notify_dashboard_transition(
+            _notice(previous=previous, current=current, dashboard_id=dash)
+        )
+
+    subjects = [c["subject"] for c in fake.calls]
+    assert len(subjects) == 3
+    assert "-> critical" in subjects[0]
+    assert "-> degraded" in subjects[1]
+    assert "-> critical" in subjects[2], "the below-floor recovery must have reset the window"
+
+
+@pytest.mark.asyncio
+async def test_valkey_failure_on_claim_fails_open(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """A Valkey teardown never drops a page -- deliver, warn, move on."""
+    fake = _install_transport(monkeypatch)
+    suppression_store.set_exc = RuntimeError("valkey down")
+
+    with capture_logs() as logs:
+        await notify_dashboard_transition(_notice())
+
+    assert len(fake.calls) == 1, "suppression is fail-open: the mail must be sent"
+    failed = [e for e in logs if e["event"] == "checks_notify_suppression_failed"]
+    assert len(failed) == 1
+    assert failed[0]["phase"] == "claim"
+
+
+@pytest.mark.asyncio
+async def test_valkey_failure_on_clear_fails_open(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """A failing key clear never blocks the all-clear mail."""
+    fake = _install_transport(monkeypatch)
+    suppression_store.delete_exc = RuntimeError("valkey down")
+
+    with capture_logs() as logs:
+        await notify_dashboard_transition(_notice(previous="critical", current="ok"))
+
+    assert len(fake.calls) == 1
+    failed = [e for e in logs if e["event"] == "checks_notify_suppression_failed"]
+    assert len(failed) == 1
+    assert failed[0]["phase"] == "clear"
+
+
+@pytest.mark.asyncio
+async def test_window_zero_disables_and_skips_valkey(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``0`` restores one-mail-per-edge and short-circuits before any Valkey call."""
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setenv("CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES", "0")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        notify,
+        "get_broadcast_client",
+        lambda: pytest.fail("window 0 must not touch Valkey"),
+    )
+    dash = uuid4()
+
+    for _ in range(2):
+        await notify_dashboard_transition(_notice(dashboard_id=dash))
+    await notify_dashboard_transition(_notice(previous="critical", current="ok", dashboard_id=dash))
+
+    assert len(fake.calls) == 3, "no suppression and no clear when the window is 0"
+
+
+@pytest.mark.asyncio
+async def test_failed_send_still_claims_the_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window bounds attempts, not confirmed deliveries.
+
+    The claim is atomic check-and-claim *before* the send (claiming after
+    would race a slow SMTP session against the next flap edge), so a failed
+    attempt is not retried by the next same-state crossing -- the #2719
+    one-attempt-per-claimed-transition contract, now per window.
+    """
+    fake = _install_transport(monkeypatch, exc=RuntimeError("MTA down"))
+    dash = uuid4()
+
+    with capture_logs() as logs:
+        await notify_dashboard_transition(_notice(dashboard_id=dash))
+        await notify_dashboard_transition(_notice(dashboard_id=dash))
+
+    assert len(fake.calls) == 1, "the second same-state edge is suppressed, not retried"
+    assert any(e["event"] == "checks_notify_failed" for e in logs)
+    assert any(e["event"] == "checks_notify_suppressed" for e in logs)
+
+
+@pytest.mark.asyncio
+async def test_flap_through_the_seam_is_suppressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Suppression bounds delivery only -- the memo keeps advancing per edge.
+
+    A member flapping ``critical <-> degraded`` through the real persist
+    seam mails once per state; every edge still moves
+    ``last_rollup_state`` (the claim, the broadcast event, and the
+    investigator gate are deliberately untouched by #2732).
+    """
+    fake = _install_transport(monkeypatch)
+    monkeypatch.setattr(inv, "_schedule_investigation", lambda **_: None)
+    await _seed_tenant()
+    sid = await _seed_sensor(name="flappy", last_state="critical")
+    dash = await _seed_dashboard(name="prod-health", sensor_ids=[sid], notify_min_state="degraded")
+
+    for state in ("degraded", "critical", "degraded"):
+        await inv.investigate_on_transition(sensor_id=sid, tenant_id=_TENANT)
+        await notify._await_pending_notifications()
+        await _set_sensor_state(sid, state)
+    await inv.investigate_on_transition(sensor_id=sid, tenant_id=_TENANT)
+    await notify._await_pending_notifications()
+
+    assert len(fake.calls) == 2, "one mail per distinct state inside the window"
+    assert "-> critical" in fake.calls[0]["subject"]
+    assert "-> degraded" in fake.calls[1]["subject"]
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(CheckDashboard, dash)
+        assert row is not None
+        assert row.last_rollup_state == "degraded", "the memo must advance on every edge"
+
+
+# ---------------------------------------------------------------------------
 # Finding mail (#2721)
 # ---------------------------------------------------------------------------
 
@@ -666,6 +984,41 @@ async def test_finding_mail_bounds_a_runaway_answer(
     assert "x" * (notify._MAX_FINDING_CHARS + 1) not in body
     assert body.count("\n- line-") == notify._MAX_EVIDENCE_LINES
     assert "5 further line(s) not shown." in body
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_has_no_state_floor_and_no_flap_window(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """The #2732 decision, pinned: finding mail gates on ``notify_email`` alone.
+
+    ``notify_min_state`` is a floor over a transition *edge* and a finding
+    is not an edge; the investigator's fire gate is the volume control. So
+    a finding about a Dashboard whose ``degraded`` incident never reached
+    the default ``critical`` transition floor still mails, and repeated
+    findings are not flap-suppressed -- no Valkey key is ever touched.
+    """
+    fake = _install_transport(monkeypatch)
+    dash = uuid4()
+
+    for _ in range(2):
+        await notify_finding(
+            FindingNotice(
+                dashboard_id=dash,
+                dashboard_name="prod-health",
+                run_id=uuid4(),
+                verdict="actionable",
+                summary="Sensor degraded below the paging floor.",
+                evidence=(),
+                recommended_action=None,
+                recipient="oncall@example.com",
+            )
+        )
+
+    assert len(fake.calls) == 2, "no floor and no window applies to finding mail"
+    assert suppression_store.set_calls == []
+    assert suppression_store.deleted == []
 
 
 @pytest.mark.asyncio

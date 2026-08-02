@@ -674,6 +674,7 @@ def _dashboard_notice(
     task with no session of its own.
     """
     return DashboardNotice(
+        tenant_id=dashboard.tenant_id,
         dashboard_id=snapshot.dashboard_id,
         name=snapshot.name,
         previous_state=snapshot.previous_state,

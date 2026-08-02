@@ -1074,6 +1074,15 @@ class Settings(BaseModel):
     #: state) window. ``0`` disables the feature entirely (no DB read on
     #: any dispatch).
     checks_alert_advisory_window_minutes: int = Field(default=30, ge=0)
+    #: Flap-suppression window (minutes) for Dashboard transition email
+    #: (#2732). The first crossing into a non-green state mails; repeat
+    #: crossings into the *same* state inside the window are suppressed
+    #: (Valkey ``SET NX EX`` per (tenant, dashboard, state)). A different
+    #: state mails immediately, and a recovery both mails and resets the
+    #: Dashboard's windows. ``0`` disables suppression entirely (one mail
+    #: per claimed edge, the pre-#2732 behaviour) and short-circuits
+    #: before any Valkey call.
+    checks_notify_suppression_window_minutes: int = Field(default=30, ge=0)
     # Broadcast v2 T2 (#2547) -- durable-announcement retention prune
     # knobs. ``days=0`` is the keep-forever opt-out sentinel;
     # ``enabled=False`` skips starting the background task entirely
@@ -1752,6 +1761,9 @@ def get_settings() -> Settings:
         ),
         checks_alert_advisory_window_minutes=int(
             os.environ.get("CHECKS_ALERT_ADVISORY_WINDOW_MINUTES", "30"),
+        ),
+        checks_notify_suppression_window_minutes=int(
+            os.environ.get("CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES", "30"),
         ),
         broadcast_announcement_retention_days=int(
             os.environ.get("BROADCAST_ANNOUNCEMENT_RETENTION_DAYS", "90"),

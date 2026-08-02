@@ -201,6 +201,29 @@ connector-related release-notes line.
   investigator's worsening-only fire conditions are unchanged.
   Requires migration `0068`. (#2719)
 
+### Added — checks notifications: flap suppression window (#2732)
+
+- Dashboard transition email now carries a per-(dashboard, state)
+  **flap-suppression window**: the first crossing into a non-green
+  state mails, repeat crossings into the *same* state inside the window
+  are suppressed (Valkey `SET NX EX`, the #2718 advisory's idiom;
+  `CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`, default 30, `0` restores
+  one-mail-per-edge). A member Sensor flapping `critical <-> unknown`
+  at the runner cadence — the stale-probe shape of the RDC lab — now
+  produces one mail per state per window instead of one per edge.
+  Escalation is never suppressed (a different state is a different
+  key), recovery is never suppressed **and resets the Dashboard's
+  windows** (an incident after an all-clear pages again immediately,
+  even when the recovery edge itself sat below the `notify_min_state`
+  floor), and the whole gate fails open — a Valkey error warn-logs and
+  the mail is sent, because a missed alert is worse than a duplicate.
+  Suppression bounds delivery only: the rollup memo, the
+  `checks.transition` broadcast event, and the investigator gate see
+  every edge. Finding email is deliberately exempt from both this
+  window and the `notify_min_state` floor (its volume control is the
+  investigator's budget-gated fire gate — decision recorded in
+  `docs/codebase/checks-notifications.md`). (#2732)
+
 ### Added — checks advisory: non-green Dashboards surface on dispatch responses (#2718)
 
 - Successful dispatch responses — agent `call_operation` and the

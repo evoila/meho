@@ -276,6 +276,40 @@ def test_vault_addr_set_env_is_preserved(
         get_settings.cache_clear()
 
 
+def test_checks_notify_suppression_window_defaults_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`` → the 30-minute default."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().checks_notify_suppression_window_minutes == 30
+    finally:
+        get_settings.cache_clear()
+
+
+def test_checks_notify_suppression_window_env_override_takes_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`` flows through ``get_settings()``.
+
+    The #2732 acceptance criterion, and the `Settings` trap it exists
+    for: `Settings` is a plain pydantic ``BaseModel``, not
+    ``BaseSettings`` — ``get_settings()`` hand-maps every env var, so a
+    field declared without its mapping would be silently inert and the
+    documented operator knob a no-op. A full round-trip (env in, value
+    out) is the only shape that catches the missing mapping.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES", "0")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().checks_notify_suppression_window_minutes == 0
+    finally:
+        get_settings.cache_clear()
+
+
 def test_result_handle_max_spill_rows_defaults_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -270,7 +270,7 @@ _INCLUDE_STALE_QUERY = Query(
 #: is G0.18-T4 (#1357) — distinct slug from the annotate flow's
 #: ``node_not_found`` (`_node_not_found_http`) because the operator
 #: action differs (closure: register / refresh the target; annotate:
-#: seed the endpoint via ``meho.topology.create_node``).
+#: seed the endpoint via ``meho_topology_create_node``).
 _CLOSURE_RESPONSES: Final[dict[int | str, dict[str, Any]]] = {
     404: {
         "description": (
@@ -1321,7 +1321,7 @@ def _node_untracked_http(exc: NodeNotFoundError) -> HTTPException:
     diagnostic ("not in the topology graph — likely a registered
     non-k8s target the auto-discovery doesn't cover yet") instead of
     the annotate-write diagnostic ("seed the endpoint first via
-    ``meho.topology.create_node``"). The two share a 404 status code
+    ``meho_topology_create_node``"). The two share a 404 status code
     and the same ``name`` / ``kind`` echo, only the ``error`` slug
     diverges — the operator action diverges too. Pre-G0.18-T4 the
     closure routes returned an empty list for this case, which

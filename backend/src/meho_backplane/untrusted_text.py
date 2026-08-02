@@ -6,7 +6,7 @@
 MEHO stores agent-authored free text (broadcast announcement
 ``activity`` / ``scope`` / ``target``, kb bodies, memory bodies) and
 later re-serves it verbatim through LLM-facing read surfaces (the
-``meho.broadcast.recent`` / ``meho.broadcast.watch`` tools, the
+``meho_broadcast_recent`` / ``meho_broadcast_watch`` tools, the
 ``meho://tenant/{tenant_id}/feed``, ``meho://kb/{slug}`` and
 ``meho://memory/{scope}/{slug}`` resources). Text one agent wrote in a
 past session is **untrusted input** to the agent reading it back — a

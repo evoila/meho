@@ -4,8 +4,8 @@ Operator-facing real-time view of every audited operation, plus
 agent-authored announcements, scoped per tenant. The substrate is a
 Valkey 9.x Stream (`meho:feed:{tenant_id}`); the SSE surface
 (`/api/v1/feed` and `/ui/broadcast/stream`) and the MCP tools
-(`meho.broadcast.recent`, `meho.broadcast.watch`,
-`meho.broadcast.announce`) all read or write to that single substrate.
+(`meho_broadcast_recent`, `meho_broadcast_watch`,
+`meho_broadcast_announce`) all read or write to that single substrate.
 MEHO-hosted agent runs reach the same substrate through the agent
 meta-tool bridge (`broadcast_announce` / `broadcast_recent` /
 `broadcast_watch`, #2548), which reuses these MCP handlers — see
@@ -41,8 +41,8 @@ Three layers, separated for traceability:
    | --- | --- | --- | --- | --- |
    | SSE feed | `GET /api/v1/feed` (Bearer JWT) | `XREAD BLOCK` | `$` (live tail) | **Last 50 on `$` connections** |
    | SSE bridge | `GET /ui/broadcast/stream` (session cookie) | `XREAD BLOCK` | `$` (live tail) | **Last 50 on `$` connections** |
-   | MCP recent | `meho.broadcast.recent` | `XRANGE` | 30-min window | All entries in window |
-   | MCP watch | `meho.broadcast.watch` | `XREAD BLOCK` | caller-supplied `since_cursor` (required) | None — caller pins |
+   | MCP recent | `meho_broadcast_recent` | `XRANGE` | 30-min window | All entries in window |
+   | MCP watch | `meho_broadcast_watch` | `XREAD BLOCK` | caller-supplied `since_cursor` (required) | None — caller pins |
    | MCP resource | `tenant_feed` snapshot | `XREVRANGE + COUNT 50` | n/a | Latest 50 |
    | UI history | `GET /ui/broadcast/history` | `XRANGE` | 30-min window | All entries in window |
    | Agent bridge | `broadcast_recent` / `broadcast_watch` meta-tools (#2548) | reuse the MCP recent/watch handlers | as MCP recent/watch | as MCP recent/watch |
@@ -98,12 +98,12 @@ Three layers, separated for traceability:
     envelope guards agent free text on `AgentAnnouncementEvent` only).
     Optional with `None` defaults, so pre-T3 stream entries that predate
     the fields still validate on read. `event_matches`
-    (`broadcast/history.py`) and the `meho.broadcast.recent` /
-    `meho.broadcast.watch` `filter` object gained matching `actor_sub`
+    (`broadcast/history.py`) and the `meho_broadcast_recent` /
+    `meho_broadcast_watch` `filter` object gained matching `actor_sub`
     and `work_ref` exact-match filters ("what has this agent been
     doing"); an announcement never qualifies for a lineage filter.
 - `AgentAnnouncementEvent` (`broadcast/agent_events.py`) — agent-
-  authored announcements published via `meho.broadcast.announce`.
+  authored announcements published via `meho_broadcast_announce`.
   Fields: `event_id` (UUID, minted at publish via `default_factory=uuid4`
   — the real per-announcement identity, #2547; also the durable
   `agent_announcement` row's PK, served unwrapped), `tenant_id`,
@@ -226,7 +226,7 @@ HTTP request
 ### Write path (agent-authored)
 
 ```
-MCP tools/call meho.broadcast.announce
+MCP tools/call meho_broadcast_announce
   → _handler_announce (mcp/tools/broadcast.py)
     → enforce_announce_rate_limit(tenant_id, principal_sub)  ← fail-loud
       → (skipped when broadcast_announce_rate_per_minute == 0)
@@ -260,7 +260,7 @@ counter lives on the same fast broadcast client as the publish and is
 fail-loud for the same reason — a Valkey wobble must not silently let a
 principal bypass the cap. See `broadcast/rate_limit.py`.
 
-The four-step broadcast discipline (check `meho.broadcast.recent` →
+The four-step broadcast discipline (check `meho_broadcast_recent` →
 announce `start` → `update` → `completion`) is seeded into every MCP
 session preamble as a static band (`BROADCAST_DISCIPLINE_BAND` in
 `conventions/preamble.py`, #2546) so agents receive it without relying
@@ -352,7 +352,7 @@ On the **success path of a write-class dispatch**, the operation response
 carries a compact advisory of recent *peer* activity on the same target so
 the caller learns another principal is already active there — post-op
 awareness, not a lock or a block (pre-op checking stays the discipline's
-`meho.broadcast.recent` read step). The advisory rides
+`meho_broadcast_recent` read step). The advisory rides
 `OperationResult.extras["target_activity_advisory"]`
 (`connectors/schemas.py`), the established envelope-extension slot.
 
@@ -429,7 +429,7 @@ PK), `tenant_id` (FK), `principal_sub`, `activity`, `target`, `scope`,
 between its bounded Events TTL and the durable records it expects
 elsewhere.
 
-**Recent DB backfill.** `meho.broadcast.recent` reads the archive when
+**Recent DB backfill.** `meho_broadcast_recent` reads the archive when
 the requested window reaches before the stream's oldest surviving entry
 (`_backfill_recent_from_db` in `broadcast/history.py`). The stream
 `XRANGE` from the window start defines the covered range; the gap
@@ -476,7 +476,7 @@ different substrate).
     buffer). Used by every blocking `XREAD` caller: the SSE feed
     (`api/v1/feed.py`), the UI SSE bridge
     (`ui/routes/broadcast/stream.py`), the
-    `meho.broadcast.watch` MCP tool, and the agent approval-wait
+    `meho_broadcast_watch` MCP tool, and the agent approval-wait
     loop (`agent/approval_wait.py`). The longer timeout lets a quiet
     BLOCK expire naturally (`xread` returns `None`) instead of
     raising `redis.TimeoutError` from the socket layer at 5 s, which
@@ -530,7 +530,7 @@ indefinitely.
   publish hot path, SSE backlog prelude (`XREVRANGE`).
 - `get_broadcast_blocking_client()` — `socket_timeout=35 s` (30 s
   BLOCK + 5 s buffer). Every blocking `XREAD` caller: the SSE feed,
-  the UI SSE bridge, the `meho.broadcast.watch` MCP tool, and the
+  the UI SSE bridge, the `meho_broadcast_watch` MCP tool, and the
   agent approval-wait loop.
 
 Now on a quiet tenant, `XREAD BLOCK 30000` returns `None` after the
@@ -583,7 +583,7 @@ failure modes:
 2. **76+ existing events never surfaced.** The `/ui/broadcast`
    page's first render had no signal of life, no backlog, no
    indication that the operator was even on the right tenant.
-   The MCP `meho.broadcast.recent` tool (XRANGE-based) surfaced
+   The MCP `meho_broadcast_recent` tool (XRANGE-based) surfaced
    the same events fine to agents, deepening the consumer's
    "the SSE layer is broken" diagnosis.
 

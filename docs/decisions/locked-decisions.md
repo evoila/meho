@@ -105,7 +105,7 @@ MEHO speaks MCP from v0.2 day 1. Bootstrap filed as G0.5 (#226).
 
 - **The agent surface is ~17 meta-tools** registered by G0.5 (`search_connectors` / `list_connectors` / `list_operation_groups` / `search_operations` / `call_operation` / `search_knowledge` / `add_to_knowledge` / `search_memory` / `add_to_memory` / `broadcast_recent` / `broadcast_announce` / `broadcast_watch` / `list_targets` / `query_topology` / `query_audit` / `result_query` / `result_aggregate` / `result_export` / `result_describe`). Per CLAUDE.md.
 - **No per-vendor MCP tools.** Vendor operations (vCenter's 3,000+ paths, K8s's 13 ops, etc.) reach the agent through `call_operation`, dispatched by [#388 G0.6 operation registry](https://github.com/evoila/meho/issues/388).
-- **Admin operations** use the `meho.*` namespace (`meho.broadcast.overrides.set`, `meho.audit.replay`, `meho.topology.annotate`, `meho.memory.promote`) — tenant_admin role required; not in the agent's daily surface.
+- **Admin operations** use the `meho_*` prefix (`meho_broadcast_overrides_set`, `meho_audit_replay`, `meho_topology_annotate`, `meho_memory_promote`) — tenant_admin role required; not in the agent's daily surface. (Originally the dotted `meho.*` namespace; #2745 renamed the dotted tools to underscore-only names because the Anthropic tool-name pattern `^[a-zA-Z0-9_-]{1,64}$` rejects dots and Claude Desktop / claude.ai withhold the entire toolset when one name fails.)
 - G0.5 registers the meta-tools as stubs initially; each backing Initiative (G0.6 / G4.1 / G5.1 / G6.1 / G8.1 / G9.1) ships a Task that swaps the stub for the real handler.
 
 **Spec target:** MCP revision **2025-06-18** (current stable). Pinned in `docs/architecture/mcp.md`.

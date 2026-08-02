@@ -140,8 +140,8 @@ def test_broadcast_tools_require_operator_floor() -> None:
 @pytest.mark.parametrize(
     ("agent_name", "mcp_name"),
     [
-        ("broadcast_recent", "meho.broadcast.recent"),
-        ("broadcast_watch", "meho.broadcast.watch"),
+        ("broadcast_recent", "meho_broadcast_recent"),
+        ("broadcast_watch", "meho_broadcast_watch"),
     ],
 )
 def test_read_tool_schema_matches_mcp(agent_name: str, mcp_name: str) -> None:
@@ -163,7 +163,7 @@ def test_read_tool_schema_matches_mcp(agent_name: str, mcp_name: str) -> None:
 def test_watch_bridge_strips_anyof_but_registry_keeps_it() -> None:
     """The bridged ``broadcast_watch`` schema drops the cursor XOR; MCP keeps it (#2644).
 
-    ``meho.broadcast.watch``'s registered ``inputSchema`` carries a top-level
+    ``meho_broadcast_watch``'s registered ``inputSchema`` carries a top-level
     ``anyOf`` so ``mcp/handlers.py``'s ``jsonschema.validate`` rejects a call
     that supplies neither cursor spelling. That combinator 400s the Anthropic
     Messages API when it reaches a tool's ``input_schema``, killing every
@@ -179,7 +179,7 @@ def test_watch_bridge_strips_anyof_but_registry_keeps_it() -> None:
     # The parameters both cursor spellings live on survive the strip.
     assert {"cursor", "since_cursor"} <= set(published["properties"])
 
-    entry = get_tool("meho.broadcast.watch")
+    entry = get_tool("meho_broadcast_watch")
     assert entry is not None
     registered = entry[0].inputSchema
     assert registered["anyOf"] == [
@@ -198,7 +198,7 @@ def test_announce_schema_hides_run_scoped_fields() -> None:
     # The agent-authored coordination fields remain.
     assert {"activity", "target", "targets", "scope", "planned_op_class"} <= set(props)
     # The MCP tool still advertises the full field set (deep-copy isolation).
-    entry = get_tool("meho.broadcast.announce")
+    entry = get_tool("meho_broadcast_announce")
     assert entry is not None
     mcp_props = entry[0].inputSchema["properties"]
     assert "run_id" in mcp_props

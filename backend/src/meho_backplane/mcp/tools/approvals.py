@@ -3,19 +3,19 @@
 
 """MCP tools for the approval surfacing channel (G11.2-T5 / #818).
 
-Four ``meho.approvals.*`` tools that mirror the REST routes
+Four ``meho_approvals_*`` tools that mirror the REST routes
 (:mod:`meho_backplane.api.v1.approvals`) onto the MCP transport:
 
-* ``meho.approvals.list`` — list approval requests, optionally filtered
+* ``meho_approvals_list`` — list approval requests, optionally filtered
   by status. Role: ``operator``.
-* ``meho.approvals.get`` — inspect one approval request by id. Returns
+* ``meho_approvals_get`` — inspect one approval request by id. Returns
   the ``proposed_effect`` so an operator can decide before approving.
   Role: ``operator``.
-* ``meho.approvals.approve`` — approve a pending request (operator
+* ``meho_approvals_approve`` — approve a pending request (operator
   decision: status flip + audit + broadcast; **no** params required —
   the agent's REST path retains the params-hash check).
   Role: ``operator``.
-* ``meho.approvals.reject`` — reject a pending request. Role:
+* ``meho_approvals_reject`` — reject a pending request. Role:
   ``operator``.
 
 All four tools drive
@@ -31,12 +31,12 @@ MCP elicitation URL-mode (forward-looking)
 ------------------------------------------
 
 When an in-loop agent hits a ``needs-approval`` verdict, the agent
-runtime can use the row's ``id`` (returned from ``meho.approvals.get``)
+runtime can use the row's ``id`` (returned from ``meho_approvals_get``)
 to construct an elicitation URL of the form
 ``meho://approvals/{request_id}/decide``. MCP-2025-11-25 hosts that
 support elicitation URL-mode open this URL in the operator's decision
 UI; until that lands the operator approves/rejects via the explicit
-``meho.approvals.{approve,reject}`` tools above.
+``meho_approvals_{approve,reject}`` tools above.
 
 Error mapping
 -------------
@@ -85,11 +85,11 @@ _OP_IDS: Final[dict[str, str]] = {
     "reject": "approval.reject",
 }
 
-#: Allowed ``status`` filter values on ``meho.approvals.list``. Mirrors
+#: Allowed ``status`` filter values on ``meho_approvals_list``. Mirrors
 #: :class:`~meho_backplane.db.models.ApprovalRequestStatus` plus the
 #: ``"all"`` sentinel that means "no filter". Pinning the enum here (and
-#: in the inputSchema below) brings ``meho.approvals.list.status`` into
-#: parity with ``meho.scheduler.list.status``: both surface the allowed
+#: in the inputSchema below) brings ``meho_approvals_list.status`` into
+#: parity with ``meho_scheduler_list.status``: both surface the allowed
 #: vocabulary as a JSON-Schema ``enum`` rather than prose, so a schema-
 #: driven MCP client renders the same dropdown shape for sibling list
 #: filters (RDC #789 N4 / G0.18-T5 #1358).
@@ -189,7 +189,7 @@ def _require_id(arguments: dict[str, Any]) -> uuid.UUID:
 
 
 # ---------------------------------------------------------------------------
-# meho.approvals.list
+# meho_approvals_list
 # ---------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ async def _list_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="approvals",
-        name="meho.approvals.list",
+        name="meho_approvals_list",
         description=(
             "List approval requests for your tenant (G11.2-T5 / #818). "
             "Operator-level. Use status='pending' (default) for the "
@@ -258,7 +258,7 @@ register_mcp_tool(
                     "description": (
                         "Filter by status. 'all' is the sentinel meaning "
                         "'no filter'. Vocabulary mirrors "
-                        "`meho.scheduler.list.status` (both surface the "
+                        "`meho_scheduler_list.status` (both surface the "
                         "allowed values as a JSON enum, not prose) — "
                         "RDC #789 N4 / G0.18-T5."
                     ),
@@ -295,7 +295,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.approvals.get
+# meho_approvals_get
 # ---------------------------------------------------------------------------
 
 
@@ -325,7 +325,7 @@ async def _get_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="approvals",
-        name="meho.approvals.get",
+        name="meho_approvals_get",
         description=(
             "Inspect a single approval request by id (G11.2-T5 / #818). "
             "Operator-level. Returns the full detail including "
@@ -351,7 +351,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.approvals.approve
+# meho_approvals_approve
 # ---------------------------------------------------------------------------
 
 
@@ -444,7 +444,7 @@ async def _approve_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="approvals",
-        name="meho.approvals.approve",
+        name="meho_approvals_approve",
         description=(
             "Approve a pending approval request (G11.2-T5 / #818; #1503; "
             "#2293). Operator-level. Flips the request to 'approved', writes "
@@ -481,7 +481,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.approvals.reject
+# meho_approvals_reject
 # ---------------------------------------------------------------------------
 
 
@@ -531,7 +531,7 @@ async def _reject_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="approvals",
-        name="meho.approvals.reject",
+        name="meho_approvals_reject",
         description=(
             "Reject a pending approval request (G11.2-T5 / #818). "
             "Operator-level. Flips the request to 'rejected', writes the "

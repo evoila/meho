@@ -7,7 +7,7 @@ A write-class dispatch on a target with recent PEER activity carries a
 compact ``extras["target_activity_advisory"]`` on its success response so
 the caller learns another principal is active there at the moment it
 matters. This is post-op awareness -- not a lock, not a block. Pre-op
-checking stays the discipline's ``meho.broadcast.recent`` read step.
+checking stays the discipline's ``meho_broadcast_recent`` read step.
 
 Coverage mirrors the acceptance criteria on the issue:
 

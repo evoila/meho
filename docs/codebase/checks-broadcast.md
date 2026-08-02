@@ -5,7 +5,7 @@
 Every claimed Dashboard rollup edge is published to the tenant broadcast
 feed (`meho:feed:{tenant_id}`) as one `BroadcastEvent` with op-id
 `checks.transition` and op-class `checks`. Feed watchers —
-`meho.broadcast.recent`, `meho.broadcast.watch`, `GET /api/v1/feed`, and
+`meho_broadcast_recent`, `meho_broadcast_watch`, `GET /api/v1/feed`, and
 `/ui/broadcast/stream?op_class=checks` — see check state changes the way
 they already see `approval.*` lifecycle events (#2720).
 

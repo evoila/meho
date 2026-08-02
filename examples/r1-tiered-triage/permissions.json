@@ -5,7 +5,7 @@
   "permissions": [
     {
       "principal_sub": "<cheap-principal-sub>",
-      "op_pattern": "meho.broadcast.recent",
+      "op_pattern": "meho_broadcast_recent",
       "target_scope": "*",
       "verdict": "auto-execute",
       "_purpose": "Cheap tier reads recent broadcast events as the source of triage signal. Read-only op; auto-executes."

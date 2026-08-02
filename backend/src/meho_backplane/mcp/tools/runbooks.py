@@ -8,7 +8,7 @@
 # Splitting would obscure the contract. Same structural choice as the
 # sibling mcp/tools/runbook_runs.py (run-side).
 
-"""``meho.runbook.*`` template-lifecycle MCP tools (G12.2-T4).
+"""``meho_runbook_*`` template-lifecycle MCP tools (G12.2-T4).
 
 Seven tool registrations that surface
 :class:`~meho_backplane.runbooks.service.RunbookTemplateService` on the
@@ -17,22 +17,25 @@ MCP transport. The matching REST routes are owned by the sibling Task
 algebra (edit-draft vs fork-from-published), the status state machine,
 and the ``in_flight_run_count`` query all live in one place (T2, #1296).
 
-Naming + field canonicalisation (#1612)
-=======================================
+Naming + field canonicalisation (#1612, renamed #2745)
+======================================================
 
-The tool names are dotted — ``meho.runbook.draft_template``,
-``meho.runbook.show_template``, … — matching the ``meho.<noun>.<verb>``
-grammar every other multi-verb family on the surface uses. The original
-flat ``runbook_*`` names were kept as deprecated aliases for one window
-after #1612 and were removed in v0.15.0 (#1625; the deadline was
-deferred once from the original v0.14.0 window by #1702).
+The tool names are ``meho_runbook_draft_template``,
+``meho_runbook_show_template``, … — matching the ``meho_<noun>_<verb>``
+grammar every other multi-verb family on the surface uses. History: the
+original flat ``runbook_*`` names were kept as deprecated aliases for one
+window after #1612 (which made dotted ``meho.runbook.*`` canonical) and
+were removed in v0.15.0 (#1625; the deadline was deferred once from the
+original v0.14.0 window by #1702); #2745 renamed the dotted forms to
+underscores for the Anthropic tool-name pattern
+``^[a-zA-Z0-9_-]{1,64}$``.
 
 The template identifier is ``template_slug`` on every wire input
-(matching ``meho.runbook.start`` / ``meho.runbook.list_runs`` on the run
+(matching ``meho_runbook_start`` / ``meho_runbook_list_runs`` on the run
 side); the pre-#1612 ``slug`` input alias was removed alongside the flat
 names. Responses still mirror the model's ``slug`` key as
 ``template_slug`` (see :func:`_mirror_template_slug`) so an id read from
-any template verb round-trips verbatim into ``meho.runbook.start`` with
+any template verb round-trips verbatim into ``meho_runbook_start`` with
 no field rename.
 
 Why the descriptions are long
@@ -54,8 +57,8 @@ RBAC, audit, error mapping
 ===========================
 
 Five of the seven tools are ``TENANT_ADMIN``-only (authoring + status
-flips + draft discard). ``meho.runbook.list_templates`` is ``OPERATOR``-readable
-(summaries, no step bodies). ``meho.runbook.show_template`` admits an
+flips + draft discard). ``meho_runbook_list_templates`` is ``OPERATOR``-readable
+(summaries, no step bodies). ``meho_runbook_show_template`` admits an
 ``OPERATOR`` at the
 dispatcher gate but applies a *run-state-conditional* carve-out inside
 the handler (G12.3-T4 / #1309): a ``TENANT_ADMIN`` is a pass-through, an
@@ -149,7 +152,7 @@ _INVALID_PARAMS_ERRORS = (
     InvalidKbSlugError,
 )
 
-#: Default + maximum row cap for ``meho.runbook.list_templates``. Matches the
+#: Default + maximum row cap for ``meho_runbook_list_templates``. Matches the
 #: :meth:`RunbookTemplateService.list_templates` default (100).
 _DEFAULT_LIST_LIMIT: Final[int] = 100
 _MAX_LIST_LIMIT: Final[int] = 500
@@ -215,7 +218,7 @@ def _mirror_template_slug(payload: dict[str, Any]) -> dict[str, Any]:
     The shared Pydantic response models keep their ``slug`` field (the
     REST surface is out of #1612's scope), so the MCP handlers mirror it
     at the wire boundary: every template-verb response carries
-    ``template_slug`` (canonical, the field name ``meho.runbook.start``
+    ``template_slug`` (canonical, the field name ``meho_runbook_start``
     accepts verbatim) alongside the model's native ``slug``. Top-level
     only — the nested ``forked_from.slug`` names the fork *source* and is
     not a round-trip input.
@@ -238,7 +241,7 @@ _DRAFT_DESCRIPTION: Final[str] = (
     "was tribal knowledge until now) and wants it captured as a "
     "governance-graded artifact.\n\n"
     "If a draft already exists for the slug, this fails with -32602. Use "
-    "`meho.runbook.edit_template` to mutate the existing draft.\n\n"
+    "`meho_runbook_edit_template` to mutate the existing draft.\n\n"
     "Requires TENANT_ADMIN role."
 )
 
@@ -256,20 +259,20 @@ _EDIT_DESCRIPTION: Final[str] = (
     "Authoring a real cert-rotation runbook means walking through a "
     "procedure across\n"
     "days. The pattern is:\n"
-    "  1. Start a draft with `meho.runbook.draft_template(template_slug, "
+    "  1. Start a draft with `meho_runbook_draft_template(template_slug, "
     "minimal_body)`.\n"
     "  2. As the procedure surfaces (the senior walks you through it, you "
     "capture\n"
     "     bash + verify steps), call "
-    "`meho.runbook.edit_template(template_slug, updated_body)`\n"
+    "`meho_runbook_edit_template(template_slug, updated_body)`\n"
     "     periodically to persist progress.\n"
     "  3. Coming back in a NEW session, call "
-    "`meho.runbook.show_template(template_slug)` to read\n"
+    "`meho_runbook_show_template(template_slug)` to read\n"
     "     the current draft, then resume appending via further "
-    "`meho.runbook.edit_template`\n"
+    "`meho_runbook_edit_template`\n"
     "     calls.\n"
     "  4. Once the senior signs off, "
-    "`meho.runbook.publish_template(template_slug, version)` flips\n"
+    "`meho_runbook_publish_template(template_slug, version)` flips\n"
     "     status to published.\n\n"
     "Drafts are mutable across sessions. Published versions are pinned for "
     "in-flight\n"
@@ -281,7 +284,7 @@ _EDIT_DESCRIPTION: Final[str] = (
     "mid-run\n"
     "operators stay pinned to their version. If you want to change the "
     "in-flight\n"
-    "procedure, use `meho.runbook.abort` + start over against the new "
+    "procedure, use `meho_runbook_abort` + start over against the new "
     "version instead.\n\n"
     "The `forked_from.in_flight_run_count` field tells you how many "
     "operators are\n"
@@ -293,10 +296,10 @@ _PUBLISH_DESCRIPTION: Final[str] = (
     "Flip a draft template to published. Idempotent on already-published "
     "versions.\n\n"
     "After publish, the template is the latest start target for "
-    "`meho.runbook.start`.\n"
+    "`meho_runbook_start`.\n"
     "Previous published versions stay addressable for in-flight runs (which "
     "are\n"
-    "pinned at start time) and for `meho.runbook.show_template`.\n\n"
+    "pinned at start time) and for `meho_runbook_show_template`.\n\n"
     "Use when: the senior has signed off on a draft and wants juniors to be "
     "able to\n"
     "start runs against it.\n\n"
@@ -308,9 +311,9 @@ _PUBLISH_DESCRIPTION: Final[str] = (
 _DEPRECATE_DESCRIPTION: Final[str] = (
     "Mark a published version as deprecated. In-flight runs continue to "
     "advance\n"
-    "(they're pinned), but new `meho.runbook.start` calls against this "
+    "(they're pinned), but new `meho_runbook_start` calls against this "
     "version are refused.\n"
-    "`meho.runbook.start` falls back to the latest non-deprecated published "
+    "`meho_runbook_start` falls back to the latest non-deprecated published "
     "version of\n"
     "the slug.\n\n"
     "Use when: a procedure is no longer current (cert validity period "
@@ -328,7 +331,7 @@ _DISCARD_DESCRIPTION: Final[str] = (
     "steps) instead of the publish-then-deprecate workaround.\n\n"
     "ONLY drafts are discardable. A published or deprecated version is "
     "refused with\n"
-    "-32602 — those are retired with `meho.runbook.deprecate_template` "
+    "-32602 — those are retired with `meho_runbook_deprecate_template` "
     "(which preserves\n"
     "lifecycle history), never erased. A missing (slug, version) is also "
     "-32602, so a\n"
@@ -343,12 +346,12 @@ _LIST_DESCRIPTION: Final[str] = (
     "List runbook templates in the operator's tenant. Returns "
     "template_slugs + titles + status\n"
     "+ target_kind + edited_at. Does NOT return step bodies — use\n"
-    "`meho.runbook.show_template` to read full content (TENANT_ADMIN "
+    "`meho_runbook_show_template` to read full content (TENANT_ADMIN "
     "unconditionally; OPERATOR only for a template they hold a "
     "completed or abandoned run against).\n\n"
     "Operators see this surface to discover available procedures before\n"
-    "`meho.runbook.start` — each summary's `template_slug` is accepted "
-    "verbatim by `meho.runbook.start`. TENANT_ADMINs see the same to "
+    "`meho_runbook_start` — each summary's `template_slug` is accepted "
+    "verbatim by `meho_runbook_start`. TENANT_ADMINs see the same to "
     "audit what's in flight.\n\n"
     "Filters: status (draft/published/deprecated), target_kind. Limit "
     "default 100."
@@ -363,9 +366,9 @@ _SHOW_DESCRIPTION: Final[str] = (
     "freely.\n"
     "**For operators executing a runbook, step opacity lives on the run "
     "surface — \n"
-    "`meho.runbook.next` returns only the current step at run time, not the "
+    "`meho_runbook_next` returns only the current step at run time, not the "
     "whole "
-    "template.** An operator calling `meho.runbook.show_template` directly "
+    "template.** An operator calling `meho_runbook_show_template` directly "
     "while a run\n"
     "is in flight is denied (-32602, opacity_floor).\n\n"
     "POST-COMPLETION EXCEPTION (G12.3): once an operator has a completed or "
@@ -384,7 +387,7 @@ _SHOW_DESCRIPTION: Final[str] = (
     "abandoned run against that specific resolved version to be granted the "
     "read.\n\n"
     "The response's `template_slug` is accepted verbatim by "
-    "`meho.runbook.start` — no field rename needed."
+    "`meho_runbook_start` — no field rename needed."
 )
 
 
@@ -402,11 +405,11 @@ _TEMPLATE_SLUG_PROPERTY: Final[dict[str, Any]] = {
         "lowercase letters, digits, hyphens, or dots. Example: "
         "'vcenter-9.0-cert-rotation'. REQUIRED. Canonical field name "
         "across all 12 runbook tools (#1612) — the same name "
-        "`meho.runbook.start` takes. Template responses (show_template, "
+        "`meho_runbook_start` takes. Template responses (show_template, "
         "each list_templates summary) carry this id under both "
         "`template_slug` (this canonical mirror) and the model-native "
         "`slug`, equal values — either round-trips into "
-        "`meho.runbook.start` verbatim."
+        "`meho_runbook_start` verbatim."
     ),
 }
 
@@ -464,7 +467,7 @@ async def _draft_template_handler(
     ``-32602``.
     """
     service = RunbookTemplateService()
-    slug = _resolve_template_slug("meho.runbook.draft_template", arguments)
+    slug = _resolve_template_slug("meho_runbook_draft_template", arguments)
     try:
         request = DraftTemplateRequest.model_validate({"slug": slug, "body": arguments["body"]})
         response = await service.create_draft(
@@ -473,7 +476,7 @@ async def _draft_template_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("meho.runbook.draft_template", exc) from exc
+        raise _to_invalid_params("meho_runbook_draft_template", exc) from exc
     return _mirror_template_slug(response.model_dump(mode="json"))
 
 
@@ -488,7 +491,7 @@ async def _edit_template_handler(
     on the in-place path it is ``None``.
     """
     service = RunbookTemplateService()
-    slug = _resolve_template_slug("meho.runbook.edit_template", arguments)
+    slug = _resolve_template_slug("meho_runbook_edit_template", arguments)
     try:
         request = EditTemplateRequest.model_validate({"slug": slug, "body": arguments["body"]})
         response = await service.update_or_fork(
@@ -497,7 +500,7 @@ async def _edit_template_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("meho.runbook.edit_template", exc) from exc
+        raise _to_invalid_params("meho_runbook_edit_template", exc) from exc
     return _mirror_template_slug(response.model_dump(mode="json"))
 
 
@@ -507,7 +510,7 @@ async def _publish_template_handler(
 ) -> dict[str, Any]:
     """Promote ``(slug, version)`` from draft to published. Idempotent."""
     service = RunbookTemplateService()
-    slug = _resolve_template_slug("meho.runbook.publish_template", arguments)
+    slug = _resolve_template_slug("meho_runbook_publish_template", arguments)
     try:
         request = PublishTemplateRequest.model_validate(
             {"slug": slug, "version": arguments["version"]}
@@ -517,7 +520,7 @@ async def _publish_template_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("meho.runbook.publish_template", exc) from exc
+        raise _to_invalid_params("meho_runbook_publish_template", exc) from exc
     return _mirror_template_slug(response.model_dump(mode="json"))
 
 
@@ -527,7 +530,7 @@ async def _deprecate_template_handler(
 ) -> dict[str, Any]:
     """Retire ``(slug, version)`` from published to deprecated. Idempotent."""
     service = RunbookTemplateService()
-    slug = _resolve_template_slug("meho.runbook.deprecate_template", arguments)
+    slug = _resolve_template_slug("meho_runbook_deprecate_template", arguments)
     try:
         request = DeprecateTemplateRequest.model_validate(
             {"slug": slug, "version": arguments["version"]}
@@ -537,7 +540,7 @@ async def _deprecate_template_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("meho.runbook.deprecate_template", exc) from exc
+        raise _to_invalid_params("meho_runbook_deprecate_template", exc) from exc
     return _mirror_template_slug(response.model_dump(mode="json"))
 
 
@@ -552,7 +555,7 @@ async def _discard_template_handler(
     ``-32602`` via :data:`_INVALID_PARAMS_ERRORS`.
     """
     service = RunbookTemplateService()
-    slug = _resolve_template_slug("meho.runbook.discard_template", arguments)
+    slug = _resolve_template_slug("meho_runbook_discard_template", arguments)
     try:
         request = DiscardTemplateRequest.model_validate(
             {"slug": slug, "version": arguments["version"]}
@@ -562,7 +565,7 @@ async def _discard_template_handler(
             request=request,
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("meho.runbook.discard_template", exc) from exc
+        raise _to_invalid_params("meho_runbook_discard_template", exc) from exc
     return _mirror_template_slug(response.model_dump(mode="json"))
 
 
@@ -590,7 +593,7 @@ async def _list_templates_handler(
             limit=int(arguments.get("limit", _DEFAULT_LIST_LIMIT)),
         )
     except (ValidationError, *_INVALID_PARAMS_ERRORS) as exc:
-        raise _to_invalid_params("meho.runbook.list_templates", exc) from exc
+        raise _to_invalid_params("meho_runbook_list_templates", exc) from exc
     return {
         "templates": [
             _mirror_template_slug(summary.model_dump(mode="json")) for summary in summaries
@@ -623,7 +626,7 @@ async def _show_template_handler(
     :func:`_show_template_operator_path`).
     """
     template_service = RunbookTemplateService()
-    slug = _resolve_template_slug("meho.runbook.show_template", arguments)
+    slug = _resolve_template_slug("meho_runbook_show_template", arguments)
     raw_version = arguments.get("version")
     requested_version = int(raw_version) if raw_version is not None else None
 
@@ -638,7 +641,7 @@ async def _show_template_handler(
                     tenant_id=operator.tenant_id, slug=slug, version=requested_version
                 )
             except _INVALID_PARAMS_ERRORS as exc:
-                raise _to_invalid_params("meho.runbook.show_template", exc) from exc
+                raise _to_invalid_params("meho_runbook_show_template", exc) from exc
         else:
             response = await _show_template_operator_path(
                 template_service=template_service,
@@ -703,7 +706,7 @@ def _opacity_floor_denial() -> McpInvalidParamsError:
     which leg of the predicate failed (slug missing, version missing, no
     completed run).
     """
-    return McpInvalidParamsError("meho.runbook.show_template: opacity_floor")
+    return McpInvalidParamsError("meho_runbook_show_template: opacity_floor")
 
 
 # ---------------------------------------------------------------------------
@@ -718,10 +721,10 @@ register_mcp_tool(
         # driver — they dispatch writes, so they follow the
         # ``write_surfaces`` beta line, matching the /ui area mapping
         # in :mod:`meho_backplane.ui.maturity`. Applies to every
-        # meho.runbook.* tool in this module and its sibling
+        # meho_runbook_* tool in this module and its sibling
         # runbook_runs.py.
         feature="write_surfaces",
-        name="meho.runbook.draft_template",
+        name="meho_runbook_draft_template",
         description=_DRAFT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -742,7 +745,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
-        name="meho.runbook.edit_template",
+        name="meho_runbook_edit_template",
         description=_EDIT_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -763,7 +766,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
-        name="meho.runbook.publish_template",
+        name="meho_runbook_publish_template",
         description=_PUBLISH_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -784,7 +787,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
-        name="meho.runbook.deprecate_template",
+        name="meho_runbook_deprecate_template",
         description=_DEPRECATE_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -805,7 +808,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
-        name="meho.runbook.discard_template",
+        name="meho_runbook_discard_template",
         description=_DISCARD_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -826,7 +829,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
-        name="meho.runbook.list_templates",
+        name="meho_runbook_list_templates",
         description=_LIST_DESCRIPTION,
         inputSchema={
             "type": "object",
@@ -861,7 +864,7 @@ register_mcp_tool(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="write_surfaces",
-        name="meho.runbook.show_template",
+        name="meho_runbook_show_template",
         description=_SHOW_DESCRIPTION,
         inputSchema={
             "type": "object",

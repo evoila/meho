@@ -79,20 +79,20 @@ __all__ = [
 AUDIT_METHOD: Final[str] = "SERVICE"
 
 #: Op-ids (audit-row ``path`` column) for the mutating actions.
-OP_ENABLE_CONNECTOR: Final[str] = "meho.connector.enable"
-OP_DISABLE_CONNECTOR: Final[str] = "meho.connector.disable"
-OP_ENABLE_GROUP: Final[str] = "meho.connector.enable_group"
-OP_ENABLE_READS: Final[str] = "meho.connector.enable_reads"
-OP_EDIT_GROUP: Final[str] = "meho.connector.edit_group"
-OP_EDIT_OP: Final[str] = "meho.connector.edit_op"
-OP_DELETE_CONNECTOR: Final[str] = "meho.connector.delete"
-OP_LLM_GROUPING: Final[str] = "meho.connector.llm_grouping"
+OP_ENABLE_CONNECTOR: Final[str] = "meho_connector_enable"
+OP_DISABLE_CONNECTOR: Final[str] = "meho_connector_disable"
+OP_ENABLE_GROUP: Final[str] = "meho_connector_enable_group"
+OP_ENABLE_READS: Final[str] = "meho_connector_enable_reads"
+OP_EDIT_GROUP: Final[str] = "meho_connector_edit_group"
+OP_EDIT_OP: Final[str] = "meho_connector_edit_op"
+OP_DELETE_CONNECTOR: Final[str] = "meho_connector_delete"
+OP_LLM_GROUPING: Final[str] = "meho_connector_llm_grouping"
 #: Audit op-id for the first stamp of an :class:`ExecutionProfile` onto an
 #: ingested connector (G0.28-T5 #1971). The stamp makes the connector
 #: *dispatchable* but deliberately does NOT auto-enable its ops — they stay
 #: ``is_enabled=False`` / ``review_status='staged'`` behind the review gate.
 #: The audit row makes the dispatchability change durable and attributable.
-OP_PROFILE_STAMP: Final[str] = "meho.connector.profile_stamp"
+OP_PROFILE_STAMP: Final[str] = "meho_connector_profile_stamp"
 
 #: HTTP methods that classify an ingested op as *read-class*. The
 #: bulk read-class enable path (G0.25-T7 #1749) flips ``is_enabled``
@@ -474,7 +474,7 @@ async def operator_disabled_op_ids(
       JSON-stored-as-TEXT on SQLite. Filtering the SQL side would
       need dialect-specific JSON operators; instead we filter
       Python-side after loading the candidate rows (rows with
-      ``path = 'meho.connector.edit_op'``).
+      ``path = 'meho_connector_edit_op'``).
     """
     if not group_ids:
         return []

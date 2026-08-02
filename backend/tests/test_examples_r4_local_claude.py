@@ -124,7 +124,7 @@ def test_agent_definition_payload_parses_against_live_schema() -> None:
     # the trio.
     allowed_tools = parsed.toolset.get("allowed", [])
     assert set(allowed_tools) == {
-        "meho.broadcast.recent",
+        "meho_broadcast_recent",
         "add_to_memory",
         "search_memory",
     }, (

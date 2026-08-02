@@ -541,7 +541,7 @@ def _process_entries(
     audit-driven :class:`~meho_backplane.broadcast.events.BroadcastEvent`
     (one per audited operation) and the agent-authored
     :class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`
-    (one per ``meho.broadcast.announce`` call). The wire discriminator is
+    (one per ``meho_broadcast_announce`` call). The wire discriminator is
     the top-level ``kind`` field; :func:`select_event_model` picks the model
     class to validate against so an announcement flows to SSE consumers as a
     first-class ``event: broadcast`` frame instead of being skipped as

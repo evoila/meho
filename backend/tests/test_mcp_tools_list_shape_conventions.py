@@ -82,8 +82,8 @@ def test_query_audit_op_class_enum_matches_broadcast_enum() -> None:
     RDC #789 N4 caught the v0.8.0 wire drift: `query_audit.op_class`
     advertised five values in prose (`read` / `write` /
     `credential_read` / `audit_query` / `other`) while
-    `meho.broadcast.recent.filter.op_class` and
-    `meho.broadcast.watch.filter.op_class` enumerated six (the five
+    `meho_broadcast_recent.filter.op_class` and
+    `meho_broadcast_watch.filter.op_class` enumerated six (the five
     plus `credential_mint`). An operator filtering audit for a
     freshly-minted credential operation (`harbor.robot.create`) found
     the filter syntactically rejected on one surface and accepted on
@@ -100,7 +100,7 @@ def test_query_audit_op_class_enum_matches_broadcast_enum() -> None:
         f"got {audit_values}, want {list(OP_CLASS_ENUM)}"
     )
     # The broadcast filters use the same enum.
-    for tool_name in ("meho.broadcast.recent", "meho.broadcast.watch"):
+    for tool_name in ("meho_broadcast_recent", "meho_broadcast_watch"):
         broadcast_enum = _properties(tool_name)["filter"]["properties"]["op_class"]["enum"]
         assert tuple(broadcast_enum) == tuple(OP_CLASS_ENUM), (
             f"{tool_name}.filter.op_class drifted from OP_CLASS_ENUM: "
@@ -110,7 +110,7 @@ def test_query_audit_op_class_enum_matches_broadcast_enum() -> None:
     # the finding. Pin its presence on every surface that filters
     # op_class so a future re-removal trips this assertion.
     assert "credential_mint" in audit_values
-    for tool_name in ("meho.broadcast.recent", "meho.broadcast.watch"):
+    for tool_name in ("meho_broadcast_recent", "meho_broadcast_watch"):
         filter_enum = _properties(tool_name)["filter"]["properties"]["op_class"]["enum"]
         assert "credential_mint" in filter_enum
 
@@ -127,8 +127,8 @@ _TOOLS_WITH_CURSOR_PARAM: tuple[str, ...] = (
     "query_topology",
     "list_targets",
     "list_operation_groups",
-    "meho.broadcast.recent",
-    "meho.broadcast.watch",
+    "meho_broadcast_recent",
+    "meho_broadcast_watch",
 )
 
 
@@ -149,20 +149,20 @@ def test_paginating_read_tools_expose_cursor_parameter(tool_name: str) -> None:
 
 
 def test_broadcast_recent_carries_since_alias_marked_deprecated() -> None:
-    """`meho.broadcast.recent.since` survives as deprecated alias for `cursor`.
+    """`meho_broadcast_recent.since` survives as deprecated alias for `cursor`.
 
     Migration shape: `since` was the v0.8.0 name; we keep it accepted
     for backward compat but flag it `deprecated` so a schema-driven
     client (Inspector, etc.) renders the migration nudge.
     """
-    properties = _properties("meho.broadcast.recent")
+    properties = _properties("meho_broadcast_recent")
     assert properties["since"].get("deprecated") is True
     assert "deprecated" not in properties["cursor"]
 
 
 def test_broadcast_watch_carries_since_cursor_alias_marked_deprecated() -> None:
-    """`meho.broadcast.watch.since_cursor` survives as deprecated alias for `cursor`."""
-    properties = _properties("meho.broadcast.watch")
+    """`meho_broadcast_watch.since_cursor` survives as deprecated alias for `cursor`."""
+    properties = _properties("meho_broadcast_watch")
     assert properties["since_cursor"].get("deprecated") is True
     assert "deprecated" not in properties["cursor"]
 
@@ -175,7 +175,7 @@ def test_broadcast_watch_required_anyof_accepts_either_alias() -> None:
     accept either at the schema layer and let the handler enforce the
     mutual exclusion.
     """
-    schema = _input_schema("meho.broadcast.watch")
+    schema = _input_schema("meho_broadcast_watch")
     assert schema["anyOf"] == [
         {"required": ["cursor"]},
         {"required": ["since_cursor"]},
@@ -192,7 +192,7 @@ def test_broadcast_watch_required_anyof_accepts_either_alias() -> None:
 
 @pytest.mark.parametrize(
     "tool_name",
-    ("meho.approvals.get", "meho.approvals.approve", "meho.approvals.reject"),
+    ("meho_approvals_get", "meho_approvals_approve", "meho_approvals_reject"),
 )
 def test_approvals_tools_expose_approval_request_id_canonical_name(
     tool_name: str,
@@ -223,19 +223,19 @@ def test_approvals_tools_expose_approval_request_id_canonical_name(
 
 
 def test_run_status_exposes_run_id_canonical_name_with_handle_alias() -> None:
-    """`meho.agents.run_status` names its run UUID `run_id` (G0.32 #2471).
+    """`meho_agents_run_status` names its run UUID `run_id` (G0.32 #2471).
 
     Convention §14.3: every MCP tool that names a resource UUID uses the
     `<noun>_id` form. `run_status` was the sole remaining resource-UUID
-    input arg spelling it `handle` while its sibling `meho.agents.run` /
-    `meho.agents.list_runs` rows return `run_id` — so the obvious
+    input arg spelling it `handle` while its sibling `meho_agents_run` /
+    `meho_agents_list_runs` rows return `run_id` — so the obvious
     round-trip `run_status(run_id=row.run_id)` failed. `run_id` is now
     canonical; `handle` survives as a deprecated alias for one cycle,
     guarded by the same `anyOf` + handler XOR the approvals tools use.
     """
-    properties = _properties("meho.agents.run_status")
+    properties = _properties("meho_agents_run_status")
     assert "run_id" in properties, (
-        f"meho.agents.run_status: missing canonical `run_id` (properties={sorted(properties)})"
+        f"meho_agents_run_status: missing canonical `run_id` (properties={sorted(properties)})"
     )
     assert properties["run_id"]["format"] == "uuid"
     # The deprecated `handle` alias survives for backward compat.
@@ -243,7 +243,7 @@ def test_run_status_exposes_run_id_canonical_name_with_handle_alias() -> None:
     assert properties["handle"].get("deprecated") is True
     assert "deprecated" not in properties["run_id"]
     # Either alias name satisfies the schema-level required check.
-    schema = _input_schema("meho.agents.run_status")
+    schema = _input_schema("meho_agents_run_status")
     assert schema["anyOf"] == [
         {"required": ["run_id"]},
         {"required": ["handle"]},
@@ -289,8 +289,8 @@ def test_list_targets_tenant_argument_is_tenant_id_with_legacy_alias() -> None:
     """`list_targets` exposes the cross-tenant scope as `tenant_id`.
 
     Convention §14.4: the cross-tenant scope parameter is named
-    `tenant_id` (the form used by `meho.connector.*` and
-    `meho.scheduler.create`). The v0.8.0 `list_targets.tenant` is
+    `tenant_id` (the form used by `meho_connector_*` and
+    `meho_scheduler_create`). The v0.8.0 `list_targets.tenant` is
     retained as a deprecated alias.
 
     Accepted shape asymmetry: `list_targets.tenant_id` accepts slug
@@ -308,13 +308,13 @@ def test_list_targets_tenant_argument_is_tenant_id_with_legacy_alias() -> None:
 @pytest.mark.parametrize(
     "tool_name",
     (
-        "meho.connector.ingest",
-        "meho.connector.review",
-        "meho.connector.edit_group",
-        "meho.connector.edit_op",
-        "meho.connector.enable",
-        "meho.connector.disable",
-        "meho.scheduler.create",
+        "meho_connector_ingest",
+        "meho_connector_review",
+        "meho_connector_edit_group",
+        "meho_connector_edit_op",
+        "meho_connector_enable",
+        "meho_connector_disable",
+        "meho_scheduler_create",
     ),
 )
 def test_admin_tools_use_tenant_id_uuid_only(tool_name: str) -> None:
@@ -334,8 +334,8 @@ def test_admin_tools_use_tenant_id_uuid_only(tool_name: str) -> None:
 @pytest.mark.parametrize(
     "tool_name, expected_limit_default, expected_offset_default",
     (
-        ("meho.approvals.list", 50, 0),
-        ("meho.scheduler.list", 100, 0),
+        ("meho_approvals_list", 50, 0),
+        ("meho_scheduler_list", 100, 0),
     ),
 )
 def test_list_tools_declare_limit_offset_defaults_in_schema(
@@ -376,16 +376,16 @@ def test_list_operation_groups_limit_default_declared() -> None:
 
 
 def test_approvals_list_status_is_json_enum() -> None:
-    """`meho.approvals.list.status` surfaces as a JSON-Schema enum.
+    """`meho_approvals_list.status` surfaces as a JSON-Schema enum.
 
     Convention §14.6: list-tool `status` filters declare their allowed
     values via `enum`, not in prose. Pairs with
-    `meho.scheduler.list.status` (which already used the JSON enum
+    `meho_scheduler_list.status` (which already used the JSON enum
     shape).
     """
-    status_schema = _properties("meho.approvals.list")["status"]
+    status_schema = _properties("meho_approvals_list")["status"]
     assert "enum" in status_schema, (
-        f"meho.approvals.list.status: expected `enum` declaration (got {sorted(status_schema)})"
+        f"meho_approvals_list.status: expected `enum` declaration (got {sorted(status_schema)})"
     )
     assert status_schema["enum"] == [
         "pending",
@@ -398,8 +398,8 @@ def test_approvals_list_status_is_json_enum() -> None:
 
 
 def test_scheduler_list_status_remains_json_enum() -> None:
-    """`meho.scheduler.list.status` is (and remains) a JSON enum."""
-    status_schema = _properties("meho.scheduler.list")["status"]
+    """`meho_scheduler_list.status` is (and remains) a JSON enum."""
+    status_schema = _properties("meho_scheduler_list")["status"]
     assert status_schema["enum"] == ["active", "paused", "cancelled", "fired"]
 
 
@@ -409,17 +409,17 @@ def test_scheduler_list_status_remains_json_enum() -> None:
 
 
 def test_agent_principals_register_name_enforces_documented_alphabet() -> None:
-    """`meho.agent_principals.register.name` carries the documented pattern.
+    """`meho_agent_principals_register.name` carries the documented pattern.
 
     Convention §14.7: when a tool documents an alphabet for a name
     field, the JSON-Schema declares that alphabet via `pattern`. The
     v0.8.0 `agent_principals.register.name` documented its safe
     alphabet in prose only; the service-layer regex validated
     post-dispatch, so an MCP client schema-validating ahead of the
-    call never saw the constraint. `meho.agents.create.name` already
+    call never saw the constraint. `meho_agents_create.name` already
     carried the pattern — this pins parity.
     """
-    name_schema = _properties("meho.agent_principals.register")["name"]
+    name_schema = _properties("meho_agent_principals_register")["name"]
     assert "pattern" in name_schema
     assert name_schema["pattern"] == r"^[A-Za-z0-9_\-\.]+$"
     assert name_schema["minLength"] == 1
@@ -430,8 +430,8 @@ def test_agent_principals_register_name_enforces_documented_alphabet() -> None:
 
 
 def test_agents_create_name_remains_pattern_constrained() -> None:
-    """`meho.agents.create.name` is (and remains) pattern-constrained."""
-    name_schema = _properties("meho.agents.create")["name"]
+    """`meho_agents_create.name` is (and remains) pattern-constrained."""
+    name_schema = _properties("meho_agents_create")["name"]
     assert name_schema["pattern"] == r"^[A-Za-z0-9_\-\.]+$"
 
 
@@ -463,26 +463,29 @@ def test_list_operation_groups_paginates_keyset_on_group_key() -> None:
 
 
 # ---------------------------------------------------------------------------
-# §14.9 — runbook family: dotted names only + template_slug field
+# §14.9 — runbook family: canonical meho_runbook_* names + template_slug field
 # ---------------------------------------------------------------------------
 
-#: The 12 canonical dotted runbook tool names (#1612, + discard_template
-#: #135). After #1625 these are the *only* runbook tools on the surface —
+#: The 12 canonical runbook tool names. #1612 (+ discard_template #135)
+#: made dotted ``meho.runbook.<verb>`` names canonical and #1625 removed
 #: the flat ``runbook_*`` aliases that bridged the one-release migration
-#: window were removed.
-_DOTTED_RUNBOOK_TOOLS = (
-    "meho.runbook.draft_template",
-    "meho.runbook.edit_template",
-    "meho.runbook.publish_template",
-    "meho.runbook.deprecate_template",
-    "meho.runbook.discard_template",
-    "meho.runbook.list_templates",
-    "meho.runbook.show_template",
-    "meho.runbook.start",
-    "meho.runbook.next",
-    "meho.runbook.abort",
-    "meho.runbook.reassign",
-    "meho.runbook.list_runs",
+#: window. #2745 then renamed the dotted names to underscore-only
+#: ``meho_runbook_<verb>`` — the Anthropic tool-name pattern
+#: ``^[a-zA-Z0-9_-]{1,64}$`` rejects dots, and Claude Desktop / claude.ai
+#: withhold the ENTIRE toolset when one name fails.
+_CANONICAL_RUNBOOK_TOOLS = (
+    "meho_runbook_draft_template",
+    "meho_runbook_edit_template",
+    "meho_runbook_publish_template",
+    "meho_runbook_deprecate_template",
+    "meho_runbook_discard_template",
+    "meho_runbook_list_templates",
+    "meho_runbook_show_template",
+    "meho_runbook_start",
+    "meho_runbook_next",
+    "meho_runbook_abort",
+    "meho_runbook_reassign",
+    "meho_runbook_list_runs",
 )
 
 #: The flat names removed by #1625 — each must now resolve to nothing.
@@ -501,22 +504,23 @@ _REMOVED_FLAT_RUNBOOK_TOOLS = (
 )
 
 
-def test_runbook_family_is_exactly_twelve_dotted_tools() -> None:
-    """Convention §14.9: the runbook family is exactly 12 dotted tools, zero flat.
+def test_runbook_family_is_exactly_twelve_canonical_tools() -> None:
+    """Convention §14.9: exactly the 12 ``meho_runbook_*`` tools, no aliases.
 
-    The runbook family was the last flat multi-verb family on the surface
-    (#1612). #1612 made the dotted ``meho.runbook.<verb>`` names canonical
-    and kept the flat ``runbook_*`` names as deprecated aliases for one
-    release; #1625 removed them. #135 added ``discard_template``. The wire
-    surface now serves exactly the 12 dotted tools and no flat aliases.
+    Naming history: #1612 made dotted ``meho.runbook.<verb>`` canonical and
+    kept the original flat ``runbook_*`` names as deprecated aliases for one
+    release; #1625 removed them; #135 added ``discard_template``; #2745
+    renamed the dotted names to ``meho_runbook_<verb>`` for Anthropic
+    tool-name conformance. The wire surface now serves exactly the 12
+    canonical tools and no aliases of either historical spelling.
     """
     # Enumerate the live tool registry (the same private map the
     # dispatcher resolves against). The structural pin is total: the set
-    # of runbook-family tools equals the 11 dotted names, with no flat
-    # ``runbook_*`` survivor anywhere on the surface.
+    # of runbook-family tools equals the 12 canonical names, with no
+    # bare ``runbook_*`` survivor anywhere on the surface.
     registered = set(mcp_registry._TOOLS)
     runbook_family = {name for name in registered if "runbook" in name.lower()}
-    assert runbook_family == set(_DOTTED_RUNBOOK_TOOLS)
+    assert runbook_family == set(_CANONICAL_RUNBOOK_TOOLS)
     assert not [name for name in registered if name.startswith("runbook_")]
 
 
@@ -534,11 +538,11 @@ def test_removed_flat_runbook_alias_does_not_resolve(flat_name: str) -> None:
 @pytest.mark.parametrize(
     ("tool_name", "required"),
     (
-        ("meho.runbook.draft_template", ["template_slug", "body"]),
-        ("meho.runbook.edit_template", ["template_slug", "body"]),
-        ("meho.runbook.publish_template", ["template_slug", "version"]),
-        ("meho.runbook.deprecate_template", ["template_slug", "version"]),
-        ("meho.runbook.show_template", ["template_slug"]),
+        ("meho_runbook_draft_template", ["template_slug", "body"]),
+        ("meho_runbook_edit_template", ["template_slug", "body"]),
+        ("meho_runbook_publish_template", ["template_slug", "version"]),
+        ("meho_runbook_deprecate_template", ["template_slug", "version"]),
+        ("meho_runbook_show_template", ["template_slug"]),
     ),
 )
 def test_runbook_template_tools_require_template_slug_only(
@@ -564,7 +568,7 @@ def test_runbook_template_tools_require_template_slug_only(
 
 @pytest.mark.parametrize(
     "tool_name",
-    ("meho.runbook.start", "meho.runbook.list_runs"),
+    ("meho_runbook_start", "meho_runbook_list_runs"),
 )
 def test_runbook_run_tools_keep_template_slug_field(tool_name: str) -> None:
     """Convention §14.9: the run verbs already used `template_slug` — pinned."""
@@ -592,7 +596,7 @@ def test_grant_row_mirrors_id_as_grant_id_accepted_by_sibling_verbs() -> None:
     row = _mirror_grant_id({"id": "grant-uuid", "principal_sub": "agent:x"})
     assert row["grant_id"] == row["id"] == "grant-uuid"
     # The sibling verbs require that exact key.
-    for tool_name in ("meho.agents.grant.show", "meho.agents.grant.revoke"):
+    for tool_name in ("meho_agents_grant_show", "meho_agents_grant_revoke"):
         assert "grant_id" in _properties(tool_name)
         assert _input_schema(tool_name)["required"] == ["grant_id"]
 
@@ -601,22 +605,22 @@ def test_scheduler_row_mirrors_id_as_trigger_id_accepted_by_cancel() -> None:
     """A scheduler row carries `trigger_id` (== native `id`), accepted by cancel."""
     row = _mirror_trigger_id({"id": "trigger-uuid", "kind": "cron"})
     assert row["trigger_id"] == row["id"] == "trigger-uuid"
-    assert "trigger_id" in _properties("meho.scheduler.cancel")
-    assert _input_schema("meho.scheduler.cancel")["required"] == ["trigger_id"]
+    assert "trigger_id" in _properties("meho_scheduler_cancel")
+    assert _input_schema("meho_scheduler_cancel")["required"] == ["trigger_id"]
 
 
 @pytest.mark.parametrize("state", ("in_progress", "completed", "abandoned"))
 def test_runbook_run_row_mirrors_state_as_status_within_filter_enum(state: str) -> None:
     """A run summary carries `status` (== native `state`), a `status`-filter member.
 
-    §14.6 keeps the `meho.runbook.list_runs` filter named `status`; the
+    §14.6 keeps the `meho_runbook_list_runs` filter named `status`; the
     row model keeps its native `state`. The mirror makes the row's
     `status` value round-trippable into the filter — so each mirrored
     value is a member of the `status` filter enum.
     """
     row = _mirror_run_status({"state": state, "run_id": "run-uuid"})
     assert row["status"] == row["state"] == state
-    status_enum = _properties("meho.runbook.list_runs")["status"]["enum"]
+    status_enum = _properties("meho_runbook_list_runs")["status"]["enum"]
     assert state in status_enum
 
 

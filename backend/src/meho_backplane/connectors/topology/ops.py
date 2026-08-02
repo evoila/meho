@@ -320,7 +320,7 @@ async def topology_bulk_import(
     """Apply a batch of curated ``graph_edge`` assertions atomically.
 
     Op-id: ``topology.bulk_import``. Targetless typed op — the **apply**
-    half of ``meho.topology.bulk_import`` (#2539). Only the gated apply
+    half of ``meho_topology_bulk_import`` (#2539). Only the gated apply
     path dispatches here; the free dry-run plan calls the service
     directly from the MCP front and never reaches the dispatcher. The
     dispatcher has already validated *params* against
@@ -485,7 +485,7 @@ _OPERATION_SPECS: tuple[dict[str, Any], ...] = (
             "Applies up to 1000 curated `graph_edge` assertions in one "
             "all-or-nothing transaction — a single invalid row rolls the "
             "whole batch back. This is the apply half of the "
-            "`meho.topology.bulk_import` tool; the free dry-run plan is a "
+            "`meho_topology_bulk_import` tool; the free dry-run plan is a "
             "read-shaped service call that never dispatches here. Each "
             "row is one `topology.annotate` (both endpoints must already "
             "exist). Tenant-scoped automatically. Agent-principal calls "

@@ -557,7 +557,7 @@ unreachable, the listing read errors on this deploy) parks with the
 identifier fields **plus** `preview_unavailable: true` and a
 `preview_error` reason naming the failed read. The marker rides through
 every reviewer surface that renders `proposed_effect` verbatim (REST
-`GET /api/v1/approvals`, `meho.approvals.list` / `.get`, `meho
+`GET /api/v1/approvals`, `meho_approvals_list` / `.get`, `meho
 approvals show`), so "blast-radius unknown" is distinguishable from a
 genuinely small action. The 7 read composites register no builder —
 they never park.

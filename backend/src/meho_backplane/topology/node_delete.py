@@ -9,7 +9,7 @@ surface, so a mis-seeded or probe-residue manual node persisted
 indefinitely: refresh reconciliation only touches nodes adopted onto the
 refreshed target, and soft-deleted nodes stay reachable in traversals
 anyway (``topology/query.py``). :func:`delete_node` is the guarded
-hard-delete the MCP tool ``meho.topology.delete_node`` and the REST route
+hard-delete the MCP tool ``meho_topology_delete_node`` and the REST route
 ``DELETE /api/v1/topology/nodes/{node_id}`` both front.
 
 The verb is the delete-half mirror of ``create_or_get_node`` and reuses

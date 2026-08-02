@@ -521,7 +521,7 @@ async def test_op_id_collision_job_error_names_remediation() -> None:
     context to raise into) and records only ``str(exc)``. Folding the
     remediation into the exception message is therefore what makes the
     async job's polling response name the fix -- re-ingest under the
-    original spec URI, or ``meho.connector.delete`` to clear crashed-job
+    original spec URI, or ``meho_connector_delete`` to clear crashed-job
     debris -- not just the fault.
     """
     registry = IngestJobRegistry()
@@ -544,7 +544,7 @@ async def test_op_id_collision_job_error_names_remediation() -> None:
     assert stored.error_class == "OpIdCollision"
     assert stored.error is not None
     assert "original spec URI" in stored.error
-    assert "meho.connector.delete" in stored.error
+    assert "meho_connector_delete" in stored.error
 
 
 @pytest.mark.asyncio

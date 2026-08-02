@@ -5,12 +5,12 @@
 
 Three surfaces land here:
 
-* ``meho.topology.annotate`` — tenant_admin-only write meta-tool.
+* ``meho_topology_annotate`` — tenant_admin-only write meta-tool.
   Calls :func:`annotate_edge` (#595) directly; one audit row + one
   broadcast event per call (the service primitive owns both — the
   dispatcher's own audit row at ``/mcp/tools/call/...`` is a second,
   per-call row on a different ``method`` axis).
-* ``meho.topology.unannotate`` — tenant_admin-only write meta-tool.
+* ``meho_topology_unannotate`` — tenant_admin-only write meta-tool.
   Same direct-substrate shape; refuses an `source='auto'` row with a
   structured -32602 (the auto-vs-curated rule).
 * ``query_topology(kind="edges", ...)`` — the inventory-survey facet
@@ -24,12 +24,12 @@ Coverage maps to the issue acceptance criteria:
   ``op_class='write'``; a non-admin session does not see them in
   ``tools/list``; a direct ``tools/call`` from a non-admin returns
   -32602 with a ``forbidden``-prefixed message.
-* ``tools/call meho.topology.annotate {...}`` creates a curated edge
+* ``tools/call meho_topology_annotate {...}`` creates a curated edge
   (idempotent on repeat) and emits one audit row + one broadcast event.
 * ``query_topology {kind: edges, source: curated}`` returns only the
   tenant's curated edges; ``conflicts: true`` narrows to conflicted
   ones; no separate ``list_edges`` tool was registered.
-* ``meho.topology.unannotate`` on an auto edge returns a structured
+* ``meho_topology_unannotate`` on an auto edge returns a structured
   error mentioning the auto-vs-curated rule.
 * Tool descriptions name the when-to-call use case + warn against
   annotating auto-discoverable kinds (the AI-engineering anchor).
@@ -159,7 +159,7 @@ def _annotate_call(client: TestClient, call_id: int, arguments: dict[str, Any]) 
             "jsonrpc": "2.0",
             "id": call_id,
             "method": "tools/call",
-            "params": {"name": "meho.topology.annotate", "arguments": arguments},
+            "params": {"name": "meho_topology_annotate", "arguments": arguments},
         },
     )
 
@@ -171,7 +171,7 @@ def _unannotate_call(client: TestClient, call_id: int, arguments: dict[str, Any]
             "jsonrpc": "2.0",
             "id": call_id,
             "method": "tools/call",
-            "params": {"name": "meho.topology.unannotate", "arguments": arguments},
+            "params": {"name": "meho_topology_unannotate", "arguments": arguments},
         },
     )
 
@@ -221,7 +221,7 @@ def _make_edge(
 
 def test_admin_tools_register_with_tenant_admin_and_write() -> None:
     """Both admin tools land with TENANT_ADMIN gate + write op_class."""
-    for tool_name in ("meho.topology.annotate", "meho.topology.unannotate"):
+    for tool_name in ("meho_topology_annotate", "meho_topology_unannotate"):
         entry = get_tool(tool_name)
         assert entry is not None, f"{tool_name} not registered"
         defn, _handler = entry
@@ -316,8 +316,8 @@ def test_admin_tools_hidden_from_non_admin_tools_list(
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
     )
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.topology.annotate" not in names
-    assert "meho.topology.unannotate" not in names
+    assert "meho_topology_annotate" not in names
+    assert "meho_topology_unannotate" not in names
     # Read-half tools stay visible.
     assert "query_topology" in names
     assert "list_targets" in names
@@ -334,8 +334,8 @@ def test_admin_tools_visible_to_tenant_admin(
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     )
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.topology.annotate" in names
-    assert "meho.topology.unannotate" in names
+    assert "meho_topology_annotate" in names
+    assert "meho_topology_unannotate" in names
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
@@ -343,11 +343,11 @@ def test_admin_tools_visible_to_tenant_admin(
     ("tool_name", "arguments"),
     [
         (
-            "meho.topology.annotate",
+            "meho_topology_annotate",
             {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"},
         ),
         (
-            "meho.topology.unannotate",
+            "meho_topology_unannotate",
             {"from_name": "svc-x", "kind": "depends-on", "to_name": "db-y"},
         ),
     ],
@@ -381,7 +381,7 @@ def test_admin_tool_call_from_non_admin_is_forbidden(
 
 
 # ---------------------------------------------------------------------------
-# meho.topology.annotate — end-to-end via the SQLite test DB
+# meho_topology_annotate — end-to-end via the SQLite test DB
 # ---------------------------------------------------------------------------
 
 
@@ -390,10 +390,10 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     _seeded_tenant: None,
 ) -> None:
-    """tools/call meho.topology.annotate {...} → curated row + 1 audit + 1 broadcast.
+    """tools/call meho_topology_annotate {...} → curated row + 1 audit + 1 broadcast.
 
     Three audit axes since #2537: the MCP dispatcher writes its row at
-    ``/mcp/tools/call/meho.topology.annotate`` (the per-MCP-call axis),
+    ``/mcp/tools/call/meho_topology_annotate`` (the per-MCP-call axis),
     the operations dispatcher writes a ``method='DISPATCH'`` row keyed
     ``path='topology.annotate'`` (the policy-gated dispatch axis, new
     in #2537), and ``annotate_edge`` writes the service-level row
@@ -465,7 +465,7 @@ async def test_annotate_creates_curated_edge_and_emits_audit_plus_broadcast(
     # row (#2537), and one MCP dispatcher row.
     service_rows = [a for a in audits if a.path == "topology.annotate" and a.method == "ANNOTATE"]
     gate_rows = [a for a in audits if a.path == "topology.annotate" and a.method == "DISPATCH"]
-    dispatcher_rows = [a for a in audits if a.path == "/mcp/tools/call/meho.topology.annotate"]
+    dispatcher_rows = [a for a in audits if a.path == "/mcp/tools/call/meho_topology_annotate"]
     assert len(service_rows) == 1
     assert len(gate_rows) == 1
     assert len(dispatcher_rows) == 1
@@ -661,7 +661,7 @@ def test_annotate_rejects_additional_properties(
 
 
 # ---------------------------------------------------------------------------
-# meho.topology.unannotate — auto-edge refusal + happy path
+# meho_topology_unannotate — auto-edge refusal + happy path
 # ---------------------------------------------------------------------------
 
 
@@ -1112,7 +1112,7 @@ def test_annotate_description_scopes_auto_kind_warning_to_actual_conflict() -> N
     "when a competing auto edge already exists" and explicitly names
     the non-k8s "right way" path.
     """
-    entry = get_tool("meho.topology.annotate")
+    entry = get_tool("meho_topology_annotate")
     assert entry is not None
     desc = entry[0].description
     assert "WHEN TO CALL" in desc
@@ -1139,7 +1139,7 @@ def test_annotate_description_matches_actual_response_shape() -> None:
     load-bearing for an LLM agent reading the description as the API
     contract.
     """
-    entry = get_tool("meho.topology.annotate")
+    entry = get_tool("meho_topology_annotate")
     assert entry is not None
     defn = entry[0]
     desc = defn.description
@@ -1160,7 +1160,7 @@ def test_annotate_description_matches_actual_response_shape() -> None:
 
 def test_unannotate_description_names_auto_refusal() -> None:
     """unannotate description names the auto-vs-curated refusal rule."""
-    entry = get_tool("meho.topology.unannotate")
+    entry = get_tool("meho_topology_unannotate")
     assert entry is not None
     desc = entry[0].description
     assert "auto" in desc.lower()

@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Tests for the ``meho.status`` reference MCP tool (G0.5-T4, #249).
+"""Tests for the ``meho_status`` reference MCP tool (G0.5-T4, #249).
 
 Covers acceptance criteria 1-4 on issue #249:
 
-* ``tools/list`` exposes ``meho.status`` with a well-formed JSON Schema
+* ``tools/list`` exposes ``meho_status`` with a well-formed JSON Schema
   2020-12 ``inputSchema``.
 * ``tools/call`` with no arguments returns the operator identity + Vault
   + DB-migration bundle wire-identical to ``GET /api/v1/health`` (modulo
@@ -55,7 +55,7 @@ from tests.mcp_test_fixtures import (
 def test_tools_list_exposes_meho_status_with_well_formed_input_schema(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """AC #1: ``tools/list`` surfaces ``meho.status`` with a 2020-12 schema."""
+    """AC #1: ``tools/list`` surfaces ``meho_status`` with a 2020-12 schema."""
     client, _op = client_with_operator
 
     response = post_mcp(
@@ -66,7 +66,7 @@ def test_tools_list_exposes_meho_status_with_well_formed_input_schema(
     assert response.status_code == 200
     body = response.json()
     tools = body["result"]["tools"]
-    statuses = [t for t in tools if t["name"] == "meho.status"]
+    statuses = [t for t in tools if t["name"] == "meho_status"]
     assert len(statuses) == 1
     schema = statuses[0]["inputSchema"]
     assert schema["type"] == "object"
@@ -80,7 +80,7 @@ def test_tools_list_exposes_meho_status_with_well_formed_input_schema(
 def test_tools_call_meho_status_returns_health_response_shape(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """AC #2: ``tools/call meho.status`` wire-matches ``GET /api/v1/health``.
+    """AC #2: ``tools/call meho_status`` wire-matches ``GET /api/v1/health``.
 
     The MCP envelope wraps the response in ``content[0].text`` carrying
     a JSON-serialised dict. Decoding that dict and asserting against the
@@ -95,7 +95,7 @@ def test_tools_call_meho_status_returns_health_response_shape(
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
     )
 
@@ -134,7 +134,7 @@ def test_tools_call_meho_status_rejects_extra_arguments(
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {"foo": "bar"}},
+            "params": {"name": "meho_status", "arguments": {"foo": "bar"}},
         },
     )
 

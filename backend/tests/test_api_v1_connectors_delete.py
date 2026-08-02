@@ -20,7 +20,7 @@ surface on top of it:
   spec through ``POST /api/v1/connectors/ingest``, watch the stub
   appear as a ``state="registered"`` row in ``GET
   /api/v1/connectors``, DELETE it, and verify it is gone from the
-  listing, the v2 registry, and that the ``meho.connector.delete``
+  listing, the v2 registry, and that the ``meho_connector_delete``
   audit row landed.
 
 Self-contained rather than appended to
@@ -223,7 +223,7 @@ async def _service_delete_audit_count() -> int:
         result = await session.execute(
             select(AuditLog).where(
                 AuditLog.method == "SERVICE",
-                AuditLog.path == "meho.connector.delete",
+                AuditLog.path == "meho_connector_delete",
             ),
         )
         return len(list(result.scalars().all()))

@@ -315,7 +315,7 @@ CREATE_NODE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "`principal` are the canonical use case: those rows "
                 "cannot be auto-discovered (no probe walks the Vault "
                 "policy tree as a topology source) and must be seeded "
-                "manually before `meho.topology.annotate` can reference "
+                "manually before `meho_topology_annotate` can reference "
                 "them."
             ),
         },
@@ -379,8 +379,8 @@ CREATE_NODE_RESPONSE_SCHEMA: dict[str, Any] = {
 # Bulk import (#2539) — batch curated-edge authoring for the agent surface.
 # ---------------------------------------------------------------------------
 
-#: Boundary ceiling on the number of edge rows one ``meho.topology.
-#: bulk_import`` call accepts. Mirrors the REST boundary cap
+#: Boundary ceiling on the number of edge rows one
+#: ``meho_topology_bulk_import`` call accepts. Mirrors the REST boundary cap
 #: (``api/v1/topology._BULK_IMPORT_MAX_EDGES`` = 1000) so the two fronts
 #: reject an oversized batch identically. The service layer
 #: (:func:`~meho_backplane.topology.bulk_import.bulk_import_edges`) is
@@ -399,14 +399,14 @@ _BULK_IMPORT_ROWS_PROPERTY: dict[str, Any] = {
     "items": ANNOTATE_PARAMETER_SCHEMA,
     "description": (
         "The edges to import, in source order. Each row is one "
-        "`meho.topology.annotate` call's params: `from_name`, `kind`, "
+        "`meho_topology_annotate` call's params: `from_name`, `kind`, "
         "`to_name` are required; `from_node_kind` / `to_node_kind` pin "
         "an ambiguous endpoint; `note` / `evidence_url` are optional "
         f"free text. Between 1 and {BULK_IMPORT_MAX_EDGES} rows — an "
         "oversized batch is rejected at the tool boundary before any "
         "service call runs. Both endpoints of every row must already "
         "exist as `graph_node` rows; seed them with "
-        "`meho.topology.create_node` first."
+        "`meho_topology_create_node` first."
     ),
 }
 
@@ -509,7 +509,7 @@ DELETE_NODE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "against the operator's tenant (cross-tenant is "
                 "structurally impossible — no `tenant_id` argument). "
                 "Get the id from `query_topology` or the "
-                "`meho.topology.create_node` response."
+                "`meho_topology_create_node` response."
             ),
         },
     },

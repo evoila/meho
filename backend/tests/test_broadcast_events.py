@@ -244,7 +244,7 @@ class TestClassifyOp:
     @pytest.mark.parametrize(
         "op_id",
         [
-            "meho.audit.replay",
+            "meho_audit_replay",
             "meho.audit.query",
         ],
     )
@@ -254,7 +254,7 @@ class TestClassifyOp:
         The MCP broadcast path derives op_class from ``classify_op(op_id)``
         with the tool name verbatim — it does not honor the
         ``ToolDefinition.op_class``. Without the ``meho.audit.`` prefix arm,
-        ``meho.audit.replay`` would fall through to ``other`` and broadcast
+        ``meho_audit_replay`` would fall through to ``other`` and broadcast
         its full ``ReplayNode`` payload instead of the aggregate-only view.
         """
         assert classify_op(op_id) == "audit_query"
@@ -264,9 +264,9 @@ class TestClassifyOp:
 
         Guards against the prefix arm being widened to a bare ``meho.``
         match, which would mis-redact unrelated admin meta-tools like
-        ``meho.broadcast.overrides.set``.
+        ``meho_broadcast_overrides_set``.
         """
-        assert classify_op("meho.broadcast.overrides.set") == "other"
+        assert classify_op("meho_broadcast_overrides_set") == "other"
 
     @pytest.mark.parametrize(
         "op_id",
@@ -308,7 +308,7 @@ class TestClassifyOp:
         :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
         emits this op-id on every claimed Dashboard rollup edge (#2720);
         the class is what makes ``op_class=checks`` a usable server-side
-        filter on ``meho.broadcast.recent`` / ``.watch`` and the SSE
+        filter on ``meho_broadcast_recent`` / ``.watch`` and the SSE
         stream.
         """
         assert classify_op("checks.transition") == "checks"
@@ -615,7 +615,7 @@ class TestRedactPayload:
         assert result["row_count"] is None
 
     def test_meho_audit_replay_broadcast_is_aggregate_only(self) -> None:
-        """``meho.audit.replay`` broadcasts aggregate-only — no ReplayNode tree (G8.2-T6 #1014).
+        """``meho_audit_replay`` broadcasts aggregate-only — no ReplayNode tree (G8.2-T6 #1014).
 
         The MCP broadcast path classifies via ``classify_op(op_id)`` and
         redacts via ``redact_payload(op_class, raw_params, status)``. This
@@ -625,7 +625,7 @@ class TestRedactPayload:
         ReplayNode forest (full aggregate-only integration assertion is
         T7).
         """
-        op_class = classify_op("meho.audit.replay")
+        op_class = classify_op("meho_audit_replay")
         assert op_class == "audit_query"
         result = redact_payload(
             op_class,

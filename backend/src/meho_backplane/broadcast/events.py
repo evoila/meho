@@ -284,6 +284,18 @@ _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".versions",
 )
 
+#: Underscore-spelled mirrors of the dotted verb suffixes, applied only to
+#: ``meho_``-prefixed op-ids (MEHO's own MCP tool names after the #2745
+#: rename to the Anthropic tool-name pattern ``^[a-zA-Z0-9_-]{1,64}$``).
+#: Derived from the dotted tuples rather than hand-listed so the two verb
+#: policies can never drift apart.
+_MEHO_FLAT_WRITE_SUFFIXES: Final[tuple[str, ...]] = tuple(
+    suffix.replace(".", "_") for suffix in _WRITE_SUFFIXES
+)
+_MEHO_FLAT_READ_SUFFIXES: Final[tuple[str, ...]] = tuple(
+    suffix.replace(".", "_") for suffix in _READ_SUFFIXES
+)
+
 
 class BroadcastEvent(BaseModel):
     """One broadcast event — exactly one per audited operation.
@@ -329,7 +341,7 @@ class BroadcastEvent(BaseModel):
     #:   class), one per audited operation.
     #: * ``"agent_announcement"`` -- agent-authored
     #:   :class:`~meho_backplane.broadcast.agent_events.AgentAnnouncementEvent`,
-    #:   published via ``meho.broadcast.announce``.
+    #:   published via ``meho_broadcast_announce``.
     #:
     #: Default value, not :class:`typing.Literal`-pinned, so the
     #: history-parser's switch-on-``kind`` covers two cases under a
@@ -426,14 +438,18 @@ def classify_op(op_id: str) -> str:
        so the secret-bearing params collapse to aggregate-only instead
        of broadcasting in full under the plain ``write`` class
        (G11.7-T1 #1401).
-    4. ``audit_query`` — every op-id with the ``audit.`` or
-       ``meho.audit.`` prefix classifies as audit_query regardless of
-       the verb suffix. The ``meho.audit.`` arm catches the admin
-       replay meta-tool (``meho.audit.replay``, G8.2-T6 #1014): the
-       MCP broadcast path classifies via ``classify_op(op_id)`` with
-       the tool name verbatim, so without this arm the replay tool
-       would fall through to ``other`` and broadcast its full
-       ``ReplayNode`` payload instead of the aggregate-only view.
+    4. ``audit_query`` — every op-id with the ``audit.``,
+       ``meho.audit.``, or ``meho_audit_`` prefix classifies as
+       audit_query regardless of the verb suffix. The ``meho_audit_``
+       arm catches the admin replay meta-tool (``meho_audit_replay``,
+       G8.2-T6 #1014, renamed from ``meho.audit.replay`` in #2745):
+       the MCP broadcast path classifies via ``classify_op(op_id)``
+       with the tool name verbatim, so without this arm the replay
+       tool would fall through to ``other`` and broadcast its full
+       ``ReplayNode`` payload instead of the aggregate-only view. The
+       dotted ``meho.audit.`` arm stays because this function is
+       re-run at render time on *stored* op-ids — pre-#2745 rows keep
+       their dotted identity forever.
     4b. ``approval`` — every op-id with the ``approval.`` prefix
        (``approval.pending`` / ``.approved`` / ``.rejected`` /
        ``.expired``, emitted by
@@ -487,6 +503,21 @@ def classify_op(op_id: str) -> str:
        ``vault.kv.read`` (the allowlist wins, but the exclusion keeps
        the policy single-sourced) and would reclassify the auth-config
        ``.read`` ops that intentionally broadcast as ``other``.
+    6b/7b. ``write`` / ``read`` for MEHO's own flat MCP tool names —
+       #2745 renamed the dotted ``meho.*`` MCP tools to
+       underscore-only names (``meho.sensor.list`` →
+       ``meho_sensor_list``) to satisfy the Anthropic tool-name
+       pattern ``^[a-zA-Z0-9_-]{1,64}$``. The MCP broadcast path
+       classifies on the tool name verbatim, so a scoped arm mirrors
+       the dotted verb-suffix policy for ``meho_``-prefixed op-ids
+       using underscore-spelled suffixes derived from the same tuples
+       (:data:`_WRITE_SUFFIXES` / :data:`_READ_SUFFIXES` — single
+       source, stays in lockstep). Scoped by prefix so no other flat
+       op-id (``call_operation``, ``add_to_memory``, …) is
+       reclassified, and terminal — a ``meho_`` name that matches no
+       verb suffix is ``other`` without consulting the dotted arms
+       (it cannot match them anyway; the early return just makes the
+       scoping explicit).
     8. ``other`` — everything else. Falls through to full-detail
        broadcast per decision #3.
 
@@ -505,7 +536,7 @@ def classify_op(op_id: str) -> str:
     'credential_write'
     >>> classify_op("audit.query")
     'audit_query'
-    >>> classify_op("meho.audit.replay")
+    >>> classify_op("meho_audit_replay")
     'audit_query'
     >>> classify_op("approval.pending")
     'approval'
@@ -527,6 +558,16 @@ def classify_op(op_id: str) -> str:
     'write'
     >>> classify_op("some.unknown.op")
     'other'
+    >>> classify_op("meho_audit_replay")
+    'audit_query'
+    >>> classify_op("meho_sensor_list")
+    'read'
+    >>> classify_op("meho_sensor_create")
+    'write'
+    >>> classify_op("meho_broadcast_watch")
+    'other'
+    >>> classify_op("meho.sensor.list")  # pre-#2745 stored rows re-render unchanged
+    'read'
     """
     if op_id in _CREDENTIAL_READ_OPS:
         return "credential_read"
@@ -534,7 +575,7 @@ def classify_op(op_id: str) -> str:
         return "credential_mint"
     if op_id in _CREDENTIAL_WRITE_OPS:
         return "credential_write"
-    if op_id.startswith(("audit.", "meho.audit.")):
+    if op_id.startswith(("audit.", "meho.audit.", "meho_audit_")):
         return "audit_query"
     # Approval-queue lifecycle events (approval.pending / .approved /
     # .rejected / .expired). Their own class so the approvals console
@@ -560,6 +601,17 @@ def classify_op(op_id: str) -> str:
         return "read"
     if op_id.startswith(("POST:", "PUT:", "PATCH:", "DELETE:")):
         return "write"
+    # MEHO's own flat MCP tool names (#2745: dotted meho.* → meho_*, per the
+    # Anthropic tool-name pattern). Mirrors the dotted verb-suffix policy with
+    # underscore spellings derived from the same tuples; scoped to the meho_
+    # prefix so no other flat op-id is reclassified, and terminal so the
+    # scoping is explicit (a dotless name can't match the dotted arms anyway).
+    if op_id.startswith("meho_"):
+        if op_id.endswith(_MEHO_FLAT_WRITE_SUFFIXES):
+            return "write"
+        if op_id.endswith(_MEHO_FLAT_READ_SUFFIXES):
+            return "read"
+        return "other"
     if op_id.endswith(_WRITE_SUFFIXES):
         return "write"
     if op_id.endswith(_READ_SUFFIXES):

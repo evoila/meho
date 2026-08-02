@@ -21,7 +21,7 @@ truth:
   row in the same transaction (the "request" row on create; the
   "decision" row on approve/reject/expire).
 - **T5 wires the operator surfaces on top:** `GET /api/v1/approvals/{id}`
-  (inspect), `meho.approvals.{list,get,approve,reject}` MCP tools, and
+  (inspect), `meho_approvals_{list,get,approve,reject}` MCP tools, and
   `meho approvals {list,show,approve,reject}` CLI verbs. T5 also adds
   the broadcast notifications: each `create_pending_request` /
   `approve_request` / `reject_request` publishes an
@@ -349,7 +349,7 @@ Two changes close that gap, scoped to the **direct**-op path:
    re-dispatches with `dispatch(..., _approved=True)`, falling back to
    the stored `request.params` when the surface supplies none. REST
    `/approve` (caller params, hash-verified), REST `/decide`, and the
-   MCP `meho.approvals.approve` tool all route through it. `/decide` and
+   MCP `meho_approvals_approve` tool all route through it. `/decide` and
    the MCP tool return the dispatch outcome (`dispatch_*` fields /
    `dispatch` block) alongside the decision.
 
@@ -581,18 +581,18 @@ the same grant.
 
 ### MCP (`backend/src/meho_backplane/mcp/tools/approvals.py`)
 
-Four `meho.approvals.*` tools (all `TenantRole.OPERATOR`-gated):
+Four `meho_approvals_*` tools (all `TenantRole.OPERATOR`-gated):
 
-- `meho.approvals.list` — `status` filter (`pending` default), `limit`/`offset`.
-- `meho.approvals.get` — full detail by id.
-- `meho.approvals.approve` — operator-decision path (status flip + audit +
+- `meho_approvals_list` — `status` filter (`pending` default), `limit`/`offset`.
+- `meho_approvals_get` — full detail by id.
+- `meho_approvals_approve` — operator-decision path (status flip + audit +
   `approval.approved` broadcast; **no `params` required** —
   `approve_request` skips the hash check when called without params). For
   an approved **direct** op (`run_id IS NULL`) it then re-dispatches using
   the stored params (#1503) and returns the outcome under `dispatch`; for
   an agent-run request the in-process agent runtime resumes the op off the
   broadcast, so the tool only records the decision.
-- `meho.approvals.reject` — same shape; optional `reason`.
+- `meho_approvals_reject` — same shape; optional `reason`.
 
 RBAC is enforced at two layers: the MCP registry filter hides write
 tools from non-admins in `tools/list`, and the dispatcher re-checks
@@ -748,12 +748,12 @@ behaviour).
 ## MCP elicitation URL-mode (forward-looking)
 
 When an in-loop agent hits a `needs-approval` verdict, the agent
-runtime can use the row's `id` (returned from `meho.approvals.get`) to
+runtime can use the row's `id` (returned from `meho_approvals_get`) to
 construct an elicitation URL of the form
 `meho://approvals/{request_id}/decide`. MCP-2025-11-25 hosts that
 support elicitation URL-mode can open this URL in the operator's
 decision UI; until that lands, the operator approves/rejects via the
-explicit `meho.approvals.{approve,reject}` tools.
+explicit `meho_approvals_{approve,reject}` tools.
 
 ## Agent-runtime resume on `approval.{approved,rejected}` (T9 #1117)
 

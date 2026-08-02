@@ -14,7 +14,7 @@ re-serves it verbatim to other agents:
 
 | Stored text | Write path | LLM-facing read path (wrapped) |
 |---|---|---|
-| Broadcast announcement `activity` / `scope` / `target` | `meho.broadcast.announce` → `publish_agent_announcement` | `meho.broadcast.recent`, `meho.broadcast.watch`, `meho://tenant/{tenant_id}/feed` |
+| Broadcast announcement `activity` / `scope` / `target` | `meho_broadcast_announce` → `publish_agent_announcement` | `meho_broadcast_recent`, `meho_broadcast_watch`, `meho://tenant/{tenant_id}/feed` |
 | kb entry `body` | `add_to_knowledge`, kb file walker, UI editor | `meho://kb/{slug}` |
 | memory entry `body` | `add_to_memory` | `meho://memory/{scope}/{slug}` |
 

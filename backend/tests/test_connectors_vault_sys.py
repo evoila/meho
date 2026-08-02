@@ -782,7 +782,7 @@ def test_bootstrap_ops_classify_as_other(op_id: str) -> None:
 
     Deliberate: adding ``.enable`` to the broadcast classifier's
     write-suffix tuple would reclassify the unrelated
-    ``meho.connector.enable`` MCP admin tool from ``other`` to ``write``.
+    ``meho_connector_enable`` MCP admin tool from ``other`` to ``write``.
     None of these bootstrap ops carry secret material in their params, so
     the full-detail ``other`` broadcast leaks nothing — classifying them
     ``other`` is both the cleaner and the more scoped choice
@@ -792,14 +792,14 @@ def test_bootstrap_ops_classify_as_other(op_id: str) -> None:
 
 
 def test_adding_bootstrap_suffixes_would_not_reclassify_connector_admin() -> None:
-    """Guard: ``meho.connector.enable`` stays ``other`` (collision sentinel).
+    """Guard: ``meho_connector_enable`` stays ``other`` (collision sentinel).
 
     The broadcast op_class for the MCP connector-admin tools is derived
     from ``classify_op(op_id)`` on the tool name. This pins the decision
     NOT to add ``.enable`` to ``_WRITE_SUFFIXES`` — if a future change
     does, this assertion fails and forces a re-audit of the collision.
     """
-    assert classify_op("meho.connector.enable") == "other"
+    assert classify_op("meho_connector_enable") == "other"
 
 
 async def test_auth_enable_handler_forwards_and_returns_created(

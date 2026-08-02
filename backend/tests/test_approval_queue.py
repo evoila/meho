@@ -2251,7 +2251,7 @@ async def test_mcp_approve_redispatches_direct_op_with_stored_params(
 ) -> None:
     """A parked direct op approved via MCP by-id executes once (#1503, AC1).
 
-    Mirrors the ``/decide`` test for the MCP ``meho.approvals.approve``
+    Mirrors the ``/decide`` test for the MCP ``meho_approvals_approve``
     surface: approve by id alone → the handler re-dispatches with the
     stored params, runs once, and returns the dispatch outcome under
     ``dispatch``.

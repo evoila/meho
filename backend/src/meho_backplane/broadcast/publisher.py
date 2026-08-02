@@ -289,7 +289,7 @@ async def publish_agent_announcement(event: AgentAnnouncementEvent) -> str:
         The Valkey stream entry id (``"<ms>-<seq>"``) the ``XADD``
         wrote. Callers can return this verbatim to the agent as the
         ``event_id`` in the tools/call response so the agent can
-        round-trip it back through ``meho.broadcast.recent`` as the
+        round-trip it back through ``meho_broadcast_recent`` as the
         ``since`` cursor for verification or follow-up reads.
 
     Raises

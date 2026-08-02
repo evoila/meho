@@ -11,7 +11,7 @@ to zero operations, a multi-spec batch that fails mid-way — leaves
 that shim registered forever with no surface to remove it. This
 module is the engine behind the two removal surfaces
 (``DELETE /api/v1/connectors/{connector_id}`` and the
-``meho.connector.delete`` MCP tool, both delegating through
+``meho_connector_delete`` MCP tool, both delegating through
 :meth:`~meho_backplane.operations.ingest.service.ReviewService.delete_connector`).
 
 Mechanism note (recorded on #1700): the task body sketched
@@ -23,7 +23,7 @@ mechanism is therefore **row removal**: the scoped
 ``endpoint_descriptor`` + ``operation_group`` rows are deleted in one
 transaction (DML only, no schema change; the single inbound FK is
 ``endpoint_descriptor.group_id → operation_group.id ON DELETE SET
-NULL``), one ``meho.connector.delete`` audit row preserves the
+NULL``), one ``meho_connector_delete`` audit row preserves the
 forensic trail, and re-ingest revives the connector from scratch —
 the exact revival path the task scoped in ("once deleted, the
 operator re-ingests to bring the connector back").
@@ -139,7 +139,7 @@ class StagedConnectorDelete:
     ``shim_keys`` carries the v2-registry keys (registry spelling,
     not the parsed one) to pop **after** the caller's commit
     succeeds; ``audit_payload`` is the JSON-safe dict for the
-    ``meho.connector.delete`` audit row the caller writes into the
+    ``meho_connector_delete`` audit row the caller writes into the
     same transaction.
     """
 
@@ -376,7 +376,7 @@ def _audit_payload(
     *,
     deleted_group_keys: list[str],
 ) -> dict[str, Any]:
-    """Build the JSON-safe ``meho.connector.delete`` audit payload."""
+    """Build the JSON-safe ``meho_connector_delete`` audit payload."""
     return {
         "connector_id": result.connector_id,
         "tenant_scope": str(scope.tenant_id) if scope.tenant_id is not None else None,

@@ -441,7 +441,7 @@ class UnexecutableRunbookReferenceError(AgentRunError):
     refusal is machine-classifiable on the run outcome object, mirroring
     :class:`ScheduledRunNoInputError` / :data:`SCHEDULED_RUN_NO_INPUT_CLASS`
     (#1505). It also spells out *why* the path is closed rather than built:
-    runbook steps are confirm-gated by design (``meho.runbook.next``: only
+    runbook steps are confirm-gated by design (``meho_runbook_next``: only
     the human operator may answer), so autonomous completion would violate
     the runbook contract even if a tool existed.
 
@@ -458,7 +458,7 @@ class UnexecutableRunbookReferenceError(AgentRunError):
             f"runbook{named}; agent {agent!r} was instructed to execute a "
             "runbook but its toolset resolves no runbook-execution tool. "
             "Runbooks are operator-driven — confirm-gated steps must be "
-            "answered by a human operator (meho.runbook.next) — so the run "
+            "answered by a human operator (meho_runbook_next) — so the run "
             "is refused before any model call instead of degrading to a "
             "fabricated answer."
         )

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the G0.9.1-T6 ``meho.topology.create_node`` admin tool.
+"""Behavioural tests for the G0.9.1-T6 ``meho_topology_create_node`` admin tool.
 
 Coverage matrix (Task #778 acceptance criteria — the MCP-level half;
 the substrate is covered in :mod:`tests.test_topology_create_node`):
@@ -10,7 +10,7 @@ the substrate is covered in :mod:`tests.test_topology_create_node`):
   ``op_class='write'``; non-admin sessions do not see it in
   ``tools/list`` and a direct ``tools/call`` from an operator returns
   -32602 ``forbidden``.
-* ``tools/call meho.topology.create_node {kind, name}`` creates a
+* ``tools/call meho_topology_create_node {kind, name}`` creates a
   fresh ``graph_node`` row in the operator's tenant and returns
   ``{node_id, kind, name, source: "curated", was_created: true}``.
 * A repeat ``tools/call`` is idempotent — returns ``was_created:
@@ -19,11 +19,11 @@ the substrate is covered in :mod:`tests.test_topology_create_node`):
 * A non-vocabulary ``kind`` is rejected at the inputSchema layer
   before the handler runs (jsonschema enum), surfacing as -32602.
 * The annotate tool's description carries the bootstrap precondition
-  and names ``meho.topology.create_node`` as the remediation path —
+  and names ``meho_topology_create_node`` as the remediation path —
   the documentation half of the issue's "an agent reading only the
   description knows the entry point" criterion.
 * End-to-end **empty-tenant bootstrap**: two ``create_node`` calls
-  then one ``meho.topology.annotate`` call land a curated edge with
+  then one ``meho_topology_annotate`` call land a curated edge with
   no probe / refresh in the loop. Closes the consumer's
   ``-32602 no graph_node matched 'rdc-vault'`` dead-end.
 
@@ -88,7 +88,7 @@ def _create_node_call(client: TestClient, call_id: int, arguments: dict[str, Any
             "jsonrpc": "2.0",
             "id": call_id,
             "method": "tools/call",
-            "params": {"name": "meho.topology.create_node", "arguments": arguments},
+            "params": {"name": "meho_topology_create_node", "arguments": arguments},
         },
     )
 
@@ -100,7 +100,7 @@ def _annotate_call(client: TestClient, call_id: int, arguments: dict[str, Any]) 
             "jsonrpc": "2.0",
             "id": call_id,
             "method": "tools/call",
-            "params": {"name": "meho.topology.annotate", "arguments": arguments},
+            "params": {"name": "meho_topology_annotate", "arguments": arguments},
         },
     )
 
@@ -112,8 +112,8 @@ def _annotate_call(client: TestClient, call_id: int, arguments: dict[str, Any]) 
 
 def test_create_node_tool_registers_with_tenant_admin_and_write() -> None:
     """The admin tool lands with TENANT_ADMIN gate + write op_class."""
-    entry = get_tool("meho.topology.create_node")
-    assert entry is not None, "meho.topology.create_node not registered"
+    entry = get_tool("meho_topology_create_node")
+    assert entry is not None, "meho_topology_create_node not registered"
     defn, _handler = entry
     assert defn.required_role == TenantRole.TENANT_ADMIN
     assert defn.op_class == "write"
@@ -135,7 +135,7 @@ def test_create_node_input_schema_kind_is_pattern_constrained() -> None:
         WELL_KNOWN_NODE_KINDS,
     )
 
-    entry = get_tool("meho.topology.create_node")
+    entry = get_tool("meho_topology_create_node")
     assert entry is not None
     defn, _ = entry
     kind_schema = defn.inputSchema["properties"]["kind"]
@@ -156,7 +156,7 @@ def test_annotate_description_states_bootstrap_precondition() -> None:
     the load-bearing tokens so a future edit doesn't silently drop
     them.
     """
-    entry = get_tool("meho.topology.annotate")
+    entry = get_tool("meho_topology_annotate")
     assert entry is not None
     defn, _ = entry
     description = defn.description
@@ -165,7 +165,7 @@ def test_annotate_description_states_bootstrap_precondition() -> None:
     assert "graph_node" in description
     assert "no graph_node matched" in description
     # The two remediation paths must be named so an agent picks one.
-    assert "meho.topology.create_node" in description
+    assert "meho_topology_create_node" in description
     assert "meho topology refresh" in description
 
 
@@ -180,7 +180,7 @@ def test_create_node_hidden_from_non_admin_tools_list(
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
     )
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.topology.create_node" not in names
+    assert "meho_topology_create_node" not in names
     # Sibling read-half tools stay visible.
     assert "query_topology" in names
 
@@ -196,14 +196,14 @@ def test_create_node_visible_to_tenant_admin(
         json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
     )
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.topology.create_node" in names
+    assert "meho_topology_create_node" in names
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 def test_create_node_call_from_non_admin_is_forbidden(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """tools/call meho.topology.create_node from an operator → -32602 forbidden."""
+    """tools/call meho_topology_create_node from an operator → -32602 forbidden."""
     client, _op = client_with_operator
     response = _create_node_call(client, 3, {"kind": "vault-role", "name": "rdc-vault"})
     body = response.json()
@@ -212,7 +212,7 @@ def test_create_node_call_from_non_admin_is_forbidden(
 
 
 # ---------------------------------------------------------------------------
-# meho.topology.create_node — end-to-end via the SQLite test DB
+# meho_topology_create_node — end-to-end via the SQLite test DB
 # ---------------------------------------------------------------------------
 
 
@@ -221,7 +221,7 @@ async def test_create_node_inserts_row_and_returns_was_created_true(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     _seeded_tenant: None,
 ) -> None:
-    """tools/call meho.topology.create_node {...} on empty tenant → fresh row."""
+    """tools/call meho_topology_create_node {...} on empty tenant → fresh row."""
     client, _op = client_with_operator
 
     with patch(_PUBLISH_NODES_PATCH, new=AsyncMock()) as publish_mock:
@@ -359,8 +359,8 @@ async def test_bootstrap_then_annotate_round_trip_via_mcp(
 ) -> None:
     """Issue's bootstrap acceptance criterion at the MCP layer.
 
-    Empty tenant → ``meho.topology.create_node`` twice → ``meho.topology.
-    annotate`` once → curated edge lands without any probe / refresh in
+    Empty tenant → ``meho_topology_create_node`` twice →
+    ``meho_topology_annotate`` once → curated edge lands without any probe / refresh in
     the loop. Closes the ``-32602 no graph_node matched 'rdc-vault'``
     dead-end the consumer hit in the 2026-05-21 dogfood.
     """

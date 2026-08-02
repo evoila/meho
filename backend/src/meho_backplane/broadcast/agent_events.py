@@ -8,12 +8,12 @@ which is **derived from an audit row** every chassis call writes (one
 broadcast per audited operation, fail-open publish, payload PII-redacted
 upstream). :class:`AgentAnnouncementEvent` is **agent-authored** -- a
 narrative event the agent emits explicitly via the
-``meho.broadcast.announce`` MCP tool to coordinate with other operators
+``meho_broadcast_announce`` MCP tool to coordinate with other operators
 in the same tenant (intent at start of work, periodic updates, final
 completion summary). Three differences carry across every field on this
 class:
 
-* **No ``audit_id``.** The audit row for the ``meho.broadcast.announce``
+* **No ``audit_id``.** The audit row for the ``meho_broadcast_announce``
   tools/call invocation itself comes from the chassis ``AuditMiddleware``
   (one audit row per MCP call). The stream event records the
   announcement *content*; the audit log records the *act* of announcing.
@@ -45,8 +45,8 @@ as untrusted:
 * **Slack mirror** (G6.2, already shipped): plain-text mode, no rich
   formatting (no Markdown rendering that could activate injected
   markup).
-* **LLM consumption** (other agents reading via ``meho.broadcast.recent``,
-  ``meho.broadcast.watch``, or ``meho://tenant/{tenant_id}/feed``):
+* **LLM consumption** (other agents reading via ``meho_broadcast_recent``,
+  ``meho_broadcast_watch``, or ``meho://tenant/{tenant_id}/feed``):
   the calling agent MUST NOT treat another agent's ``activity`` as
   policy / system input. This is the same isolation contract the G7.1
   preamble assembler enforces with its
@@ -113,7 +113,7 @@ References
   :func:`meho_backplane.broadcast.publisher.publish_agent_announcement`.
 * MCP tool handler:
   :mod:`meho_backplane.mcp.tools.broadcast` (section
-  ``meho.broadcast.announce``).
+  ``meho_broadcast_announce``).
 * Untrusted-content precedent:
   :mod:`meho_backplane.conventions.preamble`.
 * Decision #3 (PII defaults -- N/A here; agent-authored content is
@@ -210,7 +210,7 @@ PLANNED_OP_CLASS_VALUES: Final[tuple[str, ...]] = get_args(PlannedOpClass)
 class AgentAnnouncementEvent(BaseModel):
     """One agent-authored announcement event written to the tenant stream.
 
-    Built by the ``meho.broadcast.announce`` MCP handler from validated
+    Built by the ``meho_broadcast_announce`` MCP handler from validated
     tool arguments and ``XADD``'d to ``meho:feed:{operator.tenant_id}``
     via :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`.
 

@@ -24,7 +24,7 @@ Typed connectors and ingested connectors are both first-class ([CLAUDE.md](../..
 - **Role.** Write verbs (`ingest`, `edit-group`, `edit-op`, `enable`, `disable`) require `tenant_admin`. Read verbs (`list`, `review`) require `operator`. The backplane returns HTTP 403 with the CLI exit code 5 if the wrong role tries a write verb.
 - **A running backplane.** `meho login <backplane-url>` writes a session token the CLI reuses across every verb. Override per-call with `--backplane <url>` when needed.
 - **The OpenAPI spec.** A path to a local file (`file:///abs/path/spec.yaml`) or an HTTPS URL the backplane can fetch (`https://vendor.example.com/openapi.yaml`). The CLI also accepts the `docs:<product>-<version>/<spec>.yaml` shorthand that resolves against `$CLAUDE_RDC_DOCS` when set; otherwise the shorthand is passed through for the backplane to resolve against its own checked-in docs corpus.
-- **`ANTHROPIC_API_KEY` set for the grouping pass.** As of #1386 the chassis wires a production `LlmClient` at FastAPI lifespan startup: [`build_anthropic_ingest_llm_client`](../../backend/src/meho_backplane/operations/ingest/anthropic_client.py) is installed via [`set_llm_client_factory`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py) and reuses `settings.anthropic_api_key` (the same key the agent runtime reads), talking to the Anthropic Messages API directly. So a deploy with the key set groups non-dry-run ingests for real across all three surfaces (REST route, CLI, and the `meho.connector.ingest` MCP tool — they all read the lifespan-wired factory). A deploy that configured **no key** keeps the fail-closed posture: the ingest REST route returns HTTP 503 `LlmClientUnavailable` and the CLI prints the structured error. (Tests inject a deterministic stub via the constructor's `llm_client_factory=` argument.) See [`ingest-llm-key.md`](ingest-llm-key.md) for the deployed-backplane on-ramp — where the key goes in the Helm chart (it renders only under `agent.enabled: true`), how to verify on a live deploy, and the no-key 503 symptom — and [`docs/codebase/spec-ingestion.md` §"LLM-client wiring"](../codebase/spec-ingestion.md#llm-client-wiring) for the symbol-level framing, including the air-gapped/resolver-routing follow-up.
+- **`ANTHROPIC_API_KEY` set for the grouping pass.** As of #1386 the chassis wires a production `LlmClient` at FastAPI lifespan startup: [`build_anthropic_ingest_llm_client`](../../backend/src/meho_backplane/operations/ingest/anthropic_client.py) is installed via [`set_llm_client_factory`](../../backend/src/meho_backplane/api/v1/connectors_ingest.py) and reuses `settings.anthropic_api_key` (the same key the agent runtime reads), talking to the Anthropic Messages API directly. So a deploy with the key set groups non-dry-run ingests for real across all three surfaces (REST route, CLI, and the `meho_connector_ingest` MCP tool — they all read the lifespan-wired factory). A deploy that configured **no key** keeps the fail-closed posture: the ingest REST route returns HTTP 503 `LlmClientUnavailable` and the CLI prints the structured error. (Tests inject a deterministic stub via the constructor's `llm_client_factory=` argument.) See [`ingest-llm-key.md`](ingest-llm-key.md) for the deployed-backplane on-ramp — where the key goes in the Helm chart (it renders only under `agent.enabled: true`), how to verify on a live deploy, and the no-key 503 symptom — and [`docs/codebase/spec-ingestion.md` §"LLM-client wiring"](../codebase/spec-ingestion.md#llm-client-wiring) for the symbol-level framing, including the air-gapped/resolver-routing follow-up.
 - **Postgres with pgvector + FTS extensions.** v0.2 ships the `pgvector/pgvector:pg16`-derived chart image; local development uses the testcontainers fixture.
 
 ## Step-by-step
@@ -251,7 +251,7 @@ Inline text up to ~2 KB works directly on the command line. For longer prose, us
 meho connector edit-group vmware-rest-9.0 storage --when-to-use @/tmp/storage_when_to_use.md
 ```
 
-`edit-group` also accepts `--name` to override the LLM's group display name. Each edit writes a `meho.connector.edit_group` audit row in the same transaction as the column update so [G8 audit replay](https://github.com/evoila/meho/issues/218) can reconstruct exactly which operator polished which group at which time.
+`edit-group` also accepts `--name` to override the LLM's group display name. Each edit writes a `meho_connector_edit_group` audit row in the same transaction as the column update so [G8 audit replay](https://github.com/evoila/meho/issues/218) can reconstruct exactly which operator polished which group at which time.
 
 Most operators polish 2–4 groups per ingest; the LLM's output is usable for the rest.
 
@@ -280,7 +280,7 @@ meho connector edit-op vmware-rest-9.0 'POST:/vcenter/legacy/deprecated-thing' -
 
 `edit-op` requires at least one of `--custom-description`, `--safety`, `--requires-approval`, `--no-requires-approval`, `--enable`, `--disable`. An empty PATCH yields HTTP 400.
 
-Each edit writes a single `meho.connector.edit_op` audit row.
+Each edit writes a single `meho_connector_edit_op` audit row.
 
 ### Step 7 — enable the connector
 
@@ -324,7 +324,7 @@ meho connector disable vmware-rest-9.0 --confirm
 
 **Per-op operator overrides are preserved** (`custom_description`, `safety_level`, `requires_approval`) so a future `enable` resurfaces them verbatim. There is no `delete` verb — the rollback is reversible without losing operator work.
 
-The audit trail (`meho.connector.disable` row + the prior `meho.connector.enable` row) is sufficient to reconstruct what happened.
+The audit trail (`meho_connector_disable` row + the prior `meho_connector_enable` row) is sufficient to reconstruct what happened.
 
 After fix → re-run `meho connector ingest` against the corrected spec. T2's body-hash idempotence skips re-embedding rows whose parser output didn't change; only the changed rows take an embedding hit. After `review` + `enable`, the agent path re-warms.
 

@@ -543,7 +543,7 @@ what it is". Both are part of the API surface; they must agree.
 
 Code reference: G0.16-T6 Finding G (#1312) reconciled the
 ``since`` parameter across both fronts on resolution (a)
-(extend the impl). The MCP ``meho.broadcast.recent`` parser
+(extend the impl). The MCP ``meho_broadcast_recent`` parser
 in
 [`backend/src/meho_backplane/broadcast/history.py`](../../backend/src/meho_backplane/broadcast/history.py)
 (``_normalise_since`` + ``_iso8601_to_min_cursor``) already
@@ -889,7 +889,7 @@ the value set as a JSON-Schema `enum` sourced from the canonical
 [`OP_CLASS_ENUM`](../../backend/src/meho_backplane/broadcast/history.py)
 tuple. The v0.8.0 drift was prose-only on `query_audit.op_class`
 (five values, missing `credential_mint`) vs JSON-enum on
-`meho.broadcast.recent`/`watch` (six values). Convention: one
+`meho_broadcast_recent`/`watch` (six values). Convention: one
 import, one tuple, one enum on every surface that filters on it.
 Issue #2731 completed the harmonisation the other way too: `OP_CLASS_ENUM`
 now spans exactly `classify_op`'s output range (the tuple had omitted
@@ -903,8 +903,8 @@ a member alone.
 
 Every MCP read tool that paginates forward names the cursor
 parameter `cursor`. The v0.8.0 wire shape spelled the same concept
-three ways: `since` (`meho.broadcast.recent`), `since_cursor`
-(`meho.broadcast.watch`), `cursor` (`query_audit` / `query_topology` /
+three ways: `since` (`meho_broadcast_recent`), `since_cursor`
+(`meho_broadcast_watch`), `cursor` (`query_audit` / `query_topology` /
 `list_targets`). The reconciled name is `cursor` (the lexical
 shortest, present on four of the six tools); `since` and
 `since_cursor` survive as **deprecated aliases** marked
@@ -918,9 +918,9 @@ v0.9.0 → v0.10.0 cycle; the next sweep drops the aliases.
 ### §14.3 — `<noun>_id` UUID parameter convention
 
 Every MCP tool that names a resource UUID uses the `<noun>_id`
-form: `trigger_id` (`meho.scheduler.cancel`), `agent_session_id`
+form: `trigger_id` (`meho_scheduler_cancel`), `agent_session_id`
 (`query_audit`), `audit_id` (`query_audit`), `approval_request_id`
-(`meho.approvals.*`). The v0.8.0 `meho.approvals.{get,approve,reject}`
+(`meho_approvals_*`). The v0.8.0 `meho.approvals.{get,approve,reject}`
 used a bare `id` — the only sibling-drift left after the previous
 sweeps. Canonical name post-G0.18-T5: `approval_request_id`; bare
 `id` survives as a deprecated alias.
@@ -929,7 +929,7 @@ sweeps. Canonical name post-G0.18-T5: `approval_request_id`; bare
 
 Every MCP tool that exposes a cross-tenant scope parameter names it
 `tenant_id`. The v0.8.0 `list_targets` spelled the same concept
-`tenant`; the admin tools (`meho.connector.*`, `meho.scheduler.create`)
+`tenant`; the admin tools (`meho.connector.*`, `meho_scheduler_create`)
 spelled it `tenant_id`. Reconciled: `tenant_id` everywhere;
 `list_targets.tenant` survives as a deprecated alias.
 
@@ -948,17 +948,17 @@ wire field with two accepted shapes on one tool, not two wire fields.
 
 Every paginating list tool declares `default: <N>` on its `limit`
 and `offset` (and on `cursor` when applicable). The v0.8.0 surface
-had `default` declared in-schema for some (`meho.approvals.*`,
+had `default` declared in-schema for some (`meho_approvals_*`,
 `query_audit`, `list_targets`, `search_operations`) but prose-only
-for others (`meho.scheduler.list`, `query_topology.limit`). A
+for others (`meho_scheduler_list`, `query_topology.limit`). A
 schema-driven MCP client renders the documented default; prose-
 only defaults force the client to guess. Canonical: in-schema.
 
 ### §14.6 — `*.list.status` is a JSON enum
 
 Every MCP list tool that filters by status declares the allowed
-values as a JSON-Schema `enum`, not in prose. `meho.scheduler.list`
-already did; `meho.approvals.list` did not (`status` was a bare
+values as a JSON-Schema `enum`, not in prose. `meho_scheduler_list`
+already did; `meho_approvals_list` did not (`status` was a bare
 `type: string` with prose-listed values). Canonical: `enum` +
 `default` on every list-tool `status` filter.
 
@@ -968,8 +968,8 @@ When a tool's `name` field documents an alphabet (`agent identity
 name (letters, digits, hyphen, underscore, dot)`), the JSON-Schema
 declares that alphabet via `pattern` so an MCP client schema-
 validating ahead of the call sees the constraint before the
-service-layer regex fires. `meho.agents.create.name` already
-carried the pattern; `meho.agent_principals.register.name` did
+service-layer regex fires. `meho_agents_create.name` already
+carried the pattern; `meho_agent_principals_register.name` did
 not. Canonical: `pattern` declared at the schema layer matches
 the service-side regex.
 
@@ -983,20 +983,28 @@ paginated. Convention: keyset on the natural sort key (`group_key`
 for `list_operation_groups`, `name` for `list_targets`) with the
 same `next_cursor` shape on the response.
 
-### §14.9 — Tool names: dotted `meho.<noun>.<verb>` for multi-verb families
+### §14.9 — Tool names: `meho_<noun>_<verb>` for multi-verb families
 
-Every multi-verb domain family on the MCP surface uses the dotted
-`meho.<noun>.<verb>` grammar (`meho.agents.*`, `meho.approvals.*`,
-`meho.broadcast.*`, `meho.connector.*`, `meho.scheduler.*`,
-`meho.agent_principals.*`). The runbook family was the lone flat
-hold-out (`runbook_start`, `runbook_show_template`, …) until #1612
-canonicalised the 11 tools as `meho.runbook.<verb>`. The flat names
-were kept as deprecated aliases for one release and **removed in
-v0.15.0** by #1625 (the original one-release v0.14.0 deadline slipped
-past the v0.14.0 tag and was re-pinned, with a public CHANGELOG
-erratum, by #1702). The runbook family now serves exactly the 11
-dotted tools; a flat name falls through to the dispatcher's standard
-unknown-tool error. The same #1612 change unified the template
+Every multi-verb domain family on the MCP surface uses the underscore
+`meho_<noun>_<verb>` grammar (`meho_agents_*`, `meho_approvals_*`,
+`meho_broadcast_*`, `meho_connector_*`, `meho_scheduler_*`,
+`meho_agent_principals_*`). Every published name must match the
+Anthropic tool-name pattern `^[a-zA-Z0-9_-]{1,64}$` — Claude Desktop /
+claude.ai validate every remote-MCP tool name against it and withhold
+the ENTIRE toolset when a single name fails, so the constraint is
+machine-checked by `tests/test_published_tool_schema_shape.py`.
+Naming history: the grammar was originally dotted `meho.<noun>.<verb>`;
+the runbook family was the lone flat hold-out (`runbook_start`,
+`runbook_show_template`, …) until #1612 canonicalised the 11 tools as
+`meho.runbook.<verb>`. The flat names were kept as deprecated aliases
+for one release and **removed in v0.15.0** by #1625 (the original
+one-release v0.14.0 deadline slipped past the v0.14.0 tag and was
+re-pinned, with a public CHANGELOG erratum, by #1702). #2745 then
+renamed every dotted name to the underscore form
+(`meho.runbook.start` → `meho_runbook_start`) because the dots fail
+the Anthropic pattern. The runbook family now serves exactly the 12
+canonical tools; a bare flat name falls through to the dispatcher's
+standard unknown-tool error. The same #1612 change unified the template
 identifier on `template_slug` across all 11 tools (the template verbs
 previously took `slug` while the run verbs took `template_slug`);
 `slug` was accepted as a deprecated input alias on the template verbs
@@ -1004,7 +1012,7 @@ for the same window and was removed alongside the flat names, so
 `template_slug` is now a plain required field (no `anyOf`, no `slug`
 sibling). Template-verb responses still mirror the id as
 `template_slug` so a value read from `show_template` /
-`list_templates` round-trips into `meho.runbook.start` verbatim. See
+`list_templates` round-trips into `meho_runbook_start` verbatim. See
 also [`mcp.md`](mcp.md) §Tool naming grammar.
 
 ### §14.10 — List rows mirror the qualified name the sibling verb accepts
@@ -1034,7 +1042,7 @@ already-codified molds, picked by whether the mismatch is on an
   and a handler-level XOR resolver that names both on a both-supplied
   `-32602` and speaks the canonical name in every error string. This is
   the approvals `id`→`approval_request_id` mold (§14.3); #2471 applied
-  it to `meho.agents.run_status` (`handle`→`run_id`), the last
+  it to `meho_agents_run_status` (`handle`→`run_id`), the last
   resource-UUID input arg violating the grammar.
 
 * **Response mismatch → additive mirror (native key stays).** When the
@@ -1043,11 +1051,11 @@ already-codified molds, picked by whether the mismatch is on an
   the qualified name the sibling verb accepts, equal values. The REST
   surface and the shared Pydantic model are untouched. This is the
   `_mirror_template_slug` mold (#1612). #2471 added three more:
-  `meho.agents.grant.{list,show,create,elevate}` rows mirror `id` →
+  `meho_agents_grant_{list,show,create,elevate}` rows mirror `id` →
   `grant_id` (accepted by `grant.show` / `grant.revoke`);
-  `meho.scheduler.list` rows mirror `id` → `trigger_id` (accepted by
+  `meho_scheduler_list` rows mirror `id` → `trigger_id` (accepted by
   `scheduler.cancel`, and the same key `scheduler.create` already
-  returns at top level); `meho.runbook.list_runs` run summaries mirror
+  returns at top level); `meho_runbook_list_runs` run summaries mirror
   `state` → `status`. The runbook filter itself stays `status` (§14.6
   pins `*.list.status` surface-wide), so the mirror makes the row's
   `status` value a member of the filter's own enum — a clean

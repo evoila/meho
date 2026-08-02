@@ -8,5 +8,5 @@ python -m scripts.<name>``); they are intentionally NOT shipped in the
 wheel (see ``backend/pyproject.toml`` -- ``[tool.hatch.build.targets.
 wheel] packages = ["src/meho_backplane"]``). Production code paths that
 need the same behaviour at request time go through the MCP /
-REST surfaces (``meho.connector.review.edit_op`` etc.).
+REST surfaces (``meho_connector_edit_op`` etc.).
 """

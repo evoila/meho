@@ -149,7 +149,7 @@ BROADCAST_BLOCK_END: Final[str] = "<<END_BROADCAST_DISCIPLINE>>"
 #: lived only in an optional consumer onboarding template. Static text:
 #: it has no tenant-specific data source, so it is always present
 #: (exactly once) regardless of whether the tenant has any operational
-#: conventions. Names the dotted MCP tool names (``meho.broadcast.*``)
+#: conventions. Names the MCP tool names (``meho_broadcast_*``)
 #: so an agent reading the preamble can act on it directly. This is
 #: advisory guidance, not an enforced gate -- MEHO never blocks work on
 #: a missing announcement (the discipline stays substrate-minimal); the
@@ -163,12 +163,12 @@ BROADCAST_DISCIPLINE_BAND: Final[str] = "\n".join(
         "This tenant shares a live coordination channel so concurrent "
         "agents and operators avoid crossfire. Follow this discipline:",
         "",
-        "1. Before starting work on a target, call `meho.broadcast.recent` "
+        "1. Before starting work on a target, call `meho_broadcast_recent` "
         "(optionally with `filter.target`) to check for conflicting "
         "in-flight activity; if another principal is already working the "
         "target, surface the conflict before proceeding. "
-        "`meho.broadcast.watch` long-polls the same feed for live tailing.",
-        "2. Announce intent with `meho.broadcast.announce` "
+        "`meho_broadcast_watch` long-polls the same feed for live tailing.",
+        "2. Announce intent with `meho_broadcast_announce` "
         '(`phase="start"`), naming the target(s) and the expected work.',
         "3. During long work, re-announce progress "
         '(`phase="update"`) so the shared awareness stays fresh.',

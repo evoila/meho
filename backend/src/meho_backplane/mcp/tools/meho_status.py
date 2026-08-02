@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``meho.status`` — the reference MCP tool (G0.5-T4).
+"""``meho_status`` — the reference MCP tool (G0.5-T4).
 
 Mirrors :func:`~meho_backplane.api.v1.health.authenticated_health` onto
 the MCP transport. A call to ``tools/call`` with
-``name="meho.status"`` returns the same operator-identity +
+``name="meho_status"`` returns the same operator-identity +
 Vault-federation + DB-migration bundle the chassis ``GET /api/v1/health``
 route returns, scoped to the operator the MCP dispatcher already
 authenticated.
@@ -63,7 +63,7 @@ register_mcp_tool(
         # /api/v1/health — infrastructure, not a classified feature
         # (the _READY_ENTRY_FEATURE ``mcp``-entry precedent).
         feature=None,
-        name="meho.status",
+        name="meho_status",
         description=(
             "Returns the operator's identity (sub, name, email) plus the "
             "MEHO backplane's dependency status: Vault federation chain "

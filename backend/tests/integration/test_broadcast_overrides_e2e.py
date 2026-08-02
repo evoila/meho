@@ -21,7 +21,7 @@ Scenarios (one ``async def`` per Initiative-DoD AC):
    shape (the upgrade path from decision #3's aggregate-only-by-
    default for ``audit_query``).
 2. ``test_tenant_rule_downgrades_read_op_to_aggregate`` -- tenant
-   admin creates a rule downgrading ``meho.broadcast.overrides.list``
+   admin creates a rule downgrading ``meho_broadcast_overrides_list``
    to aggregate; the next GET broadcasts an aggregate payload tagged
    ``broadcast_detail_origin = "tenant_rule:<uuid>"``.
 3. ``test_scoped_rule_scope_miss_falls_through_to_default`` -- the
@@ -40,10 +40,10 @@ Scenarios (one ``async def`` per Initiative-DoD AC):
 6. ``test_rbac_blocks_non_admin_on_rest_and_mcp`` -- an operator-
    role JWT (not tenant_admin) hitting ``POST
    /api/v1/broadcast/overrides`` returns 403, and ``tools/call
-   meho.broadcast.overrides.set`` over the MCP transport returns
+   meho_broadcast_overrides_set`` over the MCP transport returns
    JSON-RPC ``-32602`` with a ``forbidden`` detail token.
 7. ``test_tenant_isolation_rule_does_not_leak`` -- tenant A's
-   downgrade rule on ``meho.broadcast.overrides.list`` does not
+   downgrade rule on ``meho_broadcast_overrides_list`` does not
    affect tenant B's identical GET; B still gets the default full
    detail.
 
@@ -135,7 +135,7 @@ _TENANT_B: UUID = UUID("22222222-2222-2222-2222-222222222222")
 # in the production wiring -- the default detail is full, so a rule
 # saying ``detail=aggregate`` produces an observable downgrade in
 # the broadcast event.
-_LIST_OP_PATTERN: str = "meho.broadcast.overrides.list"
+_LIST_OP_PATTERN: str = "meho_broadcast_overrides_list"
 
 
 def _docker_socket_present() -> bool:
@@ -427,7 +427,7 @@ async def test_tenant_rule_downgrades_read_op_to_aggregate(
     """An op-wide downgrade rule changes the broadcast event's detail.
 
     Setup: tenant-admin creates a rule on
-    ``meho.broadcast.overrides.list`` with ``detail=aggregate``.
+    ``meho_broadcast_overrides_list`` with ``detail=aggregate``.
     Action: hit ``GET /api/v1/broadcast/overrides`` (which binds
     ``op_id`` to the same pattern + ``op_class=read``).
     Assert: the resolver picks the tenant rule; the audit row's
@@ -633,7 +633,7 @@ async def test_rbac_blocks_non_admin_on_rest_and_mcp(
     role token returns 403 + ``insufficient_role`` detail (T4's RBAC
     gate, exercised end-to-end through ``require_role``).
 
-    MCP: ``tools/call meho.broadcast.overrides.set`` from the same
+    MCP: ``tools/call meho_broadcast_overrides_set`` from the same
     operator token returns either a JSON-RPC ``-32602`` envelope
     whose ``error.message`` contains the ``forbidden`` token, or an
     HTTP 401/403 if the MCP audience guard rejects the operator's
@@ -658,7 +658,7 @@ async def test_rbac_blocks_non_admin_on_rest_and_mcp(
                 "id": "rbac-check",
                 "method": "tools/call",
                 "params": {
-                    "name": "meho.broadcast.overrides.set",
+                    "name": "meho_broadcast_overrides_set",
                     "arguments": {
                         "op_id_pattern": "vault.kv.*",
                         "detail": "aggregate",
@@ -685,7 +685,7 @@ async def test_tenant_isolation_rule_does_not_leak(production_app: FastAPI) -> N
     """Tenant A's downgrade rule does not change tenant B's broadcast detail.
 
     Two parallel JWT chains (one key per tenant). Tenant A's admin
-    creates a downgrade rule on ``meho.broadcast.overrides.list``;
+    creates a downgrade rule on ``meho_broadcast_overrides_list``;
     tenant B's admin then does a list call. The audit row for tenant
     B's call must carry ``broadcast_detail_origin = "default"`` --
     tenant A's rule lives only in tenant A's row set (verified by the

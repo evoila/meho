@@ -3,17 +3,17 @@
 
 """Admin MCP tools for the agent-definition CRUD surface.
 
-G11.1-T2 (#809) under Initiative #802 -- five ``meho.agents.*`` tools
+G11.1-T2 (#809) under Initiative #802 -- five ``meho_agents_*`` tools
 that mirror the REST surface (``/api/v1/agents``) onto the MCP
 transport:
 
-* ``meho.agents.list`` -- list the operator's tenant's definitions.
+* ``meho_agents_list`` -- list the operator's tenant's definitions.
   Role: ``operator``.
-* ``meho.agents.show`` -- fetch one definition by name. Role:
+* ``meho_agents_show`` -- fetch one definition by name. Role:
   ``operator``.
-* ``meho.agents.create`` -- create a definition. Role: ``tenant_admin``.
-* ``meho.agents.edit`` -- partial update by name. Role: ``tenant_admin``.
-* ``meho.agents.delete`` -- delete a definition by name. Role:
+* ``meho_agents_create`` -- create a definition. Role: ``tenant_admin``.
+* ``meho_agents_edit`` -- partial update by name. Role: ``tenant_admin``.
+* ``meho_agents_delete`` -- delete a definition by name. Role:
   ``tenant_admin``.
 
 RBAC enforcement happens at two layers: the registry filter
@@ -98,7 +98,7 @@ def _require_name(arguments: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.list
+# meho_agents_list
 # ---------------------------------------------------------------------------
 
 
@@ -118,7 +118,7 @@ async def _list_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.list",
+        name="meho_agents_list",
         description=(
             "List agent definitions for the operator's tenant "
             "(Initiative #802). Operator-level read. Returns "
@@ -137,7 +137,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.show
+# meho_agents_show
 # ---------------------------------------------------------------------------
 
 
@@ -160,7 +160,7 @@ async def _show_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.show",
+        name="meho_agents_show",
         description=(
             "Fetch one agent definition by name for the operator's "
             "tenant (Initiative #802). Operator-level read. Returns "
@@ -189,7 +189,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.create
+# meho_agents_create
 # ---------------------------------------------------------------------------
 
 
@@ -227,7 +227,7 @@ async def _create_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.create",
+        name="meho_agents_create",
         description=(
             "Create an agent definition for the operator's tenant "
             "(Initiative #802). Tenant-admin only. Args: name (slug), "
@@ -303,7 +303,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.edit
+# meho_agents_edit
 # ---------------------------------------------------------------------------
 
 
@@ -338,7 +338,7 @@ async def _edit_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.edit",
+        name="meho_agents_edit",
         description=(
             "Apply a partial update to an agent definition by name "
             "(Initiative #802). Tenant-admin only. Supply name plus any "
@@ -385,7 +385,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.delete
+# meho_agents_delete
 # ---------------------------------------------------------------------------
 
 
@@ -409,7 +409,7 @@ async def _delete_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.delete",
+        name="meho_agents_delete",
         description=(
             "Delete an agent definition by name for the operator's "
             "tenant (Initiative #802). Tenant-admin only. Returns "

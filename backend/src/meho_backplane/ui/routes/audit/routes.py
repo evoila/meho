@@ -859,7 +859,7 @@ async def _replay_handler(
     **TENANT_ADMIN-gated.** Replaying an *arbitrary* session reconstructs
     another principal's full session trace -- a privileged forensic act,
     matching the REST replay route's ``_require_tenant_admin`` gate
-    (``api/v1/audit.py``) and the MCP ``meho.audit.replay`` posture. The role
+    (``api/v1/audit.py``) and the MCP ``meho_audit_replay`` posture. The role
     is lifted via the fail-soft :func:`_resolve_role`; a ``read_only`` /
     ``operator`` -- or any failed lift -- renders the 403 forbidden fragment
     ("session replay is a tenant-admin forensic action"), never the tree.

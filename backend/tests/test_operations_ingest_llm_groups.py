@@ -19,7 +19,7 @@ Coverage matrix (G0.7-T3 / Task #404 acceptance criteria):
   (zero LLM calls, zero rows mutated, no audit row).
 * Partial regrouping -- re-running on a partially-grouped connector
   runs Pass-2-only over the unassigned rows, reusing existing groups.
-* Audit row -- one ``meho.connector.llm_grouping`` row written with
+* Audit row -- one ``meho_connector_llm_grouping`` row written with
   ``{connector_id, groups_created, operations_assigned,
   operations_unassigned, llm_call_count, batch_size}`` payload.
 * Prompt rendering -- snapshot-style assertions on the rendered Jinja
@@ -512,7 +512,7 @@ async def test_run_llm_grouping_small_corpus_persists_groups_and_assigns_ops(
 async def test_run_llm_grouping_writes_audit_row(
     stub_embedding_service: Any,
 ) -> None:
-    """One ``meho.connector.llm_grouping`` audit row with the documented payload."""
+    """One ``meho_connector_llm_grouping`` audit row with the documented payload."""
     await _ingest_small_corpus(stub_embedding_service)
     stub = StubLlmClient(
         responses=[

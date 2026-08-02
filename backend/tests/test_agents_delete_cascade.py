@@ -269,7 +269,7 @@ async def test_rest_delete_scheduled_definition_returns_204() -> None:
 
 @pytest.mark.asyncio
 async def test_mcp_delete_scheduled_definition_returns_removed() -> None:
-    """The ``meho.agents.delete`` handler returns ``{removed: true}``.
+    """The ``meho_agents_delete`` handler returns ``{removed: true}``.
 
     Drives the real MCP tool handler. Pre-fix the uncaught
     :class:`IntegrityError` was mapped to ``-32603 "internal error:
@@ -315,7 +315,7 @@ async def test_mcp_delete_scheduled_definition_over_the_wire(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.agents.delete",
+                "name": "meho_agents_delete",
                 "arguments": {"name": "incident-triage"},
             },
         },

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""MCP-front tests for ``meho.topology.bulk_import`` (#2539, Initiative #2533).
+"""MCP-front tests for ``meho_topology_bulk_import`` (#2539, Initiative #2533).
 
 Coverage (the MCP-level half — the batch service is covered in
 :mod:`tests.test_topology_bulk_import`; the agent-park / approve-execute
@@ -55,7 +55,7 @@ from tests.mcp_test_fixtures import (
 # Broadcast publisher patch — the apply path fans out one event per row
 # through the shared annotate helper.
 _PUBLISH_PATCH = "meho_backplane.topology.annotate.publish_event"
-_TOOL_NAME = "meho.topology.bulk_import"
+_TOOL_NAME = "meho_topology_bulk_import"
 
 
 # ---------------------------------------------------------------------------

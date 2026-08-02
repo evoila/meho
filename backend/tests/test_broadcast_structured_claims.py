@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Structured intent claims on ``meho.broadcast.announce`` (T1, #2544).
+"""Structured intent claims on ``meho_broadcast_announce`` (T1, #2544).
 
 Covers the keystone contract of Broadcast v2 (Initiative #2543):
 
@@ -13,7 +13,7 @@ Covers the keystone contract of Broadcast v2 (Initiative #2543):
   serialise UNWRAPPED; the free-text fields (``activity`` / ``scope`` /
   ``target`` / ``targets[]`` / ``work_ref``) stay behind the
   untrusted-content envelope. Filtering runs pre-wrap on the model.
-* ``meho.broadcast.recent`` gains ``work_ref`` + ``active_only`` filters
+* ``meho_broadcast_recent`` gains ``work_ref`` + ``active_only`` filters
   and the ``target`` filter now matches an announcement's ``targets``
   list; invalid claims reject at the boundary with ``-32602``.
 * Back-compat: single-``target`` announcements and pre-v2 stream entries
@@ -339,7 +339,7 @@ def test_announce_schema_exposes_claim_fields(
     client, _op = client_with_operator
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     announce = next(
-        t for t in resp.json()["result"]["tools"] if t["name"] == "meho.broadcast.announce"
+        t for t in resp.json()["result"]["tools"] if t["name"] == "meho_broadcast_announce"
     )
     props = announce["inputSchema"]["properties"]
     assert props["targets"]["type"] == "array"
@@ -379,7 +379,7 @@ def test_announce_invalid_claim_rejects_with_invalid_params(
     client, _op = client_with_operator
     resp = post_mcp(
         client,
-        _tools_call("meho.broadcast.announce", {"activity": "x", **bad_args}),
+        _tools_call("meho_broadcast_announce", {"activity": "x", **bad_args}),
     )
     body = resp.json()
     assert "error" in body, body
@@ -402,7 +402,7 @@ def test_announce_echoes_declared_claims_and_publishes_them(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.announce",
+                "meho_broadcast_announce",
                 {
                     "activity": "rotating tokens on cluster X",
                     "targets": ["cluster-x"],
@@ -451,7 +451,7 @@ def test_bare_announce_keeps_pre_v2_ack_shape(
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
+            _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     result = _result_dict(resp)
     # No declared claims -> only the two identity keys (no claim echoes).

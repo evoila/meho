@@ -500,7 +500,7 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
   module-level `source_kind='typed'` ops with **no** backing connector
   class, `resolve_authoring_kind`'s resolver replay misses. It keys on
   the row's own `source_kind` to recognize this class-less typed mold, so
-  the connector listing and `meho.connector.review` report
+  the connector listing and `meho_connector_review` report
   `net-probe-1.x` as `kind="typed"` / `dispatchable=true` rather than the
   `ingested-shim` dead end. A prior projection bug read the miss as
   non-dispatchable, so a live operator concluded the connector was dead

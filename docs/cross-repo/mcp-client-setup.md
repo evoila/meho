@@ -127,12 +127,12 @@ npx @modelcontextprotocol/inspector --cli \
   --method tools/list \
   --header "Authorization: Bearer $TOKEN"
 
-# Invoke meho.status — exercises the full chain.
+# Invoke meho_status — exercises the full chain.
 npx @modelcontextprotocol/inspector --cli \
   https://meho.example.com/mcp \
   --transport http \
   --method tools/call \
-  --tool-name meho.status \
+  --tool-name meho_status \
   --header "Authorization: Bearer $TOKEN"
 ```
 
@@ -173,9 +173,9 @@ Opening RFC 7591 DCR on the realm side is **not** the right fix: a public DCR en
 
 After the client is wired:
 
-- Run `meho.status` from the connected client. The response should carry the operator's identity (sub, tenant_id, role) plus the Vault federation status and DB migration state.
+- Run `meho_status` from the connected client. The response should carry the operator's identity (sub, tenant_id, role) plus the Vault federation status and DB migration state.
 - Read the operator's tenant info: ask the client to read the resource at `meho://tenant/<your-tenant-id>/info`. The response should be the operator's tenant identity bundle (id, slug, name, role).
-- On the backplane, `SELECT method, path, operator_sub, status_code, occurred_at FROM audit_log ORDER BY occurred_at DESC LIMIT 10` should show the two operations with `method='MCP'` and `path='/mcp/tools/call/meho.status'` / `path='/mcp/resources/read/meho://tenant/<id>/info'`.
+- On the backplane, `SELECT method, path, operator_sub, status_code, occurred_at FROM audit_log ORDER BY occurred_at DESC LIMIT 10` should show the two operations with `method='MCP'` and `path='/mcp/tools/call/meho_status'` / `path='/mcp/resources/read/meho://tenant/<id>/info'`.
 
 If any of these don't appear, walk the troubleshooting section.
 
@@ -218,7 +218,7 @@ The client attempted dynamic client registration (RFC 7591) and Keycloak rejecte
 
 ### `tools/list` returns an empty list
 
-The operator's token carries a `tenant_role` claim below the role rank any registered tool requires (`read_only < operator < tenant_admin`). v0.2 ships only `meho.status` (`read_only` minimum), so an empty list means the JWT lacks the `tenant_role` claim entirely or carries a role below `read_only`. Walk back through the realm's `tenant_role` mapper.
+The operator's token carries a `tenant_role` claim below the role rank any registered tool requires (`read_only < operator < tenant_admin`). v0.2 ships only `meho_status` (`read_only` minimum), so an empty list means the JWT lacks the `tenant_role` claim entirely or carries a role below `read_only`. Walk back through the realm's `tenant_role` mapper.
 
 ### Newly-shipped tools don't appear after a backplane upgrade
 

@@ -7,7 +7,7 @@ The connector admin surface is split across two tool modules by
 responsibility:
 
 * :mod:`meho_backplane.mcp.tools.connector_ingest` — the ingest
-  pipeline tools (``meho.connector.ingest`` + ``meho.connector.ingest_status``)
+  pipeline tools (``meho_connector_ingest`` + ``meho_connector_ingest_status``)
   that wrap :class:`IngestionPipelineService` + the in-memory job registry.
 * :mod:`meho_backplane.mcp.tools.connector_admin` — the review /
   edit / state-machine tools (``list`` / ``review`` / ``edit_group`` /
@@ -238,8 +238,8 @@ def raise_invalid_params_for_ambiguous_scope(
 ) -> NoReturn:
     """Map :class:`AmbiguousConnectorScopeError` onto :class:`McpInvalidParamsError`.
 
-    The two scope-resolving curation tools (``meho.connector.review`` /
-    ``meho.connector.enable_reads``) raise this when one ``connector_id``
+    The two scope-resolving curation tools (``meho_connector_review`` /
+    ``meho_connector_enable_reads``) raise this when one ``connector_id``
     maps to **both** a tenant-curated row and a built-in row, so the
     shared resolver cannot pick one without guessing (G0.26-T1 #1801).
     The REST siblings already render it as a structured ``409 Conflict``
@@ -293,7 +293,7 @@ def raise_invalid_params_for_connector_not_found(
 ) -> NoReturn:
     """Map :class:`ConnectorNotFoundError` onto :class:`McpInvalidParamsError`.
 
-    Every ``meho.connector.*`` tool that takes a ``connector_id``
+    Every ``meho_connector_*`` tool that takes a ``connector_id``
     (``review`` / ``edit_group`` / ``edit_op`` / ``enable`` /
     ``enable_reads`` / ``disable`` / ``delete``) resolves the label to a
     row-scope before acting; an unknown or cross-tenant label raises

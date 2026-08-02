@@ -3,7 +3,7 @@
 
 """Tests for the connector-ingest MCP tools (G3.5-T2 / #1531).
 
-Covers ``meho.connector.ingest`` + ``meho.connector.ingest_status``,
+Covers ``meho_connector_ingest`` + ``meho_connector_ingest_status``,
 the ingest-pipeline tools split out of ``connector_admin`` into
 :mod:`meho_backplane.mcp.tools.connector_ingest`. The review / edit /
 state-machine tools are tested in ``test_mcp_tools_connector_admin.py``.
@@ -89,8 +89,8 @@ from tests.mcp_test_fixtures import (
     required_settings_env,  # noqa: F401 — pytest-discovered autouse fixture
 )
 
-_INGEST_TOOL = "meho.connector.ingest"
-_INGEST_STATUS_TOOL = "meho.connector.ingest_status"
+_INGEST_TOOL = "meho_connector_ingest"
+_INGEST_STATUS_TOOL = "meho_connector_ingest_status"
 
 
 @pytest.fixture(autouse=True)
@@ -700,7 +700,7 @@ async def test_inline_divergent_product_with_handrolled_impl_fails_closed() -> N
     """The MCP ingest tool rejects a divergent product whose impl_id is hand-coded.
 
     G0.27 / T3 (#1817) — the hole #1851 closes. The
-    ``meho.connector.ingest`` tool calls
+    ``meho_connector_ingest`` tool calls
     :meth:`IngestionPipelineService.ingest` directly, never the REST 422
     guard. Before #1851, ``--product vcf-logs --impl-id vrli-rest`` (where
     ``VcfLogsConnector`` is registered under the canonical ``vrli``)
@@ -852,11 +852,11 @@ async def test_inline_op_id_collision_maps_to_invalid_params(
     assert err.data["existing_spec_source"] == "spec:vcenter.yaml"
     assert err.data["incoming_spec_source"] == "spec:vi-json.yaml"
     # #2273 — the MCP -32602 data + message both name the remediation:
-    # re-ingest under the original URI, or meho.connector.delete to clear
+    # re-ingest under the original URI, or meho_connector_delete to clear
     # crashed-job debris.
     assert "original spec URI" in err.data["remediation"]
-    assert "meho.connector.delete" in err.data["remediation"]
-    assert "meho.connector.delete" in str(err)
+    assert "meho_connector_delete" in err.data["remediation"]
+    assert "meho_connector_delete" in str(err)
 
 
 async def test_inline_upstream_not_spec_maps_to_invalid_params(

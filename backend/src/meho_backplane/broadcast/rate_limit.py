@@ -3,7 +3,7 @@
 
 """Per-principal fixed-window rate limit for agent announcements (G6.5-T6).
 
-``meho.broadcast.announce`` writes to the count-trimmed per-tenant
+``meho_broadcast_announce`` writes to the count-trimmed per-tenant
 Valkey stream (``XADD ... MAXLEN ~ 10000``, see
 :mod:`~meho_backplane.broadcast.publisher`). Nothing bounded the write
 rate: a single looping principal could emit >10 000 announcements in a

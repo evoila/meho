@@ -101,7 +101,7 @@ class AgentElevationCreate(AgentGrantCreate):
 
     Identical to :class:`AgentGrantCreate` but ``expires_at`` is
     required. The REST surface accepts both; the MCP surface exposes
-    a dedicated ``meho.agents.grant.elevate`` tool that uses this schema
+    a dedicated ``meho_agents_grant_elevate`` tool that uses this schema
     so the field-level validation message is specific:
     "expires_at is required for elevations".
     """

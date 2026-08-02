@@ -143,7 +143,7 @@ _XRANGE_END: Final[str] = "+"
 #: every tool call against the advertised ``inputSchema`` with
 #: ``jsonschema``, so an op_class absent from here is a JSON-RPC
 #: ``-32602`` before the handler runs -- the class would be published
-#: on the feed but unreachable from ``meho.broadcast.recent`` /
+#: on the feed but unreachable from ``meho_broadcast_recent`` /
 #: ``.watch`` / ``query_audit`` (#2731 closed that gap for
 #: ``credential_write`` and ``approval``).
 #:
@@ -352,7 +352,7 @@ def event_matches(
     :class:`BroadcastEvent` (one event per audited operation, written
     by :func:`meho_backplane.broadcast.publisher.publish_event`) and
     the agent-authored :class:`AgentAnnouncementEvent` (one event per
-    ``meho.broadcast.announce`` call, written by
+    ``meho_broadcast_announce`` call, written by
     :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`).
     They share ``principal_sub`` but diverge on the other filters:
 
@@ -461,7 +461,7 @@ def parse_entry(
       announcement-shape ``activity`` / ``phase`` fields).
     * Agent-authored :class:`AgentAnnouncementEvent` -- written by
       :func:`~meho_backplane.broadcast.publisher.publish_agent_announcement`
-      per ``meho.broadcast.announce`` call. JSON carries
+      per ``meho_broadcast_announce`` call. JSON carries
       ``"kind": "agent_announcement"`` (the new top-level discriminator
       per :doc:`/docs/codebase/api-shape-conventions` §6) and also
       ``"event_kind": "agent_announcement"`` (backward-compat alias).
@@ -549,8 +549,8 @@ def dump_event_wire(
     :class:`BroadcastEvent` dumps pass through unchanged.
 
     Every surface that re-serves stream events **to a model** goes through
-    this helper — ``meho.broadcast.recent`` (via
-    :func:`list_recent_events_strict`), ``meho.broadcast.watch``
+    this helper — ``meho_broadcast_recent`` (via
+    :func:`list_recent_events_strict`), ``meho_broadcast_watch``
     (:func:`meho_backplane.mcp.tools.broadcast._filter_xread_items`)
     and the ``meho://tenant/{tenant_id}/feed`` resource
     (:mod:`meho_backplane.mcp.resources.tenant_feed`). The UI history
@@ -583,7 +583,7 @@ def dump_event_wire(
 def _backfill_window_start(since: str | None) -> datetime | None:
     """Resolve the window-start instant a DB archive backfill would cover.
 
-    Broadcast v2 T2 (#2547). ``meho.broadcast.recent`` backfills durable
+    Broadcast v2 T2 (#2547). ``meho_broadcast_recent`` backfills durable
     :class:`~meho_backplane.db.models.AgentAnnouncement` rows when the
     caller's requested window reaches back before the stream's oldest
     surviving entry. That only makes sense for a wall-clock window:
@@ -1049,7 +1049,7 @@ _ADVISORY_WRITE_OP_CLASSES: Final[frozenset[str]] = frozenset(
 
 #: Maximum advisory entries surfaced on a single dispatch response. The
 #: advisory is an awareness nudge, not an audit -- the caller who needs
-#: the full picture queries ``meho.broadcast.recent``.
+#: the full picture queries ``meho_broadcast_recent``.
 _ADVISORY_MAX_ENTRIES: Final[int] = 5
 
 #: Bounded scan cap for the advisory stream read. The window (settings
@@ -1148,7 +1148,7 @@ async def build_target_activity_advisory(
     operation or an active announcement claim -- the response carries a
     compact advisory so the caller learns about the overlap at the moment
     it matters. This is NOT a lock or a block; pre-op checking remains the
-    discipline's ``meho.broadcast.recent`` read step.
+    discipline's ``meho_broadcast_recent`` read step.
 
     Returns ``{"target_activity_advisory": [...]}`` with up to
     :data:`_ADVISORY_MAX_ENTRIES` most-recent peer entries in chronological

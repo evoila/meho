@@ -183,7 +183,7 @@ async def _enable_reads_audit_count() -> int:
         result = await session.execute(
             select(AuditLog).where(
                 AuditLog.method == "SERVICE",
-                AuditLog.path == "meho.connector.enable_reads",
+                AuditLog.path == "meho_connector_enable_reads",
             ),
         )
         return len(list(result.scalars().all()))

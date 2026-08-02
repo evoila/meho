@@ -11,7 +11,7 @@ path both the REST route and the MCP tool drive):
   ``endpoint_descriptor`` row under the caller's scope (including
   ``group_id IS NULL`` strays the mid-pipeline-abort shape leaves),
   pops the triple's auto-shim from the v2 registry, writes exactly
-  one ``meho.connector.delete`` audit row, and drops the connector
+  one ``meho_connector_delete`` audit row, and drops the connector
   from ``list_ingested_connectors``.
 * Zero-op stub delete (the primary #1700 consumer scenario): no rows
   anywhere, only the auto-registered shim — registry-only delete.
@@ -240,7 +240,7 @@ async def _delete_audit_rows() -> list[AuditLog]:
         result = await session.execute(
             select(AuditLog).where(
                 AuditLog.method == "SERVICE",
-                AuditLog.path == "meho.connector.delete",
+                AuditLog.path == "meho_connector_delete",
             ),
         )
         return list(result.scalars().all())

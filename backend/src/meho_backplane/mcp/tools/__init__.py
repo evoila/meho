@@ -12,7 +12,7 @@ invoked from the FastAPI ``lifespan`` (see
 ``pkgutil.iter_modules`` so the registrations land before the first
 ``tools/list`` request arrives.
 
-T4 (#249) lands the first tool: ``meho.status`` at
+T4 (#249) lands the first tool: ``meho_status`` at
 :mod:`meho_backplane.mcp.tools.meho_status` — the reference impl
 downstream G3-G9 connector tools copy.
 """

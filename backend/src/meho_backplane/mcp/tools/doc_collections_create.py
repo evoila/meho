@@ -19,7 +19,7 @@ Two gates, mirroring the lifecycle write fronts
   ``list_doc_collections`` / ``search_docs`` declare.
 * ``required_role=TENANT_ADMIN``, ``op_class="write"`` — a create mutates
   the registry, so it carries the tenant_admin floor the REST create route
-  and the ``meho.connector.*`` write tools use, not the OPERATOR floor the
+  and the ``meho_connector_*`` write tools use, not the OPERATOR floor the
   read-class catalogue tool uses.
 
 The tool is a thin front: it validates + builds a

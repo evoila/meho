@@ -19,7 +19,7 @@ Tool descriptions are load-bearing
 ==================================
 
 Per :doc:`../../../../../.claude/skills/implement-issue/ai_engineering_best_practices`
-and the G0.5-T4 ``meho.status`` reference impl, the ``description``
+and the G0.5-T4 ``meho_status`` reference impl, the ``description``
 field is the agent's prompt for *when to call this tool*. Imprecise
 descriptions get tools called incorrectly or never invoked at all.
 Each description below names:
@@ -43,7 +43,7 @@ JSON-Schema 2020-12 fragments matching :class:`CallOperationBody` /
 :mod:`meho_backplane.operations.meta_tools`. The MCP dispatcher
 validates incoming ``tools/call.arguments`` against ``inputSchema``
 before invoking the handler; the handler's return shape is documented
-by ``outputSchema`` for client introspection (T4 ``meho.status``
+by ``outputSchema`` for client introspection (T4 ``meho_status``
 showed the pattern). ``additionalProperties: false`` on every input
 schema keeps the agent from passing unexpected fields the handler
 would silently ignore.
@@ -221,7 +221,7 @@ register_mcp_tool(
                         "next. Results are ordered by `group_key` "
                         "ascending. Matches `cursor` on `query_audit` / "
                         "`query_topology` / `list_targets` / "
-                        "`meho.broadcast.recent` (G0.18-T5 #1358)."
+                        "`meho_broadcast_recent` (G0.18-T5 #1358)."
                     ),
                     "maxLength": 256,
                 },

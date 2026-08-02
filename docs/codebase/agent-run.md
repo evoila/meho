@@ -195,7 +195,7 @@ one transaction):
   lifecycle state; `agent_definition_id` narrows to runs produced by one
   agent definition (the name→id resolution lives at the caller — #2472);
   the page size is clamped server-side to `[1, 500]`. Surfaced as
-  `GET /api/v1/agents/runs`, the `meho.agents.list_runs` MCP tool, and
+  `GET /api/v1/agents/runs`, the `meho_agents_list_runs` MCP tool, and
   `meho agent run-list --work-ref` / `--agent-name`.
 - `resolve_agent_definition_id(session, *, tenant_id, name) -> UUID | None`
   — resolves an agent definition name to its id within the tenant, backing

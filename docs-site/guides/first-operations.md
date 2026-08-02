@@ -34,7 +34,7 @@ nothing, and writing no audit row.
 
 | Step | MCP tool | CLI |
 |---|---|---|
-| Find the connector | `meho.connector.list` | `meho connector list` |
+| Find the connector | `meho_connector_list` | `meho connector list` |
 | List operation groups | `list_operation_groups` | `meho operation groups <connector_id>` |
 | Search operations | `search_operations` | `meho operation search <connector_id> "<query>"` |
 | Preview the request | `preview_operation` | — (REST/MCP only) |

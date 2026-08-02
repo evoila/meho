@@ -164,7 +164,7 @@ meho audit query --principal agent:r4-alert-triage --limit 5 --json \
 ```
 
 A successful triage run lands one or more rows with
-`op_id=meho.broadcast.recent`, optionally followed by
+`op_id=meho_broadcast_recent`, optionally followed by
 `op_id=add_to_memory` (the latter ONLY when the cheap-tier
 decided some event was interesting). A `result_status=denied` on
 `add_to_memory` is the most common first-time failure — the
@@ -359,9 +359,9 @@ token, which carries the operator's `tenant_role` claim. That
 role binds **every** call the session makes via MCP, including
 the ones the local model decides to issue without asking:
 
-- `read_only` — read tools work (`meho.status`, `search_memory`,
-  `search_knowledge`, `meho.broadcast.recent`); write tools 403.
-- `operator` — adds tool-call execution: `meho.agents.run`,
+- `read_only` — read tools work (`meho_status`, `search_memory`,
+  `search_knowledge`, `meho_broadcast_recent`); write tools 403.
+- `operator` — adds tool-call execution: `meho_agents_run`,
   `meho.connector.*` reads, user-scope memory writes
   (`add_to_memory` at `scope="user"` / `"user-tenant"` /
   `"user-target"`), and typed-op connector calls gated by the

@@ -546,13 +546,13 @@ async def test_op_id_collision_across_calls_with_different_spec_sources_raises(
     assert "petstore.yaml" in msg
     assert "petstore-admin.yaml" in msg
     # The message names its remediation (#2273): re-ingest under the
-    # original spec URI, or meho.connector.delete to clear crashed-job
+    # original spec URI, or meho_connector_delete to clear crashed-job
     # debris. str(exc) is what every transport carries -- the async job
     # error field, the REST 400 message, the MCP -32602 message -- so
     # naming the fix here covers all three.
     assert excinfo.value.remediation
     assert "original spec URI" in msg
-    assert "meho.connector.delete" in msg
+    assert "meho_connector_delete" in msg
 
     # No second encode call: the raise short-circuits the re-embed path.
     assert stub_embedding_service.encode_one.call_count == encode_calls_before
@@ -671,7 +671,7 @@ async def test_reingest_same_uri_after_mid_batch_crash_succeeds(
 
     The payoff of per-spec atomicity: because the crashed run persisted
     nothing, the retry inserts cleanly with no ``OpIdCollision`` against
-    stranded rows and without a manual ``meho.connector.delete`` (#2273
+    stranded rows and without a manual ``meho_connector_delete`` (#2273
     acceptance criterion 2).
     """
     from meho_backplane.operations.ingest import register_ingested as _reg
@@ -1409,7 +1409,7 @@ async def test_service_ingest_rejects_divergent_product_with_handrolled_impl_no_
     ``register_ingested_operations(product='vcf-logs', impl_id='vrli-rest')``
     would persist rows under ``vcf-logs`` (the silent non-dispatchable
     shadow #1810 exists to eliminate). The REST 422 guard covered this for
-    the route, but the ``meho.connector.ingest`` MCP tool reaches
+    the route, but the ``meho_connector_ingest`` MCP tool reaches
     ``register_ingested_operations`` directly and bypassed it.
 
     Moving the round-trip enforcement into

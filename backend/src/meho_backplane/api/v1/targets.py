@@ -186,7 +186,7 @@ _require_admin = Depends(require_role(TenantRole.TENANT_ADMIN))
 _DISCOVER_OP_ID = "targets.discover"
 
 #: Canonical op id for the DELETE route's audit row. Mirrors the
-#: ``meho.connector.edit_*`` audit precedent (``api/v1/connectors_ingest.py``)
+#: ``meho_connector_edit_*`` audit precedent (``api/v1/connectors_ingest.py``)
 #: and the ``conventions.delete`` shape so cross-tenant audit
 #: queries (G8) can filter on ``audit_op_id LIKE 'targets.%'``
 #: without a special case.
@@ -1530,7 +1530,7 @@ async def delete_target(
     Returns 204 on success. The audit row is written by the
     :class:`~meho_backplane.audit.AuditMiddleware` with
     ``audit_op_id='targets.delete'`` (mirrors the
-    ``meho.connector.edit_*`` precedent so cross-tenant audit
+    ``meho_connector_edit_*`` precedent so cross-tenant audit
     queries can filter by op id prefix).
 
     Re-deletes collapse to 404 — the second DELETE goes through

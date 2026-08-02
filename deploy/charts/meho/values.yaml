@@ -480,7 +480,7 @@ topology:
   historyPruneEnabled: true
 
 # Durable-announcement retention (Broadcast v2 #2547). Agent-authored
-# announcements published via `meho.broadcast.announce` are persisted to
+# announcements published via `meho_broadcast_announce` are persisted to
 # an append-only `agent_announcement` DB table (the durable archive that
 # outlives the ~24h Valkey stream). The retention prune -- registered in
 # the FastAPI lifespan as a weekly `asyncio.create_task` loop, the same

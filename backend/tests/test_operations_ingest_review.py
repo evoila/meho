@@ -579,8 +579,8 @@ async def test_edit_group_updates_when_to_use_and_name_and_writes_audit() -> Non
         assert group.when_to_use == "Updated when-to-use."
         assert group.name == "Updated Name"
 
-    assert await _count_audit_rows(op_id="meho.connector.edit_group") == 1
-    row = await _latest_audit_row(op_id="meho.connector.edit_group")
+    assert await _count_audit_rows(op_id="meho_connector_edit_group") == 1
+    row = await _latest_audit_row(op_id="meho_connector_edit_group")
     assert row.method == "SERVICE"
     assert row.tenant_id == tenant_id
     payload: Any = row.payload
@@ -638,8 +638,8 @@ async def test_edit_op_updates_overrides_and_writes_audit() -> None:
         assert op_row.requires_approval is True
         assert op_row.is_enabled is False
 
-    assert await _count_audit_rows(op_id="meho.connector.edit_op") == 1
-    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    assert await _count_audit_rows(op_id="meho_connector_edit_op") == 1
+    row = await _latest_audit_row(op_id="meho_connector_edit_op")
     payload: Any = row.payload
     assert payload["op_id"] == target_op
     assert sorted(payload["fields_updated"]) == sorted(
@@ -691,7 +691,7 @@ async def test_edit_op_sets_llm_instructions_and_writes_audit_without_echo() -> 
         op_row = (await session.execute(stmt)).scalar_one()
         assert op_row.llm_instructions == blob
 
-    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    row = await _latest_audit_row(op_id="meho_connector_edit_op")
     payload: Any = row.payload
     assert payload["fields_updated"] == ["llm_instructions"]
     # The blob itself is NOT in the audit payload — operator-authored
@@ -754,7 +754,7 @@ async def test_edit_op_explicit_null_custom_description_clears_column() -> None:
         assert op_row.custom_description is None
         assert op_row.custom_description != ""
 
-    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    row = await _latest_audit_row(op_id="meho_connector_edit_op")
     payload: Any = row.payload
     assert payload["fields_updated"] == ["custom_description"]
 
@@ -798,7 +798,7 @@ async def test_edit_op_null_custom_description_with_other_field_clears_and_appli
         assert op_row.custom_description is None
         assert op_row.is_enabled is False
 
-    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    row = await _latest_audit_row(op_id="meho_connector_edit_op")
     payload: Any = row.payload
     assert sorted(payload["fields_updated"]) == ["custom_description", "is_enabled"]
     assert payload["is_enabled_set_to"] is False
@@ -839,7 +839,7 @@ async def test_edit_op_omitted_custom_description_left_unchanged() -> None:
         op_row = (await session.execute(stmt)).scalar_one()
         assert op_row.custom_description == "Keep me across an unrelated edit."
 
-    row = await _latest_audit_row(op_id="meho.connector.edit_op")
+    row = await _latest_audit_row(op_id="meho_connector_edit_op")
     payload: Any = row.payload
     assert payload["fields_updated"] == ["is_enabled"]
 
@@ -941,7 +941,7 @@ async def test_edit_op_enable_on_auto_shim_connector_returns_warning() -> None:
         impl_id="acme-rest",
     )
     assert enabled_state["GET:/api/v1/group-0/0"] is True
-    assert await _count_audit_rows(op_id="meho.connector.edit_op") == 1
+    assert await _count_audit_rows(op_id="meho_connector_edit_op") == 1
 
 
 @pytest.mark.asyncio
@@ -1038,8 +1038,8 @@ async def test_enable_connector_transitions_and_cascades() -> None:
     enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
     assert all(enabled_state.values()), "every child op should be is_enabled=True"
 
-    assert await _count_audit_rows(op_id="meho.connector.enable") == 1
-    row = await _latest_audit_row(op_id="meho.connector.enable")
+    assert await _count_audit_rows(op_id="meho_connector_enable") == 1
+    row = await _latest_audit_row(op_id="meho_connector_enable")
     payload: Any = row.payload
     assert payload["to_status"] == "enabled"
     assert sorted(payload["transitioned_group_keys"]) == ["group-0", "group-1"]
@@ -1059,11 +1059,11 @@ async def test_enable_connector_idempotent_writes_no_second_audit_row() -> None:
     service = ReviewService(_make_operator(tenant_id=tenant_id))
 
     await service.enable_connector("vmware-rest-9.0", tenant_id=tenant_id)
-    assert await _count_audit_rows(op_id="meho.connector.enable") == 1
+    assert await _count_audit_rows(op_id="meho_connector_enable") == 1
 
     # Second call — no-op.
     await service.enable_connector("vmware-rest-9.0", tenant_id=tenant_id)
-    assert await _count_audit_rows(op_id="meho.connector.enable") == 1
+    assert await _count_audit_rows(op_id="meho_connector_enable") == 1
 
 
 @pytest.mark.asyncio
@@ -1086,7 +1086,7 @@ async def test_disable_connector_transitions_and_cascades() -> None:
     enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
     assert not any(enabled_state.values()), "every child op should be is_enabled=False"
 
-    assert await _count_audit_rows(op_id="meho.connector.disable") == 1
+    assert await _count_audit_rows(op_id="meho_connector_disable") == 1
 
 
 @pytest.mark.asyncio
@@ -1103,7 +1103,7 @@ async def test_disable_connector_idempotent_writes_no_second_audit_row() -> None
     service = ReviewService(_make_operator(tenant_id=tenant_id))
 
     await service.disable_connector("vmware-rest-9.0", tenant_id=tenant_id)
-    assert await _count_audit_rows(op_id="meho.connector.disable") == 0
+    assert await _count_audit_rows(op_id="meho_connector_disable") == 0
 
 
 @pytest.mark.asyncio
@@ -1120,10 +1120,10 @@ async def test_disable_then_re_enable_round_trip() -> None:
     service = ReviewService(_make_operator(tenant_id=tenant_id))
 
     await service.disable_connector("vmware-rest-9.0", tenant_id=tenant_id)
-    assert await _count_audit_rows(op_id="meho.connector.disable") == 1
+    assert await _count_audit_rows(op_id="meho_connector_disable") == 1
 
     await service.enable_connector("vmware-rest-9.0", tenant_id=tenant_id)
-    assert await _count_audit_rows(op_id="meho.connector.enable") == 1
+    assert await _count_audit_rows(op_id="meho_connector_enable") == 1
     statuses = await _group_statuses(tenant_id=tenant_id)
     assert set(statuses.values()) == {"enabled"}
     enabled_state = await _ops_enabled_state(tenant_id=tenant_id)
@@ -1161,7 +1161,7 @@ async def test_enable_group_transitions_one_group_only() -> None:
     assert enabled_state["GET:/api/v1/group-0/1"] is True
     assert enabled_state["GET:/api/v1/group-1/0"] is False
 
-    assert await _count_audit_rows(op_id="meho.connector.enable_group") == 1
+    assert await _count_audit_rows(op_id="meho_connector_enable_group") == 1
 
 
 @pytest.mark.asyncio
@@ -1181,7 +1181,7 @@ async def test_enable_group_idempotent_on_already_enabled() -> None:
         "group-0",
         tenant_id=tenant_id,
     )
-    assert await _count_audit_rows(op_id="meho.connector.enable_group") == 0
+    assert await _count_audit_rows(op_id="meho_connector_enable_group") == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1261,7 +1261,7 @@ async def test_builtin_connector_accessible_to_tenant_admin() -> None:
 
     # Audit row carries the operator's tenant, not the affected
     # rows' (NULL) scope.
-    row = await _latest_audit_row(op_id="meho.connector.enable")
+    row = await _latest_audit_row(op_id="meho_connector_enable")
     assert row.tenant_id == operator_tenant
 
 
@@ -1321,7 +1321,7 @@ async def test_audit_rows_carry_service_method_marker() -> None:
         result = await session.execute(
             select(AuditLog).where(
                 AuditLog.path.in_(
-                    ["meho.connector.edit_group", "meho.connector.enable"],
+                    ["meho_connector_edit_group", "meho_connector_enable"],
                 ),
             ),
         )
@@ -1438,15 +1438,15 @@ async def test_enable_reads_flips_reads_leaves_writes_default_deny() -> None:
 
 @pytest.mark.asyncio
 async def test_enable_reads_writes_one_audit_row_with_count() -> None:
-    """AC: exactly one ``meho.connector.enable_reads`` audit row carrying the count."""
+    """AC: exactly one ``meho_connector_enable_reads`` audit row carrying the count."""
     tenant_id = uuid.uuid4()
     await _seed_mixed_methods(tenant_id=tenant_id, op_is_enabled=False)
     service = ReviewService(_make_operator(tenant_id=tenant_id))
 
     await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
 
-    assert await _count_audit_rows(op_id="meho.connector.enable_reads") == 1
-    row = await _latest_audit_row(op_id="meho.connector.enable_reads")
+    assert await _count_audit_rows(op_id="meho_connector_enable_reads") == 1
+    row = await _latest_audit_row(op_id="meho_connector_enable_reads")
     payload: Any = row.payload
     assert payload["connector_id"] == "vmware-rest-9.0"
     assert payload["ops_enabled_count"] == 2
@@ -1462,11 +1462,11 @@ async def test_enable_reads_is_idempotent_no_second_audit_row() -> None:
 
     first = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
     assert first == 2
-    assert await _count_audit_rows(op_id="meho.connector.enable_reads") == 1
+    assert await _count_audit_rows(op_id="meho_connector_enable_reads") == 1
 
     second = await service.enable_reads("vmware-rest-9.0", tenant_id=tenant_id)
     assert second == 0
-    assert await _count_audit_rows(op_id="meho.connector.enable_reads") == 1
+    assert await _count_audit_rows(op_id="meho_connector_enable_reads") == 1
 
 
 @pytest.mark.asyncio
@@ -1536,7 +1536,7 @@ async def test_enable_reads_builtin_accessible_to_tenant_admin() -> None:
     ops_enabled = await service.enable_reads("vmware-rest-9.0", tenant_id=None)
     assert ops_enabled == 2
 
-    row = await _latest_audit_row(op_id="meho.connector.enable_reads")
+    row = await _latest_audit_row(op_id="meho_connector_enable_reads")
     # Audit row carries the operator's tenant, not the affected rows'
     # (NULL) scope.
     assert row.tenant_id == operator_tenant

@@ -165,13 +165,13 @@ Per the [parent Initiative #229](https://github.com/evoila/meho/issues/229)
 (updated 2026-05-14), every session, no matter how short, follows
 this contract:
 
-1. **Before starting work on a target:** call `meho.broadcast.recent`
+1. **Before starting work on a target:** call `meho_broadcast_recent`
    (optionally with `filter.target`) to check whether another
    operator/agent is touching the same target. If conflicting
    activity is in flight, surface the conflict to the operator
-   before proceeding. `meho.broadcast.watch` long-polls the same
+   before proceeding. `meho_broadcast_watch` long-polls the same
    feed for live tailing.
-2. **Announce intent:** call `meho.broadcast.announce` with
+2. **Announce intent:** call `meho_broadcast_announce` with
    `phase="start"` and the planned activity (e.g. *"investigating
    cluster X latency"*, *"applying NSX policy change to tenant Y"*)
    scoped to the target. Sessions that go quiet for >10 minutes
@@ -182,8 +182,8 @@ this contract:
 4. **Report on completion:** announce with `phase="completion"` and
    the result summary.
 
-> **Tooling status.** The MCP tools `meho.broadcast.recent` /
-> `meho.broadcast.announce` / `meho.broadcast.watch` are registered
+> **Tooling status.** The MCP tools `meho_broadcast_recent` /
+> `meho_broadcast_announce` / `meho_broadcast_watch` are registered
 > and appear on `tools/list` for an operator-scoped session (shipped
 > in [#1092](https://github.com/evoila/meho/issues/1092)). Human
 > operators can still use `meho status --watch` for the read side and
@@ -193,7 +193,7 @@ this contract:
 > - **Announcements are advisory, not enforced.** MEHO never blocks
 >   work on a missing announcement; the discipline is coordination
 >   guidance. The one server-side guard is a per-principal rate limit
->   on `meho.broadcast.announce` (default 10/minute) — announce
+>   on `meho_broadcast_announce` (default 10/minute) — announce
 >   meaningful transitions, not a tight loop; over-limit returns a
 >   `-32000` error naming the window and a retry-after.
 > - **Trust rule.** Announcement free text (`activity`, `scope`,

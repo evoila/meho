@@ -1184,7 +1184,7 @@ async def test_review_payload_surfaces_classless_typed_as_dispatchable(
 ) -> None:
     """``GET /{id}/review`` reports the class-less typed mold as dispatchable typed (#2496).
 
-    The ``meho.connector.review`` surface (MCP) and this REST review
+    The ``meho_connector_review`` surface (MCP) and this REST review
     route share :func:`resolve_authoring_kind` via
     :func:`_authoring_kind_for_payload`, so the projection fix must hold
     on the review path too, not only the listing.
@@ -1973,7 +1973,7 @@ async def test_edit_group_updates_and_writes_audit_row(
             headers=_authed(token),
         )
     assert response.status_code == 204
-    audit_count = await _audit_row_count(op_id="meho.connector.edit_group")
+    audit_count = await _audit_row_count(op_id="meho_connector_edit_group")
     assert audit_count == 1
 
 
@@ -2043,7 +2043,7 @@ async def test_edit_op_updates_safety_level_and_writes_audit_row(
         )
     assert response.status_code == 200
     assert response.json() == {"warnings": []}
-    audit_count = await _audit_row_count(op_id="meho.connector.edit_op")
+    audit_count = await _audit_row_count(op_id="meho_connector_edit_op")
     assert audit_count == 1
 
 
@@ -2131,7 +2131,7 @@ async def test_edit_op_enable_on_auto_shim_connector_returns_structured_warning(
     assert warning["code"] == "unreplaced_auto_shim"
     assert warning["connector_class"] == "AutoShim_acme_1_2_acme_rest"
     assert "per-product Connector subclass" in warning["message"]
-    assert await _audit_row_count(op_id="meho.connector.edit_op") == 1
+    assert await _audit_row_count(op_id="meho_connector_edit_op") == 1
 
 
 @pytest.mark.asyncio
@@ -2198,7 +2198,7 @@ async def test_enable_transitions_all_groups_and_cascades(
     assert response.status_code == 204
     statuses = await _group_statuses(tenant_id=tenant_a)
     assert set(statuses.values()) == {"enabled"}
-    audit_count = await _audit_row_count(op_id="meho.connector.enable")
+    audit_count = await _audit_row_count(op_id="meho_connector_enable")
     assert audit_count == 1
 
 
@@ -2215,7 +2215,7 @@ async def test_enable_is_idempotent(client: TestClient) -> None:
             headers=_authed(token),
         )
     assert response.status_code == 204
-    audit_count = await _audit_row_count(op_id="meho.connector.enable")
+    audit_count = await _audit_row_count(op_id="meho_connector_enable")
     assert audit_count == 0
 
 
@@ -2236,7 +2236,7 @@ async def test_disable_transitions_and_writes_audit_row(
     assert response.status_code == 204
     statuses = await _group_statuses(tenant_id=tenant_a)
     assert set(statuses.values()) == {"disabled"}
-    audit_count = await _audit_row_count(op_id="meho.connector.disable")
+    audit_count = await _audit_row_count(op_id="meho_connector_disable")
     assert audit_count == 1
 
 
@@ -2267,7 +2267,7 @@ async def test_disable_is_idempotent(client: TestClient) -> None:
     assert second.status_code == 204
     statuses = await _group_statuses(tenant_id=tenant_a)
     assert set(statuses.values()) == {"disabled"}
-    audit_count = await _audit_row_count(op_id="meho.connector.disable")
+    audit_count = await _audit_row_count(op_id="meho_connector_disable")
     assert audit_count == 1
 
 
@@ -2634,7 +2634,7 @@ async def test_omitted_tenant_id_resolves_global_on_both_surfaces(
        (``tenant_id IS NULL``) — before #2085 it silently minted rows
        under the calling operator's JWT tenant, diverging from the MCP
        surface's documented "omit = global".
-    2. The MCP sibling ``meho.connector.ingest`` with ``tenant_id``
+    2. The MCP sibling ``meho_connector_ingest`` with ``tenant_id``
        *omitted* targets the same built-in / global scope.
     3. Re-ingesting the **same spec** over the other surface is
        therefore an idempotent dedup hit (``inserted_count == 0``,
@@ -3203,7 +3203,7 @@ def test_ingest_op_id_collision_400_detail_names_remediation(client: TestClient)
     A cross-call ``OpIdCollision`` (the shape a crashed ingest's stranded
     debris leaves) surfaces on the wire with a structured ``remediation``
     field and a ``message`` that names both remedies: re-ingest under the
-    original spec URI, or ``meho.connector.delete`` to clear the debris.
+    original spec URI, or ``meho_connector_delete`` to clear the debris.
     """
     exc = OpIdCollision(
         op_ids=["GET:/api/items"],
@@ -3233,8 +3233,8 @@ def test_ingest_op_id_collision_400_detail_names_remediation(client: TestClient)
     assert response.status_code == 400, response.text
     detail = response.json()["detail"]
     assert "original spec URI" in detail["remediation"]
-    assert "meho.connector.delete" in detail["remediation"]
-    assert "meho.connector.delete" in detail["message"]
+    assert "meho_connector_delete" in detail["remediation"]
+    assert "meho_connector_delete" in detail["message"]
 
 
 def test_ingest_vcenter_9_under_label_8_returns_422(client: TestClient, tmp_path: Any) -> None:

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for the #2485 ``meho.topology.delete_node`` admin tool.
+"""Behavioural tests for the #2485 ``meho_topology_delete_node`` admin tool.
 
 Coverage matrix (Task #2485 acceptance criteria — the MCP-level half;
 the substrate is covered in :mod:`tests.test_topology_delete_node`, the
@@ -11,7 +11,7 @@ REST route in :mod:`tests.test_api_v1_topology`):
   ``op_class='write'``; non-admin sessions do not see it in
   ``tools/list`` and a direct ``tools/call`` from an operator returns
   -32602 ``forbidden``.
-* ``tools/call meho.topology.delete_node {node_id}`` on a manually-
+* ``tools/call meho_topology_delete_node {node_id}`` on a manually-
   seeded (``source='curated'``) node hard-deletes the row and returns
   ``{node_id, kind, name}``. A second call returns -32602 (gone).
 * A probe-owned (``source='auto'``) node is refused with -32602
@@ -86,7 +86,7 @@ def _delete_node_call(client: TestClient, call_id: int, arguments: dict[str, Any
             "jsonrpc": "2.0",
             "id": call_id,
             "method": "tools/call",
-            "params": {"name": "meho.topology.delete_node", "arguments": arguments},
+            "params": {"name": "meho_topology_delete_node", "arguments": arguments},
         },
     )
 
@@ -98,8 +98,8 @@ def _delete_node_call(client: TestClient, call_id: int, arguments: dict[str, Any
 
 def test_delete_node_tool_registers_with_tenant_admin_and_write() -> None:
     """The admin tool lands with TENANT_ADMIN gate + write op_class."""
-    entry = get_tool("meho.topology.delete_node")
-    assert entry is not None, "meho.topology.delete_node not registered"
+    entry = get_tool("meho_topology_delete_node")
+    assert entry is not None, "meho_topology_delete_node not registered"
     defn, _handler = entry
     assert defn.required_role == TenantRole.TENANT_ADMIN
     assert defn.op_class == "write"
@@ -113,7 +113,7 @@ def test_delete_node_hidden_from_non_admin_tools_list(
     client, _op = client_with_operator
     response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.topology.delete_node" not in names
+    assert "meho_topology_delete_node" not in names
     assert "query_topology" in names
 
 
@@ -125,14 +125,14 @@ def test_delete_node_visible_to_tenant_admin(
     client, _op = client_with_operator
     response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     names = {t["name"] for t in response.json()["result"]["tools"]}
-    assert "meho.topology.delete_node" in names
+    assert "meho_topology_delete_node" in names
 
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 def test_delete_node_call_from_non_admin_is_forbidden(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """tools/call meho.topology.delete_node from an operator → -32602 forbidden."""
+    """tools/call meho_topology_delete_node from an operator → -32602 forbidden."""
     client, _op = client_with_operator
     response = _delete_node_call(client, 3, {"node_id": str(uuid.uuid4())})
     body = response.json()

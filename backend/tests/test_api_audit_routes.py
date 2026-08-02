@@ -893,7 +893,7 @@ def test_replay_operator_role_returns_403(client: TestClient) -> None:
     The replay route takes an *arbitrary* ``session_id`` and reconstructs
     another principal's full session trace, so it gates one rank above the
     flat / self-scoped routes (which stay ``operator``). This matches the
-    MCP ``meho.audit.replay`` tool and ``docs/cross-repo/audit-replay.md``.
+    MCP ``meho_audit_replay`` tool and ``docs/cross-repo/audit-replay.md``.
     The substrate is never reached — RBAC rejects before dispatch.
     """
     key = make_rsa_keypair("kid-A")
@@ -933,7 +933,7 @@ def test_replay_binds_replay_op_id_and_aggregate_only_class(
     client: TestClient,
     log_buffer: io.StringIO,
 ) -> None:
-    """AC5: replay binds ``audit_op_id='meho.audit.replay'`` + aggregate-only class.
+    """AC5: replay binds ``audit_op_id='meho_audit_replay'`` + aggregate-only class.
 
     The route's own audit-on-replay broadcast must be aggregate-only
     (``op_class='audit_query'``) and tagged with the distinct replay
@@ -955,10 +955,10 @@ def test_replay_binds_replay_op_id_and_aggregate_only_class(
     observed = [
         line
         for line in lines
-        if line.get("audit_op_id") == "meho.audit.replay"
+        if line.get("audit_op_id") == "meho_audit_replay"
         and line.get("audit_op_class") == "audit_query"
     ]
     assert observed, (
-        "expected a structlog line carrying audit_op_id='meho.audit.replay' "
+        "expected a structlog line carrying audit_op_id='meho_audit_replay' "
         "+ audit_op_class='audit_query' bound by the replay route"
     )

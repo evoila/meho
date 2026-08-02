@@ -389,7 +389,7 @@ or the curated content:
    sufficient to reconstruct what happened. Provider-plane and
    tenant-plane audit rows are not differentiated at the
    `audit_log.path` level — both share the same
-   `meho.connector.edit_*` paths — but each row's `payload`
+   `meho_connector_edit_*` paths — but each row's `payload`
    carries the op_id, and the `spec:cloudapi` / `spec:iaas` tag
    on the referenced `endpoint_descriptor` row identifies the
    plane.

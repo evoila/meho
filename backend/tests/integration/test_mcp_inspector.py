@@ -13,7 +13,7 @@ against a real Postgres + the production auth chain:
   audience) + RFC 9728 ``WWW-Authenticate`` header on 401.
 * T3 (#248) — Tool + resource registries with RBAC-aware list filtering
   and call-time role re-check.
-* T4 (#249) — Reference impls (``meho.status`` tool, ``meho://tenant/
+* T4 (#249) — Reference impls (``meho_status`` tool, ``meho://tenant/
   {tenant_id}/info`` resource).
 * T5 (#250) — Per-operation audit rows for every ``tools/call`` and
   ``resources/read`` invocation; chassis ``AuditMiddleware`` path-
@@ -262,9 +262,9 @@ async def test_full_mcp_lifecycle_succeeds(
             )
             assert list_tools.status_code == 200
             tools = list_tools.json()["result"]["tools"]
-            assert any(t["name"] == "meho.status" for t in tools), tools
+            assert any(t["name"] == "meho_status" for t in tools), tools
 
-            # 4. tools/call meho.status — exercises T4 reference impl
+            # 4. tools/call meho_status — exercises T4 reference impl
             # through T1's dispatch and T5's audit writer.
             call_status = await client.post(
                 "/mcp",
@@ -272,7 +272,7 @@ async def test_full_mcp_lifecycle_succeeds(
                     "jsonrpc": "2.0",
                     "id": 3,
                     "method": "tools/call",
-                    "params": {"name": "meho.status", "arguments": {}},
+                    "params": {"name": "meho_status", "arguments": {}},
                 },
                 headers=auth_headers,
             )

@@ -136,11 +136,17 @@ mismatch pattern and what behaviour change would unblock them.
 
 ## Tool naming grammar and deprecation aliases
 
-Multi-verb tool families on the MCP surface are named with the dotted
-`meho.<noun>.<verb>` grammar — `meho.agents.create`,
-`meho.approvals.approve`, `meho.connector.ingest`,
-`meho.runbook.start`, etc. An agent that has internalised one family
-can predict the rest. (A handful of single-purpose reference tools
+Multi-verb tool families on the MCP surface are named with the
+underscore `meho_<noun>_<verb>` grammar — `meho_agents_create`,
+`meho_approvals_approve`, `meho_connector_ingest`,
+`meho_runbook_start`, etc. An agent that has internalised one family
+can predict the rest. Every published name must match the Anthropic
+tool-name pattern `^[a-zA-Z0-9_-]{1,64}$` (#2745): Claude's frontend
+validates remote-MCP tool names against it and rejects the whole
+toolset all-or-nothing when one name fails, so dots are banned and the
+constraint is pinned by `tests/test_published_tool_schema_shape.py`.
+(The grammar was dotted `meho.<noun>.<verb>` from #1612 until the
+#2745 rename — a hard rename, since MCP has no alias mechanism.) (A handful of single-purpose reference tools
 predating the grammar — `search_docs`, `add_to_memory`,
 `call_operation`, … — remain flat.)
 
@@ -165,15 +171,16 @@ the template identifier across two field names (`slug` on the five
 template verbs, `template_slug` on the run verbs). Both were unified
 in #1612:
 
-* **Canonical names** are `meho.runbook.<verb>` for all 11 verbs
+* **Canonical names** became `meho.runbook.<verb>` for all 11 verbs
   (`draft_template`, `edit_template`, `publish_template`,
   `deprecate_template`, `list_templates`, `show_template`, `start`,
-  `next`, `abort`, `reassign`, `list_runs`).
+  `next`, `abort`, `reassign`, `list_runs`) — since renamed to
+  `meho_runbook_<verb>` by #2745 (Anthropic tool-name conformance).
 * **Canonical field** for the template id is `template_slug` on every
   input, and every template-verb response mirrors the model's `slug`
   key as `template_slug` — so an id read from
-  `meho.runbook.show_template` or a `list_templates` summary is
-  accepted by `meho.runbook.start` verbatim, no rename.
+  `meho_runbook_show_template` or a `list_templates` summary is
+  accepted by `meho_runbook_start` verbatim, no rename.
 
 ### Alias window (closed — removed in v0.15.0, #1625)
 
@@ -229,19 +236,19 @@ Two molds apply, by where the mismatch sits:
 
 * **Input arg** (a resource UUID off the `<noun>_id` grammar) →
   canonical-name + deprecated-alias, the §14.3 approvals mold.
-  `meho.agents.run_status` took `handle`; #2471 renamed it to the
-  canonical `run_id` (the key its sibling `meho.agents.run` /
-  `meho.agents.list_runs` rows already return) and kept `handle` as a
+  `meho_agents_run_status` took `handle`; #2471 renamed it to the
+  canonical `run_id` (the key its sibling `meho_agents_run` /
+  `meho_agents_list_runs` rows already return) and kept `handle` as a
   `deprecated: true` alias for one cycle, guarded by an `anyOf` and a
   handler-level XOR resolver that speaks `run_id` in every error string.
 * **Response key** on a REST-shared row → additive mirror, the
   `_mirror_template_slug` mold. The row carries **both** the native key
   and the qualified name, equal values; the REST surface and shared
   Pydantic model are untouched. #2471 added `_mirror_grant_id` (`id` →
-  `grant_id` on `meho.agents.grant.{list,show,create,elevate}`),
-  `_mirror_trigger_id` (`id` → `trigger_id` on `meho.scheduler.list`),
+  `grant_id` on `meho_agents_grant_{list,show,create,elevate}`),
+  `_mirror_trigger_id` (`id` → `trigger_id` on `meho_scheduler_list`),
   and `_mirror_run_status` (`state` → `status` on
-  `meho.runbook.list_runs` summaries — the filter itself stays `status`
+  `meho_runbook_list_runs` summaries — the filter itself stays `status`
   per §14.6, so the mirror makes the row value a member of the filter's
   own enum).
 

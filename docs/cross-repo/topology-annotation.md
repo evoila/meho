@@ -483,8 +483,8 @@ grep-verified against the shipped code in `cli/internal/cmd/topology/`,
 
 | Operation        | CLI (operator)                              | REST                                            | MCP                                             |
 | ---------------- | ------------------------------------------- | ----------------------------------------------- | ----------------------------------------------- |
-| Create / upsert  | `meho topology annotate <from> <kind> <to>` | `POST /api/v1/topology/edges` (tenant_admin)    | `meho.topology.annotate` (tenant_admin)         |
-| Revoke           | `meho topology unannotate <id\|triple>`     | `DELETE /api/v1/topology/edges/{edge_id}` (tenant_admin) | `meho.topology.unannotate` (tenant_admin)       |
+| Create / upsert  | `meho topology annotate <from> <kind> <to>` | `POST /api/v1/topology/edges` (tenant_admin)    | `meho_topology_annotate` (tenant_admin)         |
+| Revoke           | `meho topology unannotate <id\|triple>`     | `DELETE /api/v1/topology/edges/{edge_id}` (tenant_admin) | `meho_topology_unannotate` (tenant_admin)       |
 | List / filter    | `meho topology list-edges [--kind ...]`     | `GET /api/v1/topology/edges` (operator)         | `query_topology { kind: edges, ... }` (operator)|
 | Conflict survey  | `meho topology list-edges --conflicts`      | `GET /api/v1/topology/edges?conflicts=true`     | `query_topology { kind: edges, conflicts: true }`|
 
@@ -521,7 +521,7 @@ the G9.1 `GET /path` route uses.
 Three of the four topology MCP tools land for tenant-admin sessions;
 the fourth is the read facet on the operator surface.
 
-- `meho.topology.annotate` (tenant_admin) — arguments
+- `meho_topology_annotate` (tenant_admin) — arguments
   `{from_name, kind, to_name, from_node_kind?, to_node_kind?, note?,
   evidence_url?}`. Returns
   `{edge_id, from: {id, kind, name}, to: {id, kind, name}, kind,
@@ -529,7 +529,7 @@ the fourth is the read facet on the operator surface.
   §6 rule-2 surfacing on the response shape; superseded auto edges
   are *not* listed on the return shape (inspect them with
   `query_topology { kind: edges, conflicts: true }` if you need to).
-- `meho.topology.unannotate` (tenant_admin) — arguments
+- `meho_topology_unannotate` (tenant_admin) — arguments
   `{edge_id}` **or** `{from_name, kind, to_name, from_node_kind?,
   to_node_kind?}`. The two selector forms are mutually exclusive at
   the `inputSchema` `oneOf` layer; a partial triple or both forms
@@ -638,7 +638,7 @@ would let a probing operator distinguish "row never existed" from
   accepted — the vocabulary is open.
 - **Role gating on writes.** `annotate` / `unannotate` require
   `tenant_admin`. An `operator`-role caller never sees the
-  `meho.topology.*` tools in `tools/list` and a direct `tools/call`
+  `meho_topology_*` tools in `tools/list` and a direct `tools/call`
   is refused with `-32602 forbidden`; on REST the equivalent is
   HTTP 403. This is policy-layer assertion: a curated edge changes
   blast-radius answers tenant-wide, so the same role gate Vault's

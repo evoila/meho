@@ -3,19 +3,19 @@
 
 """MCP tools for the agent invocation surface (G11.1-T4 / #811).
 
-Two ``meho.agents.*`` tools that mirror the REST invocation routes
+Two ``meho_agents_*`` tools that mirror the REST invocation routes
 (:mod:`meho_backplane.api.v1.agent_runs`) onto the MCP transport:
 
-* ``meho.agents.run`` — run a named agent. Sync (default) blocks up to the
+* ``meho_agents_run`` — run a named agent. Sync (default) blocks up to the
   server-side timeout and returns the final output; ``async=true`` (or a
   sync run that exceeds the timeout) returns a run handle. Role:
   ``operator``.
-* ``meho.agents.run_status`` — poll a run's durable status by ``run_id``
+* ``meho_agents_run_status`` — poll a run's durable status by ``run_id``
   (the deprecated ``handle`` alias is still accepted). Role: ``operator``.
 
 SSE streaming is REST-only: the MCP request/response shape has no
 streaming-events transport here, so an MCP caller that wants progress polls
-``meho.agents.run_status`` after an async ``meho.agents.run``. Both tools
+``meho_agents_run_status`` after an async ``meho_agents_run``. Both tools
 drive the same :class:`~meho_backplane.agent.invocation.AgentInvoker`
 singleton the REST routes use, so a run started over MCP is poll-able over
 REST and vice versa — the durable ``agent_run`` row is the shared state.
@@ -62,8 +62,8 @@ _RUN_OP_IDS: Final[dict[str, str]] = {
     "list": "agent.list_runs",
 }
 
-#: Canonical ``run_id`` schema fragment for ``meho.agents.run_status``.
-#: The row key ``meho.agents.run`` / ``meho.agents.list_runs`` return —
+#: Canonical ``run_id`` schema fragment for ``meho_agents_run_status``.
+#: The row key ``meho_agents_run`` / ``meho_agents_list_runs`` return —
 #: so a value read off a run response round-trips into ``run_status``
 #: verbatim (§14.3 ``<noun>_id`` grammar; approvals precedent #1358).
 _RUN_ID_PROPERTY: Final[dict[str, Any]] = {
@@ -72,7 +72,7 @@ _RUN_ID_PROPERTY: Final[dict[str, Any]] = {
     "minLength": 1,
     "description": (
         "Run UUID. Canonical name (G0.32 #2471) — the `run_id` key "
-        "`meho.agents.run` and `meho.agents.list_runs` return, matching "
+        "`meho_agents_run` and `meho_agents_list_runs` return, matching "
         "the `<noun>_id` convention used by every other MCP tool that "
         "names a resource UUID."
     ),
@@ -106,8 +106,8 @@ def _require_run_id(arguments: dict[str, Any]) -> uuid.UUID:
     Accepts the canonical ``run_id`` (G0.32 #2471) and the deprecated
     ``handle`` (pre-#2471 wire shape) as aliases — exactly one must be
     supplied. Passing both rejects with -32602. The ``<noun>_id`` rename
-    aligns ``meho.agents.run_status`` with the ``run_id`` key its sibling
-    ``meho.agents.run`` / ``meho.agents.list_runs`` already return, so a
+    aligns ``meho_agents_run_status`` with the ``run_id`` key its sibling
+    ``meho_agents_run`` / ``meho_agents_list_runs`` already return, so a
     value read off a run response round-trips verbatim; ``handle`` is
     retained for one cycle so pre-#2471 callers continue to work.
     """
@@ -143,7 +143,7 @@ def _require_input(arguments: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.run
+# meho_agents_run
 # ---------------------------------------------------------------------------
 
 
@@ -196,14 +196,14 @@ async def _run_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.run",
+        name="meho_agents_run",
         description=(
             "Run a named agent for the operator's tenant (Initiative #802). "
             "Operator-level. Sync (default) blocks up to the server-side "
             "timeout and returns {run_id, status, output, error}; set "
             "async=true (or let a long sync run convert) to get a handle "
             "back immediately ({run_id, status='running', "
-            "converted_to_async}). Poll progress with meho.agents.run_status. "
+            "converted_to_async}). Poll progress with meho_agents_run_status. "
             "A missing / cross-tenant name returns 'agent_not_found'; a "
             "disabled definition returns 'agent_disabled'."
         ),
@@ -231,7 +231,7 @@ register_mcp_tool(
                         "Optional external change-ticket reference to bind the run "
                         "to (work_ref I3-T2 #1662), e.g. 'gh:evoila/meho#11'. "
                         "Stamped on the run row and filterable via "
-                        "meho.agents.list_runs."
+                        "meho_agents_list_runs."
                     ),
                 },
             },
@@ -246,7 +246,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.run_status
+# meho_agents_run_status
 # ---------------------------------------------------------------------------
 
 
@@ -282,7 +282,7 @@ async def _run_status_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.run_status",
+        name="meho_agents_run_status",
         description=(
             "Poll an agent run's durable status by run_id (Initiative "
             "#802). Operator-level. Returns {run_id, status, turns, "
@@ -291,8 +291,8 @@ register_mcp_tool(
             "terminal state; agent_definition_id / agent_name are null for "
             "an ad-hoc run or a definition deleted after the run (#2472). "
             "Reads the durable run record, so it works after the call that "
-            "started the run returned. Pass the `run_id` a `meho.agents.run` "
-            "/ `meho.agents.list_runs` row returned (canonical name; G0.32 "
+            "started the run returned. Pass the `run_id` a `meho_agents_run` "
+            "/ `meho_agents_list_runs` row returned (canonical name; G0.32 "
             "#2471) or the deprecated `handle` alias. An unknown / "
             "cross-tenant run_id returns 'agent_run_not_found'."
         ),
@@ -313,7 +313,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.list_runs
+# meho_agents_list_runs
 # ---------------------------------------------------------------------------
 
 
@@ -382,7 +382,7 @@ async def _list_runs_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.list_runs",
+        name="meho_agents_list_runs",
         description=(
             "List the operator's tenant's agent runs, newest first "
             "(Initiative #802; work_ref I3-T2 #1662). Operator-level. "

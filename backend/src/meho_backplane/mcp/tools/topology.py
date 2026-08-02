@@ -29,7 +29,7 @@ CLAUDE.md narrow-waist agent surface (postulate 5):
 * ``list_targets`` — enumerate the operator's accessible infrastructure
   targets so an agent can pick a target before a ``call_operation`` or
   a ``query_topology`` call.
-* ``meho.topology.annotate`` / ``meho.topology.unannotate`` — admin
+* ``meho_topology_annotate`` / ``meho_topology_unannotate`` — admin
   meta-tools (``tenant_admin`` only) for the curated-edge write half
   (G9.2-T3 #595). Live in the ``meho.*`` admin namespace per Initiative
   #364 §9 — not on the daily ~17 meta-tool agent surface. Visible only
@@ -281,7 +281,7 @@ _QUERY_TOPOLOGY_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "Optional `graph_edge.source` filter for `kind=edges`: "
                 "`auto` for probe-derived edges (G9.1 refresh service), "
                 "`curated` for operator-asserted ones "
-                "(`meho.topology.annotate`). Omit to list both. "
+                "(`meho_topology_annotate`). Omit to list both. "
                 "Ignored for the closure kinds and `path`."
             ),
         },
@@ -556,7 +556,7 @@ _QUERY_TOPOLOGY_DESCRIPTION: Final[str] = (
     "annotation lands. *Do not* read an `node_untracked` response as "
     "'safe to delete'; the call has produced no blast-radius signal. "
     "The recovery is `meho topology refresh <target>` for a k8s "
-    "target or `meho.topology.annotate` for cross-system relationships "
+    "target or `meho_topology_annotate` for cross-system relationships "
     "the probes can't infer (G0.18-T4 #1357, RDC #789 N2). "
     '`{kind: "path", path: TopologyPath|null}` for `path` '
     "(null = unreachable within `max_hops`, a valid answer, not an "
@@ -1180,7 +1180,7 @@ _LIST_TARGETS_INPUT_SCHEMA: Final[dict[str, Any]] = {
                 "-32602 (naming your own tenant explicitly is always "
                 "allowed). Canonical name "
                 "(G0.18-T5 #1358); matches `tenant_id` on "
-                "`meho.connector.*` / `meho.scheduler.create`. "
+                "`meho_connector_*` / `meho_scheduler_create`. "
                 "NOTE: `list_targets.tenant_id` accepts a slug OR a "
                 "UUID; the connector / scheduler tools accept UUID-"
                 "only because they cannot resolve slugs from inside "
@@ -1318,7 +1318,7 @@ async def _list_targets_handler(
     -----------------------------------------
 
     ``tenant_id`` is the canonical cross-tenant scope argument; matches
-    the field name on ``meho.connector.*`` / ``meho.scheduler.create``.
+    the field name on ``meho_connector_*`` / ``meho_scheduler_create``.
     ``tenant`` (v0.8.0 wire shape) is retained as a deprecated alias;
     the two are mutually exclusive (passing both rejects with -32602).
     """
@@ -1417,7 +1417,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.topology.annotate / meho.topology.unannotate — admin namespace
+# meho_topology_annotate / meho_topology_unannotate — admin namespace
 # ---------------------------------------------------------------------------
 #
 # Task #598 (G9.2-T7), rerouted through the dispatcher by #2537. Two
@@ -1440,16 +1440,16 @@ register_mcp_tool(
 # ``query_topology``'s schema for the same convention). Keeping the
 # names consistent across all four MCP topology tools lets an agent
 # carry a node-pair through ``query_topology(path)`` →
-# ``meho.topology.annotate`` without renaming.
+# ``meho_topology_annotate`` without renaming.
 
 
-_ANNOTATE_TOOL_NAME: Final[str] = "meho.topology.annotate"
-_UNANNOTATE_TOOL_NAME: Final[str] = "meho.topology.unannotate"
+_ANNOTATE_TOOL_NAME: Final[str] = "meho_topology_annotate"
+_UNANNOTATE_TOOL_NAME: Final[str] = "meho_topology_unannotate"
 
 #: Result shape of a parked (agent-principal) topology write. The
 #: policy gate returned ``needs-approval``: a durable ApprovalRequest
 #: row exists and the write executes only when a human approves it
-#: (``/ui/approvals``, ``meho approvals list``, ``meho.approvals.*``).
+#: (``/ui/approvals``, ``meho approvals list``, ``meho_approvals_*``).
 PARKED_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
     "type": "object",
     "properties": {
@@ -1505,8 +1505,8 @@ async def dispatch_topology_write(
 ) -> dict[str, Any]:
     """Dispatch one gated topology write and translate the result for MCP.
 
-    The single dispatch shim behind ``meho.topology.annotate`` /
-    ``meho.topology.unannotate`` / ``meho.topology.create_node``
+    The single dispatch shim behind ``meho_topology_annotate`` /
+    ``meho_topology_unannotate`` / ``meho_topology_create_node``
     (imported by :mod:`meho_backplane.mcp.tools.topology_create_node`).
     Routes through :func:`~meho_backplane.operations.dispatch` with
     ``target=None`` (the graph is tenant-scoped state, not a probed
@@ -1550,7 +1550,7 @@ async def dispatch_topology_write(
                 f"{approval_request_id}): the write executes with these "
                 "exact params once a tenant operator approves it via "
                 "/ui/approvals, `meho approvals list`, or the "
-                "meho.approvals.* MCP tools."
+                "meho_approvals_* MCP tools."
             ),
         }
     if result.status == "denied":
@@ -1582,14 +1582,14 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "`graph_node` rows in the tenant. A fresh tenant has zero nodes; "
     "calling annotate there returns -32602 `no graph_node matched "
     "<name> in this tenant`. Seed the endpoints first with "
-    "`meho.topology.create_node {kind, name}` (the manual MCP seed "
+    "`meho_topology_create_node {kind, name}` (the manual MCP seed "
     "verb) or via the CLI `meho topology refresh <target>` (the "
     "probe-driven path). The create_node verb is the right path for "
     "the empty-tenant bootstrap and for curated inner-graph nodes the "
     "probes cannot derive (vault-role, keycloak-realm, ...).\n\n"
     "WHEN TO CALL: an operator asks 'record that the prod namespace "
     "authenticates against the rdc-vault role binding' — "
-    "`meho.topology.annotate {from_name: prod, kind: "
+    "`meho_topology_annotate {from_name: prod, kind: "
     "authenticates-via, to_name: rdc-vault-role-bar}`. After this, "
     "`query_topology {kind: dependents, target: rdc-vault-role-bar}` "
     "surfaces the namespace in the blast radius.\n\n"
@@ -1612,7 +1612,7 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     'kind, source: "curated", conflicts: [<edge-id>...], superseded: '
     "[<edge-id>...]}`. `conflicts` lists edges of an incompatible kind "
     "over the same endpoint pair — a diagnostic; the recovery flow is to "
-    "`meho.topology.unannotate` this edge. `superseded` lists the "
+    "`meho_topology_unannotate` this edge. `superseded` lists the "
     "`source='auto'` edges this annotation displaced (same kind, "
     "different endpoint): each is stamped `properties.superseded_by` on "
     "its database row and drops out of traversal until this curated edge "
@@ -1622,7 +1622,7 @@ _ANNOTATE_DESCRIPTION: Final[str] = (
     "parks as a durable approval request and the tool returns "
     "`{status: awaiting_approval, approval_request_id, ...}`. A human "
     "operator approves it from the approvals surfaces (`/ui/approvals`, "
-    "`meho approvals list`, `meho.approvals.*`), which re-executes the "
+    "`meho approvals list`, `meho_approvals_*`), which re-executes the "
     "write with the exact original params. Human tenant_admin calls "
     "execute immediately as before."
 )
@@ -1632,7 +1632,7 @@ async def _annotate_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Route a ``meho.topology.annotate`` call through the dispatcher (#2537).
+    """Route a ``meho_topology_annotate`` call through the dispatcher (#2537).
 
     :func:`dispatch_topology_write` owns the whole translation: policy
     gate (agents park, humans execute), the typed-op handler's call into
@@ -1668,7 +1668,7 @@ _UNANNOTATE_DESCRIPTION: Final[str] = (
     "WHEN TO CALL: an annotation was wrong and needs to be revoked — "
     "the operator originally asserted `service-X depends-on database-Y` "
     "but it turns out the real dependency is `database-Z`. "
-    "`meho.topology.unannotate {from_name: service-X, kind: depends-on, "
+    "`meho_topology_unannotate {from_name: service-X, kind: depends-on, "
     "to_name: database-Y}` removes the curated row and re-promotes any "
     "auto edge it had marked superseded (§6 recoverability invariant). "
     "After this, blast-radius checks no longer include the wrong edge.\n\n"
@@ -1690,7 +1690,7 @@ async def _unannotate_handler(
     operator: Operator,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    """Route a ``meho.topology.unannotate`` call through the dispatcher (#2537).
+    """Route a ``meho_topology_unannotate`` call through the dispatcher (#2537).
 
     The two selector forms (UUID primary key vs. ``(from, kind, to)``
     triple) stay mutually exclusive at the wire boundary — this tool's

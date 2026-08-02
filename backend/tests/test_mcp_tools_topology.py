@@ -225,7 +225,7 @@ def test_no_published_tool_wire_schema_has_top_level_combinator() -> None:
     the full registered tool set (tenant_admin sees every tool) and
     asserts each :meth:`ToolDefinition.to_wire` output is API-legal. It
     would have caught both ``query_topology`` (allOf) and
-    ``meho.topology.unannotate`` (oneOf), and catches any future tool that
+    ``meho_topology_unannotate`` (oneOf), and catches any future tool that
     reintroduces the pattern at the source rather than at first 400.
     """
     forbidden = ("oneOf", "allOf", "anyOf")

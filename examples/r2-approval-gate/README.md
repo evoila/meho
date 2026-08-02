@@ -110,7 +110,7 @@ already ships:
 - **G11.2 approval queue** — durable `ApprovalRequest` row + two
   synchronous audit rows ([`approval_queue.py`][aq]).
 - **G11.2 approval surface** — REST `/api/v1/approvals/*` and MCP
-  `meho.approvals.*` for operator decisions ([`approvals.py REST`][rest],
+  `meho_approvals_*` for operator decisions ([`approvals.py REST`][rest],
   [`approvals.py MCP`][mcp]).
 - **G11.1 agent-runtime resume** — `XREAD BLOCK` over the per-tenant
   Valkey stream → re-dispatch with `_approved=True` on the approved
@@ -161,7 +161,7 @@ JSON row per grant. Apply each row via one of:
 - CLI: `meho agent grant create --principal ... --op ... --target ... --verdict ...`,
   one invocation per row. See [§6](#6-productionising-the-agent-definition)
   for the literal commands.
-- MCP: `meho.agents.grant.create` tool, one call per row.
+- MCP: `meho_agents_grant_create` tool, one call per row.
 
 All three wrap the same INSERT into `agent_permission`.
 
@@ -268,10 +268,10 @@ execution on the broadcast event, not on the REST round-trip.
 For operators driving Claude Code (or any other MCP-aware client):
 
 ```
-meho.approvals.list                            # pending requests
-meho.approvals.get(request_id="…")             # inspect proposed_effect
-meho.approvals.approve(request_id="…")         # approve
-meho.approvals.reject(request_id="…", reason="…")  # reject
+meho_approvals_list                            # pending requests
+meho_approvals_get(request_id="…")             # inspect proposed_effect
+meho_approvals_approve(request_id="…")         # approve
+meho_approvals_reject(request_id="…", reason="…")  # reject
 ```
 
 Same wire format as the REST surface; tools auto-load when the

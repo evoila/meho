@@ -3,16 +3,16 @@
 
 """Tests for the connector review / state-machine admin MCP tools (G0.7-T7 #407).
 
-Covers the seven ``meho.connector.*`` review / edit / enable /
+Covers the seven ``meho_connector_*`` review / edit / enable /
 disable / delete tools. The ingest-pipeline tools
-(``meho.connector.ingest`` + ``meho.connector.ingest_status``) split
+(``meho_connector_ingest`` + ``meho_connector_ingest_status``) split
 out into their own handler module (#1531) and are tested in
 ``test_mcp_tools_connector_ingest.py``.
 
 Coverage matrix:
 
 * ``tools/list`` exposes the right subset of admin tools per role:
-  - ``read_only`` operator sees ZERO of these ``meho.connector.*`` tools.
+  - ``read_only`` operator sees ZERO of these ``meho_connector_*`` tools.
   - ``operator`` operator sees the 2 read tools (``list`` + ``review``).
   - ``tenant_admin`` operator sees all six review / edit tools.
 * Each tool's ``inputSchema`` is strict JSON-Schema 2020-12 with
@@ -20,13 +20,13 @@ Coverage matrix:
 * Tool descriptions name when to use / when not to (AI engineering
   anchor, #407 AC 3).
 * ``tools/call`` dispatch to a stubbed canonical service layer:
-  - ``meho.connector.list`` returns the stubbed ConnectorListItem rows.
-  - ``meho.connector.review`` returns the stubbed ConnectorReviewPayload.
-  - ``meho.connector.edit_group`` writes via ReviewService and only
+  - ``meho_connector_list`` returns the stubbed ConnectorListItem rows.
+  - ``meho_connector_review`` returns the stubbed ConnectorReviewPayload.
+  - ``meho_connector_edit_group`` writes via ReviewService and only
     forwards explicitly named fields (PATCH-semantic intent).
-  - ``meho.connector.enable`` flips status via ReviewService.
+  - ``meho_connector_enable`` flips status via ReviewService.
 * RBAC enforcement at call time: ``operator``-role calling
-  ``meho.connector.enable`` returns a JSON-RPC error (not the success
+  ``meho_connector_enable`` returns a JSON-RPC error (not the success
   envelope) even when guessing the tool name.
 
 Why we stub the canonical service layer rather than spin up a real
@@ -283,24 +283,24 @@ def stubbed_services(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, Any]
 
 
 # The review / edit / state-machine tools this module owns. The
-# ingest-pipeline tools (``meho.connector.ingest`` +
-# ``meho.connector.ingest_status``) moved to
+# ingest-pipeline tools (``meho_connector_ingest`` +
+# ``meho_connector_ingest_status``) moved to
 # ``test_mcp_tools_connector_ingest.py`` alongside their handler module
 # (#1531); they're asserted there, not here.
 _ADMIN_TOOL_NAMES = {
-    "meho.connector.list",
-    "meho.connector.review",
-    "meho.connector.edit_group",
-    "meho.connector.edit_op",
-    "meho.connector.enable",
-    "meho.connector.enable_reads",
-    "meho.connector.disable",
-    "meho.connector.delete",
+    "meho_connector_list",
+    "meho_connector_review",
+    "meho_connector_edit_group",
+    "meho_connector_edit_op",
+    "meho_connector_enable",
+    "meho_connector_enable_reads",
+    "meho_connector_disable",
+    "meho_connector_delete",
 }
 
 _READ_ADMIN_TOOL_NAMES = {
-    "meho.connector.list",
-    "meho.connector.review",
+    "meho_connector_list",
+    "meho_connector_review",
 }
 
 _TENANT_ADMIN_ONLY_TOOL_NAMES = _ADMIN_TOOL_NAMES - _READ_ADMIN_TOOL_NAMES
@@ -314,7 +314,7 @@ _TENANT_ADMIN_ONLY_TOOL_NAMES = _ADMIN_TOOL_NAMES - _READ_ADMIN_TOOL_NAMES
 def test_admin_tools_hidden_from_read_only_role(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """AC: a read_only operator sees zero ``meho.connector.*`` tools."""
+    """AC: a read_only operator sees zero ``meho_connector_*`` tools."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -461,7 +461,7 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stubbed_services: dict[str, Any],
 ) -> None:
-    """``tools/call meho.connector.list`` returns the stubbed connector list."""
+    """``tools/call meho_connector_list`` returns the stubbed connector list."""
     client, op = client_with_operator
     response = post_mcp(
         client,
@@ -470,7 +470,7 @@ def test_call_meho_connector_list_dispatches_to_list_ingested_connectors(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.list",
+                "name": "meho_connector_list",
                 "arguments": {"status": "staged"},
             },
         },
@@ -501,7 +501,7 @@ def test_call_meho_connector_list_surfaces_scope_twin_fields(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``meho.connector.list`` passes ``scope`` + ``shadowed_by_tenant_scope`` through.
+    """``meho_connector_list`` passes ``scope`` + ``shadowed_by_tenant_scope`` through.
 
     #2474: the tool serialises each row via ``model_dump(mode="json")``,
     so the two additive scope-twin fields ride the MCP surface identically
@@ -554,7 +554,7 @@ def test_call_meho_connector_list_surfaces_scope_twin_fields(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.connector.list", "arguments": {}},
+            "params": {"name": "meho_connector_list", "arguments": {}},
         },
     )
     assert response.status_code == 200
@@ -579,7 +579,7 @@ def test_call_meho_connector_review_dispatches_to_review_service(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stubbed_services: dict[str, Any],
 ) -> None:
-    """``tools/call meho.connector.review`` returns the stubbed review payload."""
+    """``tools/call meho_connector_review`` returns the stubbed review payload."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -588,7 +588,7 @@ def test_call_meho_connector_review_dispatches_to_review_service(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.review",
+                "name": "meho_connector_review",
                 "arguments": {"connector_id": "vmware-rest-9.0"},
             },
         },
@@ -623,7 +623,7 @@ def test_call_meho_connector_edit_group_dispatches(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_group",
+                "name": "meho_connector_edit_group",
                 "arguments": {
                     "connector_id": "vmware-rest-9.0",
                     "group_key": "vm-lifecycle",
@@ -682,7 +682,7 @@ def test_call_meho_connector_edit_group_distinguishes_omitted_from_null(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_group",
+                "name": "meho_connector_edit_group",
                 "arguments": {
                     "connector_id": "vmware-rest-9.0",
                     "group_key": "vm-lifecycle",
@@ -699,7 +699,7 @@ def test_call_meho_connector_edit_group_distinguishes_omitted_from_null(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_group",
+                "name": "meho_connector_edit_group",
                 "arguments": {
                     "connector_id": "vmware-rest-9.0",
                     "group_key": "vm-lifecycle",
@@ -741,7 +741,7 @@ def test_call_meho_connector_edit_op_distinguishes_omitted_from_null(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_op",
+                "name": "meho_connector_edit_op",
                 "arguments": {
                     "connector_id": "vmware-rest-9.0",
                     "op_id": "GET:/api/vcenter/cluster",
@@ -757,7 +757,7 @@ def test_call_meho_connector_edit_op_distinguishes_omitted_from_null(
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_op",
+                "name": "meho_connector_edit_op",
                 "arguments": {
                     "connector_id": "vmware-rest-9.0",
                     "op_id": "GET:/api/vcenter/cluster",
@@ -813,7 +813,7 @@ def test_call_meho_connector_edit_op_surfaces_enable_time_warnings(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_op",
+                "name": "meho_connector_edit_op",
                 "arguments": {
                     "connector_id": "acme-rest-1.2",
                     "op_id": "GET:/api/v1/group-0/0",
@@ -850,7 +850,7 @@ def test_call_meho_connector_enable_dispatches(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.enable",
+                "name": "meho_connector_enable",
                 "arguments": {"connector_id": "vmware-rest-9.0"},
             },
         },
@@ -890,7 +890,7 @@ def test_call_meho_connector_enable_reads_dispatches(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.enable_reads",
+                "name": "meho_connector_enable_reads",
                 "arguments": {"connector_id": "vmware-rest-9.0"},
             },
         },
@@ -919,7 +919,7 @@ def test_call_meho_connector_review_forwards_prefer(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stubbed_services: dict[str, Any],
 ) -> None:
-    """#2029: ``meho.connector.review`` forwards ``prefer`` to the service."""
+    """#2029: ``meho_connector_review`` forwards ``prefer`` to the service."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -928,7 +928,7 @@ def test_call_meho_connector_review_forwards_prefer(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.review",
+                "name": "meho_connector_review",
                 "arguments": {"connector_id": "vmware-rest-9.0", "prefer": "tenant"},
             },
         },
@@ -947,7 +947,7 @@ def test_call_meho_connector_enable_reads_forwards_prefer(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
     stubbed_services: dict[str, Any],
 ) -> None:
-    """#2029: ``meho.connector.enable_reads`` forwards ``prefer`` to the service."""
+    """#2029: ``meho_connector_enable_reads`` forwards ``prefer`` to the service."""
     client, _op = client_with_operator
     response = post_mcp(
         client,
@@ -956,7 +956,7 @@ def test_call_meho_connector_enable_reads_forwards_prefer(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.enable_reads",
+                "name": "meho_connector_enable_reads",
                 "arguments": {"connector_id": "vmware-rest-9.0", "prefer": "builtin"},
             },
         },
@@ -978,7 +978,7 @@ def test_review_tool_schema_advertises_prefer() -> None:
     import meho_backplane.mcp.tools.connector_admin  # noqa: F401  (ensure registration)
     from meho_backplane.mcp.registry import get_tool
 
-    for tool_name in ("meho.connector.review", "meho.connector.enable_reads"):
+    for tool_name in ("meho_connector_review", "meho_connector_enable_reads"):
         registered = get_tool(tool_name)
         assert registered is not None, tool_name
         definition, _handler = registered
@@ -1005,7 +1005,7 @@ def test_call_meho_connector_enable_reads_rejected_for_operator_role(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.enable_reads",
+                "name": "meho_connector_enable_reads",
                 "arguments": {"connector_id": "vmware-rest-9.0"},
             },
         },
@@ -1046,7 +1046,7 @@ def test_call_meho_connector_delete_defaults_to_global_scope(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.delete",
+                "name": "meho_connector_delete",
                 "arguments": {"connector_id": "vmware-rest-9.0"},
             },
         },
@@ -1116,7 +1116,7 @@ def test_call_meho_connector_delete_surfaces_enabled_ops_warning(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.delete",
+                "name": "meho_connector_delete",
                 "arguments": {
                     "connector_id": "vmware-rest-9.0",
                     "tenant_id": str(op.tenant_id),
@@ -1165,7 +1165,7 @@ def test_operator_role_cannot_call_tenant_admin_mutator(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.enable",
+                "name": "meho_connector_enable",
                 "arguments": {"connector_id": "vmware-rest-9.0"},
             },
         },
@@ -1296,7 +1296,7 @@ def test_call_review_ambiguous_scope_returns_invalid_params_over_the_wire(
     stubbed_services: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: ``tools/call meho.connector.review`` on an ambiguous label.
+    """End-to-end: ``tools/call meho_connector_review`` on an ambiguous label.
 
     The wire response is a JSON-RPC ``-32602`` (not the bare ``-32603``
     the dispatcher catch-all would emit) carrying the candidate scopes on
@@ -1316,7 +1316,7 @@ def test_call_review_ambiguous_scope_returns_invalid_params_over_the_wire(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.review",
+                "name": "meho_connector_review",
                 "arguments": {
                     "connector_id": "vrli-rest-9.0.2",
                     "tenant_id": str(op.tenant_id),
@@ -1341,7 +1341,7 @@ def test_call_enable_reads_ambiguous_scope_returns_invalid_params_over_the_wire(
     stubbed_services: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: ``tools/call meho.connector.enable_reads`` on an ambiguous label."""
+    """End-to-end: ``tools/call meho_connector_enable_reads`` on an ambiguous label."""
     monkeypatch.setattr(
         _FakeReviewService,
         "raise_on_resolve",
@@ -1355,7 +1355,7 @@ def test_call_enable_reads_ambiguous_scope_returns_invalid_params_over_the_wire(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.enable_reads",
+                "name": "meho_connector_enable_reads",
                 "arguments": {
                     "connector_id": "vrli-rest-9.0.2",
                     "tenant_id": str(op.tenant_id),
@@ -1375,7 +1375,7 @@ def test_call_enable_reads_ambiguous_scope_returns_invalid_params_over_the_wire(
 #
 # An unknown or cross-tenant connector_id resolves to no visible row, so
 # the shared ReviewService resolver raises ConnectorNotFoundError. Every
-# one of the seven meho.connector.* connector_id-taking tools (review /
+# one of the seven meho_connector_* connector_id-taking tools (review /
 # edit_group / edit_op / enable / enable_reads / disable / delete) must
 # surface it as a JSON-RPC -32602 carrying the bare domain message
 # "connector_not_found" — NOT the dispatcher's generic
@@ -1472,7 +1472,7 @@ def test_call_review_not_found_returns_invalid_params_over_the_wire(
     stubbed_services: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: ``tools/call meho.connector.review`` on a ghost label.
+    """End-to-end: ``tools/call meho_connector_review`` on a ghost label.
 
     The wire response is a JSON-RPC ``-32602 connector_not_found`` (not
     the bare ``-32603 "internal error: ConnectorNotFoundError"`` the
@@ -1493,7 +1493,7 @@ def test_call_review_not_found_returns_invalid_params_over_the_wire(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.review",
+                "name": "meho_connector_review",
                 "arguments": {"connector_id": "ghost-rest-9.9"},
             },
         },
@@ -1518,7 +1518,7 @@ def test_call_delete_not_found_returns_invalid_params_over_the_wire(
     stubbed_services: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: ``tools/call meho.connector.delete`` on a ghost label.
+    """End-to-end: ``tools/call meho_connector_delete`` on a ghost label.
 
     Covers a write-class handler over the wire (the read path is proven
     by the review case above), closing the mutator half of the #2481 gap.
@@ -1536,7 +1536,7 @@ def test_call_delete_not_found_returns_invalid_params_over_the_wire(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.delete",
+                "name": "meho_connector_delete",
                 "arguments": {"connector_id": "ghost-rest-9.9"},
             },
         },
@@ -1629,7 +1629,7 @@ def test_call_edit_op_no_field_returns_invalid_params_over_the_wire(
     stubbed_services: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: ``tools/call meho.connector.edit_op`` with no editable field.
+    """End-to-end: ``tools/call meho_connector_edit_op`` with no editable field.
 
     The wire response is a JSON-RPC ``-32602`` whose message names the
     editable fields (not the dispatcher's bare ``-32603 "internal error:
@@ -1649,7 +1649,7 @@ def test_call_edit_op_no_field_returns_invalid_params_over_the_wire(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_op",
+                "name": "meho_connector_edit_op",
                 "arguments": {"connector_id": "vmware-rest-9.0", "op_id": "GET:/x"},
             },
         },
@@ -1673,7 +1673,7 @@ def test_call_edit_group_no_field_returns_invalid_params_over_the_wire(
     stubbed_services: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end: ``tools/call meho.connector.edit_group`` with no editable field.
+    """End-to-end: ``tools/call meho_connector_edit_group`` with no editable field.
 
     Covers the edit_group half of the #2488 gap over the wire — the same
     -32602 mapping, closing the no-fields leak the task calls out as
@@ -1689,7 +1689,7 @@ def test_call_edit_group_no_field_returns_invalid_params_over_the_wire(
             "id": 1,
             "method": "tools/call",
             "params": {
-                "name": "meho.connector.edit_group",
+                "name": "meho_connector_edit_group",
                 "arguments": {"connector_id": "vmware-rest-9.0", "group_key": "g"},
             },
         },

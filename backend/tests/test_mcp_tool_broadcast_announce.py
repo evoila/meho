@@ -1,16 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Behavioural tests for ``meho.broadcast.announce`` (G6.4-T2, #1092).
+"""Behavioural tests for ``meho_broadcast_announce`` (G6.4-T2, #1092).
 
 Acceptance-criteria coverage (per issue body):
 
-* ``meho.broadcast.announce`` is registered and visible on ``tools/list``
+* ``meho_broadcast_announce`` is registered and visible on ``tools/list``
   for an ``operator`` JWT; hidden from ``read_only``.
 * ``activity`` length is capped at 500 chars; over-length input rejects
   with JSON-RPC ``-32602`` Invalid Params.
 * Cross-tenant isolation: tenant-A's announcement is NOT visible to
-  tenant-B's ``meho.broadcast.recent``; the stream key is derived
+  tenant-B's ``meho_broadcast_recent``; the stream key is derived
   exclusively from ``operator.tenant_id``.
 * Valkey unreachable during publish → handler raises (NOT fail-open);
   error propagates as ``-32603`` Internal Error (distinct from the
@@ -175,16 +175,16 @@ def _counter_value(counter: Any, **labels: str) -> float:
 def test_tools_list_exposes_announce_for_operator(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:
-    """``operator`` role sees ``meho.broadcast.announce`` on tools/list."""
+    """``operator`` role sees ``meho_broadcast_announce`` on tools/list."""
     client, _op = client_with_operator
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     assert resp.status_code == 200
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.announce" in names
+    assert "meho_broadcast_announce" in names
 
     announce_def = next(
-        t for t in body["result"]["tools"] if t["name"] == "meho.broadcast.announce"
+        t for t in body["result"]["tools"] if t["name"] == "meho_broadcast_announce"
     )
     # MEHO-internal RBAC fields stripped from the wire shape.
     assert "required_role" not in announce_def
@@ -211,7 +211,7 @@ def test_tools_list_hides_announce_from_read_only(
     resp = post_mcp(client, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     body = resp.json()
     names = {t["name"] for t in body["result"]["tools"]}
-    assert "meho.broadcast.announce" not in names
+    assert "meho_broadcast_announce" not in names
 
 
 def test_read_only_tools_call_announce_is_rejected(
@@ -226,7 +226,7 @@ def test_read_only_tools_call_announce_is_rejected(
     client, _op = client_with_operator  # default fixture role is READ_ONLY
     resp = post_mcp(
         client,
-        _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
+        _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
     )
     body = resp.json()
     assert "error" in body
@@ -254,7 +254,7 @@ def test_activity_at_exactly_cap_is_accepted(
         resp = post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.announce",
+                "meho_broadcast_announce",
                 {"activity": "x" * ACTIVITY_MAX_CHARS},
             ),
         )
@@ -281,7 +281,7 @@ def test_activity_one_over_cap_returns_invalid_params(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.announce",
+            "meho_broadcast_announce",
             {"activity": "x" * (ACTIVITY_MAX_CHARS + 1)},
         ),
     )
@@ -300,7 +300,7 @@ def test_activity_empty_returns_invalid_params(
 ) -> None:
     """``activity`` empty string rejects with -32602."""
     client, _op = client_with_operator
-    resp = post_mcp(client, _tools_call("meho.broadcast.announce", {"activity": ""}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_announce", {"activity": ""}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -316,7 +316,7 @@ def test_activity_missing_returns_invalid_params(
 ) -> None:
     """``activity`` absent rejects (required by schema)."""
     client, _op = client_with_operator
-    resp = post_mcp(client, _tools_call("meho.broadcast.announce", {}))
+    resp = post_mcp(client, _tools_call("meho_broadcast_announce", {}))
     body = resp.json()
     assert "error" in body
     assert body["error"]["code"] == INVALID_PARAMS
@@ -335,7 +335,7 @@ def test_phase_outside_enum_returns_invalid_params(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.announce",
+            "meho_broadcast_announce",
             {"activity": "x", "phase": "in-progress"},
         ),
     )
@@ -367,7 +367,7 @@ def test_stream_key_derived_from_operator_tenant_id(
     The audit-driven publish-on-write hook
     (:func:`meho_backplane.mcp.handlers._publish_after_dispatch` /
     :func:`meho_backplane.broadcast.publisher.publish_event`) ALSO
-    calls ``xadd`` for the ``meho.broadcast.announce`` invocation
+    calls ``xadd`` for the ``meho_broadcast_announce`` invocation
     itself -- the MCP call is an audited operation, so two xadd
     calls land per request: one for the announcement content (this
     handler), one for the audit-driven sibling event. Both target
@@ -380,7 +380,7 @@ def test_stream_key_derived_from_operator_tenant_id(
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
-            _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
+            _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     expected_key = f"meho:feed:{op.tenant_id}"
     # Every xadd MUST target the operator's tenant -- structural
@@ -463,7 +463,7 @@ def test_valkey_unreachable_surfaces_as_internal_error(
     ):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
+            _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     body = resp.json()
     assert "error" in body
@@ -531,7 +531,7 @@ def test_successful_publish_returns_event_id(
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-7")):
         resp = post_mcp(
             client,
-            _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
+            _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     result = _result_dict(resp)
     assert result["cursor"] == "1747800000000-7"
@@ -566,7 +566,7 @@ def test_metric_increments_per_phase(
         post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.announce",
+                "meho_broadcast_announce",
                 {"activity": "x", "phase": phase_label},
             ),
         )
@@ -589,7 +589,7 @@ def test_phase_defaults_to_update(
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")):
         post_mcp(
             client,
-            _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
+            _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
     assert _counter_value(BROADCAST_AGENT_ANNOUNCEMENTS_TOTAL, phase="update") - baseline == 1
 
@@ -616,7 +616,7 @@ def test_failed_publish_does_not_increment_metric(
         post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.announce",
+                "meho_broadcast_announce",
                 {"activity": "x", "phase": "start"},
             ),
         )
@@ -650,7 +650,7 @@ def test_published_event_carries_agent_announcement_kind(
         post_mcp(
             client,
             _tools_call(
-                "meho.broadcast.announce",
+                "meho_broadcast_announce",
                 {
                     "activity": "investigating cluster X latency",
                     "target": "prod-vc-1",
@@ -663,7 +663,7 @@ def test_published_event_carries_agent_announcement_kind(
     # Two xadd calls land per request: one from the announcement
     # handler (the AGENT-authored payload this test asserts on) and one
     # from the chassis audit-driven publish-on-write hook (the audit
-    # sibling BroadcastEvent for the meho.broadcast.announce MCP call
+    # sibling BroadcastEvent for the meho_broadcast_announce MCP call
     # itself). Pick the announcement-side payload explicitly by
     # event_kind so the assertion stays robust to the call ordering.
     decoded_payloads = [
@@ -706,7 +706,7 @@ def test_target_and_scope_default_to_none(
     with patch.object(bc, "xadd", new=AsyncMock(return_value="1747800000000-0")) as xa:
         post_mcp(
             client,
-            _tools_call("meho.broadcast.announce", {"activity": "investigating"}),
+            _tools_call("meho_broadcast_announce", {"activity": "investigating"}),
         )
 
     # Pick the announcement-side xadd specifically -- the audit-driven
@@ -738,7 +738,7 @@ def test_target_wrong_type_returns_invalid_params(
     resp = post_mcp(
         client,
         _tools_call(
-            "meho.broadcast.announce",
+            "meho_broadcast_announce",
             {"activity": "x", "target": 42},
         ),
     )

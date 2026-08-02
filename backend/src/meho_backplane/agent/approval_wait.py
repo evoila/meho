@@ -6,7 +6,7 @@
 This module is the agent-side half of the **operator/agent split** that the
 G11.2 approval substrate established:
 
-* The operator decides — via REST ``/decide``, MCP ``meho.approvals.{approve,reject}``,
+* The operator decides — via REST ``/decide``, MCP ``meho_approvals_{approve,reject}``,
   CLI, or wall-monitor — and the decision row + ``approval.{approved,rejected}``
   broadcast event commit durably (see :mod:`meho_backplane.operations.approval_queue`).
 * The agent run that bridged the ``requires_approval`` op is left awaiting that
@@ -18,7 +18,7 @@ G11.2 approval substrate established:
 
 The helper here closes that gap. It subscribes to the per-tenant Valkey stream
 (``meho:feed:{tenant_id}`` — the same stream the SSE feed and the
-``meho.broadcast.watch`` tool read from) and blocks until it sees the
+``meho_broadcast_watch`` tool read from) and blocks until it sees the
 ``approval.{approved,rejected}`` event for *this* request, or the timeout
 elapses. The caller (the agent's wrapped ``call_operation`` tool) then either
 re-dispatches with ``_approved=True`` (approved), reports the rejection back
@@ -41,7 +41,7 @@ return; the operator can re-issue or the run can be cancelled.
 Why ``XREAD BLOCK`` and not the high-level ``watch`` tool
 =========================================================
 
-The MCP ``meho.broadcast.watch`` tool wraps ``XREAD BLOCK`` plus filtering,
+The MCP ``meho_broadcast_watch`` tool wraps ``XREAD BLOCK`` plus filtering,
 but it's bounded by ``_WATCH_MAX_TIMEOUT_MS`` (30s) — a sensible cap for
 an MCP-call latency budget, the wrong shape for a human approval which can
 take minutes to hours. This helper drives ``XREAD BLOCK`` directly with the
@@ -110,7 +110,7 @@ ApprovalDecision = Literal["approved", "rejected", "timeout"]
 #: run, the agent loop tears down) lands within this window rather than at
 #: the end of the full multi-minute timeout. 5s balances "responsive to
 #: cancellation" against "syscall overhead from re-issuing ``XREAD`` too
-#: often"; mirrors the ``meho.broadcast.watch`` per-call default with the
+#: often"; mirrors the ``meho_broadcast_watch`` per-call default with the
 #: orders-of-magnitude longer overall wait wrapped around it.
 _BLOCK_WINDOW_MS: Final[int] = 5_000
 

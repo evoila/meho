@@ -9,7 +9,7 @@ ingest orphans (``vcf-logs`` etc.) that migration ``0038``'s
 collision-guard deliberately skipped -- the operation-row complement
 of that backfill and of the ``targets.product`` reconciliation (#1814,
 migration ``0047``). Those orphans are non-dispatchable and unreachable
-by ``meho.connector.delete`` (#1910).
+by ``meho_connector_delete`` (#1910).
 
 Test matrix
 -----------

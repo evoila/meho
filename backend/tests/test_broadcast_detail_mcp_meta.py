@@ -106,7 +106,7 @@ async def test_mcp_tools_call_audit_row_carries_origin_and_effective(
 ) -> None:
     """Without ``_meta.broadcast_detail``, audit row carries default origin + full effective.
 
-    ``meho.status`` is a ``read`` op_class -- non-sensitive -- so the
+    ``meho_status`` is a ``read`` op_class -- non-sensitive -- so the
     default detail is ``"full"``. No tenant rules, no override → origin
     is ``"default"``, effective is ``"full"``.
     """
@@ -117,7 +117,7 @@ async def test_mcp_tools_call_audit_row_carries_origin_and_effective(
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "meho.status", "arguments": {}},
+            "params": {"name": "meho_status", "arguments": {}},
         },
     )
     assert response.status_code == 200
@@ -138,7 +138,7 @@ async def test_mcp_tools_call_with_full_meta_does_not_change_non_sensitive_origi
     """``_meta.broadcast_detail="full"`` on a non-sensitive op is a no-op for origin.
 
     The request_override branch only fires when ``op_class`` is in
-    ``{credential_read, audit_query}``. ``meho.status`` is ``read``,
+    ``{credential_read, audit_query}``. ``meho_status`` is ``read``,
     so origin stays ``"default"``. Pins that the middleware/handler
     parsing path doesn't accidentally upgrade non-sensitive ops.
     Resolver-level "request_override upgrades sensitive class"
@@ -152,7 +152,7 @@ async def test_mcp_tools_call_with_full_meta_does_not_change_non_sensitive_origi
             "id": 2,
             "method": "tools/call",
             "params": {
-                "name": "meho.status",
+                "name": "meho_status",
                 "arguments": {},
                 "_meta": {"broadcast_detail": "full"},
             },
@@ -184,7 +184,7 @@ async def test_mcp_tools_call_with_malformed_meta_does_not_crash(
             "id": 3,
             "method": "tools/call",
             "params": {
-                "name": "meho.status",
+                "name": "meho_status",
                 "arguments": {},
                 "_meta": "this should be a dict",
             },

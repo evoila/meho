@@ -3,24 +3,24 @@
 
 """Admin MCP tools for the connector review + state-machine surface (G0.7-T7).
 
-Eight tools under the ``meho.connector.*`` namespace, deliberately
+Eight tools under the ``meho_connector_*`` namespace, deliberately
 separate from the agent-surface meta-tools
 (:mod:`~meho_backplane.mcp.tools.operations`):
 
-* ``meho.connector.list`` — list ingested connectors. **operator**.
-* ``meho.connector.review`` — get the review payload. **operator**.
-* ``meho.connector.edit_group`` — edit one group. **tenant_admin**.
-* ``meho.connector.edit_op`` — edit one op override. **tenant_admin**.
-* ``meho.connector.enable`` — flip the connector to enabled. **tenant_admin**.
-* ``meho.connector.enable_reads`` — bulk-enable every read-class
+* ``meho_connector_list`` — list ingested connectors. **operator**.
+* ``meho_connector_review`` — get the review payload. **operator**.
+* ``meho_connector_edit_group`` — edit one group. **tenant_admin**.
+* ``meho_connector_edit_op`` — edit one op override. **tenant_admin**.
+* ``meho_connector_enable`` — flip the connector to enabled. **tenant_admin**.
+* ``meho_connector_enable_reads`` — bulk-enable every read-class
   (GET/HEAD) ingested op; writes stay default-deny (G0.25-T7 #1749).
   **tenant_admin**.
-* ``meho.connector.disable`` — flip the connector to disabled. **tenant_admin**.
-* ``meho.connector.delete`` — delete the connector's rows + auto-shim
+* ``meho_connector_disable`` — flip the connector to disabled. **tenant_admin**.
+* ``meho_connector_delete`` — delete the connector's rows + auto-shim
   registration (G0.25-T2 #1700). **tenant_admin**.
 
-The ingest-pipeline tools (``meho.connector.ingest`` +
-``meho.connector.ingest_status``) live in the sibling
+The ingest-pipeline tools (``meho_connector_ingest`` +
+``meho_connector_ingest_status``) live in the sibling
 :mod:`meho_backplane.mcp.tools.connector_ingest` module; the two files
 split the admin tools by responsibility (pipeline vs. review) so
 neither grows past the code-quality file-size budget. The shared
@@ -58,7 +58,7 @@ Each tool's handler is a thin shim that wraps the canonical
 service layer T5 (CLI) and T6 (REST routes) also consume — there
 is no parallel "admin service" class here:
 
-1. ``meho.connector.list`` calls the
+1. ``meho_connector_list`` calls the
    :func:`list_ingested_connectors` query helper directly.
 2. Every other tool constructs :class:`ReviewService` and
    delegates to its existing read / edit / state-machine methods.
@@ -417,7 +417,7 @@ async def _delete_handler(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.list",
+        name="meho_connector_list",
         feature="typed_connector_reads",
         description=(
             "List ingested connectors visible to the operator's tenant "
@@ -431,7 +431,7 @@ register_mcp_tool(
             "operator needs to find a connector to review or to see "
             "what's already in place. Filter via status=staged to "
             "surface only connectors that need review. Pair with "
-            "meho.connector.review to drill into an individual "
+            "meho_connector_review to drill into an individual "
             "connector. Read-only; visible to operator and "
             "tenant_admin roles."
         ),
@@ -463,17 +463,17 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.review",
+        name="meho_connector_review",
         feature="connector_ingest",
         description=(
             "Get the full review payload for one connector (groups + "
             "per-group operations + per-op flags). Use after "
-            "meho.connector.list has surfaced a connector that needs "
+            "meho_connector_list has surfaced a connector that needs "
             "review, or whenever you need to inspect an already-enabled "
             "connector's surface. The payload includes "
             "operator-editable fields (when_to_use, custom_description, "
             "safety_level, requires_approval, is_enabled) — pair with "
-            "meho.connector.edit_group / meho.connector.edit_op to "
+            "meho_connector_edit_group / meho_connector_edit_op to "
             "modify them. Read-only; visible to operator and "
             "tenant_admin roles. Tenant-scoped: cross-tenant reads are "
             "rejected with a ConnectorNotFoundError. When a connector_id "
@@ -505,18 +505,18 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.edit_group",
+        name="meho_connector_edit_group",
         feature="connector_ingest",
         description=(
             "Edit one operation group's when_to_use prose or display "
-            "name (tenant_admin only). Use after meho.connector.review "
+            "name (tenant_admin only). Use after meho_connector_review "
             "has surfaced a group whose LLM-generated description needs "
             "operator-authored prose. Pass at least one of when_to_use "
             "or name — passing neither is rejected. Each edit writes one "
             "audit row. Do NOT use this to change group membership "
             "(operation-to-group assignment): that requires re-running "
             "ingest or editing per-op assignments via "
-            "meho.connector.edit_op."
+            "meho_connector_edit_op."
         ),
         inputSchema={
             "type": "object",
@@ -543,7 +543,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.edit_op",
+        name="meho_connector_edit_op",
         feature="connector_ingest",
         description=(
             "Edit one operation's per-op overrides (tenant_admin only). "
@@ -553,14 +553,14 @@ register_mcp_tool(
             "out-of-band approval), is_enabled (per-op enable/disable "
             "that survives connector-level enable/disable cycles). Pass "
             "at least one field; passing none is rejected. Use during "
-            "review (after meho.connector.review surfaces the op) when "
+            "review (after meho_connector_review surfaces the op) when "
             "an LLM-generated description is misleading or when a "
             "DELETE-shaped op needs the safety_level promoted from "
             "'dangerous' to require approval. is_enabled=false here "
-            "STICKS: a subsequent meho.connector.enable will NOT "
+            "STICKS: a subsequent meho_connector_enable will NOT "
             "clobber the operator's per-op disable. Do not use this "
             "to flip whole-connector state — pair with "
-            "meho.connector.enable / .disable for that."
+            "meho_connector_enable / meho_connector_disable for that."
         ),
         inputSchema={
             "type": "object",
@@ -596,15 +596,15 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.enable",
+        name="meho_connector_enable",
         feature="typed_connector_reads",
         description=(
             "Flip every group of a connector to review_status='enabled' "
             "(tenant_admin only). Cascades is_enabled=true to every "
             "child op except those an operator previously set "
-            "is_enabled=false on via meho.connector.edit_op (operator "
+            "is_enabled=false on via meho_connector_edit_op (operator "
             "overrides stick). Use AFTER reviewing the connector with "
-            "meho.connector.review + applying any needed edits. "
+            "meho_connector_review + applying any needed edits. "
             "Idempotent — already-enabled groups are a no-op (no audit "
             "row written). DO NOT use this on a connector that's still "
             "actively being reviewed; the agent surface starts "
@@ -632,7 +632,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.enable_reads",
+        name="meho_connector_enable_reads",
         feature="typed_connector_reads",
         description=(
             "Bulk-enable every read-class operation of a connector in "
@@ -647,12 +647,12 @@ register_mcp_tool(
             "boundary). Returns ops_enabled, the count flipped. "
             "Idempotent: re-running once the reads are enabled flips "
             "nothing and writes no audit row (ops_enabled=0). Pair with "
-            "meho.connector.review to inspect the surface first. Reach "
-            "for meho.connector.enable instead when you want the full "
+            "meho_connector_review to inspect the surface first. Reach "
+            "for meho_connector_enable instead when you want the full "
             "per-group state transition — this verb does NOT move any "
             "group's review_status, so a connector can stay staged at "
             "the group level while its reads become dispatchable. "
-            "Writes one meho.connector.enable_reads audit row when at "
+            "Writes one meho_connector_enable_reads audit row when at "
             "least one op flips. Omit tenant_id (or pass null) for "
             "built-in / global connectors; pass the operator's own "
             "tenant UUID for tenant-curated rows. When a connector_id "
@@ -685,7 +685,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.disable",
+        name="meho_connector_disable",
         feature="typed_connector_reads",
         description=(
             "Flip every group of a connector to "
@@ -696,7 +696,7 @@ register_mcp_tool(
             "regression — the connector's operations stop showing up "
             "in search_operations the moment this returns. Idempotent. "
             "Do NOT use as a soft toggle during normal review; pair "
-            "with meho.connector.enable to bring the connector back "
+            "with meho_connector_enable to bring the connector back "
             "after the regression is fixed. Operator-set per-op "
             "disables are recovered from the audit log when the re-"
             "enable cascade fires."
@@ -723,7 +723,7 @@ register_mcp_tool(
 
 register_mcp_tool(
     definition=ToolDefinition(
-        name="meho.connector.delete",
+        name="meho_connector_delete",
         feature="typed_connector_reads",
         description=(
             "Delete one connector (tenant_admin only): remove its "
@@ -743,9 +743,9 @@ register_mcp_tool(
             "Deleting a connector that still has enabled operations "
             "completes and returns an enabled_operations_deleted "
             "warning (advisory, never blocks). One "
-            "meho.connector.delete audit row is written. Do NOT use "
+            "meho_connector_delete audit row is written. Do NOT use "
             "this for a temporary roll-back — pair with "
-            "meho.connector.disable for reversible state instead; "
+            "meho_connector_disable for reversible state instead; "
             "delete is permanent (no undo), though re-running ingest "
             "for the same product/version/impl re-registers the "
             "connector from scratch. Hand-coded connector classes "

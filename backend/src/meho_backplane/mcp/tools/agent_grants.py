@@ -3,19 +3,19 @@
 
 """Admin MCP tools for the agent permission grant surface.
 
-G11.2-T6 (#819) under Initiative #803 — five ``meho.agents.grant.*``
+G11.2-T6 (#819) under Initiative #803 — five ``meho_agents_grant_*``
 tools that mirror the REST surface
 (``/api/v1/agents/grants``) onto the MCP transport:
 
-* ``meho.agents.grant.list`` — list grants in the operator's tenant.
+* ``meho_agents_grant_list`` — list grants in the operator's tenant.
   Role: ``tenant_admin``.
-* ``meho.agents.grant.show`` — fetch one grant by id.
+* ``meho_agents_grant_show`` — fetch one grant by id.
   Role: ``tenant_admin``.
-* ``meho.agents.grant.create`` — create a grant (permanent or
+* ``meho_agents_grant_create`` — create a grant (permanent or
   time-bounded). Role: ``tenant_admin``.
-* ``meho.agents.grant.elevate`` — create a time-bounded elevation
+* ``meho_agents_grant_elevate`` — create a time-bounded elevation
   (``expires_at`` required). Role: ``tenant_admin``.
-* ``meho.agents.grant.revoke`` — revoke (delete) a grant.
+* ``meho_agents_grant_revoke`` — revoke (delete) a grant.
   Role: ``tenant_admin``.
 
 RBAC enforcement
@@ -81,7 +81,7 @@ def _mirror_grant_id(payload: dict[str, Any]) -> dict[str, Any]:
     ``GET /api/v1/agents/grants`` (#1612 kept shared models out of a
     rename's scope), so the MCP handlers mirror the id at the wire
     boundary instead: every grant row carries ``grant_id`` — the field
-    ``meho.agents.grant.show`` / ``meho.agents.grant.revoke`` accept
+    ``meho_agents_grant_show`` / ``meho_agents_grant_revoke`` accept
     verbatim — alongside the model's native ``id``.
     """
     if "id" in payload:
@@ -109,7 +109,7 @@ def _require_uuid(arguments: dict[str, Any], key: str) -> UUID:
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.grant.list
+# meho_agents_grant_list
 # ---------------------------------------------------------------------------
 
 
@@ -135,11 +135,11 @@ async def _list_grants_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.grant.list",
+        name="meho_agents_grant_list",
         description=(
             "List agent permission grants for the operator's tenant "
             "(G11.2-T6). Returns {grants: [...]}; each row carries "
-            "`grant_id` (accepted verbatim by meho.agents.grant.show / "
+            "`grant_id` (accepted verbatim by meho_agents_grant_show / "
             ".revoke) alongside the model-native `id`. "
             "Optional principal_sub filters to one agent. "
             "include_expired=true includes past elevations."
@@ -167,7 +167,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.grant.show
+# meho_agents_grant_show
 # ---------------------------------------------------------------------------
 
 
@@ -190,7 +190,7 @@ async def _show_grant_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.grant.show",
+        name="meho_agents_grant_show",
         description=(
             "Fetch one agent permission grant by id (G11.2-T6). "
             "Returns the grant row (carrying both `grant_id` and the "
@@ -215,7 +215,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.grant.create
+# meho_agents_grant_create
 # ---------------------------------------------------------------------------
 
 
@@ -243,14 +243,14 @@ async def _create_grant_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.grant.create",
+        name="meho_agents_grant_create",
         description=(
             "Grant a permission to an agent principal (G11.2-T6). "
             "verdict: auto-execute | needs-approval | deny. "
             "expires_at (ISO-8601 UTC) makes the grant time-bounded. "
             "Omit expires_at for a permanent grant. The created row "
             "carries `grant_id` (accepted verbatim by "
-            "meho.agents.grant.show / .revoke) alongside the native `id`. "
+            "meho_agents_grant_show / meho_agents_grant_revoke) alongside the native `id`. "
             "Enforcement scope: grants gate ONLY tokens carrying the "
             "principal_kind=agent claim (registered agent principals); "
             "human/service tokens are never gated by grants. principal_sub "
@@ -294,7 +294,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.grant.elevate
+# meho_agents_grant_elevate
 # ---------------------------------------------------------------------------
 
 
@@ -322,13 +322,13 @@ async def _elevate_grant_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.grant.elevate",
+        name="meho_agents_grant_elevate",
         description=(
             "Grant a time-bounded elevation to an agent principal (G11.2-T6). "
             "expires_at is required. The grant-expiry sweeper reverts the "
             "agent to baseline automatically after the window ends. The "
             "created row carries `grant_id` (accepted verbatim by "
-            "meho.agents.grant.show / .revoke) alongside the native `id`. "
+            "meho_agents_grant_show / meho_agents_grant_revoke) alongside the native `id`. "
             "Enforcement scope: elevations gate ONLY tokens carrying the "
             "principal_kind=agent claim (registered agent principals); "
             "human/service tokens are never gated. principal_sub must name a "
@@ -372,7 +372,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agents.grant.revoke
+# meho_agents_grant_revoke
 # ---------------------------------------------------------------------------
 
 
@@ -395,7 +395,7 @@ async def _revoke_grant_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agents.grant.revoke",
+        name="meho_agents_grant_revoke",
         description=(
             "Revoke (delete) a permission grant by id (G11.2-T6). "
             "Returns {revoked: <grant_id>} on success."

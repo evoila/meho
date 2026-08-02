@@ -3,14 +3,14 @@
 
 """Admin MCP tools for the scheduled-trigger CRUD surface.
 
-G11.3-T5 (#826) under Initiative #804 -- three ``meho.scheduler.*``
+G11.3-T5 (#826) under Initiative #804 -- three ``meho_scheduler_*``
 tools that mirror the REST surface (``/api/v1/scheduler/triggers``)
 onto the MCP transport:
 
-* ``meho.scheduler.list`` -- list the operator's tenant's triggers
+* ``meho_scheduler_list`` -- list the operator's tenant's triggers
   (with optional kind / status filters). Role: ``operator``.
-* ``meho.scheduler.create`` -- create a trigger. Role: ``tenant_admin``.
-* ``meho.scheduler.cancel`` -- cancel a trigger by id (terminal
+* ``meho_scheduler_create`` -- create a trigger. Role: ``tenant_admin``.
+* ``meho_scheduler_cancel`` -- cancel a trigger by id (terminal
   ``status='cancelled'`` transition). Role: ``tenant_admin``.
 
 Why three tools rather than one parametric ``manage_scheduled_trigger``
@@ -96,8 +96,8 @@ def _mirror_trigger_id(payload: dict[str, Any]) -> dict[str, Any]:
     The row model :class:`ScheduledTriggerRead` is shared with the REST
     route ``/api/v1/scheduler/triggers``, so the MCP handler mirrors the
     id at the wire boundary instead of renaming it: every trigger row
-    carries ``trigger_id`` — the field ``meho.scheduler.cancel`` accepts
-    verbatim, and the same top-level key ``meho.scheduler.create``
+    carries ``trigger_id`` — the field ``meho_scheduler_cancel`` accepts
+    verbatim, and the same top-level key ``meho_scheduler_create``
     already returns — alongside the model's native ``id``.
     """
     if "id" in payload:
@@ -122,7 +122,7 @@ def _require_trigger_id(arguments: dict[str, Any]) -> uuid.UUID:
 
 
 # ---------------------------------------------------------------------------
-# meho.scheduler.list
+# meho_scheduler_list
 # ---------------------------------------------------------------------------
 
 
@@ -159,13 +159,13 @@ async def _list_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="scheduler",
-        name="meho.scheduler.list",
+        name="meho_scheduler_list",
         description=(
             "List scheduled triggers for the operator's tenant "
             "(Initiative #804). Operator-level read. Returns "
             "{triggers: [trigger, ...]} sorted newest-first; each row "
             "carries `trigger_id` (accepted verbatim by "
-            "meho.scheduler.cancel) alongside the model-native `id`. "
+            "meho_scheduler_cancel) alongside the model-native `id`. "
             "Optional filters: kind ('cron'|'one_off'|'event'), "
             "status ('active'|'paused'|'cancelled'|'fired'), "
             "work_ref (exact-match change-ticket reference). "
@@ -217,7 +217,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.scheduler.create
+# meho_scheduler_create
 # ---------------------------------------------------------------------------
 
 
@@ -276,7 +276,7 @@ async def _create_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="scheduler",
-        name="meho.scheduler.create",
+        name="meho_scheduler_create",
         description=(
             "Create one scheduled trigger under the operator's tenant "
             "(Initiative #804). Tenant_admin only. Args: kind "
@@ -388,7 +388,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.scheduler.cancel
+# meho_scheduler_cancel
 # ---------------------------------------------------------------------------
 
 
@@ -418,7 +418,7 @@ async def _cancel_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="scheduler",
-        name="meho.scheduler.cancel",
+        name="meho_scheduler_cancel",
         description=(
             "Cancel one scheduled trigger by id (Initiative #804). "
             "Tenant_admin only. Transitions status='cancelled'; the row "

@@ -11,7 +11,7 @@ Covers acceptance criteria 4 + 7 on issue #399:
 * Each tool's ``inputSchema`` is JSON-Schema-2020-12 well-formed with
   ``additionalProperties: false``.
 * MEHO-internal fields (``required_role``, ``op_class``) are stripped
-  from the wire shape (same contract as the meho.status reference tool).
+  from the wire shape (same contract as the meho_status reference tool).
 * ``tools/call list_operation_groups`` against a seeded group returns the
   groups list with the agent-facing ``when_to_use`` blurb.
 

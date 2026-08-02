@@ -1003,7 +1003,7 @@ async def test_novel_kinds_flow_end_to_end_on_postgres(
     The T1 #2534 acceptance path on the production dialect:
 
     1. :func:`create_or_get_node` (the service primitive behind
-       ``meho.topology.create_node``) seeds a ``dns-record`` node and
+       ``meho_topology_create_node``) seeds a ``dns-record`` node and
        a ``keycloak-realm`` node — both outside the old closed
        14-kind vocabulary, the latter being the pre-T1 doc-vs-enum
        drift example that must now round-trip.

@@ -143,7 +143,8 @@ with these rules:
 The same view lives in the operator console at `/ui/checks` (list)
 and `/ui/checks/{dashboard_id}` (member breakdown). Dashboards have
 CLI, REST, and UI surfaces; sensors additionally have MCP tools
-(`meho.sensor.list` / `create` / `delete`) — **dashboards have no MCP
+(`meho_sensor_list` / `meho_sensor_create` / `meho_sensor_delete`) —
+**dashboards have no MCP
 tools today**.
 
 ## Step 4 — break something and watch

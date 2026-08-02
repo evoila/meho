@@ -3,14 +3,14 @@
 
 """MCP tools for the agent-principal lifecycle surface.
 
-G11.2-T1 (#815) under Initiative #803. Three ``meho.agent_principals.*``
+G11.2-T1 (#815) under Initiative #803. Three ``meho_agent_principals_*``
 tools that mirror the REST surface (``/api/v1/agent-principals``):
 
-* ``meho.agent_principals.list`` — list active agent principals for
+* ``meho_agent_principals_list`` — list active agent principals for
   the operator's tenant. Role: ``operator``.
-* ``meho.agent_principals.register`` — register a new agent principal
+* ``meho_agent_principals_register`` — register a new agent principal
   (create Keycloak client + DB row). Role: ``tenant_admin``.
-* ``meho.agent_principals.revoke`` — revoke an agent principal (kill
+* ``meho_agent_principals_revoke`` — revoke an agent principal (kill
   switch). Role: ``tenant_admin``.
 
 RBAC is enforced at two layers: the registry filter hides write tools
@@ -90,7 +90,7 @@ def _require_name(arguments: dict[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# meho.agent_principals.list
+# meho_agent_principals_list
 # ---------------------------------------------------------------------------
 
 
@@ -111,7 +111,7 @@ async def _list_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agent_principals.list",
+        name="meho_agent_principals_list",
         description=(
             "List agent principals registered for the operator's tenant "
             "(G11.2-T1 #815). Returns {principals: [...]} sorted by name. "
@@ -136,7 +136,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agent_principals.register
+# meho_agent_principals_register
 # ---------------------------------------------------------------------------
 
 
@@ -193,7 +193,7 @@ async def _register_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agent_principals.register",
+        name="meho_agent_principals_register",
         description=(
             "Register a new agent principal for the operator's tenant "
             "(G11.2-T1 #815). Creates a Keycloak client tagged kind=agent "
@@ -212,8 +212,8 @@ register_mcp_tool(
                     # Mirror :data:`meho_backplane.auth.agent_principals._NAME_PATTERN`
                     # at the schema layer so the documented alphabet is enforced
                     # before the service layer's regex check fires. Pairs
-                    # ``meho.agent_principals.register.name`` with
-                    # ``meho.agents.create.name`` (which already enforces the
+                    # ``meho_agent_principals_register.name`` with
+                    # ``meho_agents_create.name`` (which already enforces the
                     # pattern), per RDC #789 N4 / G0.18-T5 #1358.
                     "pattern": r"^[A-Za-z0-9_\-\.]+$",
                     "description": (
@@ -243,7 +243,7 @@ register_mcp_tool(
 
 
 # ---------------------------------------------------------------------------
-# meho.agent_principals.revoke
+# meho_agent_principals_revoke
 # ---------------------------------------------------------------------------
 
 
@@ -278,7 +278,7 @@ async def _revoke_handler(
 register_mcp_tool(
     definition=ToolDefinition(
         feature="agent_runtime",
-        name="meho.agent_principals.revoke",
+        name="meho_agent_principals_revoke",
         description=(
             "Revoke an agent principal — kill switch (G11.2-T1 #815). "
             "Disables the Keycloak client immediately (no new token grants) "

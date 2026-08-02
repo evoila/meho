@@ -424,7 +424,7 @@ async def test_list_recent_serves_announcement_wrapped() -> None:
     """AC #1: the broadcast re-serve path emits envelope-wrapped announcement text.
 
     End-to-end through :func:`list_recent_events_strict` (the
-    ``meho.broadcast.recent`` core): an announcement XRANGE'd off the
+    ``meho_broadcast_recent`` core): an announcement XRANGE'd off the
     stream reaches the caller with ``activity`` wrapped — even when the
     stored text embeds the closing-delimiter literal (the positional
     wrapper emits its own terminator last, so the forged one cannot

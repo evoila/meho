@@ -186,7 +186,7 @@ the posture and relies on the existing gate). The policy refinement
   identity has no connector class, so `resolve_authoring_kind`'s resolver
   replay misses. It keys on the row's own `source_kind` to recognize this
   class-less typed mold, so the connector listing and
-  `meho.connector.review` report `secret-broker-1.x` as `kind="typed"` /
+  `meho_connector_review` report `secret-broker-1.x` as `kind="typed"` /
   `dispatchable=true` rather than the `ingested-shim` dead end.
 
 ## References

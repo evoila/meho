@@ -236,7 +236,7 @@ def test_checks_is_filterable_from_the_agent_surface() -> None:
     ``inputSchema`` validation is jsonschema-enforced at the dispatcher,
     so a class absent from :data:`OP_CLASS_ENUM` is a ``-32602`` before
     the handler runs -- the class would be published but unreachable from
-    ``meho.broadcast.recent`` / ``.watch``.
+    ``meho_broadcast_recent`` / ``.watch``.
     """
     assert "checks" in OP_CLASS_ENUM
 

@@ -338,7 +338,7 @@ async def k8s_e2e(
     # reads product + fingerprint["version"] + preferred_impl_id off it
     # exactly as a production probed target. fingerprint is a JSON dict
     # (the probe route persists FingerprintResult.model_dump(mode="json")
-    # to this column), so resolve_connector's _resolve_target_version
+    # to this column), so resolve_connector's resolve_target_version
     # reads it via .get("version"); the K8s connector advertises
     # supported_version_range=None so the version is not filtered on,
     # only echoed into the audit payload — same as the _K3sTarget stub.

@@ -325,7 +325,7 @@ def resolve_connector(target: Any) -> type[Connector]:
             f"target has no product slug; cannot resolve a connector: target={target!r}"
         )
 
-    target_version = _resolve_target_version(target)
+    target_version = resolve_target_version(target)
     preferred_impl_id = getattr(target, "preferred_impl_id", None)
 
     candidates = _filter_candidates(product, target_version)
@@ -532,7 +532,7 @@ def _run_tie_break_ladder(
     return None, "ambiguous", candidates
 
 
-def _resolve_target_version(target: Any) -> str | None:
+def resolve_target_version(target: Any) -> str | None:
     """Pull the target's product version from fingerprint or operator hint.
 
     Two sources, in priority order:

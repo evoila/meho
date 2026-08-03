@@ -692,6 +692,92 @@ async def test_dispatch_ingested_returns_no_connector_when_resolver_misses(
     assert "ghost" in result.extras["exception_message"]
 
 
+@pytest.mark.asyncio
+async def test_no_connector_error_names_target_product_not_connector_id(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """#2701: the ``no_connector`` error names the TARGET's product, not the caller's.
+
+    Reproduces the exact reported shape: the ``connector_id`` product
+    (``k8s``) resolves a valid descriptor, but the target is registered
+    under a *different*, unadvertised product (``kubernetes``) so the
+    resolver misses. The error must point at the failing input -- the
+    target's ``kubernetes`` -- and must not echo the caller's ``k8s`` as
+    the unsupported product (which read as "your connector_id is wrong").
+
+    The sibling ghost/ghost test above cannot catch this: there the
+    connector_id product and the target product are identical, so echoing
+    either one happens to be correct.
+    """
+    from datetime import UTC, datetime
+
+    from meho_backplane.db.models import EndpointDescriptor
+
+    # Descriptor lives under product ``k8s`` so the connector_id
+    # ``k8s-1.x`` lookup succeeds (Step 2). No connector advertises
+    # ``kubernetes``, so resolving the target misses (Step 5).
+    descriptor = EndpointDescriptor(
+        id=uuid.uuid4(),
+        tenant_id=None,
+        product="k8s",
+        version="1.x",
+        impl_id="k8s",
+        op_id="GET:/api/2701-about",
+        source_kind="ingested",
+        method="GET",
+        path="/api/2701-about",
+        handler_ref=None,
+        summary="k8s about",
+        description="Ingested op under product k8s.",
+        tags=[],
+        parameter_schema={},
+        response_schema=None,
+        llm_instructions=None,
+        safety_level="safe",
+        requires_approval=False,
+        is_enabled=True,
+        embedding=stub_embedding_service.encode_one.return_value,
+        custom_description=None,
+        custom_notes=None,
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session.add(descriptor)
+    await session.commit()
+
+    operator = _make_operator()
+    # Target's registered product differs from the connector_id product;
+    # no version anywhere, so the resolver sees version=None.
+    target = _FakeTarget(product="kubernetes")
+
+    result = await dispatch(
+        operator=operator,
+        connector_id="k8s-1.x",
+        op_id="GET:/api/2701-about",
+        target=target,
+        params={},
+    )
+
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.startswith("no_connector:")
+    # Names the target's product (the failing input) ...
+    assert "product='kubernetes'" in result.error
+    # ... and does NOT present the caller's connector_id product as the
+    # unsupported product (the misattribution #2701 is about).
+    assert "product='k8s'" not in result.error
+    # The version the resolver actually saw was None (no fingerprint,
+    # no operator-asserted version), not the connector_id's ``1.x``.
+    assert "version=None" in result.error
+    assert "version='1.x'" not in result.error
+    # Machine-readable extras align to the target, not the connector_id.
+    assert result.extras["error_code"] == "no_connector"
+    assert result.extras["product"] == "kubernetes"
+    assert result.extras["version"] is None
+
+
 # ---------------------------------------------------------------------------
 # G0.14-T1 (#1142): typed/composite resolver miss must surface
 # no_connector (matching the ingested branch), and the resolver's

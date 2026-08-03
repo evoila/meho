@@ -466,6 +466,23 @@ set).
   `valid_products: [...]` on miss (Option C: recovery-time net).
   Both layers share `registered_product_tokens()` as the
   source-of-truth so they cannot disagree.
+- **#2701** — the Part B residual of Signal 5: even after T3 #1144
+  rejects an unadvertised `product` at registration, a target that
+  predates the validation (or was backfilled around it) still fails
+  every dispatch, and the `no_connector` error named the **wrong
+  value** — it echoed the caller's `connector_id`-parsed
+  `(product, version)` (e.g. `product='k8s' version='1.x'`) instead
+  of the *target's* registered product the resolver actually rejected
+  (`product='kubernetes' version=None`), reading as "your connector_id
+  is wrong". This violates convention (a) (*name the specific value
+  involved*) at the site the whole convention exists for. The fix
+  swaps the dispatcher's `result_no_connector` call
+  (`operations/dispatcher.py`, connector-resolution step) to name
+  `target.product` and the version `resolve_target_version(target)`
+  read (which may be `None`), aligning `extras['product']` /
+  `extras['version']` to the target; it falls back to the connector_id
+  pair only when there is no target product to name. The register-time
+  reject (#1144) is unchanged; this is diagnosability-only.
 
 ## References
 

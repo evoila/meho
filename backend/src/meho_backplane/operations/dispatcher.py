@@ -232,6 +232,7 @@ from meho_backplane.connectors import (
     ResolutionLabel,
     ResultHandle,
     resolve_connector_or_label,
+    resolve_target_version,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, shim_kind
@@ -2091,10 +2092,28 @@ async def dispatch(
             # faults, which only arise when a target *was* supplied).
             return result_target_required(op_id, _elapsed_ms(started))
         if resolution_error == "no_connector":
+            # #2701: the resolver miss is on the TARGET's product/version,
+            # not the ``connector_id`` the caller passed. That connector_id
+            # already resolved a valid descriptor at Step 2 (else
+            # ``result_unknown_op`` fired), so echoing its parsed
+            # ``(product, version)`` here names the wrong input and reads as
+            # "your connector_id is wrong" -- the exact misattribution that
+            # sent the reporter chasing connector ids. Name the target's
+            # registered product and the version the resolver actually read
+            # (which may be ``None``). Fall back to the connector_id pair
+            # only when there is no target product to name (e.g. an ingested
+            # op dispatched with ``target=None``).
+            target_product = getattr(target, "product", None)
+            if isinstance(target_product, str) and target_product:
+                miss_product = target_product
+                miss_version: str | None = resolve_target_version(target)
+            else:
+                miss_product = product
+                miss_version = version
             return result_no_connector(
                 op_id,
-                product,
-                version,
+                miss_product,
+                miss_version,
                 _elapsed_ms(started),
                 exception_message=exception_message,
             )

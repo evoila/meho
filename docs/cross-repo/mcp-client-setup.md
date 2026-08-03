@@ -58,7 +58,7 @@ MEHO doesn't implement RFC 7591 Dynamic Client Registration; operators register 
 # PKCE for the OAuth 2.1 authorization-code flow. PKCE on a public
 # client is what the spec calls out as the v0.2 default.
 kcadm.sh create clients -r <realm> -b '{
-  "clientId": "meho-mcp-client",
+  "clientId": "meho-mcp",
   "name": "MEHO MCP client (static)",
   "protocol": "openid-connect",
   "publicClient": true,
@@ -157,7 +157,7 @@ OAuth handling is client-specific; refer to each client's docs for the token-acq
 
 Claude Code's native HTTP-MCP support and Cursor's MCP wire-up, as of 2026-05, follow the RFC 9728 metadata trail correctly: they fetch `/.well-known/oauth-protected-resource`, read the `authorization_servers` field, then attempt OAuth 2.1 + PKCE against the Keycloak realm. The problem is the next step: **neither `.mcp.json` shape exposes a `client_id` field**, so both clients fall back to dynamic client registration (RFC 7591). Keycloak's default Trusted Hosts policy ships with an empty whitelist — anonymous DCR is de-facto disabled — so the registration POST returns `HTTP 403 {"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request to client-registration service. Details: Host not trusted."}` and the wire-up never completes.
 
-Pre-registering `meho-mcp-client` on the realm side (Step 2 above + the [auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)) is necessary but **not sufficient** for these clients: they have no place to put the resulting `client_id`.
+Pre-registering `meho-mcp` on the realm side (Step 2 above + the [auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)) is necessary but **not sufficient** for these clients: they have no place to put the resulting `client_id`.
 
 Three workarounds today:
 

@@ -1853,7 +1853,7 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      `publicClient=true`, `oauth2DeviceAuthorizationGrantEnabled=true`,
      every other flow off).
   2. Public authorization-code+PKCE MCP client (default name
-     `meho-mcp-client`, `standardFlowEnabled=true`,
+     `meho-mcp`, `standardFlowEnabled=true`,
      `pkce.code.challenge.method=S256`, redirect URIs for Claude.ai +
      localhost MCP Inspector).
   3. 5 protocol mappers cloned from the reference shape on
@@ -1871,7 +1871,7 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      it, with a password set via `/users/{id}/reset-password`.
   6. Optional client scope `offline_access` on the MCP client only —
      the realm's built-in `offline_access` scope is attached to
-     `meho-mcp-client` as **optional** (not default — only flows that
+     `meho-mcp` as **optional** (not default — only flows that
      ask for a refresh token mint one). The CLI device-code client
      (`meho-cli`) deliberately does **not** get it: RFC 8628
      device-code clients re-run the device dance rather than hold a

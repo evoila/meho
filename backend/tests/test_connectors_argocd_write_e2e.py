@@ -37,6 +37,7 @@ from typing import Any
 
 import pytest
 import respx
+from sqlalchemy import select
 
 import meho_backplane.connectors.argocd  # noqa: F401 -- import for registry side-effects
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -47,6 +48,7 @@ from meho_backplane.connectors.argocd.ops_write import (
 )
 from meho_backplane.connectors.argocd.session import ArgoCdTargetLike
 from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations.dispatcher import set_default_reducer
@@ -767,3 +769,81 @@ async def test_all_writes_carry_bearer_and_never_leak_secret(
         for call in mock.calls:
             assert call.request.headers.get("authorization") == f"Bearer {_BEARER_TOKEN}"
             assert _OPERATOR.raw_jwt not in (call.request.headers.get("authorization") or "")
+
+
+# ---------------------------------------------------------------------------
+# Approved-dispatch 5xx: vendor detail in BOTH the caller envelope and the
+# durable DISPATCH audit row (#2680)
+#
+# The DoD witness: an approved re-dispatch whose upstream ArgoCD sync POST
+# returns HTTP 500 with a gRPC-gateway JSON body must (1) return an
+# OperationResult whose extras carry the structured error envelope
+# (error_code + http_status=500 + upstream_message extracted from the body)
+# rather than the pre-fix bare connector_error, and (2) persist that same
+# envelope on the DISPATCH audit row's payload rather than only
+# result_status='error'. approved=True drives the identical _execute_and_audit
+# error arm the approvals resume path (resume_dispatch_after_approval ->
+# dispatch(_approved=True)) reaches, so this is a faithful witness of it.
+# ---------------------------------------------------------------------------
+
+
+#: gRPC-gateway-shaped 500 body ArgoCD returns when a sync dry-run fails
+#: server-side. ``message`` is the vendor detail an operator needs; before
+#: #2680 only ``str(HTTPStatusError)`` (the status line + URL) reached the
+#: envelope, so this text was discarded.
+_ARGOCD_SYNC_500_BODY: dict[str, Any] = {
+    "error": "rpc error: code = Internal desc = application dry-run failed",
+    "code": 13,
+    "message": "application dry-run failed: pruning would delete Service guestbook-ui",
+}
+
+
+async def _dispatch_audit_rows(op_id: str) -> list[AuditLog]:
+    """Read back the durable DISPATCH audit rows for *op_id*."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        result = await session.execute(select(AuditLog).where(AuditLog.path == op_id))
+        return list(result.scalars().all())
+
+
+@pytest.mark.asyncio
+async def test_approved_sync_500_surfaces_vendor_detail_to_caller_and_audit(
+    argocd_write_e2e: ArgoCdConnector,
+) -> None:
+    """An approved sync whose POST 500s carries the vendor body to caller AND audit (#2680)."""
+    with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        post_route = mock.post(f"/api/v1/applications/{_APP_NAME}/sync").respond(
+            500, json=_ARGOCD_SYNC_500_BODY
+        )
+        result = await _dispatch(
+            "argocd.app.sync",
+            {"name": _APP_NAME, "dry_run": True},
+        )
+
+    # The POST fired (this is the re-dispatch, not a park) and 500'd.
+    assert post_route.called
+
+    # Clause 1 -- VENDOR DETAIL reaches the caller. Not the pre-fix bare
+    # connector_error (whose only free-text was str(exc), the httpx status
+    # line): the 5xx now carries http_status + the extracted upstream body.
+    assert result["status"] == "error"
+    extras = result["extras"]
+    assert extras["error_code"] == "connector_error"
+    assert extras["http_status"] == 500
+    assert "application dry-run failed" in extras["upstream_message"]
+    # The Vault bearer never rides the error envelope.
+    assert _BEARER_TOKEN not in str(result)
+
+    # Clause 2 -- the DISPATCH audit row persists the SAME envelope, not
+    # merely result_status='error'.
+    rows = await _dispatch_audit_rows("argocd.app.sync")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.method == "DISPATCH"
+    assert row.payload["result_status"] == "error"
+    envelope = row.payload["error"]
+    assert envelope["error_code"] == "connector_error"
+    assert envelope["http_status"] == 500
+    assert "application dry-run failed" in envelope["upstream_message"]
+    # The durable ledger row does not leak the bearer either.
+    assert _BEARER_TOKEN not in str(row.payload)

@@ -1019,11 +1019,14 @@ async def test_dispatch_404_falls_through_to_connector_error(
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A 404 ``HTTPStatusError`` is unchanged -- generic ``connector_error`` flatten.
+    """A 404 ``HTTPStatusError`` stays ``connector_error`` -- not the auth shape.
 
     Scope boundary (#1804 AC): only the auth-class set (401 / 440) is
     siphoned into ``connector_auth_failed``; every other status (404 here)
-    falls through to the existing generic catch.
+    falls through to the generic catch. #2680: that generic catch now
+    surfaces ``http_status`` + the ``upstream_message`` for any
+    ``HTTPStatusError`` -- but stays ``connector_error`` (no auth-specific
+    ``host`` / restage remediation).
     """
     register_connector_v2(
         product="vcfops",
@@ -1055,7 +1058,10 @@ async def test_dispatch_404_falls_through_to_connector_error(
     assert result.extras["exception_class"] == "HTTPStatusError"
     # Did NOT get reclassified as the auth shape.
     assert "connector_auth_failed" not in result.error
-    assert "http_status" not in result.extras
+    # #2680: the generic connector_error now surfaces the vendor detail, but
+    # NOT the auth builder's host / restage fields.
+    assert result.extras["http_status"] == 404
+    assert result.extras["upstream_message"] == "Not Found"
     assert "host" not in result.extras
 
     assert len(captured_events) == 1
@@ -1068,7 +1074,10 @@ async def test_dispatch_500_falls_through_to_connector_error(
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A 5xx ``HTTPStatusError`` is unchanged -- generic ``connector_error`` flatten."""
+    """A 5xx ``HTTPStatusError`` stays ``connector_error`` -- not the auth shape.
+
+    #2680: the generic catch now also surfaces the 5xx vendor detail.
+    """
     register_connector_v2(
         product="vcfops",
         version="9",
@@ -1098,7 +1107,10 @@ async def test_dispatch_500_falls_through_to_connector_error(
     assert result.extras["error_code"] == "connector_error"
     # Did NOT get reclassified as the auth shape.
     assert "connector_auth_failed" not in result.error
-    assert "http_status" not in result.extras
+    # #2680: the generic connector_error now surfaces the 5xx vendor detail.
+    assert result.extras["http_status"] == 500
+    assert result.extras["upstream_message"] == "Server Error"
+    assert "host" not in result.extras
 
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "error"

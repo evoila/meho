@@ -782,11 +782,15 @@ async def test_dispatch_non_403_or_422_status_error_falls_through_to_connector_e
     session: AsyncSession,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """A 500 ``HTTPStatusError`` is unchanged -- generic ``connector_error`` flatten.
+    """A 500 ``HTTPStatusError`` stays ``connector_error`` -- not the 403/422 shapes.
 
     Scope boundary (#1649 AC): only 403 / 422 are siphoned into the
-    structured ``connector_http_*`` shapes; every other status falls
-    through those branches into the existing generic catch.
+    dedicated ``connector_http_*`` structured shapes; every other status
+    (404, 429, 5xx) falls through those branches into the generic
+    ``connector_error`` catch. #2680: that generic catch now enriches a
+    5xx (and any ``HTTPStatusError``) with ``http_status`` + the extracted
+    ``upstream_message`` -- the ``error_code`` stays ``connector_error``
+    (not reclassified), but the vendor body is no longer discarded.
     """
     register_connector_v2(
         product="gh",
@@ -819,7 +823,10 @@ async def test_dispatch_non_403_or_422_status_error_falls_through_to_connector_e
     # Did NOT get reclassified as the 403 / 422 shapes.
     assert "connector_http_403" not in (result.error or "")
     assert "connector_http_422" not in (result.error or "")
-    assert "http_status" not in result.extras
+    # #2680: the generic connector_error now surfaces the 5xx vendor detail
+    # (http_status + the upstream body message) instead of discarding it.
+    assert result.extras["http_status"] == 500
+    assert result.extras["upstream_message"] == "Server Error"
 
     assert len(captured_events) == 1
     assert captured_events[0].result_status == "error"

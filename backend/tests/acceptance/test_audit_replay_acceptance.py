@@ -485,6 +485,16 @@ async def test_scenario_1_mcp_replay_returns_multi_level_tree(
             )
     result = envelope["result"]
     structured = result.get("structuredContent") or json.loads(result["content"][0]["text"])
+    # #2776: the MCP envelope carries the same key-set as REST, including
+    # excluded_null_session_count (0 here — no header-less MCP rows seeded).
+    assert set(structured.keys()) == {
+        "root",
+        "session_id",
+        "tenant_id",
+        "row_count",
+        "excluded_null_session_count",
+    }
+    assert structured["excluded_null_session_count"] == 0
     assert structured["session_id"] == str(agent_session_id)
     assert structured["tenant_id"] == TENANT_A_ID
     # The MCP envelope's row_count is the assembled node count (all 4 nodes).

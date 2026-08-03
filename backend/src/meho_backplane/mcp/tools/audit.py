@@ -312,6 +312,38 @@ async def _count_session_rows(
     return int((await session.execute(stmt)).scalar_one())
 
 
+async def _count_excluded_null_session_rows(
+    *,
+    tenant_id: uuid.UUID,
+    session: AsyncSession,
+) -> int:
+    """Count the tenant's ``method=MCP`` rows with a NULL ``agent_session_id``.
+
+    These are calls from clients that reached ``/mcp`` without negotiating
+    a session via the ``initialize`` handshake (#2700): the row records
+    the operation but carries no lineage key, so it can never anchor or be
+    walked by *any* session replay. Reporting the tally alongside
+    ``row_count`` lets an investigator tell an empty forest (this session
+    did nothing) apart from an empty history (this identity's MCP traffic
+    is un-negotiated and structurally invisible to lineage).
+
+    Scoped to ``method='MCP'`` on purpose: only the MCP audit path
+    populates ``agent_session_id`` at all, so NULLs on other methods (CLI
+    / REST rows) are not "excluded" from a surface they were never part
+    of. Tenant-scoped and independent of any ``session_id`` — the
+    un-negotiated rows belong to no session. Duplicated from
+    :func:`~meho_backplane.api.v1.audit._count_excluded_null_session_rows`
+    (REST) rather than shared, matching the sibling :func:`_count_session_rows`
+    precedent.
+    """
+    stmt = sa.select(sa.func.count(AuditLog.id)).where(
+        AuditLog.tenant_id == tenant_id,
+        AuditLog.method == "MCP",
+        AuditLog.agent_session_id.is_(None),
+    )
+    return int((await session.execute(stmt)).scalar_one())
+
+
 async def _build_replay_response(
     session_id: uuid.UUID,
     *,
@@ -327,9 +359,15 @@ async def _build_replay_response(
     ``session_too_large`` token — the MCP analogue of T4's REST 413, the
     transport has no streaming body for a 413-style partial), dispatches
     through :func:`replay_session`, and returns the
-    ``{root, session_id, tenant_id, row_count}`` envelope. ``row_count``
-    is the assembled-node count (post depth-cap), so it reflects what the
-    caller actually receives.
+    ``{root, session_id, tenant_id, row_count, excluded_null_session_count}``
+    envelope. ``row_count`` is the assembled-node count (post depth-cap),
+    so it reflects what the caller actually receives.
+    ``excluded_null_session_count`` (#2700 → #2776 MCP parity) is the
+    tenant-wide tally of header-less ``method=MCP`` rows that no replay can
+    reach — it keeps an empty forest distinguishable from an empty history.
+    It is computed *after* the over-cap guard, so a rejected session raises
+    ``session_too_large`` before the field is ever built (matching REST's
+    pre-413 behaviour).
     """
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -355,6 +393,10 @@ async def _build_replay_response(
             session=session,
             max_depth=max_depth,
         )
+        excluded_null_session_count = await _count_excluded_null_session_rows(
+            tenant_id=tenant_id,
+            session=session,
+        )
 
     serialized_root = [node.model_dump(mode="json") for node in root]
     return {
@@ -362,6 +404,7 @@ async def _build_replay_response(
         "session_id": str(session_id),
         "tenant_id": str(tenant_id),
         "row_count": _count_tree_nodes(serialized_root),
+        "excluded_null_session_count": excluded_null_session_count,
     }
 
 
@@ -530,8 +573,23 @@ _REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
             "type": "integer",
             "description": "Total node count in the returned tree.",
         },
+        "excluded_null_session_count": {
+            "type": "integer",
+            "description": (
+                "Tenant-wide tally of header-less `method=MCP` audit "
+                "rows (NULL `agent_session_id`) that no session replay "
+                "can reach. Distinguishes an empty forest from an "
+                "empty history (#2700)."
+            ),
+        },
     },
-    "required": ["root", "session_id", "tenant_id", "row_count"],
+    "required": [
+        "root",
+        "session_id",
+        "tenant_id",
+        "row_count",
+        "excluded_null_session_count",
+    ],
 }
 
 
@@ -644,10 +702,14 @@ _REPLAY_TOOL_DESCRIPTION: Final[str] = (
     "Filter/result contents are NEVER broadcast on the SSE feed — only "
     "the `{op_class, result_status, row_count}` aggregate appears.\n\n"
     "Returns `{root: [ReplayNode, ...], session_id, tenant_id, "
-    "row_count}`. `root` is the forest of session roots ascending by "
-    "timestamp; each node carries its full audit row plus `depth` and "
-    "`children`. `row_count` is the total node count in the returned "
-    "tree."
+    "row_count, excluded_null_session_count}`. `root` is the forest of "
+    "session roots ascending by timestamp; each node carries its full "
+    "audit row plus `depth` and `children`. `row_count` is the total node "
+    "count in the returned tree. `excluded_null_session_count` is the "
+    "tenant-wide tally of header-less `method=MCP` audit rows (NULL "
+    "`agent_session_id`) that no session replay can reach — a non-zero "
+    "value on an empty forest means un-negotiated MCP traffic this surface "
+    "structurally cannot see (#2700)."
 )
 
 

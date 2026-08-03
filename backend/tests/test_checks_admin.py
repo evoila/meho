@@ -37,6 +37,7 @@ from meho_backplane.checks.repository import record_sensor_result
 from meho_backplane.checks.schemas import SensorCreate
 from meho_backplane.checks.service import (
     SensorAdminService,
+    SensorIdentitySubForbiddenError,
     SensorNameConflictError,
     SensorOperationNotFoundError,
     SensorRequiresSafeOperationError,
@@ -256,6 +257,52 @@ async def test_service_create_rejects_duplicate_name() -> None:
         await service.create(
             tenant_id=_TENANT_A, created_by_sub="op-admin", payload=_create_payload(name="dupe")
         )
+
+
+@pytest.mark.asyncio
+async def test_service_create_rejects_foreign_identity_sub() -> None:
+    """#2699: identity_sub naming a principal the creator does not own is refused.
+
+    identity_sub becomes the audited dispatch principal (``operator_sub`` on
+    every evaluation's audit row / broadcast ``principal_sub``); a caller must
+    not be able to attribute the sensor's recurring stream to an arbitrary sub.
+    """
+    await _seed_tenant_and_safe_op()
+    service = SensorAdminService()
+    with pytest.raises(SensorIdentitySubForbiddenError) as excinfo:
+        await service.create(
+            tenant_id=_TENANT_A,
+            created_by_sub="alice",
+            payload=_create_payload(identity_sub="bob-victim-sub"),
+        )
+    assert excinfo.value.error_code == "sensor_identity_sub_forbidden"
+    assert excinfo.value.identity_sub == "bob-victim-sub"
+
+
+@pytest.mark.asyncio
+async def test_service_create_allows_creator_own_identity_sub() -> None:
+    """The creator may attribute the sensor to their own sub (the per-row knob)."""
+    await _seed_tenant_and_safe_op()
+    service = SensorAdminService()
+    entry = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="alice",
+        payload=_create_payload(name="own-sub", identity_sub="alice"),
+    )
+    assert entry.identity_sub == "alice"
+
+
+@pytest.mark.asyncio
+async def test_service_create_defaults_to_sentinel_identity_sub() -> None:
+    """Omitting identity_sub persists the ``__sensor__`` sentinel (the default)."""
+    await _seed_tenant_and_safe_op()
+    service = SensorAdminService()
+    entry = await service.create(
+        tenant_id=_TENANT_A,
+        created_by_sub="alice",
+        payload=_create_payload(name="sentinel"),
+    )
+    assert entry.identity_sub == "__sensor__"
 
 
 def test_is_unique_violation_classifies_dialects() -> None:
@@ -617,6 +664,33 @@ async def test_rest_create_unknown_op_returns_422(client: TestClient) -> None:
         )
         assert result.status_code == 422, result.text
         assert result.json()["detail"] == "sensor_operation_not_found"
+
+
+@pytest.mark.asyncio
+async def test_rest_create_foreign_identity_sub_returns_422(client: TestClient) -> None:
+    """#2699: identity_sub the caller does not own is refused at the REST boundary."""
+    await _seed_tenant_and_safe_op()
+    key = make_rsa_keypair("kid-identity")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        # _token(...) mints sub="op-admin"; "bob-victim-sub" is neither that
+        # nor the "__sensor__" sentinel, so the create choke point rejects it.
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        result = client.post(
+            "/api/v1/sensors",
+            json={
+                "name": "spoofed",
+                "connector_id": _SAFE_CONNECTOR,
+                "op_id": _SAFE_OP,
+                "assertion": _ASSERTION,
+                "cadence_kind": "interval",
+                "interval_seconds": 60,
+                "identity_sub": "bob-victim-sub",
+            },
+            headers=headers,
+        )
+        assert result.status_code == 422, result.text
+        assert result.json()["detail"] == "sensor_identity_sub_forbidden"
 
 
 @pytest.mark.asyncio

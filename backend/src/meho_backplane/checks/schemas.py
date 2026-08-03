@@ -89,8 +89,15 @@ class SensorCreate(BaseModel):
     ``extra="forbid"`` a body carrying ``status`` is a 422.
 
     *identity_sub* defaults to ``"__sensor__"`` (the sentinel #2505's
-    runner dispatches under). *tenant_id* (optional) lets a platform-admin
-    caller target another tenant; the boundary enforces the RBAC.
+    runner dispatches under). It is the ``sub`` every scheduled dispatch is
+    audit-attributed to (``AuditLog.operator_sub`` / broadcast
+    ``principal_sub``), so :meth:`SensorAdminService.create` accepts only the
+    sentinel or the creating operator's own sub -- any other value is refused
+    with ``sensor_identity_sub_forbidden`` (#2699). The wire model only
+    length-caps it here; the ownership check lives at the service choke point
+    because Pydantic has no access to the authenticated operator.
+    *tenant_id* (optional) lets a platform-admin caller target another tenant;
+    the boundary enforces the RBAC.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

@@ -37,6 +37,9 @@ CLI verbs own the :func:`~meho_backplane.auth.rbac.require_role` gate
 Error contract
 --------------
 
+* :class:`SensorIdentitySubForbiddenError` -- ``identity_sub`` names a
+  principal the creator does not own (neither the ``"__sensor__"`` sentinel
+  nor ``created_by_sub``). Mapped to 422.
 * :class:`SensorOperationNotFoundError` -- ``(connector_id, op_id)`` does
   not resolve to a descriptor visible to *tenant_id*. Mapped to 422.
 * :class:`SensorRequiresSafeOperationError` -- the resolved descriptor's
@@ -65,10 +68,17 @@ from meho_backplane.operations._lookup import lookup_descriptor, parse_connector
 
 __all__ = [
     "SensorAdminService",
+    "SensorIdentitySubForbiddenError",
     "SensorNameConflictError",
     "SensorOperationNotFoundError",
     "SensorRequiresSafeOperationError",
 ]
+
+
+#: The sentinel ``sub`` a Sensor dispatches under when the creator names no
+#: identity of their own. Mirrors :attr:`SensorCreate.identity_sub`'s default
+#: and the ``sensor.identity_sub`` column default in ``db/models.py``.
+SENSOR_IDENTITY_SENTINEL: str = "__sensor__"
 
 
 #: Default per-call paging cap for :meth:`SensorAdminService.list_`.
@@ -152,6 +162,38 @@ class SensorNameConflictError(Exception):
         super().__init__(f"a sensor named {name!r} already exists in this tenant")
 
 
+class SensorIdentitySubForbiddenError(Exception):
+    """Raised when ``identity_sub`` names a principal the creator does not own.
+
+    ``identity_sub`` is the ``sub`` the check runner dispatches every
+    evaluation under (#2505), and it becomes the ``operator_sub`` on the audit
+    row and the ``principal_sub`` on the broadcast event for a high-volume
+    recurring stream. Left as caller-supplied free text (#2699) it let one
+    operator attribute the sensor's dispatches to *any* principal they named,
+    corrupting the audit ledger. The create choke point now accepts only the
+    ``"__sensor__"`` sentinel or the creating operator's own sub
+    (``created_by_sub``); any other value is refused here. The boundary maps it
+    to 422 ``sensor_identity_sub_forbidden`` (the MCP transport surfaces the
+    same code as an invalid-params error).
+
+    This is **attribution-only**, not privilege escalation: ``identity_sub``
+    selects no credentials (the credential cache keys on
+    ``(tenant_id, target_id)`` with no identity component; the runner's
+    downstream service-principal token is a separate axis, #2642), so the guard
+    exists purely to keep the audit ledger honest.
+    """
+
+    #: Machine-readable error code surfaced on every transport.
+    error_code = "sensor_identity_sub_forbidden"
+
+    def __init__(self, identity_sub: str) -> None:
+        self.identity_sub = identity_sub
+        super().__init__(
+            f"identity_sub {identity_sub!r} must be the {SENSOR_IDENTITY_SENTINEL!r} "
+            "sentinel or the creating operator's own sub",
+        )
+
+
 def _is_unique_violation(exc: IntegrityError) -> bool:
     """Return whether *exc* is a unique-constraint violation.
 
@@ -172,6 +214,22 @@ def _is_unique_violation(exc: IntegrityError) -> bool:
     sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
     orig_msg = str(orig or exc)
     return sqlstate == "23505" or "UNIQUE constraint failed" in orig_msg
+
+
+def _require_owned_identity_sub(identity_sub: str, created_by_sub: str) -> None:
+    """Refuse an ``identity_sub`` the creator does not own (#2699).
+
+    ``identity_sub`` is the ``sub`` the runner dispatches every evaluation under
+    and the value audit-stamped as ``AuditLog.operator_sub`` / broadcast
+    ``principal_sub``, so a caller may name only the ``"__sensor__"`` sentinel or
+    their own sub. A pure in-memory ownership check that
+    :meth:`SensorAdminService.create` runs before any DB read; it lives at the
+    service (not the :class:`~meho_backplane.checks.schemas.SensorCreate`
+    Pydantic model, which has no access to the authenticated operator) so REST,
+    MCP, and the Go CLI are all covered in one place.
+    """
+    if identity_sub not in (SENSOR_IDENTITY_SENTINEL, created_by_sub):
+        raise SensorIdentitySubForbiddenError(identity_sub)
 
 
 def _row_to_read(row: Sensor) -> SensorRead:
@@ -214,6 +272,11 @@ class SensorAdminService:
 
         Raises
         ------
+        SensorIdentitySubForbiddenError
+            ``payload.identity_sub`` is neither the ``"__sensor__"`` sentinel
+            nor *created_by_sub* -- the caller tried to attribute the sensor's
+            dispatch stream to a principal they do not own. The boundary maps
+            this to 422 ``sensor_identity_sub_forbidden``.
         SensorOperationNotFoundError
             ``(connector_id, op_id)`` resolves to no enabled descriptor.
             The boundary maps this to 422 ``sensor_operation_not_found``.
@@ -229,6 +292,11 @@ class SensorAdminService:
             tightening migration) propagates rather than being misreported
             as a name conflict -- the boundary maps it to a 500.
         """
+        # Identity-attribution guard (#2699) -- runs first, before any DB read,
+        # because it is a pure in-memory ownership check on the audited dispatch
+        # principal. See :func:`_require_owned_identity_sub`.
+        _require_owned_identity_sub(payload.identity_sub, created_by_sub)
+
         # Safe-only create guard -- resolve the descriptor and refuse a
         # non-safe / unknown op before any DB write.
         product, version, impl_id = parse_connector_id(payload.connector_id)

@@ -66,6 +66,11 @@ from meho_backplane.checks.runner import (
     start_sensor_runner,
     stop_sensor_runner,
 )
+from meho_backplane.checks.schemas import SensorCreate
+from meho_backplane.checks.service import (
+    SensorAdminService,
+    SensorIdentitySubForbiddenError,
+)
 from meho_backplane.connectors._shared import credential_backend
 from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerBackend
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
@@ -73,7 +78,13 @@ from meho_backplane.connectors.base import Connector
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorStatus, Tenant
+from meho_backplane.db.models import (
+    EndpointDescriptor,
+    Sensor,
+    SensorCadenceKind,
+    SensorStatus,
+    Tenant,
+)
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import register_typed_operation, reset_dispatcher_caches
 from meho_backplane.scheduler.cron import next_fire_after
@@ -118,6 +129,33 @@ async def _seed_tenant(tenant_id: uuid.UUID = _TENANT) -> None:
         if await session.get(Tenant, tenant_id) is None:
             session.add(Tenant(id=tenant_id, slug=str(tenant_id)[:8], name="Tenant C"))
             await session.commit()
+
+
+async def _seed_safe_descriptor() -> None:
+    """Insert the global safe ``vmware.vm.list`` descriptor the create guard reads.
+
+    ``SensorAdminService.create`` resolves ``connector_id="vmware-rest-9.0"`` +
+    ``op_id="vmware.vm.list"`` to a ``safety_level='safe'`` descriptor before it
+    writes the row; the runner-file helpers create rows via the repository
+    directly (bypassing the guard), so the descriptor is only needed by the
+    tests that exercise the real service create path (#2699).
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        session.add(
+            EndpointDescriptor(
+                product="vmware",
+                version="9.0",
+                impl_id="vmware-rest",
+                op_id="vmware.vm.list",
+                source_kind="ingested",
+                method="GET",
+                path="/vmware.vm.list",
+                parameter_schema={"type": "object", "properties": {}},
+                safety_level="safe",
+            )
+        )
+        await session.commit()
 
 
 async def _create_interval_sensor(
@@ -543,11 +581,54 @@ async def test_dispatch_runs_as_synthetic_tenant_user_operator(
     assert operator.raw_jwt == ""
 
 
+def _service_create_payload(*, identity_sub: str) -> SensorCreate:
+    """A minimal valid interval ``SensorCreate`` for the real create path."""
+    return SensorCreate.model_validate(
+        {
+            "name": f"sensor-{uuid.uuid4().hex[:8]}",
+            "connector_id": "vmware-rest-9.0",
+            "op_id": "vmware.vm.list",
+            "assertion": _OK_ASSERTION,
+            "cadence_kind": "interval",
+            "interval_seconds": 300,
+            "identity_sub": identity_sub,
+        }
+    )
+
+
 @pytest.mark.asyncio
-async def test_dispatch_uses_custom_identity_sub(
+async def test_service_create_refuses_spoofed_identity_sub_before_dispatch() -> None:
+    """A caller cannot register a sensor under an identity_sub they do not own.
+
+    #2699 inversion of the former ``test_dispatch_uses_custom_identity_sub``,
+    which pinned the spoofable behaviour (any explicit ``identity_sub`` was
+    honoured at dispatch and became the audited ``operator_sub``). The guard
+    now lives at the ``SensorAdminService.create`` choke point: a foreign sub is
+    refused *before* the row is written, so it can never reach the runner. The
+    runner remains faithful to the stored (now-validated) sub.
+    """
+    await _seed_tenant()
+    await _seed_safe_descriptor()
+    service = SensorAdminService()
+    with pytest.raises(SensorIdentitySubForbiddenError):
+        await service.create(
+            tenant_id=_TENANT,
+            created_by_sub="op-owner",
+            payload=_service_create_payload(identity_sub="svc:sensor-x"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_creator_owned_identity_sub(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A sensor created with an explicit identity_sub dispatches under it."""
+    """The creator's own sub is the only non-sentinel value that reaches dispatch.
+
+    The legitimate per-row knob is preserved: a sensor created (via the real
+    service path) with ``identity_sub == created_by_sub`` dispatches under that
+    real principal -- proving the runner still honours a *validated* sub while
+    a spoofed one can never be persisted (#2699).
+    """
     captured: dict[str, Any] = {}
 
     async def _capturing_dispatch(*, operator: Operator, **_kwargs: Any) -> OperationResult:
@@ -556,12 +637,18 @@ async def test_dispatch_uses_custom_identity_sub(
 
     monkeypatch.setattr("meho_backplane.checks.runner.dispatch", _capturing_dispatch)
 
-    sensor_id = await _create_interval_sensor(interval_seconds=300, identity_sub="svc:sensor-x")
-    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+    await _seed_tenant()
+    await _seed_safe_descriptor()
+    entry = await SensorAdminService().create(
+        tenant_id=_TENANT,
+        created_by_sub="op-owner",
+        payload=_service_create_payload(identity_sub="op-owner"),
+    )
+    await _force_due(entry.id, datetime.now(UTC) - timedelta(seconds=1))
 
     await run_one_sensor_tick()
     await _drain_in_flight()
-    assert captured["operator"].sub == "svc:sensor-x"
+    assert captured["operator"].sub == "op-owner"
 
 
 # --------------------------------------------------------------------------- #

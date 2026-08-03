@@ -354,8 +354,9 @@ def test_happy_path_returns_full_federation_response(
     # migration applied at fixture setup, so the probe reports healthy
     # and ``migrated`` is True. ``mcp_session_id_capture`` reports the
     # G8.2 audit-replay capture mode (G0.14-T6 #1147); default mode is
-    # ``"always"`` because ``MCP_REQUIRE_SESSION_ID`` is unset in this
-    # test fixture's env. ``mcp_protocol_version`` reports the server's
+    # ``"when_negotiated"`` because ``MCP_REQUIRE_SESSION_ID`` is unset
+    # in this test fixture's env (#2700 — capture is negotiated, not
+    # guaranteed). ``mcp_protocol_version`` reports the server's
     # build-time pinned MCP revision (G0.14-T13 #1202).
     from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 
@@ -363,7 +364,7 @@ def test_happy_path_returns_full_federation_response(
         "operator": {"sub": "op-100", "name": "Alice", "email": "alice@example.com"},
         "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
         "db": {"migrated": True},
-        "mcp_session_id_capture": "always",
+        "mcp_session_id_capture": "when_negotiated",
         "mcp_protocol_version": PROTOCOL_VERSION,
     }
 
@@ -615,24 +616,25 @@ def test_vault_malformed_payload_returns_200_with_read_failed_detail(
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_session_id_capture_default_always(
+def test_mcp_session_id_capture_default_when_negotiated(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default deploy → ``mcp_session_id_capture == "always"``.
+    """Default deploy → ``mcp_session_id_capture == "when_negotiated"`` (#2700).
 
-    Unset ``MCP_REQUIRE_SESSION_ID`` → the capture-vs-enforcement
-    decouple (G0.14-T6 #1147) reports ``"always"``: any
-    ``Mcp-Session-Id`` header the client sends is captured, and a
-    missing header is accepted (the audit row's ``agent_session_id``
-    lands as NULL). This is the mode G8.2 audit-replay needs to light
-    up on a stock deploy.
+    Unset ``MCP_REQUIRE_SESSION_ID`` → the field reports
+    ``"when_negotiated"``, **not** ``"always"``: a ``Mcp-Session-Id``
+    header is captured only when the client negotiated a session via the
+    handshake, while a header-less call is accepted and its row's
+    ``agent_session_id`` lands as NULL (invisible to session-lineage
+    replay). #2700 reported the old ``"always"`` label as a false
+    guarantee; the honest label is asserted here.
     """
     monkeypatch.delenv("MCP_REQUIRE_SESSION_ID", raising=False)
     get_settings.cache_clear()
 
-    key = _make_rsa_keypair("kid-capture-always")
-    token = _mint_token(key, sub="op-capture-always")
+    key = _make_rsa_keypair("kid-capture-negotiated")
+    token = _mint_token(key, sub="op-capture-negotiated")
     _install_fake_vault(monkeypatch, version=1)
 
     with respx.mock as mock_router:
@@ -643,7 +645,9 @@ def test_mcp_session_id_capture_default_always(
         )
 
     assert response.status_code == 200
-    assert response.json()["mcp_session_id_capture"] == "always"
+    capture = response.json()["mcp_session_id_capture"]
+    assert capture == "when_negotiated"
+    assert capture != "always"
 
 
 def test_mcp_session_id_capture_enforced_when_env_set(

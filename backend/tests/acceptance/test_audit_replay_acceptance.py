@@ -426,7 +426,13 @@ async def test_scenario_1_rest_replay_returns_multi_level_tree(
             )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert set(body.keys()) == {"root", "session_id", "tenant_id", "row_count"}
+    assert set(body.keys()) == {
+        "root",
+        "session_id",
+        "tenant_id",
+        "row_count",
+        "excluded_null_session_count",
+    }
     assert body["session_id"] == str(agent_session_id)
     assert body["tenant_id"] == TENANT_A_ID
     # row_count is the session's anchor-row count (all four share the session).
@@ -1062,7 +1068,13 @@ async def test_e2e_cli_wire_contract_replay_envelope_against_seeded_db(
     body = resp.json()
 
     # Envelope shape the Go ReplayResult struct decodes.
-    assert set(body.keys()) == {"root", "session_id", "tenant_id", "row_count"}
+    assert set(body.keys()) == {
+        "root",
+        "session_id",
+        "tenant_id",
+        "row_count",
+        "excluded_null_session_count",
+    }
     assert isinstance(body["root"], list)
     assert isinstance(body["row_count"], int)
 

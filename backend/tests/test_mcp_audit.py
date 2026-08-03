@@ -952,7 +952,7 @@ async def test_initialize_issued_session_id_round_trips_to_audit_row(
     Before G0.15-T4 #1213, step 2 didn't happen — the client had no
     server-assigned id to echo back, so steps 4 and 5 saw an empty
     inbound header and the column landed NULL despite ``meho_status``
-    advertising ``mcp_session_id_capture: "always"``. This test
+    advertising ``mcp_session_id_capture: "when_negotiated"``. This test
     regression-locks the full chain so the next consumer-side dogfood
     cycle doesn't relive `claude-rdc-hetzner-dc#753` finding 2.
     """

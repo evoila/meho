@@ -201,7 +201,7 @@ def test_initialize_without_protocol_version_returns_invalid_params(
 # because MEHO never issued an id — clients (Claude Code by default,
 # per `claude-rdc-hetzner-dc#753` finding 2) therefore had nothing to
 # echo back, so every MCP audit row landed with ``agent_session_id:
-# null`` regardless of the ``capture_mode: "always"`` advertisement.
+# null`` regardless of the ``capture_mode: "when_negotiated"`` advertisement.
 # ---------------------------------------------------------------------------
 
 
@@ -879,17 +879,23 @@ def _pin_chassis_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 
-def test_mcp_session_id_capture_mode_default_is_always(
+def test_mcp_session_id_capture_mode_default_is_when_negotiated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default env (no ``MCP_REQUIRE_SESSION_ID``) → ``"always"``."""
+    """Default env (no ``MCP_REQUIRE_SESSION_ID``) → ``"when_negotiated"`` (#2700).
+
+    Not ``"always"``: capture is header-driven, and a header-less
+    caller that skipped the handshake writes a NULL-session row. The
+    honest label states that a session id is captured only when the
+    client negotiated one.
+    """
     from meho_backplane.mcp.server import mcp_session_id_capture_mode
 
     _pin_chassis_env(monkeypatch)
     monkeypatch.delenv("MCP_REQUIRE_SESSION_ID", raising=False)
     get_settings.cache_clear()
     try:
-        assert mcp_session_id_capture_mode() == "always"
+        assert mcp_session_id_capture_mode() == "when_negotiated"
     finally:
         get_settings.cache_clear()
 

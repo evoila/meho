@@ -712,46 +712,51 @@ def _validate_protocol_version_header(
 
 
 def mcp_session_id_capture_mode() -> str:
-    """Report whether MCP session-id capture is ``"always"`` or ``"enforced"``.
+    """Report the MCP session-id capture mode: ``"when_negotiated"`` or ``"enforced"``.
 
-    Capture is **unconditional**: whenever a request carries a
-    parseable ``Mcp-Session-Id`` header the server binds it to the
-    structlog contextvar regardless of any env var, so the
-    ``audit_log.agent_session_id`` column populates automatically for
-    every client that sends one (G8.2 audit replay then has rows to
-    walk in the default deploy). The
+    Capture is **header-driven, not guaranteed**: whenever a request
+    carries a parseable ``Mcp-Session-Id`` header the server binds it to
+    the structlog contextvar regardless of any env var, so the
+    ``audit_log.agent_session_id`` column populates for that call. But a
+    client only ever *has* a header to send once it completed the
+    server-driven handshake — per the MCP 2025-06-18 Streamable HTTP
+    transport §"Session Management" rule 2, the client emits
+    ``Mcp-Session-Id`` only after the server assigned one on a
+    successful ``initialize`` (:func:`_issue_mcp_session_id`). A caller
+    that skips ``initialize`` and POSTs ``tools/call`` directly never
+    received an id to echo, so its audit row lands with
+    ``agent_session_id = NULL`` and is invisible to G8.2 session-lineage
+    replay.
+
+    That is why the default label is ``"when_negotiated"`` and **not**
+    ``"always"``. The former was reported (#2700) as actively
+    misleading: it reads as a guarantee that every ``method=MCP`` row
+    carries a session id, when in fact header-less callers are accepted
+    and nulled. ``"when_negotiated"`` states the real contract — a
+    session id is captured when, and only when, the client negotiated
+    one via the handshake. The
     :attr:`~meho_backplane.settings.Settings.mcp_require_session_id`
     knob (``MCP_REQUIRE_SESSION_ID`` env) is **strictly about
-    enforcement** — whether a missing header is a 400 reject. It does
-    not gate capture.
-
-    Crucially, the capture chain is only useful **when clients actually
-    send the header**. Per the MCP 2025-06-18 Streamable HTTP transport
-    §"Session Management" the client only emits ``Mcp-Session-Id`` on
-    subsequent requests when the server assigned one in an
-    ``Mcp-Session-Id`` **response header** on the ``InitializeResult``
-    (spec rule 2: *"If an ``Mcp-Session-Id`` is returned by the server
-    during initialization, clients … **MUST** include it"*). G0.15-T4
-    (#1213) closes the regression where MEHO captured the header end
-    of the chain but never issued one — leaving every Claude Code MCP
-    audit row's ``agent_session_id`` as NULL despite this helper
-    reporting ``"always"``. See :func:`_issue_mcp_session_id` for the
-    issuance side.
+    enforcement** — whether a missing header is a ``-32600`` reject
+    before dispatch — and does not gate capture.
 
     Operators can introspect the current mode via
     :func:`~meho_backplane.api.v1.health.authenticated_health` (Task
     G0.14-T6 #1147) so the deploy-time observability story for the
-    audit-replay feature gate (G8.2) is a single GET away. Task
-    G0.14-T7 #1148's ``/ready`` features block reads this helper too
-    so both surfaces stay consistent.
+    audit-replay feature gate (G8.2) is a single GET away. To
+    distinguish an empty replay forest from an empty history when the
+    mode is ``"when_negotiated"``, the REST replay surface additionally
+    reports ``excluded_null_session_count`` — the tally of ``method=MCP``
+    rows the caller left un-negotiated (#2700).
 
     Returns ``"enforced"`` when ``MCP_REQUIRE_SESSION_ID=true`` (every
     MCP call must carry a header or the server rejects it before
-    dispatch); ``"always"`` otherwise (header is captured when sent,
-    otherwise ``agent_session_id`` lands as NULL — which is fine: the
-    G8.2 replay route filters NULLs out of session walks naturally).
+    dispatch, so capture is effectively guaranteed);
+    ``"when_negotiated"`` otherwise (header is captured when the client
+    negotiated a session, otherwise ``agent_session_id`` lands as NULL
+    and the row is excluded from session walks).
     """
-    return "enforced" if get_settings().mcp_require_session_id else "always"
+    return "enforced" if get_settings().mcp_require_session_id else "when_negotiated"
 
 
 #: Lowercase HTTP header name for the MCP session id, used on both the

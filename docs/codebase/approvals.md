@@ -549,11 +549,16 @@ delete case in `tests/test_connectors_argocd_write_e2e.py`.
 
 Relatedly, `classify_op` gained the ArgoCD write verbs so all seven ops
 classify `op_class: write` rather than four of them falling through to
-`other`: `.set` / `.sync` / `.rollback` joined the global write-suffix set,
-and `argocd.app.refresh` (a reconcile-forcing GET) is pinned by exact op-id
-in `_WRITE_OPS` — deliberately not a global `.refresh` suffix, which would
-also relabel the read-class `topology.refresh` at render time. See
-[`events.md`](events.md).
+`other`. All four verbs that were misclassified — `argocd.app.set` /
+`.sync` / `.rollback` / `.refresh` — are pinned by **exact op-id** in
+`_WRITE_OPS` rather than added to the global write-suffix set. A `.set` /
+`.sync` / `.rollback` suffix would classify the dotted argocd op-ids
+correctly, but `_MEHO_FLAT_WRITE_SUFFIXES` is auto-derived from
+`_WRITE_SUFFIXES` (`.` → `_`), so it would also relabel `meho_`-prefixed
+MCP-tool ops such as `meho_broadcast_overrides_set` from `other` to
+`write`; a `.refresh` suffix would likewise relabel the read-class
+`topology.refresh` at render time. Exact-pinning the dotted argocd op-ids
+avoids both collisions. See [`events.md`](events.md).
 
 ## Permission preflight hook (#1504)
 

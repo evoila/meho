@@ -38,9 +38,10 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
   `next_fire_at`) and `record_sensor_result` (the one named projection
   write path).
 - `meho_backplane.checks.service.SensorAdminService` — tenant-scoped CRUD +
-  the three guard exceptions (`SensorOperationNotFoundError`,
-  `SensorRequiresSafeOperationError`, `SensorNameConflictError`), each
-  carrying an `error_code` the transports surface verbatim.
+  the four guard exceptions (`SensorIdentitySubForbiddenError`,
+  `SensorOperationNotFoundError`, `SensorRequiresSafeOperationError`,
+  `SensorNameConflictError`), each carrying an `error_code` the transports
+  surface verbatim.
 
 ## Control flow
 
@@ -49,11 +50,21 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
 1. The wire schema validates the cadence union (`interval_seconds`
    5..86400 XOR `cron_expr` + timezone), parses the `assertion` into
    `AssertionSpec`, and caps its serialized size (≤ 8 KiB).
-2. The service parses `connector_id` into `(product, version, impl_id)`
+2. **Identity-attribution guard (#2699)**: `identity_sub` is the `sub` the
+   runner dispatches — and audit-attributes (`AuditLog.operator_sub` /
+   broadcast `principal_sub`) — every evaluation under. The service accepts
+   only the `"__sensor__"` sentinel or the creating operator's own
+   `created_by_sub`; any other value ⇒ 422 `sensor_identity_sub_forbidden`.
+   The check runs first (a pure in-memory ownership check, no DB read) and at
+   the **service** choke point — `SensorCreate` (Pydantic) cannot see the
+   authenticated operator, so one place covers REST + MCP + CLI. This is
+   attribution-only: `identity_sub` selects no credentials (the runner's
+   downstream principal token is a separate axis, #2642).
+3. The service parses `connector_id` into `(product, version, impl_id)`
    (`operations/_lookup.parse_connector_id`) and resolves the
    `EndpointDescriptor` via `lookup_descriptor` (tenant-scoped, then
    global). No descriptor ⇒ 422 `sensor_operation_not_found`.
-3. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
+4. **Safe-only guard**: `descriptor.safety_level != "safe"` ⇒ 422
    `sensor_requires_safe_operation`. This is a create-time-only guard:
    the dispatch-time policy gate (`operations/dispatcher.dispatch`)
    still runs on every evaluation, but it does **not** re-validate
@@ -68,7 +79,7 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
    `ingest_safety_class_changed` warning per change, so the operator
    knows which sensors to re-audit (see
    `docs/codebase/spec-ingestion.md`, `IngestionResult`).
-4. `create_sensor` inserts the row, materialising `next_fire_at`
+5. `create_sensor` inserts the row, materialising `next_fire_at`
    (`now + interval_seconds` for interval; `next_fire_after(cron_expr, …)`
    for cron) so #2505's claim query (`status='active' AND next_fire_at <= now`)
    is uniform across kinds. A duplicate `(tenant_id, name)` ⇒ 409
@@ -116,6 +127,14 @@ runner parking.
 - The safe-only guard's descriptor read and the insert are in separate
   sessions (a TOCTOU window); acceptable because the dispatch-time policy
   gate is the real boundary.
+- **The `identity_sub` ownership guard (#2699) is create-time only.** There
+  is no update route, so it covers every new row, but any `sensor` row
+  persisted *before* the guard landed with a spoofed `identity_sub` keeps
+  dispatching (and audit-attributing) under it — no data migration
+  normalises historical rows. Deployments that ran the pre-guard build
+  should re-audit existing sensors' `identity_sub`. Dropping the per-row
+  knob entirely (always dispatch as `__sensor__`) is the stronger fix but a
+  breaking wire+schema change, deferred as a human decision.
 - OpenAPI note: `AssertionSpec`'s `Field(gt=0)` bounds (e.g. the freshness
   comparator) are the first numeric `exclusiveMinimum` exposed through the
   API; `cli/api/snapshot-openapi.py` downgrades them to the OpenAPI 3.0

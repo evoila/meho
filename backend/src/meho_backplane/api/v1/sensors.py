@@ -69,6 +69,7 @@ from meho_backplane.checks.schemas import (
 )
 from meho_backplane.checks.service import (
     SensorAdminService,
+    SensorIdentitySubForbiddenError,
     SensorNameConflictError,
     SensorOperationNotFoundError,
     SensorRequiresSafeOperationError,
@@ -175,6 +176,14 @@ async def create_sensor(
             created_by_sub=operator.sub,
             payload=body,
         )
+    except SensorIdentitySubForbiddenError as exc:
+        # 422 -- identity_sub named a principal the creator does not own.
+        # identity_sub is the audited dispatch principal, so only the
+        # __sensor__ sentinel or the creator's own sub is accepted (#2699).
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.error_code,
+        ) from exc
     except SensorOperationNotFoundError as exc:
         # 422 -- (connector_id, op_id) resolves to no enabled descriptor.
         raise HTTPException(

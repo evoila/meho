@@ -47,6 +47,7 @@ from meho_backplane.auth.rbac import authorize_tenant_scope
 from meho_backplane.checks.schemas import SensorCreate, SensorRead
 from meho_backplane.checks.service import (
     SensorAdminService,
+    SensorIdentitySubForbiddenError,
     SensorNameConflictError,
     SensorOperationNotFoundError,
     SensorRequiresSafeOperationError,
@@ -210,6 +211,8 @@ async def _create_handler(
             created_by_sub=operator.sub,
             payload=payload,
         )
+    except SensorIdentitySubForbiddenError as exc:
+        raise McpInvalidParamsError(exc.error_code) from exc
     except SensorOperationNotFoundError as exc:
         raise McpInvalidParamsError(exc.error_code) from exc
     except SensorRequiresSafeOperationError as exc:
@@ -239,7 +242,10 @@ register_mcp_tool(
             "Optional: target (dispatch target object), params (op params "
             "object), severity ('degraded'|'critical', default 'critical'), "
             "for_seconds (hold-time hysteresis, default 0), identity_sub "
-            "(default '__sensor__'), tenant_id (platform-admin-only "
+            "(the sub the runner dispatches -- and audit-attributes -- each "
+            "evaluation under; only the '__sensor__' sentinel (default) or "
+            "your own sub is accepted, any other value is refused with "
+            "'sensor_identity_sub_forbidden'), tenant_id (platform-admin-only "
             "cross-tenant target; a non-platform tenant-admin naming "
             "another tenant is refused with "
             "'cross_tenant_requires_platform_admin'). A duplicate name -> "
@@ -303,7 +309,13 @@ register_mcp_tool(
                 "identity_sub": {
                     "type": "string",
                     "maxLength": 256,
-                    "description": "Identity sub the runner dispatches under (default __sensor__).",
+                    "description": (
+                        "Identity sub the runner dispatches under and "
+                        "audit-attributes each evaluation to (default "
+                        "__sensor__). Only the __sensor__ sentinel or your own "
+                        "sub is accepted; any other value is refused with "
+                        "sensor_identity_sub_forbidden (#2699)."
+                    ),
                 },
                 "tenant_id": {
                     "type": ["string", "null"],

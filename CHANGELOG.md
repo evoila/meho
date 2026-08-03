@@ -90,7 +90,9 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
-### Changed
+## [0.27.0] - 2026-08-03
+
+### Breaking changes
 
 - **BREAKING: all 62 dotted `meho.*` MCP tool names renamed to
   underscore-only names** (`meho.broadcast.watch` →
@@ -192,6 +194,20 @@ connector-related release-notes line.
   | `meho.topology.create_node` | `meho_topology_create_node` |
   | `meho.topology.delete_node` | `meho_topology_delete_node` |
   | `meho.topology.unannotate` | `meho_topology_unannotate` |
+
+### Changed
+
+- MCP client-setup recipe corrected to the internal-only deployment
+  model: the backplane is never publicly exposed, so the cloud-brokered
+  claude.ai / Claude Desktop remote Custom Connector path (which
+  requires public reachability for the RFC 9728 metadata fetch) is
+  documented as not applicable and replaced by the local `mcp-remote`
+  stdio-shim setup for Claude Desktop; the Step-5 troubleshooting
+  guidance to "expose the backplane via a public ingress or a tunnel"
+  is reversed to keep-it-internal (#2744).
+- Docs-site Project section de-stubbed — feature-maturity model,
+  versioning policy, security posture, and roadmap pages are now real
+  content instead of placeholders (#2747).
 
 ## [0.26.0] - 2026-08-02
 

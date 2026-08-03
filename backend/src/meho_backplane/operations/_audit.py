@@ -377,6 +377,7 @@ def _build_audit_payload(
     *,
     redaction_policy_id: str | None = None,
     handle_metadata: dict[str, Any] | None = None,
+    error_extras: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compose the ``audit_log.payload`` dict for the dispatcher row.
 
@@ -416,6 +417,21 @@ def _build_audit_payload(
     verbatim under the audit payload so a consumer reading one row
     attributes *"the agent saw N of M rows materialized as handle
     <uuid>"* without joining the reducer's in-memory state.
+
+    *error_extras* (#2680) is the structured error envelope the dispatcher
+    built for an error-path row -- the same ``OperationResult.extras`` the
+    caller receives (``error_code``, plus ``http_status`` +
+    ``upstream_message`` when the failure was an upstream HTTP error, and
+    the per-builder diagnostic fields). It lands verbatim under a nested
+    ``payload["error"]`` so a failed dispatch's durable audit row records
+    *why* it failed rather than only ``result_status='error'``, closing
+    the forensics gap where the approver's ephemeral surface saw the real
+    error but the ledger did not. ``None`` (and ``{}``) on every non-error
+    write, so success / denied / pending rows are unchanged. The envelope
+    is already Tier-1-redacted + capped by the ``operations/_errors.py``
+    builders, so persisting it to the durable ledger adds no leak surface;
+    it is threaded to the audit row **only**, never onto the params-only
+    broadcast frame (:func:`publish_broadcast`).
     """
     payload: dict[str, Any] = {
         "op_id": descriptor.op_id,
@@ -445,6 +461,12 @@ def _build_audit_payload(
     # default keys are documented + load-bearing for audit consumers,
     # so this layering is the explicit knob, not an accidental coupling.
     payload.update(_resolve_audit_extras_from_contextvars())
+    # #2680: the structured error envelope is authoritative for an error
+    # row, so it lands last -- after the handler-extras merge -- under a
+    # dedicated ``error`` key that cannot collide with the structural /
+    # lineage keys above. Absent (or empty) for every non-error write.
+    if error_extras:
+        payload["error"] = dict(error_extras)
     return payload
 
 
@@ -518,6 +540,7 @@ async def write_audit_row(
     redaction_manifest: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
     handle_metadata: dict[str, Any] | None = None,
+    error_extras: dict[str, Any] | None = None,
 ) -> None:
     """Insert one ``audit_log`` row for this dispatch.
 
@@ -535,12 +558,17 @@ async def write_audit_row(
     manifest, and the resolved policy id. Error-path rows (handler
     raised before producing a response) leave them ``None``; the
     columns are nullable per migration ``0030``.
+
+    *error_extras* (#2680) is the error row's structured envelope,
+    forwarded to :func:`_build_audit_payload` where it lands under
+    ``payload["error"]``. ``None`` on every non-error write.
     """
     sessionmaker = get_sessionmaker()
     payload = _build_audit_payload(
         descriptor,
         params_hash,
         result_status,
+        error_extras=error_extras,
         redaction_policy_id=redaction_policy_id,
         handle_metadata=handle_metadata,
     )
@@ -681,6 +709,7 @@ async def audit_and_broadcast_safe(
     redaction_manifest: list[dict[str, Any]] | None = None,
     redaction_policy_id: str | None = None,
     handle_metadata: dict[str, Any] | None = None,
+    error_extras: dict[str, Any] | None = None,
 ) -> None:
     """Write the audit row + publish broadcast; swallow internal failures.
 
@@ -708,6 +737,13 @@ async def audit_and_broadcast_safe(
     broadcast surface ships params only -- the response goes nowhere
     near the broadcast subscribers, who already see redacted outcomes
     via the broadcast detail policy (G6.3).
+
+    *error_extras* (#2680) is the built error result's structured
+    envelope. It is forwarded to :func:`write_audit_row` (landing under
+    ``payload["error"]`` on the durable row) and deliberately **not**
+    passed to :func:`publish_broadcast`: the broadcast frame stays
+    params-only, so the error detail rides the audit ledger alone.
+    ``None`` on every non-error write.
     """
     try:
         await write_audit_row(
@@ -722,6 +758,7 @@ async def audit_and_broadcast_safe(
             redaction_manifest=redaction_manifest,
             redaction_policy_id=redaction_policy_id,
             handle_metadata=handle_metadata,
+            error_extras=error_extras,
         )
     except Exception:
         _log.exception(

@@ -101,6 +101,23 @@ connector-related release-notes line.
   returns `excluded_null_session_count`, the tenant-wide tally of
   un-negotiated `method=MCP` rows, so an empty replay forest is
   distinguishable from an empty history (#2700).
+- **A failed dispatch now surfaces the upstream vendor detail to both the
+  caller and the durable audit row** (#2680). Two connector-agnostic gaps
+  are closed. (1) A non-4xx-classified upstream HTTP status (404 / 429 /
+  any 5xx) reaching the generic `connector_error` builder now carries
+  `http_status` + the extracted `upstream_message` in `extras` — before
+  this, `str(HTTPStatusError)` (the status line + URL) was the only
+  free-text, so a 5xx discarded the vendor body (e.g. an ArgoCD
+  `"application dry-run failed: <detail>"` on an approved
+  `argocd.app.sync` dry-run). The `error_code` stays `connector_error`
+  and the summary is unchanged; the detail is additive. (2) The DISPATCH
+  `audit_log.payload` for an error row now persists the **same** structured
+  envelope the caller receives (under a nested `error` key), not merely
+  `result_status='error'` — the dispatcher builds the structured result
+  first and threads its already-redacted extras through
+  `audit_and_broadcast_safe` → `write_audit_row` → `_build_audit_payload`,
+  applied uniformly to every error arm. The params-only broadcast frame is
+  unchanged; the never-raises and audit-fail-open contracts are preserved.
 
 ## [0.27.0] - 2026-08-03
 

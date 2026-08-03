@@ -683,17 +683,16 @@ async def _execute_and_audit(
         op_id=op_id,
     )
     if isinstance(redaction, OperationResult):
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            redaction,
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=_elapsed_ms(started),
         )
-        return redaction
 
     return await _reduce_and_audit_success(
         op_id=op_id,
@@ -877,17 +876,16 @@ async def _run_branch_with_error_handling(
         )
     except (ImportError, TypeError) as exc:
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
         )
-        return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
     except NotImplementedError as nie_exc:
         # G0.23-T1 (#1627): a connector raising NotImplementedError is a
         # deliberate "I don't do this" -- VmwareRestConnector.auth_headers
@@ -936,25 +934,24 @@ async def _run_branch_with_error_handling(
                 exclude_impl_id=connector_instance.impl_id,
             )
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_connector_unsupported(
+                op_id,
+                nie_exc,
+                cause=cause,
+                connector_class=(
+                    type(connector_instance).__name__ if connector_instance is not None else None
+                ),
+                duration_ms=duration_ms,
+                sibling_impl_id=sibling_impl_id,
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
-        )
-        return result_connector_unsupported(
-            op_id,
-            nie_exc,
-            cause=cause,
-            connector_class=(
-                type(connector_instance).__name__ if connector_instance is not None else None
-            ),
-            duration_ms=duration_ms,
-            sibling_impl_id=sibling_impl_id,
         )
     except httpx.HTTPStatusError as http_exc:
         return await _handle_http_status_error(
@@ -999,22 +996,24 @@ async def _run_branch_with_error_handling(
         # fall through to ``result_connector_error`` -- never mislabelled
         # as a TLS fault.
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
+            "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
+        )
+        conn_result = (
+            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
+            if is_tls_verify_failure
+            else result_connector_error(op_id, conn_exc, duration_ms)
+        )
+        return await _audit_error_and_return(
+            conn_result,
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
         )
-        is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
-            "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
-        )
-        if is_tls_verify_failure:
-            return result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
-        return result_connector_error(op_id, conn_exc, duration_ms)
     except hvac.exceptions.Forbidden as vault_exc:
         # #2091: Vault answering "permission denied" during dispatch is a
         # classifiable authorization failure, not an unforeseen crash. The
@@ -1036,16 +1035,6 @@ async def _run_branch_with_error_handling(
         # this arm — ``vault_client_for_operator`` wraps them into the
         # ``VaultClientError`` family before the handler sees them.
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
         # #2331: a typed KV-v2 *write* (``vault.kv.put`` / ``patch`` /
         # ``delete``) that Vault denies is the post-approval write-identity
         # gap, not a credential-resolution read. The read-oriented
@@ -1071,33 +1060,44 @@ async def _run_branch_with_error_handling(
                 # presence, but stay defensive inside the never-raises arm) —
                 # omit the path rather than fault.
                 write_path = None
-            return result_connector_vault_write_forbidden(
+            vault_result = result_connector_vault_write_forbidden(
                 op_id,
                 vault_exc,
                 duration_ms,
                 write_path=write_path,
                 identity_hint=operator.sub,
             )
-        expected_secret_ref: str | None = None
-        target_name = getattr(target, "name", None)
-        if target_name:
-            # Call-time import on purpose (the ingest-arm precedent above):
-            # ``tenant_paths`` drags the vault ops module in via its
-            # imports, and the dispatcher must stay import-light.
-            from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+        else:
+            expected_secret_ref: str | None = None
+            target_name = getattr(target, "name", None)
+            if target_name:
+                # Call-time import on purpose (the ingest-arm precedent above):
+                # ``tenant_paths`` drags the vault ops module in via its
+                # imports, and the dispatcher must stay import-light.
+                from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 
-            try:
-                expected_secret_ref = tenant_secret_ref(operator.tenant_id, target_name)
-            except ValueError:
-                # Whitespace/slash-only target identity — no derivable
-                # leaf; the builder falls back to the convention template.
-                expected_secret_ref = None
-        return result_connector_vault_forbidden(
-            op_id,
-            vault_exc,
-            target,
-            duration_ms,
-            expected_secret_ref=expected_secret_ref,
+                try:
+                    expected_secret_ref = tenant_secret_ref(operator.tenant_id, target_name)
+                except ValueError:
+                    # Whitespace/slash-only target identity — no derivable
+                    # leaf; the builder falls back to the convention template.
+                    expected_secret_ref = None
+            vault_result = result_connector_vault_forbidden(
+                op_id,
+                vault_exc,
+                target,
+                duration_ms,
+                expected_secret_ref=expected_secret_ref,
+            )
+        return await _audit_error_and_return(
+            vault_result,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
         )
     except ConnectorAuthError as auth_exc:
         # #2329: a session *establish* rejected the credential (401/403 at the
@@ -1118,32 +1118,48 @@ async def _run_branch_with_error_handling(
         # without a backplane restart (duck-typed; no-op for connectors with no
         # credential cache).
         await _evict_connector_credentials(connector_instance, target)
-        duration_ms = await _audit_error(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            started=started,
-        )
-        return result_connector_auth_failed(op_id, auth_exc, target, duration_ms)
-    except Exception as exc:
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_connector_auth_failed(op_id, auth_exc, target, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
         )
-        return result_connector_error(op_id, exc, duration_ms)
+    except Exception as exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_error(op_id, exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
 
-async def _audit_error(
+def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
+    """The structured error envelope to persist on the DISPATCH audit row (#2680).
+
+    A plain-dict copy of the built error result's ``extras`` -- the same
+    envelope the caller receives (``error_code``, plus ``http_status`` +
+    ``upstream_message`` on an upstream HTTP error, and every per-builder
+    diagnostic field). ``operations/_errors.py`` already Tier-1-redacts +
+    caps every free-text leaf, so the copy is durable-ledger-safe as is.
+    ``None`` when the result carries no extras (nothing to persist), which
+    keeps ``payload["error"]`` absent rather than writing an empty dict.
+    """
+    extras = result.extras
+    return dict(extras) if extras else None
+
+
+async def _audit_error_and_return(
+    result: OperationResult,
     *,
     audit_id: uuid.UUID,
     operator: Operator,
@@ -1151,15 +1167,32 @@ async def _audit_error(
     target: Any,
     params: dict[str, Any],
     params_hash: str,
-    started: float,
-) -> float:
-    """Write the dispatch's ``result_status='error'`` audit row + broadcast.
+    duration_ms: float,
+    raw_payload: Any | None = None,
+    redaction_manifest: list[dict[str, Any]] | None = None,
+    redaction_policy_id: str | None = None,
+) -> OperationResult:
+    """Write the ``result_status='error'`` audit row for a built result, then return it.
 
-    Returns the elapsed-milliseconds value the calling error arm threads into
-    the structured :class:`OperationResult` builder, so the audited duration
-    and the returned duration are the same measurement.
+    #2680: inverts the legacy audit-then-build ordering. Every error arm now
+    builds its structured :class:`OperationResult` **first** so the envelope
+    is in scope for the audit write; this helper threads that envelope
+    (:func:`_error_extras_for_audit`) into ``audit_and_broadcast_safe`` ->
+    ``write_audit_row`` -> ``_build_audit_payload`` so the durable DISPATCH
+    row records the same ``error_code`` / ``http_status`` / ``upstream_message``
+    detail the caller received, not merely ``result_status='error'``. The
+    audited duration equals the returned result's duration because the arm
+    passes the one ``duration_ms`` it built the result with. The broadcast
+    frame is untouched (params-only) -- the envelope rides the audit row alone.
+
+    *raw_payload* / *redaction_manifest* / *redaction_policy_id* carry the
+    connector-boundary redaction artefacts through for the one error arm that
+    has them (the post-redaction reducer failure in :func:`_reduce_or_error`);
+    ``None`` for the pre-response error arms. Fail-open on the audit write is
+    preserved: ``audit_and_broadcast_safe`` swallows its own internal failures,
+    so the never-raises contract holds and the built ``result`` is always
+    returned.
     """
-    duration_ms = _elapsed_ms(started)
     await audit_and_broadcast_safe(
         audit_id=audit_id,
         operator=operator,
@@ -1169,8 +1202,12 @@ async def _audit_error(
         params_hash=params_hash,
         result_status="error",
         duration_ms=duration_ms,
+        raw_payload=raw_payload,
+        redaction_manifest=redaction_manifest,
+        redaction_policy_id=redaction_policy_id,
+        error_extras=_error_extras_for_audit(result),
     )
-    return duration_ms
+    return result
 
 
 async def _evict_connector_credentials(connector_instance: Connector | None, target: Any) -> None:
@@ -1325,20 +1362,21 @@ async def _handle_http_status_error(
         )
         return recovered
 
-    duration_ms = await _audit_error(
+    duration_ms = _elapsed_ms(started)
+    return await _audit_error_and_return(
+        _classify_http_status_error(
+            http_exc=http_exc,
+            op_id=op_id,
+            connector_instance=connector_instance,
+            target=target,
+            duration_ms=duration_ms,
+        ),
         audit_id=audit_id,
         operator=operator,
         descriptor=descriptor,
         target=target,
         params=params,
         params_hash=params_hash,
-        started=started,
-    )
-    return _classify_http_status_error(
-        http_exc=http_exc,
-        op_id=op_id,
-        connector_instance=connector_instance,
-        target=target,
         duration_ms=duration_ms,
     )
 
@@ -1387,25 +1425,26 @@ async def _retry_after_session_invalidation(
             audit_id=audit_id,
         )
     except httpx.HTTPStatusError as retry_exc:
-        duration_ms = await _audit_error(
+        duration_ms = _elapsed_ms(started)
+        # #2400: the re-login SUCCEEDED (invalidate_session ran, the re-dispatch
+        # re-established a fresh session) yet the fresh session was still
+        # rejected -- ``reestablished`` stamps ``session_dispatch_<s>_after_relogin``.
+        return await _audit_error_and_return(
+            _classify_http_status_error(
+                http_exc=retry_exc,
+                op_id=op_id,
+                connector_instance=connector_instance,
+                target=target,
+                duration_ms=duration_ms,
+                relogin="reestablished",
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            started=started,
-        )
-        # #2400: the re-login SUCCEEDED (invalidate_session ran, the re-dispatch
-        # re-established a fresh session) yet the fresh session was still
-        # rejected -- ``reestablished`` stamps ``session_dispatch_<s>_after_relogin``.
-        return _classify_http_status_error(
-            http_exc=retry_exc,
-            op_id=op_id,
-            connector_instance=connector_instance,
-            target=target,
             duration_ms=duration_ms,
-            relogin="reestablished",
         )
     except ConnectorAuthError as retry_exc:
         # #2329 convergence with #2067: the one-shot re-dispatch forces a
@@ -1421,32 +1460,34 @@ async def _retry_after_session_invalidation(
         # the session token ``invalidate_session`` already dropped) so the next
         # dispatch after a restage re-reads the store without a restart.
         await _evict_connector_credentials(connector_instance, target)
-        duration_ms = await _audit_error(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            started=started,
-        )
+        duration_ms = _elapsed_ms(started)
         # #2400: the forced re-login POST was itself rejected -- an establish
         # failure (``session_establish_<s>``), narrowed by ``attempted_failed``
         # to the "re-login after a mid-session expiry" sub-case in the summary.
-        return result_connector_auth_failed(
-            op_id, retry_exc, target, duration_ms, relogin="attempted_failed"
-        )
-    except Exception as retry_exc:
-        duration_ms = await _audit_error(
+        return await _audit_error_and_return(
+            result_connector_auth_failed(
+                op_id, retry_exc, target, duration_ms, relogin="attempted_failed"
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            started=started,
+            duration_ms=duration_ms,
         )
-        return result_connector_error(op_id, retry_exc, duration_ms)
+    except Exception as retry_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_error(op_id, retry_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
 
 def _apply_redaction_middleware(
@@ -1648,20 +1689,19 @@ async def _reduce_or_error(
         )
     except Exception as exc:
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_connector_error(op_id, exc, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
             raw_payload=raw_payload_for_audit,
             redaction_manifest=redaction_manifest_for_audit,
             redaction_policy_id=redaction_policy_id,
         )
-        return result_connector_error(op_id, exc, duration_ms)
 
 
 def _identifier_default_effect(

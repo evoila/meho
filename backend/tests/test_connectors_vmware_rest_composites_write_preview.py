@@ -268,6 +268,20 @@ async def _park(
     return result, row
 
 
+def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, Any]:
+    """Assert the uniform op-identity envelope fields (#2681), return the rest.
+
+    ``op_id`` / ``connector_id`` / ``target_id`` are stamped onto every parked
+    envelope since #2681 (one schema per connector regardless of the per-op
+    preview outcome), so the content+metadata equality checks below strip them
+    — ``target_id`` is a runtime UUID — after verifying they are present.
+    """
+    assert effect["op_id"] == op_id
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert isinstance(effect["target_id"], str)
+    return {k: v for k, v in effect.items() if k not in {"op_id", "connector_id", "target_id"}}
+
+
 # ===========================================================================
 # Wiring — all 9 write composites register a builder (criterion 4)
 # ===========================================================================
@@ -450,7 +464,7 @@ async def test_power_bulk_park_carries_action_filter_and_resolved_set(
         {"action": "stop", "filter": {"names": ["web-*"]}},
     )
 
-    assert row.proposed_effect == {
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.vm.power.bulk") == {
         "op_class": "other",
         "preview": {
             "action": "stop",
@@ -561,7 +575,7 @@ async def test_host_evacuate_park_resolves_vm_set_on_host(
 
     _, row = await _park("vmware.composite.host.evacuate", {"host": "host-1"})
 
-    assert row.proposed_effect == {
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.host.evacuate") == {
         "op_class": "other",
         "preview": {
             "host": "host-1",
@@ -587,7 +601,9 @@ async def test_host_detach_from_vds_park_resolves_vm_set_on_host(
         {"host": "host-1", "dvs": "dvs-1", "fallback_network": "net-fallback"},
     )
 
-    assert row.proposed_effect == {
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.host.detach_from_vds"
+    ) == {
         "op_class": "other",
         "preview": {
             "host": "host-1",
@@ -615,7 +631,7 @@ async def test_cluster_patch_park_resolves_host_set(
 
     _, row = await _park("vmware.composite.cluster.patch", {"cluster": "domain-c1"})
 
-    assert row.proposed_effect == {
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.cluster.patch") == {
         "op_class": "write",
         "preview": {
             "cluster": "domain-c1",
@@ -649,7 +665,7 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
         {"folder_name": "prod", "name": "vm-new", "guest_os": "UBUNTU_64"},
     )
 
-    assert row.proposed_effect == {
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.vm.create") == {
         "op_class": "write",
         "preview": {
             "name": "vm-new",

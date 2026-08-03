@@ -1711,25 +1711,33 @@ async def _build_proposed_effect(
       for credential-class ops and is merged under the
       ``"permission_preflight"`` key.
 
-    Always returns a dict on the normal path: the merged envelope when a
-    hook produced one, otherwise the identifier-only base shaped exactly
-    like the :func:`~meho_backplane.operations.approval_queue.create_pending_request`
-    default. Onto that base it stamps the catalog
+    Always returns a dict on the normal path with **one uniform envelope
+    schema per connector** (#2681): the op-identity fields (``op_id`` /
+    ``connector_id`` / ``target_id``) and ``op_class`` are stamped onto
+    whatever base the preview hook produced — a computed
+    ``{op_class, preview}``, the generic ``{op_class, params_echo}``, the
+    ``preview_unavailable`` fail-soft marker, or the empty base when the op
+    declined — so the field-set no longer swings with the per-op preview
+    outcome (previously the identifier fields rode only the declines/raises
+    paths, e.g. an ``app.delete`` parked against a nonexistent app carried
+    them while one against a live app did not). The bespoke ``preview`` XOR
+    generic ``params_echo`` content key legitimately still varies and is not
+    unified. Onto that base it also stamps the catalog
     ``descriptor.safety_level`` (#1855) so *every* parked op carries its
     severity (``safe`` / ``caution`` / ``dangerous``) — a ``dangerous``
     op and a ``caution`` op are distinguishable on the reviewer-facing
     row even when neither registers a preview builder. The severity is
     read straight off the descriptor, never recomputed.
 
-    When only the preflight fired, its result is merged onto the
-    identifier base so the reviewer still sees the denial banner. A
+    When only the preflight fired, its result rides alongside the uniform
+    identity fields so the reviewer still sees the denial banner. A
     *failed* preview (the hook's ``preview_unavailable`` marker, #1628)
-    is likewise merged onto the identifier base — the reviewer keeps the
-    op identity and additionally sees that the blast radius could not be
-    resolved, instead of a bare identifier default indistinguishable
-    from a small action. The ``op_class`` / ``preview`` / fail-soft-marker
-    envelope built by :func:`build_proposed_effect` itself is unchanged;
-    ``safety_level`` is layered on here.
+    keeps the op identity and additionally surfaces that the blast radius
+    could not be resolved, instead of a bare identifier default
+    indistinguishable from a small action. The ``op_class`` / ``preview`` /
+    fail-soft-marker envelope built by :func:`build_proposed_effect` itself
+    is unchanged; the identity fields and ``safety_level`` are layered on
+    here (``setdefault``, so a value the hook already supplied always wins).
 
     Returns ``None`` only when connector resolution / hook execution
     raises: those faults degrade to "no preview" (the caller stores its
@@ -1750,26 +1758,14 @@ async def _build_proposed_effect(
             connector_id=connector_id,
         )
         preview = await build_proposed_effect(ctx)
-        if preview is not None and preview.get("preview_unavailable") is True:
-            # The registered builder *failed* (vs. declined) — keep the
-            # identifier fields the default would have carried and ride
-            # the marker + reason alongside them (#1628).
-            marked = _identifier_default_effect(
-                op_id=op_id, connector_id=connector_id, target=target
-            )
-            marked.update(preview)
-            preview = marked
         preflight = await build_permission_preflight(ctx)
-        # The preflight fired; attach it to whatever base the preview
-        # produced. When there is no preview (the common case: a
-        # suppressed credential-class write, or an op with no registered
-        # builder), use the same identifier-only shape
-        # ``create_pending_request`` would default to so the row still
-        # names the op alongside the severity / denial banner.
-        if preview is not None:
-            base = dict(preview)
-        else:
-            base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
+        # Whatever the preview hook produced becomes the starting base: a
+        # computed ``{op_class, preview}``, the generic ``{op_class,
+        # params_echo}`` default, a ``{op_class, preview_unavailable,
+        # preview_error}`` fail-soft marker, or ``None`` when the op
+        # declined / is a suppressed credential-class write. The uniform
+        # op-identity + metadata fields are stamped on below.
+        base = dict(preview) if preview is not None else {}
         if preflight is not None:
             base["permission_preflight"] = preflight
             # #2331: promote a will-be-denied preflight to a named,
@@ -1788,13 +1784,31 @@ async def _build_proposed_effect(
         # sparse — a deliberately-redacted credential write vs a connector
         # that never populated one — so the approval surface can style the
         # blind case as elevated-risk. Read from the value
-        # :func:`build_proposed_effect` produced (``preview``), so the
-        # identifier-only default that ``base`` may hold is classified
-        # correctly rather than mislabelled populated.
+        # :func:`build_proposed_effect` produced (``preview``), BEFORE the
+        # identifier fields are merged below, so an identifier-only
+        # (declined) envelope is classified not-populated rather than
+        # mislabelled by the merged ``op_id``.
         preview_populated, preview_reason = describe_preview_provenance(preview, op_id=op_id)
         base["preview_populated"] = preview_populated
         if preview_reason is not None:
             base["preview_reason"] = preview_reason
+        # Uniform op-identity + metadata envelope (#2681). The identifier
+        # fields (``op_id`` / ``connector_id`` / ``target_id``) and
+        # ``op_class`` are stamped onto EVERY parked envelope — builder
+        # success, generic params-echo, decline-to-identifier, or fail-soft
+        # marker — so a consumer reads one schema per connector regardless of
+        # the per-op preview outcome (runtime state, e.g. whether a delete's
+        # target app exists, no longer swings the field-set). Before this,
+        # the identifier fields leaked onto only the declines/raises paths.
+        # ``setdefault`` never overrides a value the preview hook already
+        # supplied (its own ``op_class``, or an identifier a builder chose to
+        # echo). The bespoke/generic content key (``preview`` XOR
+        # ``params_echo``) legitimately still varies and is NOT unified.
+        for _key, _value in _identifier_default_effect(
+            op_id=op_id, connector_id=connector_id, target=target
+        ).items():
+            base.setdefault(_key, _value)
+        base.setdefault("op_class", classify_op(op_id))
         # Promote the catalog severity onto every parked op's envelope
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``

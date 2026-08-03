@@ -19,7 +19,9 @@ This module wires the registry primitives in
   tool list per MCP 2025-06-18 §Listing Tools.
 * ``tools/call`` — :func:`handle_tools_call`. Validates arguments
   against the tool's ``inputSchema`` (jsonschema), dispatches to the
-  registered handler, packs the result into the MCP ``content`` array.
+  registered handler, packs the result into the MCP ``content`` array
+  (plus ``structuredContent`` for tools declaring an ``outputSchema``,
+  #2774).
 * ``resources/list`` — :func:`handle_resources_list`. Returns the
   list of concrete (non-templated) resources. v0.2 ships only templated
   resources, so this always returns an empty list — present for spec
@@ -227,8 +229,18 @@ async def handle_tools_call(
 
     Handler return value is packed into the MCP ``content`` array as
     a single ``text`` block containing the JSON-serialised dict, per
-    spec §Tools/Tool Result. Structured content (``structuredContent``
-    field) is a future polish.
+    spec §Tools/Tool Result. When the tool declares an ``outputSchema``,
+    the same dict is additionally emitted as ``structuredContent``
+    (#2774): MCP 2025-06-18 §Tools/Output Schema mandates that a tool
+    declaring an ``outputSchema`` "MUST return structured results that
+    conform to this schema", and Claude's frontend enforces it
+    client-side — without the field, every declaring tool hard-fails
+    in Claude Desktop with "Tool execution failed" while the server
+    logs 200. The text block stays alongside per the spec's
+    backwards-compatibility recommendation. Conformance of each
+    declaring handler's payload to its schema is machine-checked in
+    ``tests/test_mcp_output_schema_conformance.py`` (emission-time in
+    tests, not per-request in prod).
 
     Audit row writing
     -----------------
@@ -350,13 +362,20 @@ async def handle_tools_call(
         status_code = 200
 
         # MCP §Tool Result: every successful tools/call response carries a
-        # ``content`` array. v0.2 ships unstructured content only — a single
-        # text block with the JSON-serialised result. Structured content
-        # (``structuredContent``) lands when a downstream tool needs it.
-        return {
+        # ``content`` array — a single text block with the JSON-serialised
+        # result. A tool that declares an ``outputSchema`` MUST also return
+        # the dict as ``structuredContent`` (MCP 2025-06-18 §Tools/Output
+        # Schema; #2774) — Claude's frontend enforces this client-side, so
+        # omitting it hard-fails every declaring tool in Claude Desktop
+        # while the server logs 200. The text block is kept alongside per
+        # the spec's backwards-compatibility recommendation.
+        response: dict[str, Any] = {
             "content": [{"type": "text", "text": json.dumps(result)}],
             "isError": False,
         }
+        if defn.outputSchema is not None:
+            response["structuredContent"] = result
+        return response
     except McpInvalidParamsError:
         # Class-wide audit-status correction (#1481). A tool handler can
         # raise ``McpInvalidParamsError`` *after* all the explicit

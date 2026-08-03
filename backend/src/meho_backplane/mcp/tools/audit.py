@@ -497,33 +497,86 @@ async def _query_audit_handler(
     return result.model_dump(mode="json")
 
 
+#: Envelope of a session replay — the ``{root, session_id, tenant_id,
+#: row_count}`` shape :func:`_build_replay_response` returns. Shared by
+#: the ``meho_audit_replay`` outputSchema and the ``shape="tree"``
+#: branch of ``query_audit``'s outputSchema so the two declarations
+#: cannot drift from the single builder they both describe (#2774).
+_REPLAY_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "root": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": (
+                "Session-root ReplayNode forest ascending by "
+                "timestamp. See "
+                "`meho_backplane.audit_query.schemas.ReplayNode` "
+                "for the per-node field set (AuditEntry + depth + "
+                "children)."
+            ),
+        },
+        "session_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The replayed agent_session_id.",
+        },
+        "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "The tenant boundary the replay ran under.",
+        },
+        "row_count": {
+            "type": "integer",
+            "description": "Total node count in the returned tree.",
+        },
+    },
+    "required": ["root", "session_id", "tenant_id", "row_count"],
+}
+
+
 register_mcp_tool(
     definition=ToolDefinition(
         feature="audit",
         name=_TOOL_NAME,
         description=_TOOL_DESCRIPTION,
         inputSchema=_INPUT_SCHEMA,
+        # Tagged union (#2774): the flat filter path returns
+        # ``{rows, next_cursor}``; the ``shape="tree"`` self-session
+        # path returns the replay envelope. The pre-#2774 declaration
+        # required ``rows`` / ``next_cursor`` unconditionally, so every
+        # ``shape="tree"`` result violated the declared contract — a
+        # spec-conforming client validating structuredContent (MCP
+        # 2025-06-18 §Tools/Output Schema) would reject it. Same
+        # ``oneOf`` idiom as the topology writes' executed/parked union
+        # (``with_parked_shape``).
         outputSchema={
             "type": "object",
-            "properties": {
-                "rows": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": (
-                        "AuditEntry rows sorted by timestamp descending. "
-                        "See `meho_backplane.audit_query.schemas.AuditEntry` "
-                        "for the per-row field set."
-                    ),
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "rows": {
+                            "type": "array",
+                            "items": {"type": "object"},
+                            "description": (
+                                "AuditEntry rows sorted by timestamp descending. "
+                                "See `meho_backplane.audit_query.schemas.AuditEntry` "
+                                "for the per-row field set."
+                            ),
+                        },
+                        "next_cursor": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Opaque forward-pagination cursor. Null when the "
+                                "page is the end of the matching set."
+                            ),
+                        },
+                    },
+                    "required": ["rows", "next_cursor"],
                 },
-                "next_cursor": {
-                    "type": ["string", "null"],
-                    "description": (
-                        "Opaque forward-pagination cursor. Null when the "
-                        "page is the end of the matching set."
-                    ),
-                },
-            },
-            "required": ["rows", "next_cursor"],
+                _REPLAY_OUTPUT_SCHEMA,
+            ],
         },
         required_role=TenantRole.OPERATOR,
         op_class="audit_query",
@@ -638,37 +691,7 @@ register_mcp_tool(
         name=_REPLAY_TOOL_NAME,
         description=_REPLAY_TOOL_DESCRIPTION,
         inputSchema=_REPLAY_INPUT_SCHEMA,
-        outputSchema={
-            "type": "object",
-            "properties": {
-                "root": {
-                    "type": "array",
-                    "items": {"type": "object"},
-                    "description": (
-                        "Session-root ReplayNode forest ascending by "
-                        "timestamp. See "
-                        "`meho_backplane.audit_query.schemas.ReplayNode` "
-                        "for the per-node field set (AuditEntry + depth + "
-                        "children)."
-                    ),
-                },
-                "session_id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "description": "The replayed agent_session_id.",
-                },
-                "tenant_id": {
-                    "type": "string",
-                    "format": "uuid",
-                    "description": "The tenant boundary the replay ran under.",
-                },
-                "row_count": {
-                    "type": "integer",
-                    "description": "Total node count in the returned tree.",
-                },
-            },
-            "required": ["root", "session_id", "tenant_id", "row_count"],
-        },
+        outputSchema=_REPLAY_OUTPUT_SCHEMA,
         required_role=TenantRole.TENANT_ADMIN,
         op_class="audit_query",
     ),

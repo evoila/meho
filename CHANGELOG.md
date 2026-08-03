@@ -92,6 +92,28 @@ connector-related release-notes line.
 
 ### Fixed
 
+- **MCP tools declaring an `outputSchema` now emit conforming
+  `structuredContent`** (#2774). MCP 2025-06-18 §Tools/Output Schema
+  mandates structured results for declaring tools, and Claude's frontend
+  enforces it client-side — all 17 declaring tools (12 on v0.27.0:
+  `query_audit`, `meho_audit_replay`, the doc-collections trio,
+  `query_topology`, `list_targets`, and the five topology writes; plus
+  the five operation/JSONFlux tools that declared since) hard-failed in
+  Claude Desktop with "Tool execution failed" while the server logged
+  200 and wrote its audit row. The `tools/call` dispatcher now emits the
+  handler's result as `structuredContent` alongside the serialised text
+  block (the spec's backwards-compatibility shape); a new registry-wide
+  test family validates every declaring tool's real handler payload
+  against its declared schema (companion to the #2745 name-conformance
+  guard). The sweep also corrected drifted declarations:
+  `query_audit`'s schema now covers its `shape="tree"` replay envelope
+  (a `oneOf` flat|replay union — the old declaration made every tree
+  result violate the published contract), `call_operation`'s schema now
+  names the always-present JSONFlux `handle` field, and
+  `create_doc_collections`'s schema now lists the full collection wire
+  model. Payload shapes are unchanged — additive `structuredContent` +
+  schema corrections only.
+
 - MCP session-lineage honesty: `/status` (`GET /api/v1/health`) now
   reports `mcp_session_id_capture: "when_negotiated"` instead of the
   misleading `"always"` — a session id is captured only when the client

@@ -255,6 +255,42 @@ Two molds apply, by where the mismatch sits:
 The native key is never removed (the #1612 precedent keeps both), so a
 consumer reading either name keeps working.
 
+## Structured tool results (`structuredContent`, #2774)
+
+`handle_tools_call` (`mcp/handlers.py`) packs every successful result
+as a single JSON-serialised `text` content block. When the called
+tool's `ToolDefinition` declares an `outputSchema`, the handler's dict
+is **additionally** emitted as `structuredContent` — MCP 2025-06-18
+§Tools/Output Schema mandates that a declaring tool "MUST return
+structured results that conform to this schema", and Claude's frontend
+enforces it client-side: before #2774 every declaring tool hard-failed
+in Claude Desktop with a bare "Tool execution failed" while the server
+logged 200 and wrote its audit row (found by the #2666 Desktop smoke
+re-run; the third Anthropic-conformance class after #2644 and #2745).
+The text block stays alongside per the spec's backwards-compatibility
+recommendation, byte-identical to the structured object. Tools without
+an `outputSchema` get no `structuredContent` key — nothing to conform
+to, no wire bloat.
+
+Conformance is validated at **emission time in tests, not per-request
+in prod**:
+
+* `tests/test_mcp_structured_content.py` — emission rules, schema
+  well-formedness (valid Draft 2020-12, `type: object` root), the
+  pinned declaring-tool roster, and `to_wire` publishing the schema
+  verbatim.
+* `tests/test_mcp_output_schema_conformance.py` — every declaring
+  tool's **real handler payload** driven through the full dispatcher
+  and validated against its declared schema, including the non-happy
+  first-class shapes (`awaiting_approval` parked writes,
+  `status="unavailable"` previews, the `query_audit` `shape="tree"`
+  replay envelope — the drift #2774 actually found, fixed by widening
+  that schema to a `oneOf` flat|replay union).
+
+A tool that cannot honestly declare its output shape should drop the
+declaration (spec-legal — proven by the ~60 non-declaring tools)
+rather than publish a schema its payloads violate.
+
 ## Audit URI redaction for query-bearing resources
 
 The `resources/read` dispatcher

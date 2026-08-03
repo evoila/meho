@@ -17,7 +17,7 @@ the end, then return to the trail.
 |---|---|---|
 | `meho-backplane` | Confidential client | The backplane itself — the audience it validates tokens for. If your realm does not have it yet, create it first: a confidential client with ID `meho-backplane` and no login flows enabled — it exists as the resource-server identity whose client ID is the token audience (`keycloak.audience` in the chart values). |
 | `meho-cli` | **Public** client, device-code grant | `meho login` |
-| `meho-mcp-client` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
+| `meho-mcp` | **Public** client, authorization-code + PKCE | Browser-capable MCP clients (Claude Desktop, MCP Inspector, …) |
 | 5 protocol mappers | On both public clients | Make issued tokens carry the claims the backplane validates |
 | 4 default client scopes | On both public clients | Including the `basic` scope that carries the mandatory `sub` claim |
 | A user in `meho-admins` | Realm user | The human who approves device-code logins and operates MEHO |
@@ -125,17 +125,17 @@ one. Create at least one user with:
 The user's email does not need to be verified for device-code login to
 complete.
 
-## The MCP client (`meho-mcp-client`)
+## The MCP client (`meho-mcp`)
 
 Browser-capable MCP clients authenticate with authorization-code +
 PKCE, which needs a second public client. Repeat Steps 2–4 with these
 differences:
 
-| Setting | `meho-mcp-client` | Why it differs |
+| Setting | `meho-mcp` | Why it differs |
 |---|---|---|
 | Standard flow (authorization-code + PKCE) | **On** | The MCP specification mandates OAuth 2.1 authorization-code + PKCE. |
 | Device grant | Off | Not used by MCP clients. |
-| Valid redirect URIs | `https://claude.ai/api/mcp/auth_callback`, `http://localhost:*` | Covers the Claude / claude.ai callback and localhost tools. |
+| Valid redirect URIs | **Loopback only** — `http://localhost:<port>/callback` (Claude Code) plus `http://localhost:<port>/oauth/callback` and its `http://127.0.0.1:<port>/oauth/callback` twin (the `mcp-remote` shim) | MEHO is internal-only, so there is **no** public `claude.ai` Custom-Connector redirect. `<port>` matches the client's configured callback port; the exact per-client values are in [Connect clients](../clients/index.md). |
 | PKCE challenge method | `S256` | Spec-required for public clients. |
 | `offline_access` client scope | Assign as **Optional** | Some MCP clients always request a refresh token; without the scope the authorization request fails with `invalid_scope`. Deliberately *not* given to `meho-cli` — the CLI re-runs the device dance instead of holding a long-lived refresh token. |
 
@@ -210,7 +210,7 @@ usually appear:
 | Token issued, every call 401s with `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` | Missing protocol mappers | Step 3 — add all five, then log out and back in. |
 | Token issued, every call 401s with `invalid_token` or `missing_sub`; the decoded token has no `sub` | The `basic` scope is not a default scope on the client | Step 4 — assign it, re-login (existing tokens stay broken). |
 | `meho login` times out before you can approve | An ambient wrapper timeout (CI step, IDE task) shorter than the approval wait | Run `meho login` in a real terminal, or raise the wrapper timeout. |
-| MCP client fails with `invalid_scope` naming `offline_access` | The scope is not assigned on `meho-mcp-client` | Assign `offline_access` as an **optional** scope (see the MCP client table above). |
+| MCP client fails with `invalid_scope` naming `offline_access` | The scope is not assigned on `meho-mcp` | Assign `offline_access` as an **optional** scope (see the MCP client table above). |
 | `x509: certificate signed by unknown authority` | Workstation OS trust store missing your CA | Step 1 / [TLS and ingress](tls-ingress.md#your-workstation-os-trust-store). |
 
 A fuller, client-by-client troubleshooting page ships with the

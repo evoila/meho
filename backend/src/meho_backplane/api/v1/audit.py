@@ -426,6 +426,39 @@ async def _count_session_rows(
     return await session.scalar(stmt) or 0
 
 
+async def _count_excluded_null_session_rows(
+    *,
+    tenant_id: uuid.UUID,
+    session: AsyncSession,
+) -> int:
+    """Count the tenant's ``method=MCP`` rows with a NULL ``agent_session_id``.
+
+    These are calls from clients that never negotiated a session via the
+    ``initialize`` handshake (#2700): the row records the operation but
+    carries no lineage key, so it can never anchor or be walked by *any*
+    session replay. Reporting the tally alongside ``row_count`` lets an
+    investigator tell an empty forest (this session did nothing) apart
+    from an empty history (this identity's MCP traffic is
+    un-negotiated and structurally invisible to lineage).
+
+    The count is scoped to ``method='MCP'`` on purpose: only the MCP
+    audit path populates ``agent_session_id`` at all, so NULLs on other
+    methods (CLI / REST rows) are not "excluded" from a surface they
+    were never part of. Tenant-scoped and independent of any
+    ``session_id`` — the un-negotiated rows belong to no session.
+    """
+    stmt = (
+        sa.select(sa.func.count())
+        .select_from(AuditLog)
+        .where(
+            AuditLog.tenant_id == tenant_id,
+            AuditLog.method == "MCP",
+            AuditLog.agent_session_id.is_(None),
+        )
+    )
+    return await session.scalar(stmt) or 0
+
+
 @router.get("/sessions/{session_id}/replay", response_model=AuditReplayResult)
 async def replay(
     session_id: uuid.UUID,
@@ -455,6 +488,13 @@ async def replay(
     413 from a count-first guard. The count runs *before*
     :func:`replay_session`, so a runaway session never materializes its
     tree just to be rejected — the recursive build is skipped entirely.
+
+    The 200 body also carries ``excluded_null_session_count`` (#2700):
+    the tenant-wide tally of ``method=MCP`` rows with a NULL
+    ``agent_session_id`` (clients that never negotiated a session).
+    Those rows can never be part of any replay, so surfacing the count
+    keeps an empty forest (``row_count=0``) distinguishable from an
+    empty history — see :func:`_count_excluded_null_session_rows`.
     """
     _bind_audit_overrides(_AUDIT_REPLAY_OP_ID)
     sessionmaker = get_sessionmaker()
@@ -482,6 +522,10 @@ async def replay(
             tenant_id=operator.tenant_id,
             session=session,
         )
+        excluded_null_session_count = await _count_excluded_null_session_rows(
+            tenant_id=operator.tenant_id,
+            session=session,
+        )
 
     structlog.contextvars.bind_contextvars(audit_row_count=row_count)
     return AuditReplayResult(
@@ -489,4 +533,5 @@ async def replay(
         session_id=session_id,
         tenant_id=operator.tenant_id,
         row_count=row_count,
+        excluded_null_session_count=excluded_null_session_count,
     )

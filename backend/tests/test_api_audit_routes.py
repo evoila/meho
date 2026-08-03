@@ -698,6 +698,7 @@ async def _seed_audit_row(
     agent_session_id: UUID | None = None,
     parent_audit_id: UUID | None = None,
     row_id: UUID | None = None,
+    method: str = "POST",
 ) -> UUID:
     """Insert one :class:`AuditLog` row at a fixed base + ``second`` offset."""
     row_id = row_id or uuid.uuid4()
@@ -708,7 +709,7 @@ async def _seed_audit_row(
             occurred_at=base + timedelta(seconds=second),
             operator_sub="op-1",
             tenant_id=tenant_id,
-            method="POST",
+            method=method,
             path="/mcp",
             status_code=200,
             duration_ms=Decimal("1.0"),
@@ -809,7 +810,59 @@ async def test_replay_unknown_session_returns_empty_not_404(client: TestClient) 
         "session_id": str(session_id),
         "tenant_id": str(_TENANT_A),
         "row_count": 0,
+        # No MCP rows seeded in this tenant, so nothing was excluded for a
+        # null session — the empty forest IS an empty history here (#2700).
+        "excluded_null_session_count": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_replay_reports_excluded_null_session_count(client: TestClient) -> None:
+    """#2700: header-less MCP rows surface as ``excluded_null_session_count``.
+
+    A tenant whose ``method=MCP`` traffic skipped the ``initialize``
+    handshake writes rows with ``agent_session_id = NULL``. Those rows
+    can never anchor or be walked by any session replay, so a replay of
+    an *unrelated* (or empty) session must still tell the investigator
+    they exist — otherwise an empty forest (``row_count=0``) is
+    indistinguishable from an empty history. Non-MCP NULL-session rows
+    (a CLI ``POST`` row) are *not* counted: they were never part of the
+    MCP session surface.
+    """
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as s:
+        # Three header-less MCP calls: real operations, no negotiated session.
+        for i in range(3):
+            await _seed_audit_row(
+                s, tenant_id=_TENANT_A, second=i, method="MCP", agent_session_id=None
+            )
+        # A non-MCP NULL-session row must NOT inflate the count.
+        await _seed_audit_row(
+            s, tenant_id=_TENANT_A, second=9, method="POST", agent_session_id=None
+        )
+        # A different tenant's header-less MCP row must NOT leak in.
+        await _seed_audit_row(s, tenant_id=_TENANT_B, second=0, method="MCP", agent_session_id=None)
+        await s.commit()
+
+    unrelated_session = uuid.uuid4()
+    key = make_rsa_keypair("kid-A")
+    # #1843: cross-session replay is tenant_admin-gated.
+    token = _token(key, role=TenantRole.TENANT_ADMIN, tenant_id=_TENANT_A)
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        resp = client.get(
+            f"/api/v1/audit/sessions/{unrelated_session}/replay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    # Empty forest for this session id...
+    assert body["root"] == []
+    assert body["row_count"] == 0
+    # ...but NOT an empty history: three header-less MCP rows are invisible
+    # to lineage and counted here. The POST row and tenant B's row are out.
+    assert body["excluded_null_session_count"] == 3
 
 
 def test_replay_over_cap_returns_413_without_building_tree(client: TestClient) -> None:

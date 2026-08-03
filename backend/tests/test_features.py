@@ -13,8 +13,10 @@ Coverage matrix (G0.14-T7 #1148):
   ``missing_env`` list when env vars are unset.
 * Each gated feature returns ``configured: true`` with an empty
   ``missing_env`` list when env vars are fully wired.
-* ``audit_replay`` is the only entry that emits ``capture_mode``;
-  the pre-T6 (#1147) value is the fixed string ``"enforced"``.
+* ``audit_replay`` is the only entry that emits ``capture_mode``; it
+  reflects ``MCP_REQUIRE_SESSION_ID`` via the shared
+  ``mcp_session_id_capture_mode`` helper (#2700) — ``"when_negotiated"``
+  when unset, ``"enforced"`` when set.
 * ``approval_queue`` is transitive on ``agent_runtime`` — its
   ``configured`` mirrors ``agent_runtime.configured`` and the
   ``depends_on`` field surfaces the chain.
@@ -203,26 +205,38 @@ def test_ui_surface_only_session_key_present_lists_two() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_audit_replay_capture_mode_is_enforced_pre_t6() -> None:
-    """Pre-T6 (#1147): ``capture_mode`` is the fixed string ``"enforced"``.
+def test_audit_replay_capture_mode_reflects_require_session_id() -> None:
+    """``capture_mode`` mirrors ``MCP_REQUIRE_SESSION_ID`` via the shared helper.
 
-    The value is independent of :attr:`Settings.mcp_require_session_id`
-    today because capture and enforcement are the same knob — both
-    on, both off. T6 will flip ``capture_mode`` to ``"always"`` in a
-    one-line edit when capture is decoupled from enforcement.
+    #2700: the ``/ready`` ``audit_replay`` block resolves
+    ``capture_mode`` from the same
+    :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+    helper the ``/status`` surface uses (passed this block's
+    ``Settings`` snapshot), so the two agree in **both** env states —
+    ``"when_negotiated"`` when ``MCP_REQUIRE_SESSION_ID`` is unset
+    (capture is header-driven, not a guarantee), ``"enforced"`` when
+    set. The earlier hardcoded ``"enforced"`` contradicted ``/status``
+    on a default deploy — exactly the capture-guarantee dishonesty
+    #2700 exists to kill.
     """
-    block_off = build_features_block(_settings_with(mcp_require_session_id=False))
-    block_on = build_features_block(_settings_with(mcp_require_session_id=True))
+    audit_replay_off = build_features_block(_settings_with(mcp_require_session_id=False))[
+        "audit_replay"
+    ]
+    assert audit_replay_off["configured"] is True
+    assert audit_replay_off["capture_mode"] == "when_negotiated"
+    assert audit_replay_off["missing_env"] == []
+    # No ``docs`` field — the capture is feature-coupled to MCP
+    # itself, not to an admin-configurable knob. Operators don't
+    # have a separate setup doc to read.
+    assert "docs" not in audit_replay_off
 
-    for block in (block_off, block_on):
-        audit_replay = block["audit_replay"]
-        assert audit_replay["configured"] is True
-        assert audit_replay["capture_mode"] == "enforced"
-        assert audit_replay["missing_env"] == []
-        # No ``docs`` field — the capture is feature-coupled to MCP
-        # itself, not to an admin-configurable knob. Operators don't
-        # have a separate setup doc to read.
-        assert "docs" not in audit_replay
+    audit_replay_on = build_features_block(_settings_with(mcp_require_session_id=True))[
+        "audit_replay"
+    ]
+    assert audit_replay_on["configured"] is True
+    assert audit_replay_on["capture_mode"] == "enforced"
+    assert audit_replay_on["missing_env"] == []
+    assert "docs" not in audit_replay_on
 
 
 # ---------------------------------------------------------------------------

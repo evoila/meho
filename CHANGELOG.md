@@ -90,6 +90,18 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed
+
+- MCP session-lineage honesty: `/status` (`GET /api/v1/health`) now
+  reports `mcp_session_id_capture: "when_negotiated"` instead of the
+  misleading `"always"` — a session id is captured only when the client
+  negotiated one via the `initialize` handshake, so header-less callers
+  write NULL-session audit rows that no session replay can see. The REST
+  replay surface (`GET /api/v1/audit/sessions/{id}/replay`) now also
+  returns `excluded_null_session_count`, the tenant-wide tally of
+  un-negotiated `method=MCP` rows, so an empty replay forest is
+  distinguishable from an empty history (#2700).
+
 ## [0.27.0] - 2026-08-03
 
 ### Breaking changes

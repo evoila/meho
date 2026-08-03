@@ -1384,12 +1384,25 @@ type AuditQueryResult struct {
 // across tenants (the same non-leakage posture
 // “GET /show/{audit_id}“ takes).
 //
+// “excluded_null_session_count“ (#2700) is the tenant-scoped tally
+// of “method=MCP“ audit rows whose “agent_session_id“ is NULL —
+// calls from clients that never negotiated a session via the
+// “initialize“ handshake. Such rows can never anchor or be walked by
+// *any* session replay, so a “row_count=0“ response with a non-zero
+// “excluded_null_session_count“ tells an investigator the empty
+// forest is not the same as an empty history: there is un-negotiated
+// MCP traffic this forensic surface structurally cannot see. It is a
+// tenant-wide count, independent of “session_id“ (the un-negotiated
+// rows belong to no session), and mirrors the honest
+// “when_negotiated“ capture label the deploy's “/status“ reports.
+//
 // Frozen like the substrate models it carries.
 type AuditReplayResult struct {
-	Root      []ReplayNode       `json:"root"`
-	RowCount  int                `json:"row_count"`
-	SessionId openapi_types.UUID `json:"session_id"`
-	TenantId  openapi_types.UUID `json:"tenant_id"`
+	ExcludedNullSessionCount int                `json:"excluded_null_session_count"`
+	Root                     []ReplayNode       `json:"root"`
+	RowCount                 int                `json:"row_count"`
+	SessionId                openapi_types.UUID `json:"session_id"`
+	TenantId                 openapi_types.UUID `json:"tenant_id"`
 }
 
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
@@ -4194,15 +4207,22 @@ type HTTPValidationError struct {
 // “mcp_session_id_capture“ (G0.14-T6 #1147) reports the deploy's
 // audit-replay capture mode in a single field:
 //
-//   - “"always"“ — any “Mcp-Session-Id“ header the client sends is
-//     captured into “audit_log.agent_session_id“; a missing header is
-//     accepted (the row's session id lands as NULL). This is the
-//     default and what G8.2 audit-replay needs to light up on a stock
-//     deploy.
+//   - “"when_negotiated"“ — a “Mcp-Session-Id“ header is captured
+//     into “audit_log.agent_session_id“ only when the client
+//     negotiated a session via the “initialize“ handshake and echoes
+//     the server-issued id; a header-less call is accepted and its row's
+//     session id lands as NULL (invisible to session-lineage replay).
+//     This is the default. It reads “"when_negotiated"“ rather than
+//     “"always"“ because capture is not a guarantee — #2700 reported
+//     the former “"always"“ label as misleading, since header-less
+//     callers stay out of lineage. Distinguish an empty forest from an
+//     empty history via the replay surface's
+//     “excluded_null_session_count“.
 //   - “"enforced"“ — capture works the same way **plus** a missing
 //     header is a JSON-RPC “-32600“ reject before any audit row is
-//     written. Flipped on by “MCP_REQUIRE_SESSION_ID=true“ in
-//     compliance deploys that forbid header-less calls.
+//     written, so every accepted MCP call carries a session id. Flipped
+//     on by “MCP_REQUIRE_SESSION_ID=true“ in compliance deploys that
+//     forbid header-less calls.
 //
 // The field is the canonical operator-facing surface for the
 // capture state until T7 #1148's “/ready“ features block ships

@@ -112,6 +112,18 @@ class AuditReplayResult(BaseModel):
     across tenants (the same non-leakage posture
     ``GET /show/{audit_id}`` takes).
 
+    ``excluded_null_session_count`` (#2700) is the tenant-scoped tally
+    of ``method=MCP`` audit rows whose ``agent_session_id`` is NULL —
+    calls from clients that never negotiated a session via the
+    ``initialize`` handshake. Such rows can never anchor or be walked by
+    *any* session replay, so a ``row_count=0`` response with a non-zero
+    ``excluded_null_session_count`` tells an investigator the empty
+    forest is not the same as an empty history: there is un-negotiated
+    MCP traffic this forensic surface structurally cannot see. It is a
+    tenant-wide count, independent of ``session_id`` (the un-negotiated
+    rows belong to no session), and mirrors the honest
+    ``when_negotiated`` capture label the deploy's ``/status`` reports.
+
     Frozen like the substrate models it carries.
     """
 
@@ -121,3 +133,4 @@ class AuditReplayResult(BaseModel):
     session_id: uuid.UUID
     tenant_id: uuid.UUID
     row_count: int
+    excluded_null_session_count: int

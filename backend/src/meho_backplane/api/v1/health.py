@@ -196,15 +196,22 @@ class HealthResponse(BaseModel):
     ``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's
     audit-replay capture mode in a single field:
 
-    * ``"always"`` — any ``Mcp-Session-Id`` header the client sends is
-      captured into ``audit_log.agent_session_id``; a missing header is
-      accepted (the row's session id lands as NULL). This is the
-      default and what G8.2 audit-replay needs to light up on a stock
-      deploy.
+    * ``"when_negotiated"`` — a ``Mcp-Session-Id`` header is captured
+      into ``audit_log.agent_session_id`` only when the client
+      negotiated a session via the ``initialize`` handshake and echoes
+      the server-issued id; a header-less call is accepted and its row's
+      session id lands as NULL (invisible to session-lineage replay).
+      This is the default. It reads ``"when_negotiated"`` rather than
+      ``"always"`` because capture is not a guarantee — #2700 reported
+      the former ``"always"`` label as misleading, since header-less
+      callers stay out of lineage. Distinguish an empty forest from an
+      empty history via the replay surface's
+      ``excluded_null_session_count``.
     * ``"enforced"`` — capture works the same way **plus** a missing
       header is a JSON-RPC ``-32600`` reject before any audit row is
-      written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in
-      compliance deploys that forbid header-less calls.
+      written, so every accepted MCP call carries a session id. Flipped
+      on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that
+      forbid header-less calls.
 
     The field is the canonical operator-facing surface for the
     capture state until T7 #1148's ``/ready`` features block ships

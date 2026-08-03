@@ -2469,12 +2469,16 @@ async def test_park_populates_proposed_effect_from_builder(
             row = await fresh.get(ApprovalRequest, approval_request_id)
             assert row is not None
             # The builder's preview landed under the {op_class, preview}
-            # envelope -- not the identifier-only default.
+            # envelope.
             assert row.proposed_effect["op_class"] == "other"
             assert row.proposed_effect["preview"]["would_change"] == ["deployment/web"]
-            # The identifier-only default keys are NOT present (a built
-            # preview replaces the default, it doesn't merge into it).
-            assert "op_id" not in row.proposed_effect
+            # Uniform op-identity envelope (#2681): op_id/connector_id/target_id
+            # are stamped onto the built-preview envelope too, so the parked
+            # field-set is one schema per connector regardless of the builder
+            # outcome (previously they rode only the declines/raises paths).
+            assert row.proposed_effect["op_id"] == "vault.kv.preview_op"
+            assert row.proposed_effect["connector_id"] == "vault-1.x"
+            assert "target_id" in row.proposed_effect
     finally:
         _PREVIEW_BUILDERS.pop("vault.kv.preview_op", None)
 
@@ -2484,12 +2488,12 @@ async def test_park_without_builder_uses_identifier_default(
     stub_embedding_service: AsyncMock,
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """An op with no preview builder parks with the identifier-only default.
+    """An op with no preview builder (and empty params) parks with the identifier-only default.
 
     G11.7 follow-up (#1437): the hook is opt-in. An op that registers no
-    builder must park exactly as before -- the durable row carries the
-    ``{op_id, connector_id, target_id}`` default, with no error and no
-    regression.
+    builder — and whose empty params give the generic echo nothing to show —
+    parks on the ``{op_id, connector_id, target_id}`` default, now carrying
+    the uniform ``op_class`` metadata field too (#2681).
     """
     from meho_backplane.db.models import ApprovalRequest
 
@@ -2524,15 +2528,16 @@ async def test_park_without_builder_uses_identifier_default(
         row = await fresh.get(ApprovalRequest, approval_request_id)
         assert row is not None
         # Identifier-only default -- no built-preview envelope -- with the
-        # catalog safety_level stamped on by the dispatcher seam (#1855)
-        # and the reviewer-facing preview provenance (#2332):
-        # preview_populated=False + a "connector_did_not_populate" reason
-        # so a caller can refuse to auto-approve the blind, op-identity-only
-        # request.
+        # catalog safety_level stamped on by the dispatcher seam (#1855),
+        # the reviewer-facing preview provenance (#2332):
+        # preview_populated=False + a "connector_did_not_populate" reason so a
+        # caller can refuse to auto-approve the blind, op-identity-only
+        # request, and the uniform op_class metadata field (#2681).
         assert row.proposed_effect == {
             "op_id": "vault.kv.no_preview_op",
             "connector_id": "vault-1.x",
             "target_id": str(target.id),
+            "op_class": "other",
             "safety_level": "safe",
             "preview_populated": False,
             "preview_reason": "connector_did_not_populate",

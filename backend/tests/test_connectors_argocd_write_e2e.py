@@ -474,6 +474,121 @@ async def test_appproject_update_captures_before_after(
 
 
 # ---------------------------------------------------------------------------
+# Park-envelope uniformity across the write set (#2681)
+#
+# One op_class + one op-identity/metadata schema per connector, regardless of
+# whether the per-op preview builder succeeds (set / delete / appproject.update),
+# declines to the generic params-echo (sync / rollback / refresh /
+# appproject.create), or later raises (delete against a nonexistent app).
+# ---------------------------------------------------------------------------
+
+
+#: The op-identity + metadata fields every parked argocd envelope must carry
+#: uniformly (#2681 claim 3). The content key (bespoke ``preview`` XOR generic
+#: ``params_echo``) is deliberately NOT in this set — it legitimately varies.
+_ENVELOPE_IDENTITY_META_KEYS = frozenset(
+    {"op_id", "connector_id", "target_id", "op_class", "preview_populated", "safety_level"}
+)
+
+_PARK_PARAMS_BY_OP: dict[str, dict[str, Any]] = {
+    "argocd.app.sync": {"name": _APP_NAME},
+    "argocd.app.rollback": {"name": _APP_NAME, "id": 7},
+    "argocd.app.set": {"name": _APP_NAME, "spec": _APP_SPEC_AFTER},
+    "argocd.app.refresh": {"name": _APP_NAME},
+    "argocd.app.delete": {"name": _APP_NAME},
+    "argocd.appproject.create": {"project": _PROJECT_AFTER, "upsert": True},
+    "argocd.appproject.update": {"project": _PROJECT_AFTER},
+}
+
+
+def _identity_meta_keys(effect: dict[str, Any]) -> frozenset[str]:
+    """The op-identity/metadata keys present on a parked envelope."""
+    return _ENVELOPE_IDENTITY_META_KEYS & effect.keys()
+
+
+@pytest.mark.asyncio
+async def test_park_envelope_uniform_across_write_ops(
+    argocd_write_e2e: ArgoCdConnector,
+) -> None:
+    """Every parked argocd write op exposes one op_class + envelope schema (#2681).
+
+    (a) ``op_class == "write"`` for all seven (sync / rollback / set / refresh
+    classified ``other`` before the fix); (b) ``preview_populated`` is True
+    exactly when a content key — bespoke ``preview`` OR generic
+    ``params_echo`` — is present; (c) the op-identity + metadata field-set is
+    identical across every op regardless of whether its preview builder
+    succeeds or declines to the generic echo. The content key (``preview``
+    XOR ``params_echo``) is intentionally not unified, so this does NOT
+    assert ``set(effect.keys())`` equality.
+    """
+    assert set(_PARK_PARAMS_BY_OP) == set(EXPECTED_WRITE_OP_IDS)
+
+    identity_meta_sets: list[frozenset[str]] = []
+    for op_id, params in _PARK_PARAMS_BY_OP.items():
+        with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+            # Existing-app / existing-project reads for the builder-backed
+            # ops (set / delete / appproject.update). The no-builder ops
+            # issue no cluster call on the park path; unused routes are
+            # harmless under assert_all_called=False.
+            mock.get(f"/api/v1/applications/{_APP_NAME}").respond(200, json=_APP_SPEC_BEFORE)
+            mock.get(f"/api/v1/applications/{_APP_NAME}/resource-tree").respond(
+                200, json=_RESOURCE_TREE
+            )
+            mock.get("/api/v1/projects").respond(200, json=_PROJECT_LIST)
+            result = await _dispatch(op_id, params, approved=False)
+            assert result["status"] == "awaiting_approval", (op_id, result)
+            _assert_no_mutation_fired(mock)
+
+        effect = await _parked_proposed_effect(result["extras"]["approval_request_id"])
+
+        # (a) op_class is `write` for every approval-gated write op.
+        assert effect["op_class"] == "write", (op_id, effect.get("op_class"))
+        # (b) preview_populated iff a content key is present.
+        has_content = "preview" in effect or "params_echo" in effect
+        assert effect["preview_populated"] is has_content, (op_id, effect)
+        # metadata carries the catalog severity for the op.
+        assert effect["safety_level"] == EXPECTED_SAFETY[op_id], op_id
+        # (c) all op-identity + metadata fields present on this op.
+        assert _identity_meta_keys(effect) == _ENVELOPE_IDENTITY_META_KEYS, (op_id, sorted(effect))
+        identity_meta_sets.append(_identity_meta_keys(effect))
+
+    # (c) identical across all seven.
+    assert all(s == identity_meta_sets[0] for s in identity_meta_sets)
+
+
+@pytest.mark.asyncio
+async def test_park_app_delete_nonexistent_app_keeps_uniform_identity(
+    argocd_write_e2e: ArgoCdConnector,
+) -> None:
+    """app.delete parked against a NONEXISTENT app keeps the uniform schema (#2681 claim 3).
+
+    The cascade builder GETs the resource tree, receives a 404 and raises →
+    the ``preview_unavailable`` fail-soft marker. This is the ONLY branch
+    that previously carried ``op_id`` / ``target_id`` / ``connector_id``,
+    making its field-set diverge from the builder-success path. The
+    op-identity + metadata field-set must now match the existing-app cases;
+    the fault marker rides alongside and is outside that set.
+    """
+    with respx.mock(base_url=_ARGOCD_BASE_URL, assert_all_called=False) as mock:
+        tree_route = mock.get(f"/api/v1/applications/{_APP_NAME}/resource-tree").respond(
+            404, json={"error": "application not found"}
+        )
+        result = await _dispatch("argocd.app.delete", {"name": _APP_NAME}, approved=False)
+        assert result["status"] == "awaiting_approval", result
+        assert tree_route.called, "the cascade preview must attempt the resource-tree read"
+        _assert_no_mutation_fired(mock)
+
+    effect = await _parked_proposed_effect(result["extras"]["approval_request_id"])
+    # The builder faulted: not populated, and the fault marker rides along.
+    assert effect["preview_populated"] is False
+    assert effect["preview_unavailable"] is True
+    assert "preview_error" in effect
+    # But the op-identity + metadata field-set matches the existing-app cases.
+    assert _identity_meta_keys(effect) == _ENVELOPE_IDENTITY_META_KEYS
+    assert effect["op_class"] == "write"
+
+
+# ---------------------------------------------------------------------------
 # Bearer-token + secret-leak guarantee across the write set
 # ---------------------------------------------------------------------------
 
@@ -535,8 +650,9 @@ async def test_park_app_set_populates_before_after_preview(
 
     request_id = result["extras"]["approval_request_id"]
     effect = await _parked_proposed_effect(request_id)
-    # The hook wraps the builder output in {op_class, preview}.
-    assert effect["op_class"] == "other"
+    # The hook wraps the builder output in {op_class, preview}. op_class is
+    # `write` since #2681 added `.set` to the write-suffix set (was `other`).
+    assert effect["op_class"] == "write"
     preview = effect["preview"]
     assert preview["before_spec"]["source"]["targetRevision"] == "HEAD"
     # after_spec at park time is the proposed spec the approved PUT would apply.

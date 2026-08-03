@@ -522,6 +522,44 @@ top. The only path that does **not** carry it is the bare identifier
 default the caller stores when `_build_proposed_effect` returns `None`
 (connector-resolution / hook fault) — that degraded path is unchanged.
 
+## Uniform op-identity envelope (#2681)
+
+The preview base varies by outcome — a bespoke `{op_class, preview}`, the
+generic `{op_class, params_echo}`, the `preview_unavailable` marker, or the
+empty base when the op declines. Before #2681 the identifier fields
+(`op_id` / `connector_id` / `target_id`) rode **only** the
+declines/raises paths, so the parked `proposed_effect` field-set swung with
+runtime state: an `argocd.app.delete` parked against a *nonexistent* app
+(cascade builder raises → identifier fields present) had a different schema
+from the same op against a *live* app (builder succeeds → identifier fields
+absent). A consumer could not rely on one schema per connector.
+
+`dispatcher._build_proposed_effect` now stamps the op-identity fields
+(`op_id` / `connector_id` / `target_id`) **and** `op_class` onto **every**
+non-`None` envelope via `setdefault`, alongside `preview_populated` /
+`safety_level`. `setdefault` never overrides a value the preview hook
+already supplied (its own `op_class`, or an identifier a builder chose to
+echo). The bespoke `preview` XOR generic `params_echo` **content** key
+legitimately still varies and is *not* unified — so the contract is "the
+op-identity + metadata field-set is uniform," not "`set(effect.keys())` is
+identical." `target_id` is present only when the target carries a UUID id
+(a targetless op omits it uniformly). This is verified by the park-envelope
+parametrisation over all seven ArgoCD write ops plus the nonexistent-app
+delete case in `tests/test_connectors_argocd_write_e2e.py`.
+
+Relatedly, `classify_op` gained the ArgoCD write verbs so all seven ops
+classify `op_class: write` rather than four of them falling through to
+`other`. All four verbs that were misclassified — `argocd.app.set` /
+`.sync` / `.rollback` / `.refresh` — are pinned by **exact op-id** in
+`_WRITE_OPS` rather than added to the global write-suffix set. A `.set` /
+`.sync` / `.rollback` suffix would classify the dotted argocd op-ids
+correctly, but `_MEHO_FLAT_WRITE_SUFFIXES` is auto-derived from
+`_WRITE_SUFFIXES` (`.` → `_`), so it would also relabel `meho_`-prefixed
+MCP-tool ops such as `meho_broadcast_overrides_set` from `other` to
+`write`; a `.refresh` suffix would likewise relabel the read-class
+`topology.refresh` at render time. Exact-pinning the dotted argocd op-ids
+avoids both collisions. See [`events.md`](events.md).
+
 ## Permission preflight hook (#1504)
 
 The generic `proposed_effect` *preview* above is suppressed for

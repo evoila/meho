@@ -270,14 +270,18 @@ async def test_dispatcher_stamps_preview_populated_for_vault_put(monkeypatch) ->
         descriptor=_FakeStampDescriptor(op_id="vault.kv.put", safety_level="caution"),  # type: ignore[arg-type]
         operator=_operator(),
         target=None,
-        params={"path": "tenants/acme/db", "data": {"db_password": "x"}},
+        params={"path": "tenants/acme/db", "data": {"db_password": "prod-db-secret"}},
     )
     assert effect is not None
     assert effect["preview_populated"] is True
     assert "preview_reason" not in effect
     assert effect["preview"]["path"] == "tenants/acme/db"
     assert effect["safety_level"] == "caution"
-    _no_secret_anywhere(effect, "x")
+    # Uniform op-identity envelope (#2681): op_id/connector_id stamped even on
+    # the builder-success path (target_id absent here — target is None).
+    assert effect["op_id"] == "vault.kv.put"
+    assert effect["connector_id"] == "vault-1.x"
+    _no_secret_anywhere(effect, "prod-db-secret")
 
 
 @pytest.mark.asyncio

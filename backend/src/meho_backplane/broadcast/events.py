@@ -262,6 +262,46 @@ _WRITE_SUFFIXES: Final[tuple[str, ...]] = (
     ".restart",
 )
 
+#: Exact-match op-ids that classify ``write`` despite not carrying a
+#: write-shaped verb suffix. The four ArgoCD write verbs (#2681) are pinned
+#: here rather than added to :data:`_WRITE_SUFFIXES` because both spellings
+#: that a suffix would need — dotted and its underscore mirror — collide:
+#:
+#: * ``argocd.app.set`` / ``.sync`` / ``.rollback`` are approval-gated
+#:   mutations that fell through to ``other`` (their ``.delete`` /
+#:   ``appproject.create`` / ``appproject.update`` siblings already
+#:   classified ``write`` via existing suffixes). A ``.set`` / ``.sync`` /
+#:   ``.rollback`` suffix would work for the dotted argocd op-ids, but
+#:   :data:`_MEHO_FLAT_WRITE_SUFFIXES` is auto-derived from
+#:   :data:`_WRITE_SUFFIXES` by ``.`` → ``_``, so it would ALSO add
+#:   ``_set`` / ``_sync`` / ``_rollback`` to the flat MCP-tool arm and
+#:   silently relabel ``meho_``-prefixed ops such as
+#:   ``meho_broadcast_overrides_set`` from ``other`` to ``write``. ArgoCD
+#:   op-ids are always dotted (``argocd.app.set``), never ``meho_``-flat,
+#:   so an exact pin classifies them ``write`` with zero flat-mirror bleed.
+#: * ``argocd.app.refresh`` is an HTTP GET
+#:   (``GET /api/v1/applications/{name}?refresh=hard``) that forces ArgoCD
+#:   to reconcile the live vs. desired state — an approval-gated action with
+#:   a cluster-side side effect, so on the approval/audit surface it is a
+#:   write even though the HTTP verb is a read. A ``.refresh`` suffix is
+#:   shared with ``topology.refresh``, a genuine read (it emits only
+#:   aggregate node/edge counts, explicitly stored ``op_class="read"``), and
+#:   because :func:`classify_op` re-runs at render time on stored op-ids a
+#:   blanket suffix would silently relabel every historical
+#:   ``topology.refresh`` row as ``write`` in the console drawers.
+#:
+#: Same exact-pin idiom as :data:`_CHECK_EVENT_OPS` /
+#: :data:`_CREDENTIAL_MINT_OPS`: a precise pin that beats a broader
+#: structural match.
+_WRITE_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "argocd.app.set",
+        "argocd.app.sync",
+        "argocd.app.rollback",
+        "argocd.app.refresh",
+    }
+)
+
 #: Op-id suffixes that imply non-mutating read. ``.ls`` and ``.about``
 #: are the CLI-shaped verbs (``meho vsphere ls``, ``meho meho about``)
 #: that the connector layer maps to the same read class as ``.list`` /
@@ -489,10 +529,15 @@ def classify_op(op_id: str) -> str:
        non-mutating probe, matched by prefix because its verbs are
        underscore-joined (``net.tcp_check``), so a dotted read suffix
        never matches.
-    6. ``write`` — mutation suffixes (``.create`` / ``.update`` /
-       ``.delete`` / ``.patch`` / ``.put`` / ``.write`` / ``.add`` /
-       ``.remove`` / ``.assign`` / ``.restart``). The
-       ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3) runs first, so a
+    6. ``write`` — the exact-match :data:`_WRITE_OPS` pins (the four
+       ArgoCD write verbs ``argocd.app.set`` / ``.sync`` / ``.rollback`` /
+       ``.refresh``, pinned rather than made global suffixes to avoid a
+       flat-mirror bleed onto ``meho_``-prefixed ops and a ``.refresh``
+       collision with the read-class ``topology.refresh`` — see
+       :data:`_WRITE_OPS`) OR the mutation suffixes (``.create`` /
+       ``.update`` / ``.delete`` / ``.patch`` / ``.put`` / ``.write`` /
+       ``.add`` / ``.remove`` / ``.assign`` / ``.restart``).
+       The ``_CREDENTIAL_WRITE_OPS`` allowlist (step 3) runs first, so a
        secret-bearing op like ``vault.auth.userpass.write`` or
        ``rke2.node.config.update`` (``.update``-shaped, token-bearing
        patch) keeps its ``credential_write`` class.
@@ -556,6 +601,16 @@ def classify_op(op_id: str) -> str:
     'read'
     >>> classify_op("vsphere.vm.create")
     'write'
+    >>> classify_op("argocd.app.set")
+    'write'
+    >>> classify_op("argocd.app.sync")
+    'write'
+    >>> classify_op("argocd.app.rollback")
+    'write'
+    >>> classify_op("argocd.app.refresh")  # exact-match pin, not a .refresh suffix
+    'write'
+    >>> classify_op("topology.refresh")  # a read: .refresh is deliberately not global
+    'other'
     >>> classify_op("some.unknown.op")
     'other'
     >>> classify_op("meho_audit_replay")
@@ -612,7 +667,7 @@ def classify_op(op_id: str) -> str:
         if op_id.endswith(_MEHO_FLAT_READ_SUFFIXES):
             return "read"
         return "other"
-    if op_id.endswith(_WRITE_SUFFIXES):
+    if op_id in _WRITE_OPS or op_id.endswith(_WRITE_SUFFIXES):
         return "write"
     if op_id.endswith(_READ_SUFFIXES):
         return "read"

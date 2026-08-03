@@ -223,9 +223,9 @@ docker logout ghcr.io && docker pull ghcr.io/evoila/meho:main    # -> succeeds
   unconditional. Pre-G0.15-T4 deploys (≤ v0.7.0) captured the header
   but never issued one, so audit rows from MCP clients that wait for
   a server-assigned id (the spec-compliant default) landed
-  `agent_session_id: null` regardless of the `capture_mode: "always"`
+  `agent_session_id: null` regardless of the `capture_mode: "when_negotiated"`
   advertisement; v0.7.1+ closes this gap. To confirm the deploy is
-  in the expected capture mode (`always` by default; `enforced` when
+  in the expected capture mode (`when_negotiated` by default; `enforced` when
   `MCP_REQUIRE_SESSION_ID=true`), inspect
   `GET /api/v1/health`'s `mcp_session_id_capture` field.
 
@@ -285,7 +285,7 @@ Walk the four gates in the order an operator hits them:
   (which also flips a missing header into a `-32600` reject before
   dispatch). The `/ready` `features.audit_replay.capture_mode` field
   exposes the current state — `"enforced"` pre-T6,
-  `"always"` post-T6. Operators tracking the audit-replay readiness
+  `"when_negotiated"` post-T6. Operators tracking the audit-replay readiness
   signal off `/ready` get a stable contract across the T6 transition.
   G0.15-T4 (#1213) added the **issuance** half — the server now
   emits `Mcp-Session-Id` on `initialize` per MCP 2025-06-18
@@ -293,7 +293,7 @@ Walk the four gates in the order an operator hits them:
   back on the capture side. Without issuance (≤ v0.7.0), spec-
   conforming MCP clients never sent the header and every row landed
   with `agent_session_id: null` despite `capture_mode` advertising
-  `"always"`; v0.7.1+ closes the inert-promise regression.
+  `"when_negotiated"`; v0.7.1+ closes the inert-promise regression.
 
 - [ ] **Approval queue** (agent-grant approval surface;
   `POST /api/v1/agents/grants` and the agent grant lifecycle). No
@@ -350,7 +350,7 @@ curl -s "https://<your-meho-host>/ready" | jq '.features'
 ```
 
 Every gate should read `"configured": true` (or
-`"capture_mode": "always"` for `audit_replay` post-T6) when fully
+`"capture_mode": "when_negotiated"` for `audit_replay` post-T6) when fully
 enabled. Any `"configured": false` with a non-empty `missing_env`
 list is an unfinished provisioning step — name the listed env vars
 into the pod's environment and re-deploy.
@@ -433,7 +433,7 @@ and whenever the migration Job or the `db` probe changes:
 [ ] 6. Deployed to rke2-infra; smoke-green
 [ ] 6a. Post-deploy enablement — for each gate in /ready features:
         configure the env vars per the cited Vault doc; verify gate
-        flips to configured (or capture_mode=always for audit_replay
+        flips to configured (or capture_mode=when_negotiated for audit_replay
         post-T6)
 [ ] 6b. Rollback drill (releases carrying a migration): broken-readiness
         upgrade auto-rolls-back; rolled-back pods reach Ready with

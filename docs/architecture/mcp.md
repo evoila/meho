@@ -42,7 +42,7 @@ Per the spec's *Session Management* section, a server MAY assign a session id at
 - The dispatched response is HTTP 2xx **and** the JSON-RPC envelope has no `error` member — a failed initialize must not seed a session id.
 - The client did not already send an `Mcp-Session-Id` header inbound (a resume / replay attempt where the client carries an id is accepted lenient; MEHO does not overwrite the client's correlation key).
 
-Before G0.15-T4 #1213, MEHO captured the header end of the chain but never issued one. The visible symptom (`claude-rdc-hetzner-dc#753` finding 2) was every Claude Code MCP audit row landing with `agent_session_id: null` despite [`meho_status`](../../backend/src/meho_backplane/api/v1/health.py) / [`/ready.features.audit_replay.capture_mode`](../../backend/src/meho_backplane/api/v1/health.py) advertising `"always"` — both surfaces correctly reported the **capture** config; nothing populated the column because no client had a server-assigned session id to send back.
+Before G0.15-T4 #1213, MEHO captured the header end of the chain but never issued one. The visible symptom (`claude-rdc-hetzner-dc#753` finding 2) was every Claude Code MCP audit row landing with `agent_session_id: null` despite [`meho_status`](../../backend/src/meho_backplane/api/v1/health.py) / [`/ready.features.audit_replay.capture_mode`](../../backend/src/meho_backplane/api/v1/health.py) advertising `"when_negotiated"` — both surfaces correctly reported the **capture** config; nothing populated the column because no client had a server-assigned session id to send back.
 
 **Capture side.** On every `POST /mcp`, [`_bind_mcp_session_id`](../../backend/src/meho_backplane/mcp/server.py) binds an `mcp_session_id` structlog contextvar (G8.2-T2 #1010):
 

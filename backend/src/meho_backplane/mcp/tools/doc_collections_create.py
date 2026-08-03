@@ -171,6 +171,15 @@ _CREATE_DOC_COLLECTIONS_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
         "when_to_use": {"type": ["string", "null"]},
         "backend": {"type": "object"},
         "status": {"type": "string"},
+        # The payload is the full `DocCollection` wire model
+        # (`project_doc_collection(...).model_dump(mode="json")`); the
+        # four fields below were missing from the declared properties
+        # (#2774 schema-honesty sweep). All are always present — null /
+        # empty on a fresh registration.
+        "last_ingested_at": {"type": ["string", "null"]},
+        "doc_count": {"type": ["integer", "null"]},
+        "readiness": {"type": ["object", "null"]},
+        "extras": {"type": "object"},
         "created_at": {"type": "string"},
         "updated_at": {"type": "string"},
     },

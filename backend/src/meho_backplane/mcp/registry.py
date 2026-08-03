@@ -209,8 +209,13 @@ class ToolDefinition(BaseModel):
 
     ``inputSchema`` is a JSON Schema 2020-12 object the handler validates
     incoming ``tools/call.arguments`` against. ``outputSchema`` is
-    optional; when present the handler's return value is also validated
-    against it (T4 reference tool wires this).
+    optional; when present the dispatcher emits the handler's return
+    value as ``structuredContent`` alongside the serialised text block
+    (MCP 2025-06-18 §Tools/Output Schema — a declaring tool MUST return
+    conforming structured results; #2774). Conformance is validated at
+    emission time in tests
+    (``tests/test_mcp_output_schema_conformance.py``), not per-request
+    in prod.
 
     ``required_capability`` (G4.5-T1) is an optional second gating axis
     *orthogonal* to ``required_role``. When set, the tool is filtered out

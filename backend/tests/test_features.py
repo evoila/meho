@@ -219,9 +219,9 @@ def test_audit_replay_capture_mode_reflects_require_session_id() -> None:
     on a default deploy — exactly the capture-guarantee dishonesty
     #2700 exists to kill.
     """
-    audit_replay_off = build_features_block(
-        _settings_with(mcp_require_session_id=False)
-    )["audit_replay"]
+    audit_replay_off = build_features_block(_settings_with(mcp_require_session_id=False))[
+        "audit_replay"
+    ]
     assert audit_replay_off["configured"] is True
     assert audit_replay_off["capture_mode"] == "when_negotiated"
     assert audit_replay_off["missing_env"] == []
@@ -230,9 +230,9 @@ def test_audit_replay_capture_mode_reflects_require_session_id() -> None:
     # have a separate setup doc to read.
     assert "docs" not in audit_replay_off
 
-    audit_replay_on = build_features_block(
-        _settings_with(mcp_require_session_id=True)
-    )["audit_replay"]
+    audit_replay_on = build_features_block(_settings_with(mcp_require_session_id=True))[
+        "audit_replay"
+    ]
     assert audit_replay_on["configured"] is True
     assert audit_replay_on["capture_mode"] == "enforced"
     assert audit_replay_on["missing_env"] == []

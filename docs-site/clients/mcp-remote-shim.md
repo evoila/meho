@@ -38,9 +38,10 @@ export MEHO_TOKEN="Bearer $(jq -r '.entries[].access_token' \
   "${XDG_CONFIG_HOME:-$HOME/.config}/meho/credentials.json")"
 ```
 
-Keep the `Bearer ` prefix inside the variable — `mcp-remote`'s `--header`
-argument mishandles the space if you put it on the command line, so the
-value (space and all) must live in the environment.
+Keep the `Bearer ` prefix (and its trailing space) inside the variable:
+`mcp-remote` splits `--header` on the first colon into name and value,
+and its README documents stashing a space-containing value in the
+environment as the robust form for a bearer header.
 
 ## Point the client's stdio command at the shim
 
@@ -51,11 +52,11 @@ same:
 
 ```bash
 npx -y mcp-remote@0.1.38 https://meho.example.com/mcp \
-  --header "Authorization:${MEHO_TOKEN}" \
-  --allow-http=false
+  --header "Authorization:${MEHO_TOKEN}"
 ```
 
-Set `NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the client's
+The backplane is HTTPS, so no `--allow-http` is needed. Set
+`NODE_EXTRA_CA_CERTS=/path/to/internal-ca.pem` in the client's
 environment for an internal-CA deploy — Node does not read the OS trust
 store. Because the header carries the token, `mcp-remote` performs no
 OAuth flow and needs no redirect URI on the realm.

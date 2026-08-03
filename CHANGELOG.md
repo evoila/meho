@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added
+
+- **Docs site — the *Connect clients* section** (#2672): a CLI-first
+  onboarding path plus the full internal-only MCP client matrix. New
+  pages cover the `meho` CLI (cosign-verified binary, device-code
+  login, internal-CA and split-DNS walls), Claude Desktop via the
+  `mcp-remote` stdio shim (the empirically-observed
+  [#2666](https://github.com/evoila/meho/issues/2666) flow, including
+  the underscore-tool-name and `structuredContent` build requirements
+  and the finding that `meho://` resources are not discoverable through
+  the shim), Claude Code (`.mcp.json` HTTP + loopback PKCE), the
+  generic `mcp-remote` static-token shim for clients that cannot carry
+  a `client_id`, and a symptom-first troubleshooting page promoting the
+  auth-wall matrix. Every page is internal-only with no public-exposure
+  guidance — the remote Custom Connector is documented as *not
+  applicable*. Also aligns the site + install pages onto the settled
+  `meho-mcp` public-client name.
+
 ### Fixed
 
 - **MCP tools declaring an `outputSchema` now emit conforming

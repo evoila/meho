@@ -49,13 +49,16 @@ ingress:
     secretName: meho-tls
 ```
 
-A **publicly-trusted** certificate here keeps everything downstream
-simple (workstations and hosted MCP clients trust it out of the box).
-An **internal CA** works for the CLI and self-hosted clients — but
-note for later that hosted agent frontends (e.g. connecting claude.ai
-directly to your backplane) can only reach endpoints whose
-certificates chain to a public CA. The client-by-client picture lives
-in [Connect clients](../clients/index.md).
+A **publicly-trusted** certificate here keeps workstation trust simple
+— operator machines, and the local MCP shims they run, trust it out of
+the box with no OS-store import. An **internal CA** works just as well
+and is the norm: every MEHO client connects from the internal network
+/ VPN, so there is no cloud-brokered frontend in the picture (the
+remote claude.ai / Claude Desktop Custom Connector is **not
+applicable** — MEHO is never publicly exposed). The one extra step an
+internal CA adds — trusting it on each operator workstation — and the
+per-client trust picture are in
+[Connect clients](../clients/index.md).
 
 ## Your workstation: OS trust store
 

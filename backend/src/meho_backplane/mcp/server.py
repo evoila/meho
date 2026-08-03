@@ -105,7 +105,7 @@ from meho_backplane.mcp.schemas import (
     JsonRpcResponse,
     ServerCapabilities,
 )
-from meho_backplane.settings import get_settings
+from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
     "RESOURCES_SUBSCRIBE_ENABLED",
@@ -711,7 +711,7 @@ def _validate_protocol_version_header(
     )
 
 
-def mcp_session_id_capture_mode() -> str:
+def mcp_session_id_capture_mode(settings: Settings | None = None) -> str:
     """Report the MCP session-id capture mode: ``"when_negotiated"`` or ``"enforced"``.
 
     Capture is **header-driven, not guaranteed**: whenever a request
@@ -755,8 +755,17 @@ def mcp_session_id_capture_mode() -> str:
     ``"when_negotiated"`` otherwise (header is captured when the client
     negotiated a session, otherwise ``agent_session_id`` lands as NULL
     and the row is excluded from session walks).
+
+    ``settings`` defaults to :func:`get_settings` (the request-time
+    global) so the ``/status`` health surface calls this argless. It is
+    accepted explicitly so the pure ``/ready`` features builder
+    (:func:`meho_backplane.features.build_features_block`) can resolve
+    the same value from the :class:`Settings` snapshot it already holds,
+    without a second global lookup — both surfaces run this one helper,
+    so their ``capture_mode`` can never drift (#2700).
     """
-    return "enforced" if get_settings().mcp_require_session_id else "when_negotiated"
+    resolved = settings if settings is not None else get_settings()
+    return "enforced" if resolved.mcp_require_session_id else "when_negotiated"
 
 
 #: Lowercase HTTP header name for the MCP session id, used on both the
@@ -783,10 +792,13 @@ def _issue_mcp_session_id(response: Response) -> uuid.UUID:
     begin with. The visible symptom on `claude-rdc-hetzner-dc#753`
     finding 2 was eight Claude Code MCP rows with
     ``agent_session_id: null`` despite ``meho_status`` /
-    ``/ready.features.audit_replay`` advertising ``capture_mode:
-    "always"`` — both surfaces correctly reported the **capture**
+    ``/ready.features.audit_replay`` advertising a populated
+    ``capture_mode`` — both surfaces correctly reported the **capture**
     config; nothing populated the column because no client had a
-    server-assigned session id to send back.
+    server-assigned session id to send back. (Both surfaces now render
+    that field as ``"when_negotiated"`` on a default deploy via the
+    shared :func:`mcp_session_id_capture_mode` helper — #2700 retired
+    the misleading ``"always"`` label that read as a guarantee.)
 
     The issued value is a fresh :func:`uuid.uuid4` rendered as the
     canonical UUID string (the same shape :func:`_bind_mcp_session_id`

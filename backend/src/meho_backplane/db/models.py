@@ -929,7 +929,7 @@ class Target(Base):
     # can still be created and probed; once the probe succeeds the
     # authoritative ``fingerprint.version`` takes precedence at resolver
     # time (see
-    # :func:`~meho_backplane.connectors.resolver._resolve_target_version`).
+    # :func:`~meho_backplane.connectors.resolver.resolve_target_version`).
     # G0.15-T6 (#1215) ships this column to break the chicken-and-egg
     # the v0.7.0 dogfood surfaced (RDC #753, signal 6): every typed
     # connector except K8s required ``fingerprint.version`` to resolve,

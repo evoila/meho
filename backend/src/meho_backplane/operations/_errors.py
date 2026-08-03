@@ -285,11 +285,20 @@ def result_ambiguous_target(
 def result_no_connector(
     op_id: str,
     product: str,
-    version: str,
+    version: str | None,
     duration_ms: float,
     exception_message: str | None = None,
 ) -> OperationResult:
     """Resolver miss -- no registered impl for *(product, version)*.
+
+    ``product`` / ``version`` name the **failing input** the resolver
+    rejected -- i.e. the *target's* registered product and the version
+    the resolver read off it (which may be ``None`` when the target
+    carries no fingerprint or operator-asserted version), **not** the
+    ``connector_id`` the caller passed. The dispatcher's connector_id
+    already resolved a valid descriptor before this builder is reached
+    (else ``result_unknown_op`` fires), so echoing it here would blame
+    the wrong input (evoila/meho#2701).
 
     ``exception_message`` (added by G0.14-T1 #1142) carries the
     :exc:`~meho_backplane.connectors.NoMatchingConnector` exception text

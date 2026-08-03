@@ -133,8 +133,8 @@ There are two MCP entry points for replay, split by role and scope. The split is
 
 | Tool | Role | Scope | Shape |
 |---|---|---|---|
-| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count}` |
-| `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count}` |
+| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count, excluded_null_session_count}` |
+| `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count, excluded_null_session_count}` |
 
 ### `query_audit` with `shape:"tree"` (operator, self-session-only)
 
@@ -185,7 +185,8 @@ Both tree paths reject an over-cap session with `-32602` (`session_too_large`) �
   "root": [ /* ReplayNode forest, chronological roots */ ],
   "session_id": "11111111-1111-1111-1111-111111111111",
   "tenant_id": "22222222-2222-2222-2222-222222222222",
-  "row_count": 4
+  "row_count": 4,
+  "excluded_null_session_count": 0
 }
 ```
 
@@ -260,13 +261,14 @@ A worked `--json` tree (truncated to the rendering-relevant fields; every `Audit
   ],
   "session_id": "11111111-1111-1111-1111-111111111111",
   "tenant_id": "22222222-2222-2222-2222-222222222222",
-  "row_count": 4
+  "row_count": 4,
+  "excluded_null_session_count": 0
 }
 ```
 
 > **`row_count` semantics.** On the **CLI / REST** envelope, `row_count` is the count of *anchor* rows in the session (rows whose `agent_session_id` equals `session_id`). It is the same number the 413 guard evaluates — NULL-session lineage children pulled into the tree are present but not counted. On the **MCP** tools, `row_count` is the total *assembled node count* (post depth-cap), so it reflects what the caller actually receives. Both are documented on the surfaces above; use `row_count` as a session-size signal, not a strict tree-node count across surfaces.
 
-> **`excluded_null_session_count` (CLI / REST only, #2700).** The **CLI / REST** envelope additionally carries `excluded_null_session_count`: a tenant-wide tally of `method=MCP` audit rows whose `agent_session_id` is NULL — calls from clients that reached `/mcp` without negotiating a session via the `initialize` handshake. Those rows record real operations but can never anchor or be walked by *any* session replay, so a `row_count=0` response with a non-zero `excluded_null_session_count` tells an investigator the empty forest is **not** an empty history: there is un-negotiated MCP traffic this surface structurally cannot see. It is independent of `session_id` (the un-negotiated rows belong to no session) and mirrors the honest `when_negotiated` capture label the deploy's `/status` reports — see [`docs/codebase/error-message-shape.md`](../codebase/error-message-shape.md) signal 11. The MCP `query_audit`/`meho_audit_replay` tools do not yet carry this field.
+> **`excluded_null_session_count` (all replay surfaces, #2700 / #2776).** Every replay envelope carries `excluded_null_session_count`: a tenant-wide tally of `method=MCP` audit rows whose `agent_session_id` is NULL — calls from clients that reached `/mcp` without negotiating a session via the `initialize` handshake. Those rows record real operations but can never anchor or be walked by *any* session replay, so a `row_count=0` response with a non-zero `excluded_null_session_count` tells an investigator the empty forest is **not** an empty history: there is un-negotiated MCP traffic this surface structurally cannot see. It is independent of `session_id` (the un-negotiated rows belong to no session) and mirrors the honest `when_negotiated` capture label the deploy's `/status` reports — see [`docs/codebase/error-message-shape.md`](../codebase/error-message-shape.md) signal 11. The field landed first on CLI / REST (#2700) and now carries at parity on the MCP `meho_audit_replay` and `query_audit` (`shape="tree"`) forensic tools (#2776).
 
 ### Forward-compat contract
 

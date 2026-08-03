@@ -22,16 +22,21 @@ The patch points are the names bound in
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.audit_query import ReplayNode
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.db.engine import get_sessionmaker
+from meho_backplane.db.models import AuditLog
 from meho_backplane.mcp.registry import get_tool
 from meho_backplane.mcp.schemas import INVALID_PARAMS
 from tests.mcp_test_fixtures import (
@@ -47,6 +52,43 @@ _COUNT_PATCH = "meho_backplane.mcp.tools.audit._count_session_rows"
 
 _SESSION_ID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 _OTHER_SESSION_ID = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+#: A second tenant, used to prove the excluded-null tally is tenant-scoped.
+_OTHER_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-0000000000b0")
+
+
+def _add_audit_row(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    second: int,
+    method: str,
+    agent_session_id: uuid.UUID | None,
+) -> None:
+    """Stage one :class:`AuditLog` row at a fixed base + ``second`` offset.
+
+    Mirrors ``tests/test_api_audit_routes.py::_seed_audit_row`` so the MCP
+    excluded-null count is exercised against real rows (the substrate
+    ``replay_session`` / ``_count_session_rows`` stay patched, but the new
+    ``_count_excluded_null_session_rows`` runs its real query here).
+    ``session.add`` is synchronous; the caller commits inside its own
+    ``session.begin()`` block.
+    """
+    base = datetime(2026, 5, 14, 12, 0, 0, tzinfo=UTC)
+    session.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            occurred_at=base + timedelta(seconds=second),
+            operator_sub="op-1",
+            tenant_id=tenant_id,
+            method=method,
+            path="/mcp",
+            status_code=200,
+            duration_ms=Decimal("1.0"),
+            payload={"op_id": "vsphere.vm.list", "op_class": "read"},
+            agent_session_id=agent_session_id,
+        ),
+    )
 
 
 def _node(node_id: str, *, depth: int, children: list[ReplayNode] | None = None) -> ReplayNode:
@@ -201,11 +243,115 @@ def test_replay_admin_returns_tree_envelope(
     assert payload["tenant_id"] == str(op.tenant_id)
     # row_count counts every node in the returned tree (root + child).
     assert payload["row_count"] == 2
+    # #2776: the excluded-null tally rides on the same envelope; empty
+    # audit_log in this test → zero.
+    assert payload["excluded_null_session_count"] == 0
     assert len(payload["root"]) == 1
     assert payload["root"][0]["id"] == "11111111-1111-1111-1111-111111111111"
     assert payload["root"][0]["depth"] == 0
     assert len(payload["root"][0]["children"]) == 1
     assert payload["root"][0]["children"][0]["depth"] == 1
+
+
+def _replay_seeded(client: TestClient, session_id: str) -> dict[str, object]:
+    """Call ``meho_audit_replay`` with the substrate patched to an empty forest.
+
+    ``replay_session`` returns ``[]`` and ``_count_session_rows`` returns
+    ``0`` so ``row_count`` is 0; the real ``_count_excluded_null_session_rows``
+    query runs against whatever rows the test seeded.
+    """
+    mock_replay = AsyncMock(return_value=[])
+    mock_count = AsyncMock(return_value=0)
+    with patch(_REPLAY_PATCH, new=mock_replay), patch(_COUNT_PATCH, new=mock_count):
+        response = post_mcp(
+            client,
+            {
+                "jsonrpc": "2.0",
+                "id": 15,
+                "method": "tools/call",
+                "params": {
+                    "name": "meho_audit_replay",
+                    "arguments": {"session_id": session_id},
+                },
+            },
+        )
+    body = response.json()
+    assert body["result"]["isError"] is False
+    return json.loads(body["result"]["content"][0]["text"])
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_replay_admin_reports_excluded_null_session_count(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """#2700 → #2776: header-less MCP rows surface as ``excluded_null_session_count``.
+
+    Mirrors the REST reference
+    (``test_api_audit_routes.py::test_replay_reports_excluded_null_session_count``)
+    on the MCP ``meho_audit_replay`` path: three header-less ``method=MCP``
+    / null rows are counted; a ``method=POST`` null row and a different
+    tenant's MCP-null row are excluded. The forest is empty (``row_count``
+    0), so a non-zero tally proves an empty forest is NOT an empty history.
+    """
+    client, op = client_with_operator
+
+    async def _seed() -> None:
+        sessionmaker = get_sessionmaker()
+        async with sessionmaker() as session, session.begin():
+            # Three header-less MCP calls: real operations, no negotiated session.
+            for i in range(3):
+                _add_audit_row(
+                    session,
+                    tenant_id=op.tenant_id,
+                    second=i,
+                    method="MCP",
+                    agent_session_id=None,
+                )
+            # A non-MCP NULL-session row must NOT inflate the count.
+            _add_audit_row(
+                session,
+                tenant_id=op.tenant_id,
+                second=9,
+                method="POST",
+                agent_session_id=None,
+            )
+            # A different tenant's header-less MCP row must NOT leak in.
+            _add_audit_row(
+                session,
+                tenant_id=_OTHER_TENANT_ID,
+                second=0,
+                method="MCP",
+                agent_session_id=None,
+            )
+
+    asyncio.run(_seed())
+
+    payload = _replay_seeded(client, _SESSION_ID)
+    # Empty forest for this session id...
+    assert payload["root"] == []
+    assert payload["row_count"] == 0
+    # ...but NOT an empty history: three header-less MCP rows are counted.
+    # The POST row and tenant B's row are out.
+    assert payload["excluded_null_session_count"] == 3
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.TENANT_ADMIN],
+    indirect=True,
+)
+def test_replay_admin_excluded_null_session_count_zero_base_case(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """No header-less MCP rows → the tally is 0 (empty forest IS empty history)."""
+    client, _op = client_with_operator
+    payload = _replay_seeded(client, _SESSION_ID)
+    assert payload["row_count"] == 0
+    assert payload["excluded_null_session_count"] == 0
 
 
 @pytest.mark.parametrize(
@@ -416,6 +562,8 @@ def test_query_audit_tree_own_session_returns_tree(
     assert payload["session_id"] == _SESSION_ID
     assert payload["tenant_id"] == str(op.tenant_id)
     assert payload["row_count"] == 2
+    # #2776: parity — the operator self-session tree branch carries the key too.
+    assert payload["excluded_null_session_count"] == 0
     assert mock_replay.await_args.kwargs["tenant_id"] == op.tenant_id
 
 

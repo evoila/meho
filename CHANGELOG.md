@@ -118,11 +118,13 @@ connector-related release-notes line.
   reports `mcp_session_id_capture: "when_negotiated"` instead of the
   misleading `"always"` — a session id is captured only when the client
   negotiated one via the `initialize` handshake, so header-less callers
-  write NULL-session audit rows that no session replay can see. The REST
-  replay surface (`GET /api/v1/audit/sessions/{id}/replay`) now also
-  returns `excluded_null_session_count`, the tenant-wide tally of
-  un-negotiated `method=MCP` rows, so an empty replay forest is
-  distinguishable from an empty history (#2700).
+  write NULL-session audit rows that no session replay can see. The
+  replay surfaces now also return `excluded_null_session_count`, the
+  tenant-wide tally of un-negotiated `method=MCP` rows, so an empty
+  replay forest is distinguishable from an empty history — first on REST
+  (`GET /api/v1/audit/sessions/{id}/replay`, #2700), now at parity on the
+  MCP `meho_audit_replay` and `query_audit` (`shape="tree"`) forensic
+  tools (#2776).
 - **A failed dispatch now surfaces the upstream vendor detail to both the
   caller and the durable audit row** (#2680). Two connector-agnostic gaps
   are closed. (1) A non-4xx-classified upstream HTTP status (404 / 429 /

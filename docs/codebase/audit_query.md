@@ -182,7 +182,7 @@ tenant-scoping invariant is enforced one layer up.
 | `GET /api/v1/audit/by-work-ref/{ref}` | Path param (`{ref:path}` converter — a work_ref carries embedded slashes, `#` is percent-encoded) becomes `filters.work_ref` (exact match); `since` query has **no** default window (a change-ticket lookup wants the whole governed history of the ref, not just the last 24h). The "show every write authorised by ticket X" lookup (work_ref I1-T3 #1658). | Pre-canned shortcut. |
 | `GET /api/v1/audit/my-recent` | `filters.principal = operator.sub`; `since` query defaults to `"24h"`. | Pre-canned shortcut. |
 | `GET /api/v1/audit/show/{audit_id}` | `filters.audit_id = <path>`, `limit=1`. Substrate returns 0 rows for cross-tenant lookups → router raises **404** (not 403) so existence never leaks. | Single-row fetch. |
-| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
+| `GET /api/v1/audit/sessions/{session_id}/replay` | Dispatches `replay_session(session_id, tenant_id=operator.tenant_id, ...)`. 200 body is `AuditReplayResult` (`{root: [ReplayNode], session_id, tenant_id, row_count, excluded_null_session_count}`). Unknown / foreign session → `root=[]` / `row_count=0` (**not** 404 — same non-leakage as `show`). `row_count > 10_000` → **413** `{"detail": "session_too_large", "row_count": n}` from a count-first guard run *before* the recursive tree build. **`tenant_admin`-gated (#1843)** — see RBAC below. | Per-session replay (G8.2-T4). |
 
 The replay route's **413 cap** is a cheap tenant-scoped
 `SELECT count(*) WHERE agent_session_id = :id AND tenant_id = :tid` (the
@@ -317,8 +317,9 @@ attempt (the dispatcher's per-call RBAC re-check, not a transport
 `query_audit` grows a `shape` enum (`"flat"` default / `"tree"`). With
 `shape="tree"` the handler short-circuits the flat filter path and
 reconstructs the caller's session as a `ReplayNode` forest via
-`replay_session`, returning `{root, session_id, tenant_id, row_count}`
-(same envelope as the admin tool below).
+`replay_session`, returning `{root, session_id, tenant_id, row_count,
+excluded_null_session_count}` (same envelope, including the same
+`excluded_null_session_count` gloss, as the admin tool below).
 
 The tree path is **self-session only** and intentionally stricter than
 the flat path (which already returns other in-tenant principals' rows):
@@ -348,9 +349,11 @@ admin replays *another* agent's session, where `query_audit`'s
   session=…, max_depth=…)`. Tenant scope is the JWT's — never an
   argument — so an admin cannot replay another tenant's session (a
   foreign session id yields an empty `root`).
-* Returns `{root: [ReplayNode…], session_id, tenant_id, row_count}`
-  via `model_dump(mode="json")`; `row_count` is the total node count
-  in the returned tree.
+* Returns `{root: [ReplayNode…], session_id, tenant_id, row_count,
+  excluded_null_session_count}` via `model_dump(mode="json")`;
+  `row_count` is the total node count in the returned tree, and
+  `excluded_null_session_count` is the tenant-wide tally of header-less
+  `method=MCP` NULL-session rows no replay can reach (#2700 / #2776).
 * `op_class="audit_query"`, so — via the matching `meho.audit.` arm
   in `classify_op` — the MCP broadcast event is aggregate-only
   (`{op_class, result_status, row_count}`), never the `ReplayNode`

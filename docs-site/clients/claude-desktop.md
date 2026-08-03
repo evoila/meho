@@ -92,10 +92,10 @@ shim auto-refreshes.
 
 ## What actually works — and the sharp edges
 
-The smoke test proved the transport end to end and surfaced three
-version-sensitive findings. All three are resolved on a current
-backplane; they are documented because they gate **which build you
-must pin**.
+The smoke test proved the transport end-to-end and surfaced three
+findings. **Two are build-gated** — fixed on a current backplane, but
+they dictate which build you must pin (below). **The third — resource
+discovery — is a standing limitation** with no fix yet.
 
 ### Pin a build with underscore tool names and structured results
 

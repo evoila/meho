@@ -91,7 +91,7 @@ first, then match the row:
 | `invalid_issuer` | The token's `iss` does not match the configured realm. | Point the client at the same realm `KEYCLOAK_ISSUER_URL` names; a stale OAuth state from a previous realm can survive across config changes. |
 | `token_expired` / `token_not_yet_valid` | `exp` is in the past, or `nbf` in the future beyond leeway (clock skew). | Refresh the token; for `nbf`, sync the clock on the issuing or calling host. |
 | `signature_verification_failed` | The JWS does not verify against the issuer's published keys. | Confirm the token comes from the realm the backplane validates against. |
-| `invalid_token` | A structural failure with no more specific code — a truncated JWS, `alg: none`, or a `kid` absent from the JWKS. | Capture the raw `Authorization` value and confirm it is a three-segment RS256 JWS. |
+| `invalid_token` | A structural failure with no more specific code — a truncated JWS, `alg: none`, or a `kid` absent from the JWKS. | Inspect the token **locally** — confirm it is a three-segment RS256 JWS (segment count, `alg`, `kid`). Treat the bearer as a live credential: decode it on your own machine and never paste it into a shared issue, log, or chat — redact it from any diagnostic you share. |
 
 The diagnostic detail (expected audience, claim name, exception class)
 is in the backplane's **server log**, not the 401 body — that

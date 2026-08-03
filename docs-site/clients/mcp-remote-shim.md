@@ -34,7 +34,8 @@ read the access token out of `credentials.json`:
 ```bash
 MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com
 
-export MEHO_TOKEN="Bearer $(jq -r '.entries[].access_token' \
+export MEHO_TOKEN="Bearer $(jq -r --arg url https://meho.example.com \
+  '.entries[] | select(.backplane_url == $url) | .access_token' \
   "${XDG_CONFIG_HOME:-$HOME/.config}/meho/credentials.json")"
 ```
 

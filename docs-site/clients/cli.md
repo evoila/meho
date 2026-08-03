@@ -154,8 +154,11 @@ read it from `credentials.json`:
 ```bash
 MEHO_KEYRING_DISABLE=1 meho login https://meho.example.com
 
-# The file holds one entry per backplane; extract the access token:
-jq -r '.entries[].access_token' \
+# The file holds one entry per backplane; select the one you logged
+# into (extracting .entries[] unfiltered would print every backplane's
+# token):
+jq -r --arg url "https://meho.example.com" \
+  '.entries[] | select(.backplane_url == $url) | .access_token' \
   "${XDG_CONFIG_HOME:-$HOME/.config}/meho/credentials.json"
 ```
 

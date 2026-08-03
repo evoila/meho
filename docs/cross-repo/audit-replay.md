@@ -133,8 +133,8 @@ There are two MCP entry points for replay, split by role and scope. The split is
 
 | Tool | Role | Scope | Shape |
 |---|---|---|---|
-| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count}` |
-| `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count}` |
+| `query_audit({agent_session_id, shape:"tree"})` | `operator` | **Self-session only** | `{root, session_id, tenant_id, row_count, excluded_null_session_count}` |
+| `meho_audit_replay({session_id})` | `tenant_admin` | **Cross-session** (any session in the tenant) | `{root, session_id, tenant_id, row_count, excluded_null_session_count}` |
 
 ### `query_audit` with `shape:"tree"` (operator, self-session-only)
 
@@ -185,7 +185,8 @@ Both tree paths reject an over-cap session with `-32602` (`session_too_large`) â
   "root": [ /* ReplayNode forest, chronological roots */ ],
   "session_id": "11111111-1111-1111-1111-111111111111",
   "tenant_id": "22222222-2222-2222-2222-222222222222",
-  "row_count": 4
+  "row_count": 4,
+  "excluded_null_session_count": 0
 }
 ```
 
@@ -260,7 +261,8 @@ A worked `--json` tree (truncated to the rendering-relevant fields; every `Audit
   ],
   "session_id": "11111111-1111-1111-1111-111111111111",
   "tenant_id": "22222222-2222-2222-2222-222222222222",
-  "row_count": 4
+  "row_count": 4,
+  "excluded_null_session_count": 0
 }
 ```
 

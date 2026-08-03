@@ -506,7 +506,7 @@ parity with the ``/api/v1/*`` chassis path and the MCP transport path.
   of the session walk naturally (no synthetic per-call uuid4 polluting
   the search). Operators can confirm the deploy's mode at
   `GET /api/v1/health`'s `mcp_session_id_capture` field
-  (`"always"` / `"enforced"`).
+  (`"when_negotiated"` / `"enforced"`).
 
 * **`op_id` / `op_class` glob filtering is JSON-path-based.** On PostgreSQL
   the `payload->>'op_id'` lookup runs over the JSONB column without an index

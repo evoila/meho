@@ -47,6 +47,7 @@ import ipaddress
 import select
 import socket
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -135,13 +136,30 @@ _CHAIN_ITEM_SCHEMA: dict[str, Any] = {
         },
         "not_before": {"type": "string", "description": "ISO 8601 UTC notBefore."},
         "not_after": {"type": "string", "description": "ISO 8601 UTC notAfter."},
+        "days_to_expiry": {
+            "type": "number",
+            "description": (
+                "Days from probe time until notAfter (notAfter - now, in days); "
+                "negative once the cert has expired. Point a threshold assertion "
+                "at it for cert-expiry early warning."
+            ),
+        },
         "serial": {"type": "string", "description": "Serial number as a decimal string."},
         "self_signed": {
             "type": "boolean",
             "description": "True iff subject == issuer (a root or self-signed leaf).",
         },
     },
-    "required": ["subject", "issuer", "san", "not_before", "not_after", "serial", "self_signed"],
+    "required": [
+        "subject",
+        "issuer",
+        "san",
+        "not_before",
+        "not_after",
+        "days_to_expiry",
+        "serial",
+        "self_signed",
+    ],
     "additionalProperties": False,
 }
 
@@ -188,6 +206,14 @@ _NET_TLS_INSPECT_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": "Leaf notAfter (ISO 8601 UTC) for the common 'is it expiring' read.",
         },
+        "days_to_expiry": {
+            "type": ["number", "null"],
+            "description": (
+                "Leaf days-to-expiry (notAfter - probe time, in days; negative once "
+                "expired); null on a failed handshake. A {type: threshold, op: lt} "
+                "assertion pointed here expresses cert-expiry early warning."
+            ),
+        },
         "hostname_match": {
             "type": "boolean",
             "description": (
@@ -211,6 +237,7 @@ _NET_TLS_INSPECT_RESPONSE_SCHEMA: dict[str, Any] = {
         "chain",
         "leaf",
         "not_after",
+        "days_to_expiry",
         "hostname_match",
         "chain_complete",
     ],
@@ -220,21 +247,24 @@ _NET_TLS_INSPECT_RESPONSE_SCHEMA: dict[str, Any] = {
 _NET_TLS_INSPECT_WHEN_TO_USE = (
     "Inspect the full TLS certificate chain an endpoint presents — the "
     "openssl 's_client -showcerts' read: 'what cert does the load "
-    "balancer serve on 443?', 'is this appliance's cert expired or "
-    "self-signed?', 'did the server send the intermediate?'. Verification "
-    "is OFF, so a self-signed / expired / mismatched cert is inspected and "
-    "reported, never rejected — the cert is the answer. A refused, "
-    "timed-out, or non-TLS endpoint is a normal result, not an error. The "
-    "destination must be inside MEHO_NETDIAG_PROBE_ALLOWLIST."
+    "balancer serve on 443?', 'is this appliance's cert expired, expiring "
+    "soon, or self-signed?', 'did the server send the intermediate?'. Each "
+    "presented cert carries days_to_expiry (float days until notAfter, "
+    "negative once expired), so a threshold assertion warns N days before a "
+    "cert expires. Verification is OFF, so a self-signed / expired / "
+    "mismatched cert is inspected and reported, never rejected — the cert "
+    "is the answer. A refused, timed-out, or non-TLS endpoint is a normal "
+    "result, not an error. The destination must be inside "
+    "MEHO_NETDIAG_PROBE_ALLOWLIST."
 )
 
 _NET_TLS_INSPECT_LLM_INSTRUCTIONS: dict[str, Any] = {
     "when_to_use": (
         "Use to read the certificate chain a TLS endpoint presents "
         "(leaf, intermediates, root-if-sent) without trusting it: chain "
-        "completeness, per-cert validity window, self-signed flags, and "
-        "whether the leaf matches a hostname. Read-only: no application "
-        "bytes are sent."
+        "completeness, per-cert validity window and days-to-expiry (for "
+        "cert-expiry early warning), self-signed flags, and whether the "
+        "leaf matches a hostname. Read-only: no application bytes are sent."
     ),
     "parameter_hints": {
         "host": "Required. Hostname or IP literal. Must be allowlisted for probing.",
@@ -244,13 +274,15 @@ _NET_TLS_INSPECT_LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": (
         "On a completed handshake: {'handshake': true, 'reason': null, "
-        "'chain': [{subject, issuer, san, not_before, not_after, serial, "
-        "self_signed}, ...] (leaf-first), 'leaf': <chain[0]>, "
-        "'hostname_match': <bool>, 'chain_complete': <bool>, 'protocol': "
-        "<str>, 'cipher': <str>, 'not_after': <leaf notAfter>, 'host', "
-        "'port', 'server_name'}. On a refused / timed-out / non-TLS "
-        "endpoint: the same keys with handshake=false, reason set, chain=[] "
-        "and leaf=null — still a successful (status=ok) op."
+        "'chain': [{subject, issuer, san, not_before, not_after, "
+        "days_to_expiry, serial, self_signed}, ...] (leaf-first), 'leaf': "
+        "<chain[0]>, 'hostname_match': <bool>, 'chain_complete': <bool>, "
+        "'protocol': <str>, 'cipher': <str>, 'not_after': <leaf notAfter>, "
+        "'days_to_expiry': <leaf days-to-expiry, float; negative once "
+        "expired>, 'host', 'port', 'server_name'}. On a refused / "
+        "timed-out / non-TLS endpoint: the same keys with handshake=false, "
+        "reason set, chain=[], leaf=null and days_to_expiry=null — still a "
+        "successful (status=ok) op."
     ),
 }
 
@@ -359,13 +391,17 @@ def _leaf_hostname_match(cert: x509.Certificate, server_name: str) -> bool:
     return common_name is not None and _dns_name_matches([common_name], name)
 
 
-def _cert_to_dict(cert: x509.Certificate) -> dict[str, Any]:
+def _cert_to_dict(cert: x509.Certificate, now: datetime) -> dict[str, Any]:
     """Flatten one presented certificate into the audit-safe report shape.
 
     ``serial`` is stringified (a serial is a large integer that a JS
     consumer would silently truncate as a JSON number); timestamps use the
     tz-aware ``*_utc`` accessors (naive ``not_valid_after`` is deprecated
-    in ``cryptography``).
+    in ``cryptography``). ``days_to_expiry`` is ``(not_after - now)`` in
+    days (negative once expired) — a numeric field a threshold assertion
+    can bite on for cert-expiry early warning, computed against a single
+    probe-time *now* the caller injects so every cert in one chain shares
+    the same reference instant.
     """
     return {
         "subject": cert.subject.rfc4514_string(),
@@ -373,6 +409,7 @@ def _cert_to_dict(cert: x509.Certificate) -> dict[str, Any]:
         "san": _san_dns_names(cert) + _san_ip_addresses(cert),
         "not_before": cert.not_valid_before_utc.isoformat(),
         "not_after": cert.not_valid_after_utc.isoformat(),
+        "days_to_expiry": (cert.not_valid_after_utc - now).total_seconds() / 86400.0,
         "serial": str(cert.serial_number),
         "self_signed": cert.subject == cert.issuer,
     }
@@ -391,6 +428,7 @@ def _failure(host: str, port: int, server_name: str, reason: str) -> dict[str, A
         "chain": [],
         "leaf": None,
         "not_after": None,
+        "days_to_expiry": None,
         "hostname_match": False,
         "chain_complete": False,
     }
@@ -516,7 +554,8 @@ async def net_tls_inspect(
         # an OSError, so both bases are caught here.
         return _failure(host, port, server_name, _connect_failure_reason(exc))
 
-    chain_dicts = [_cert_to_dict(cert) for cert in chain]
+    now = datetime.now(UTC)
+    chain_dicts = [_cert_to_dict(cert, now) for cert in chain]
     leaf = chain_dicts[0] if chain_dicts else None
     hostname_match = bool(chain) and _leaf_hostname_match(chain[0], server_name)
     chain_complete = bool(chain) and (chain[-1].subject == chain[-1].issuer)
@@ -532,6 +571,7 @@ async def net_tls_inspect(
         "chain": chain_dicts,
         "leaf": leaf,
         "not_after": leaf["not_after"] if leaf else None,
+        "days_to_expiry": leaf["days_to_expiry"] if leaf else None,
         "hostname_match": hostname_match,
         "chain_complete": chain_complete,
     }

@@ -1313,6 +1313,15 @@ class Settings(BaseModel):
     # evaluator (or the test path without a runner) can opt out.
     sensor_runner_enabled: bool = True
     sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    # #2763 — evaluation-loop watchdog. A stall is "no completed runner tick
+    # for stall_after_ticks x tick_interval_seconds" (default 6 x 10 s = 60 s);
+    # the threshold scales with the tick grid so a deployment that slows the
+    # cadence widens the stall window with it. Floor of 2: a threshold at or
+    # below one tick interval would flag every ordinary sleep-then-tick gap.
+    # The watchdog itself has no enable flag -- it starts and stops with
+    # SENSOR_RUNNER_ENABLED (a watchdog with its own kill switch is how the
+    # silent-stall class stays invisible).
+    sensor_runner_stall_after_ticks: int = Field(default=6, ge=2, le=1000)
     # #2642 (G0.37) — the in-process check-runner's own service-principal
     # identity for background dispatch. Both empty (the default) keeps
     # today's behaviour bit-for-bit: the runner's synthetic operator carries
@@ -1913,6 +1922,9 @@ def get_settings() -> Settings:
         ),
         sensor_runner_enabled=parse_bool_env(
             os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
+        ),
+        sensor_runner_stall_after_ticks=int(
+            os.environ.get("SENSOR_RUNNER_STALL_AFTER_TICKS", "6"),
         ),
         check_runner_client_id=os.environ.get("CHECK_RUNNER_CLIENT_ID", "").strip(),
         check_runner_client_secret=os.environ.get("CHECK_RUNNER_CLIENT_SECRET", "").strip(),

@@ -86,6 +86,7 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connectors._shared.credential_backend import (
     UnknownCredentialBackendError,
     resolve_credential_backend,
@@ -190,6 +191,31 @@ class DbStatus(BaseModel):
     migrated: bool | None
 
 
+class SensorRunnerStatus(BaseModel):
+    """Liveness of this process's sensor evaluation loop (#2763).
+
+    The queryable half of the checks-runner watchdog: an external prober
+    ("how we monitor the monitoring") alerts when
+    ``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` — or
+    simply on ``stalled``, which is that comparison server-side.
+    ``stalled`` is derived live from the in-process tick stamp on every
+    read (never from the watchdog task's emission latch), so it stays
+    truthful even if the watchdog task itself has died.
+
+    ``seconds_since_last_tick`` is ``None`` only in the window between
+    process start and runner start — once the lifespan is up it is
+    always a number. The value is per-process: each replica reports its
+    own loop, which is exactly the failure mode observed (one process's
+    loop coroutine going quiet).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    seconds_since_last_tick: float | None
+    stalled: bool
+    stall_threshold_seconds: float
+
+
 class HealthResponse(BaseModel):
     """``GET /api/v1/health`` response body.
 
@@ -220,6 +246,13 @@ class HealthResponse(BaseModel):
     :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
     helper so both surfaces stay consistent).
 
+    ``sensor_runner`` (#2763) carries the checks evaluation-loop's
+    liveness (:class:`SensorRunnerStatus`), and is ``None`` exactly
+    when ``SENSOR_RUNNER_ENABLED=false`` — a deliberately disabled
+    runner must not read as stalled. The ``None`` default keeps
+    response decoders generated against the pre-#2763 shape working;
+    the handler always populates it on an enabled runner.
+
     ``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's
     pinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.
     Mirrors the ``mcp_session_id_capture`` precedent: single-field
@@ -238,6 +271,7 @@ class HealthResponse(BaseModel):
     db: DbStatus
     mcp_session_id_capture: str
     mcp_protocol_version: str = PROTOCOL_VERSION
+    sensor_runner: SensorRunnerStatus | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -252,12 +286,21 @@ class LivenessResponse(BaseModel):
     :class:`HealthResponse` route so a low-privilege monitoring
     principal can never drive a per-operator Vault credential
     federation from the liveness path.
+
+    ``sensor_runner`` (#2763) rides here as well as on the deep check:
+    the external prober that watches the evaluation loop is precisely
+    the ``read_only`` monitoring principal this route exists for, and
+    polling the deep route instead would federate a Vault credential
+    and write an audit row per poll. The facet honours this handler's
+    constraints — an in-memory clock read; no connector, no credential,
+    no secret.
     """
 
     model_config = ConfigDict(frozen=True)
 
     operator: OperatorIdentity
     db: DbStatus
+    sensor_runner: SensorRunnerStatus | None = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -475,6 +518,24 @@ async def _probe_federation(operator: Operator, log: Any) -> VaultStatus:
     return await _probe_backend_federation(operator, log, backend_kind)
 
 
+def _sensor_runner_status() -> SensorRunnerStatus | None:
+    """Map the watchdog's liveness view onto the wire model.
+
+    ``None`` when ``SENSOR_RUNNER_ENABLED=false`` — the facet's absence
+    *is* the "deliberately disabled" signal, distinct from a present
+    facet with a stale stamp (#2763 acceptance: a disabled runner must
+    not read as stalled).
+    """
+    if not get_settings().sensor_runner_enabled:
+        return None
+    liveness = sensor_runner_liveness()
+    return SensorRunnerStatus(
+        seconds_since_last_tick=liveness.seconds_since_last_tick,
+        stalled=liveness.stalled,
+        stall_threshold_seconds=liveness.stall_threshold_seconds,
+    )
+
+
 async def build_health_response(operator: Operator) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
@@ -500,6 +561,7 @@ async def build_health_response(operator: Operator) -> HealthResponse:
         db=DbStatus(migrated=db_probe_result.ok),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
         mcp_protocol_version=PROTOCOL_VERSION,
+        sensor_runner=_sensor_runner_status(),
     )
 
 
@@ -527,6 +589,7 @@ async def liveness(
             email=operator.email,
         ),
         db=DbStatus(migrated=db_probe_result.ok),
+        sensor_runner=_sensor_runner_status(),
     )
 
 

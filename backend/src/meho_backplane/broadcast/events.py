@@ -175,9 +175,11 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
 )
 
 #: Op-ids that classify as ``checks`` — the checks subsystem's own
-#: state-change events (#2720), published by
-#: :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
-#: rather than by the audit middleware.
+#: state-change events, published by
+#: :mod:`meho_backplane.checks.broadcast` rather than by the audit
+#: middleware: the Dashboard rollup edge (#2720,
+#: ``publish_check_transition_event``) and the evaluation-loop watchdog's
+#: stall/recovery pair (#2763, ``publish_scheduler_liveness_event``).
 #:
 #: An explicit allowlist, **not** a ``checks.`` prefix branch. The
 #: ``/api/v1/checks/*`` gateway routes already own three shipped op-ids
@@ -209,7 +211,13 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
 #:
 #: The allowlist is the same idiom :data:`_CREDENTIAL_MINT_OPS` uses for
 #: the same reason: an exact pin that beats a broader structural match.
-_CHECK_EVENT_OPS: Final[frozenset[str]] = frozenset({"checks.transition"})
+_CHECK_EVENT_OPS: Final[frozenset[str]] = frozenset(
+    {
+        "checks.transition",
+        "checks.scheduler_stalled",
+        "checks.scheduler_recovered",
+    }
+)
 
 #: Op-id suffixes that imply mutation. Append to this tuple when a new
 #: write-shaped verb spelling lands. ``.put`` is the KV-v2 write verb
@@ -506,9 +514,10 @@ def classify_op(op_id: str) -> str:
        stays full-detail like ``other`` did -- see
        :data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`.
     4c. ``checks`` — the checks subsystem's own state-change events
-       (:data:`_CHECK_EVENT_OPS`; today just ``checks.transition``,
-       emitted by
-       :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`).
+       (:data:`_CHECK_EVENT_OPS`; ``checks.transition`` from #2720's
+       :func:`~meho_backplane.checks.broadcast.publish_check_transition_event`
+       plus #2763's ``checks.scheduler_stalled`` /
+       ``checks.scheduler_recovered`` watchdog pair).
        Its own class for the same reason ``approval`` has one: a feed
        watcher filters ``op_class=checks`` server-side to follow
        Dashboard rollup edges without reading every unclassified op.

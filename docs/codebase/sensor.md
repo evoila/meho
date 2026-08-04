@@ -143,7 +143,8 @@ runner parking.
 ## References
 
 - Initiative #2416 (binding design), Task #2503, dependency #2504, parent
-  goal #221. Runner #2505, dashboard/rollup #2506, investigator #2507
-  build on this storage shape.
+  goal #221. Runner #2505 (see `docs/codebase/checks-runner.md`, which
+  also covers the #2763 evaluation-loop watchdog), dashboard/rollup
+  #2506, investigator #2507 build on this storage shape.
 - Mould: `ScheduledTrigger` (`db/models.py`), `scheduler/` service/repo/
   schemas, `docs/codebase/scheduler.md`.

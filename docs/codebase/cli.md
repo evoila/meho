@@ -482,7 +482,9 @@ Authorization Grant (RFC 8628). End-to-end shape:
 4. **Prompt.** The CLI prints the verification URL and `user_code` to
    stdout. The operator opens the URL on any device with a browser,
    signs in, and approves the request. (Browser auto-launch is
-   deferred to a future Task per the v0.1 scope.)
+   deferred to a future Task per the v0.1 scope.) Under `--print-token`
+   this prompt is written to stderr instead, so stdout stays reserved
+   for the token — see step 7.
 5. **Polling.** `Config.DeviceAccessToken` polls the token endpoint
    at the IdP-supplied `interval`, honouring RFC 8628's
    `authorization_pending` and `slow_down` semantics. The polling
@@ -522,6 +524,22 @@ Authorization Grant (RFC 8628). End-to-end shape:
 6. **Persistence.** The access token plus issuer, client_id,
    refresh token (captured for v0.2), and id_token are persisted to
    a backend chosen at runtime — see below.
+7. **Token print (`--print-token`).** After persistence, when the
+   operator passed `--print-token`, the CLI writes the freshly minted
+   access token — and nothing else — to stdout, followed by a single
+   newline, then returns. Every other line the command emits (the
+   device-code prompt, the success message, the migration nudge, the
+   config-persist warning) is diverted to stderr for the whole run, so
+   `TOKEN=$(meho login --print-token <url>)` captures exactly the
+   bearer and `meho login --print-token <url> | wc -l` is `1`. This is
+   the coherent home for raw-token retrieval — `meho status` redacts
+   the token by design (see "Bearer redaction" below), so the flag
+   lives on `login`, not `status`. Two helpers keep the contract
+   auditable and unit-testable: `humanWriter` routes operator-facing
+   chrome to stderr, and `printAccessToken` is the sole writer to
+   stdout on this path. The value is a live credential, so `--help`
+   carries a do-not-log caution and the flag is off by default.
+   Precedent: `gcloud auth print-access-token`, `gh auth token`.
 
 ### Token storage
 

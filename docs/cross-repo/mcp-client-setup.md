@@ -118,7 +118,7 @@ The remote Custom Connector path (paste a `/mcp` URL into claude.ai → Settings
 # Obtain a token via the realm's preferred flow — for the dogfood
 # consumer, `meho login` is the simplest path; for direct Keycloak
 # device-code, `kcadm.sh` works too.
-TOKEN=$(meho login --print-token)
+TOKEN=$(meho login --print-token https://meho.example.com)
 
 # List tools (smoke test).
 npx @modelcontextprotocol/inspector --cli \

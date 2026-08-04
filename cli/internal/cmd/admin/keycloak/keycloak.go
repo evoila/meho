@@ -217,7 +217,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&skipUserProvisioning, "skip-user-provisioning", false,
 		"skip the group + user creation steps (use when users are externally-managed via federation / SCIM)")
 	cmd.Flags().StringSliceVar(&mcpRedirectURIs, "mcp-redirect-uri", nil,
-		"redirect URI(s) for the MCP browser-flow client (default: claude.ai callback + localhost)")
+		"redirect URI(s) for the MCP browser-flow client (default: loopback localhost + 127.0.0.1, any port/path)")
 	cmd.Flags().StringSliceVar(&mcpWebOrigins, "mcp-web-origin", nil,
 		"CORS web origin(s) for the MCP browser-flow client (default: `+` — allow the redirect-URI origins)")
 	cmd.Flags().BoolVar(&insecureSkipTLS, "insecure-skip-tls-verify", false,

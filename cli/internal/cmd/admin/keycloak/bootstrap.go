@@ -66,8 +66,10 @@ type BootstrapOptions struct {
 	SkipUserProvisioning bool
 
 	// MCPRedirectURIs / MCPWebOrigins control the public MCP client's
-	// browser-flow allowlists. Defaults cover Claude.ai + localhost
-	// MCP Inspector.
+	// browser-flow allowlists. Defaults cover the loopback callbacks
+	// (localhost + 127.0.0.1, any port/path) that mcp-remote and Claude
+	// Code listen on — Keycloak matches redirect hosts literally, so
+	// both loopback forms are listed.
 	MCPRedirectURIs []string
 	MCPWebOrigins   []string
 
@@ -106,8 +108,8 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 	}
 	if len(o.MCPRedirectURIs) == 0 {
 		o.MCPRedirectURIs = []string{
-			"https://claude.ai/api/mcp/auth_callback",
 			"http://localhost:*",
+			"http://127.0.0.1:*",
 		}
 	}
 	if len(o.MCPWebOrigins) == 0 {

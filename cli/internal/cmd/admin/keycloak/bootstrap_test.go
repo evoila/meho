@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -813,6 +814,43 @@ func TestBootstrap_MCPClientHasStandardFlowAndPKCE(t *testing.T) {
 	}
 	if len(mcpClient.RedirectURIs) == 0 {
 		t.Errorf("MCP client must have at least one redirect URI")
+	}
+}
+
+// TestBootstrap_MCPClientDefaultRedirectURIsLoopbackOnly is the
+// regression contract for #2793: when no --mcp-redirect-uri is given,
+// withDefaults() must apply the loopback-only set covering both host
+// forms (localhost + 127.0.0.1). Keycloak matches redirect hosts
+// literally, so `http://localhost:*` alone does NOT cover the
+// `127.0.0.1` host that mcp-remote's `/oauth/callback` uses (#2666).
+// The dead claude.ai cloud callback — structurally unreachable for
+// internal-only MEHO (#2744) — must not be defaulted.
+func TestBootstrap_MCPClientDefaultRedirectURIsLoopbackOnly(t *testing.T) {
+	fake := newFakeKeycloak()
+	if _, _, err := runBootstrapOnce(t, fake, fullOpts()); err != nil {
+		t.Fatalf("Bootstrap: %v", err)
+	}
+	var mcpClient *clientRep
+	for _, c := range fake.clients {
+		if c.ClientID == "meho-mcp" {
+			mcpClient = c
+		}
+	}
+	if mcpClient == nil {
+		t.Fatalf("meho-mcp not found")
+	}
+
+	want := []string{"http://localhost:*", "http://127.0.0.1:*"}
+	if !slices.Equal(mcpClient.RedirectURIs, want) {
+		t.Errorf("default MCP redirect URIs = %v, want %v",
+			mcpClient.RedirectURIs, want)
+	}
+	for _, uri := range mcpClient.RedirectURIs {
+		if strings.Contains(uri, "claude.ai") {
+			t.Errorf("default MCP redirect URIs must not include a "+
+				"claude.ai cloud callback (internal-only MEHO can never "+
+				"exercise it); got %q", uri)
+		}
 	}
 }
 

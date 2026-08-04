@@ -1872,8 +1872,10 @@ agent-facing operation, and is **not** mirrored on the MCP surface.
      every other flow off).
   2. Public authorization-code+PKCE MCP client (default name
      `meho-mcp`, `standardFlowEnabled=true`,
-     `pkce.code.challenge.method=S256`, redirect URIs for Claude.ai +
-     localhost MCP Inspector).
+     `pkce.code.challenge.method=S256`, default redirect URIs for the
+     loopback callbacks `http://localhost:*` + `http://127.0.0.1:*`
+     that `mcp-remote` and Claude Code listen on — Keycloak matches
+     redirect hosts literally, so both loopback forms are listed).
   3. 5 protocol mappers cloned from the reference shape on
      `meho-backplane`, installed on **both** public clients:
      `audience-meho-backplane`, `meho-mcp-audience`, `tenant-id`,

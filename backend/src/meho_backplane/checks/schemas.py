@@ -223,17 +223,19 @@ class SensorRead(BaseModel):
 
 
 class SensorListResponse(BaseModel):
-    """Response envelope for ``GET /api/v1/sensors``.
+    """Unified list envelope for ``GET /api/v1/sensors``.
 
-    Wrapped in ``{"sensors": [...]}`` so a future paging / cursor field
-    can land non-breakingly -- the same shape
-    :class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`
-    adopted.
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. The listing is not
+    cursor-paginated (``limit`` / ``offset`` truncate), so ``next_cursor``
+    is always ``None`` but present so the endpoint can grow pagination
+    later without a further breaking change.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    sensors: list[SensorRead]
+    items: list[SensorRead]
+    next_cursor: str | None = None
 
 
 #: Re-exported sentinel status literal for query-string filter handling at

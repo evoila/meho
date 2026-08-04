@@ -90,6 +90,32 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes — `GET /api/v1/checks/dashboards` + `GET /api/v1/sensors` converged on the `{items, next_cursor}` envelope (#2742)
+
+- **BREAKING.** The two check-plane `GET`-list routes that still wrapped
+  their list under a resource-named key now return the unified
+  `{items, next_cursor?}` list envelope
+  (`docs/codebase/api-shape-conventions.md` §2) — the same convention the
+  seven #2338 reference routes adopted, so the API no longer diverges from
+  its own standard on its newest routes. Both listings are unpaginated, so
+  `next_cursor` is always `null` (present so the field can grow a real
+  cursor later without a further breaking change). Both are now pinned by
+  the platform-wide contract test
+  (`backend/tests/test_api_v1_list_envelope_contract.py`) so the
+  divergence cannot recur. Affected endpoints and the wire-shape change
+  adopters must migrate:
+  - `GET /api/v1/checks/dashboards` — was `{"dashboards": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/sensors` — was `{"sensors": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+
+  **Migration recipe.** Read the list from `response["items"]` instead of
+  the old key (`dashboards` / `sensors`); read `response["next_cursor"]`
+  for pagination (always `null` on these routes today). The bundled `meho`
+  CLI and the generated Go client already read the new envelope — this
+  change ships them together. The MCP `meho.sensors.*` tool payload is
+  unchanged (governed by its own conventions test, not §2).
+
 ### Added
 
 - **Checks evaluation-loop watchdog + queryable runner liveness**

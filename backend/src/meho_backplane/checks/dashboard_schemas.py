@@ -194,12 +194,16 @@ class DashboardDetail(DashboardRead):
 
 
 class DashboardListResponse(BaseModel):
-    """Response envelope for ``GET /api/v1/checks/dashboards``.
+    """Unified list envelope for ``GET /api/v1/checks/dashboards``.
 
-    Wrapped in ``{"dashboards": [...]}`` so a future paging / cursor field
-    can land non-breakingly -- the same shape the Sensor list adopts.
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. The listing is not
+    cursor-paginated (``limit`` / ``offset`` truncate), so ``next_cursor``
+    is always ``None`` but present so the endpoint can grow pagination
+    later without a further breaking change.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    dashboards: list[DashboardRead]
+    items: list[DashboardRead]
+    next_cursor: str | None = None

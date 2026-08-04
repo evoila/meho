@@ -134,6 +134,8 @@ _LIST_ENVELOPE_ENDPOINTS = [
     pytest.param("/api/v1/broadcast/overrides", None, id="broadcast-overrides"),
     pytest.param("/api/v1/runbooks/templates", "templates", id="runbook-templates"),
     pytest.param("/api/v1/runbooks/runs", "runs", id="runbook-runs"),
+    pytest.param("/api/v1/checks/dashboards", "dashboards", id="checks-dashboards"),
+    pytest.param("/api/v1/sensors", "sensors", id="sensors"),
 ]
 
 #: Bare path list for the schema / route-table checks (the parametrize

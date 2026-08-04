@@ -338,7 +338,7 @@ func TestRunListHappyPath(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.SensorListResponse{
-			Sensors: []api.SensorRead{fakeSensor(t, "interval")},
+			Items: []api.SensorRead{fakeSensor(t, "interval")},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -358,7 +358,7 @@ func TestRunListEmptyResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/sensors", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.SensorListResponse{Sensors: nil})
+		_ = json.NewEncoder(w).Encode(api.SensorListResponse{Items: nil})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

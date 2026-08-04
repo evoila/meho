@@ -320,7 +320,7 @@ async def test_rest_create_list_delete_round_trip(client: TestClient) -> None:
 
         listed = client.get("/api/v1/checks/dashboards", headers=headers)
         assert listed.status_code == 200
-        rows = listed.json()["dashboards"]
+        rows = listed.json()["items"]
         assert [d["id"] for d in rows] == [dashboard_id]
         assert rows[0]["state"] == "ok"
 
@@ -394,7 +394,7 @@ async def test_rest_cross_tenant_dashboard_id_is_404(client: TestClient) -> None
         assert got.status_code == 404
         assert got.json()["detail"] == "dashboard_not_found"
         # And B's list does not include A's dashboard.
-        assert client.get("/api/v1/checks/dashboards", headers=b_headers).json()["dashboards"] == []
+        assert client.get("/api/v1/checks/dashboards", headers=b_headers).json()["items"] == []
 
 
 @pytest.mark.asyncio
@@ -534,7 +534,7 @@ async def test_rest_create_round_trips_notify_config(client: TestClient) -> None
         assert detail.json()["notify_min_state"] == "degraded"
 
         listed = client.get("/api/v1/checks/dashboards", headers=headers)
-        row = next(d for d in listed.json()["dashboards"] if d["id"] == dashboard_id)
+        row = next(d for d in listed.json()["items"] if d["id"] == dashboard_id)
         assert row["notify_email"] == "oncall@example.com"
         assert row["notify_min_state"] == "degraded"
 
@@ -619,7 +619,7 @@ async def test_rest_create_round_trips_investigator_prompt(client: TestClient) -
         assert detail.json()["investigator_prompt"] == prompt
 
         listed = client.get("/api/v1/checks/dashboards", headers=headers)
-        row = next(d for d in listed.json()["dashboards"] if d["id"] == dashboard_id)
+        row = next(d for d in listed.json()["items"] if d["id"] == dashboard_id)
         assert row["investigator_prompt"] == prompt
 
     async with get_sessionmaker()() as session:

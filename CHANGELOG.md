@@ -179,6 +179,18 @@ connector-related release-notes line.
   applied uniformly to every error arm. The params-only broadcast frame is
   unchanged; the never-raises and audit-fail-open contracts are preserved.
 
+### Security
+
+- Bump `aiohttp` 3.14.1 → 3.14.3 (CVE-2026-69244, out-of-bounds heap
+  read in the C HTTP response parser error path) and `cryptography`
+  49.0.0 → 50.0.0 (CVE-2026-69247, PKCS#7 EnvelopedData Bleichenbacher
+  oracle) — both fixable HIGH findings that turned the image trivy gate
+  red on every `main` push from 2026-08-04. `pyopenssl` rides along
+  26.3.0 → 26.4.0 for the new cryptography major, and the
+  `cryptography` floor in `backend/pyproject.toml` rises to `>=50.0.0`
+  so downstream installs cannot resolve back onto the vulnerable
+  version. (#2798)
+
 ## [0.27.0] - 2026-08-03
 
 ### Breaking changes

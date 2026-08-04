@@ -40,7 +40,7 @@ from meho_backplane.checks.repository import list_sensor_results, record_sensor_
 from meho_backplane.checks.schemas import SensorCreate, SensorResultsQuery
 from meho_backplane.checks.service import SensorAdminService, SensorResultsCursorError
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, SensorResult, Tenant
+from meho_backplane.db.models import EndpointDescriptor, Sensor, SensorResult, Tenant
 from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
@@ -280,6 +280,47 @@ async def test_record_history_stale_result_appends_no_duplicate() -> None:
             is False
         )
         await session.commit()
+    assert await _count_results(sensor_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_record_history_appends_row_for_unconfirmed_soft_reading() -> None:
+    """A #2799 soft/pending reading (unconfirmed) still lands in history.
+
+    The #2756 x #2799 collision invariant the initiative called out: the
+    evidence append rides *before* the confirmation gate, so a reading held as
+    a soft state (no commit, projection unchanged) still produces exactly one
+    evidence row -- history records the observed outcome, not just committed
+    transitions.
+    """
+    sensor_id = await _seed_sensor()
+    # Give the sensor a confirmation window (#2799); there is no update route,
+    # so set it directly on the row.
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        row = await session.get(Sensor, sensor_id)
+        assert row is not None
+        row.retry_times = 2
+        await session.commit()
+
+    async with sessionmaker() as session:
+        committed = await record_sensor_result(
+            session,
+            sensor_id=sensor_id,
+            state="critical",
+            value=9,
+            evidence={"reason": "breach"},
+            evaluated_at=datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC),
+            record_history=True,
+        )
+        await session.commit()
+
+    # retry_times=2 holds the first differing reading soft: nothing commits...
+    assert committed is False
+    read = await SensorAdminService().get(_TENANT_A, sensor_id)
+    assert read is not None
+    assert read.last_state == "unknown"
+    # ...but the unconfirmed reading is still in the evidence history.
     assert await _count_results(sensor_id) == 1
 
 

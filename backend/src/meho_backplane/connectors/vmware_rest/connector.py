@@ -2,9 +2,10 @@
 # Copyright (c) 2026 evoila Group
 # code-quality-allow: file-size — pre-existing >600-line connector (session
 # lifecycle + per-op mount hooks + 6 typed-op delegators accreted across
-# #2257/#2258/#2300/#2329/#2396/#2398); this change only adds the VI-JSON
-# vmomi transport seam (#2466). Splitting the module by responsibility is
-# separate refactor work, out of scope for a mount-path bug fix.
+# #2257/#2258/#2300/#2329/#2396/#2398, the VI-JSON vmomi transport seam
+# #2466, and the vCenter-capable fingerprint fallback chain #2765).
+# Splitting the module by responsibility is separate refactor work, out
+# of scope for a probe-chain bug fix.
 
 """VmwareRestConnector — hand-rolled HttpConnector subclass for vSphere REST.
 
@@ -93,6 +94,7 @@ from typing import Any
 
 import httpx
 import structlog
+from defusedxml.ElementTree import ParseError, fromstring
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors._shared.cache_key import target_cache_key
@@ -123,7 +125,7 @@ from meho_backplane.connectors.vmware_rest.session import (
     load_session_credentials_from_vault,
 )
 
-__all__ = ["VmwareRestConnector", "product_from_line_id"]
+__all__ = ["VmwareRestConnector", "product_from_line_id", "service_versions_api_version"]
 
 _log = structlog.get_logger(__name__)
 
@@ -161,6 +163,81 @@ _SESSION_TOKEN_OBJECT_KEY = SESSION_TOKEN_OBJECT_KEY
 # through _post_json instead — see HttpConnector for the policy.
 # Lifted here so :meth:`auth_headers`-level callers can introspect.
 _IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# Fingerprint probe chain (#2765). ``GET /api/about`` is the ESXi host
+# REST surface — vCenter's Automation API spec has no such path (its
+# only "about" is ``/api/vcenter/phm/about``) and answers HTTP 404 —
+# so on a 404 the probe falls back to the unauthenticated version-
+# discovery document at ``/sdk/vimServiceVersions.xml``, served by
+# both vCenter and ESXi since the SOAP era (it is how pyVim/govmomi
+# negotiate API versions), then best-effort enriches the result from
+# the authenticated appliance-version read only vCenter (VCSA) serves.
+_ABOUT_PATH = "/api/about"
+_ABOUT_PROBE = "GET /api/about"
+_SERVICE_VERSIONS_PATH = "/sdk/vimServiceVersions.xml"
+_SERVICE_VERSIONS_PROBE = "GET /sdk/vimServiceVersions.xml"
+_APPLIANCE_VERSION_PATH = "/api/appliance/system/version"
+_APPLIANCE_VERSION_PROBE = "GET /api/appliance/system/version"
+
+#: The ``vimServiceVersions.xml`` namespace entry whose ``<version>``
+#: carries the current vim25 API version (four-part, e.g. ``8.0.3.0``
+#: — the same value the VI-JSON ``/sdk/vim25/{release}`` base uses).
+_VIM25_NAMESPACE = "urn:vim25"
+
+
+def _xml_local_name(tag: str) -> str:
+    """Return *tag* without any ``{uri}`` XML-namespace prefix."""
+    return tag.rsplit("}", 1)[-1]
+
+
+def service_versions_api_version(document: str) -> str | None:
+    """Extract the current vim25 API version from a ``vimServiceVersions.xml`` body.
+
+    The version-discovery document has the shape::
+
+        <namespaces version="1.0">
+          <namespace>
+            <name>urn:vim25</name>
+            <version>8.0.3.0</version>
+            <priorVersions><version>8.0.2.0</version>...</priorVersions>
+          </namespace>
+        </namespaces>
+
+    Older products serve a variant whose tags carry the
+    ``http://www.vmware.com/vi/versions`` XML namespace (the second
+    format pyVim's ``__VersionIsSupported`` handles); matching on the
+    tags' local names covers both. Only *direct* children of a
+    ``namespace`` element are read, so ``priorVersions`` entries never
+    shadow the current version.
+
+    Returns the ``urn:vim25`` entry's version, falling back to the
+    first namespace entry carrying one; ``None`` when the document is
+    malformed or yields no version — the caller treats that as "no
+    version discovered", never an exception.
+    """
+    try:
+        root = fromstring(document)
+    except ParseError:
+        return None
+    first_version: str | None = None
+    for element in root.iter():
+        if _xml_local_name(element.tag) != "namespace":
+            continue
+        name: str | None = None
+        version: str | None = None
+        for child in element:
+            local = _xml_local_name(child.tag)
+            if local == "name":
+                name = (child.text or "").strip()
+            elif local == "version":
+                version = (child.text or "").strip() or None
+        if version is None:
+            continue
+        if name == _VIM25_NAMESPACE:
+            return version
+        if first_version is None:
+            first_version = version
+    return first_version
 
 
 def product_from_line_id(line_id: str) -> str:
@@ -282,9 +359,11 @@ class VmwareRestConnector(HttpConnector):
         # by-IP appliance that pins its cert to an FQDN is revoked over
         # the same SNI-corrected handshake the establish call used.
         self._session_extensions: dict[tuple[str, str], dict[str, Any]] = {}
-        # Per-target ``about.version`` (``GET /api/about``), resolved once
-        # and cached so the VI-JSON ``{release}`` segment
-        # (:meth:`_post_vmomi_json`) costs one probe per target rather than
+        # Per-target version for the VI-JSON ``{release}`` segment
+        # (``GET /api/about``'s ``version``, or the vim25 API version
+        # from ``/sdk/vimServiceVersions.xml`` when ``/api/about`` 404s
+        # on vCenter, #2765), resolved once and cached so
+        # :meth:`_post_vmomi_json` costs one probe per target rather than
         # one per vmomi read. Keyed on the same tenant-unique tuple as
         # ``_session_tokens``. ``None`` records "probe failed / no version"
         # so the vmomi path falls back to the ``/api`` mount without
@@ -416,8 +495,9 @@ class VmwareRestConnector(HttpConnector):
           form via :func:`._mount.mounted_path` — the pre-#2466 behaviour,
           unchanged, so the vcsim integration lane stays green.
         * **modern** (session minted at ``/api/session``): derive
-          ``{release}`` from ``GET /api/about`` (:meth:`_about_version`)
-          and POST ``/sdk/vim25/{release}{vmomi_path}``. On HTTP 404 there
+          ``{release}`` via :meth:`_about_version` (``GET /api/about``,
+          falling back to the version-discovery document on vCenter,
+          #2765) and POST ``/sdk/vim25/{release}{vmomi_path}``. On HTTP 404 there
           (a deployment that does not serve VI-JSON at the derived
           release), fall back **once** to the ``/api``-mounted form. When
           the release can't be derived, skip straight to the ``/api`` form.
@@ -461,29 +541,67 @@ class VmwareRestConnector(HttpConnector):
             raise
 
     async def _about_version(self, target: VsphereTargetLike, operator: Operator) -> str | None:
-        """Return *target*'s ``about.version`` string, resolved once and cached.
+        """Return *target*'s version string for the VI-JSON ``{release}`` segment.
 
-        Reads ``GET /api/about`` (the same probe :meth:`fingerprint` uses)
-        to obtain the ``version`` field that drives the VI-JSON
-        ``{release}`` segment in :meth:`_post_vmomi_json`. Cached per
+        Reads ``GET /api/about`` (the same probe :meth:`fingerprint`
+        starts with) for its ``version`` field. When that endpoint
+        answers HTTP 404 — vCenter serves no ``/api/about`` (#2765) —
+        falls back to the unauthenticated version-discovery document's
+        vim25 API version, which is exactly the four-part value the
+        VI-JSON base is versioned by, so the ``{release}`` derivation
+        in :meth:`_post_vmomi_json` works on vCenter too. Cached per
         tenant-unique ``target_cache_key`` so repeated vmomi reads share
-        one probe. Any transport / status / shape failure caches and
-        returns ``None`` — the vmomi caller then falls back to the ``/api``
-        mount rather than failing, and the failed probe is not retried on
-        every subsequent read.
+        one probe. Any other transport / status / shape failure caches
+        and returns ``None`` — the vmomi caller then falls back to the
+        ``/api`` mount rather than failing, and the failed probe is not
+        retried on every subsequent read.
         """
         cache_key = target_cache_key(target)
         if cache_key in self._about_versions:
             return self._about_versions[cache_key]
+        resolved: str | None = None
         try:
-            payload = await self._get_json(target, "/api/about", operator=operator)
+            payload = await self._get_json(target, _ABOUT_PATH, operator=operator)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                resolved = await self._service_versions_or_none(target)
         except (httpx.HTTPError, OSError, RuntimeError):
-            self._about_versions[cache_key] = None
-            return None
-        version = payload.get("version") if isinstance(payload, dict) else None
-        resolved = version if isinstance(version, str) and version else None
+            resolved = None
+        else:
+            version = payload.get("version") if isinstance(payload, dict) else None
+            resolved = version if isinstance(version, str) and version else None
         self._about_versions[cache_key] = resolved
         return resolved
+
+    async def _fetch_service_versions_api_version(self, target: VsphereTargetLike) -> str | None:
+        """GET the version-discovery document and return its vim25 API version.
+
+        Issues a bare GET on the pooled per-target client — deliberately
+        not :meth:`_get_json`: the document is XML (not JSON) and both
+        vCenter and ESXi serve it without authentication (pyVim fetches
+        it pre-login), so injecting :meth:`auth_headers` would force a
+        session establish the read doesn't need. Transport / status
+        errors propagate to the caller, which decides reachability; a
+        200 whose body yields no parsable version returns ``None``.
+        """
+        client = await self._http_client(target)
+        resp = await client.get(_SERVICE_VERSIONS_PATH, extensions=self._request_extensions(target))
+        resp.raise_for_status()
+        return service_versions_api_version(resp.text)
+
+    async def _service_versions_or_none(self, target: VsphereTargetLike) -> str | None:
+        """Error-swallowing :meth:`_fetch_service_versions_api_version` wrapper.
+
+        For callers (the ``{release}`` derivation) where a failed
+        discovery read must degrade to "no version" rather than raise —
+        :meth:`_fingerprint_via_service_versions` by contrast needs the
+        error to report reachability truthfully, so it calls the
+        raising form directly.
+        """
+        try:
+            return await self._fetch_service_versions_api_version(target)
+        except (httpx.HTTPError, OSError):
+            return None
 
     async def _session_token(self, target: VsphereTargetLike, operator: Operator) -> str:
         """Return the cached session token for *target*, establishing one on first use.
@@ -662,7 +780,18 @@ class VmwareRestConnector(HttpConnector):
         target: VsphereTargetLike,
         operator: Operator | None = None,
     ) -> FingerprintResult:
-        """Canonical fingerprint built from ``GET /api/about``.
+        """Canonical fingerprint built from the #2765 probe chain.
+
+        ``GET /api/about`` first — the richest source, but it is the
+        ESXi host REST surface and vCenter answers HTTP 404. On that
+        404 (specifically — transport/auth failures keep the
+        unreachable arm) the probe falls back to the unauthenticated
+        ``/sdk/vimServiceVersions.xml`` version-discovery document,
+        best-effort enriched by ``GET /api/appliance/system/version``
+        (VCSA-only). ``probe_method`` always names the endpoint(s) that
+        produced the result. Pre-#2765 the probe stopped at
+        ``/api/about``, so every vCenter target permanently read
+        ``reachable=False``.
 
         The session token is fetched lazily by :meth:`auth_headers`
         (called transitively through :meth:`HttpConnector._request_json`).
@@ -693,19 +822,23 @@ class VmwareRestConnector(HttpConnector):
         # when no real operator is in scope.
         eff_operator = operator if operator is not None else synthesise_system_operator()
         try:
-            payload = await self._get_json(target, "/api/about", operator=eff_operator)
+            payload = await self._get_json(target, _ABOUT_PATH, operator=eff_operator)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                # vCenter serves no GET /api/about (#2765); a session
+                # was already established for the GET that 404'd, so
+                # the fallback's appliance read reuses it.
+                return await self._fingerprint_via_service_versions(target, eff_operator, probed_at)
+            return self._unreachable_fingerprint(
+                target, probed_at, _ABOUT_PROBE, f"{type(exc).__name__}: {exc}"
+            )
         except (httpx.HTTPError, OSError, RuntimeError) as exc:
             # RuntimeError catches the session-establish failures from
             # :meth:`_session_token` so an unauthenticatable target
             # surfaces as a clean ``reachable=False`` fingerprint
             # rather than propagating the wrapped exception.
-            return FingerprintResult(
-                vendor="vmware",
-                product="vcenter",
-                reachable=False,
-                probed_at=probed_at,
-                probe_method="GET /api/about",
-                extras={"error": f"{type(exc).__name__}: {exc}"},
+            return self._unreachable_fingerprint(
+                target, probed_at, _ABOUT_PROBE, f"{type(exc).__name__}: {exc}"
             )
         return FingerprintResult(
             vendor="vmware",
@@ -715,7 +848,7 @@ class VmwareRestConnector(HttpConnector):
             edition=payload.get("license_product_name"),
             reachable=True,
             probed_at=probed_at,
-            probe_method="GET /api/about",
+            probe_method=_ABOUT_PROBE,
             extras={
                 "uuid": payload.get("instance_uuid"),
                 "full_name": payload.get("full_name"),
@@ -723,6 +856,126 @@ class VmwareRestConnector(HttpConnector):
                 "api_type": payload.get("api_type"),
                 "os_type": payload.get("os_type"),
             },
+        )
+
+    async def _fingerprint_via_service_versions(
+        self,
+        target: VsphereTargetLike,
+        operator: Operator,
+        probed_at: datetime,
+    ) -> FingerprintResult:
+        """Fingerprint a target whose ``GET /api/about`` answered HTTP 404.
+
+        Chain steps 2 + 3 of #2765: read the unauthenticated
+        version-discovery document for the vim25 API version (enough
+        for ``reachable=True`` + a version), then best-effort enrich
+        from the authenticated appliance-version read. Only the
+        appliance surface identifies the product as vCenter by
+        observation; without it the result carries the target's
+        registered product — the discovery document alone cannot
+        distinguish vCenter from an older ESXi that predates the host
+        REST surface.
+        """
+        chain = f"{_ABOUT_PROBE} + {_SERVICE_VERSIONS_PROBE}"
+        about_extras = {"api_about": "HTTP 404 (endpoint is ESXi-only)"}
+        try:
+            api_version = await self._fetch_service_versions_api_version(target)
+        except (httpx.HTTPError, OSError) as exc:
+            return self._unreachable_fingerprint(
+                target, probed_at, chain, f"{type(exc).__name__}: {exc}", extras=about_extras
+            )
+        if api_version is None:
+            # A 200 with no parsable vim25 version is an answering
+            # socket, not a verified vSphere surface — some other web
+            # server on the target's port must not read as reachable.
+            return self._unreachable_fingerprint(
+                target,
+                probed_at,
+                chain,
+                "vimServiceVersions.xml answered but yielded no vim25 API version",
+                extras=about_extras,
+            )
+        appliance = await self._appliance_version(target, operator)
+        if appliance is None:
+            return FingerprintResult(
+                vendor="vmware",
+                product=getattr(target, "product", None) or "unknown",
+                version=api_version,
+                reachable=True,
+                probed_at=probed_at,
+                probe_method=_SERVICE_VERSIONS_PROBE,
+                extras={"api_version": api_version},
+            )
+        version = appliance.get("version")
+        build = appliance.get("build")
+        return FingerprintResult(
+            vendor="vmware",
+            # The appliance surface is served by VCSA only, so an
+            # answer here is observed evidence of vCenter — unlike
+            # the failure arms, this is not an assumption.
+            product="vcenter",
+            version=version if isinstance(version, str) and version else api_version,
+            build=build if isinstance(build, str) and build else None,
+            reachable=True,
+            probed_at=probed_at,
+            probe_method=f"{_SERVICE_VERSIONS_PROBE} + {_APPLIANCE_VERSION_PROBE}",
+            extras={
+                "api_version": api_version,
+                "product_name": appliance.get("product"),
+                "type": appliance.get("type"),
+            },
+        )
+
+    async def _appliance_version(
+        self, target: VsphereTargetLike, operator: Operator
+    ) -> dict[str, Any] | None:
+        """Best-effort authenticated ``GET /api/appliance/system/version`` read.
+
+        Returns the appliance ``VersionStruct`` payload (``version`` /
+        ``build`` / ``product`` / ``type`` / ...) — the authoritative
+        vCenter version source — or ``None`` on any failure: the
+        appliance surface is VCSA-only, so its absence (ESXi, vcsim, a
+        transient error mid-probe) must not turn an already-verified
+        reachable fingerprint red (#2765).
+        """
+        try:
+            payload = await self._get_json(target, _APPLIANCE_VERSION_PATH, operator=operator)
+        except (httpx.HTTPError, OSError, RuntimeError) as exc:
+            _log.debug(
+                "vsphere_appliance_version_unavailable",
+                target=target.name,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _unreachable_fingerprint(
+        self,
+        target: VsphereTargetLike,
+        probed_at: datetime,
+        probe_method: str,
+        error: str,
+        extras: dict[str, Any] | None = None,
+    ) -> FingerprintResult:
+        """Build the ``reachable=False`` result for a failed probe chain.
+
+        ``product`` reports the target's *registered* product when the
+        concrete target model carries one, falling back to ``"unknown"``
+        — a failed probe observed nothing, so the previous hardcoded
+        ``"vcenter"`` could stamp a product the target never exhibited
+        (#2765). ``probe_method`` names every endpoint the chain
+        attempted so the operator can see how far it got.
+        """
+        merged: dict[str, Any] = {"error": error}
+        if extras:
+            merged.update(extras)
+        return FingerprintResult(
+            vendor="vmware",
+            product=getattr(target, "product", None) or "unknown",
+            reachable=False,
+            probed_at=probed_at,
+            probe_method=probe_method,
+            extras=merged,
         )
 
     async def probe(self, target: VsphereTargetLike) -> ProbeResult:

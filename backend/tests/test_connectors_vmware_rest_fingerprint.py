@@ -17,6 +17,18 @@ Coverage matrix (per #498 acceptance criteria):
   ``ConnectError``, HTTP 401 from session, 5xx from ``/api/about``).
 * :meth:`probe` returns ``ok=True`` when fingerprint is reachable;
   ``ok=False`` with ``reason`` populated when not.
+
+Plus the #2765 vCenter-capable fallback chain (``GET /api/about`` is the
+ESXi host REST surface; vCenter 404s it):
+
+* a 404 on ``/api/about`` falls back to the unauthenticated
+  ``/sdk/vimServiceVersions.xml`` (``reachable=True`` + vim25 API
+  version), enriched by ``GET /api/appliance/system/version`` when the
+  appliance surface answers (``product="vcenter"`` + version/build);
+* both probes failing stays ``reachable=False`` with the error in
+  ``extras``; non-404 ``/api/about`` failures never enter the fallback;
+* the unreachable arm no longer hardcodes ``product="vcenter"`` — it
+  reports the target's registered product, else ``"unknown"``.
 """
 
 from __future__ import annotations
@@ -40,6 +52,7 @@ from meho_backplane.connectors.vmware_rest import (
     VsphereTargetLike,
     product_from_line_id,
 )
+from meho_backplane.connectors.vmware_rest.connector import service_versions_api_version
 
 # ---------------------------------------------------------------------------
 # Target stub — same shape as the auth-test module's stub
@@ -198,6 +211,10 @@ async def test_fingerprint_returns_unreachable_on_connect_error() -> None:
     # Vendor stays vmware so the operator can identify the failed
     # connector class without a separate lookup.
     assert result.vendor == "vmware"
+    # #2765: the unreachable arm no longer asserts product="vcenter" —
+    # nothing was observed, and the stub target carries no registered
+    # product, so the truthful value is "unknown".
+    assert result.product == "unknown"
     assert result.probe_method == "GET /api/about"
     assert "ConnectError" in result.extras["error"]
     await connector.aclose()
@@ -214,6 +231,7 @@ async def test_fingerprint_returns_unreachable_on_session_401() -> None:
         result = await connector.fingerprint(_TARGET)
 
     assert result.reachable is False
+    assert result.product == "unknown"  # #2765: no observed product on failure
     assert "401" in result.extras["error"]
     await connector.aclose()
 
@@ -245,6 +263,211 @@ async def test_fingerprint_returns_unreachable_on_about_5xx() -> None:
     assert result.reachable is False
     assert "503" in result.extras["error"]
     await connector.aclose()
+
+
+# ---------------------------------------------------------------------------
+# #2765 — vCenter-capable fallback chain
+# ---------------------------------------------------------------------------
+
+#: The version-discovery document both vCenter and ESXi serve
+#: unauthenticated at /sdk/vimServiceVersions.xml (shape per pyVim's
+#: ``__VersionIsSupported`` parser and govmomi's simulator template).
+_SERVICE_VERSIONS_XML = """<?xml version="1.0" encoding="UTF-8"?>
+<namespaces version="1.0">
+ <namespace>
+  <name>urn:vim25</name>
+  <version>8.0.3.0</version>
+  <priorVersions>
+   <version>8.0.2.0</version>
+   <version>7.0.3.0</version>
+  </priorVersions>
+ </namespace>
+</namespaces>
+"""
+
+#: ``GET /api/appliance/system/version`` body (appliance VersionStruct
+#: shape per the vSphere Automation SDK: version / product / build /
+#: type / summary / releasedate / install_time).
+_APPLIANCE_VERSION_PAYLOAD: dict[str, Any] = {
+    "version": "8.0.3.00000",
+    "build": "24022515",
+    "product": "VMware vCenter Server",
+    "type": "vCenter Server with an embedded Platform Services Controller",
+    "summary": "Patch for VMware vCenter Server 8.0",
+    "releasedate": "May 21, 2024",
+    "install_time": "2024-06-01T00:00:00.000Z",
+}
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_falls_back_to_service_versions_on_about_404() -> None:
+    """A 404 on /api/about + a served discovery document → reachable=True.
+
+    The vCenter shape (#2765): no /api/about, but the unauthenticated
+    version-discovery document answers. Without the appliance surface
+    (404 here) the fingerprint carries the vim25 API version and the
+    truthful probe_method; the stub target registers no product, so
+    product falls back to "unknown".
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-fp.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="vc-session-token")
+        mock.get("/api/about").respond(404)
+        mock.get("/sdk/vimServiceVersions.xml").respond(
+            200, text=_SERVICE_VERSIONS_XML, headers={"content-type": "text/xml"}
+        )
+        mock.get("/api/appliance/system/version").respond(404)
+        result = await connector.fingerprint(_TARGET)
+
+    assert result.reachable is True
+    assert result.vendor == "vmware"
+    assert result.product == "unknown"
+    assert result.version == "8.0.3.0"
+    assert result.build is None
+    assert result.probe_method == "GET /sdk/vimServiceVersions.xml"
+    assert result.extras["api_version"] == "8.0.3.0"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_fallback_reports_registered_product_when_present() -> None:
+    """Without observed product evidence the target's registered product is used."""
+
+    @dataclass
+    class _ProductTarget(_StubTarget):
+        product: str = "vmware"
+
+    target = _ProductTarget(
+        name="vcenter-fp",
+        host="vcenter-fp.test.invalid",
+        port=443,
+        secret_ref="vsphere/vcenter-fp",
+    )
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-fp.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="vc-session-token")
+        mock.get("/api/about").respond(404)
+        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
+        mock.get("/api/appliance/system/version").respond(404)
+        result = await connector.fingerprint(target)
+
+    assert result.reachable is True
+    assert result.product == "vmware"
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_fallback_enriches_from_appliance_version() -> None:
+    """With a session, the VCSA appliance read supplies version + build.
+
+    The appliance surface is vCenter-only, so an answer is observed
+    evidence for product="vcenter"; version/build come from the
+    authoritative appliance VersionStruct, and probe_method names both
+    endpoints that produced the result.
+    """
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-fp.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="vc-session-token")
+        mock.get("/api/about").respond(404)
+        mock.get("/sdk/vimServiceVersions.xml").respond(200, text=_SERVICE_VERSIONS_XML)
+        mock.get("/api/appliance/system/version").respond(200, json=_APPLIANCE_VERSION_PAYLOAD)
+        result = await connector.fingerprint(_TARGET)
+
+    assert result.reachable is True
+    assert result.product == "vcenter"
+    assert result.version == "8.0.3.00000"
+    assert result.build == "24022515"
+    assert result.probe_method == (
+        "GET /sdk/vimServiceVersions.xml + GET /api/appliance/system/version"
+    )
+    assert result.extras["api_version"] == "8.0.3.0"
+    assert result.extras["product_name"] == "VMware vCenter Server"
+    assert result.extras["type"] == ("vCenter Server with an embedded Platform Services Controller")
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_stays_unreachable_when_both_probes_fail() -> None:
+    """/api/about 404 + discovery document 404 → reachable=False with the error."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-fp.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="vc-session-token")
+        mock.get("/api/about").respond(404)
+        mock.get("/sdk/vimServiceVersions.xml").respond(404)
+        result = await connector.fingerprint(_TARGET)
+
+    assert result.reachable is False
+    assert result.product == "unknown"
+    assert result.probe_method == "GET /api/about + GET /sdk/vimServiceVersions.xml"
+    assert "404" in result.extras["error"]
+    assert "404" in result.extras["api_about"]
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_fingerprint_unreachable_when_discovery_document_unparsable() -> None:
+    """A 200 with no vim25 version (some other web server) is not reachable."""
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+
+    async with respx.mock(base_url="https://vcenter-fp.test.invalid") as mock:
+        mock.post("/api/session").respond(200, json="vc-session-token")
+        mock.get("/api/about").respond(404)
+        mock.get("/sdk/vimServiceVersions.xml").respond(200, text="<html>login page</html>")
+        result = await connector.fingerprint(_TARGET)
+
+    assert result.reachable is False
+    assert "no vim25 API version" in result.extras["error"]
+    await connector.aclose()
+
+
+@pytest.mark.parametrize(
+    ("document", "expected"),
+    [
+        # The modern un-namespaced shape (govmomi simulator template);
+        # priorVersions entries must not shadow the current version.
+        (_SERVICE_VERSIONS_XML, "8.0.3.0"),
+        # The XML-namespaced variant older products serve (the second
+        # format pyVim's __VersionIsSupported handles).
+        (
+            '<namespaces version="1.0" xmlns="http://www.vmware.com/vi/versions">'
+            "<namespace><name>urn:vim25</name><version>6.7.3</version></namespace>"
+            "</namespaces>",
+            "6.7.3",
+        ),
+        # vim25 entry wins over other namespace entries regardless of order.
+        (
+            '<namespaces version="1.0">'
+            "<namespace><name>urn:vim</name><version>2.5</version></namespace>"
+            "<namespace><name>urn:vim25</name><version>7.0.3.0</version></namespace>"
+            "</namespaces>",
+            "7.0.3.0",
+        ),
+        # No vim25 entry: fall back to the first entry carrying a version.
+        (
+            '<namespaces version="1.0">'
+            "<namespace><name>urn:vim</name><version>2.5</version></namespace>"
+            "</namespaces>",
+            "2.5",
+        ),
+        # No namespace entries / not the discovery document at all.
+        ('<namespaces version="1.0"></namespaces>', None),
+        ("<html>login page</html>", None),
+        # Malformed XML must yield None, never raise.
+        ("<namespaces><namespace>", None),
+        ("", None),
+    ],
+)
+def test_service_versions_api_version_parsing(document: str, expected: str | None) -> None:
+    assert service_versions_api_version(document) == expected
 
 
 # ---------------------------------------------------------------------------

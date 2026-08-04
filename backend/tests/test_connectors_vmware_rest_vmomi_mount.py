@@ -290,6 +290,41 @@ async def test_unresolvable_about_version_goes_straight_to_api() -> None:
 
 
 @pytest.mark.asyncio
+async def test_about_404_derives_release_from_service_versions_document() -> None:
+    """On vCenter (/api/about 404s, #2765) the release comes from the discovery doc.
+
+    The vim25 API version in /sdk/vimServiceVersions.xml is the same
+    four-part value the VI-JSON base is versioned by, so the vmomi read
+    mounts on /sdk/vim25/{release} instead of dropping straight to the
+    /api form.
+    """
+    document = (
+        '<namespaces version="1.0"><namespace><name>urn:vim25</name>'
+        "<version>8.0.3.0</version></namespace></namespaces>"
+    )
+    connector = _make_connector()
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(404)
+            mock.get("/sdk/vimServiceVersions.xml").respond(200, text=document)
+            vijson = mock.post(_VIJSON_URL).respond(200, json={"objects": ["vi-json"]})
+            api = mock.post(_API_URL).respond(200, json={"objects": ["api"]})
+            result = await connector._post_vmomi_json(
+                _StubTarget(),
+                _RETRIEVE_PROPERTIES_PATH,
+                operator=_make_operator(),
+                json=_RETRIEVE_BODY,
+            )
+        assert result == {"objects": ["vi-json"]}
+        assert vijson.call_count == 1
+        assert not api.called
+    finally:
+        await connector.aclose()
+
+
+@pytest.mark.asyncio
 async def test_about_version_resolved_once_and_cached_across_reads() -> None:
     """The about-version probe runs once per target and is reused (AC caching)."""
     connector = _make_connector()

@@ -276,23 +276,48 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
 
 ### fingerprint() / probe()
 
-`fingerprint(target)` issues `GET /api/about` (auth headers injected
-lazily via the cached session token); the response payload populates
-the canonical `FingerprintResult`:
+`fingerprint(target)` runs the #2765 probe chain. `GET /api/about`
+first (auth headers injected lazily via the cached session token) —
+the richest source, but it is the **ESXi host REST surface**: vCenter's
+Automation API has no `/api/about` and answers HTTP 404, which
+pre-#2765 left every vCenter target permanently `reachable=False`.
 
-- `vendor="vmware"`
-- `product` — via `product_from_line_id(payload.product_line_id)`
-  (`vpx` → `vcenter`; `embeddedEsx`/`esx` → `esxi`; fall-through for
-  unknown values; `""`/`None` → `"unknown"`)
-- `version`, `build`, `edition` — straight from the payload
-- `extras` — `uuid`, `full_name`, `product_line_id`, `api_type`,
-  `os_type`
+1. `GET /api/about` answers 200 → the payload populates the canonical
+   `FingerprintResult` exactly as before:
+   - `vendor="vmware"`
+   - `product` — via `product_from_line_id(payload.product_line_id)`
+     (`vpx` → `vcenter`; `embeddedEsx`/`esx` → `esxi`; fall-through for
+     unknown values; `""`/`None` → `"unknown"`)
+   - `version`, `build`, `edition` — straight from the payload
+   - `extras` — `uuid`, `full_name`, `product_line_id`, `api_type`,
+     `os_type`
+2. `GET /api/about` answers **404 specifically** (not transport/auth
+   failures) → fall back to `GET /sdk/vimServiceVersions.xml`, the
+   unauthenticated version-discovery document both vCenter and ESXi
+   have served since the SOAP era (`service_versions_api_version`
+   parses the `urn:vim25` entry's current version; the request is a
+   bare client GET — no auth headers, no session). A parsed vim25 API
+   version → `reachable=True`, `version=<api version>`,
+   `probe_method="GET /sdk/vimServiceVersions.xml"`, `product` from
+   the target's registered product (else `"unknown"` — the document
+   alone cannot distinguish vCenter from a pre-REST ESXi).
+3. Best-effort enrichment: `GET /api/appliance/system/version`
+   (authenticated; the session from step 1's attempt is reused). The
+   appliance surface is VCSA-only, so an answer is observed evidence of
+   `product="vcenter"` and supplies the authoritative `version` +
+   `build`; `probe_method` then names both fallback endpoints. Any
+   failure here is swallowed (`_appliance_version` → `None`) — absence
+   must not turn a reachable fingerprint red.
 
 `probe(target)` delegates to `fingerprint()` and folds the boolean
 reachable flag into a `ProbeResult`. Failure modes (TCP `ConnectError`,
-TLS error, 401 from `/api/session`, 5xx from `/api/about`) surface as
-`reachable=False` with the exception class + message in
-`extras["error"]` / `ProbeResult.reason`.
+TLS error, 401 from `/api/session`, 5xx from `/api/about`, 404 on both
+`/api/about` and the discovery document) surface as `reachable=False`
+with the exception class + message in `extras["error"]` /
+`ProbeResult.reason`, and `probe_method` names every endpoint the chain
+attempted. The unreachable arm reports the target's **registered**
+product (else `"unknown"`) rather than asserting `"vcenter"` — a failed
+probe observed nothing (#2765).
 
 ### aclose()
 
@@ -619,9 +644,12 @@ they never park.
   `mount_op_path` resolves for `/vcenter/*` paths. Mounting a vmomi
   method on `/api` 404s on vCenter 8.0.x (observed on a live 8.0.3 host).
   `VmwareRestConnector._post_vmomi_json` owns this seam: for a
-  modern-session target it derives `{release}` from `GET /api/about`'s
-  `version` (`8.0.3` → `8.0.3.0`, resolved once and cached in
-  `_about_versions`), POSTs `/sdk/vim25/{release}{path}`, and on a 404
+  modern-session target it derives `{release}` via `_about_version` —
+  `GET /api/about`'s `version` (`8.0.3` → `8.0.3.0`), falling back on a
+  404 to the vim25 API version from `/sdk/vimServiceVersions.xml`
+  (vCenter serves no `/api/about`, #2765; the discovery document's
+  four-part value is exactly the VI-JSON release), resolved once and
+  cached in `_about_versions` — POSTs `/sdk/vim25/{release}{path}`, and on a 404
   falls back **once** to the `/api`-mounted form (the undocumented
   accommodation the 9.0.2 fleet serves); when both 404 the raised
   `RuntimeError` names both attempted URLs + the vCenter version so a

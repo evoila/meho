@@ -582,7 +582,7 @@ jq -n --rawfile pin /path/to/appliance-ca.pem \
   '{name:"vcf-logs-lab", product:"vmware-rest", host:"vrli.nested.lab",
     auth_model:"shared_service_account", tls_ca_pin:$pin}' \
 | curl -sf -X POST https://meho.example.com/api/v1/targets \
-    -H "Authorization: Bearer $(meho status --print-token)" \
+    -H "Authorization: Bearer $(meho login --print-token https://meho.example.com)" \
     -H 'Content-Type: application/json' -d @-
 
 # Rotate the pin (e.g. the appliance cert was re-issued): PATCH the new
@@ -590,12 +590,12 @@ jq -n --rawfile pin /path/to/appliance-ca.pem \
 # client-pool cache key, so the old client is never reused.
 jq -n --rawfile pin /path/to/new-appliance-ca.pem '{tls_ca_pin:$pin}' \
 | curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
-    -H "Authorization: Bearer $(meho status --print-token)" \
+    -H "Authorization: Bearer $(meho login --print-token https://meho.example.com)" \
     -H 'Content-Type: application/json' -d @-
 
 # Clear the pin (the CA is now in the global bundle, say): send null.
 curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $(meho login --print-token https://meho.example.com)" \
   -H 'Content-Type: application/json' \
   -d '{"tls_ca_pin": null}'
 ```
@@ -616,7 +616,7 @@ settable on both create and update (the route is `tenant_admin`-only):
 ```bash
 # Create a target with verification off (self-signed lab appliance).
 curl -sf -X POST https://meho.example.com/api/v1/targets \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $(meho login --print-token https://meho.example.com)" \
   -H 'Content-Type: application/json' \
   -d '{
         "name": "vcf-logs-lab",
@@ -628,7 +628,7 @@ curl -sf -X POST https://meho.example.com/api/v1/targets \
 
 # Flip an existing target back to secure once its CA is in the bundle.
 curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $(meho login --print-token https://meho.example.com)" \
   -H 'Content-Type: application/json' \
   -d '{"verify_tls": true}'
 ```
@@ -878,12 +878,12 @@ array, e.g. `["meho-docs", "meho-docs:vmware"]`.
 
 **Verify the claim is present on the audience that's failing.** Decode the
 token each surface validates and confirm both the audience and the
-capability. Using `meho status --print-token` (the CLI/REST audience):
+capability. Using `meho login --print-token` (the CLI/REST audience):
 
 ```bash
 # 1. The capabilities claim carries the per-collection key on the REST/UI
 #    audience token. (jwt-cli `jwt decode`, or jq over the base64 payload.)
-meho status --print-token \
+meho login --print-token https://meho.example.com \
   | jwt decode --json - \
   | jq '{aud: .payload.aud, capabilities: .payload.capabilities}'
 # Expect aud to include "meho-backplane" AND capabilities to include
@@ -893,7 +893,7 @@ meho status --print-token \
 # 2. Probe the REST surface directly: a 403 names the missing claim + the
 #    identity it checked, so you can grant exactly that capability.
 curl -s -X POST https://meho.example.com/api/v1/search_docs \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $(meho login --print-token https://meho.example.com)" \
   -H 'Content-Type: application/json' \
   -d '{"query":"x","collection":"vmware"}' | jq .detail
 # {
@@ -1304,7 +1304,7 @@ meho login https://meho.evba.lab
 # Logged in to https://meho.evba.lab; token stored in keyring.
 
 # 3. Authenticated REST call succeeds.
-curl -sf -H "Authorization: Bearer $(meho status --print-token)" \
+curl -sf -H "Authorization: Bearer $(meho login --print-token https://meho.evba.lab)" \
   https://meho.evba.lab/api/v1/health
 # {"status": "ok"}
 

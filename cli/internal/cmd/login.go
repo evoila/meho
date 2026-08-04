@@ -35,6 +35,7 @@ func newLoginCmd() *cobra.Command {
 		scopes            []string
 		insecureAllowHTTP bool
 		resolveEntries    []string
+		printToken        bool
 	)
 
 	cmd := &cobra.Command{
@@ -135,12 +136,22 @@ func newLoginCmd() *cobra.Command {
 				return err
 			}
 
-			// Prompter renders the verification URL + user code to
-			// stdout. Output discipline: this is a prompt, not an
-			// error, so it goes to stdout (per Goal #11 §5 + matches
-			// `gh auth login`, `flux bootstrap` behaviour).
+			// Prompter renders the verification URL + user code for
+			// the operator. Output discipline: a prompt is not an
+			// error, so by default it goes to stdout (per Goal #11 §5,
+			// matching `gh auth login` / `flux bootstrap`). Under
+			// --print-token, stdout is reserved exclusively for the
+			// freshly minted access token so a subshell capture
+			// (`TOKEN=$(meho login --print-token <url>)`) sees only the
+			// credential; every operator-facing line — this prompt, the
+			// success message, the migration nudge — is diverted to
+			// stderr. This mirrors status.go's redaction posture: the
+			// live bearer never reaches stdout unless the operator asks
+			// for exactly it.
 			out := cmd.OutOrStdout()
-			prompter := stdoutPrompter(out)
+			errOut := cmd.ErrOrStderr()
+			humanOut := humanWriter(out, errOut, printToken)
+			prompter := stdoutPrompter(humanOut)
 
 			// Build the detached device-flow context. Inherits values
 			// from parentCtx (so future oauth2.HTTPClient injections
@@ -179,12 +190,20 @@ func newLoginCmd() *cobra.Command {
 			// the operator can supply --backplane explicitly on the
 			// next invocation.
 			if err := auth.SaveConfig(auth.Config{BackplaneURL: backplaneURL}); err != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(),
+				fmt.Fprintf(errOut,
 					"warning: failed to persist backplane URL to config file: %v\n", err)
 			}
 
-			fmt.Fprintf(out, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
-			printMigrationNudge(out)
+			fmt.Fprintf(humanOut, "Logged in to %s; token stored in %s.\n", backplaneURL, store.Describe())
+			printMigrationNudge(humanOut)
+
+			// --print-token contract: the freshly minted bearer is the
+			// only thing written to real stdout, so it can be captured
+			// with `TOKEN=$(meho login --print-token <url>)`.
+			// printAccessToken is the sole writer to stdout on this path.
+			if printToken {
+				printAccessToken(out, stored.AccessToken)
+			}
 			return nil
 		},
 	}
@@ -202,6 +221,11 @@ func newLoginCmd() *cobra.Command {
 		"pin a host to an IP for the flow, mirroring `curl --resolve <host>:<port>:<ip>` "+
 			"(split-DNS escape hatch when the Keycloak host doesn't resolve). Repeat for multiple hosts. "+
 			"TLS SNI/Host use the real hostname, so certificate validation is unaffected")
+	cmd.Flags().BoolVar(&printToken, "print-token", false,
+		"after a successful login, print ONLY the access token to stdout (every other line — the "+
+			"device-code prompt, the success message, warnings — goes to stderr) so it can be captured "+
+			"with 'TOKEN=$(meho login --print-token <backplane-url>)'. WARNING: the value is a live bearer "+
+			"credential — never log it or paste it into shared channels")
 	return cmd
 }
 
@@ -419,4 +443,29 @@ func stdoutPrompter(w io.Writer) auth.DeviceFlowPrompter {
 		fmt.Fprintf(w, "Waiting for authorisation…\n")
 		return nil
 	}
+}
+
+// humanWriter selects where operator-facing chrome — the device-code
+// prompt, the success line, the migration nudge — is written. On the
+// default path that is stdout. Under --print-token, stdout is reserved
+// exclusively for the access token, so chrome is diverted to stderr;
+// this keeps `TOKEN=$(meho login --print-token <url>)` free of any
+// bytes but the credential. Extracted to package scope so the routing
+// decision is unit-testable in isolation, matching the discipline
+// status.go applies to its own token-redaction helper.
+func humanWriter(stdout, stderr io.Writer, printToken bool) io.Writer {
+	if printToken {
+		return stderr
+	}
+	return stdout
+}
+
+// printAccessToken writes tok to w followed by exactly one newline and
+// nothing else. It is the only function that writes to stdout on the
+// `meho login --print-token` path, so the stdout contract lives here:
+// piped output is `wc -l == 1` and a `$(...)` capture yields exactly
+// the token. Mirrors status.go's redactJWTLike — exposed at package
+// scope so a unit test can pin the exact stdout shape.
+func printAccessToken(w io.Writer, tok string) {
+	fmt.Fprintln(w, tok)
 }

@@ -46,18 +46,22 @@ KEY_FILE="${MEHO_REVIEW_APP_KEY_FILE:-}"
 
 err() { printf 'mint-review-app-token: %s\n' "$*" >&2; }
 
+usage() {
+  printf 'usage: mint-review-app-token.sh --client-id <id> --key-file <pem-path|-> [--repo owner/name]\n'
+}
+
 usage_exit() {
   err "$1"
-  err "usage: mint-review-app-token.sh --client-id <id> --key-file <pem-path|-> [--repo owner/name]"
+  usage >&2
   exit 2
 }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --client-id) CLIENT_ID="${2:-}"; shift 2 ;;
-    --key-file)  KEY_FILE="${2:-}";  shift 2 ;;
-    --repo)      REPO="${2:-}";      shift 2 ;;
-    -h|--help)   usage_exit "help requested" ;;
+    --client-id) [ $# -ge 2 ] || usage_exit "missing value for --client-id"; CLIENT_ID="$2"; shift 2 ;;
+    --key-file)  [ $# -ge 2 ] || usage_exit "missing value for --key-file";  KEY_FILE="$2";  shift 2 ;;
+    --repo)      [ $# -ge 2 ] || usage_exit "missing value for --repo";      REPO="$2";      shift 2 ;;
+    -h|--help)   usage; exit 0 ;;
     *)           usage_exit "unknown argument: $1" ;;
   esac
 done
@@ -107,9 +111,13 @@ gh_api() {
   # it back off — a function cannot export a variable across the
   # command-substitution subshell boundary).
   local method="$1" path="$2"
+  # The Authorization header is fed through a process-substitution FD,
+  # not argv — the JWT is a live credential and command lines are
+  # world-readable via ps (op-cli rule 1: never put a secret value on
+  # a command line). curl reads header lines from @file since 7.55.
   curl -sS -X "$method" \
     -H "Accept: application/vnd.github+json" \
-    -H "Authorization: Bearer ${jwt}" \
+    -H @<(printf 'Authorization: Bearer %s\n' "$jwt") \
     -H "X-GitHub-Api-Version: 2022-11-28" \
     -w '\n%{http_code}' \
     "${API}${path}"

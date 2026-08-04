@@ -975,7 +975,7 @@ client-shape contrast with `meho-cli`:
 | --- | --- | --- |
 | Standard flow (authorization-code + PKCE) | **On** | MCP 2025-06-18 mandates OAuth 2.1 authorization-code + PKCE for the `/mcp` path; the device grant is a CLI-only convenience. |
 | Device grant | Off | Not needed; MCP clients run the browser-redirect flow. |
-| Valid redirect URIs | `https://claude.ai/api/mcp/auth_callback`, `http://localhost:*` | Covers the Claude.ai Custom Connector and any localhost MCP Inspector. |
+| Valid redirect URIs | `http://localhost:*`, `http://127.0.0.1:*` | Loopback only — `localhost` for a local MCP Inspector / Claude Code, plus the `127.0.0.1` twin the `mcp-remote` shim needs (Keycloak matches redirect hosts literally, so `localhost` ≠ `127.0.0.1`). MEHO is internal-only, so there is **no** public `claude.ai` Custom-Connector redirect. |
 | Web origins | `+` (or a tight allow-list) | CORS for the browser flow. |
 | PKCE challenge method | `S256` | Spec-required for public-client PKCE. |
 | **Optional client scopes** | **`offline_access`** | Claude Code's MCP client **always** requests `offline_access` in its scope parameter to obtain a refresh token; if the scope isn't assigned on the client, Keycloak rejects the authorization request with `invalid_scope` (Wall #7). Assign as **optional** rather than default — only flows that ask for a refresh token (browser MCP clients) should mint one. The CLI device-code client deliberately doesn't get this scope (RFC 8628 device-code clients re-run the device dance instead of holding a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than a fresh dance prompt). |

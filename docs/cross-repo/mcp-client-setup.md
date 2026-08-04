@@ -65,8 +65,8 @@ kcadm.sh create clients -r <realm> -b '{
   "standardFlowEnabled": true,
   "directAccessGrantsEnabled": false,
   "redirectUris": [
-    "https://claude.ai/api/mcp/auth_callback",
-    "http://localhost:*"
+    "http://localhost:*",
+    "http://127.0.0.1:*"
   ],
   "webOrigins": ["+"],
   "attributes": {
@@ -77,10 +77,10 @@ kcadm.sh create clients -r <realm> -b '{
 # Attach the audience mapper from Step 1 to this client.
 ```
 
-`redirectUris` covers two patterns:
+`redirectUris` is loopback-only — MEHO is internal-only, so there is no public `claude.ai` Custom Connector redirect (see the callout at the top of this doc). Both loopback hosts are registered:
 
-- `https://claude.ai/api/mcp/auth_callback` for the Claude.ai Custom Connector flow.
 - `http://localhost:*` for MCP Inspector and other CLI / desktop clients that listen on an ephemeral local port.
+- `http://127.0.0.1:*` — the loopback twin the `mcp-remote` shim needs. Keycloak matches redirect hosts literally, so `localhost` and `127.0.0.1` are distinct and both must be registered.
 
 A future-proof alternative is to make this client a *Dynamic Client Registration* template once Keycloak's DCR support and the v0.2.next MEHO RFC 7591 work land; for v0.2, the static recipe above is the path.
 

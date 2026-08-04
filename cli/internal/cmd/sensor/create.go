@@ -122,7 +122,8 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().IntVar(&retryTimes, "retry-times", 0,
 		"consecutive confirming re-checks required before a state change commits, 0..5 (default 0 = off)")
 	cmd.Flags().IntVar(&retryBackoffSeconds, "retry-backoff-seconds", 0,
-		"accelerated re-check spacing in seconds while a state change is pending, 5..300 (default 15)")
+		"accelerated re-check spacing in seconds while a state change is pending, 5..300 "+
+			"(omitted when unset; the server then applies its default of 15)")
 	cmd.Flags().StringVar(&targetArg, "target", "",
 		"optional dispatch-target JSON object (inline JSON, @<path>, or @-)")
 	cmd.Flags().StringVar(&paramsArg, "params", "",

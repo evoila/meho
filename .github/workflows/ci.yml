@@ -669,7 +669,12 @@ jobs:
         # continue-on-error absorbs. A job-level timeout would instead
         # cancel the job and flip the whole run conclusion to `cancelled`
         # (see the job-level timeout-minutes comment above).
-        timeout-minutes: 45
+        # TEMP #2800 VALIDATION — DO NOT MERGE: step cap lowered 45 → 2
+        # and a sleep injected below so the induced hang trips the step
+        # timeout fast on the real meho-runners-ci-heavy pod. The
+        # mechanism under test (step timeout → step failure → absorbed →
+        # run `success`) is cap-value-independent.
+        timeout-minutes: 2
         env:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook
@@ -691,6 +696,11 @@ jobs:
         # once. No --maxfail: a coverage run wants the whole suite measured even
         # if one test is flaky; redness here is non-blocking anyway.
         run: |
+          # TEMP #2800 VALIDATION — DO NOT MERGE: induced hang before
+          # pytest (also exercises the no-coverage-data path: combine
+          # must warn-skip, upload must be skipped by its hashFiles guard).
+          echo "TEMP 2800 validation: sleeping past the step cap to simulate a pytest hang"
+          sleep 600
           uv run pytest -n 1 --dist loadscope -p no:cov \
             --ignore=tests/integration tests/
 

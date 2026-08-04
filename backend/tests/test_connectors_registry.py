@@ -399,6 +399,12 @@ def test_lifespan_calls_eager_import_connectors() -> None:
                 # KeyErrors on KEYCLOAK_ISSUER_URL in this env-free lifespan test.
                 start_announcement_retention_sweeper=MagicMock(),
                 stop_announcement_retention_sweeper=AsyncMock(),
+                # #2756 per-tick evidence retention sweeper (same #2547 mould,
+                # gated on checks_evidence_prune_enabled). Same defensive patch
+                # so the real sweeper never starts its get_settings() tick read
+                # and KeyErrors on KEYCLOAK_ISSUER_URL in this env-free test.
+                start_evidence_retention_sweeper=MagicMock(),
+                stop_evidence_retention_sweeper=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),
@@ -522,6 +528,12 @@ def test_lifespan_runs_broadcast_dispose_even_when_engine_dispose_fails() -> Non
                 # KeyErrors on KEYCLOAK_ISSUER_URL in this env-free lifespan test.
                 start_announcement_retention_sweeper=MagicMock(),
                 stop_announcement_retention_sweeper=AsyncMock(),
+                # #2756 per-tick evidence retention sweeper (same #2547 mould,
+                # gated on checks_evidence_prune_enabled). Same defensive patch
+                # so the real sweeper never starts its get_settings() tick read
+                # and KeyErrors on KEYCLOAK_ISSUER_URL in this env-free test.
+                start_evidence_retention_sweeper=MagicMock(),
+                stop_evidence_retention_sweeper=AsyncMock(),
                 start_agent_run_reaper=MagicMock(),
                 stop_agent_run_reaper=AsyncMock(),
                 start_event_drain=MagicMock(),

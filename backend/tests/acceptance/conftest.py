@@ -266,6 +266,13 @@ _TRUNCATE_TABLES: tuple[str, ...] = (
     # acceptance test errors at setup with ``cannot truncate a table
     # referenced in a foreign key constraint``.
     "sensor",
+    # ``sensor_results`` FKs ``sensor`` with ``ondelete=CASCADE`` (migration
+    # ``0071``, #2756 per-tick evidence). It has no ``tenant_id`` FK, so the
+    # tenant-FK drift guard (tests/test_truncate_list_drift) does not require
+    # it -- but PG still rejects truncating ``sensor`` unless every referencing
+    # table is in the same statement, exactly as ``check_dashboard_sensors``
+    # (also a sensor-FK, no tenant_id) is listed below.
+    "sensor_results",
     # ``check_dashboards.tenant_id`` is a real ``REFERENCES tenant(id)`` FK
     # from migration ``0065`` (Initiative #2416 T2506); and
     # ``check_dashboard_sensors`` FKs both ``check_dashboards`` and ``sensor``

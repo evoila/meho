@@ -38,17 +38,25 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
   (`ok`/`degraded`/`critical`/`unknown`/`skip`); `ck_sensor_last_state` is
   populated from `CheckState`'s members and drift-guarded against them in
   `tests/test_db_sensor.py`.
+- `meho_backplane.db.models.SensorResult` — the append-only per-tick evidence
+  row (`sensor_results`, #2756); see **Per-tick evidence history**.
 - `meho_backplane.checks.schemas` — `SensorCreate` (frozen, `extra="forbid"`;
   the `assertion` field is typed with `AssertionSpec`, so a bad select path
-  or comparator is a 422 at the wire), `SensorRead`, `SensorListResponse`.
+  or comparator is a 422 at the wire), `SensorRead`, `SensorListResponse`,
+  plus the trend-query trio `SensorResultRead` / `SensorResultListResponse`
+  (`{items, next_cursor}`) / `SensorResultsQuery` (frozen, `extra="forbid"`).
 - `meho_backplane.checks.repository` — `create_sensor` (materialises
-  `next_fire_at`) and `record_sensor_result` (the one named projection
-  write path).
+  `next_fire_at`), `record_sensor_result` (the one named projection write
+  path, which also appends the history row when `record_history=True`), and
+  `list_sensor_results` (the keyset trend read).
 - `meho_backplane.checks.service.SensorAdminService` — tenant-scoped CRUD +
-  the four guard exceptions (`SensorIdentitySubForbiddenError`,
-  `SensorOperationNotFoundError`, `SensorRequiresSafeOperationError`,
-  `SensorNameConflictError`), each carrying an `error_code` the transports
+  `list_results` (the trend query) + the guard exceptions
+  (`SensorIdentitySubForbiddenError`, `SensorOperationNotFoundError`,
+  `SensorRequiresSafeOperationError`, `SensorNameConflictError`,
+  `SensorResultsCursorError`), each carrying an `error_code` the transports
   surface verbatim.
+- `meho_backplane.checks.evidence_retention` — the lifespan-owned retention
+  prune sweeper for `sensor_results` (#2756).
 
 ## Control flow
 
@@ -113,25 +121,74 @@ accepted call, and commits `last_state`/`state_since` through the
 
 The gate lives in the repository function — not the runner task — so
 runner-local and satellite-gateway batch-posted results are confirmed
-identically. Returns `True` iff the *committed* state changed. There is
-still no results history table — the projection (now including the
-soft-state window) is the single source of current state (**Decision D,
-annotated by #2799**: the consecutive-confirmation counter is carried
-as projection columns, the #2327 `skip_count` precedent, not derived
-from history). Downstream, `state_since` marks the *confirmed*
-transition instant, so a `for_seconds` hold measures confirmed time on
-top of confirmation — count-based commit gate first, duration-based
-fold hold second, two independent layers.
+identically. Returns `True` iff the *committed* state changed. A
+monotonicity guard ignores a result whose `evaluated_at` is not strictly
+newer than the row's last (a stale / reordered / duplicate persist),
+leaving the projection untouched. Downstream, `state_since` marks the
+*confirmed* transition instant, so a `for_seconds` hold measures confirmed
+time on top of confirmation — count-based commit gate first, duration-based
+hold second, two independent layers.
+
+The projection (now including the soft-state window) is the current-state
+fast path — but it is **no longer the only** record. Task #2503 originally
+shipped it as "not a results table" (Decision D: a history table would
+demand retention/pruning, speculative until asked for; #2799 annotated that
+the consecutive-confirmation counter is carried as projection columns, the
+#2327 `skip_count` precedent, not derived from history). Task #2756
+(Initiative #2780) supersedes the "no history table" half: a post-incident
+review needed "when did this first flap / how fast is it filling", and every
+tick overwriting the projection had discarded exactly the history the runner
+already computed. So `record_sensor_result` now **also** appends a per-tick
+`sensor_results` row (see **Per-tick evidence history** below) **in the same
+transaction** as the projection update, gated on retention being enabled —
+history and projection can never diverge. The row records the *observed*
+outcome of each evaluation (committed, soft/pending, or re-confirmed), so a
+flapping reading that never commits still lands in history.
+
+### Per-tick evidence history (#2756)
+
+`meho_backplane.db.models.SensorResult` (`sensor_results` table, migration
+`0071`) is an append-only `(sensor_id, evaluated_at, state, value, evidence,
+reason)` row per non-stale evaluation. `sensor_id` is a real FK with
+**`ON DELETE CASCADE`** — deleting a Sensor drops its history. Because the
+monotonicity guard makes `evaluated_at` strictly increasing per sensor, it is
+a total order the trend query's keyset cursor rides with no tiebreaker.
+
+- **Retention is deploy-level**: `CHECKS_EVIDENCE_RETENTION_DAYS` (default 7,
+  conservative single-digit) bounds row age; a lifespan-owned sweeper
+  (`meho_backplane.checks.evidence_retention`, the #2547 announcement-sweeper
+  mould) deletes rows past the window on `CHECKS_EVIDENCE_PRUNE_INTERVAL_SECONDS`
+  cadence, gated by `CHECKS_EVIDENCE_PRUNE_ENABLED`. **`0` disables the feature
+  entirely** — no rows are written (`record_sensor_result` skips the append,
+  gated by the runner on the same setting), restoring the pre-#2756 latest-only
+  behaviour. This deliberately diverges from the announcement/topology sweepers'
+  `0`=keep-forever, because an evidence history that grows forever is the
+  surprise #2756 exists to prevent.
+- **The trend query** (`SensorAdminService.list_results` →
+  `repository.list_sensor_results`) answers the forensic question with binary
+  filters only — `sensor_id` (exact), `from`/`to` (inclusive window), optional
+  `state`, bounded `limit` — deterministic `evaluated_at ASC` ordering, and an
+  opaque keyset `cursor`. Raw rows in a `{items, next_cursor}` envelope (#2742);
+  the client aggregates. **No** server-side smoothing / downsampling / scoring
+  — the `SensorResultsQuery` wire model is `extra="forbid"`, so an unknown
+  filter param is a 422 (REST) / schema refusal (MCP), pinning that bound.
+- **Tenant scoping**: `list_results` resolves the sensor within the caller's
+  tenant first, so a cross-tenant sensor id returns `None` → 404
+  `sensor_not_found` (never a 403, and never another tenant's history). The
+  trend surface is own-tenant-only on all three transports (no platform-admin
+  `tenant_filter`).
 
 **Delete** is a hard `DELETE` (no tombstone) — a sensor carries no
 fire-history the audit trail needs post-delete.
 
 Surfaces: REST (`api/v1/sensors.py`, registered in `main.py`), MCP
 (`mcp/tools/sensors.py`, auto-loaded), Go CLI (`cli/internal/cmd/sensor/`).
-There is **no** update / pause / resume path — `status` is
-server-initialized to `active` at create (clients cannot supply it; a body
-carrying `status` is a 422) and transitions to `paused` only via #2505's
-runner parking.
+Each surface carries the four verbs — `list` / `create` / `delete` plus the
+`results` trend query (#2756): `GET /api/v1/sensors/{id}/results`, the
+`meho_sensor_results` MCP tool, and `meho sensor results <id>`. There is
+**no** update / pause / resume path — `status` is server-initialized to
+`active` at create (clients cannot supply it; a body carrying `status` is a
+422) and transitions to `paused` only via #2505's runner parking.
 
 ## Dependencies
 
@@ -141,8 +198,11 @@ runner parking.
 - `meho_backplane.scheduler.cron` — `is_valid_cron_expr`, `resolve_timezone`,
   `next_fire_after` (shared with the scheduler).
 - `meho_backplane.operations._lookup` — descriptor resolution for the guard.
-- Migrations `0064_create_sensor.py` (`down_revision="0063"`) and
-  `0070_add_sensor_confirmation_retries.py` (#2799 columns).
+- Migrations `0064_create_sensor.py` (`down_revision="0063"`),
+  `0070_add_sensor_confirmation_retries.py` (#2799 soft-state columns), and
+  `0071_create_sensor_results.py` (`down_revision="0070"`, #2756 history table).
+- **#2756** (Initiative #2780) — per-tick evidence retention + trend query;
+  the retention sweeper reuses the #2547 announcement-sweeper mould.
 
 ## Known issues / boundaries
 

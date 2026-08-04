@@ -123,7 +123,9 @@ func TestNewRootCmd_Subcommands(t *testing.T) {
 	if cmd.Use != "sensor" {
 		t.Fatalf("expected Use=sensor, got %q", cmd.Use)
 	}
-	want := map[string]bool{"list": true, "create": true, "delete <sensor_id>": true}
+	want := map[string]bool{
+		"list": true, "create": true, "delete <sensor_id>": true, "results <sensor_id>": true,
+	}
 	for _, sub := range cmd.Commands() {
 		if !want[sub.Use] {
 			t.Errorf("unexpected subcommand %q", sub.Use)

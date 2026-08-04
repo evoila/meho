@@ -449,6 +449,12 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
     recomputes sees no edge from it.
     """
     evaluated_at = datetime.now(UTC)
+    # #2756: persist a per-tick evidence-history row alongside the projection
+    # when retention is enabled. ``CHECKS_EVIDENCE_RETENTION_DAYS == 0``
+    # disables the feature (no history rows -- the pre-#2756 latest-only
+    # behaviour); the append rides ``record_sensor_result``'s own transaction
+    # so it commits or rolls back atomically with the projection update.
+    record_history = get_settings().checks_evidence_retention_days > 0
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await record_sensor_result(
@@ -458,6 +464,7 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
             value=outcome.value,
             evidence=outcome.evidence,
             evaluated_at=evaluated_at,
+            record_history=record_history,
         )
         # Identity-map read (record_sensor_result already loaded the row;
         # a missing row means it was deleted mid-evaluation -- nothing to

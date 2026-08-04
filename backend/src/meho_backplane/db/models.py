@@ -6103,18 +6103,29 @@ class Sensor(Base):
     #2505's claim query (``status='active' AND next_fire_at <= now``) is
     uniform; the composite partial index ``sensor_due_idx`` drives it.
 
-    Latest-state projection (not a results table)
-    ---------------------------------------------
+    Latest-state projection + per-tick evidence history
+    ---------------------------------------------------
 
-    Sensor results live as a projection ON the row -- ``last_state`` /
+    Current state lives as a projection ON the row -- ``last_state`` /
     ``last_value`` / ``last_evidence`` / ``last_evaluated_at`` /
     ``state_since`` -- the in-repo precedent #2327's scheduler skip-state
     set. #2506's rollup and ``for:`` hold-time hysteresis need only the
-    current state and how long it has held (``state_since``), never
-    history; a results table would demand retention/pruning, speculative
-    until an operator asks for history. The named write path is one
-    repository function
-    (:func:`~meho_backplane.checks.repository.record_sensor_result`).
+    current state and how long it has held (``state_since``), so the
+    projection stays the fast current-state read path.
+
+    The projection alone was originally the *whole* story (Task #2503
+    Decision D: "not a results table", on the grounds a history table
+    would demand retention/pruning and was speculative until an operator
+    asked). Task #2756 (Initiative #2780) supersedes that: a post-incident
+    review needed "when did this first flap / how fast is it filling", and
+    every tick overwriting the projection had discarded exactly the history
+    the runner already computed. The bounded answer -- a deploy-level
+    retention window (``CHECKS_EVIDENCE_RETENTION_DAYS``) -- settles the
+    original cost objection, so per-tick evidence now persists to
+    :class:`SensorResult` **in the same transaction** as this projection
+    update. The single named write path is unchanged
+    (:func:`~meho_backplane.checks.repository.record_sensor_result`); it
+    now also appends the history row when retention is enabled.
 
     #2799 extends the projection with a *soft-state* window
     (``pending_state`` / ``pending_count``): because there is no history
@@ -6386,6 +6397,114 @@ class Sensor(Base):
         sa.CheckConstraint(
             _SENSOR_CADENCE_FIELDS_CHECK,
             name="ck_sensor_cadence_fields",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# SensorResult -- append-only per-tick evidence history
+# (Initiative #2780, Task #2756)
+# ---------------------------------------------------------------------------
+
+
+class SensorResult(Base):
+    """One append-only row per completed Sensor evaluation (#2756).
+
+    The latest-state projection on :class:`Sensor` (``last_state`` /
+    ``last_value`` / ``last_evidence`` / ``last_evaluated_at``) answers "what
+    is this sensor doing right now" but overwrites the prior tick, so the
+    history the runner already computed was discarded. This table preserves
+    it: one row per non-stale evaluation, appended in the **same transaction**
+    as the projection update
+    (:func:`~meho_backplane.checks.repository.record_sensor_result`), so
+    history and projection can never diverge.
+
+    Bounded, not unbounded. Rows are pruned past
+    ``CHECKS_EVIDENCE_RETENTION_DAYS`` by the lifespan-owned sweeper
+    (:mod:`meho_backplane.checks.evidence_retention`); a retention of ``0``
+    disables the feature entirely (no rows written), so the latest-only
+    behaviour that predates #2756 is one env var away. The forensic read
+    surface is the trend query (REST ``GET /api/v1/sensors/{id}/results``, the
+    ``meho_sensor_results`` MCP tool, and ``meho sensor results``): binary
+    filters (``sensor_id`` exact, ``from`` / ``to``, optional ``state``,
+    bounded ``limit``), deterministic ``evaluated_at ASC``, raw rows -- no
+    server-side smoothing, downsampling, or scoring (the #1177 determinism
+    bound the report cites).
+
+    Per-sensor monotonicity. ``record_sensor_result`` appends only when the
+    result's ``evaluated_at`` is strictly newer than the projection's last
+    (the monotonicity guard), so ``evaluated_at`` is strictly increasing --
+    and therefore unique -- within one sensor's rows. The trend query's
+    keyset pagination relies on that: ``evaluated_at`` alone totally orders a
+    single sensor's rows, so the cursor needs no tiebreaker.
+    """
+
+    __tablename__ = "sensor_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(), primary_key=True, default=uuid.uuid4)
+    # Real REFERENCES sensor(id) FK with ON DELETE CASCADE -- deleting a
+    # Sensor drops its history (the delete-cascades decision #2756 pins; the
+    # membership join #2506 cascades off ``sensor.id`` the same way).
+    sensor_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(),
+        ForeignKey("sensor.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # The instant the runner evaluated this result (UTC). NOT NULL -- the
+    # temporal key the trend query filters and orders on.
+    evaluated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    # The five-state ``CheckState`` verdict, over exactly #2504's vocabulary
+    # (the ``ck_sensor_results_state`` CHECK below, drift-guarded via
+    # ``_SENSOR_LAST_STATES``).
+    state: Mapped[str] = mapped_column(Text, nullable=False)
+    # The observed scalar the comparator judged (``AssertionOutcome.value`` --
+    # a JSON scalar, not a dict), or NULL when unknown. Mirrors
+    # ``sensor.last_value``'s portable-JSON encoding.
+    value: Mapped[object | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # The full evidence dict the evaluator emitted. Mirrors
+    # ``sensor.last_evidence``.
+    evidence: Mapped[dict[str, object] | None] = mapped_column(
+        JSON(none_as_null=True).with_variant(JSONB(none_as_null=True), "postgresql"),
+        nullable=True,
+        default=None,
+    )
+    # Denormalised machine reason (``evidence['reason']``) -- the evaluator
+    # sets it on an ``unknown`` outcome, NULL otherwise. A first-class column
+    # so "why did this flap" reads without unpacking the evidence blob.
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
+    __table_args__ = (
+        # The trend query: ``WHERE sensor_id = ? [AND evaluated_at >= ?]
+        # [AND evaluated_at <= ?] ORDER BY evaluated_at ASC`` + the keyset
+        # ``evaluated_at > :cursor``. A composite btree on
+        # (sensor_id, evaluated_at) serves the equality + range + order in one.
+        Index(
+            "sensor_results_sensor_evaluated_idx",
+            "sensor_id",
+            "evaluated_at",
+            postgresql_using="btree",
+        ),
+        # The retention sweep: ``DELETE WHERE evaluated_at < cutoff``. A
+        # standalone btree on ``evaluated_at`` lets the periodic prune
+        # range-scan instead of seq-scanning (the composite above leads with
+        # ``sensor_id``, so it cannot drive the fleet-wide cutoff predicate).
+        Index(
+            "sensor_results_evaluated_at_idx",
+            "evaluated_at",
+            postgresql_using="btree",
+        ),
+        # ``state`` over exactly #2504's ``CheckState`` members -- the same
+        # closed vocabulary + drift guard ``sensor.last_state`` uses.
+        sa.CheckConstraint(
+            _ck_in("state", _SENSOR_LAST_STATES),
+            name="ck_sensor_results_state",
         ),
     )
 

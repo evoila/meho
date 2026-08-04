@@ -20,6 +20,11 @@
 //   - `meho sensor delete <sensor_id> [--tenant <id>] [--json]` —
 //     hard-delete one sensor via DELETE /api/v1/sensors/{id}.
 //     Role: tenant_admin.
+//   - `meho sensor results <sensor_id> [--from T] [--to T] [--state S]
+//     [--limit N] [--cursor C] [--json]` — the per-tick evidence trend
+//     query (#2756) via GET /api/v1/sensors/{id}/results: raw rows in
+//     evaluated_at ASC order, binary filters only, keyset-cursor paging.
+//     Role: operator, own-tenant only.
 //
 // Every verb drives the generated `api.ClientWithResponses` surface
 // directly (the G0.12-T13 typed-client discipline): consumer-side struct
@@ -151,6 +156,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newCreateCmd())
 	cmd.AddCommand(newDeleteCmd())
+	cmd.AddCommand(newResultsCmd())
 	return cmd
 }
 

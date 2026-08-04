@@ -175,6 +175,30 @@ state)` window:
   edge, suppressed or not. Finding mail is not flap-suppressed — its
   volume control is the investigator's fire gate.
 
+## Three anti-flap layers (#2799 composition)
+
+The delivery window above is one of three independent layers; they
+compose, none rediscovers another:
+
+1. **Confirmation retries (#2799, upstream of everything).** Per-sensor
+   `retry_times` × `retry_backoff_seconds`: `record_sensor_result`
+   commits a *sensor* state change only after consecutive confirming
+   re-checks (soft/hard states, `docs/codebase/sensor.md`). An
+   unconfirmed transition never reaches the projection, so the rollup
+   CAS, this notifier, the broadcaster, the investigator, and the
+   advisory are all gated for free — fewer, better edges arrive here.
+   This is what suppresses the observed one-flaky-reading incident: the
+   two nuisance mails were first crossings into *distinct* states,
+   which the #2732 window deliberately never suppresses.
+2. **`for_seconds` hold (#2506, fold-side).** Duration-based, at the
+   dashboard rollup read path: a confirmed-but-young failing state
+   contributes `ok` until it has held. Since #2799, `state_since` marks
+   the *confirmed* instant, so the hold measures confirmed time on top
+   of confirmation.
+3. **Delivery window (#2732, this file).** Bounds repeat *same-state*
+   mails per `(tenant, dashboard, state)`; claim-side consumers see
+   every edge. Unchanged by #2799 — it just sees fewer edges.
+
 ## Message shape
 
 Subject: `[MEHO] <name>: <previous> -> <current>`, with an

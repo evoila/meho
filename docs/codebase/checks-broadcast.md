@@ -32,6 +32,12 @@ Unlike the notifier, the publish has **no floor**. A feed event costs one
 `XADD` against a `MAXLEN ~`-trimmed stream, so narrowing belongs to the
 consumer (`op_class=checks`), not to the producer.
 
+Since #2799, a sensor with `retry_times > 0` commits a state change only
+after consecutive confirming re-checks (`docs/codebase/sensor.md`), so
+transient one-reading flaps never reach the rollup CAS — the feed sees
+**fewer raw edges**, each one a confirmed transition. No change to this
+module; the gate is upstream of the claim all three consumers share.
+
 ## Key types
 
 - `publish_check_transition_event(*, tenant_id, dashboard_id,

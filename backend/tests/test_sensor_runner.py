@@ -165,6 +165,8 @@ async def _create_interval_sensor(
     assertion: dict[str, Any] | None = None,
     tenant_id: uuid.UUID = _TENANT,
     base: datetime | None = None,
+    retry_times: int = 0,
+    retry_backoff_seconds: int = 15,
 ) -> uuid.UUID:
     await _seed_tenant(tenant_id)
     sessionmaker = get_sessionmaker()
@@ -184,6 +186,8 @@ async def _create_interval_sensor(
             timezone="UTC",
             severity="critical",
             for_seconds=0,
+            retry_times=retry_times,
+            retry_backoff_seconds=retry_backoff_seconds,
             identity_sub=identity_sub,
             created_by_sub="op-admin",
             base=base,
@@ -217,6 +221,8 @@ async def _create_cron_sensor(
             timezone=timezone,
             severity="critical",
             for_seconds=0,
+            retry_times=0,
+            retry_backoff_seconds=15,
             identity_sub="__sensor__",
             created_by_sub="op-admin",
             base=base,
@@ -1050,6 +1056,8 @@ async def _create_target_bound_sensor(
             timezone="UTC",
             severity="critical",
             for_seconds=0,
+            retry_times=0,
+            retry_backoff_seconds=15,
             identity_sub="__sensor__",
             created_by_sub="op-admin",
         )

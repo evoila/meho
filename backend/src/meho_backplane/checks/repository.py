@@ -35,6 +35,7 @@ from meho_backplane.db.models import Sensor, SensorCadenceKind, SensorStatus
 from meho_backplane.scheduler.cron import next_fire_after
 
 __all__ = [
+    "accelerate_sensor_next_fire",
     "advance_sensor_next_fire",
     "claim_due_sensors",
     "create_sensor",
@@ -59,6 +60,8 @@ async def create_sensor(
     timezone: str,
     severity: str,
     for_seconds: int,
+    retry_times: int,
+    retry_backoff_seconds: int,
     identity_sub: str,
     created_by_sub: str,
     base: datetime | None = None,
@@ -107,6 +110,8 @@ async def create_sensor(
         next_fire_at=next_fire,
         severity=severity,
         for_seconds=for_seconds,
+        retry_times=retry_times,
+        retry_backoff_seconds=retry_backoff_seconds,
         identity_sub=identity_sub,
         created_by_sub=created_by_sub,
     )
@@ -136,13 +141,38 @@ async def record_sensor_result(
     evidence: dict[str, object],
     evaluated_at: datetime,
 ) -> bool:
-    """Update the latest-state projection for *sensor_id*; return state-changed.
+    """Update the latest-state projection for *sensor_id*; return state-committed.
 
-    Updates ``last_state`` / ``last_value`` / ``last_evidence`` /
-    ``last_evaluated_at``, and bumps ``state_since`` **only** when ``state``
-    differs from the row's current ``last_state`` -- so #2506's ``for:``
-    hold-time hysteresis can read how long the current state has held.
-    Returns ``True`` iff the state changed.
+    Updates ``last_value`` / ``last_evidence`` / ``last_evaluated_at`` on
+    every accepted result, and flips ``last_state`` / bumps ``state_since``
+    **only** when the new state is *confirmed* -- so #2506's ``for:``
+    hold-time hysteresis measures confirmed time. Returns ``True`` iff the
+    committed state changed.
+
+    **Confirmation gate (#2799, Nagios soft/hard states).** With
+    ``retry_times == 0`` (the default) every differing reading commits
+    immediately -- the pre-#2799 behaviour, bit for bit. With
+    ``retry_times > 0`` a reading that differs from the committed
+    ``last_state`` is held as a soft state instead:
+
+    * differs from ``pending_state`` too -> a new confirmation window
+      opens (``pending_state = outcome``, ``pending_count = 1``); an
+      escalation mid-window restarts the count on the new candidate.
+    * equals ``pending_state`` -> ``pending_count += 1``; once
+      ``pending_count > retry_times`` the state commits (``last_state``
+      flips, ``state_since`` bumps to this result's ``evaluated_at``)
+      and the window clears.
+    * equals the committed ``last_state`` (the candidate reverted) -> the
+      window clears without committing anything.
+
+    The gate is symmetric in both directions -- recovery to ``ok`` is
+    confirmed exactly like a degradation (deliberately unlike Nagios'
+    immediate hard recovery: the observed flap's second nuisance mail
+    *was* a flapping all-clear, the failure mode Prometheus grew
+    ``keep_firing_for`` for) -- and ``unknown`` participates like any
+    state, so a transient dispatch timeout cannot flip the sensor. The
+    gate lives here, not in the runner task, so the satellite-gateway
+    batch-post path is confirmed identically.
 
     **Monotonicity guard.** A result whose ``evaluated_at`` is not strictly
     newer than the row's recorded ``last_evaluated_at`` is ignored (returns
@@ -165,15 +195,35 @@ async def record_sensor_result(
     ):
         # Stale or duplicate result -- keep the newer projection intact.
         return False
-    changed = row.last_state != state
-    row.last_state = state
     row.last_value = value
     row.last_evidence = evidence
     row.last_evaluated_at = evaluated_at
-    if changed:
-        row.state_since = evaluated_at
+    if state == row.last_state:
+        # The committed state re-confirmed itself; any half-open
+        # confirmation window was a transient -- close it.
+        row.pending_state = None
+        row.pending_count = 0
+        await session.flush()
+        return False
+    if row.retry_times > 0:
+        if state != row.pending_state:
+            # First differing reading (or an escalation mid-window):
+            # open a fresh window on this candidate.
+            row.pending_state = state
+            row.pending_count = 1
+        else:
+            row.pending_count += 1
+        if row.pending_count <= row.retry_times:
+            # Soft state -- observed but unconfirmed. No commit, no
+            # transition for downstream consumers.
+            await session.flush()
+            return False
+    row.last_state = state
+    row.state_since = evaluated_at
+    row.pending_state = None
+    row.pending_count = 0
     await session.flush()
-    return changed
+    return True
 
 
 async def claim_due_sensors(
@@ -287,6 +337,58 @@ async def advance_sensor_next_fire(
     # without re-querying.
     row.next_fire_at = new_next
     return row
+
+
+async def accelerate_sensor_next_fire(
+    session: AsyncSession,
+    sensor_id: uuid.UUID,
+    *,
+    not_later_than: datetime,
+) -> bool:
+    """Pull ``next_fire_at`` forward to *not_later_than* if it is later.
+
+    The accelerated re-check half of #2799's confirmation retries: after a
+    pending (unconfirmed) result, the runner pulls the sensor's next fire
+    to ``evaluated_at + retry_backoff_seconds`` so the confirming
+    re-evaluation does not wait a full cadence. Implemented as one
+    conditional UPDATE (``WHERE next_fire_at > :accel``), i.e.
+    ``min(next_fire_at, accel)`` semantics done atomically:
+
+    * never *delays* a fire -- a row already scheduled sooner (or pulled
+      sooner by a concurrent writer) matches zero rows;
+    * only rides the existing claim/advance machinery -- the re-check is
+      an ordinary due row on the next tick, so the #804 at-most-once
+      discipline, the overlap guard, and replica-safety are untouched
+      (no in-process sleep loop that would die on ``stop_sensor_runner``
+      and pin ``_IN_FLIGHT``);
+    * ``status='active'`` guard so a row parked between the evaluation
+      and this persist is not resurrected onto the due index.
+
+    Returns ``True`` when the row was pulled forward, ``False`` when the
+    UPDATE matched nothing (already sooner, parked, or deleted).
+
+    ``synchronize_session=False``: the caller's session already holds the
+    row (``record_sensor_result`` loaded it), and the default ``'auto'``
+    strategy would evaluate the ``>`` predicate *Python-side* against the
+    in-memory attribute -- naive on the aiosqlite round-trip vs the aware
+    *not_later_than*, a ``TypeError``. The DB-side comparison is
+    dialect-consistent, and nothing reads the in-memory ``next_fire_at``
+    after this call (the session commits and closes).
+    """
+    stmt = (
+        update(Sensor)
+        .where(
+            Sensor.id == sensor_id,
+            Sensor.status == SensorStatus.ACTIVE.value,
+            Sensor.next_fire_at > not_later_than,
+        )
+        .values(next_fire_at=not_later_than)
+        .execution_options(synchronize_session=False)
+    )
+    result = await session.execute(stmt)
+    await session.flush()
+    rowcount: int = result.rowcount  # type: ignore[attr-defined]
+    return rowcount > 0
 
 
 async def park_sensor(

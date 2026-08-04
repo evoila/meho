@@ -385,6 +385,14 @@ const (
 	SensorReadLastStateUnknown  SensorReadLastState = "unknown"
 )
 
+// Defines values for SensorReadPendingState.
+const (
+	SensorReadPendingStateCritical SensorReadPendingState = "critical"
+	SensorReadPendingStateDegraded SensorReadPendingState = "degraded"
+	SensorReadPendingStateOk       SensorReadPendingState = "ok"
+	SensorReadPendingStateUnknown  SensorReadPendingState = "unknown"
+)
+
 // Defines values for SensorSeverity.
 const (
 	SensorSeverityCritical SensorSeverity = "critical"
@@ -6350,15 +6358,17 @@ type SensorCreate struct {
 	// Closed enum: widening it is a coordinated DB + model change so the
 	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
 	// ``0064``'s frozen tuple cannot drift.
-	CadenceKind     SensorCadenceKind       `json:"cadence_kind"`
-	ConnectorId     string                  `json:"connector_id"`
-	CronExpr        *string                 `json:"cron_expr"`
-	ForSeconds      *int                    `json:"for_seconds,omitempty"`
-	IdentitySub     *string                 `json:"identity_sub,omitempty"`
-	IntervalSeconds *int                    `json:"interval_seconds"`
-	Name            string                  `json:"name"`
-	OpId            string                  `json:"op_id"`
-	Params          *map[string]interface{} `json:"params,omitempty"`
+	CadenceKind         SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId         string                  `json:"connector_id"`
+	CronExpr            *string                 `json:"cron_expr"`
+	ForSeconds          *int                    `json:"for_seconds,omitempty"`
+	IdentitySub         *string                 `json:"identity_sub,omitempty"`
+	IntervalSeconds     *int                    `json:"interval_seconds"`
+	Name                string                  `json:"name"`
+	OpId                string                  `json:"op_id"`
+	Params              *map[string]interface{} `json:"params,omitempty"`
+	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
+	RetryTimes          *int                    `json:"retry_times,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -6413,23 +6423,27 @@ type SensorRead struct {
 	// Closed enum: widening it is a coordinated DB + model change so the
 	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
 	// ``0064``'s frozen tuple cannot drift.
-	CadenceKind     SensorCadenceKind       `json:"cadence_kind"`
-	ConnectorId     string                  `json:"connector_id"`
-	CreatedAt       time.Time               `json:"created_at"`
-	CreatedBySub    string                  `json:"created_by_sub"`
-	CronExpr        *string                 `json:"cron_expr"`
-	ForSeconds      int                     `json:"for_seconds"`
-	Id              openapi_types.UUID      `json:"id"`
-	IdentitySub     string                  `json:"identity_sub"`
-	IntervalSeconds *int                    `json:"interval_seconds"`
-	LastEvaluatedAt *time.Time              `json:"last_evaluated_at"`
-	LastEvidence    *map[string]interface{} `json:"last_evidence"`
-	LastState       SensorReadLastState     `json:"last_state"`
-	LastValue       interface{}             `json:"last_value"`
-	Name            string                  `json:"name"`
-	NextFireAt      *time.Time              `json:"next_fire_at"`
-	OpId            string                  `json:"op_id"`
-	Params          map[string]interface{}  `json:"params"`
+	CadenceKind         SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId         string                  `json:"connector_id"`
+	CreatedAt           time.Time               `json:"created_at"`
+	CreatedBySub        string                  `json:"created_by_sub"`
+	CronExpr            *string                 `json:"cron_expr"`
+	ForSeconds          int                     `json:"for_seconds"`
+	Id                  openapi_types.UUID      `json:"id"`
+	IdentitySub         string                  `json:"identity_sub"`
+	IntervalSeconds     *int                    `json:"interval_seconds"`
+	LastEvaluatedAt     *time.Time              `json:"last_evaluated_at"`
+	LastEvidence        *map[string]interface{} `json:"last_evidence"`
+	LastState           SensorReadLastState     `json:"last_state"`
+	LastValue           interface{}             `json:"last_value"`
+	Name                string                  `json:"name"`
+	NextFireAt          *time.Time              `json:"next_fire_at"`
+	OpId                string                  `json:"op_id"`
+	Params              map[string]interface{}  `json:"params"`
+	PendingCount        int                     `json:"pending_count"`
+	PendingState        *SensorReadPendingState `json:"pending_state"`
+	RetryBackoffSeconds int                     `json:"retry_backoff_seconds"`
+	RetryTimes          int                     `json:"retry_times"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -6459,6 +6473,9 @@ type SensorRead struct {
 
 // SensorReadLastState defines model for SensorRead.LastState.
 type SensorReadLastState string
+
+// SensorReadPendingState defines model for SensorRead.PendingState.
+type SensorReadPendingState string
 
 // SensorRunnerStatus Liveness of this process's sensor evaluation loop (#2763).
 //

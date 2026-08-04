@@ -27856,6 +27856,20 @@
             "title": "For Seconds",
             "default": 0
           },
+          "retry_times": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Retry Times",
+            "default": 0
+          },
+          "retry_backoff_seconds": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 5.0,
+            "title": "Retry Backoff Seconds",
+            "default": 15
+          },
           "identity_sub": {
             "type": "string",
             "maxLength": 256,
@@ -27976,6 +27990,14 @@
             "type": "integer",
             "title": "For Seconds"
           },
+          "retry_times": {
+            "type": "integer",
+            "title": "Retry Times"
+          },
+          "retry_backoff_seconds": {
+            "type": "integer",
+            "title": "Retry Backoff Seconds"
+          },
           "last_state": {
             "type": "string",
             "enum": [
@@ -28007,6 +28029,21 @@
             "format": "date-time",
             "nullable": true,
             "title": "State Since"
+          },
+          "pending_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown"
+            ],
+            "nullable": true,
+            "title": "Pending State"
+          },
+          "pending_count": {
+            "type": "integer",
+            "title": "Pending Count"
           },
           "identity_sub": {
             "type": "string",
@@ -28046,11 +28083,15 @@
           "next_fire_at",
           "severity",
           "for_seconds",
+          "retry_times",
+          "retry_backoff_seconds",
           "last_state",
           "last_value",
           "last_evidence",
           "last_evaluated_at",
           "state_since",
+          "pending_state",
+          "pending_count",
           "identity_sub",
           "created_by_sub",
           "created_at",

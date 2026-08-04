@@ -447,7 +447,14 @@ func printSensorSummary(w io.Writer, s *api.SensorRead) {
 	}
 	fmt.Fprintf(w, "%-22s %s\n", "severity:", string(s.Severity))
 	fmt.Fprintf(w, "%-22s %d\n", "for_seconds:", s.ForSeconds)
+	if s.RetryTimes > 0 {
+		fmt.Fprintf(w, "%-22s %d\n", "retry_times:", s.RetryTimes)
+		fmt.Fprintf(w, "%-22s %ds\n", "retry_backoff_seconds:", s.RetryBackoffSeconds)
+	}
 	fmt.Fprintf(w, "%-22s %s\n", "last_state:", string(s.LastState))
+	if s.PendingState != nil {
+		fmt.Fprintf(w, "%-22s %s (x%d)\n", "pending_state:", string(*s.PendingState), s.PendingCount)
+	}
 	if s.LastEvaluatedAt != nil {
 		fmt.Fprintf(w, "%-22s %s\n", "last_evaluated_at:", formatTime(s.LastEvaluatedAt))
 	}

@@ -93,6 +93,10 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("SCHEDULER_ENABLED", "false")
     monkeypatch.setenv("SENSOR_RUNNER_ENABLED", "false")
+    # The notifier pre-screens every recipient against this floor (#2764), so
+    # the ``@example.com`` addresses these tests mail to must be allowlisted;
+    # a non-``example.com`` address exercises the per-entry refusal.
+    monkeypatch.setenv("MAIL_RECIPIENT_ALLOWLIST", "example.com")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -502,6 +506,78 @@ async def test_body_bounds_members_and_fields(monkeypatch: pytest.MonkeyPatch) -
 
 
 # ---------------------------------------------------------------------------
+# Multi-recipient fan-out (#2764)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_transition_mail_fans_out_to_every_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A comma-joined ``notify_email`` delivers the identical mail to all (#2764)."""
+    fake = _install_transport(monkeypatch)
+    await notify_dashboard_transition(_notice(email="oncall@example.com,team@example.com"))
+    assert len(fake.calls) == 1, "one send fans out to every recipient"
+    assert fake.calls[0]["to"] == ["oncall@example.com", "team@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_transition_mail_drops_only_the_refused_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused recipient never silences delivery to the allowlisted rest (#2764).
+
+    The allowlist floor is ``example.com`` (the settings fixture); the
+    ``@blocked.test`` entry is refused per-entry and warn-logged, while the
+    allowlisted address still receives the mail in one ``send_email`` call --
+    the transport's own all-or-nothing screen is deliberately left untouched.
+    """
+    fake = _install_transport(monkeypatch)
+    with capture_logs() as logs:
+        await notify_dashboard_transition(_notice(email="oncall@example.com,stranger@blocked.test"))
+    assert len(fake.calls) == 1, "the allowlisted recipient still receives the mail"
+    assert fake.calls[0]["to"] == ["oncall@example.com"]
+    refused = [e for e in logs if e["event"] == "checks_notify_recipient_refused"]
+    assert len(refused) == 1
+    assert refused[0]["recipient"] == "stranger@blocked.test"
+
+
+@pytest.mark.asyncio
+async def test_transition_mail_all_recipients_refused_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every configured recipient is refused there is nothing to send (#2764)."""
+    fake = _install_transport(monkeypatch)
+    with capture_logs() as logs:
+        await notify_dashboard_transition(_notice(email="a@blocked.test,b@blocked.test"))
+    assert fake.calls == []
+    assert any(e["event"] == "checks_notify_no_allowed_recipients" for e in logs)
+    assert [e["recipient"] for e in logs if e["event"] == "checks_notify_recipient_refused"] == [
+        "a@blocked.test",
+        "b@blocked.test",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_one_suppression_claim_per_edge_regardless_of_recipients(
+    monkeypatch: pytest.MonkeyPatch,
+    suppression_store: _FakeSuppressionStore,
+) -> None:
+    """A multi-recipient Dashboard claims exactly one flap window per edge (#2764).
+
+    The suppression key carries no recipient segment, so N recipients cannot
+    burn N windows -- one claim covers the whole fan-out.
+    """
+    fake = _install_transport(monkeypatch)
+    await notify_dashboard_transition(
+        _notice(email="oncall@example.com,team@example.com", dashboard_id=uuid4())
+    )
+    assert len(fake.calls) == 1
+    assert len(fake.calls[0]["to"]) == 2, "both recipients received the one mail"
+    assert len(suppression_store.set_calls) == 1, "exactly one claim covers every recipient"
+
+
+# ---------------------------------------------------------------------------
 # Integration through the persist seam
 # ---------------------------------------------------------------------------
 
@@ -895,6 +971,43 @@ async def test_finding_mail_carries_verdict_summary_and_run(
     assert "Reclaim thin-provisioned space." in body
     # The advisory-only disclaimer rides with the action, not without it.
     assert "diagnose-only" in body
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_fans_out_to_every_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The finding mail fans out to the same recipient list as the transition (#2764)."""
+    fake = _install_transport(monkeypatch)
+    await notify_finding(_finding(email="oncall@example.com,team@example.com"))
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["to"] == ["oncall@example.com", "team@example.com"]
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_drops_only_the_refused_recipient(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused finding recipient drops only itself; the rest still get mailed (#2764)."""
+    fake = _install_transport(monkeypatch)
+    with capture_logs() as logs:
+        await notify_finding(_finding(email="oncall@example.com,stranger@blocked.test"))
+    assert fake.calls[0]["to"] == ["oncall@example.com"]
+    refused = [e for e in logs if e["event"] == "checks_notify_recipient_refused"]
+    assert len(refused) == 1
+    assert refused[0]["recipient"] == "stranger@blocked.test"
+
+
+@pytest.mark.asyncio
+async def test_finding_mail_all_recipients_refused_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finding whose every recipient is refused sends nothing, warn-logged (#2764)."""
+    fake = _install_transport(monkeypatch)
+    with capture_logs() as logs:
+        await notify_finding(_finding(email="a@blocked.test,b@blocked.test"))
+    assert fake.calls == []
+    assert any(e["event"] == "checks_finding_email_no_allowed_recipients" for e in logs)
 
 
 @pytest.mark.asyncio

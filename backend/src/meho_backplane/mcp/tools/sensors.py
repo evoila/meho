@@ -241,7 +241,11 @@ register_mcp_tool(
             "interval_seconds (5..86400) or cron_expr (+ optional timezone). "
             "Optional: target (dispatch target object), params (op params "
             "object), severity ('degraded'|'critical', default 'critical'), "
-            "for_seconds (hold-time hysteresis, default 0), identity_sub "
+            "for_seconds (hold-time hysteresis, default 0), retry_times "
+            "(consecutive confirming re-checks required before a state "
+            "change commits + notifies, 0..5, default 0 = off) with "
+            "retry_backoff_seconds (accelerated re-check spacing while "
+            "pending, 5..300, default 15), identity_sub "
             "(the sub the runner dispatches -- and audit-attributes -- each "
             "evaluation under; only the '__sensor__' sentinel (default) or "
             "your own sub is accepted, any other value is refused with "
@@ -305,6 +309,28 @@ register_mcp_tool(
                     "type": "integer",
                     "minimum": 0,
                     "description": "Hold-time hysteresis seconds (default 0).",
+                },
+                "retry_times": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5,
+                    "description": (
+                        "Consecutive confirming re-evaluations required "
+                        "after the first differing reading before a state "
+                        "change commits + notifies (Nagios soft/hard "
+                        "states; default 0 = off, every reading commits "
+                        "immediately)."
+                    ),
+                },
+                "retry_backoff_seconds": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 300,
+                    "description": (
+                        "Accelerated re-check spacing in seconds while a "
+                        "state change is pending confirmation (default "
+                        "15; inert while retry_times is 0)."
+                    ),
                 },
                 "identity_sub": {
                     "type": "string",

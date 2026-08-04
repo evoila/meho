@@ -143,6 +143,8 @@ async def _seed_active_sensor(tenant_id: uuid.UUID) -> None:
             timezone="UTC",
             severity="critical",
             for_seconds=0,
+            retry_times=0,
+            retry_backoff_seconds=15,
             identity_sub="__sensor__",
             created_by_sub="op-test",
         )

@@ -333,6 +333,8 @@ class SensorAdminService:
                     timezone=payload.timezone,
                     severity=payload.severity.value,
                     for_seconds=payload.for_seconds,
+                    retry_times=payload.retry_times,
+                    retry_backoff_seconds=payload.retry_backoff_seconds,
                     identity_sub=payload.identity_sub,
                     created_by_sub=created_by_sub,
                 )

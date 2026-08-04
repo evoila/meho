@@ -90,7 +90,11 @@ dispatcher._reduce_and_audit_success(...)   # after audit + broadcast
   compare-and-swap), never the on-read rollup — so a staleness-derived
   `unknown` is not reflected, and a `NULL` memo (never-transitioned
   Dashboard) yields nothing. Documented limitation, acceptable for an
-  awareness nudge.
+  awareness nudge. Since #2799, a sensor with `retry_times > 0` moves
+  the memo only after its confirmation window commits, so the advisory
+  reflects a fresh incident with up to `retry_times ×
+  (retry_backoff_seconds + one runner tick)` of added latency — the
+  cost of not nudging every caller about a one-reading flap.
 - **Fail-open, advisory-only.** A broad guard swallows any DB/Valkey
   error, warn-logs `checks_alert_advisory_failed`, and returns `{}`.
   Never gates, blocks, or fails a dispatch.

@@ -71,6 +71,16 @@ _INTERVAL_SECONDS_MAX = 86400
 #: any realistic bounded assertion.
 _ASSERTION_MAX_SERIALIZED_BYTES = 8192
 
+#: Confirmation-retry bounds (#2799). ``retry_times`` is capped at 5 --
+#: Nagios deployments rarely exceed ``max_check_attempts`` 3-5, and each
+#: retry adds a full backoff to worst-case detection latency.
+#: ``retry_backoff_seconds`` is floored at 5 s (the same
+#: hammer-the-target floor as ``interval_seconds``) and capped at 300 s
+#: (a confirmation slower than that should just ride the cadence).
+_RETRY_TIMES_MAX = 5
+_RETRY_BACKOFF_SECONDS_MIN = 5
+_RETRY_BACKOFF_SECONDS_MAX = 300
+
 
 class SensorCreate(BaseModel):
     """Request body for ``POST /api/v1/sensors``.
@@ -117,6 +127,11 @@ class SensorCreate(BaseModel):
     timezone: Annotated[str, Field(max_length=_TIMEZONE_MAX_LENGTH)] = "UTC"
     severity: SensorSeverity = SensorSeverity.CRITICAL
     for_seconds: Annotated[int, Field(ge=0)] = 0
+    retry_times: Annotated[int, Field(ge=0, le=_RETRY_TIMES_MAX)] = 0
+    retry_backoff_seconds: Annotated[
+        int,
+        Field(ge=_RETRY_BACKOFF_SECONDS_MIN, le=_RETRY_BACKOFF_SECONDS_MAX),
+    ] = 15
     identity_sub: Annotated[str, Field(max_length=_IDENTITY_SUB_MAX_LENGTH)] = "__sensor__"
     tenant_id: uuid.UUID | None = None
 
@@ -187,11 +202,20 @@ class SensorRead(BaseModel):
     next_fire_at: datetime | None
     severity: SensorSeverity
     for_seconds: int
+    retry_times: int
+    retry_backoff_seconds: int
     last_state: Literal["ok", "degraded", "critical", "unknown", "skip"]
     last_value: Any
     last_evidence: dict[str, object] | None
     last_evaluated_at: datetime | None
     state_since: datetime | None
+    # Soft-state window (#2799): the unconfirmed candidate state (never
+    # ``skip`` -- a rollup-side derivation, not an evaluation outcome)
+    # and how many consecutive readings have agreed on it. Exposed so
+    # the pending window is observable, the way Prometheus exposes
+    # ``pending`` alerts via ``ALERTS``.
+    pending_state: Literal["ok", "degraded", "critical", "unknown"] | None
+    pending_count: int
     identity_sub: str
     created_by_sub: str
     created_at: datetime

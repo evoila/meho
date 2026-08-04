@@ -116,7 +116,7 @@ import asyncio
 import contextlib
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
@@ -132,6 +132,7 @@ from meho_backplane.checks.assertions import AssertionOutcome, AssertionSpec
 from meho_backplane.checks.evaluate import evaluate_assertion
 from meho_backplane.checks.investigate import investigate_on_transition
 from meho_backplane.checks.repository import (
+    accelerate_sensor_next_fire,
     advance_sensor_next_fire,
     claim_due_sensors,
     park_sensor,
@@ -425,13 +426,27 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
 async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> None:
     """Write *outcome* onto the sensor's latest-state projection (own session).
 
+    When the persist leaves a confirmation window open (#2799 --
+    ``record_sensor_result`` held the reading as a pending soft state
+    instead of committing it), pull the row's ``next_fire_at`` to
+    ``min(next_fire_at, evaluated_at + retry_backoff_seconds)`` so the
+    confirming re-evaluation runs on the accelerated schedule. The
+    re-check then rides the existing claim/advance/overlap machinery
+    unchanged -- no in-process sleep loop (which would die on
+    :func:`stop_sensor_runner` and pin ``_IN_FLIGHT``), and effective
+    spacing quantizes up to the tick grid like any sub-tick cadence.
+    This acceleration is runner-local: satellite-posted results share
+    the same commit gate but re-check at their own posting cadence.
+
     After the projection commits, hand off to #2507's transition detector: it
     recomputes the rollup for the Dashboards holding this sensor, maintains the
     ``last_rollup_state`` memo, and fires a diagnose-only investigator on a
     green->non-green edge. The hook never raises (its contract), so the persist
     path is unaffected by any investigation-side failure -- and it runs on every
     result (not only state changes) because a ``for:`` hold expiring flips a
-    Dashboard non-green with no sensor-state change.
+    Dashboard non-green with no sensor-state change. An *unconfirmed*
+    reading never changes ``last_state``, so the fold the detector
+    recomputes sees no edge from it.
     """
     evaluated_at = datetime.now(UTC)
     sessionmaker = get_sessionmaker()
@@ -444,6 +459,16 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
             evidence=outcome.evidence,
             evaluated_at=evaluated_at,
         )
+        # Identity-map read (record_sensor_result already loaded the row;
+        # a missing row means it was deleted mid-evaluation -- nothing to
+        # accelerate).
+        row = await session.get(Sensor, snap.id)
+        if row is not None and row.pending_state is not None:
+            await accelerate_sensor_next_fire(
+                session,
+                snap.id,
+                not_later_than=evaluated_at + timedelta(seconds=row.retry_backoff_seconds),
+            )
         await session.commit()
     await investigate_on_transition(sensor_id=snap.id, tenant_id=snap.tenant_id)
 

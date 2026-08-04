@@ -19,10 +19,17 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
 
 ## Key types
 
-- `meho_backplane.db.models.Sensor` — the ORM row. 26 columns: identity
+- `meho_backplane.db.models.Sensor` — the ORM row. 30 columns: identity
   (`connector_id` + `op_id`), `params`/`target`, `assertion` (JSON), the
-  cadence union, `severity`/`for_seconds`, the latest-result projection,
-  and `status`/`status_reason`.
+  cadence union, `severity`/`for_seconds`, the confirmation knobs
+  `retry_times`/`retry_backoff_seconds` (#2799, create-only like every
+  other sensor knob), the latest-result projection (including the
+  soft-state window `pending_state`/`pending_count`), and
+  `status`/`status_reason`. `pending_state`'s CHECK admits `CheckState`
+  minus `skip` (`skip` is a rollup-side derivation, never an evaluation
+  outcome); `_SENSOR_PENDING_STATES` derives from `CheckState` and is
+  drift-guarded in `tests/test_db_sensor.py` against migration `0070`'s
+  frozen literal.
 - `SensorCadenceKind` (`interval` | `cron`), `SensorStatus`
   (`active` | `paused`), `SensorSeverity` (`degraded` | `critical`) —
   closed StrEnums with DB `CHECK`s. The five-state `last_state` vocabulary
@@ -86,10 +93,35 @@ delete, the runner (#2505) owns claim/advance/park and the result write.
    `sensor_name_conflict`.
 
 **Result recording** (`record_sensor_result`, called by #2505/#2507/#2415-T3):
-updates `last_state`/`last_value`/`last_evidence`/`last_evaluated_at` on
-every call, bumps `state_since` **only** when the state changes, and
-returns whether it changed. There is no results history table — the
-projection is the single source of current state (Decision D).
+updates `last_value`/`last_evidence`/`last_evaluated_at` on every
+accepted call, and commits `last_state`/`state_since` through the
+**confirmation gate** (#2799, Nagios soft/hard states):
+
+- `retry_times = 0` (default): every differing reading commits
+  immediately — the pre-#2799 behaviour, bit for bit.
+- `retry_times > 0`: a reading differing from the committed
+  `last_state` opens (or advances) the soft-state window —
+  `pending_state`/`pending_count` on the row. Same candidate again →
+  count increments; `pending_count > retry_times` → commit
+  (`last_state` flips, `state_since` = the commit-time `evaluated_at`)
+  and the window clears. A different candidate mid-window (escalation)
+  restarts the count; a reading equal to the committed state clears the
+  window without committing. Symmetric in both directions (recovery to
+  `ok` is confirmed too — deliberately unlike Nagios' immediate hard
+  recovery, because the observed flap's second nuisance mail was a
+  flapping all-clear); `unknown` participates like any state.
+
+The gate lives in the repository function — not the runner task — so
+runner-local and satellite-gateway batch-posted results are confirmed
+identically. Returns `True` iff the *committed* state changed. There is
+still no results history table — the projection (now including the
+soft-state window) is the single source of current state (**Decision D,
+annotated by #2799**: the consecutive-confirmation counter is carried
+as projection columns, the #2327 `skip_count` precedent, not derived
+from history). Downstream, `state_since` marks the *confirmed*
+transition instant, so a `for_seconds` hold measures confirmed time on
+top of confirmation — count-based commit gate first, duration-based
+fold hold second, two independent layers.
 
 **Delete** is a hard `DELETE` (no tombstone) — a sensor carries no
 fire-history the audit trail needs post-delete.
@@ -109,7 +141,8 @@ runner parking.
 - `meho_backplane.scheduler.cron` — `is_valid_cron_expr`, `resolve_timezone`,
   `next_fire_after` (shared with the scheduler).
 - `meho_backplane.operations._lookup` — descriptor resolution for the guard.
-- Migration `0064_create_sensor.py` (`down_revision="0063"`).
+- Migrations `0064_create_sensor.py` (`down_revision="0063"`) and
+  `0070_add_sensor_confirmation_retries.py` (#2799 columns).
 
 ## Known issues / boundaries
 

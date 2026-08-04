@@ -6054,6 +6054,14 @@ _SENSOR_SEVERITIES: tuple[str, ...] = tuple(s.value for s in SensorSeverity)
 #: against them in :mod:`tests.test_db_sensor`.
 _SENSOR_LAST_STATES: tuple[str, ...] = get_args(CheckState)
 
+#: Closed ``sensor.pending_state`` vocabulary (#2799) -- ``CheckState``
+#: minus ``skip``: ``skip`` is a rollup-side *derivation* for paused
+#: members (#2506), never an evaluation outcome, so it can never be a
+#: confirmation candidate. Derived from :data:`CheckState` so the two
+#: cannot drift; migration ``0070`` records its own frozen literal and
+#: the drift guard in :mod:`tests.test_db_sensor` pins all three.
+_SENSOR_PENDING_STATES: tuple[str, ...] = tuple(s for s in get_args(CheckState) if s != "skip")
+
 #: Discriminated-union invariant for the cadence union: exactly one of
 #: ``interval_seconds`` / ``cron_expr`` carries the semantics, the other
 #: is NULL. Portable ``(cadence_kind = '...' AND col IS NOT NULL AND
@@ -6107,6 +6115,14 @@ class Sensor(Base):
     until an operator asks for history. The named write path is one
     repository function
     (:func:`~meho_backplane.checks.repository.record_sensor_result`).
+
+    #2799 extends the projection with a *soft-state* window
+    (``pending_state`` / ``pending_count``): because there is no history
+    table, the consecutive-confirmation counter the commit gate needs is
+    carried as columns on the row (the #2327 ``skip_count`` precedent),
+    not derived. ``state_since`` marks the *confirmed* transition
+    instant, so the ``for:`` hold measures confirmed time on top of
+    confirmation.
 
     Storage-only
     ------------
@@ -6221,6 +6237,27 @@ class Sensor(Base):
         default=0,
         server_default="0",
     )
+    # State-confirmation retries (#2799, Nagios ``max_check_attempts``):
+    # consecutive confirming re-evaluations required after the first
+    # differing reading before ``record_sensor_result`` commits the new
+    # state. 0 (the default) disables confirmation -- every reading
+    # commits immediately, the pre-#2799 behaviour.
+    retry_times: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
+    # Accelerated re-check spacing while a state is pending (#2799,
+    # Nagios ``retry_interval``). Seconds the runner pulls
+    # ``next_fire_at`` forward by after an unconfirmed reading;
+    # quantizes up to the runner tick grid like any sub-tick cadence.
+    retry_backoff_seconds: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=15,
+        server_default="15",
+    )
     # Latest-state projection (Decision D). ``last_state`` carries the
     # five-state vocabulary #2504's ``CheckState`` declares (default
     # ``unknown``); ``record_sensor_result`` touches ``state_since`` only
@@ -6252,6 +6289,25 @@ class Sensor(Base):
         DateTime(timezone=True),
         nullable=True,
         default=None,
+    )
+    # Soft-state window (#2799). When ``retry_times > 0`` and a reading
+    # differs from the committed ``last_state``, the candidate is held
+    # here (``pending_state`` + how many consecutive readings agreed)
+    # instead of flipping the projection; ``record_sensor_result``
+    # commits only once ``pending_count`` exceeds ``retry_times``. NULL
+    # / 0 on a sensor with no confirmation in flight. Exposed on
+    # ``SensorRead`` so the pending window is observable (the same
+    # reason Prometheus exposes ``pending`` via ``ALERTS``).
+    pending_state: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+        default=None,
+    )
+    pending_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
     # Identity ``sub`` #2505's runner dispatches under -- the sensor
     # analogue of the trigger's ``__scheduler__`` sentinel.
@@ -6317,6 +6373,13 @@ class Sensor(Base):
         sa.CheckConstraint(
             _ck_in("last_state", _SENSOR_LAST_STATES),
             name="ck_sensor_last_state",
+        ),
+        # ``pending_state`` over ``CheckState`` minus ``skip`` (#2799).
+        # NULL passes an IN check (SQL three-valued logic), so the
+        # no-window-open state needs no explicit OR IS NULL clause.
+        sa.CheckConstraint(
+            _ck_in("pending_state", _SENSOR_PENDING_STATES),
+            name="ck_sensor_pending_state",
         ),
         # Cadence discriminated-union invariant -- see
         # :data:`_SENSOR_CADENCE_FIELDS_CHECK`.

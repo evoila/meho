@@ -49,6 +49,12 @@ watchdog deliberately has no enable flag of its own.
 ```text
 runner loop:  sleep(interval) → run_one_sensor_tick()
                                   ├─ claim + advance + spawn evaluations
+                                  │    evaluation → _persist_outcome:
+                                  │      record_sensor_result (commit gate)
+                                  │      pending window open? →
+                                  │        accelerate_sensor_next_fire
+                                  │        (next_fire_at := min(next_fire_at,
+                                  │         evaluated_at + retry_backoff_seconds))
                                   └─ note_tick_completed()
                                        └─ stall flagged? → emit
                                           checks_scheduler_recovered
@@ -71,6 +77,37 @@ health read:   GET /api/v1/health · GET /api/v1/health/live
 Detection latency is bounded by `threshold + one tick interval` (the
 watchdog rides the runner's own cadence; a finer grid would not tighten
 that bound).
+
+### Confirmation retries (#2799)
+
+A sensor with `retry_times > 0` does not commit a differing evaluation
+outcome on first sight: `record_sensor_result` holds it as a pending
+soft state (`pending_state` / `pending_count` on the row) and commits
+`last_state` / `state_since` only after `retry_times` consecutive
+confirming re-evaluations (Nagios soft/hard states; symmetric — recovery
+to `ok` is confirmed too, and `unknown` participates like any state).
+The runner's contribution is the **accelerated re-check**: when a
+persist leaves the window open, `_persist_outcome` pulls the row's
+`next_fire_at` to `min(next_fire_at, evaluated_at +
+retry_backoff_seconds)` (`accelerate_sensor_next_fire`, a conditional
+`UPDATE ... WHERE next_fire_at > :accel` — atomic min, never a delay).
+The re-check then rides the ordinary claim/advance/overlap machinery:
+no in-process sleep loop, so `stop_sensor_runner` and the at-most-once
+advance discipline are untouched, and effective spacing quantizes up to
+the tick grid like any sub-tick cadence.
+
+**Worst-case detection latency** for a genuine transition becomes
+`first differing reading + retry_times × (retry_backoff_seconds + one
+tick interval)` — each confirming re-check waits its backoff plus up to
+one tick of grid quantization (the same fire-time contract shape #2245
+states for the scheduler's 30 s grid).
+
+**Satellite asymmetry:** the commit gate lives in
+`record_sensor_result`, so satellite-gateway batch-posted results are
+confirmation-counted identically — but the accelerated re-fire is
+runner-local (`next_fire_at` is the central runner's clock; a satellite
+re-checks at its own posting cadence, so remote confirmation is paced
+by that cadence instead of `retry_backoff_seconds`).
 
 ## Settings
 
@@ -154,7 +191,8 @@ external prober alerts on it (`stalled == true`, or
 - `backend/src/meho_backplane/main.py` (lifespan wiring)
 - `backend/tests/test_checks_watchdog.py`, `test_sensor_runner.py`,
   `test_api_v1_health.py`
-- #2763 (watchdog), #2505 (runner), Initiative #2780, parent goal #221
+- #2763 (watchdog), #2505 (runner), #2799 (confirmation retries),
+  Initiative #2780, parent goal #221
 - Moulds: `gateway/deadman.py` (#2501 — the satellite-runner dead-man
   switch, same lapse-detection shape at a different altitude),
   `memory/expiry.py` (loop lifecycle)

@@ -20,7 +20,7 @@ dependencies = [
     # no ssl.SSLError in the cause chain (#2771). Already present
     # transitively via httpx; declared direct so the connector's runtime
     # requirement is explicit (same pattern as dnspython / cryptography).
-    "anyio>=4.0",
+    "anyio>=4.14.2",
     "hvac>=2.4.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.29",

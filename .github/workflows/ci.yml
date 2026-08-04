@@ -530,13 +530,14 @@ jobs:
     #     Remove the label once validated; routine PRs never carry it.
     #   * NON-REQUIRED + whole-job continue-on-error (#1987 AC5) — it is NOT
     #     in branch protection's required contexts, AND continue-on-error
-    #     means a coverage-job FAILURE (OOM, red tests, step timeout)
-    #     reports the JOB as success, so it never fails the overall CI run
-    #     conclusion. That matters twice: a red coverage job must not block
-    #     merge (it can't — push runs after merge — but defence in depth),
-    #     and it must not flip the CI run's `conclusion` to `failure`,
-    #     which would suppress quality-gate.yml's `workflow_run` (it only
-    #     runs on `conclusion == 'success'`).
+    #     means a coverage-job FAILURE (OOM, red tests, step timeout) is
+    #     absorbed: the job itself still reports conclusion `failure` (jobs
+    #     API, observed on run 30925197316), but it never fails the overall
+    #     CI run conclusion. That matters twice: a red coverage job must not
+    #     block merge (it can't — push runs after merge — but defence in
+    #     depth), and it must not flip the CI run's `conclusion` to
+    #     `failure`, which would suppress quality-gate.yml's `workflow_run`
+    #     (it only runs on `conclusion == 'success'`).
     #     CAUTION (#2800): continue-on-error absorbs *failure* only —
     #     cancellation leaks through. A JOB-level `timeout-minutes` expiry
     #     CANCELS the job, and the `cancelled` conclusion propagated to the

@@ -21,9 +21,11 @@ Coverage mapped to the issue's acceptance criteria:
   derived live from the tick stamp, never from the watchdog's emission
   latch, and reads unknown-not-stalled before the runner has started.
 
-All clock-sensitive paths inject ``now`` -- no ``asyncio.sleep``-driven
-timing anywhere (python_best_practices §14). The DB layer is real
-against the autouse SQLite engine from :mod:`tests.conftest`;
+All stall/recovery *logic* is exercised with injected clocks
+(python_best_practices §14); the only real sleeps are in the
+loop-lifecycle tests, which drive the watchdog loop's own cadence and
+poll for completion rather than assert on wall-clock timing. The DB
+layer is real against the autouse SQLite engine from :mod:`tests.conftest`;
 ``publish_event`` is replaced by a recording fake so no Valkey
 connection is opened (same seam as ``tests/test_checks_broadcast.py``).
 """

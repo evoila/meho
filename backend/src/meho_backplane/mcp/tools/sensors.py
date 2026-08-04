@@ -44,13 +44,14 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
-from meho_backplane.checks.schemas import SensorCreate, SensorRead
+from meho_backplane.checks.schemas import SensorCreate, SensorRead, SensorResultsQuery
 from meho_backplane.checks.service import (
     SensorAdminService,
     SensorIdentitySubForbiddenError,
     SensorNameConflictError,
     SensorOperationNotFoundError,
     SensorRequiresSafeOperationError,
+    SensorResultsCursorError,
 )
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -62,6 +63,7 @@ _SENSOR_OP_IDS: Final[dict[str, str]] = {
     "list": "sensor.list",
     "create": "sensor.create",
     "delete": "sensor.delete",
+    "results": "sensor.results",
 }
 
 
@@ -414,4 +416,105 @@ register_mcp_tool(
         op_class="write",
     ),
     handler=_delete_handler,
+)
+
+
+# ---------------------------------------------------------------------------
+# meho_sensor_results (#2756)
+# ---------------------------------------------------------------------------
+
+
+async def _results_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    sensor_id = _require_sensor_id(arguments)
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_SENSOR_OP_IDS["results"],
+        audit_op_class="read",
+        audit_sensor_id=str(sensor_id),
+    )
+    # Re-validate the filter args through the frozen query model: this is the
+    # MCP-side "schema refusal" for an unknown param (``extra="forbid"``
+    # rejects an aggregation knob), and it applies the same date-time / enum /
+    # bounds parsing the REST route gets. ``sensor_id`` is the path arg, not a
+    # filter field, so it is stripped before validation.
+    filter_args = {k: v for k, v in arguments.items() if k != "sensor_id"}
+    try:
+        query = SensorResultsQuery.model_validate(filter_args)
+    except ValidationError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+    service = SensorAdminService()
+    try:
+        page = await service.list_results(operator.tenant_id, sensor_id, query)
+    except SensorResultsCursorError as exc:
+        raise McpInvalidParamsError(exc.error_code) from exc
+    if page is None:
+        raise McpInvalidParamsError("sensor_not_found")
+    structlog.contextvars.bind_contextvars(audit_row_count=len(page.items))
+    return page.model_dump(mode="json")
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        feature="sensors",
+        name="meho_sensor_results",
+        description=(
+            "Per-tick evidence trend query for one sensor (Initiative #2780, "
+            "#2756). Operator-level read -- the forensic 'when did this start "
+            "degrading / how fast is it filling' history the latest-result "
+            "projection discards. Returns {items: [{sensor_id, evaluated_at, "
+            "state, value, evidence, reason}, ...], next_cursor} in "
+            "evaluated_at ASC order. Binary filters only: from / to (inclusive "
+            "ISO-8601 window), state (exact), limit (bounded); page via the "
+            "opaque cursor (echo next_cursor back). Raw rows -- no smoothing, "
+            "downsampling, or aggregation (the client aggregates). "
+            "Tenant-scoped via the JWT; a cross-tenant / absent sensor id -> "
+            "'sensor_not_found'."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "sensor_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "UUID of the sensor whose evidence history to read.",
+                },
+                "from": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Inclusive lower bound on evaluated_at (ISO 8601). Optional.",
+                },
+                "to": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Inclusive upper bound on evaluated_at (ISO 8601). Optional.",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["ok", "degraded", "critical", "unknown", "skip"],
+                    "description": "Optional exact state filter.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 100,
+                    "description": "Max rows per page. Default 100; max 500.",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": (
+                        "Opaque keyset pagination token; echo the response's "
+                        "next_cursor back here to fetch the next page. Optional."
+                    ),
+                },
+            },
+            "required": ["sensor_id"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.OPERATOR,
+        op_class="read",
+    ),
+    handler=_results_handler,
 )

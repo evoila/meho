@@ -8138,6 +8138,121 @@
         }
       }
     },
+    "/api/v1/sensors/{sensor_id}/results": {
+      "get": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "List Sensor Results",
+        "description": "Return a page of a sensor's per-tick evidence history, ``evaluated_at ASC``.\n\nThe forensic trend query (#2756) -- \"when did this start degrading / how\nfast is it filling\". ``operator`` role. Binary filters only: an inclusive\n``from`` / ``to`` window, an exact ``state``, a bounded ``limit``, and an\nopaque keyset ``cursor`` (echo ``next_cursor`` back to page). An unknown\nquery param is a 422 (the :class:`SensorResultsQuery` model forbids extras)\nso \"no aggregation knobs\" holds at the wire; a malformed ``cursor`` is a 422\n``sensor_results_invalid_cursor``. An absent sensor id (or one owned by\nanother tenant) returns 404 ``sensor_not_found`` -- never 403 -- so neither\na sensor's existence nor its history leaks across the tenant boundary.\n\nScoped to the caller's own tenant: unlike ``list`` / ``delete`` there is no\nplatform-admin ``tenant_filter`` here. Cross-tenant forensic history is not\na stated need, the MCP ``meho_sensor_results`` tool is likewise\nown-tenant-only, and folding a standalone cross-tenant query param in beside\nthe :class:`SensorResultsQuery` model would collapse the flattened OpenAPI\nquery parameters into a single opaque object -- breaking the typed Go CLI\nclient the ``meho sensor results`` verb is generated from.",
+        "operationId": "list_sensor_results_api_v1_sensors__sensor_id__results_get",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "To"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ok",
+                "degraded",
+                "critical",
+                "unknown",
+                "skip"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "State"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorResultListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/checks/dashboards": {
       "get": {
         "tags": [
@@ -28099,6 +28214,78 @@
         ],
         "title": "SensorRead",
         "description": "Response shape for one ``sensor`` row.\n\nMirrors :class:`~meho_backplane.db.models.Sensor`'s column set,\nprojected to the wire types the JSON renderer can serialise. Includes\nthe latest-result projection (``last_state`` / ``last_value`` /\n``last_evidence`` / ``last_evaluated_at`` / ``state_since``) so the\nlist response carries the current status view (there is no REST\nGET-by-id -- the mould exposes none). ``frozen=True`` so a route\nhandler cannot mutate the row after returning it."
+      },
+      "SensorResultListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SensorResultRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "SensorResultListResponse",
+        "description": "Response envelope for ``GET /api/v1/sensors/{sensor_id}/results``.\n\nThe ``{items, next_cursor}`` keyset-pagination shape (#2742): ``items`` is\nthe page of evidence rows in ``evaluated_at ASC`` order; ``next_cursor`` is\nthe opaque continuation token to pass back as ``?cursor=`` for the next\npage, or ``null`` when this is the final page. No aggregate / rollup fields\n-- the client aggregates raw rows (#2756's determinism bound)."
+      },
+      "SensorResultRead": {
+        "properties": {
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Evaluated At"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "State"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Evidence"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensor_id",
+          "evaluated_at",
+          "state",
+          "value",
+          "evidence",
+          "reason"
+        ],
+        "title": "SensorResultRead",
+        "description": "Response shape for one ``sensor_results`` evidence row (#2756).\n\nMirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the\nwire types the JSON renderer serialises: the raw ``(evaluated_at, state,\nvalue, evidence, reason)`` the runner computed, plus the owning\n``sensor_id``. ``frozen=True`` so a route handler cannot mutate a row after\nreturning it."
       },
       "SensorRunnerStatus": {
         "properties": {

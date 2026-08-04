@@ -65,6 +65,8 @@ from meho_backplane.checks.schemas import (
     SensorCreate,
     SensorListResponse,
     SensorRead,
+    SensorResultListResponse,
+    SensorResultsQuery,
     SensorStatusFilter,
 )
 from meho_backplane.checks.service import (
@@ -73,6 +75,7 @@ from meho_backplane.checks.service import (
     SensorNameConflictError,
     SensorOperationNotFoundError,
     SensorRequiresSafeOperationError,
+    SensorResultsCursorError,
 )
 
 __all__ = ["router"]
@@ -90,6 +93,7 @@ _SENSOR_OP_IDS: Final[dict[str, str]] = {
     "list": "sensor.list",
     "create": "sensor.create",
     "delete": "sensor.delete",
+    "results": "sensor.results",
 }
 
 
@@ -242,3 +246,51 @@ async def delete_sensor(
             detail="sensor_not_found",
         )
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+
+@router.get("/{sensor_id}/results", response_model=SensorResultListResponse)
+async def list_sensor_results(
+    sensor_id: Annotated[uuid.UUID, Path()],
+    operator: Annotated[Operator, _require_operator],
+    query: Annotated[SensorResultsQuery, Query()],
+) -> SensorResultListResponse:
+    """Return a page of a sensor's per-tick evidence history, ``evaluated_at ASC``.
+
+    The forensic trend query (#2756) -- "when did this start degrading / how
+    fast is it filling". ``operator`` role. Binary filters only: an inclusive
+    ``from`` / ``to`` window, an exact ``state``, a bounded ``limit``, and an
+    opaque keyset ``cursor`` (echo ``next_cursor`` back to page). An unknown
+    query param is a 422 (the :class:`SensorResultsQuery` model forbids extras)
+    so "no aggregation knobs" holds at the wire; a malformed ``cursor`` is a 422
+    ``sensor_results_invalid_cursor``. An absent sensor id (or one owned by
+    another tenant) returns 404 ``sensor_not_found`` -- never 403 -- so neither
+    a sensor's existence nor its history leaks across the tenant boundary.
+
+    Scoped to the caller's own tenant: unlike ``list`` / ``delete`` there is no
+    platform-admin ``tenant_filter`` here. Cross-tenant forensic history is not
+    a stated need, the MCP ``meho_sensor_results`` tool is likewise
+    own-tenant-only, and folding a standalone cross-tenant query param in beside
+    the :class:`SensorResultsQuery` model would collapse the flattened OpenAPI
+    query parameters into a single opaque object -- breaking the typed Go CLI
+    client the ``meho sensor results`` verb is generated from.
+    """
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_SENSOR_OP_IDS["results"],
+        audit_op_class="read",
+        audit_sensor_id=str(sensor_id),
+    )
+    service = SensorAdminService()
+    try:
+        page = await service.list_results(operator.tenant_id, sensor_id, query)
+    except SensorResultsCursorError as exc:
+        raise HTTPException(
+            status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.error_code,
+        ) from exc
+    if page is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_404_NOT_FOUND,
+            detail="sensor_not_found",
+        )
+    structlog.contextvars.bind_contextvars(audit_row_count=len(page.items))
+    return page

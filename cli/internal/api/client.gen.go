@@ -393,6 +393,15 @@ const (
 	SensorReadPendingStateUnknown  SensorReadPendingState = "unknown"
 )
 
+// Defines values for SensorResultReadState.
+const (
+	SensorResultReadStateCritical SensorResultReadState = "critical"
+	SensorResultReadStateDegraded SensorResultReadState = "degraded"
+	SensorResultReadStateOk       SensorResultReadState = "ok"
+	SensorResultReadStateSkip     SensorResultReadState = "skip"
+	SensorResultReadStateUnknown  SensorResultReadState = "unknown"
+)
+
 // Defines values for SensorSeverity.
 const (
 	SensorSeverityCritical SensorSeverity = "critical"
@@ -644,6 +653,15 @@ const (
 const (
 	ListSensorsApiV1SensorsGetParamsCadenceKindCron     ListSensorsApiV1SensorsGetParamsCadenceKind = "cron"
 	ListSensorsApiV1SensorsGetParamsCadenceKindInterval ListSensorsApiV1SensorsGetParamsCadenceKind = "interval"
+)
+
+// Defines values for ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState.
+const (
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateCritical ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "critical"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateDegraded ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "degraded"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateOk       ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "ok"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateSkip     ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "skip"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateUnknown  ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "unknown"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -6477,6 +6495,37 @@ type SensorReadLastState string
 // SensorReadPendingState defines model for SensorRead.PendingState.
 type SensorReadPendingState string
 
+// SensorResultListResponse Response envelope for “GET /api/v1/sensors/{sensor_id}/results“.
+//
+// The “{items, next_cursor}“ keyset-pagination shape (#2742): “items“ is
+// the page of evidence rows in “evaluated_at ASC“ order; “next_cursor“ is
+// the opaque continuation token to pass back as “?cursor=“ for the next
+// page, or “null“ when this is the final page. No aggregate / rollup fields
+// -- the client aggregates raw rows (#2756's determinism bound).
+type SensorResultListResponse struct {
+	Items      []SensorResultRead `json:"items"`
+	NextCursor *string            `json:"next_cursor"`
+}
+
+// SensorResultRead Response shape for one “sensor_results“ evidence row (#2756).
+//
+// Mirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the
+// wire types the JSON renderer serialises: the raw “(evaluated_at, state,
+// value, evidence, reason)“ the runner computed, plus the owning
+// “sensor_id“. “frozen=True“ so a route handler cannot mutate a row after
+// returning it.
+type SensorResultRead struct {
+	EvaluatedAt time.Time               `json:"evaluated_at"`
+	Evidence    *map[string]interface{} `json:"evidence"`
+	Reason      *string                 `json:"reason"`
+	SensorId    openapi_types.UUID      `json:"sensor_id"`
+	State       SensorResultReadState   `json:"state"`
+	Value       interface{}             `json:"value"`
+}
+
+// SensorResultReadState defines model for SensorResultRead.State.
+type SensorResultReadState string
+
 // SensorRunnerStatus Liveness of this process's sensor evaluation loop (#2763).
 //
 // The queryable half of the checks-runner watchdog: an external prober
@@ -8431,6 +8480,19 @@ type DeleteSensorApiV1SensorsSensorIdDeleteParams struct {
 	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
 	Authorization *string             `json:"authorization,omitempty"`
 }
+
+// ListSensorResultsApiV1SensorsSensorIdResultsGetParams defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
+type ListSensorResultsApiV1SensorsSensorIdResultsGetParams struct {
+	From          *time.Time                                                  `form:"from,omitempty" json:"from,omitempty"`
+	To            *time.Time                                                  `form:"to,omitempty" json:"to,omitempty"`
+	State         *ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState `form:"state,omitempty" json:"state,omitempty"`
+	Limit         *int                                                        `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string                                                     `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Authorization *string                                                     `json:"authorization,omitempty"`
+}
+
+// ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
+type ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState string
 
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
@@ -11127,6 +11189,9 @@ type ClientInterface interface {
 
 	// DeleteSensorApiV1SensorsSensorIdDelete request
 	DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
+	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13950,6 +14015,18 @@ func (c *Client) CreateSensorApiV1SensorsPost(ctx context.Context, params *Creat
 
 func (c *Client) DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(c.Server, sensorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(c.Server, sensorId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -25596,6 +25673,141 @@ func NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(server string, sensorId op
 	}
 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest generates requests for ListSensorResultsApiV1SensorsSensorIdResultsGet
+func NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(server string, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s/results", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "from", runtime.ParamLocationQuery, *params.From); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "to", runtime.ParamLocationQuery, *params.To); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -37926,6 +38138,9 @@ type ClientWithResponsesInterface interface {
 	// DeleteSensorApiV1SensorsSensorIdDeleteWithResponse request
 	DeleteSensorApiV1SensorsSensorIdDeleteWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteSensorApiV1SensorsSensorIdDeleteResponse, error)
 
+	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
+	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -41467,6 +41682,29 @@ func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListSensorResultsApiV1SensorsSensorIdResultsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SensorResultListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -47850,6 +48088,15 @@ func (c *ClientWithResponses) DeleteSensorApiV1SensorsSensorIdDeleteWithResponse
 		return nil, err
 	}
 	return ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp)
+}
+
+// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request returning *ListSensorResultsApiV1SensorsSensorIdResultsGetResponse
+func (c *ClientWithResponses) ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
+	rsp, err := c.ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx, sensorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -54517,6 +54764,39 @@ func ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp *http.Response) (*D
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse parses an HTTP response from a ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse call
+func ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp *http.Response) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSensorResultsApiV1SensorsSensorIdResultsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SensorResultListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

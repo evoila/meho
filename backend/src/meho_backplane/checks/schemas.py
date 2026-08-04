@@ -28,7 +28,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from meho_backplane.checks.assertions import AssertionSpec
+from meho_backplane.checks.assertions import AssertionSpec, CheckState
 from meho_backplane.db.models import SensorCadenceKind, SensorSeverity, SensorStatus
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
 
@@ -36,6 +36,9 @@ __all__ = [
     "SensorCreate",
     "SensorListResponse",
     "SensorRead",
+    "SensorResultListResponse",
+    "SensorResultRead",
+    "SensorResultsQuery",
 ]
 
 #: Max length of an operator-supplied Sensor name. Sensors are referenced
@@ -243,3 +246,71 @@ SensorStatusFilter = Literal["active", "paused"]
 
 #: Re-exported sentinel cadence-kind literal for query-string filtering.
 SensorCadenceFilter = Literal["interval", "cron"]
+
+
+# ---------------------------------------------------------------------------
+# Per-tick evidence trend query (#2756)
+# ---------------------------------------------------------------------------
+
+#: Default / max page size for the evidence trend query. Mirrors the sensor
+#: list bounds (``SensorAdminService.DEFAULT_LIST_LIMIT`` / ``MAX_LIST_LIMIT``)
+#: for surface consistency; larger windows page via the keyset ``cursor``.
+_RESULTS_DEFAULT_LIMIT = 100
+_RESULTS_MAX_LIMIT = 500
+
+
+class SensorResultRead(BaseModel):
+    """Response shape for one ``sensor_results`` evidence row (#2756).
+
+    Mirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the
+    wire types the JSON renderer serialises: the raw ``(evaluated_at, state,
+    value, evidence, reason)`` the runner computed, plus the owning
+    ``sensor_id``. ``frozen=True`` so a route handler cannot mutate a row after
+    returning it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sensor_id: uuid.UUID
+    evaluated_at: datetime
+    state: Literal["ok", "degraded", "critical", "unknown", "skip"]
+    value: Any
+    evidence: dict[str, object] | None
+    reason: str | None
+
+
+class SensorResultListResponse(BaseModel):
+    """Response envelope for ``GET /api/v1/sensors/{sensor_id}/results``.
+
+    The ``{items, next_cursor}`` keyset-pagination shape (#2742): ``items`` is
+    the page of evidence rows in ``evaluated_at ASC`` order; ``next_cursor`` is
+    the opaque continuation token to pass back as ``?cursor=`` for the next
+    page, or ``null`` when this is the final page. No aggregate / rollup fields
+    -- the client aggregates raw rows (#2756's determinism bound).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    items: list[SensorResultRead]
+    next_cursor: str | None = None
+
+
+class SensorResultsQuery(BaseModel):
+    """Query-parameter model for the evidence trend query (#2756).
+
+    ``extra="forbid"`` is load-bearing: FastAPI otherwise silently ignores
+    unknown query parameters, but the task pins "no aggregation knobs" -- an
+    unknown filter (``smoothing=``, ``downsample=``, ``aggregate=``) must be
+    *rejected* with a 422, not quietly dropped. Binary filters only: an exact
+    ``state``, an inclusive ``[from, to]`` window, a bounded ``limit``, and the
+    opaque keyset ``cursor``. ``from`` is aliased because it is a Python
+    keyword. All optional except the implicit path ``sensor_id``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
+    state: CheckState | None = None
+    limit: int = Field(default=_RESULTS_DEFAULT_LIMIT, ge=1, le=_RESULTS_MAX_LIMIT)
+    cursor: str | None = None

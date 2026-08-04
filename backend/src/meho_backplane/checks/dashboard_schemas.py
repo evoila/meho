@@ -22,7 +22,15 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    EmailStr,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+)
 
 from meho_backplane.checks.assertions import CheckState
 from meho_backplane.db.models import SensorSeverity, SensorStatus
@@ -64,6 +72,24 @@ _MAX_MEMBERS = 200
 #: which is also what the briefing's token budget tracks.
 _INVESTIGATOR_PROMPT_MAX_LENGTH = 4096
 
+#: Max recipients a Dashboard's ``notify_email`` may fan out to (#2764). The
+#: same closed-list posture as ``sensor_ids`` (``_MAX_MEMBERS``), scaled to the
+#: notification surface: a channel address plus a handful of individuals is the
+#: shape the ops report described, and a Dashboard mailing more than this many
+#: distinct mailboxes wants a distribution-list alias, not N recipients pinned
+#: on the row. Bounds both the comma-joined ``text`` column and the per-send
+#: fan-out, restoring the implicit single-address bound the field carried
+#: before it accepted a list.
+_MAX_NOTIFY_RECIPIENTS = 16
+
+#: Per-entry validator reused for the comma-separated ``notify_email`` list
+#: (#2764). Built once at import. ``EmailStr`` (``email-validator``) lower-cases
+#: the domain, strips surrounding whitespace, and returns the validated address
+#: as a plain ``str``; an unparseable entry raises
+#: :class:`~pydantic.ValidationError`, which the field validator re-raises as a
+#: boundary 422 naming the offending entry.
+_EMAIL_ADAPTER: TypeAdapter[str] = TypeAdapter(EmailStr)
+
 
 class DashboardCreate(BaseModel):
     """Request body for ``POST /api/v1/checks/dashboards``.
@@ -79,10 +105,13 @@ class DashboardCreate(BaseModel):
 
     ``notify_email`` / ``notify_min_state`` are the #2719 notification config,
     set at create only like membership. Omitting ``notify_email`` leaves
-    notifications off for this Dashboard. The address is validated with
-    pydantic's ``EmailStr`` (``email-validator``), so a malformed one is a
-    boundary 422 rather than a delivery failure discovered hours later on the
-    first transition.
+    notifications off for this Dashboard. Since #2764 it carries **one or more**
+    comma-separated recipients: each entry is validated individually with
+    pydantic's ``EmailStr`` (``email-validator``), so a single malformed entry
+    is a boundary 422 naming it rather than a delivery failure discovered hours
+    later on the first transition. The normalised, comma-joined form is what
+    persists (the existing ``text`` column from migration ``0068``, no new
+    migration), and a lone address is stored and read back unchanged.
 
     ``investigator_prompt`` is the #2721 operator context appended to the
     diagnose-only investigator's briefing. Bounded at
@@ -97,8 +126,11 @@ class DashboardCreate(BaseModel):
     description: str | None = Field(default=None, max_length=_DESCRIPTION_MAX_LENGTH)
     sensor_ids: list[uuid.UUID] = Field(default_factory=list, max_length=_MAX_MEMBERS)
     tenant_id: uuid.UUID | None = None
-    #: Single recipient for transition mail; ``None`` disables notification.
-    notify_email: EmailStr | None = None
+    #: One or more comma-separated recipients for transition + finding mail;
+    #: ``None`` disables notification. Each entry is ``EmailStr``-validated by
+    #: :meth:`_validate_notify_email` and the normalised set persists
+    #: comma-joined (#2764).
+    notify_email: str | None = None
     #: Floor an edge must reach before mail is sent, under
     #: ``ok < degraded < critical`` applied to ``max(previous, current)``.
     notify_min_state: NotifyMinState = "critical"
@@ -107,6 +139,42 @@ class DashboardCreate(BaseModel):
     investigator_prompt: str | None = Field(
         default=None, max_length=_INVESTIGATOR_PROMPT_MAX_LENGTH
     )
+
+    @field_validator("notify_email", mode="after")
+    @classmethod
+    def _validate_notify_email(cls, value: str | None) -> str | None:
+        """Validate ``notify_email`` as a comma-separated recipient list (#2764).
+
+        ``None`` stays ``None`` (notifications off). Otherwise the value is
+        split on commas, each entry is individually validated as an
+        ``EmailStr`` -- so one malformed address is a 422 naming it, not a
+        delivery failure found on the first transition -- and the normalised
+        entries are re-joined for storage in the existing ``text`` column. A
+        single address is stored and read back unchanged; a present-but-empty
+        value (empty or all-blank / comma-only string) is refused, since the
+        way to disable notifications is to omit the field, not to send a blank
+        recipient. Bounded at :data:`_MAX_NOTIFY_RECIPIENTS`.
+        """
+        if value is None:
+            return None
+        entries = [part.strip() for part in value.split(",") if part.strip()]
+        if not entries:
+            raise ValueError(
+                "notify_email must carry at least one address; omit the field "
+                "to disable notifications"
+            )
+        if len(entries) > _MAX_NOTIFY_RECIPIENTS:
+            raise ValueError(
+                f"notify_email accepts at most {_MAX_NOTIFY_RECIPIENTS} "
+                f"recipients; got {len(entries)}"
+            )
+        validated: list[str] = []
+        for entry in entries:
+            try:
+                validated.append(_EMAIL_ADAPTER.validate_python(entry))
+            except ValidationError as exc:
+                raise ValueError(f"{entry!r} is not a valid email address") from exc
+        return ",".join(validated)
 
 
 class DashboardMemberView(BaseModel):

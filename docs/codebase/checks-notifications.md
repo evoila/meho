@@ -4,10 +4,17 @@
 
 When a check Dashboard's five-state rollup crosses an edge,
 `meho_backplane.checks.notify` mails the Dashboard's configured
-recipient — **in both directions**. An operator paged for `critical`
+recipient(s) — **in both directions**. An operator paged for `critical`
 gets the all-clear when the Dashboard recovers, which is what Prometheus
 Alertmanager's `send_resolved` provides and what #2716 made a binding
 decision for this layer.
+
+Since #2764 `notify_email` may carry **more than one** comma-separated
+address. The identical mail fans out to every recipient in one
+`send_email` call; each entry is screened individually against the
+`MAIL_RECIPIENT_ALLOWLIST` floor (`_allowed_recipients`), so one refused
+recipient drops only itself and never silences delivery to the
+allowlisted rest.
 
 The notifier is the second, independent consumer of #2507's transition
 claim. The first is the diagnose-only investigator
@@ -66,8 +73,14 @@ delivery — see `docs/codebase/checks-investigator.md`):
 
 | Column | Type | Meaning |
 |---|---|---|
-| `notify_email` | `text` NULL | The single recipient. **NULL = notifications off**, the state every pre-#2719 row backfills to. |
+| `notify_email` | `text` NULL | One or more comma-separated recipients (#2764), each `EmailStr`-validated on the way in and stored comma-joined. **NULL = notifications off**, the state every pre-#2719 row backfills to. |
 | `notify_min_state` | `text` NOT NULL, default `'critical'`, CHECK `IN ('degraded','critical')` | The floor an edge must reach. |
+
+The `notify_email` column type is unchanged by #2764 — a lone address is
+stored and read back verbatim, and pre-#2764 single-address rows keep
+working — so no migration was needed. The wire schema
+(`DashboardCreate.notify_email`) caps the list at `_MAX_NOTIFY_RECIPIENTS`
+(16); a Dashboard needing more mailboxes wants a distribution-list alias.
 
 `notify_min_state`'s vocabulary is deliberately narrower than
 `CheckState`: `ok` as a floor would mail on every edge, and
@@ -78,9 +91,12 @@ tuple are pinned against each other by drift guards in
 
 Both are set at Dashboard-create only — the same immutability posture as
 membership. There is no PATCH route; "edit" is delete + recreate.
-Surfaces: `POST /api/v1/checks/dashboards` (body fields, `EmailStr`-
-validated → 422 on a malformed address) and
-`meho dashboard create --notify-email --notify-min-state`.
+Surfaces: `POST /api/v1/checks/dashboards` (body fields; each
+comma-separated `notify_email` entry is `EmailStr`-validated → 422 naming
+a malformed one) and
+`meho dashboard create --notify-email --notify-min-state` (the CLI
+forwards the raw comma-separated string; the server splits and validates
+each entry).
 
 ## The notify rule
 
@@ -115,17 +131,24 @@ including `ok -> unknown`, since `unknown` shares rank 1 with
    that used to live inside the claim now sits at this single site,
    unchanged in meaning: `worsening and non_green` → investigator. Every
    claimed edge → `schedule_dashboard_notification`.
-3. **Threshold + flap window + build + send**
+3. **Threshold + flap window + screen + send**
    (`notify_dashboard_transition`). Unset recipient short-circuits; a
    recovery crossing clears the Dashboard's flap windows; then the rank
-   rule; then the #2732 suppression claim (see below); then one
-   `send_email`.
-4. **Outcome logging.** `checks_notify_sent` (info) on delivery;
-   `checks_notify_failed` (warning, with the transport's stable reason
-   code) on a `sent=False` result or an unexpected exception;
+   rule; then the #2732 suppression claim (see below); then per-entry
+   allowlist screening (`_allowed_recipients`, #2764); then one
+   `send_email` fan-out to the survivors. Screening sits **after** the
+   suppression claim, so the claim stays per-edge (one window covers all
+   recipients) and the attempt-based contract is unchanged.
+4. **Outcome logging.** `checks_notify_sent` (info, with
+   `recipient_count`) on delivery; `checks_notify_failed` (warning, with
+   the transport's stable reason code) on a `sent=False` result or an
+   unexpected exception; `checks_notify_recipient_refused` (warning, #2764)
+   for each configured recipient the allowlist drops;
+   `checks_notify_no_allowed_recipients` (warning, #2764) when every
+   configured recipient is refused and there is nothing to send;
    `checks_notify_skipped_unconfigured` /
    `checks_notify_skipped_below_threshold` /
-   `checks_notify_suppressed` (info) on the three short-circuits;
+   `checks_notify_suppressed` (info) on the short-circuits;
    `checks_notify_suppression_failed` (warning, `phase` = `claim` or
    `clear`) when Valkey misbehaves and the fail-open path runs. All are
    at info or above because a claimed edge is a rare event and "no mail
@@ -143,11 +166,12 @@ state)` window:
 - **Mechanism.** The first crossing into a non-green state claims a
   Valkey key — `meho:checks:notify:<tenant>:<dashboard>:<state>`, one
   atomic `SET NX EX`, the #2718 advisory's idiom (`checks/advisory.py`)
-  minus the caller segment (the audience is the Dashboard's one
-  configured recipient, not whoever dispatches). Repeat crossings into
-  the **same** state inside the window lose the claim and log
-  `checks_notify_suppressed`. The Valkey TTL key *is* the state —
-  nothing durable; a Valkey flush re-arms every window.
+  minus the caller segment. The key also carries **no recipient
+  segment**: the claim is per edge, so one window covers every recipient
+  of a multi-recipient Dashboard (#2764) — N recipients cannot burn N
+  windows. Repeat crossings into the **same** state inside the window
+  lose the claim and log `checks_notify_suppressed`. The Valkey TTL key
+  *is* the state — nothing durable; a Valkey flush re-arms every window.
 - **Knob.** `CHECKS_NOTIFY_SUPPRESSION_WINDOW_MINUTES`, default 30.
   `0` disables suppression entirely (one mail per claimed edge, the
   pre-#2732 behaviour) and short-circuits before any Valkey call.
@@ -294,8 +318,9 @@ from the memo would mean re-mailing every unchanged evaluation.
 - `meho_backplane.checks.investigate` — imports this module (never the
   reverse) and owns the claim.
 - `check_dashboards.notify_email` / `notify_min_state` — migration
-  `0068`. The finding mail reuses `notify_email` as its recipient (no
-  separate column).
+  `0068`. The finding mail reuses `notify_email` as its recipient(s) (no
+  separate column) and fans out to the same allowlist-screened list the
+  transition mail does (#2764).
 
 ## Known issues / boundaries
 
@@ -308,12 +333,19 @@ from the memo would mean re-mailing every unchanged evaluation.
   inside a window is not retried by the next same-state crossing, and a
   Valkey flush (or failover to an empty replica) re-arms every window —
   worst case one extra mail per state, never a dropped one.
-- **One recipient per Dashboard.** No lists, no routing rules, no
-  per-Sensor recipients. More when a consumer asks.
+- **Multiple recipients, but no routing.** Since #2764 `notify_email`
+  carries one or more comma-separated recipients and the identical mail
+  fans out to all of them (capped at `_MAX_NOTIFY_RECIPIENTS`). What is
+  still out of scope: routing rules, per-recipient `notify_min_state`,
+  per-Sensor recipients, templating, and digests/batching — the flat
+  closed list is deliberate (#2716 boundary). More when a consumer asks.
 - **Deployment-level SMTP.** One MTA and one allowlist for the whole
   backplane; there is no per-tenant mail config. A tenant admin can
-  therefore name a recipient the allowlist refuses, and learns about it
-  only from `checks_notify_failed` in the pod log.
+  therefore name a recipient the allowlist refuses. Since #2764 that
+  refusal is per-entry: the offending recipient is dropped and
+  warn-logged (`checks_notify_recipient_refused`) while the allowlisted
+  recipients still receive the mail, and a Dashboard whose every
+  recipient is refused logs `checks_notify_no_allowed_recipients`.
 - **No delivery record.** Nothing durable says a mail was sent; the
   structlog event is the whole trace (`checks_notify_sent` /
   `checks_finding_email_sent`). The `checks.transition` broadcast event

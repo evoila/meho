@@ -98,6 +98,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.delenv("VAULT_NAMESPACE", raising=False)
     monkeypatch.setenv("SCHEDULER_ENABLED", "false")
     monkeypatch.setenv("SENSOR_RUNNER_ENABLED", "false")
+    # The finding-mail notifier pre-screens recipients against this floor
+    # (#2764); allowlist the ``example.test`` domain these tests mail to.
+    monkeypatch.setenv("MAIL_RECIPIENT_ALLOWLIST", "example.test")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

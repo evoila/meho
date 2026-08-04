@@ -23625,7 +23625,6 @@
           },
           "notify_email": {
             "type": "string",
-            "format": "email",
             "nullable": true,
             "title": "Notify Email"
           },
@@ -23651,7 +23650,7 @@
           "name"
         ],
         "title": "DashboardCreate",
-        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. The address is validated with\npydantic's ``EmailStr`` (``email-validator``), so a malformed one is a\nboundary 422 rather than a delivery failure discovered hours later on the\nfirst transition.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. Since #2764 it carries **one or more**\ncomma-separated recipients: each entry is validated individually with\npydantic's ``EmailStr`` (``email-validator``), so a single malformed entry\nis a boundary 422 naming it rather than a delivery failure discovered hours\nlater on the first transition. The normalised, comma-joined form is what\npersists (the existing ``text`` column from migration ``0068``, no new\nmigration), and a lone address is stored and read back unchanged.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
       },
       "DashboardDetail": {
         "properties": {

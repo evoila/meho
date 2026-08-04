@@ -546,6 +546,38 @@ async def test_rest_create_round_trips_notify_config(client: TestClient) -> None
 
 
 @pytest.mark.asyncio
+async def test_rest_create_accepts_multiple_notify_recipients(client: TestClient) -> None:
+    """A comma-separated ``notify_email`` lands normalised + comma-joined (#2764)."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    sid = await _seed_sensor(name="multi-notify-sensor", last_state="ok")
+    key = make_rsa_keypair("kid-multi-notify")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        created = client.post(
+            "/api/v1/checks/dashboards",
+            json={
+                "name": "multi-notified",
+                "sensor_ids": [str(sid)],
+                # Surrounding whitespace is normalised away on the way in.
+                "notify_email": "oncall@example.com, team@example.com",
+            },
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["notify_email"] == "oncall@example.com,team@example.com"
+
+        dashboard_id = created.json()["id"]
+        detail = client.get(f"/api/v1/checks/dashboards/{dashboard_id}", headers=headers)
+        assert detail.json()["notify_email"] == "oncall@example.com,team@example.com"
+
+    async with get_sessionmaker()() as session:
+        persisted = await session.get(CheckDashboard, UUID(dashboard_id))
+        assert persisted is not None
+        assert persisted.notify_email == "oncall@example.com,team@example.com"
+
+
+@pytest.mark.asyncio
 async def test_rest_create_defaults_notify_off_at_critical(client: TestClient) -> None:
     """Omitting both fields leaves notifications off at the ``critical`` floor."""
     await _seed_tenant(_TENANT_A, "tenant-a")
@@ -569,6 +601,10 @@ async def test_rest_create_defaults_notify_off_at_critical(client: TestClient) -
     [
         pytest.param("notify_email", "not-an-address", id="malformed-email"),
         pytest.param("notify_email", "oncall@", id="empty-domain"),
+        # #2764: one malformed entry in an otherwise-valid list is a 422.
+        pytest.param("notify_email", "ok@example.com,not-an-address", id="malformed-in-list"),
+        # #2764: a present-but-blank recipient is refused (omit to disable).
+        pytest.param("notify_email", "   ", id="blank-recipient"),
         pytest.param("notify_min_state", "ok", id="floor-outside-vocabulary"),
         pytest.param("notify_min_state", "warn", id="floor-not-a-state"),
     ],

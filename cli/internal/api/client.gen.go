@@ -3479,10 +3479,13 @@ type DailyUsageBucketSurface string
 //
 // “notify_email“ / “notify_min_state“ are the #2719 notification config,
 // set at create only like membership. Omitting “notify_email“ leaves
-// notifications off for this Dashboard. The address is validated with
-// pydantic's “EmailStr“ (“email-validator“), so a malformed one is a
-// boundary 422 rather than a delivery failure discovered hours later on the
-// first transition.
+// notifications off for this Dashboard. Since #2764 it carries **one or more**
+// comma-separated recipients: each entry is validated individually with
+// pydantic's “EmailStr“ (“email-validator“), so a single malformed entry
+// is a boundary 422 naming it rather than a delivery failure discovered hours
+// later on the first transition. The normalised, comma-joined form is what
+// persists (the existing “text“ column from migration “0068“, no new
+// migration), and a lone address is stored and read back unchanged.
 //
 // “investigator_prompt“ is the #2721 operator context appended to the
 // diagnose-only investigator's briefing. Bounded at
@@ -3493,7 +3496,7 @@ type DashboardCreate struct {
 	Description        *string                        `json:"description"`
 	InvestigatorPrompt *string                        `json:"investigator_prompt"`
 	Name               string                         `json:"name"`
-	NotifyEmail        *openapi_types.Email           `json:"notify_email"`
+	NotifyEmail        *string                        `json:"notify_email"`
 	NotifyMinState     *DashboardCreateNotifyMinState `json:"notify_min_state,omitempty"`
 	SensorIds          *[]openapi_types.UUID          `json:"sensor_ids,omitempty"`
 	TenantId           *openapi_types.UUID            `json:"tenant_id"`

@@ -1405,6 +1405,7 @@ version = "0.1.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "alembic" },
+    { name = "anyio" },
     { name = "asyncpg" },
     { name = "asyncssh" },
     { name = "authlib" },
@@ -1469,6 +1470,7 @@ docs = [
 [package.metadata]
 requires-dist = [
     { name = "alembic", specifier = ">=1.18.5" },
+    { name = "anyio", specifier = ">=4.0" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "asyncssh", specifier = ">=2.24.0,<3.0" },
     { name = "authlib", specifier = ">=1.3" },

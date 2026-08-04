@@ -193,8 +193,37 @@ subject/issuer/`notAfter` (public identity, never private material);
 before the handler runs. Reason codes extend the T1 set with
 `invalid_url`, `blocked_redirect`, `too_many_redirects`, and `tls_error`.
 
+**Transport-failure classification (#2771).** A connection-level failure
+is mapped to its reason code by walking the caught `httpx.TransportError`
+*tree* — both the `__cause__` chain **and** any `ExceptionGroup`
+children (`.exceptions`, PEP 654) — not just `__cause__`. This matters
+because anyio's happy-eyeballs connect raises `OSError("All connection
+attempts failed") from ExceptionGroup(...)` on a multi-address (dual-stack
+A+AAAA) host, so the real per-attempt errors (`ConnectionRefusedError`,
+`socket.gaierror`, `ssl.SSLError`) sit in the group's children, invisible
+to a `__cause__`-only walk — which is why they used to collapse to
+`unreachable`. When several inner causes disagree, the most
+specific/actionable wins: `tls_error` > `dns_failure` > `refused` >
+`timeout` > `unreachable`. TLS-phase failures that carry **no**
+`ssl.SSLError` are also caught: httpcore's `start_tls` maps
+`anyio.EndOfStream` / `anyio.BrokenResourceError` to `ConnectError` when
+the peer closes or sends an alert mid-handshake; `EndOfStream` is
+start_tls-only, and `BrokenResourceError` is disambiguated by the probe
+scheme (it only reads `tls_error` on `https`, since `connect_tcp` also
+maps it). Every connection-level failure additionally carries
+`error_detail` — a bounded, innermost-first `[{type, message}]` of the
+mapped exception chain (exception type + message only, never the response
+body) — so a caller sees the actual inner error without re-running the
+probe under instrumentation. `error_detail` is `null` on a clean response
+or a pre-dial refusal (`not_in_probe_allowlist` / `invalid_url`).
+
 Because it issues an HTTP request, `net.http_probe` adds **`httpx`** to
-the family's dependency surface (already a project dep — no new dep).
+the family's dependency surface (already a project dep). It also imports
+**`anyio`** directly (httpx's async transport backend) to `isinstance`
+the TLS-phase stream exceptions above; anyio is already present
+transitively via httpx and is now declared a direct dependency in
+`backend/pyproject.toml` so the requirement is explicit (same pattern as
+`dnspython` / `cryptography`).
 
 ## `net.ntp_check` — clock offset/skew + stratum (T5, #2410)
 
@@ -462,8 +491,12 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
   declared runtime dependency (the handler imports `cryptography.x509`
   directly).
 - `net.http_probe`: `httpx` (already a project dependency) for the HTTP
-  request and its `network_stream` TLS extension — no **new** runtime
-  dependency is added.
+  request and its `network_stream` TLS extension, plus **`anyio`**
+  (httpx's async backend, promoted from transitive to a declared direct
+  dependency, #2771) — imported to `isinstance` the TLS-phase stream
+  exceptions (`anyio.EndOfStream` / `anyio.BrokenResourceError`) when
+  classifying a transport failure. No **new** package enters the resolved
+  set (anyio was already installed via httpx).
 - `net.dns_lookup`: **dnspython** (ISC-licensed, already present
   transitively via `email-validator` / `pymongo`; pinned direct in
   `backend/pyproject.toml` so the connector's requirement is explicit) —

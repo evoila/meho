@@ -51,8 +51,10 @@ import hashlib
 import socket
 import ssl
 import time
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Final
 
+import anyio
 import httpx
 import structlog
 
@@ -209,6 +211,26 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "allowlist and never dialed; else null."
             ),
         },
+        "error_detail": {
+            "type": ["array", "null"],
+            "description": (
+                "On a connection-level failure, the actual mapped "
+                "exception chain as innermost-first {type, message} "
+                "entries (bounded, each message truncated) — the "
+                "evidence behind the 'reason' code. Null on a clean "
+                "response or a pre-dial refusal (not_in_probe_allowlist "
+                "/ invalid_url). Never contains the response body."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "type": {"type": "string"},
+                    "message": {"type": "string"},
+                },
+                "required": ["type", "message"],
+                "additionalProperties": False,
+            },
+        },
         "url": {"type": "string", "description": "The initially requested URL (audit-visible)."},
         "method": {"type": "string", "description": "The HTTP method issued."},
     },
@@ -224,6 +246,7 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
         "body_sha256",
         "final_url",
         "blocked_redirect",
+        "error_detail",
         "url",
         "method",
     ],
@@ -266,7 +289,9 @@ _NET_HTTP_PROBE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "reason='blocked_redirect', blocked_redirect=<host>, and the "
         "host is never dialed. A connection failure: reachable=false "
         "with reason (timeout|dns_failure|refused|tls_error|unreachable "
-        "|not_in_probe_allowlist). Every case is status=ok. Never a body."
+        "|not_in_probe_allowlist) plus error_detail (innermost-first "
+        "[{type, message}], bounded) as the evidence behind reason. "
+        "Every case is status=ok. Never a body."
     ),
 }
 
@@ -301,6 +326,7 @@ def _result(
     body_sha256: str | None = None,
     final_url: str | None = None,
     blocked_redirect: str | None = None,
+    error_detail: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Build the flat result payload (every key present, nulls where N/A).
 
@@ -320,6 +346,7 @@ def _result(
         "body_sha256": body_sha256,
         "final_url": final_url,
         "blocked_redirect": blocked_redirect,
+        "error_detail": error_detail,
         "url": url,
         "method": method,
     }
@@ -401,28 +428,127 @@ async def _consume_body_size_and_hash(response: httpx.Response) -> tuple[int, st
     return size, hasher.hexdigest()
 
 
-def _reason_for_transport_error(exc: httpx.TransportError) -> str:
+#: Priority order for transport-failure reason codes when one failure
+#: surfaces several inner causes at once (e.g. a dual-stack probe whose
+#: IPv6 attempt was refused while the IPv4 attempt hit a TLS error). The
+#: most specific/actionable code wins; ``unreachable`` is the implicit
+#: floor returned when nothing above matches.
+_TRANSPORT_REASON_PRIORITY: Final[tuple[str, ...]] = (
+    "tls_error",
+    "dns_failure",
+    "refused",
+    "timeout",
+)
+#: Bounds on the ``error_detail`` evidence list — at most this many
+#: innermost exceptions, each message truncated to this many characters.
+_MAX_ERROR_DETAIL_ENTRIES: Final[int] = 6
+_MAX_ERROR_DETAIL_MESSAGE_CHARS: Final[int] = 200
+
+
+def _iter_exception_tree(exc: BaseException) -> Iterator[BaseException]:
+    """Yield *exc* and every exception reachable from it, each once.
+
+    Follows two edges: the ``__cause__`` chain (``raise X from Y`` — how
+    httpcore/httpx re-wrap the underlying OS/TLS error) and, for an
+    :class:`ExceptionGroup` / :class:`BaseExceptionGroup`, its
+    ``.exceptions`` children (PEP 654). anyio raises
+    ``OSError("All connection attempts failed") from ExceptionGroup(...)``
+    on a multi-address (happy-eyeballs) connect, so the real per-attempt
+    errors live in the group's children, not on ``__cause__`` — walking
+    both edges is what stops them collapsing to ``unreachable``. An
+    ``id``-based seen-set guards against ``__cause__`` cycles.
+    """
+    stack: list[BaseException] = [exc]
+    seen: set[int] = set()
+    while stack:
+        node = stack.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        yield node
+        if node.__cause__ is not None:
+            stack.append(node.__cause__)
+        if isinstance(node, BaseExceptionGroup):
+            stack.extend(node.exceptions)
+
+
+def _reason_for_transport_error(exc: httpx.TransportError, *, tls: bool) -> str:
     """Map an httpx transport error to a probe reason code.
 
-    Walks the exception's ``__cause__`` chain to the underlying OS/TLS
-    error so DNS, TLS, and connection-refused failures each get a
-    distinct code rather than collapsing to ``unreachable``.
+    Walks the whole exception tree (``__cause__`` **and**
+    ``ExceptionGroup`` children — see :func:`_iter_exception_tree`) and
+    classifies each node by type, so DNS, TLS, and connection-refused
+    failures each get a distinct code instead of collapsing to
+    ``unreachable``. When several inner causes disagree the most
+    specific/actionable wins, per :data:`_TRANSPORT_REASON_PRIORITY`
+    (``tls_error`` > ``dns_failure`` > ``refused`` > ``timeout`` >
+    ``unreachable``).
+
+    TLS-phase failures that carry **no** ``ssl.SSLError`` are caught too:
+    httpcore's ``start_tls`` maps ``anyio.EndOfStream`` and
+    ``anyio.BrokenResourceError`` to ``ConnectError`` when the peer
+    closes or sends an alert mid-handshake (verified against
+    httpcore 1.0.9 / anyio 4.13.0). ``EndOfStream`` is start_tls-only,
+    but ``BrokenResourceError`` is *also* mapped by ``connect_tcp`` — so
+    it only reads ``tls_error`` when *tls* is set (the probe URL was
+    ``https``); on plain HTTP there is no handshake to blame and it stays
+    ``unreachable``.
     """
-    cause: BaseException | None = exc
-    seen: set[int] = set()
-    while cause is not None and id(cause) not in seen:
-        seen.add(id(cause))
-        if isinstance(cause, ssl.SSLError):
-            return "tls_error"
-        if isinstance(cause, socket.gaierror):
-            return "dns_failure"
-        if isinstance(cause, ConnectionRefusedError):
-            return "refused"
-        cause = cause.__cause__
-    # No recognised inner cause — classify by the httpx type.
-    if isinstance(exc, httpx.ConnectTimeout | httpx.ReadTimeout | httpx.TimeoutException):
-        return "timeout"
+    reasons: set[str] = set()
+    for node in _iter_exception_tree(exc):
+        if isinstance(node, ssl.SSLError):
+            reasons.add("tls_error")
+        elif isinstance(node, socket.gaierror):
+            reasons.add("dns_failure")
+        elif isinstance(node, ConnectionRefusedError):
+            reasons.add("refused")
+        elif isinstance(node, TimeoutError):
+            reasons.add("timeout")
+        elif tls and isinstance(node, (anyio.EndOfStream, anyio.BrokenResourceError)):
+            reasons.add("tls_error")
+    if isinstance(exc, httpx.TimeoutException):
+        reasons.add("timeout")
+    for reason in _TRANSPORT_REASON_PRIORITY:
+        if reason in reasons:
+            return reason
     return "unreachable"
+
+
+def _exc_type_name(exc: BaseException) -> str:
+    """Readable type label for the evidence detail (``module.Qual``).
+
+    Drops the noisy ``builtins.`` prefix so a refused connect reads
+    ``ConnectionRefusedError`` rather than
+    ``builtins.ConnectionRefusedError``, while a library type keeps its
+    module (``anyio.EndOfStream``, ``httpx.ConnectError``) for
+    unambiguous attribution.
+    """
+    cls = type(exc)
+    if cls.__module__ in ("builtins", "__main__"):
+        return cls.__qualname__
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _error_detail(exc: BaseException) -> list[dict[str, str]]:
+    """Bounded, innermost-first ``[{type, message}]`` of *exc*'s tree.
+
+    The classifier collapses a failure to one closed-enum ``reason``;
+    this rides alongside it so a caller sees the *actual* mapped
+    exception chain without re-running the probe under instrumentation.
+    Innermost-first (the leaf cause is the most actionable), capped at
+    :data:`_MAX_ERROR_DETAIL_ENTRIES` entries with each message truncated
+    to :data:`_MAX_ERROR_DETAIL_MESSAGE_CHARS` — exception type + message
+    only, never the response body.
+    """
+    nodes = list(_iter_exception_tree(exc))
+    nodes.reverse()
+    detail: list[dict[str, str]] = []
+    for node in nodes[:_MAX_ERROR_DETAIL_ENTRIES]:
+        message = str(node)
+        if len(message) > _MAX_ERROR_DETAIL_MESSAGE_CHARS:
+            message = message[:_MAX_ERROR_DETAIL_MESSAGE_CHARS] + "..."
+        detail.append({"type": _exc_type_name(node), "message": message})
+    return detail
 
 
 async def _walk_redirects(
@@ -593,21 +719,23 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
                 _walk_redirects(client=client, url=url, method=method, started=started),
                 timeout=timeout,
             )
-    except (TimeoutError, httpx.TimeoutException):
+    except (TimeoutError, httpx.TimeoutException) as exc:
         return _result(
             url=url,
             method=method,
             reachable=False,
             reason="timeout",
             timing_ms=_elapsed_ms(started),
+            error_detail=_error_detail(exc),
         )
     except httpx.TransportError as exc:
         return _result(
             url=url,
             method=method,
             reachable=False,
-            reason=_reason_for_transport_error(exc),
+            reason=_reason_for_transport_error(exc, tls=parsed.scheme == "https"),
             timing_ms=_elapsed_ms(started),
+            error_detail=_error_detail(exc),
         )
 
 
@@ -647,7 +775,10 @@ async def register_net_http_probe_operations(
             "⇒ the connector is inert). A refused, timed-out, DNS-failed, "
             "TLS-failed, or redirect-blocked probe returns reachable "
             "with a reason code and status=ok — a failed probe is the "
-            "product, never a connector error."
+            "product, never a connector error. A connection-level "
+            "failure also carries error_detail: the actual mapped "
+            "exception chain (innermost-first {type, message}, bounded) "
+            "behind the reason code."
         ),
         parameter_schema=NET_HTTP_PROBE_PARAMETER_SCHEMA,
         response_schema=_NET_HTTP_PROBE_RESPONSE_SCHEMA,

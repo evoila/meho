@@ -128,6 +128,27 @@ connector-related release-notes line.
 
 ### Fixed
 
+- **`net.http_probe` classifies transport failures instead of
+  collapsing them to `unreachable`** (#2771). The reason classifier now
+  walks the whole `httpx.TransportError` tree — both the `__cause__`
+  chain and `ExceptionGroup` children (PEP 654) — so a dual-stack
+  (happy-eyeballs) connect failure, whose real per-attempt errors anyio
+  nests in an `ExceptionGroup`, is mapped to `refused` / `dns_failure` /
+  `tls_error` rather than the uninformative `unreachable` it used to
+  return. When several inner causes disagree the most actionable wins
+  (`tls_error` > `dns_failure` > `refused` > `timeout` > `unreachable`).
+  TLS-phase handshake failures that carry no `ssl.SSLError` — the peer
+  closes or sends an alert, which httpcore's `start_tls` maps to
+  `ConnectError` via `anyio.EndOfStream` / `anyio.BrokenResourceError` —
+  now read `tls_error` on `https` probes, so an endpoint behind a
+  private CA the chart trust bundle does not know is finally
+  distinguishable from an unreachable host. Every connection-level
+  failure also carries a new bounded, innermost-first `error_detail`
+  (`[{type, message}]`) exposing the actual mapped exception chain —
+  evidence the op previously discarded, forcing operators to offer an
+  instrumented repro. `anyio` is promoted to a declared direct
+  dependency (already present transitively via httpx).
+
 - **MCP tools declaring an `outputSchema` now emit conforming
   `structuredContent`** (#2774). MCP 2025-06-18 §Tools/Output Schema
   mandates structured results for declaring tools, and Claude's frontend

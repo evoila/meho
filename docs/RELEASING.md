@@ -67,7 +67,11 @@ Choose the bump from what's in `[Unreleased]`:
 - [ ] **"cancelled" ≠ "green".** A cancelled CI run is *inconclusive*,
   not a pass. Merge-storm concurrency cancellation (a later push
   cancels an in-flight run on the same ref) is the common cause, and a
-  cancelled run reads green-ish in a glance — it is not. If the latest
+  cancelled run reads green-ish in a glance — it is not. (A hung
+  `python-coverage` job is *no longer* a cause: since #2800 a pytest
+  hang trips the step-level timeout and degrades to an absorbed job
+  failure with run conclusion `success`, so a `cancelled` main run
+  means a genuine cancel.) If the latest
   `main` run for the tagged commit is `cancelled`, **re-run it and wait
   for a real `success`** before tagging:
 

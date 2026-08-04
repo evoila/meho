@@ -212,7 +212,9 @@ by automation. Record completion in the decision record's
    # See .claude/skills/op-cli/SKILL.md for the create-via-template shape.
    op item get meho-review-app --vault <vault> >/dev/null 2>&1 || \
      echo "create item meho-review-app in <vault> with fields client-id, private-key"
-   rm -P ~/Downloads/meho-review.*.private-key.pem
+   # Plain rm — secure-wipe flags are platform-specific (and moot on
+   # modern filesystems); if the deletion worries you, rotate the key.
+   rm ~/Downloads/meho-review.*.private-key.pem
    ```
 
 6. **Smoke-test the mint path:**

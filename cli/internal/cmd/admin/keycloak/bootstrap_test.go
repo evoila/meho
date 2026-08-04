@@ -441,8 +441,8 @@ func TestBootstrap_FreshRealmCreatesEverything(t *testing.T) {
 	if res.CLIClientID != "meho-cli" {
 		t.Errorf("CLIClientID = %q, want meho-cli", res.CLIClientID)
 	}
-	if res.MCPClientID != "meho-mcp-client" {
-		t.Errorf("MCPClientID = %q, want meho-mcp-client", res.MCPClientID)
+	if res.MCPClientID != "meho-mcp" {
+		t.Errorf("MCPClientID = %q, want meho-mcp", res.MCPClientID)
 	}
 
 	// Each client has 5 mappers.
@@ -798,12 +798,12 @@ func TestBootstrap_MCPClientHasStandardFlowAndPKCE(t *testing.T) {
 	}
 	var mcpClient *clientRep
 	for _, c := range fake.clients {
-		if c.ClientID == "meho-mcp-client" {
+		if c.ClientID == "meho-mcp" {
 			mcpClient = c
 		}
 	}
 	if mcpClient == nil {
-		t.Fatalf("meho-mcp-client not found")
+		t.Fatalf("meho-mcp not found")
 	}
 	if mcpClient.StandardFlowEnabled == nil || !*mcpClient.StandardFlowEnabled {
 		t.Errorf("MCP client standardFlow should be on")
@@ -836,7 +836,7 @@ func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
 		switch c.ClientID {
 		case "meho-cli":
 			cliUUID = uuid
-		case "meho-mcp-client":
+		case "meho-mcp":
 			mcpUUID = uuid
 		}
 	}
@@ -844,7 +844,7 @@ func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
 		t.Fatalf("meho-cli client not found")
 	}
 	if mcpUUID == "" {
-		t.Fatalf("meho-mcp-client not found")
+		t.Fatalf("meho-mcp not found")
 	}
 
 	// MCP client: offline_access is attached as an OPTIONAL scope.
@@ -857,7 +857,7 @@ func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
 		}
 	}
 	if !foundOnMCP {
-		t.Errorf("meho-mcp-client missing optional scope offline_access; "+
+		t.Errorf("meho-mcp missing optional scope offline_access; "+
 			"got optionalScopes=%v", mcpOpt)
 	}
 
@@ -866,7 +866,7 @@ func TestBootstrap_MCPClientHasOfflineAccessOptionalScope(t *testing.T) {
 	// whether the client requested it).
 	for _, sid := range fake.defaultScopes[mcpUUID] {
 		if sid == "scope-offline-access" {
-			t.Errorf("meho-mcp-client has offline_access as DEFAULT — " +
+			t.Errorf("meho-mcp has offline_access as DEFAULT — " +
 				"must be optional only (else every browser-flow login " +
 				"mints a refresh token even when offline_access isn't " +
 				"requested)")

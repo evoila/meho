@@ -35,7 +35,7 @@ type BootstrapOptions struct {
 
 	// MCPClientID is the public authorization-code+PKCE client name
 	// used by Claude.ai Custom Connector / MCP Inspector; defaults to
-	// "meho-mcp-client".
+	// "meho-mcp".
 	MCPClientID string
 
 	// BackplaneAudience is the confidential resource-server client's
@@ -90,7 +90,7 @@ func (o BootstrapOptions) withDefaults() BootstrapOptions {
 		o.CLIClientID = "meho-cli"
 	}
 	if o.MCPClientID == "" {
-		o.MCPClientID = "meho-mcp-client"
+		o.MCPClientID = "meho-mcp"
 	}
 	if o.BackplaneAudience == "" {
 		o.BackplaneAudience = "meho-backplane"
@@ -357,7 +357,7 @@ type Result struct {
 //  1. Public CLI device-code client (`meho-cli`)
 //  2. 5 protocol mappers cloned from the reference
 //  3. 4 default client scopes (basic / roles / web-origins / acr)
-//  4. Public MCP browser-flow client (`meho-mcp-client`)
+//  4. Public MCP browser-flow client (`meho-mcp`)
 //  5. Same 5 mappers + 4 default scopes on the MCP client, **plus**
 //     `offline_access` as an *optional* client scope (the CLI
 //     device-code client deliberately doesn't get it — see RDC Wall W7

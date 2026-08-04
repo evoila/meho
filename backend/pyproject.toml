@@ -118,7 +118,9 @@ dependencies = [
     # presented cert via ``cryptography.x509`` (subject/SAN/issuer/validity
     # extraction). Previously a dev-only + transitive (pyjwt[crypto],
     # pyopenssl) install; declared here because the app imports it directly.
-    "cryptography>=49.0.0",
+    # Floor at 50.0.0: CVE-2026-69247 (PKCS#7 EnvelopedData Bleichenbacher
+    # oracle) is fixed there and the trivy image gate fails on anything older.
+    "cryptography>=50.0.0",
 ]
 
 [dependency-groups]

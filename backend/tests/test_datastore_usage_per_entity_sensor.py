@@ -67,15 +67,19 @@ _FREE_SPACE_COMPARE: dict[str, Any] = {
 
 
 def _reducer() -> JsonFluxReducer:
-    """A default-threshold reducer (50 rows / 4096 bytes, matching the singleton
-    installed at ``main.py``).
+    """A reducer pinned to the production default thresholds (50 rows /
+    ``_BYTE_THRESHOLD`` bytes, matching ``JsonFluxReducer()`` installed at
+    ``main.py``).
 
-    An explicit ``sample_byte_budget`` is passed only so the over-threshold
+    ``byte_threshold`` is passed explicitly rather than relying on the
+    constructor default, so the guard tests' byte assertions and the reducer's
+    own collapse decision share one source of truth if the library default
+    ever moves. ``sample_byte_budget`` is set only so the over-threshold
     assemble path does not read app settings (``get_settings()``) in this
-    pure-module test; it sizes the envelope's inline sample and does not
-    change the byte threshold that decides whether a payload collapses.
+    pure-module test; it sizes the envelope's inline sample, not the collapse
+    decision.
     """
-    return JsonFluxReducer(sample_byte_budget=_BYTE_THRESHOLD)
+    return JsonFluxReducer(byte_threshold=_BYTE_THRESHOLD, sample_byte_budget=_BYTE_THRESHOLD)
 
 
 def _make_operator() -> Operator:

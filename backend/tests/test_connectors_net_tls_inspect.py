@@ -40,9 +40,12 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
+from jsonschema import Draft202012Validator
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
+from meho_backplane.checks.assertions import AssertionSpec, SelectSpec, ThresholdCompare
+from meho_backplane.checks.evaluate import evaluate_assertion
 from meho_backplane.connectors.net import tls as net_tls
 from meho_backplane.connectors.net.allowlist import PROBE_ALLOWLIST_ENV
 from meho_backplane.connectors.net.tls import (
@@ -618,3 +621,122 @@ def test_dns_name_wildcard_matching() -> None:
     assert net_tls._dns_name_matches(["*.example.com"], "example.com") is False
     assert net_tls._dns_name_matches(["*.example.com"], "a.b.example.com") is False
     assert net_tls._dns_name_matches(["Host.Example.com"], "host.example.com.") is True
+
+
+# ---------------------------------------------------------------------------
+# days_to_expiry — numeric cert-expiry signal (#2772)
+# ---------------------------------------------------------------------------
+
+
+async def test_days_to_expiry_present_on_leaf_and_every_chain_entry(
+    monkeypatch: pytest.MonkeyPatch,
+    multi_cert_server: _TLSServer,
+    _registered_tls_inspect_op: None,
+) -> None:
+    """Success results carry a float days_to_expiry top-level, on the leaf, and per cert."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    result = await _dispatch_inspect(
+        {"host": "127.0.0.1", "port": multi_cert_server.port, "server_name": _LEAF_CN}
+    )
+    assert result.status == "ok", result.error
+    body = result.result
+    # Every presented cert carries a float days_to_expiry.
+    assert all(isinstance(entry["days_to_expiry"], float) for entry in body["chain"])
+    # Top-level aliases the leaf (chain[0]), which carries the same value.
+    assert isinstance(body["days_to_expiry"], float)
+    assert body["days_to_expiry"] == body["leaf"]["days_to_expiry"]
+    assert body["days_to_expiry"] == body["chain"][0]["days_to_expiry"]
+    # The multi-cert leaf is minted valid for 365 days from _NOW.
+    assert body["days_to_expiry"] == pytest.approx(365, abs=2)
+
+
+def test_cert_to_dict_days_to_expiry_arithmetic() -> None:
+    """days_to_expiry == (not_after - now) / 86400; a past-dated cert is negative."""
+    now = datetime.datetime.now(datetime.UTC)
+    key = _new_key()
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, _LEAF_CN)])
+
+    future = _sign(_LEAF_CN, key, name, key, not_after=now + datetime.timedelta(days=100))
+    future_dict = net_tls._cert_to_dict(future, now)
+    expected = (future.not_valid_after_utc - now).total_seconds() / 86400.0
+    assert future_dict["days_to_expiry"] == pytest.approx(expected)
+    # X.509 stores validity at 1-second granularity, so ~100 within a hair.
+    assert future_dict["days_to_expiry"] == pytest.approx(100.0, abs=0.001)
+
+    past = _sign(
+        _LEAF_CN,
+        key,
+        name,
+        key,
+        not_before=now - datetime.timedelta(days=400),
+        not_after=now - datetime.timedelta(days=30),
+    )
+    past_dict = net_tls._cert_to_dict(past, now)
+    assert past_dict["days_to_expiry"] < 0
+    assert past_dict["days_to_expiry"] == pytest.approx(-30.0, abs=0.001)
+
+
+async def test_success_and_failure_results_validate_against_response_schema(
+    monkeypatch: pytest.MonkeyPatch,
+    multi_cert_server: _TLSServer,
+    _registered_tls_inspect_op: None,
+) -> None:
+    """Both a success and a failure body round-trip through the response schema."""
+    schema = net_tls._NET_TLS_INSPECT_RESPONSE_SCHEMA
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    success = await _dispatch_inspect(
+        {"host": "127.0.0.1", "port": multi_cert_server.port, "server_name": _LEAF_CN}
+    )
+    assert success.status == "ok", success.error
+    validator.validate(success.result)  # raises ValidationError on non-conformance
+
+    # Empty allowlist (the autouse env clears it) ⇒ a refused, cert-less failure.
+    monkeypatch.delenv(PROBE_ALLOWLIST_ENV, raising=False)
+    failure = await _dispatch_inspect({"host": "10.9.9.9", "port": 8443})
+    assert failure.status == "ok", failure.error
+    assert failure.result["handshake"] is False
+    assert failure.result["days_to_expiry"] is None
+    validator.validate(failure.result)
+
+
+@pytest.mark.parametrize(
+    "days_out,expected_state",
+    [(45, "ok"), (20, "degraded"), (3, "critical")],
+    ids=["ok-above-30", "degraded-7-to-30", "critical-below-7"],
+)
+async def test_days_to_expiry_threshold_sensor_bands_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _registered_tls_inspect_op: None,
+    days_out: int,
+    expected_state: str,
+) -> None:
+    """A real tls_inspect result drives the classic 30/7 cert-expiry threshold sensor.
+
+    End-to-end through :func:`evaluate_assertion` with the existing machinery
+    only: ``{select: $.days_to_expiry, compare: threshold lt degraded=30
+    critical=7}`` — no new comparator. Bands: ``>30`` ⇒ ok, ``(7, 30]`` ⇒
+    degraded, ``≤7`` ⇒ critical.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    now = datetime.datetime.now(datetime.UTC)
+    server = _self_signed_server(tmp_path, not_after=now + datetime.timedelta(days=days_out))
+    try:
+        result = await _dispatch_inspect(
+            {"host": "127.0.0.1", "port": server.port, "server_name": _LEAF_CN}
+        )
+    finally:
+        server.stop()
+    assert result.status == "ok", result.error
+    body = result.result
+
+    spec = AssertionSpec(
+        select=SelectSpec(path="$.days_to_expiry"),
+        compare=ThresholdCompare(type="threshold", op="lt", degraded=30, critical=7),
+    )
+    outcome = evaluate_assertion(spec, body, now=datetime.datetime.now(datetime.UTC))
+    assert outcome.state == expected_state
+    assert outcome.value == body["days_to_expiry"]

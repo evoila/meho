@@ -286,15 +286,28 @@ Control flow (`connectors/net/tls.py`):
    by `select`-waiting under a single `deadline` derived from the
    clamped timeout, so a stalled peer cannot pin the worker thread.
 4. Each presented cert is flattened to
-   `{subject, issuer, san, not_before, not_after, serial, self_signed}`
-   (leaf-first). `serial` is stringified (a serial is a large integer a
-   JSON number consumer would truncate); timestamps use the tz-aware
-   `not_valid_*_utc` accessors.
+   `{subject, issuer, san, not_before, not_after, days_to_expiry, serial,
+   self_signed}` (leaf-first). `serial` is stringified (a serial is a
+   large integer a JSON number consumer would truncate); timestamps use
+   the tz-aware `not_valid_*_utc` accessors. `days_to_expiry` is
+   `(not_valid_after_utc - now) / 86400` as a float (negative once
+   expired), computed against a single probe-time `now = datetime.now(UTC)`
+   the handler captures once and threads into `_cert_to_dict`, so every
+   cert in one chain shares the same reference instant. This is the
+   module's only wall-clock read (its other clock use is `time.monotonic()`
+   for the handshake deadline).
 
 Derived top-level fields:
 
 - `leaf` — convenience alias for `chain[0]`; `not_after` — the leaf's,
   for the common "is it expiring" read.
+- `days_to_expiry` — the leaf's `days_to_expiry` (float; `null` on a
+  failed handshake). A **numeric** cert-expiry signal a `threshold`
+  assertion can bite on, added by #2772: `not_after` is an ISO string
+  (nothing to compare numerically) and `FreshnessCompare` is
+  past-oriented (`age = now - timestamp`, so a future `not_after` reads
+  `ok` until the cert has *already* expired). See the cert-expiry sensor
+  recipe below.
 - `hostname_match` — computed **independently** of the (disabled) stack
   verification: `server_name` vs the leaf SAN dNSNames (wildcard-aware,
   RFC 6125 single-leftmost-label), SAN iPAddresses for an IP
@@ -310,6 +323,29 @@ a reason code — `not_in_probe_allowlist` / `timeout` / `refused` /
 `dns_failure` / `unreachable` / `tls_error` — and `status="ok"`), and is
 `safety_level="safe"` + `requires_approval=False`. A completed handshake
 sends **no** application bytes.
+
+### Cert-expiry early-warning sensor (#2772)
+
+`days_to_expiry` makes the classic "warn at 30 days, page at 7"
+cert-expiry sensor expressible with the **existing** assertion machinery —
+no new comparator. Point a `threshold` assertion at the field:
+
+```json
+{
+  "select": {"path": "$.days_to_expiry"},
+  "compare": {"type": "threshold", "op": "lt", "degraded": 30, "critical": 7}
+}
+```
+
+`ThresholdCompare` (`checks/evaluate.py`) bands it — `op=lt` is a strict
+`<` and `critical` is checked before `degraded`, so the more-severe band
+wins: `days_to_expiry >= 30` ⇒ `ok`, `7 <= days_to_expiry < 30` ⇒
+`degraded`, `days_to_expiry < 7` ⇒ `critical`. Because the field is on
+every chain entry, `{"select": {"path": "$.chain[*].days_to_expiry",
+"aggregate": "min"}, ...}` watches the soonest-expiring cert in the chain
+(an intermediate included) with the same comparator. `FreshnessCompare`
+stays untouched and past-oriented; the two are complementary, not
+alternatives.
 
 ## ICMP cohort — `net.ping` / `net.trace` / `net.path_mtu` (T6, #2411)
 

@@ -1178,7 +1178,7 @@ docker PR) and re-push", not "this merge is blocked".
 action in the new steps is SHA-pinned with the human-readable tag in
 a trailing comment: `anchore/sbom-action@…` (v0.24.0),
 `aquasecurity/trivy-action@…` (v0.36.0),
-`github/codeql-action/upload-sarif@…` (v4.35.4),
+`github/codeql-action/upload-sarif@…` (v4.37.3),
 `actions/upload-artifact@…` (v7.0.1). Renovate / Dependabot bumps
 these on the same review cadence as `sigstore/cosign-installer`.
 

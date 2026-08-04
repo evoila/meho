@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# Configuration for the DCO GitHub App (https://github.com/apps/dco).
+# The app reads this file from the default branch only — changes take
+# effect after they land on `main`, not while the PR that edits them is
+# open.
+#
+# Why this file exists (#2733; decision record:
+# docs/decisions/automation-review-identity.md): the DCO app's
+# remediation-commit feature is opt-in and defaults to off. Without this
+# file, the only way to repair a commit that is missing its
+# `Signed-off-by` trailer is to rewrite the branch and force-push —
+# which destroys review anchors and cost two branch rewrites during the
+# Initiative #2716 run. With `individual: true`, the commit author can
+# instead push a follow-up remediation commit (per DCO 1.1) that applies
+# the sign-off retroactively, and the DCO check turns green without any
+# history rewrite.
+#
+# Deliberately NOT set:
+#
+#   require:
+#     members: false
+#
+# That option exempts org members' commits from the sign-off
+# requirement. Every commit on this repo keeps the requirement —
+# `git commit -s` remains mandatory (see CONTRIBUTING.md, "Developer
+# Certificate of Origin"); remediation is the repair path, not a waiver.
+
+allowRemediationCommits:
+  # The original commit author may push a follow-up signed-off commit
+  # applying their own sign-off retroactively.
+  individual: true
+  # Third-party remediation (someone else signing off on the author's
+  # behalf) stays disabled — least surface. Revisit only if an external
+  # contributor becomes unreachable mid-PR.
+  thirdParty: false

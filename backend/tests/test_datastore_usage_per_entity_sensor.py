@@ -210,23 +210,28 @@ async def test_one_name_filter_returns_inline_and_sensor_bands(
     assert outcome.value == free_space
 
 
+#: A critical-below-100-GiB free-space compare used by the dense-row guards.
+_CRIT_ONLY_COMPARE: dict[str, Any] = {
+    "type": "threshold",
+    "op": "lt",
+    "critical": float(100 * _GIB),
+}
+
+
 @pytest.mark.asyncio
 async def test_vm_dense_row_capped_stays_inline_and_assertable() -> None:
     """AC#2 guard: a VM-dense datastore's one-name result stays inline + assertable.
 
-    ``vm_count`` stays exact; ``vm_names`` is bounded to the sample cap, so the
-    single-row payload serialises under the reducer byte threshold, the real
-    reducer passes it through inline, and ``$.datastores[0].free_space`` is
-    still selectable. The uncapped row (full VM list) exceeds the threshold and
-    the real reducer collapses it to a sampled envelope, stripping the selector
-    -- the exact failure the cap prevents (#2758).
+    ``vm_count`` stays the exact total; ``vm_names`` is bounded to the sample
+    cap, so the single-row payload serialises under the reducer byte threshold,
+    the real reducer passes it through inline, and ``$.datastores[0].free_space``
+    is still selectable and thresholdable (#2758).
     """
     dense_names = [f"prod-workload-vm-{i:04d}" for i in range(300)]
-    free_space = 40 * _GIB
     raw, _ = await _usage_one_datastore(
         name="vsan-dense-01",
         capacity=50 * 1024 * _GIB,
-        free_space=free_space,
+        free_space=40 * _GIB,
         vm_names=dense_names,
     )
     row = raw["datastores"][0]
@@ -234,31 +239,51 @@ async def test_vm_dense_row_capped_stays_inline_and_assertable() -> None:
     # vm_count is the exact total; vm_names is the bounded sample (truncated).
     assert row["vm_count"] == 300
     assert row["vm_names"] == dense_names[:DATASTORE_USAGE_MAX_VM_NAMES]
-    assert len(row["vm_names"]) == DATASTORE_USAGE_MAX_VM_NAMES
 
-    # Capped payload is under the reducer byte threshold ...
+    # Under the byte threshold, so the real reducer passes it through inline.
     assert len(msgspec.json.encode(raw)) <= _BYTE_THRESHOLD
-    # ... so the real reducer passes it through inline (free_space selectable).
     reduced, handle = await _reducer().reduce(raw, None, {})
     assert handle is None
     assert reduced == raw
 
     spec = AssertionSpec.model_validate(
-        {
-            "select": {"path": "$.datastores[0].free_space"},
-            "compare": {"type": "threshold", "op": "lt", "critical": float(100 * _GIB)},
-        }
+        {"select": {"path": "$.datastores[0].free_space"}, "compare": _CRIT_ONLY_COMPARE}
     )
     assert evaluate_assertion(spec, reduced, now=NOW).state == "critical"
 
-    # Contrast: the UNCAPPED row (full 300 names) exceeds the threshold, so the
-    # reducer collapses {"datastores": [row]} to a sampled envelope and the
-    # sensor's selector is gone (evaluates "unknown").
-    uncapped = {"datastores": [{**row, "vm_count": 300, "vm_names": dense_names}]}
+
+@pytest.mark.asyncio
+async def test_uncapped_dense_row_would_collapse_and_lose_selector() -> None:
+    """Why the cap is load-bearing: an unbounded single row blows the threshold.
+
+    A datastore row carrying its full (unbounded) ``vm_names`` list serialises
+    past the reducer byte threshold, so the reducer collapses
+    ``{"datastores": [row]}`` to a sampled envelope and
+    ``$.datastores[0].free_space`` is no longer selectable (evaluates
+    ``unknown``) -- the exact failure the cap prevents (#2758).
+    """
+    uncapped: dict[str, Any] = {
+        "datastores": [
+            {
+                "id": "datastore-42",
+                "name": "vsan-dense-01",
+                "type": "vSAN",
+                "capacity": 50 * 1024 * _GIB,
+                "free_space": 40 * _GIB,
+                "vm_count": 300,
+                "vm_names": [f"prod-workload-vm-{i:04d}" for i in range(300)],
+            }
+        ]
+    }
     assert len(msgspec.json.encode(uncapped)) > _BYTE_THRESHOLD
-    envelope, env_handle = await _reducer().reduce(uncapped, None, {})
-    assert env_handle is not None
+
+    envelope, handle = await _reducer().reduce(uncapped, None, {})
+    assert handle is not None
     assert "row_count" in envelope
+
+    spec = AssertionSpec.model_validate(
+        {"select": {"path": "$.datastores[0].free_space"}, "compare": _CRIT_ONLY_COMPARE}
+    )
     assert evaluate_assertion(spec, envelope, now=NOW).state == "unknown"
 
 

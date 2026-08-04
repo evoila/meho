@@ -428,12 +428,16 @@ async def pg_engine(integration_env: None, async_pg_url: str) -> AsyncIterator[N
         # * ``gateway_command`` — migration 0059 (Initiative #2415 T2, #2498)
         #   carries a real ``REFERENCES tenant(id)`` FK; same rule, must be
         #   listed here or PG rejects the per-test TRUNCATE.
+        # * ``sensor_results`` — migration 0071 (#2756 per-tick evidence) carries
+        #   a real ``REFERENCES sensor(id)`` FK, so truncating ``sensor`` in this
+        #   same statement requires ``sensor_results`` be listed too or PG raises
+        #   ``cannot truncate a table referenced in a foreign key constraint``.
         await conn.execute(
             text(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
                 "agent_principal, runner_principal, "
                 "runner_assignments, runner_check_results, "
-                "scheduled_trigger, sensor, "
+                "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, event_outbox, gateway_command, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "
@@ -491,8 +495,9 @@ async def pg_engine_empty_tenant(
     async with eng.connect() as conn:
         # Same single non-cascading TRUNCATE as ``pg_engine`` (see that
         # fixture for why every real ``REFERENCES tenant(id)`` table —
-        # including ``agent_run`` from migration 0017 and
-        # ``agent_principal`` from migration 0018 — must be listed
+        # including ``agent_run`` from migration 0017,
+        # ``agent_principal`` from migration 0018, and ``sensor_results``
+        # (FK to ``sensor``) from migration 0071 — must be listed
         # here). Deliberately no follow-up INSERT —
         # ``tenant`` stays empty, reproducing the clean-room deploy.
         await conn.execute(
@@ -500,7 +505,7 @@ async def pg_engine_empty_tenant(
                 "TRUNCATE TABLE agent_announcement, approval_request, agent_permission, "
                 "agent_principal, runner_principal, "
                 "runner_assignments, runner_check_results, "
-                "scheduled_trigger, sensor, "
+                "scheduled_trigger, sensor_results, sensor, "
                 "check_dashboard_sensors, check_dashboards, event_outbox, gateway_command, "
                 "agent_run, audit_log, identity_budget, "
                 "documents, graph_edge, "

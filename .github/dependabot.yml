@@ -43,6 +43,14 @@ updates:
   # fail with `dependency_file_not_found: { "file-path": "/" }` (Dependabot
   # job 1360360077). The `uv` ecosystem covers the uv.lock format the
   # project uses (Dependabot supports it natively since 2025).
+  #
+  # A second, similar-looking failure had no config fix: after the
+  # 2026-05-09 history re-init the dependency graph kept the pre-pivot
+  # root uv.lock snapshot, so grouped security-update jobs kept spawning
+  # at `/.` (the manifest directory recorded on the 89 phantom alerts)
+  # and dying with `No files found in /` — a security-update job runs at
+  # its alerts' recorded path, which no dependabot.yml entry can change.
+  # Resolved 2026-08-04 by dismissing the phantom alerts (#2801).
   - package-ecosystem: "uv"
     directory: "/backend"
     schedule:

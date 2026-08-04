@@ -154,6 +154,19 @@ connector-related release-notes line.
 
 ### Fixed
 
+- **Phantom root `uv.lock` purged from the Dependabot alert surface**
+  (#2801): the dependency graph still carried the repo's pre-pivot root
+  `uv.lock` (history re-initialized 2026-05-09), so new advisories kept
+  minting alerts for packages that exist nowhere in today's tree — 89
+  open ghost alerts — and every grouped `uv in /.` security-update job
+  died with `No files found in /` (17/17 retained runs red). All 89
+  phantom alerts are dismissed as `not_used` after verifying each
+  package is absent from `backend/uv.lock` or present there only at a
+  non-vulnerable version; the real `backend/uv.lock` alert surface is
+  untouched. `.github/dependabot.yml` now records the incident in-file.
+  The stale graph snapshot itself still lists the phantom packages —
+  the re-index maneuver is documented on #2801 as an operator
+  follow-up.
 - **`net.http_probe` classifies transport failures instead of
   collapsing them to `unreachable`** (#2771). The reason classifier now
   walks the whole `httpx.TransportError` tree — both the `__cause__`

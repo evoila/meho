@@ -1147,11 +1147,13 @@ Fulcio identity (`image.yml@<ref>`), so downstream `install.sh` (the
 dogfooding consumer) verifies the entire chain — image, build
 provenance, bill of materials — with one trust anchor.
 
-**Trivy report-only scan.** `aquasecurity/trivy-action` runs after the
-attestation step against the same digest. The scan emits SARIF
-covering OS packages + the locked Python deps inside `/app/.venv`,
-filtered to `CRITICAL,HIGH` with `ignore-unfixed: true` so the
-results list only actionable findings. SARIF is uploaded **twice**:
+**Trivy vulnerability scan (fails on fixable CRITICAL/HIGH).**
+`aquasecurity/trivy-action` runs after the attestation step against the
+same digest. The scan emits SARIF covering OS packages + the locked
+Python deps inside `/app/.venv`, filtered to `CRITICAL,HIGH` with
+`ignore-unfixed: true` so the results list only actionable findings.
+SARIF is uploaded **twice** (both uploads publish on a failing scan too —
+see the gate note below):
 
 - `github/codeql-action/upload-sarif` posts the report to the GitHub
   Security tab (Code scanning alerts, category `trivy-image-scan`).
@@ -1162,18 +1164,21 @@ results list only actionable findings. SARIF is uploaded **twice**:
   Security-tab access can still download the file via
   `gh run download`.
 
-**v0.1 is report-only by deliberate split.** `exit-code: '0'` keeps
-the workflow green regardless of findings. Goal #11 splits "scan
-runs" from "scan gates the build" so the team can establish a
-baseline noise level before committing to a remediation policy. v0.2
-will flip `exit-code` to fail on a defined severity threshold once
-the baseline is known and triage cadence is sustainable.
+**The scan gates main/tag runs (`exit-code: '1'`).** A fixable
+CRITICAL/HIGH finding fails the run — a red-main alarm against silent
+CVE accumulation on a stale base image, not a PR merge gate (the step
+is skipped on `pull_request`). Both SARIF uploads are gated on the scan
+step's `outcome` (`if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}`)
+rather than the implicit `success()`, so a failing scan still lands its
+findings on the Security tab and the 30-day artefact instead of skipping
+the uploads. A red run means "bump the base-image digest (Dependabot
+docker PR) and re-push", not "this merge is blocked".
 
 **Action pin discipline (same rule as cosign).** Every third-party
 action in the new steps is SHA-pinned with the human-readable tag in
 a trailing comment: `anchore/sbom-action@…` (v0.24.0),
 `aquasecurity/trivy-action@…` (v0.36.0),
-`github/codeql-action/upload-sarif@…` (v4.35.4),
+`github/codeql-action/upload-sarif@…` (v4.37.3),
 `actions/upload-artifact@…` (v7.0.1). Renovate / Dependabot bumps
 these on the same review cadence as `sigstore/cosign-installer`.
 

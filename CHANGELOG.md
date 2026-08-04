@@ -225,6 +225,18 @@ connector-related release-notes line.
   `audit_and_broadcast_safe` → `write_audit_row` → `_build_audit_payload`,
   applied uniformly to every error arm. The params-only broadcast frame is
   unchanged; the never-raises and audit-fail-open contracts are preserved.
+- **A hung coverage-job pytest can no longer flip the whole CI run to
+  `cancelled`** (#2800): the push-only `python-coverage` job's hang backstop
+  moves from the job-level `timeout-minutes` — whose expiry *cancels* the job,
+  and cancellation (unlike failure) leaks past `continue-on-error` into the run
+  conclusion, suppressing quality-gate.yml's `workflow_run` trigger and
+  tripping the release pre-flight's "cancelled ≠ green" gate (observed three
+  times on 2026-08-04, run 30902356757) — to a step-level `timeout-minutes: 45`
+  on the pytest step. A step timeout is a step *failure*, absorbed by the job's
+  `continue-on-error: true`, so the run conclusion stays `success` and a
+  skipped coverage upload stays loud via the #2513 missing-artifact
+  annotation. The job-level cap rises to 55 min as the strictly-outer
+  backstop; the job stays non-required and non-blocking (#1987 AC5).
 
 - The weekly `uv in /backend` Dependabot version-update run no longer
   concludes red (#2802): every `presidio-anonymizer` release above the

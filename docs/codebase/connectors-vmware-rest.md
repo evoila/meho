@@ -489,6 +489,33 @@ recording the failing sub-op, its status, and the underlying error.
 The response schema marks `vm_count`/`vm_names` as nullable and adds the
 optional `enrichment_note` key (present only on a skipped row).
 
+### Per-entity capacity sensing (`filter_names`, #2758)
+
+`datastore.usage` takes an exact-match `filter_names` param (array of
+datastore names, forwarded to the listing as `filter.names`). Passing
+**exactly one** name is the per-datastore Sensor pattern: the one-row
+result returns inline (unsampled), so a Sensor can select
+`$.datastores[0].free_space` (bytes) under a `ThresholdCompare` and
+threshold a single vSAN/VMFS store's free space — the capacity-tier
+monitoring the v0.26.0 ops report needed. No new param, no fuzzy
+matching, no top-N; the filter is exact-match only.
+
+Why this is not automatic: the dispatcher's JSONFlux reducer collapses
+any op result serialising past `byte_threshold` (4096 bytes, the default
+`JsonFluxReducer()` installed at `main.py`) into a sampled envelope
+(`{row_count, …, source_key}`). A single row is one row (well under the
+50-row bound), but the best-effort `vm_names` list is unbounded — a
+VM-dense datastore (a vSAN with a few hundred VMs) pushes one row past
+4096 bytes, the whole `{"datastores": [row]}` collapses to the envelope,
+and `$.datastores[0].free_space` is no longer selectable. So `vm_names`
+is **bounded to a sample** (`DATASTORE_USAGE_MAX_VM_NAMES`, 20; the row's
+`maxItems`), while `vm_count` stays the exact total — `vm_count >
+len(vm_names)` signals truncation. Bounding the enrichment payload (not
+raising the global JSONFlux threshold) is what keeps a one-name filtered
+row reliably inline and assertable. `free_space`/`capacity` are bytes;
+band them directly (`op: lt`, `degraded`/`critical` in bytes) — no
+server-side `free_gb`/percent derivation.
+
 `capacity`/`free_space` are read from the per-datastore detail payload
 with a **list-row fallback** (#2078): some vCenter builds (observed on an
 8.0.3 vCenter against the 9.0 spec) return a detail `Datastore.Info` that

@@ -34,8 +34,9 @@ type BootstrapOptions struct {
 	CLIClientID string
 
 	// MCPClientID is the public authorization-code+PKCE client name
-	// used by Claude.ai Custom Connector / MCP Inspector; defaults to
-	// "meho-mcp".
+	// used by browser-flow MCP clients — the mcp-remote stdio shim
+	// (Claude Desktop), MCP Inspector, and Claude Code / Cursor
+	// (loopback PKCE); defaults to "meho-mcp".
 	MCPClientID string
 
 	// BackplaneAudience is the confidential resource-server client's
@@ -314,7 +315,7 @@ func (o BootstrapOptions) desiredMCPClient() *clientRep {
 	return &clientRep{
 		ClientID:                  o.MCPClientID,
 		Name:                      "MEHO MCP browser-OAuth-2.1 public client",
-		Description:               "Public OAuth client for OAuth 2.1 authorization-code + PKCE used by Claude.ai Custom Connector, MCP Inspector, and any browser-flow MCP client targeting <backplane-url>/mcp. Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
+		Description:               "Public OAuth client for OAuth 2.1 authorization-code + PKCE used by browser-flow MCP clients (mcp-remote shim, MCP Inspector, Claude Code) targeting <backplane-url>/mcp. Provisioned by `meho admin keycloak bootstrap-clients` (#791).",
 		Enabled:                   boolPtr(true),
 		PublicClient:              boolPtr(true),
 		StandardFlowEnabled:       boolPtr(true),
@@ -822,6 +823,6 @@ func buildConfigKeySummary(opts BootstrapOptions) []string {
 		"# Surfaced via GET /api/v1/auth-config as `cli_client_id`;",
 		"# `meho login` resolves it automatically.",
 		"",
-		"MCP browser-flow client_id (paste into Claude.ai Custom Connector or MCP Inspector config): " + opts.MCPClientID,
+		"MCP browser-flow client_id (paste into your MCP client config — mcp-remote shim / MCP Inspector / Claude Code): " + opts.MCPClientID,
 	}
 }

@@ -179,6 +179,18 @@ connector-related release-notes line.
   applied uniformly to every error arm. The params-only broadcast frame is
   unchanged; the never-raises and audit-fail-open contracts are preserved.
 
+- The weekly `uv in /backend` Dependabot version-update run no longer
+  concludes red (#2802): every `presidio-anonymizer` release above the
+  pinned 2.2.362 caps `cryptography` below 49, which is unsatisfiable
+  against the repo's `cryptography>=50.0.0` security floor, so the weekly
+  2.2.362 → 2.2.364 bump attempt failed `dependency_file_not_resolvable`
+  on every run since 2026-06-29 (the other backend bumps still flowed).
+  `.github/dependabot.yml` now carries an `ignore` rule for
+  `presidio-anonymizer` with the removal conditions documented in-file:
+  drop it when upstream supports the repo's cryptography floor, or
+  immediately if a security advisory lands (the ignore also suppresses
+  security-update PRs for the package — none open today).
+
 ### Security
 
 - Bump `aiohttp` 3.14.1 → 3.14.3 (CVE-2026-69244, out-of-bounds heap

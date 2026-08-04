@@ -9,7 +9,7 @@
 //  1. The public `meho-cli` device-code client + 5 protocol mappers
 //     + 4 default client scopes (`basic`, `roles`, `web-origins`,
 //     `acr`).
-//  2. The public `meho-mcp-client` authorization-code+PKCE client +
+//  2. The public `meho-mcp` authorization-code+PKCE client +
 //     the same 5 mappers + 4 default scopes.
 //  3. The `meho-admins` group.
 //  4. An admin user joined to `meho-admins` with a password.
@@ -99,7 +99,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		Long: "bootstrap-clients provisions every realm resource " +
 			"`meho login` and the MCP browser-flow onramp need:\n\n" +
 			"  * the public device-code client (default name `meho-cli`)\n" +
-			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp-client`)\n" +
+			"  * the public authorization-code+PKCE MCP client (default name `meho-mcp`)\n" +
 			"  * 5 protocol mappers on each client (audience-meho-backplane, meho-mcp-audience, tenant-id, tenant-role, groups-claim)\n" +
 			"  * 4 default client scopes on each client (basic, roles, web-origins, acr) — including the load-bearing `basic` scope that carries the `sub` claim in Keycloak 25+\n" +
 			"  * the `meho-admins` top-level group\n" +
@@ -198,7 +198,7 @@ func newBootstrapClientsCmd() *cobra.Command {
 		"master-realm admin username (or set KEYCLOAK_ADMIN_USER)")
 	cmd.Flags().StringVar(&cliClientID, "cli-client-id", "meho-cli",
 		"public client_id for the device-code flow (matches chart's `config.keycloakCliClientId`)")
-	cmd.Flags().StringVar(&mcpClientID, "mcp-client-id", "meho-mcp-client",
+	cmd.Flags().StringVar(&mcpClientID, "mcp-client-id", "meho-mcp",
 		"public client_id for the MCP browser-flow client")
 	cmd.Flags().StringVar(&backplaneAudience, "backplane-audience", "meho-backplane",
 		"audience claim the `audience-meho-backplane` mapper emits (matches chart's `config.keycloakAudience`)")

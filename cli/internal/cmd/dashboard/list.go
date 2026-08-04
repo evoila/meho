@@ -180,13 +180,13 @@ func getList(
 // printListTable renders the dashboards as a compact table:
 // ID, NAME, STATE, MEMBERS, UPDATED_AT.
 func printListTable(w io.Writer, r *api.DashboardListResponse) {
-	if r == nil || len(r.Dashboards) == 0 {
+	if r == nil || len(r.Items) == 0 {
 		fmt.Fprintln(w, "no dashboards in this tenant")
 		return
 	}
 	fmt.Fprintf(w, "%-36s %-24s %-10s %-8s %s\n",
 		"ID", "NAME", "STATE", "MEMBERS", "UPDATED_AT")
-	for _, d := range r.Dashboards {
+	for _, d := range r.Items {
 		// Name carries operator-persisted free-form text; sanitize so
 		// terminal control chars / ANSI escapes can't affect the operator's
 		// terminal. The --json path (runList) serialises the raw value

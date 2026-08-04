@@ -288,7 +288,7 @@ func TestRunListHappyPath(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		// Serve the real generated envelope shape, not a bare array (#2383).
 		_ = json.NewEncoder(w).Encode(api.DashboardListResponse{
-			Dashboards: []api.DashboardRead{fakeDashboardRead(t)},
+			Items: []api.DashboardRead{fakeDashboardRead(t)},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -312,7 +312,7 @@ func TestRunListJSONGolden(t *testing.T) {
 	mux.HandleFunc("/api/v1/checks/dashboards", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.DashboardListResponse{
-			Dashboards: []api.DashboardRead{fakeDashboardRead(t)},
+			Items: []api.DashboardRead{fakeDashboardRead(t)},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -329,11 +329,11 @@ func TestRunListJSONGolden(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("stdout not a DashboardListResponse: %v; %q", err, stdout.String())
 	}
-	if len(got.Dashboards) != 1 || got.Dashboards[0].Id.String() != stubDashboardID {
+	if len(got.Items) != 1 || got.Items[0].Id.String() != stubDashboardID {
 		t.Errorf("unexpected --json envelope; got %+v", got)
 	}
-	if string(got.Dashboards[0].State) != "ok" || got.Dashboards[0].MemberCount != 1 {
-		t.Errorf("rollup/member_count not round-tripped; got %+v", got.Dashboards[0])
+	if string(got.Items[0].State) != "ok" || got.Items[0].MemberCount != 1 {
+		t.Errorf("rollup/member_count not round-tripped; got %+v", got.Items[0])
 	}
 }
 
@@ -341,7 +341,7 @@ func TestRunListEmptyResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/checks/dashboards", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.DashboardListResponse{Dashboards: nil})
+		_ = json.NewEncoder(w).Encode(api.DashboardListResponse{Items: nil})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

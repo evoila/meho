@@ -240,6 +240,21 @@ and asserts both the runtime body and the OpenAPI 200 schema are the
 resource-named list key). A new GET-list endpoint joins the convention
 by returning the envelope and being added to that test's registry.
 
+### Later convergences
+
+Two check-plane list routes shipped after #2338 still wrapped their list
+under a resource-named key, so the API diverged from its own standard on
+its newest routes. Both converged before consumers pinned the divergent
+shapes:
+
+| Endpoint | Response model | Was | Now |
+|---|---|---|---|
+| `GET /api/v1/checks/dashboards` | `DashboardListResponse` | `{"dashboards": [...]}` | `{"items": [...], "next_cursor": null}` |
+| `GET /api/v1/sensors` | `SensorListResponse` | `{"sensors": [...]}` | `{"items": [...], "next_cursor": null}` |
+
+Both are unpaginated (`next_cursor` always `null`) and are now in the
+contract-test registry, so a future regression is caught here (#2742).
+
 Sister-surface note: the MCP list tools call the service layer
 in-process and return their own list shapes (no HTTP `?envelope=` to
 forward), so they are unaffected by the REST wire-shape flip.

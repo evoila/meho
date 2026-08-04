@@ -610,13 +610,13 @@ async def test_rest_create_list_delete_round_trip(client: TestClient) -> None:
 
         listed = client.get("/api/v1/sensors", headers=headers)
         assert listed.status_code == 200
-        assert [s["id"] for s in listed.json()["sensors"]] == [sensor_id]
+        assert [s["id"] for s in listed.json()["items"]] == [sensor_id]
 
         deleted = client.delete(f"/api/v1/sensors/{sensor_id}", headers=headers)
         assert deleted.status_code == 204
         # Hard delete: repeat returns 404 and the list is empty.
         assert client.delete(f"/api/v1/sensors/{sensor_id}", headers=headers).status_code == 404
-        assert client.get("/api/v1/sensors", headers=headers).json()["sensors"] == []
+        assert client.get("/api/v1/sensors", headers=headers).json()["items"] == []
 
 
 @pytest.mark.asyncio
@@ -833,7 +833,7 @@ async def test_rest_tenant_scoping(client: TestClient) -> None:
         b_headers = {"Authorization": f"Bearer {_token(b_key, sub='b-admin', tenant_id=_TENANT_B)}"}
         listed = client.get("/api/v1/sensors", headers=b_headers)
         assert listed.status_code == 200
-        assert listed.json()["sensors"] == []
+        assert listed.json()["items"] == []
         result = client.delete(f"/api/v1/sensors/{entry_a.id}", headers=b_headers)
         assert result.status_code == 404
         assert result.json()["detail"] == "sensor_not_found"

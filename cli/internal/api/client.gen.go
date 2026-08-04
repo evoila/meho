@@ -3506,12 +3506,16 @@ type DashboardDetailNotifyMinState string
 // DashboardDetailState defines model for DashboardDetail.State.
 type DashboardDetailState string
 
-// DashboardListResponse Response envelope for “GET /api/v1/checks/dashboards“.
+// DashboardListResponse Unified list envelope for “GET /api/v1/checks/dashboards“.
 //
-// Wrapped in “{"dashboards": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- the same shape the Sensor list adopts.
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. The listing is not
+// cursor-paginated (“limit“ / “offset“ truncate), so “next_cursor“
+// is always “None“ but present so the endpoint can grow pagination
+// later without a further breaking change.
 type DashboardListResponse struct {
-	Dashboards []DashboardRead `json:"dashboards"`
+	Items      []DashboardRead `json:"items"`
+	NextCursor *string         `json:"next_cursor"`
 }
 
 // DashboardMemberView One member Sensor as rendered on a Dashboard detail read.
@@ -6373,14 +6377,16 @@ type SensorCreate struct {
 	Timezone *string                 `json:"timezone,omitempty"`
 }
 
-// SensorListResponse Response envelope for “GET /api/v1/sensors“.
+// SensorListResponse Unified list envelope for “GET /api/v1/sensors“.
 //
-// Wrapped in “{"sensors": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- the same shape
-// :class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`
-// adopted.
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. The listing is not
+// cursor-paginated (“limit“ / “offset“ truncate), so “next_cursor“
+// is always “None“ but present so the endpoint can grow pagination
+// later without a further breaking change.
 type SensorListResponse struct {
-	Sensors []SensorRead `json:"sensors"`
+	Items      []SensorRead `json:"items"`
+	NextCursor *string      `json:"next_cursor"`
 }
 
 // SensorRead Response shape for one “sensor“ row.

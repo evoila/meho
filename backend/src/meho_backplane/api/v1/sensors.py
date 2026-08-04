@@ -140,7 +140,7 @@ async def list_sensors(
         offset=offset,
     )
     structlog.contextvars.bind_contextvars(audit_row_count=len(sensors))
-    return SensorListResponse(sensors=list(sensors))
+    return SensorListResponse(items=list(sensors))
 
 
 @router.post(

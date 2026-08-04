@@ -130,7 +130,7 @@ async def list_dashboards(
     service = CheckDashboardAdminService()
     dashboards = await service.list_(target_tenant, limit=limit, offset=offset)
     structlog.contextvars.bind_contextvars(audit_row_count=len(dashboards))
-    return DashboardListResponse(dashboards=list(dashboards))
+    return DashboardListResponse(items=list(dashboards))
 
 
 @router.post(

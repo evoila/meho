@@ -23648,20 +23648,25 @@
       },
       "DashboardListResponse": {
         "properties": {
-          "dashboards": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/DashboardRead"
             },
             "type": "array",
-            "title": "Dashboards"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "dashboards"
+          "items"
         ],
         "title": "DashboardListResponse",
-        "description": "Response envelope for ``GET /api/v1/checks/dashboards``.\n\nWrapped in ``{\"dashboards\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape the Sensor list adopts."
+        "description": "Unified list envelope for ``GET /api/v1/checks/dashboards``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. The listing is not\ncursor-paginated (``limit`` / ``offset`` truncate), so ``next_cursor``\nis always ``None`` but present so the endpoint can grow pagination\nlater without a further breaking change."
       },
       "DashboardMemberView": {
         "properties": {
@@ -27883,20 +27888,25 @@
       },
       "SensorListResponse": {
         "properties": {
-          "sensors": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/SensorRead"
             },
             "type": "array",
-            "title": "Sensors"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "sensors"
+          "items"
         ],
         "title": "SensorListResponse",
-        "description": "Response envelope for ``GET /api/v1/sensors``.\n\nWrapped in ``{\"sensors\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape\n:class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`\nadopted."
+        "description": "Unified list envelope for ``GET /api/v1/sensors``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. The listing is not\ncursor-paginated (``limit`` / ``offset`` truncate), so ``next_cursor``\nis always ``None`` but present so the endpoint can grow pagination\nlater without a further breaking change."
       },
       "SensorRead": {
         "properties": {

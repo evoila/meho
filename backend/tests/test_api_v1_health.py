@@ -366,6 +366,15 @@ def test_happy_path_returns_full_federation_response(
         "db": {"migrated": True},
         "mcp_session_id_capture": "when_negotiated",
         "mcp_protocol_version": PROTOCOL_VERSION,
+        # #2763: the runner is enabled by default but this TestClient never
+        # runs the lifespan, so no tick has stamped and no baseline is set —
+        # the facet reads unknown-not-stalled (the enabled-but-not-started
+        # shape; the conftest autouse reset guarantees a clean slate).
+        "sensor_runner": {
+            "seconds_since_last_tick": None,
+            "stalled": False,
+            "stall_threshold_seconds": 60.0,
+        },
     }
 
     # Vault was hit with the configured role / mount and the operator's
@@ -716,3 +725,120 @@ def test_mcp_protocol_version_reports_server_pinned_revision(
 
     assert response.status_code == 200
     assert response.json()["mcp_protocol_version"] == PROTOCOL_VERSION
+
+
+# ---------------------------------------------------------------------------
+# #2763 — sensor_runner liveness facet
+# ---------------------------------------------------------------------------
+
+
+def test_sensor_runner_facet_healthy_when_stamp_is_fresh(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recently completed tick reads as healthy on ``GET /api/v1/health``.
+
+    Acceptance criterion (#2763): the health response carries the
+    checks-runner liveness facet so an external prober can watch the
+    evaluation loop. The tick stamp is injected directly onto the
+    watchdog module (the stamp-writing path is covered by
+    ``tests/test_checks_watchdog.py``; this test owns the route surface).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import meho_backplane.checks.watchdog as watchdog
+
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_TICK_COMPLETED_AT",
+        datetime.now(UTC) - timedelta(seconds=1),
+    )
+    key = _make_rsa_keypair("kid-runner-healthy")
+    token = _mint_token(key, sub="op-runner-healthy")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    facet = response.json()["sensor_runner"]
+    assert facet["stalled"] is False
+    assert facet["stall_threshold_seconds"] == 60.0
+    assert 0.0 <= facet["seconds_since_last_tick"] < 30.0
+
+
+def test_sensor_runner_facet_stalled_when_stamp_is_stale(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stamp older than the stall threshold reads ``stalled: true``.
+
+    The facet derives staleness live from the stamp on every request —
+    no watchdog-task involvement — so the external prober catches a
+    stall even if the watchdog task itself died with the loop.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import meho_backplane.checks.watchdog as watchdog
+
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_TICK_COMPLETED_AT",
+        datetime.now(UTC) - timedelta(seconds=120),
+    )
+    key = _make_rsa_keypair("kid-runner-stalled")
+    token = _mint_token(key, sub="op-runner-stalled")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    facet = response.json()["sensor_runner"]
+    assert facet["stalled"] is True
+    assert facet["seconds_since_last_tick"] >= 120.0
+
+
+def test_sensor_runner_facet_absent_when_runner_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``SENSOR_RUNNER_ENABLED=false`` → ``sensor_runner: null``, never stalled.
+
+    Acceptance criterion (#2763): a deliberately disabled runner must not
+    read as stalled. The ancient stamp injected here would read as a
+    deep stall on an enabled runner; with the runner disabled the facet
+    is absent entirely.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import meho_backplane.checks.watchdog as watchdog
+
+    monkeypatch.setenv("SENSOR_RUNNER_ENABLED", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_TICK_COMPLETED_AT",
+        datetime.now(UTC) - timedelta(hours=6),
+    )
+    key = _make_rsa_keypair("kid-runner-disabled")
+    token = _mint_token(key, sub="op-runner-disabled")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sensor_runner"] is None

@@ -24892,6 +24892,10 @@
             "type": "string",
             "title": "Mcp Protocol Version",
             "default": "2025-06-18"
+          },
+          "sensor_runner": {
+            "$ref": "#/components/schemas/SensorRunnerStatus",
+            "nullable": true
           }
         },
         "type": "object",
@@ -24902,7 +24906,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
       },
       "InCompare": {
         "properties": {
@@ -25432,6 +25436,10 @@
           },
           "db": {
             "$ref": "#/components/schemas/DbStatus"
+          },
+          "sensor_runner": {
+            "$ref": "#/components/schemas/SensorRunnerStatus",
+            "nullable": true
           }
         },
         "type": "object",
@@ -25440,7 +25448,7 @@
           "db"
         ],
         "title": "LivenessResponse",
-        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path."
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret."
       },
       "ManualStep": {
         "properties": {
@@ -28050,6 +28058,31 @@
         ],
         "title": "SensorRead",
         "description": "Response shape for one ``sensor`` row.\n\nMirrors :class:`~meho_backplane.db.models.Sensor`'s column set,\nprojected to the wire types the JSON renderer can serialise. Includes\nthe latest-result projection (``last_state`` / ``last_value`` /\n``last_evidence`` / ``last_evaluated_at`` / ``state_since``) so the\nlist response carries the current status view (there is no REST\nGET-by-id -- the mould exposes none). ``frozen=True`` so a route\nhandler cannot mutate the row after returning it."
+      },
+      "SensorRunnerStatus": {
+        "properties": {
+          "seconds_since_last_tick": {
+            "type": "number",
+            "nullable": true,
+            "title": "Seconds Since Last Tick"
+          },
+          "stalled": {
+            "type": "boolean",
+            "title": "Stalled"
+          },
+          "stall_threshold_seconds": {
+            "type": "number",
+            "title": "Stall Threshold Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "seconds_since_last_tick",
+          "stalled",
+          "stall_threshold_seconds"
+        ],
+        "title": "SensorRunnerStatus",
+        "description": "Liveness of this process's sensor evaluation loop (#2763).\n\nThe queryable half of the checks-runner watchdog: an external prober\n(\"how we monitor the monitoring\") alerts when\n``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` \u2014 or\nsimply on ``stalled``, which is that comparison server-side.\n``stalled`` is derived live from the in-process tick stamp on every\nread (never from the watchdog task's emission latch), so it stays\ntruthful even if the watchdog task itself has died.\n\n``seconds_since_last_tick`` is ``None`` only in the window between\nprocess start and runner start \u2014 once the lifespan is up it is\nalways a number. The value is per-process: each replica reports its\nown loop, which is exactly the failure mode observed (one process's\nloop coroutine going quiet)."
       },
       "SensorSeverity": {
         "type": "string",

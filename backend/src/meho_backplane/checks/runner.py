@@ -137,6 +137,7 @@ from meho_backplane.checks.repository import (
     park_sensor,
     record_sensor_result,
 )
+from meho_backplane.checks.watchdog import note_tick_completed, reset_watchdog_state
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
 from meho_backplane.operations.dispatcher import dispatch
@@ -221,10 +222,12 @@ def _eval_semaphore() -> asyncio.Semaphore:
 def reset_sensor_runner_state() -> None:
     """Drop all per-process runner state (test seam).
 
-    Clears the in-flight registry, the lazily-built semaphore, and the
-    check-runner principal's cached token, so a fresh test starts with no
-    leftover tasks, a semaphore bound to its own event loop, and no token
-    minted against another test's settings. Mirrors
+    Clears the in-flight registry, the lazily-built semaphore, the
+    check-runner principal's cached token, and the #2763 watchdog's
+    tick-stamp/stall state, so a fresh test starts with no leftover
+    tasks, a semaphore bound to its own event loop, no token minted
+    against another test's settings, and no stall latched from a prior
+    test's clock. Mirrors
     :func:`meho_backplane.db.engine.reset_engine_for_testing`'s role as an
     explicit reset for module-level state.
     """
@@ -232,6 +235,7 @@ def reset_sensor_runner_state() -> None:
     global _EVAL_SEMAPHORE
     _EVAL_SEMAPHORE = None
     reset_check_runner_token_cache()
+    reset_watchdog_state()
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,7 +519,20 @@ async def run_one_sensor_tick() -> int:
     backgrounded evaluation per claimed row (subject to the overlap guard). The
     tick never awaits the evaluations, so it returns promptly and the lock is
     held for the DB work only.
+
+    Every *completed* tick -- including the lock-not-acquired no-op -- stamps
+    the #2763 watchdog via :func:`~meho_backplane.checks.watchdog.note_tick_completed`
+    (which also emits the recovery event when a stall was flagged, and never
+    raises). A tick that raises deliberately does not stamp: a loop that fails
+    every tick is a stalled evaluation plane and must trip the watchdog.
     """
+    dispatched = await _claim_and_spawn_due()
+    await note_tick_completed()
+    return dispatched
+
+
+async def _claim_and_spawn_due() -> int:
+    """The tick body: claim + advance under the lock, then spawn evaluations."""
     now = datetime.now(UTC)
     to_dispatch: list[_SensorSnapshot] = []
     sessionmaker = get_sessionmaker()

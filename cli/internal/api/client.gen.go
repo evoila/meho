@@ -4231,6 +4231,13 @@ type HTTPValidationError struct {
 // :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
 // helper so both surfaces stay consistent).
 //
+// “sensor_runner“ (#2763) carries the checks evaluation-loop's
+// liveness (:class:`SensorRunnerStatus`), and is “None“ exactly
+// when “SENSOR_RUNNER_ENABLED=false“ — a deliberately disabled
+// runner must not read as stalled. The “None“ default keeps
+// response decoders generated against the pre-#2763 shape working;
+// the handler always populates it on an enabled runner.
+//
 // “mcp_protocol_version“ (G0.14-T13 #1202) reports the server's
 // pinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.
 // Mirrors the “mcp_session_id_capture“ precedent: single-field
@@ -4263,6 +4270,23 @@ type HealthResponse struct {
 	// appear in a response body, and the :class:`Operator` model carries
 	// it for downstream Vault forward-auth only.
 	Operator OperatorIdentity `json:"operator"`
+
+	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
+	//
+	// The queryable half of the checks-runner watchdog: an external prober
+	// ("how we monitor the monitoring") alerts when
+	// ``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` — or
+	// simply on ``stalled``, which is that comparison server-side.
+	// ``stalled`` is derived live from the in-process tick stamp on every
+	// read (never from the watchdog task's emission latch), so it stays
+	// truthful even if the watchdog task itself has died.
+	//
+	// ``seconds_since_last_tick`` is ``None`` only in the window between
+	// process start and runner start — once the lifespan is up it is
+	// always a number. The value is per-process: each replica reports its
+	// own loop, which is exactly the failure mode observed (one process's
+	// loop coroutine going quiet).
+	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 
 	// Vault Federation-chain status for the deployment's credential backend.
 	//
@@ -4680,6 +4704,14 @@ type KindFilterValue string
 // :class:`HealthResponse` route so a low-privilege monitoring
 // principal can never drive a per-operator Vault credential
 // federation from the liveness path.
+//
+// “sensor_runner“ (#2763) rides here as well as on the deep check:
+// the external prober that watches the evaluation loop is precisely
+// the “read_only“ monitoring principal this route exists for, and
+// polling the deep route instead would federate a Vault credential
+// and write an audit row per poll. The facet honours this handler's
+// constraints — an in-memory clock read; no connector, no credential,
+// no secret.
 type LivenessResponse struct {
 	// Db Database migration status.
 	//
@@ -4701,6 +4733,23 @@ type LivenessResponse struct {
 	// appear in a response body, and the :class:`Operator` model carries
 	// it for downstream Vault forward-auth only.
 	Operator OperatorIdentity `json:"operator"`
+
+	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
+	//
+	// The queryable half of the checks-runner watchdog: an external prober
+	// ("how we monitor the monitoring") alerts when
+	// ``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` — or
+	// simply on ``stalled``, which is that comparison server-side.
+	// ``stalled`` is derived live from the in-process tick stamp on every
+	// read (never from the watchdog task's emission latch), so it stays
+	// truthful even if the watchdog task itself has died.
+	//
+	// ``seconds_since_last_tick`` is ``None`` only in the window between
+	// process start and runner start — once the lifespan is up it is
+	// always a number. The value is per-process: each replica reports its
+	// own loop, which is exactly the failure mode observed (one process's
+	// loop coroutine going quiet).
+	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 }
 
 // ManualStep A step the operator performs off-MEHO (SSH, web UI, console).
@@ -6410,6 +6459,27 @@ type SensorRead struct {
 
 // SensorReadLastState defines model for SensorRead.LastState.
 type SensorReadLastState string
+
+// SensorRunnerStatus Liveness of this process's sensor evaluation loop (#2763).
+//
+// The queryable half of the checks-runner watchdog: an external prober
+// ("how we monitor the monitoring") alerts when
+// “seconds_since_last_tick“ exceeds “stall_threshold_seconds“ — or
+// simply on “stalled“, which is that comparison server-side.
+// “stalled“ is derived live from the in-process tick stamp on every
+// read (never from the watchdog task's emission latch), so it stays
+// truthful even if the watchdog task itself has died.
+//
+// “seconds_since_last_tick“ is “None“ only in the window between
+// process start and runner start — once the lifespan is up it is
+// always a number. The value is per-process: each replica reports its
+// own loop, which is exactly the failure mode observed (one process's
+// loop coroutine going quiet).
+type SensorRunnerStatus struct {
+	SecondsSinceLastTick  *float32 `json:"seconds_since_last_tick"`
+	StallThresholdSeconds float32  `json:"stall_threshold_seconds"`
+	Stalled               bool     `json:"stalled"`
+}
 
 // SensorSeverity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 //

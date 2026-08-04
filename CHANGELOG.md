@@ -92,6 +92,24 @@ connector-related release-notes line.
 
 ### Added
 
+- **Checks evaluation-loop watchdog + queryable runner liveness**
+  (#2763): the sensor runner now stamps every completed tick, and a
+  sibling watchdog task detects the loop going quiet — no completed
+  tick for `SENSOR_RUNNER_STALL_AFTER_TICKS` (new setting, default 6)
+  × the tick interval emits a structured `checks_scheduler_stalled`
+  log plus a `checks.scheduler_stalled` broadcast event (op-class
+  `checks`, once per continuous stall, fanned out to every tenant with
+  an active Sensor); the first completed tick after a stall emits
+  `checks_scheduler_recovered` carrying the stall duration. Both
+  `GET /api/v1/health` and `GET /api/v1/health/live` now carry a
+  `sensor_runner` liveness facet (`seconds_since_last_tick`,
+  `stalled`, `stall_threshold_seconds`; `null` when
+  `SENSOR_RUNNER_ENABLED=false`) so an external prober — the
+  dead-man's-switch consumer — catches a stalled evaluation loop in
+  minutes instead of discovering it from a wall of degraded
+  dashboards. Motivated by a 37-minute fleet-wide silent stall on
+  v0.26.0 that recurred on v0.27.0.
+
 - **Docs site — the *Connect clients* section** (#2672): a CLI-first
   onboarding path plus the full internal-only MCP client matrix. New
   pages cover the `meho` CLI (cosign-verified binary, device-code

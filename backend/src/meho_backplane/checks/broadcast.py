@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``checks.transition`` broadcast events on the tenant feed (#2720).
+"""Checks-subsystem broadcast events on the tenant feed (#2720, #2763).
 
 Task #2720 under Initiative #2716 (parent goal #221). The third consumer
 of #2507's compare-and-swap transition claim, beside the diagnose-only
@@ -9,7 +9,11 @@ investigator (:mod:`meho_backplane.checks.investigate`) and the email
 notifier (:mod:`meho_backplane.checks.notify`): every claimed Dashboard
 rollup edge is published to ``meho:feed:{tenant_id}`` as one
 :class:`~meho_backplane.broadcast.events.BroadcastEvent` with op-id
-``checks.transition``.
+``checks.transition``. #2763 added a second producer on the same mould:
+the evaluation-loop watchdog's ``checks.scheduler_stalled`` /
+``checks.scheduler_recovered`` liveness events
+(:func:`publish_scheduler_liveness_event`, driven by
+:mod:`meho_backplane.checks.watchdog`).
 
 Why the claim is the publish point
 ==================================
@@ -80,7 +84,13 @@ from meho_backplane.broadcast.events import BroadcastEvent, classify_op
 from meho_backplane.broadcast.publisher import publish_event
 from meho_backplane.operations._audit import resolve_broadcast_lineage
 
-__all__ = ["CHECK_TRANSITION_OP_ID", "publish_check_transition_event"]
+__all__ = [
+    "CHECK_TRANSITION_OP_ID",
+    "SCHEDULER_RECOVERED_OP_ID",
+    "SCHEDULER_STALLED_OP_ID",
+    "publish_check_transition_event",
+    "publish_scheduler_liveness_event",
+]
 
 
 #: Broadcast op-id for a claimed Dashboard rollup edge. Pinned in
@@ -89,6 +99,15 @@ __all__ = ["CHECK_TRANSITION_OP_ID", "publish_check_transition_event"]
 #: ``checks`` op-class; ``tests/test_checks_broadcast.py`` asserts the two
 #: cannot drift.
 CHECK_TRANSITION_OP_ID: Final[str] = "checks.transition"
+
+#: Broadcast op-ids for the evaluation-loop watchdog (#2763): the runner's
+#: tick loop went quiet past the stall threshold / completed its first
+#: tick after a detected stall. Pinned in ``_CHECK_EVENT_OPS`` exactly
+#: like :data:`CHECK_TRANSITION_OP_ID` (exact membership, never a
+#: ``checks.`` prefix match); ``tests/test_checks_watchdog.py`` asserts
+#: the pins cannot drift.
+SCHEDULER_STALLED_OP_ID: Final[str] = "checks.scheduler_stalled"
+SCHEDULER_RECOVERED_OP_ID: Final[str] = "checks.scheduler_recovered"
 
 #: Principal recorded on a transition event. A subsystem identity, not an
 #: operator and not a Sensor's ``identity_sub`` -- see the module
@@ -177,5 +196,68 @@ async def publish_check_transition_event(
             dashboard_id=str(dashboard_id),
             previous_state=previous_state,
             new_state=new_state,
+            exc_info=True,
+        )
+
+
+async def publish_scheduler_liveness_event(
+    *,
+    tenant_id: uuid.UUID,
+    op_id: str,
+    detail: dict[str, object],
+) -> None:
+    """Publish one evaluation-loop liveness event (#2763) to a tenant feed.
+
+    **Never raises.** Called by :mod:`meho_backplane.checks.watchdog` on
+    the stall-detection edge (:data:`SCHEDULER_STALLED_OP_ID`, fanned out
+    per tenant with an active Sensor) and from the runner's tick path on
+    the first completed tick after a stall
+    (:data:`SCHEDULER_RECOVERED_OP_ID`).
+
+    Same anatomy as :func:`publish_check_transition_event`, for the same
+    reasons: ``principal_sub`` is :data:`_CHECKS_PRINCIPAL_SUB` (a stall
+    has no operator behind it), ``audit_id`` is :data:`_NO_AUDIT_ROW` (a
+    quiet loop is a *non*-operation — there is no audit row to point at),
+    and the payload stays at subsystem altitude — clock deltas and the
+    configured threshold, never Sensor values or member names.
+
+    Args:
+        tenant_id: Feed to address; the watchdog owns the fan-out policy.
+        op_id: :data:`SCHEDULER_STALLED_OP_ID` or
+            :data:`SCHEDULER_RECOVERED_OP_ID`.
+        detail: Numeric context merged into the payload
+            (``seconds_since_last_tick`` / ``stall_threshold_seconds`` /
+            ``tick_interval_seconds`` on stall, ``stalled_for_seconds``
+            on recovery).
+    """
+    try:
+        lineage = resolve_broadcast_lineage()
+        op_class = classify_op(op_id)
+        event = BroadcastEvent(
+            event_id=uuid.uuid4(),
+            ts=datetime.now(UTC),
+            tenant_id=tenant_id,
+            principal_sub=_CHECKS_PRINCIPAL_SUB,
+            op_id=op_id,
+            op_class=op_class,
+            result_status="ok",
+            audit_id=_NO_AUDIT_ROW,
+            payload={
+                "op_class": op_class,
+                "result_status": "ok",
+                **detail,
+            },
+            actor_sub=lineage.actor_sub,
+            agent_session_id=lineage.agent_session_id,
+            work_ref=lineage.work_ref,
+        )
+        await publish_event(event)
+    except Exception:
+        # Fail-open: the loop's liveness truth is the in-process stamp the
+        # watchdog reads. A feed miss must not reach the watchdog loop or
+        # the runner's tick path.
+        _log().warning(
+            "checks_scheduler_broadcast_failed",
+            op_id=op_id,
             exc_info=True,
         )

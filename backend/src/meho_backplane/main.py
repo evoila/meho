@@ -124,6 +124,7 @@ from meho_backplane.broadcast.announcement_retention import (
     stop_announcement_retention_sweeper,
 )
 from meho_backplane.checks.runner import start_sensor_runner, stop_sensor_runner
+from meho_backplane.checks.watchdog import start_checks_watchdog, stop_checks_watchdog
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
@@ -453,6 +454,7 @@ class _BackgroundTasks:
     approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
     sensor_runner: asyncio.Task[None] | None
+    sensor_watchdog: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
     gateway_deadman: asyncio.Task[None] | None
@@ -514,6 +516,14 @@ def _start_background_tasks() -> _BackgroundTasks:
     sensor_runner: asyncio.Task[None] | None = None
     if settings.sensor_runner_enabled:
         sensor_runner = start_sensor_runner()
+    # #2763 — evaluation-loop watchdog. Same gate as the runner it
+    # watches, never its own: a watchdog with an independent kill switch
+    # is how the silent-stall class stays invisible. Started right after
+    # the runner so the staleness baseline is set before the first
+    # cadence sleep elapses.
+    sensor_watchdog: asyncio.Task[None] | None = None
+    if settings.sensor_runner_enabled:
+        sensor_watchdog = start_checks_watchdog()
     # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
     # running an external lease-reclaim mechanism (DBOS Transact, a
     # workflow engine) can disable the in-tree reaper without
@@ -544,6 +554,7 @@ def _start_background_tasks() -> _BackgroundTasks:
         approval_expiry=approval_expiry,
         scheduler=scheduler,
         sensor_runner=sensor_runner,
+        sensor_watchdog=sensor_watchdog,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
         gateway_deadman=gateway_deadman,
@@ -564,6 +575,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
+    if tasks.sensor_watchdog is not None:
+        await stop_checks_watchdog(tasks.sensor_watchdog)
     if tasks.sensor_runner is not None:
         await stop_sensor_runner(tasks.sensor_runner)
     if tasks.scheduler is not None:

@@ -94,6 +94,7 @@ from typing import Any
 
 import httpx
 import structlog
+from defusedxml import DefusedXmlException
 from defusedxml.ElementTree import ParseError, fromstring
 
 from meho_backplane.auth.operator import Operator
@@ -213,11 +214,15 @@ def service_versions_api_version(document: str) -> str | None:
     Returns the ``urn:vim25`` entry's version, falling back to the
     first namespace entry carrying one; ``None`` when the document is
     malformed or yields no version — the caller treats that as "no
-    version discovered", never an exception.
+    version discovered", never an exception. ``DefusedXmlException``
+    (``EntitiesForbidden`` on an entity-bearing document; a
+    :exc:`ValueError`, not a :exc:`ParseError`) is caught alongside
+    ``ParseError`` — defusedxml *rejecting* a hostile document is the
+    same "no version discovered" outcome as failing to parse one.
     """
     try:
         root = fromstring(document)
-    except ParseError:
+    except (ParseError, DefusedXmlException):
         return None
     first_version: str | None = None
     for element in root.iter():

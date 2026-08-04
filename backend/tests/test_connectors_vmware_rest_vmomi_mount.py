@@ -308,7 +308,7 @@ async def test_about_404_derives_release_from_service_versions_document() -> Non
         async with respx.mock(base_url=_BASE, assert_all_called=False) as mock:
             mock.post("/api/session").respond(200, json="tok")
             mock.get("/api/about").respond(404)
-            mock.get("/sdk/vimServiceVersions.xml").respond(200, text=document)
+            service_versions = mock.get("/sdk/vimServiceVersions.xml").respond(200, text=document)
             vijson = mock.post(_VIJSON_URL).respond(200, json={"objects": ["vi-json"]})
             api = mock.post(_API_URL).respond(200, json={"objects": ["api"]})
             result = await connector._post_vmomi_json(
@@ -318,6 +318,7 @@ async def test_about_404_derives_release_from_service_versions_document() -> Non
                 json=_RETRIEVE_BODY,
             )
         assert result == {"objects": ["vi-json"]}
+        assert service_versions.call_count == 1
         assert vijson.call_count == 1
         assert not api.called
     finally:

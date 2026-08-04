@@ -464,6 +464,16 @@ async def test_fingerprint_unreachable_when_discovery_document_unparsable() -> N
         # Malformed XML must yield None, never raise.
         ("<namespaces><namespace>", None),
         ("", None),
+        # An entity-bearing document makes defusedxml raise
+        # EntitiesForbidden (a DefusedXmlException — ValueError, not
+        # ParseError); the parser must treat the rejection as "no
+        # version discovered", never an exception.
+        (
+            "<!DOCTYPE namespaces [<!ENTITY x 'y'>]>"
+            '<namespaces version="1.0"><namespace><name>urn:vim25</name>'
+            "<version>&x;</version></namespace></namespaces>",
+            None,
+        ),
     ],
 )
 def test_service_versions_api_version_parsing(document: str, expected: str | None) -> None:

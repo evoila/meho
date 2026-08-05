@@ -179,6 +179,18 @@ _DEFAULT_HISTORY_TAB: Final[str] = "pending"
 _HISTORY_PARTIAL_ROWS: Final[str] = "rows"
 _HISTORY_PARTIALS: Final[frozenset[str]] = frozenset({"", _HISTORY_PARTIAL_ROWS})
 
+#: Operator-docs page the self-approval guidance deep-links to (#2669).
+#: Mirrors ``ui/maturity.py``'s ``MATURITY_INDEX_URL`` convention -- the
+#: console links to the published MkDocs site's ``latest`` alias so a solo
+#: operator who hits ``self_approval_forbidden`` reaches the two
+#: single-operator patterns (the recommended agent-requester and the
+#: audited break-glass) without reading source. The wire ``403`` /
+#: MCP-error text stays authoritative (it names the flag); this UI-only
+#: link is the docs-URL convention the field asked for.
+_SINGLE_OPERATOR_DOCS_URL: Final[str] = (
+    "https://evoila.github.io/meho/latest/guides/approvals-and-break-glass/"
+)
+
 #: Optional human reason length accepted on the deny form. The audit row
 #: stores it verbatim; bounding the wire shape protects the form-body
 #: parse against a paste-from-clipboard accident.
@@ -545,6 +557,7 @@ async def _render_detail_modal(
     *,
     error_status: int | None = None,
     error_message: str | None = None,
+    self_approval_error: bool = False,
 ) -> HTMLResponse:
     """Render the request-detail modal with Approve / Deny.
 
@@ -555,7 +568,8 @@ async def _render_detail_modal(
     render rotates the token -- the #1693 / #1754 cookie-desync class). The
     ``error_*`` arguments let the decision handlers re-render this modal
     with a typed banner (e.g. a server-side self-approval 403) without a
-    second round-trip.
+    second round-trip; ``self_approval_error`` promotes that banner from a
+    bare error to the actionable single-operator guidance (#2669).
     """
     operator = await _resolve_operator(session)
     approval = await _get_request_or_404(session, request_id)
@@ -566,6 +580,8 @@ async def _render_detail_modal(
         "request": project_request_to_view(approval),
         "self_approval_blocked": self_approval_blocked,
         "self_approval_setting": "APPROVAL_ALLOW_SELF_APPROVAL",
+        "self_approval_docs_url": _SINGLE_OPERATOR_DOCS_URL,
+        "self_approval_error": self_approval_error,
         "operator_sub": operator.sub,
         "status_pill_class": STATUS_PILL_CLASS,
         "csrf_token": csrf_token,
@@ -613,12 +629,21 @@ async def _decide(
         if exc.status_code == status.HTTP_404_NOT_FOUND:
             raise
         detail = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+        # A rejected self-approval (the service 403 the operator reached by
+        # forging the disabled Approve button) is the one error worth more
+        # than a bare banner: re-render with the actionable single-operator
+        # guidance (both patterns + docs link) instead (#2669). Keyed on the
+        # stable ``self_approval_forbidden`` token both wire strings prefix.
+        self_approval_error = exc.status_code == status.HTTP_403_FORBIDDEN and detail.startswith(
+            "self_approval_forbidden"
+        )
         return await _render_detail_modal(
             request,
             session,
             request_id,
             error_status=exc.status_code,
             error_message=detail,
+            self_approval_error=self_approval_error,
         )
 
     # Approve re-dispatches the parked op (the committed approval is the

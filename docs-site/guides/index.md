@@ -14,12 +14,14 @@ one:
 | [Run your first operations](first-operations.md) | The discover → groups → search → preview → call ladder, exercised end to end against a real target, including how to page large results and what the safety flags mean. |
 | [Watch your estate with sensors](sensors-quickstart.md) | A sensor evaluating a real check on a schedule, a dashboard rolling it up, and a triage walk of the five-state vocabulary when something breaks. |
 
+Then, when an operation needs a second pair of eyes:
+
+| Guide | What you will have at the end |
+|---|---|
+| [Approvals and break-glass](approvals-and-break-glass.md) | A clear path through the four-eyes rule, including the two ways a **single operator** clears a gated write — the recommended agent-requester pattern and the audited emergency break-glass — and how to prove to an auditor which one your deploy runs. |
+
 ## Coming to this section
 
-- **Approvals and break-glass** — what happens when an operation
-  requires a second pair of eyes, and the audited single-operator
-  escape hatches. Tracked by
-  [evoila/meho#2669](https://github.com/evoila/meho/issues/2669).
 - Later guides — topology, broadcast, memory / knowledge, audit
   forensics, runbooks, scheduler, satellite gateway — land as the
   evaluation program shows where the pain is.

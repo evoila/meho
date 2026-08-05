@@ -71,6 +71,7 @@ nav:
       - guides/targets-and-secrets.md
       - guides/first-operations.md
       - guides/sensors-quickstart.md
+      - Approvals and break-glass: guides/approvals-and-break-glass.md
   - Reference:
       - reference/index.md
       # Generated from the feature-maturity registry by

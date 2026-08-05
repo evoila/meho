@@ -116,6 +116,30 @@ connector-related release-notes line.
   change ships them together. The MCP `meho.sensors.*` tool payload is
   unchanged (governed by its own conventions test, not §2).
 
+### Single-operator approval break-glass is now discoverable (#2669)
+
+- The single-operator approval story gained three operator-facing
+  surfaces so a solo deployer clears a gated `requires_approval` write
+  without reading source. The four-eyes rule (requester ≠ approver) and
+  its two single-operator escapes were already shipped (#1401, #1483,
+  #2087) — this edition makes them findable:
+  - **New operator guide** — "Do real work → Approvals and break-glass"
+    on the docs site covers both patterns: the recommended
+    **agent-requester** (a scheduled agent run's distinct subject clears
+    the gate with no flag) and the audited emergency break-glass, plus
+    how to prove which posture a deploy runs (`GET /ready` →
+    `features.approval_queue.effective_posture`).
+  - **Operator console** — the `/ui/approvals` modal now renders that
+    guidance inline (both patterns + a deep link to the guide) when the
+    Approve button is disabled and when a self-approval is rejected,
+    instead of a bare error.
+  - **Helm chart** — `config.approvalAllowSelfApproval` exposes the
+    `APPROVAL_ALLOW_SELF_APPROVAL` break-glass as a first-class,
+    schema-documented value (default `"false"`, fail-closed; the schema
+    constrains it to `"true"` / `"false"`).
+
+  No approval semantics changed — this is discoverability only.
+
 ### Added
 
 - **Checks evaluation-loop watchdog + queryable runner liveness**

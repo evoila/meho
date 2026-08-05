@@ -391,6 +391,26 @@ config:
   # a warning and falls back to 30 min — a misconfigured budget can never
   # disable the watchdog. See `docs/codebase/spec-ingestion.md`.
   ingestJobTimeoutSeconds: ""
+  # -- Self-approval **audited break-glass** switch (#1401, #2669).
+  # Rendered into `APPROVAL_ALLOW_SELF_APPROVAL`. Default `"false"`
+  # (fail-closed) enforces the four-eyes rule: the operator who requested
+  # a parked `requires_approval` write may not approve their own request
+  # (requester != approver), so a single compromised or careless account
+  # cannot both ask for and grant a privileged connector write.
+  #
+  # Set `"true"` ONLY for a genuine, audited emergency. It is **not** the
+  # single-operator answer — enabling it posture-wide re-opens, for every
+  # op, the single-account request+grant hole the guard closes. The
+  # endorsed single-operator posture is an **agent-requester** (park the
+  # write under a scheduled agent run whose distinct subject clears the
+  # gate with no flag). Even under break-glass the self-approval is
+  # forensically visible: it writes a decision audit row (requester ==
+  # approver), emits a WARNING `approval_self_approval_break_glass` log,
+  # and flips `GET /ready` → `features.approval_queue.effective_posture`
+  # to `single_operator_break_glass`. See the operator guide
+  # (docs-site "Do real work → Approvals and break-glass") and
+  # `docs/codebase/approvals.md`.
+  approvalAllowSelfApproval: "false"
   # -- Operator-console (`/ui/*`) OAuth client_id (#2594, Goal #336). The
   # browser BFF login (`GET /ui/auth/login`) runs an OAuth 2.1
   # authorization-code + PKCE grant server-side against the operator's

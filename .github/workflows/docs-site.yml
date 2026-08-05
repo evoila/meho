@@ -107,6 +107,10 @@ jobs:
     # to publish under.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # mike build/push runs a few minutes and the reachability gate below
+    # waits up to 10; 20 keeps a genuinely stuck job from burning the
+    # 6-hour default while leaving healthy runs ample head-room.
+    timeout-minutes: 20
     permissions:
       contents: write
     concurrency:

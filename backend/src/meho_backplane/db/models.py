@@ -3394,11 +3394,13 @@ class AgentRun(Base):
     * ``turns`` -- Integer NOT NULL, default 0. The count of
       **model-request** turns the loop made -- lifted from the framework
       usage accounting (``AgentRunResult.request_count``) and persisted
-      at run finalize (#2743). Written only on the succeed path, so a
-      succeeded run always reports ``turns >= 1`` while a run that failed
-      before reaching the model (the #2644 model-init-failure class)
-      keeps ``turns == 0`` -- the "never reached turn 1" outage
-      fingerprint stays meaningful. The turn *budget*
+      at run finalize (#2743). Recorded only on the succeed path, so a
+      succeeded run always reports ``turns >= 1``; any non-succeeded run
+      reports ``0`` regardless of how many requests it made, because
+      ``fail_run`` never writes the column (the #2644 model-init failure,
+      which never reaches the model, is one such case). A succeeded run
+      therefore never reads ``0``, so it is no longer indistinguishable
+      from the model-init outage. The turn *budget*
       (``UsageLimits.request_limit`` in G11.1-T1) is enforced by the
       loop, not this column -- ``turns`` is the observable counter.
 

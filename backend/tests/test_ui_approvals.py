@@ -515,6 +515,11 @@ def test_detail_modal_self_approval_disables_approve_but_not_deny() -> None:
     assert "disabled" in approve_button
     assert "APPROVAL_ALLOW_SELF_APPROVAL" in approve_button
     assert "disabled" not in deny_button
+    # #2669: the disabled button carries actionable single-operator guidance,
+    # not just a greyed-out control -- both patterns named + a docs deep link
+    # so a solo operator reaches an informed choice without reading source.
+    assert "agent-requester" in body
+    assert "guides/approvals-and-break-glass" in body
 
 
 def test_detail_modal_unknown_id_is_404() -> None:
@@ -642,8 +647,10 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
     """A forged self-approve (bypassing the disabled button) 403s; the row stays pending.
 
     The disabled Approve button is UX only; the BFF re-checks the
-    requester != approver invariant (#1401) via ``approve_request`` and
-    re-renders the modal with a 403 banner.
+    requester != approver invariant (#1401) via ``approve_request``. Rather
+    than a bare 403, the re-render carries the actionable single-operator
+    guidance -- both patterns named + a docs deep link (#2669) -- so the
+    solo operator reaches an informed choice in place.
     """
     _seed_tenant(_TENANT_A, "tenant-a")
     # Requester == reviewer, break-glass OFF (default).
@@ -667,8 +674,13 @@ def test_forced_self_approve_is_rejected_server_side() -> None:
 
     assert response.status_code == 200, response.text
     body = response.text
-    assert "403" in body
     assert "cannot approve your own request" in body.lower()
+    # #2669: the rejected self-approval renders the guidance, not the bare
+    # error -- both single-operator patterns + the docs link, and the
+    # break-glass flag named as the emergency lever.
+    assert "agent-requester" in body
+    assert "APPROVAL_ALLOW_SELF_APPROVAL" in body
+    assert "guides/approvals-and-break-glass" in body
     # The row is NOT approved, and nothing was re-dispatched.
     assert _request_status(rid) == ApprovalRequestStatus.PENDING.value
     resume_mock.assert_not_awaited()

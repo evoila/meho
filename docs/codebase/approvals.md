@@ -313,6 +313,26 @@ and it is the difference between the two agent-run entry points in
 |---|---|---|
 | `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject). | Re-park the write under an **agent-requester**: wire it as a scheduled trigger under an agent definition (the four-step recipe above) so `run_scheduled` parks it with `principal_sub=<agent-sub>`. Then approve as yourself — your distinct `sub` clears the gate. Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the #1401 single-account hole posture-wide. |
 
+### Operator-facing discoverability of this story (#2669)
+
+This section is the contributor reference; the same two single-operator
+patterns now have three **operator-facing** surfaces so a solo deployer
+finds them without reading source:
+
+- **Docs-site guide** — `docs-site/guides/approvals-and-break-glass.md`
+  ("Do real work → Approvals and break-glass"), the deployer-persona
+  distillation of this section.
+- **Console guidance** — the approvals modal
+  (`ui/templates/approvals/_modal.html`) renders both patterns + a
+  deep link to that guide when the Approve button is disabled *and* on a
+  rejected self-approval 403 (routes' `_SINGLE_OPERATOR_DOCS_URL`,
+  mirroring `ui/maturity.py`'s `MATURITY_INDEX_URL` convention). The wire
+  `403` / MCP-error text still names the flag and stays authoritative.
+- **Chart value** — `config.approvalAllowSelfApproval` (rendered into
+  `APPROVAL_ALLOW_SELF_APPROVAL` by `configmap.yaml`) exposes the
+  break-glass as a first-class, schema-documented value
+  (`values.schema.json`, `enum: ["true","false"]`, default `"false"`).
+
 ## G0.20-T3 — execute a parked direct op on approve via every surface (#1503)
 
 Before #1503 the **only** execute-after-approve path for a parked

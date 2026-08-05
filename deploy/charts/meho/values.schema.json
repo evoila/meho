@@ -340,7 +340,7 @@
     "gsm": {
       "type": "object",
       "additionalProperties": false,
-      "description": "GCP Secret Manager credential backend (Initiative #2227). Mirrors the `vault` block: an operator-facing top-level declaration the schema validates, paired with the runtime `config.gsmProject` / `config.gsmImpersonateSa` env values. `project` is required (non-empty) and `enabled` must be `true` only when `config.credentialBackend: gsm` — enforced by the root-level `allOf`. `workloadIdentityFederation` is an inert Phase-2 (#2232) stub: declared so a GSM adopter can pin the shape, but no template consumes it yet.",
+      "description": "GCP Secret Manager credential backend (Initiative #2227). Mirrors the `vault` block: an operator-facing top-level declaration the schema validates, paired with the runtime `config.gsmProject` / `config.gsmImpersonateSa` env values. `project` is required (non-empty) and `enabled` must be `true` only when `config.credentialBackend: gsm` — enforced by the root-level `allOf`. `workloadIdentityFederation` is the Phase-2 (#2232) per-operator token-exchange surface: its keys render into the ConfigMap as `GSM_WIF_*` (chart-wired in #2659), inert (empty) on a Phase-1 SA-direct or Vault install. A populated worked example is `deploy/values-examples/values-gsm-wif-example.yaml` (#2667).",
       "required": ["enabled"],
       "properties": {
         "enabled": {

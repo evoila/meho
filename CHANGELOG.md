@@ -140,6 +140,21 @@ connector-related release-notes line.
 
   No approval semantics changed — this is discoverability only.
 
+### Added — GSM per-operator-WIF values example (#2667)
+
+- A copy-pasteable **GSM per-operator-Workload-Identity-Federation**
+  chart-values example, `deploy/values-examples/values-gsm-wif-example.yaml`,
+  so a WIF adopter expresses the whole credential-backend configuration
+  (`GSM_WIF_*` plus `GSM_PROJECT` / `GSM_IMPERSONATE_SA`) through first-class
+  chart values with **zero `extraEnv`** (#2667). It populates
+  `gsm.workloadIdentityFederation.*` and enables the `checkRunner` service
+  principal the on-prem/no-ambient-identity shape needs, and the GSM deploy
+  docs (`docs/deploying.md` § Per-operator WIF) now reference it. The
+  `GSM_WIF_*` first-class ConfigMap rendering itself shipped in #2659; this
+  closes the remaining example-and-docs surface and corrects the `gsm` block's
+  `values.schema.json` description, which still called
+  `workloadIdentityFederation` a stub "no template consumes."
+
 ### Added
 
 - **Checks evaluation-loop watchdog + queryable runner liveness**

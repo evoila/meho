@@ -51,12 +51,28 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Literal, NamedTuple
 
+from meho_backplane.connectors.github.composites._board import (
+    project_item_add_composite,
+    project_item_set_field_composite,
+    project_view_composite,
+)
 from meho_backplane.connectors.github.composites._read import (
     pr_status_summary_composite,
+)
+from meho_backplane.connectors.github.composites._sub_issues import (
+    sub_issue_add_composite,
 )
 from meho_backplane.connectors.github.composites.schemas import (
     PR_STATUS_SUMMARY_PARAMETER_SCHEMA,
     PR_STATUS_SUMMARY_RESPONSE_SCHEMA,
+    PROJECT_ITEM_ADD_PARAMETER_SCHEMA,
+    PROJECT_ITEM_ADD_RESPONSE_SCHEMA,
+    PROJECT_ITEM_SET_FIELD_PARAMETER_SCHEMA,
+    PROJECT_ITEM_SET_FIELD_RESPONSE_SCHEMA,
+    PROJECT_VIEW_PARAMETER_SCHEMA,
+    PROJECT_VIEW_RESPONSE_SCHEMA,
+    SUB_ISSUE_ADD_PARAMETER_SCHEMA,
+    SUB_ISSUE_ADD_RESPONSE_SCHEMA,
 )
 from meho_backplane.operations.typed_register import register_composite_operation
 from meho_backplane.retrieval.embedding import EmbeddingService
@@ -79,8 +95,8 @@ _IMPL_ID = "gh-rest"
 #: Curated agent-actionable group selectors for the gh-rest composite
 #: surface, surfaced verbatim by ``list_operation_groups`` so the LLM
 #: client picks the right composite group before drilling into
-#: ``search_operations``. T4 ships exactly one composite (the ``pulls``
-#: group); future T7+ composites populate ``release``, ``board``, etc.
+#: ``search_operations``. T4 shipped the ``pulls`` group; #2081 adds
+#: the ``board`` (Projects-v2) and ``issues`` (sub-issue linkage) groups.
 _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "pulls": (
         "Use for one-call PR-status questions: 'is PR #N ready to "
@@ -91,6 +107,23 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "orchestrate three separate L2 calls. Read-only. Pair with the "
         "ingested L2 ops (gh.pr.get_files, gh.pr.get_commits, etc.) "
         "when drill-in beyond the summary is needed."
+    ),
+    "board": (
+        "Use to put a ticket on a GitHub Projects-v2 board and set its "
+        "Status / Priority / Size fields -- the GraphQL-only surface a "
+        "REST connector cannot reach. Start with project_view to read "
+        "the board's node id, its single-select field ids, and each "
+        "field's option ids; then project_item_add to place an issue / "
+        "PR on the board (by content node id); then "
+        "project_item_set_field to set a single-select field. This is "
+        "the 'file a board-complete ticket' path -- no gh CLI fallback."
+    ),
+    "issues": (
+        "Use to link a task to its parent as a GitHub sub-issue "
+        "(sub_issue_add). Complements the board group: after creating a "
+        "child issue you attach it under a parent by the child's "
+        "database id. The sub-issue must share the parent's repository "
+        "owner."
     ),
 }
 
@@ -143,6 +176,86 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         group_key="pulls",
         tags=["composite", "read-only", "pulls", "status"],
         safety_level="safe",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.project_view",
+        handler=project_view_composite,
+        summary="Read a Projects-v2 board: node id + fields (with option ids) + items.",
+        description=(
+            "Reads a GitHub Projects-v2 board in one GraphQL call -- its node "
+            "id, its fields (single-select fields carry their option ids), and "
+            "its current items -- via the organization/user projectV2(number) "
+            "query. The GraphQL-only Projects-v2 surface has no REST "
+            "equivalent, so this is how an agent discovers the project_id / "
+            "field_id / option_id node ids the two write composites need. "
+            "Read-only. Pair with project_item_add + project_item_set_field to "
+            "file a board-complete ticket without a gh CLI fallback."
+        ),
+        parameter_schema=PROJECT_VIEW_PARAMETER_SCHEMA,
+        response_schema=PROJECT_VIEW_RESPONSE_SCHEMA,
+        group_key="board",
+        tags=["composite", "read-only", "board", "projectv2", "graphql"],
+        safety_level="safe",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.project_item_add",
+        handler=project_item_add_composite,
+        summary="Add an issue / PR to a Projects-v2 board (addProjectV2ItemById).",
+        description=(
+            "Adds an issue or pull request to a GitHub Projects-v2 board by "
+            "content node id, wrapping the addProjectV2ItemById GraphQL "
+            "mutation. project_id comes from gh.composite.project_view; "
+            "content_id is the issue/PR node_id the REST payload carries. A "
+            "low-blast-radius board-hygiene write -- adding a card to a board "
+            "is reversible. Returns the new board item's node id, which "
+            "project_item_set_field then targets."
+        ),
+        parameter_schema=PROJECT_ITEM_ADD_PARAMETER_SCHEMA,
+        response_schema=PROJECT_ITEM_ADD_RESPONSE_SCHEMA,
+        group_key="board",
+        tags=["composite", "write", "board", "projectv2", "graphql"],
+        safety_level="caution",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.project_item_set_field",
+        handler=project_item_set_field_composite,
+        summary="Set a single-select field (Status/Priority/Size) on a board item.",
+        description=(
+            "Sets a single-select field on a GitHub Projects-v2 board item -- "
+            "Status, Priority, Size, or any other single-select field -- "
+            "wrapping the updateProjectV2ItemFieldValue GraphQL mutation with a "
+            "singleSelectOptionId value. Every argument (project_id, item_id, "
+            "field_id, option_id) is a node id resolvable from "
+            "gh.composite.project_view. A reversible board-hygiene write."
+        ),
+        parameter_schema=PROJECT_ITEM_SET_FIELD_PARAMETER_SCHEMA,
+        response_schema=PROJECT_ITEM_SET_FIELD_RESPONSE_SCHEMA,
+        group_key="board",
+        tags=["composite", "write", "board", "projectv2", "graphql"],
+        safety_level="caution",
+        requires_approval=False,
+    ),
+    _CompositeSpec(
+        op_id="gh.composite.sub_issue_add",
+        handler=sub_issue_add_composite,
+        summary="Link a sub-issue to a parent issue (POST .../sub_issues).",
+        description=(
+            "Links a task to its parent as a GitHub sub-issue, wrapping "
+            "POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues. "
+            "sub_issue_id is the child issue's DATABASE id (the ``id`` field on "
+            "the issue payload), NOT its issue number -- the REST create-issue "
+            "response carries that id. The sub-issue must share the parent's "
+            "repository owner. Set replace_parent=true to move an already-"
+            "parented sub-issue. A reversible board-hygiene write."
+        ),
+        parameter_schema=SUB_ISSUE_ADD_PARAMETER_SCHEMA,
+        response_schema=SUB_ISSUE_ADD_RESPONSE_SCHEMA,
+        group_key="issues",
+        tags=["composite", "write", "issues", "sub_issue"],
+        safety_level="caution",
         requires_approval=False,
     ),
 )

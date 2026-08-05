@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 evoila Group
+#
+# GSM backend with per-operator Workload Identity Federation (WIF) — the
+# Phase-2 counterpart to values-gsm-example.yaml (which is SA-direct, Phase 1).
+#
+# Use this when credential reads must run under the *calling operator's*
+# identity: MEHO exchanges their Keycloak JWT at sts.googleapis.com, so GCP's
+# own audit log names the operator instead of MEHO's platform SA. The switch
+# is a non-empty gsm.workloadIdentityFederation.audience; every field below
+# renders into the ConfigMap as the GSM_WIF_* / GSM_PROJECT env the backplane
+# reads (settings.py), so a WIF install needs ZERO extraEnv for
+# credential-backend configuration — the whole point of #2667. (The GSM_WIF_*
+# rendering itself landed in #2659; this file is the copy-pasteable example.)
+#
+# This example targets the hardest of the four requirement-matrix rows in
+# docs/deploying.md § "Per-operator WIF and background dispatch": an on-prem
+# cluster with NO ambient GCP identity (no GKE Workload Identity, no mounted
+# SA key). On that shape, background dispatch (Sensor evaluations, scheduled
+# topology refreshes, runbook verify dispatch) has no operator JWT to
+# federate, so the checkRunner service principal below is REQUIRED — without
+# it, credentialed Sensors read `unknown` forever. checkRunner.* is #2642's
+# chart surface; it is enabled here so this stays a complete, working recipe.
+# On GKE + Workload Identity, drop the checkRunner block: background reads
+# fall back to the pod's ambient ADC (auth_path=sa_direct_fallback).
+#
+# Prerequisites on the GCP + Keycloak side:
+#   * A Workload Identity pool + provider trusting the Keycloak realm's OIDC
+#     issuer; gsm.workloadIdentityFederation.audience is that provider's full
+#     resource name.
+#   * The federated principal has roles/secretmanager.secretAccessor on the
+#     target secrets and the meho-test-federation health-probe secret.
+#   * A confidential Keycloak client for the checkRunner with the
+#     client_credentials grant and an audience mapper matching the provider's
+#     allowed audience (see docs/cross-repo/keycloak-agent-client.md).
+#
+# Replace every value marked "# CHANGE ME" before applying.
+
+image:
+  # An immutable tag from the image pipeline — never :latest / :main.
+  tag: "v0.1.0" # CHANGE ME
+
+ingress:
+  enabled: true
+  host: meho.gsm-wif.example # CHANGE ME
+  tls:
+    enabled: true
+    secretName: meho-tls # CHANGE ME
+
+postgres:
+  host: postgres.gsm-wif.example # CHANGE ME
+  credentialsSecret: meho-postgres # CHANGE ME (Secret holding DATABASE_URL at key `url`)
+
+keycloak:
+  issuer: https://keycloak.gsm-wif.example/realms/meho # CHANGE ME
+  audience: meho-backplane
+
+config:
+  keycloakIssuerUrl: https://keycloak.gsm-wif.example/realms/meho # CHANGE ME (must match keycloak.issuer)
+  keycloakAudience: meho-backplane
+  # --- GSM credential backend (Initiative #2227) ---
+  credentialBackend: gsm
+  gsmProject: my-gcp-project # CHANGE ME (project hosting MEHO secrets + the probe secret)
+  # Optional: impersonate a dedicated reader SA for the *SA-direct* fallback
+  # reads (background dispatch on GKE). Leave "" when the checkRunner principal
+  # below owns background reads. Rendered as GSM_IMPERSONATE_SA.
+  gsmImpersonateSa: ""
+
+gsm:
+  enabled: true
+  project: my-gcp-project # CHANGE ME (typically identical to config.gsmProject)
+  # Per-operator Workload Identity Federation (#2232). A non-empty `audience`
+  # switches credential reads onto the operator's identity. These five keys
+  # render as GSM_WIF_AUDIENCE / GSM_WIF_POOL_ID / GSM_WIF_PROVIDER_ID /
+  # GSM_WIF_SERVICE_ACCOUNT / GSM_WIF_SUBJECT_TOKEN_TYPE — no extraEnv.
+  workloadIdentityFederation:
+    # Full WIF provider resource name google-auth exchanges the operator JWT
+    # against. CHANGE ME (project *number*, pool id, provider id).
+    audience: //iam.googleapis.com/projects/123456789/locations/global/workloadIdentityPools/meho-pool/providers/keycloak
+    poolId: meho-pool # CHANGE ME (must match the pool in `audience`)
+    providerId: keycloak # CHANGE ME (must match the provider in `audience`)
+    # Optional: SA the federated identity impersonates for the final Secret
+    # Manager read. "" skips impersonation (the federated principal reads
+    # directly). e.g. meho-secret-reader@my-gcp-project.iam.gserviceaccount.com
+    serviceAccount: ""
+    # "" resolves to urn:ietf:params:oauth:token-type:jwt (correct for a
+    # Keycloak OIDC JWT). Set only if your provider expects a different type.
+    subjectTokenType: ""
+
+# In-process check-runner service principal (#2642). REQUIRED on this
+# on-prem/no-ambient-identity shape: background dispatch has no operator JWT,
+# so the runner mints a client_credentials token for this confidential
+# Keycloak client and presents it as the WIF subject token. Drop this block
+# on GKE + Workload Identity (background reads use the pod's ADC). Provision
+# the Secret yourself — the client secret is wired via secretKeyRef only,
+# never a plaintext chart value.
+checkRunner:
+  enabled: true
+  clientId: meho-check-runner # CHANGE ME (confidential Keycloak client)
+  clientSecret:
+    secretName: meho-check-runner # CHANGE ME (Secret holding the client secret)
+    secretKey: client_secret
+
+networkPolicy:
+  enabled: true
+  postgresCIDR: 10.0.1.0/24 # CHANGE ME
+  # Vault egress is unused on a GSM install, but the CIDR is still required
+  # by the schema when networkPolicy.enabled is true. Point it at a harmless
+  # unused subnet (no Vault egress rule is exercised without a Vault backend).
+  vaultCIDR: 10.0.2.0/24 # CHANGE ME (unused on GSM; kept to satisfy the schema)
+  keycloakCIDR: 10.0.3.0/24 # CHANGE ME

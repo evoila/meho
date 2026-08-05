@@ -124,7 +124,10 @@ helm upgrade --install meho ./deploy/charts/meho/ \
 the **calling operator's** identity: MEHO exchanges their Keycloak JWT at
 `sts.googleapis.com`, so GCP's own audit log names the operator rather than
 MEHO's platform SA. Leaving it empty keeps the SA-direct read above. These
-keys render into the ConfigMap as `GSM_WIF_*` — no `extraEnv` needed.
+keys render into the ConfigMap as `GSM_WIF_*` — no `extraEnv` needed. A
+copy-pasteable worked example (WIF keys populated, `checkRunner` enabled for
+the on-prem shape, zero `extraEnv`) lives at
+[`../deploy/values-examples/values-gsm-wif-example.yaml`](../deploy/values-examples/values-gsm-wif-example.yaml).
 
 Turning that on raises a question the interactive path doesn't have:
 **background dispatch has no calling operator.** Sensor evaluations

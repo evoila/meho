@@ -3391,11 +3391,16 @@ class AgentRun(Base):
       (...)`` constraint (see :data:`_AGENT_RUN_STATUSES`). Closed enum
       (:class:`AgentRunStatus`). Defaults to ``pending`` on insert.
 
-    * ``turns`` -- Integer NOT NULL, default 0. The count of tool-use
-      turns the loop has executed. The runtime increments it per turn;
-      the turn budget (``UsageLimits.request_limit`` in G11.1-T1) is
-      enforced by the loop, not this column -- ``turns`` is the
-      observable counter.
+    * ``turns`` -- Integer NOT NULL, default 0. The count of
+      **model-request** turns the loop made -- lifted from the framework
+      usage accounting (``AgentRunResult.request_count``) and persisted
+      at run finalize (#2743). Written only on the succeed path, so a
+      succeeded run always reports ``turns >= 1`` while a run that failed
+      before reaching the model (the #2644 model-init-failure class)
+      keeps ``turns == 0`` -- the "never reached turn 1" outage
+      fingerprint stays meaningful. The turn *budget*
+      (``UsageLimits.request_limit`` in G11.1-T1) is enforced by the
+      loop, not this column -- ``turns`` is the observable counter.
 
     * ``cost`` -- ``Numeric(12, 6)`` nullable. **Stub until G11.5/C3**:
       the column is recorded here so C3 can populate per-identity cost

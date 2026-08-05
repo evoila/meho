@@ -41,7 +41,6 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
-from meho_backplane import __version__
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.main import app
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
@@ -55,6 +54,7 @@ from meho_backplane.mcp.schemas import (
 )
 from meho_backplane.mcp.server import _MAX_REQUEST_BODY_BYTES
 from meho_backplane.settings import get_settings
+from meho_backplane.version import deployed_version_label
 
 _DISPATCH_TEST_OPERATOR: Operator = Operator(
     sub="dispatcher-test-operator",
@@ -152,7 +152,10 @@ def test_initialize_returns_protocol_version_capabilities_and_serverinfo(
 
     result = body["result"]
     assert result["protocolVersion"] == PROTOCOL_VERSION
-    assert result["serverInfo"] == {"name": "meho-backplane", "version": __version__}
+    assert result["serverInfo"] == {
+        "name": "meho-backplane",
+        "version": deployed_version_label(),
+    }
     # T3 (#248) registers tools/* and resources/* handlers, so the
     # capabilities envelope advertises both surfaces. ``listChanged:
     # false`` because v0.2 doesn't emit `notifications/tools/list_changed`
@@ -163,6 +166,42 @@ def test_initialize_returns_protocol_version_capabilities_and_serverinfo(
         "listChanged": False,
         "subscribe": False,
     }
+
+
+def test_initialize_serverinfo_version_reports_deployed_build(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``serverInfo.version`` reflects the deployed release, not ``__version__``.
+
+    #2746: the field used to render the static package ``__version__``
+    (pinned to ``0.1.0-dev``), so the upgrade-verify guidance in
+    ``docs/cross-repo/mcp-client-setup.md`` could not read the live build
+    off it. It is now wired to
+    :func:`~meho_backplane.version.deployed_version_label`, which renders
+    ``CHART_VERSION`` (``v``-prefixed) exactly as the UI footer does
+    (#1698). Setting ``CHART_VERSION`` and observing it on the wire proves
+    the handshake reports the deployed build rather than the dev stub.
+    """
+    monkeypatch.setenv("CHART_VERSION", "0.27.0")
+    response = _post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "test-client", "version": "0.0.1"},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    server_info = response.json()["result"]["serverInfo"]
+    assert server_info["version"] == "v0.27.0"
+    assert server_info["version"] != "0.1.0-dev"
 
 
 def test_initialize_without_protocol_version_returns_invalid_params(

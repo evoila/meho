@@ -98,6 +98,7 @@ from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
+    all_listed_resources_for,
     all_resource_templates_for,
     all_tools_for,
     capability_satisfied,
@@ -564,18 +565,24 @@ def _operator_meets_required_role(
 
 
 async def handle_resources_list(
-    _operator: Operator,
+    operator: Operator,
     _params: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Return concrete (non-templated) resources.
+    """Return concrete (non-templated) resources for the operator.
 
-    v0.2 registers only templated resources (every URI carries at least
-    one ``{var}``), so this always returns an empty list. The method is
-    present for MCP spec conformance: clients that call ``resources/list``
-    expect an empty array, not ``METHOD_NOT_FOUND``. Templated resources
-    surface via :func:`handle_resources_templates_list`.
+    Concrete resources are the operator-specific URIs registered templates
+    opt into publishing via their ``list_uris`` provider (#2746) — RBAC +
+    capability filtered on the owning template by
+    :func:`~meho_backplane.mcp.registry.all_listed_resources_for`. In v0.2
+    the sole contributor is the tenant-info resource, which lists the
+    caller's own ``meho://tenant/<tenant_id>/info`` so a discovery-driven
+    client (Claude Desktop's attachment picker) can offer the documented
+    verify-step resource without the operator knowing their tenant UUID.
+    Templated resources still surface via
+    :func:`handle_resources_templates_list`; the two lists are disjoint per
+    the MCP 2025-06-18 concrete-vs-templated split.
     """
-    return {"resources": []}
+    return {"resources": all_listed_resources_for(operator)}
 
 
 async def handle_resources_templates_list(

@@ -108,6 +108,21 @@ async def _tenant_info_handler(
     }
 
 
+def _tenant_info_listed_uris(operator: Operator) -> list[str]:
+    """Publish the caller's own tenant-info resource to ``resources/list``.
+
+    The server knows the operator's tenant from the validated JWT, so it
+    can list the concrete ``meho://tenant/<tenant_id>/info`` URI a
+    discovery-driven MCP client (Claude Desktop's attachment picker calls
+    ``resources/list`` at handshake) offers — the operator never has to
+    know their tenant UUID to reach the documented Step-4 verify resource
+    (#2746). Only the caller's own tenant is listed; the per-read
+    tenant-boundary check in :func:`_tenant_info_handler` still guards the
+    fetch, so listing a single self-scoped URI leaks nothing cross-tenant.
+    """
+    return [f"meho://tenant/{operator.tenant_id}/info"]
+
+
 register_mcp_resource(
     definition=ResourceTemplateDefinition(
         uriTemplate="meho://tenant/{tenant_id}/info",
@@ -122,4 +137,5 @@ register_mcp_resource(
         required_role=TenantRole.READ_ONLY,
     ),
     handler=_tenant_info_handler,
+    list_uris=_tenant_info_listed_uris,
 )

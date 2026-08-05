@@ -65,7 +65,8 @@ register_mcp_tool(
         feature=None,
         name="meho_status",
         description=(
-            "Returns the operator's identity (sub, name, email) plus the "
+            "Returns the operator's identity (sub, name, email, tenant_id, "
+            "tenant_role) plus the "
             "MEHO backplane's dependency status: Vault federation chain "
             "(reachable + KV read OK?) and DB migration state. Call at "
             "MCP session start to verify the operator can reach all "

@@ -30,7 +30,7 @@ Call a gated operation — from the CLI, an agent, or the operator
 console — and instead of a result you get a parked request:
 
 ```bash
-meho operation call vault-1.x vault.kv.put --target rdc-vault --param ...
+meho operation call vault-1.x vault.kv.put --target rdc-vault --params '{...}'
 # → status: awaiting_approval
 #   approval_request_id: 4b1c…
 ```
@@ -96,19 +96,23 @@ definition, and drive the gated write through a **scheduled** run of
 that definition. Four steps:
 
 ```bash
-# 1. Register the agent principal (mints the agent:<name> client).
+# 1. Register the agent principal (mints its client_credentials client;
+#    the output includes the client id you pass to --identity-ref below).
 meho agent-principal register nightly-writer
 
-# 2. Author an agent definition whose identity_ref is that principal,
-#    then wire the gated write as a scheduled trigger under it.
-meho scheduler create   # --definition <name> --op <op_id> --target <id> ...
+# 2. Author an agent definition bound to that principal. Its toolset and
+#    prompt are what perform the gated write when the definition runs.
+meho agent create nightly-writer --identity-ref <client-id-from-step-1>
 
-# 3. The trigger fires an autonomous run; the write parks under the
-#    agent's sub (principal_sub=agent:nightly-writer).
+# 3. Schedule the definition. The autonomous run parks the write under the
+#    agent's sub (principal_sub=<agent-sub>). Use --kind one_off with
+#    --fire-at <ISO8601> instead for a single run rather than a cron.
+meho scheduler create --kind cron --agent-definition nightly-writer \
+  --cron-expr "0 2 * * *"
+
+# 4. The write is now parked under the agent. Approve as yourself — your
+#    sub differs from the agent's, so the gate clears and it dispatches.
 meho approvals list
-
-# 4. Approve as yourself — your sub differs from the agent's, so the
-#    gate clears and the parked write dispatches.
 meho approvals approve <id>
 ```
 

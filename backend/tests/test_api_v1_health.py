@@ -64,6 +64,7 @@ from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
@@ -361,7 +362,15 @@ def test_happy_path_returns_full_federation_response(
     from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 
     assert body == {
-        "operator": {"sub": "op-100", "name": "Alice", "email": "alice@example.com"},
+        # #2746: OperatorIdentity now carries tenant_id + tenant_role, so the
+        # federation health response echoes the caller's tenant identity too.
+        "operator": {
+            "sub": "op-100",
+            "name": "Alice",
+            "email": "alice@example.com",
+            "tenant_id": _DEFAULT_TENANT_ID,
+            "tenant_role": "operator",
+        },
         "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
         "db": {"migrated": True},
         "mcp_session_id_capture": "when_negotiated",

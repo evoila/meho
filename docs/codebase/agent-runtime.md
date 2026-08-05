@@ -50,7 +50,10 @@ All public types are re-exported from `meho_backplane.agent`
 - **`AgentRunResult`** — terminal outcome: the loop's `output` (a validated
   `output_type` instance when structured, else free text), plus
   `request_count` and `tool_call_count` lifted from the framework's usage
-  accounting.
+  accounting. On a successful run `request_count` is persisted as the run
+  row's `turns` at finalize (#2743) — the streamed path tallies the same
+  count off its `TURN` events — so `run_status` reports the model-request
+  turn total instead of a constant 0.
 - **`AgentRunStatus`** — closed enum: `RUNNING` / `SUCCEEDED` / `FAILED`.
 - **`AgentRunError`** — domain exception raised when a run cannot start or
   its result is unavailable (turn budget exhausted, a tool raised, the

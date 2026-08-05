@@ -171,6 +171,37 @@ async def test_run_then_poll_round_trip(
 
 @pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
 @pytest.mark.asyncio
+async def test_run_status_reports_turns_for_no_tool_run(
+    client_with_operator: tuple[TestClient, Operator],  # noqa: F811
+) -> None:
+    """A succeeded no-tool run reports ``turns >= 1`` via run_status (#2743).
+
+    The reporter's repro inverted: an agent with an empty toolset (the
+    seeded definition's ``toolset={}``) run to ``succeeded`` used to read
+    ``turns: 0`` on the wire surface — colliding with the pre-#2644
+    model-init-failure fingerprint. Driven through the real ``AgentInvoker``
+    over a deterministic ``FunctionModel`` (not a hand-minted double), the
+    ``meho_agents_run_status`` face now reports the model-request turn total.
+    """
+    client, op = client_with_operator
+    await _seed_definition(tenant_id=op.tenant_id)
+    _install_invoker("no-tool answer")
+
+    run = _call(client, "meho_agents_run", {"name": "triage", "input": "go"})
+    body = _result_dict(run)
+    assert body["status"] == "succeeded"
+    run_id = body["run_id"]
+
+    status = _call(client, "meho_agents_run_status", {"run_id": run_id}, rpc_id=2)
+    status_body = _result_dict(status)
+    assert status_body["status"] == "succeeded"
+    # A succeeded no-tool run made exactly one model request, so ``turns``
+    # is 1 — never the constant 0 the dead counter reported before #2743.
+    assert status_body["turns"] == 1
+
+
+@pytest.mark.parametrize("client_with_operator", [TenantRole.OPERATOR], indirect=True)
+@pytest.mark.asyncio
 async def test_list_runs_returns_tenant_runs(
     client_with_operator: tuple[TestClient, Operator],  # noqa: F811
 ) -> None:

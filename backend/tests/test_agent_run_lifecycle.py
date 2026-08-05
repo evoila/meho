@@ -17,8 +17,9 @@ Coverage matrix
   stamps ``started_at`` / ``ended_at`` at the right edges.
 * **Every illegal transition** raises :class:`IllegalTransitionError`
   before any DB write; the persisted status is unchanged.
-* **start_run / succeed_run / fail_run / increment_turns** record their
-  payload (provider+model / output / error / turn count) and move status.
+* **start_run / succeed_run / fail_run** record their payload
+  (provider+model / output + model-request turn count / error) and move
+  status.
 * **cancel_run** cancels a non-terminal run for an authorized operator;
   rejects an under-privileged operator (403-class), an already-terminal
   run (409-class), and a missing id (404-class).
@@ -59,7 +60,6 @@ from meho_backplane.operations.agent_run import (
     fail_run,
     get_run,
     heartbeat,
-    increment_turns,
     list_runs,
     release_lease,
     snapshot_in_flight_policy,
@@ -500,17 +500,28 @@ async def test_start_run_records_resolved_provider_and_model() -> None:
 
 
 @pytest.mark.asyncio
-async def test_increment_turns_counts_up_without_status_change() -> None:
-    """``increment_turns`` bumps the counter and leaves status untouched."""
+async def test_succeed_run_records_turn_count() -> None:
+    """``succeed_run`` persists the model-request ``turns`` total (#2743)."""
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         run = await _make_run(session, status=AgentRunStatus.RUNNING)
-        await increment_turns(session, run)
-        await increment_turns(session, run)
+        await succeed_run(session, run, output={"verdict": "ok"}, turns=3)
         await session.commit()
 
-    assert run.turns == 2
-    assert run.status == AgentRunStatus.RUNNING.value
+    assert run.turns == 3
+    assert run.status == AgentRunStatus.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_succeed_run_without_turns_leaves_counter_at_default() -> None:
+    """Omitting ``turns`` leaves the column untouched (default 0)."""
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as session:
+        run = await _make_run(session, status=AgentRunStatus.RUNNING)
+        await succeed_run(session, run, output={"verdict": "ok"})
+        await session.commit()
+
+    assert run.turns == 0
 
 
 @pytest.mark.asyncio

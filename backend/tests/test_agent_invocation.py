@@ -579,6 +579,111 @@ async def test_failed_loop_records_failed_run() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Turns counter (#2743) — the durable run row records the loop's model-request
+# turn total, so ``run_status`` stops reporting a constant 0.
+# ---------------------------------------------------------------------------
+
+
+async def test_no_tool_success_records_one_turn() -> None:
+    """A succeeded no-tool run (empty toolset) reports ``turns == 1``.
+
+    The reporter's repro inverted (#2743): a one-shot run with an empty
+    toolset that completes must report ``turns >= 1``, so a healthy run no
+    longer collides with the pre-#2644 model-init-failure fingerprint
+    (``turns: 0``).
+    """
+    await _seed_definition()  # the default toolset is ``{}``
+    invoker = _invoker_with(_final_text("done"))
+
+    outcome = await invoker.run(_make_operator(), "reader", "go")
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+
+    view = await invoker.poll(_make_operator(), outcome.run_id)
+    assert view.turns == 1
+
+
+async def test_tool_using_run_persists_turns_equal_to_request_count(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A tool-using run persists ``turns`` == the framework's ``request_count``.
+
+    Drives the raw runtime seam once to learn the framework's
+    :attr:`AgentRunResult.request_count` for this deterministic single-tool
+    loop, then runs the same model through the invoker and asserts the
+    persisted ``turns`` equals that count — not a hand-picked constant.
+    """
+    await _seed_echo_op(stub_embedding_service)
+    await _seed_definition(toolset={"meta_tools": ["call_operation"]})
+
+    # Ground truth from the runtime seam (the source of ``request_count``).
+    seam = PydanticAgentRun(model_factory=lambda: _call_op_then_text("answer"))
+    seam_definition = AgentDefinition(
+        name="reader",
+        system_prompt="You read secrets via MEHO operations.",
+        request_limit=5,
+        toolset={"meta_tools": ["call_operation"]},
+    )
+    handle = seam.start(seam_definition, _make_operator(), "go")
+    result = await seam.result(handle)
+    assert result.tool_call_count == 1  # sanity: the loop really used the tool
+    assert result.request_count >= 2
+
+    # The invoker persists that same count as ``turns``.
+    invoker = _invoker_with(_call_op_then_text("answer"))
+    outcome = await invoker.run(_make_operator(), "reader", "go")
+    assert outcome.status is AgentRunStatus.SUCCEEDED
+
+    view = await invoker.poll(_make_operator(), outcome.run_id)
+    assert view.turns == result.request_count
+
+
+async def test_streamed_run_persists_turn_total(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The streamed path tallies ``TURN`` events into the durable ``turns``."""
+    await _seed_echo_op(stub_embedding_service)
+    await _seed_definition(toolset={"meta_tools": ["call_operation"]})
+    invoker = _invoker_with(_call_op_then_text("answer"))
+
+    turn_events = 0
+    run_id: UUID | None = None
+    async for rid, event in invoker.stream_events(_make_operator(), "reader", "go"):
+        run_id = rid
+        if event.kind is AgentRunEventKind.TURN:
+            turn_events += 1
+
+    assert run_id is not None
+    view = await invoker.poll(_make_operator(), run_id)
+    assert view.status is AgentRunStatus.SUCCEEDED
+    # The durable count equals the number of TURN events the stream emitted.
+    assert view.turns == turn_events
+    assert view.turns >= 2
+
+
+async def test_model_init_failure_keeps_turns_zero() -> None:
+    """A run that fails before any model turn keeps ``turns == 0`` (#2644).
+
+    The model-init-failure class (a 400 at model init, the #2644 outage)
+    never reaches turn 1, so the durable row must stay at ``turns: 0`` —
+    the "never reached the model" fingerprint a probe keys on stays
+    meaningful.
+    """
+    await _seed_definition()
+
+    def _fail_at_init(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        raise RuntimeError("400 invalid_request_error: model init failed")
+
+    invoker = AgentInvoker(
+        runtime=PydanticAgentRun(model_factory=lambda: FunctionModel(_fail_at_init))
+    )
+    outcome = await invoker.run(_make_operator(), "reader", "go")
+    assert outcome.status is AgentRunStatus.FAILED
+
+    view = await invoker.poll(_make_operator(), outcome.run_id)
+    assert view.turns == 0
+
+
+# ---------------------------------------------------------------------------
 # Composition wiring (G11.1-T7 #1067) — agent invokes agent via the live invoker
 # ---------------------------------------------------------------------------
 

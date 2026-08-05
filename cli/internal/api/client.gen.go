@@ -4272,11 +4272,22 @@ type HealthResponse struct {
 	McpProtocolVersion  *string  `json:"mcp_protocol_version,omitempty"`
 	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
 
-	// Operator Operator identity surface exposed to the CLI.
+	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
 	// Excludes ``raw_jwt`` deliberately — the bearer token must never
 	// appear in a response body, and the :class:`Operator` model carries
 	// it for downstream Vault forward-auth only.
+	//
+	// ``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session
+	// confirm *which tenant and role it runs as* from inside the session —
+	// the check the clean-room program's "logged in as operator, not
+	// tenant_admin" discipline needs, and the identity the ``meho_status``
+	// tool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)
+	// already promises. Both are always present on the validated
+	// :class:`Operator` (JWT claims), so the surface can never omit them;
+	// they serialise as a UUID string / role value under
+	// ``model_dump(mode="json")`` — the same wire shape the
+	// ``meho://tenant/<id>/info`` resource returns.
 	Operator OperatorIdentity `json:"operator"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -4735,11 +4746,22 @@ type LivenessResponse struct {
 	// handler now always populates it from the probe.
 	Db DbStatus `json:"db"`
 
-	// Operator Operator identity surface exposed to the CLI.
+	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
 	// Excludes ``raw_jwt`` deliberately — the bearer token must never
 	// appear in a response body, and the :class:`Operator` model carries
 	// it for downstream Vault forward-auth only.
+	//
+	// ``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session
+	// confirm *which tenant and role it runs as* from inside the session —
+	// the check the clean-room program's "logged in as operator, not
+	// tenant_admin" discipline needs, and the identity the ``meho_status``
+	// tool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)
+	// already promises. Both are always present on the validated
+	// :class:`Operator` (JWT claims), so the surface can never omit them;
+	// they serialise as a UUID string / role value under
+	// ``model_dump(mode="json")`` — the same wire shape the
+	// ``meho://tenant/<id>/info`` resource returns.
 	Operator OperatorIdentity `json:"operator"`
 
 	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
@@ -5001,15 +5023,45 @@ type OperationDescriptor struct {
 	Version           string                  `json:"version"`
 }
 
-// OperatorIdentity Operator identity surface exposed to the CLI.
+// OperatorIdentity Operator identity surface exposed to the CLI and MCP “meho_status“.
 //
 // Excludes “raw_jwt“ deliberately — the bearer token must never
 // appear in a response body, and the :class:`Operator` model carries
 // it for downstream Vault forward-auth only.
+//
+// “tenant_id“ + “tenant_role“ (#2746) let a connected MCP session
+// confirm *which tenant and role it runs as* from inside the session —
+// the check the clean-room program's "logged in as operator, not
+// tenant_admin" discipline needs, and the identity the “meho_status“
+// tool's own doc (“docs/cross-repo/mcp-client-setup.md“ Step 4)
+// already promises. Both are always present on the validated
+// :class:`Operator` (JWT claims), so the surface can never omit them;
+// they serialise as a UUID string / role value under
+// “model_dump(mode="json")“ — the same wire shape the
+// “meho://tenant/<id>/info“ resource returns.
 type OperatorIdentity struct {
-	Email *string `json:"email"`
-	Name  *string `json:"name"`
-	Sub   string  `json:"sub"`
+	Email    *string            `json:"email"`
+	Name     *string            `json:"name"`
+	Sub      string             `json:"sub"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
 }
 
 // PermissionVerdict Three-state verdict returned by the permission resolver.

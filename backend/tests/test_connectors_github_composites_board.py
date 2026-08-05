@@ -368,3 +368,17 @@ async def test_graphql_missing_data_raises() -> None:
             query="query { x }",
             variables={},
         )
+
+
+@pytest.mark.asyncio
+async def test_graphql_non_dict_payload_raises() -> None:
+    """A non-object GraphQL body (e.g. a bare list) raises GitHubGraphQlError."""
+    connector = _RecordingConnector([["unexpected", "list", "body"]])
+    with pytest.raises(GitHubGraphQlError, match="not a JSON object"):
+        await github_graphql(
+            connector,  # type: ignore[arg-type]
+            object(),
+            _make_operator(),
+            query="query { x }",
+            variables={},
+        )

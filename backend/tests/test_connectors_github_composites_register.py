@@ -522,10 +522,10 @@ async def test_projectv2_and_sub_issue_ops_carry_discovery_tags(
 
 
 @pytest.mark.asyncio
-async def test_new_write_ops_persist_additional_properties_false_params(
+async def test_new_ops_persist_additional_properties_false_params(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Write composites' parameter schemas round-trip with ``additionalProperties:false``."""
+    """Each #2081 composite's parameter schema round-trips with ``additionalProperties:false``."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:

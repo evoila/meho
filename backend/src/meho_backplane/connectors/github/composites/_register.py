@@ -19,19 +19,26 @@ in this module so a future shape change touches one file. The helper
 handles upsert, body-hash dedupe, embedding pipeline, and
 ``source_kind="composite"`` persistence.
 
-Scope at T4 (#1224)
--------------------
+Scope
+-----
 
-One composite ships: ``gh.composite.pr_status_summary``. It is read-
-only (``safety_level="read"`` / ``requires_approval=False``) -- the
-issue body's mandatory posture for the trigger use case (the operator
-asks "is PR #N ready to merge?" and gets a structured answer without
-mutating anything).
+Five composites ship. ``gh.composite.pr_status_summary`` (T4 #1224) is
+read-only. #2081 adds four more: ``gh.composite.project_view`` (read),
+``gh.composite.project_item_add`` /
+``gh.composite.project_item_set_field`` (Projects-v2 GraphQL writes),
+and ``gh.composite.sub_issue_add`` (sub-issue linkage REST write) --
+together the "file a board-complete ticket without a gh CLI fallback"
+surface.
 
 The composite-helper's defaults are ``safety_level="dangerous"`` +
-``requires_approval=True`` (suited to write composites); the read
-composite explicitly overrides both. Future T7+ write composites will
-omit the override and inherit the helper's safe-by-default policy.
+``requires_approval=True`` (suited to high-blast-radius write
+composites). The reads override to ``safe``; the board + sub-issue
+writes override to ``caution`` -- low-blast-radius, reversible
+board-hygiene mutations -- all with ``requires_approval=False`` so a
+human / service operator can file a board-complete ticket without an
+approval round-trip while an agent still routes through the ``caution``
+safety default. See :mod:`._board` / :mod:`._sub_issues` for the
+per-composite governance rationale.
 
 ``safety_level`` value note
 ---------------------------

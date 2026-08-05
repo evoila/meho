@@ -13,11 +13,12 @@ Same conventions as the vmware-rest composite schemas module
   documentation lives on ``description`` keys; ``describe_operation``
   surfaces the schema verbatim to LLM clients.
 * T4 ships exactly one composite -- ``gh.composite.pr_status_summary``
-  -- which is read-only (``safety_level="read"`` /
-  ``requires_approval=False`` per the issue body). #2081 adds the four
-  board + sub-issue composites (``project_view`` read;
-  ``project_item_add`` / ``project_item_set_field`` / ``sub_issue_add``
-  writes) and reuses this module's pattern.
+  -- which is read-only (registered ``safety_level="safe"`` --
+  the register-time enum value for the issue body's "read" label --
+  / ``requires_approval=False``). #2081 adds the four board + sub-issue
+  composites (``project_view`` read; ``project_item_add`` /
+  ``project_item_set_field`` / ``sub_issue_add`` writes) and reuses this
+  module's pattern.
 """
 
 from __future__ import annotations

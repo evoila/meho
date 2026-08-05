@@ -50,11 +50,12 @@ if TYPE_CHECKING:
 
 __all__ = ["GITHUB_GRAPHQL_PATH", "GitHubGraphQlError", "github_graphql"]
 
-#: Wire path for GitHub's GraphQL endpoint. The connector mounts it
-#: under ``https://api.github.com`` (``_base_url``), so the full URL is
-#: ``https://api.github.com/graphql``. GHES would remap this (``/api/
-#: graphql``), but T1 ships github.com only -- consistent with the rest
-#: of the connector's github.com-only scope.
+#: Descriptor-relative path for GitHub's GraphQL endpoint. It is routed
+#: through ``connector.mount_op_path`` before the wire call (identity for
+#: github.com, so the full URL is ``https://api.github.com/graphql``),
+#: matching how the REST composites mount their paths. A future GHES
+#: override would remap it there (GHES GraphQL lives at ``/api/graphql``)
+#: in one place; T1 ships github.com only.
 GITHUB_GRAPHQL_PATH = "/graphql"
 
 
@@ -110,7 +111,10 @@ async def github_graphql(
     Issues the call through *connector*'s own session
     (:meth:`~meho_backplane.connectors.adapters.http.HttpConnector._post_json`,
     which carries the connector's ``Authorization: Bearer`` header) with
-    the standard ``{"query": ..., "variables": ...}`` request body.
+    the standard ``{"query": ..., "variables": ...}`` request body. The
+    path is routed through the connector's ``mount_op_path`` first
+    (identity for github.com), matching the REST composites and
+    localising a future GHES mount remap.
 
     Returns
     -------
@@ -130,9 +134,10 @@ async def github_graphql(
         5xx). Propagates from ``_post_json`` for the dispatcher's outer
         branch to map to the matching structured result.
     """
+    path = await connector.mount_op_path(target, GITHUB_GRAPHQL_PATH, operator)
     payload = await connector._post_json(
         target,
-        GITHUB_GRAPHQL_PATH,
+        path,
         operator=operator,
         json={"query": query, "variables": variables},
     )

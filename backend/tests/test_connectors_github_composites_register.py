@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Registration tests for the gh-rest composites (G3.11-T4 #1224).
+"""Registration tests for the gh-rest composites (G3.11-T4 #1224, #2081).
 
 Mirrors :mod:`tests.test_connectors_vmware_rest_composites_register`.
-T4 ships exactly one composite -- ``gh.composite.pr_status_summary`` --
-so the coverage scope is narrower than the vmware-rest precedent but
-the per-composite assertions are identical: ``source_kind="composite"``
-row, ``safety_level="safe"`` + ``requires_approval=False`` overrides,
-canonical module-level ``handler_ref``, group resolution into
-``pulls``, parameter schema round-trips with ``required`` keys and
-``additionalProperties:false``, response schema persists, tags include
-``composite`` + ``read-only``, idempotent re-registration, and the
+T4 shipped ``gh.composite.pr_status_summary``; #2081 adds the four
+board + sub-issue composites. The per-composite assertions are the
+same shape: ``source_kind="composite"`` row, the right ``safety_level``
++ ``requires_approval`` posture, canonical module-level ``handler_ref``,
+group resolution (``pulls`` / ``board`` / ``issues``), parameter schema
+round-trips with ``required`` keys and ``additionalProperties:false``,
+response schema persists, tags, idempotent re-registration, and the
 side-effect import wires the registrar onto the lifespan list.
 """
 
@@ -28,7 +27,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.connectors.github.composites import (
     pr_status_summary_composite,
+    project_item_add_composite,
+    project_item_set_field_composite,
+    project_view_composite,
     register_github_composite_operations,
+    sub_issue_add_composite,
 )
 from meho_backplane.connectors.registry import clear_registry
 from meho_backplane.db.engine import get_sessionmaker
@@ -40,16 +43,49 @@ from meho_backplane.operations.typed_register import (
 )
 from meho_backplane.settings import get_settings
 
-_EXPECTED_OP_IDS: tuple[str, ...] = ("gh.composite.pr_status_summary",)
+_EXPECTED_OP_IDS: tuple[str, ...] = (
+    "gh.composite.pr_status_summary",
+    "gh.composite.project_view",
+    "gh.composite.project_item_add",
+    "gh.composite.project_item_set_field",
+    "gh.composite.sub_issue_add",
+)
 
 _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     "gh.composite.pr_status_summary": (
         "meho_backplane.connectors.github.composites._read.pr_status_summary_composite"
     ),
+    "gh.composite.project_view": (
+        "meho_backplane.connectors.github.composites._board.project_view_composite"
+    ),
+    "gh.composite.project_item_add": (
+        "meho_backplane.connectors.github.composites._board.project_item_add_composite"
+    ),
+    "gh.composite.project_item_set_field": (
+        "meho_backplane.connectors.github.composites._board.project_item_set_field_composite"
+    ),
+    "gh.composite.sub_issue_add": (
+        "meho_backplane.connectors.github.composites._sub_issues.sub_issue_add_composite"
+    ),
 }
 
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "gh.composite.pr_status_summary": "pulls",
+    "gh.composite.project_view": "board",
+    "gh.composite.project_item_add": "board",
+    "gh.composite.project_item_set_field": "board",
+    "gh.composite.sub_issue_add": "issues",
+}
+
+# Governance posture per op: reads are safe, the three writes are caution;
+# none floors to requires_approval (board-hygiene writes -- see _board /
+# _sub_issues module docstrings).
+_EXPECTED_SAFETY_BY_OP: dict[str, str] = {
+    "gh.composite.pr_status_summary": "safe",
+    "gh.composite.project_view": "safe",
+    "gh.composite.project_item_add": "caution",
+    "gh.composite.project_item_set_field": "caution",
+    "gh.composite.sub_issue_add": "caution",
 }
 
 
@@ -104,10 +140,10 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 @pytest.mark.asyncio
-async def test_register_github_composite_operations_inserts_pr_status_summary(
+async def test_register_github_composite_operations_inserts_all_composites(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """The registrar lands ``gh.composite.pr_status_summary`` in ``endpoint_descriptor``."""
+    """The registrar lands every gh-rest composite (pr-status + board + sub-issue)."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -121,7 +157,7 @@ async def test_register_github_composite_operations_inserts_pr_status_summary(
             .all()
         )
     assert {row.op_id for row in rows} == set(_EXPECTED_OP_IDS)
-    assert stub_embedding_service.encode_one.call_count == 1
+    assert stub_embedding_service.encode_one.call_count == len(_EXPECTED_OP_IDS)
 
 
 @pytest.mark.asyncio
@@ -289,10 +325,10 @@ async def test_tags_include_composite_and_read_only(
 async def test_register_github_composite_operations_is_idempotent(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 1 row persists; embedding stays at 1 (skip-re-embed)."""
+    """Running the registrar twice -> N rows persist; embeddings stay at N (skip-re-embed)."""
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 1
+    assert first_count == len(_EXPECTED_OP_IDS)
 
     await register_github_composite_operations(embedding_service=stub_embedding_service)
     assert stub_embedding_service.encode_one.call_count == first_count, (
@@ -310,7 +346,7 @@ async def test_register_github_composite_operations_is_idempotent(
             .scalars()
             .all()
         )
-    assert len(rows) == 1
+    assert len(rows) == len(_EXPECTED_OP_IDS)
 
 
 # ---------------------------------------------------------------------------
@@ -379,3 +415,146 @@ def test_handler_is_module_level_coroutine_function() -> None:
     assert inspect.iscoroutinefunction(pr_status_summary_composite)
     assert "<locals>" not in pr_status_summary_composite.__qualname__
     assert pr_status_summary_composite.__qualname__ != "<lambda>"
+
+
+# ---------------------------------------------------------------------------
+# #2081 board (Projects-v2) + sub-issue composites
+# ---------------------------------------------------------------------------
+
+_NEW_OP_IDS: tuple[str, ...] = (
+    "gh.composite.project_view",
+    "gh.composite.project_item_add",
+    "gh.composite.project_item_set_field",
+    "gh.composite.sub_issue_add",
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op_id", _NEW_OP_IDS)
+async def test_new_composite_registers_with_expected_posture(
+    op_id: str,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Each #2081 composite lands as a ``composite`` row with the right posture (AC #1/#2/#3).
+
+    Asserts the descriptor is present (so ``list_operations`` / meta-tools
+    surface it), routed to the expected group, carries the canonical
+    module-level ``handler_ref``, the documented ``safety_level``, and
+    ``requires_approval=False`` -- the board-hygiene write posture.
+    """
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        descriptor = (
+            await fresh.execute(select(EndpointDescriptor).where(EndpointDescriptor.op_id == op_id))
+        ).scalar_one()
+        group = (
+            await fresh.execute(
+                select(OperationGroup).where(OperationGroup.id == descriptor.group_id)
+            )
+        ).scalar_one()
+    assert descriptor.source_kind == "composite"
+    assert descriptor.tenant_id is None
+    assert descriptor.is_enabled is True
+    assert descriptor.product == "gh"
+    assert descriptor.version == "3"
+    assert descriptor.impl_id == "gh-rest"
+    assert descriptor.handler_ref == _EXPECTED_HANDLER_REF_BY_OP[op_id]
+    assert descriptor.safety_level == _EXPECTED_SAFETY_BY_OP[op_id]
+    assert descriptor.requires_approval is False
+    assert group.group_key == _EXPECTED_GROUP_KEY_BY_OP[op_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("group_key", "op_id"),
+    [("board", "gh.composite.project_view"), ("issues", "gh.composite.sub_issue_add")],
+)
+async def test_new_groups_created_with_when_to_use(
+    group_key: str,
+    op_id: str,
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The ``board`` and ``issues`` groups are created with a curated ``when_to_use`` (AC #3).
+
+    ``list_operation_groups`` surfaces ``when_to_use`` verbatim so an LLM
+    client can pick the right group before ``search_operations`` -- a
+    missing / placeholder blurb would defeat the group selector.
+    """
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        group = (
+            await fresh.execute(
+                select(OperationGroup).where(
+                    OperationGroup.group_key == group_key,
+                    OperationGroup.product == "gh",
+                    OperationGroup.impl_id == "gh-rest",
+                )
+            )
+        ).scalar_one()
+    assert group.review_status == "enabled"
+    assert isinstance(group.when_to_use, str) and group.when_to_use.strip()
+
+
+@pytest.mark.asyncio
+async def test_projectv2_and_sub_issue_ops_carry_discovery_tags(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Board ops tag ``projectv2``; the sub-issue op tags ``sub_issue`` (searchable surface)."""
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = {
+            row.op_id: row
+            for row in (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_NEW_OP_IDS))
+                )
+            )
+            .scalars()
+            .all()
+        }
+    assert "projectv2" in rows["gh.composite.project_item_add"].tags
+    assert "projectv2" in rows["gh.composite.project_item_set_field"].tags
+    assert "projectv2" in rows["gh.composite.project_view"].tags
+    assert "sub_issue" in rows["gh.composite.sub_issue_add"].tags
+
+
+@pytest.mark.asyncio
+async def test_new_ops_persist_additional_properties_false_params(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """Each #2081 composite's parameter schema round-trips with ``additionalProperties:false``."""
+    await register_github_composite_operations(embedding_service=stub_embedding_service)
+    sessionmaker = get_sessionmaker()
+    async with sessionmaker() as fresh:
+        rows = {
+            row.op_id: row
+            for row in (
+                await fresh.execute(
+                    select(EndpointDescriptor).where(EndpointDescriptor.op_id.in_(_NEW_OP_IDS))
+                )
+            )
+            .scalars()
+            .all()
+        }
+    for op_id in _NEW_OP_IDS:
+        schema = dict(rows[op_id].parameter_schema)
+        assert schema["additionalProperties"] is False, op_id
+        assert schema["required"], op_id
+
+
+def test_new_handlers_are_module_level_coroutines() -> None:
+    """The #2081 handlers are module-level ``async def`` -- no closures / lambdas / partials."""
+    import inspect
+
+    for handler in (
+        project_view_composite,
+        project_item_add_composite,
+        project_item_set_field_composite,
+        sub_issue_add_composite,
+    ):
+        assert inspect.iscoroutinefunction(handler), handler
+        assert "<locals>" not in handler.__qualname__, handler
+        assert handler.__qualname__ != "<lambda>", handler

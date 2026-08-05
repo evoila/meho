@@ -27,9 +27,9 @@ multiple L2 sub-ops into one governed call. T4 ships the first one,
 `backend/src/meho_backplane/connectors/vmware_rest/composites/`:
 
 - **`composites/_register.py`** — `_COMPOSITES` tuple and the
-  `register_github_composite_operations` async registrar. T4 ships
-  exactly one row; future T7+ Tasks add `release_health`,
-  `board_snapshot`, etc., on the same pattern.
+  `register_github_composite_operations` async registrar. T4 shipped one
+  row (`pr_status_summary`); #2081 adds four more (the board + sub-issue
+  composites — see below), all on the same pattern.
 - **`composites/_read.py`** — module-level `async def` handlers. The
   handler `pr_status_summary_composite` declares a `connector` parameter
   and issues its three reads through the resolved `GitHubRestConnector`'s
@@ -99,6 +99,73 @@ than xfail-strict. (The separate T3 catalog-ingest parser dependency —
 the G0.7 OpenAPI parser not inlining `#/components/responses/*` refs —
 still applies to the ~700 ingested L2 ops, but is orthogonal to this
 composite now that it reads through the session directly.)
+
+### Board (Projects-v2) + sub-issue composites (#2081)
+
+`#2081` adds four composites so an agent can file a **board-complete
+ticket** through MEHO — create issue → add to a Projects-v2 board → set
+its Status/Priority field → link a sub-issue — without dropping to the
+`gh` CLI. All four use the same #2255 direct-session substrate (declare a
+`connector` parameter, call the connector's own session, no
+`endpoint_descriptor` lookup), so they work on a fresh deploy with zero
+gh catalog ingest.
+
+- **`composites/_graphql.py`** — shared GraphQL transport. GitHub's
+  Projects-v2 surface is GraphQL-only, so the board composites POST
+  documents to `/graphql` via `connector._post_json`. GitHub returns
+  **HTTP 200 even on query errors** (a bad node id / missing scope comes
+  back as `200` with a non-empty `errors` array), which
+  `raise_for_status` cannot catch; `github_graphql()` inspects the parsed
+  body, raises `GitHubGraphQlError` on `errors` (or missing `data`), and
+  returns the unwrapped `data`. Every dynamic value rides the GraphQL
+  `variables` map (injection-safe); only the `organization`/`user` root
+  selector is composed from a closed literal map keyed off the validated
+  `owner_type` enum.
+- **`composites/_board.py`** — the three `board`-group composites:
+  - `gh.composite.project_view` (read) — one GraphQL round-trip returns
+    the board's node id, its fields (single-select fields carry their
+    `options {id name}`), and its items. This is the ergonomic linchpin:
+    it hands back the `project_id` / `field_id` / `option_id` node ids the
+    two writes consume, so an agent never shells out to `gh project` to
+    discover them.
+  - `gh.composite.project_item_add` (write) — `addProjectV2ItemById`.
+  - `gh.composite.project_item_set_field` (write) —
+    `updateProjectV2ItemFieldValue` with a `singleSelectOptionId` value.
+- **`composites/_sub_issues.py`** — the one `issues`-group composite,
+  `gh.composite.sub_issue_add` (write), wrapping
+  `POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`.
+  **`sub_issue_id` is the child's database `id`, not its issue number** —
+  the REST create-issue response carries that id; passing the number is
+  the obvious mistake, so the schema and docstring both call it out. The
+  sub-issue must share the parent's repository owner.
+
+**Governance posture.** `project_view` is `safety_level="safe"`; the
+three writes are `safety_level="caution"`, all four
+`requires_approval=False`. Adding a card to a board / setting a status
+field / linking a sub-issue are low-blast-radius, reversible
+board-hygiene mutations — honestly a write, but not `dangerous` like the
+vmware VM-delete composites. Each is a **single** logical mutation, so
+the composite is the reviewed unit: the dispatcher runs `policy_gate`
+against the composite's own descriptor before invoking the handler, which
+fully governs the one write it performs. Unlike the multi-write vmware
+composites there is no heterogeneous internal write sub-op to protect, so
+these do **not** call `enforce_subop_policy` (that seam re-gates
+*additional* writes a direct-session composite fans out to). Under this
+posture a human/service operator auto-executes a board write
+(board-complete filing without a `gh` CLI fallback), while an agent
+principal routes to the approval queue via the `caution` safety default —
+exactly the governance a raw CLI fallback would bypass.
+
+**End-to-end acceptance.**
+`backend/tests/test_github_board_composite_flow.py` drives the full
+create → add-to-board → set-Status → link-sub-issue sequence against one
+shared connector-session stub (deterministic, runs in the default unit
+lane), asserting the board node id threads from `project_view` into the
+add + set-field mutations and that the sub-issue link uses the child's
+database id rather than its number. Per-handler unit tests live in
+`test_connectors_github_composites_board.py` /
+`test_connectors_github_composites_sub_issues.py`; registration/posture
+assertions are in `test_connectors_github_composites_register.py`.
 
 ## Key types
 

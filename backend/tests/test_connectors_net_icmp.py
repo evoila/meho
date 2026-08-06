@@ -161,7 +161,12 @@ async def test_empty_allowlist_refuses_before_socket(
     monkeypatch: pytest.MonkeyPatch,
     _registered_icmp_ops: None,
 ) -> None:
-    """Empty allowlist ⇒ structured refusal with no socket ever created."""
+    """Empty allowlist ⇒ a dispatch error with no socket ever created.
+
+    #2784: the refusal is classified as ``connector_probe_refused``, not
+    folded into the return-failures contract — no socket opened, so there
+    is no reachability observation to report.
+    """
 
     def _boom(*_a: object, **_kw: object) -> object:
         raise AssertionError("socket must not open when the probe is refused")
@@ -169,10 +174,12 @@ async def test_empty_allowlist_refuses_before_socket(
     monkeypatch.setattr(icmp.socket, "socket", _boom)
 
     result = await _dispatch(op_id, params)
-    assert result.status == "ok", result.error
-    assert result.result["reason"] == "not_in_probe_allowlist"
-    # No op crashed into a connector error.
-    assert result.extras.get("exception_class") is None
+    assert result.status == "error"
+    assert result.result is None
+    assert result.extras["error_code"] == "connector_probe_refused"
+    assert result.extras["host"] == "10.1.2.3"
+    # Classified, not flattened into the generic connector_error arm.
+    assert result.extras["exception_class"] == "ProbeNotAllowedError"
 
 
 # ---------------------------------------------------------------------------

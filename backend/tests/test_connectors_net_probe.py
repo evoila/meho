@@ -217,10 +217,13 @@ async def test_empty_allowlist_refuses_before_any_socket_opens(
     monkeypatch: pytest.MonkeyPatch,
     _registered_net_probe_op: None,
 ) -> None:
-    """Empty ``MEHO_NETDIAG_PROBE_ALLOWLIST`` ⇒ structured refusal, no socket.
+    """Empty ``MEHO_NETDIAG_PROBE_ALLOWLIST`` ⇒ dispatch error, no socket.
 
     ``asyncio.open_connection`` is monkeypatched to fail the test if it
-    is ever called — proving the refusal happens before the socket.
+    is ever called — proving the refusal happens before the socket. #2784:
+    the refusal is a ``connector_probe_refused`` **error**, never a
+    reading-shaped ``connected=false`` payload a Sensor would read as a
+    down host.
     """
 
     async def _boom(*_a: object, **_kw: object) -> object:
@@ -230,14 +233,19 @@ async def test_empty_allowlist_refuses_before_any_socket_opens(
 
     result = await _dispatch_check({"host": "10.1.2.3", "port": 5432})
 
-    assert result.status == "ok", result.error
-    assert result.result == {
-        "connected": False,
-        "reason": "not_in_probe_allowlist",
-        "latency_ms": None,
-        "host": "10.1.2.3",
-        "port": 5432,
-    }
+    assert result.status == "error"
+    assert result.result is None
+    assert result.extras["error_code"] == "connector_probe_refused"
+    assert result.extras["allowlist_env"] == PROBE_ALLOWLIST_ENV
+    assert result.extras["host"] == "10.1.2.3"
+    assert result.extras["exception_class"] == "ProbeNotAllowedError"
+    # The operator-facing summary names the env var + the remediation, and
+    # never echoes the destination (no internal-topology oracle).
+    assert result.error is not None
+    assert result.error.startswith("connector_probe_refused: ")
+    assert PROBE_ALLOWLIST_ENV in result.error
+    assert "netdiag.probeAllowlist" in result.error
+    assert "10.1.2.3" not in result.error
 
 
 async def test_host_outside_a_nonempty_allowlist_is_refused(
@@ -247,9 +255,9 @@ async def test_host_outside_a_nonempty_allowlist_is_refused(
     """A non-empty allowlist still refuses a host it does not cover."""
     monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "10.0.0.0/8")
     result = await _dispatch_check({"host": "192.168.1.1", "port": 443})
-    assert result.status == "ok", result.error
-    assert result.result["connected"] is False
-    assert result.result["reason"] == "not_in_probe_allowlist"
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_probe_refused"
+    assert result.extras["host"] == "192.168.1.1"
 
 
 # ---------------------------------------------------------------------------

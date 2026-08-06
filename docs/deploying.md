@@ -336,7 +336,15 @@ each lives inline in
   *allow-only-what-is-listed* floor for the `net.*` diagnostics connector:
   the parsed set is the whole permitted probe space, so an empty value
   means **deny every probe** — the connector is inert until an operator
-  opts a range in.
+  opts a range in. A probe outside the list **fails the dispatch** with
+  `connector_probe_refused`, whose message names this env var and the
+  add-the-CIDR-or-hostname remediation; nothing is dialed, so it is not a
+  reachability answer. A Sensor on such a probe therefore reads `unknown`
+  (rolling up as `degraded`), never `critical` — so a narrowed or reverted
+  allowlist shows up as "MEHO can't tell", not as a phantom outage
+  (#2784). Widen the value here rather than reading the refusal as a down
+  host; see `docs/codebase/connectors-net-diagnostics.md` for the full
+  contract.
 - **`probes.startup`** — the first-boot startup probe (300s budget). Clear
   it to opt out on a fast cluster where op-catalog registration + fastembed
   preload finish inside the liveness `initialDelaySeconds`.

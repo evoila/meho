@@ -22,7 +22,12 @@ It reuses the three foundations the T1 keystone (``net.tcp_check``,
   the concern already noted at ``adapters/http.py:260``) halts the walk
   with a structured ``{"blocked_redirect": "<host>"}`` result; the
   redirect target is never dialed. ``MEHO_NETDIAG_PROBE_ALLOWLIST``
-  empty ⇒ every probe refused (the connector is inert).
+  empty ⇒ every probe refused (the connector is inert). The two
+  refusals are deliberately asymmetric (#2784): the **initial** host
+  being refused means nothing was dialed at all, so it propagates and
+  the dispatcher renders it as ``connector_probe_refused``; a refused
+  **redirect** hop keeps ``status="ok"`` with ``reachable=true``,
+  because the prior hop did answer — that is a real observation.
 * **Audit-visible URL** — the handler's return dict carries the literal
   requested ``url`` and the ``final_url`` actually reached (a URL is not
   a secret), so the durable audit row's ``raw_payload`` answers "who
@@ -147,9 +152,11 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "Null on a clean terminal response; otherwise a code: "
-                "not_in_probe_allowlist, invalid_url, blocked_redirect, "
-                "too_many_redirects, timeout, dns_failure, refused, "
-                "tls_error, unreachable."
+                "invalid_url, blocked_redirect, too_many_redirects, "
+                "timeout, dns_failure, refused, tls_error, unreachable. A "
+                "URL host outside MEHO_NETDIAG_PROBE_ALLOWLIST is not "
+                "reported here — it fails the dispatch with "
+                "connector_probe_refused."
             ),
         },
         "status": {
@@ -218,8 +225,8 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
                 "exception chain as innermost-first {type, message} "
                 "entries (bounded, each message truncated) — the "
                 "evidence behind the 'reason' code. Null on a clean "
-                "response or a pre-dial refusal (not_in_probe_allowlist "
-                "/ invalid_url). Never contains the response body."
+                "response or a pre-dial rejection (invalid_url). Never "
+                "contains the response body."
             ),
             "items": {
                 "type": "object",
@@ -263,7 +270,9 @@ _NET_HTTP_PROBE_WHEN_TO_USE = (
     "SHA-256), every redirect hop is re-checked against the probe "
     "allowlist before it is followed, and a failed/blocked probe is a "
     "normal result, not an error. The URL host must be inside "
-    "MEHO_NETDIAG_PROBE_ALLOWLIST."
+    "MEHO_NETDIAG_PROBE_ALLOWLIST; one that is not fails with "
+    "connector_probe_refused rather than reporting a (false) unreachable "
+    "URL."
 )
 
 _NET_HTTP_PROBE_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -288,10 +297,12 @@ _NET_HTTP_PROBE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "A redirect to a non-allowlisted host: reachable=true, "
         "reason='blocked_redirect', blocked_redirect=<host>, and the "
         "host is never dialed. A connection failure: reachable=false "
-        "with reason (timeout|dns_failure|refused|tls_error|unreachable "
-        "|not_in_probe_allowlist) plus error_detail (innermost-first "
-        "[{type, message}], bounded) as the evidence behind reason. "
-        "Every case is status=ok. Never a body."
+        "with reason (timeout|dns_failure|refused|tls_error|unreachable) "
+        "plus error_detail (innermost-first [{type, message}], bounded) as "
+        "the evidence behind reason. Every case is status=ok. Never a "
+        "body. A URL host outside MEHO_NETDIAG_PROBE_ALLOWLIST is NOT a "
+        "reading: the op fails with error_code='connector_probe_refused' "
+        "and nothing was dialed."
     ),
 }
 
@@ -697,12 +708,10 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
     if parsed.scheme not in ("http", "https") or not parsed.host:
         return _result(url=url, method=method, reachable=False, reason="invalid_url")
 
-    # Gate the initial host BEFORE any socket opens.
-    try:
-        assert_probe_allowed(parsed.host)
-    except ProbeNotAllowedError:
-        _log.info("net.http_probe.refused", host=parsed.host, reason="not_in_probe_allowlist")
-        return _result(url=url, method=method, reachable=False, reason="not_in_probe_allowlist")
+    # Gate the initial host BEFORE any socket opens. A refusal propagates
+    # (#2784): no request was issued, so there is no observation to report
+    # — the dispatcher renders it as ``connector_probe_refused``.
+    assert_probe_allowed(parsed.host)
 
     started = time.perf_counter()
     # Fresh client per call (NOT HttpConnector's per-target pool);

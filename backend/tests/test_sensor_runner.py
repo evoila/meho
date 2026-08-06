@@ -75,6 +75,8 @@ from meho_backplane.connectors._shared import credential_backend
 from meho_backplane.connectors._shared.gsm_creds import GcpSecretManagerBackend
 from meho_backplane.connectors._shared.vault_creds import load_basic_credentials
 from meho_backplane.connectors.base import Connector
+from meho_backplane.connectors.net.allowlist import PROBE_ALLOWLIST_ENV
+from meho_backplane.connectors.net.ops import register_net_typed_operations
 from meho_backplane.connectors.registry import clear_registry, register_connector_v2
 from meho_backplane.connectors.schemas import FingerprintResult, OperationResult, ProbeResult
 from meho_backplane.db.engine import get_sessionmaker
@@ -167,6 +169,9 @@ async def _create_interval_sensor(
     base: datetime | None = None,
     retry_times: int = 0,
     retry_backoff_seconds: int = 15,
+    connector_id: str = "vmware-rest-9.0",
+    op_id: str = "vmware.vm.list",
+    params: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     await _seed_tenant(tenant_id)
     sessionmaker = get_sessionmaker()
@@ -175,10 +180,10 @@ async def _create_interval_sensor(
             session,
             tenant_id=tenant_id,
             name=f"sensor-{uuid.uuid4().hex[:8]}",
-            connector_id="vmware-rest-9.0",
-            op_id="vmware.vm.list",
+            connector_id=connector_id,
+            op_id=op_id,
             target=None,
-            params={},
+            params=params if params is not None else {},
             assertion=assertion if assertion is not None else _OK_ASSERTION,
             cadence_kind=SensorCadenceKind.INTERVAL,
             interval_seconds=interval_seconds,
@@ -739,6 +744,69 @@ async def test_non_ok_dispatch_persists_unknown(
     assert row.last_evidence is not None
     assert row.last_evidence["dispatch_status"] == status
     assert row.last_evidence["reason"] == "dispatch_not_ok"
+
+
+@pytest.mark.asyncio
+async def test_netdiag_allowlist_refusal_persists_unknown_not_critical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe the allowlist refuses reads ``unknown``, never a false ``critical``.
+
+    The #2784 regression, end to end through the **real** dispatcher (no
+    monkeypatched ``dispatch``): a ``net.tcp_check`` sensor asserting on
+    ``$.connected`` against a host outside ``MEHO_NETDIAG_PROBE_ALLOWLIST``.
+
+    Before the fix the refusal came back ``status="ok"`` carrying
+    ``{"connected": false, "reason": "not_in_probe_allowlist"}``, the
+    ``BoolCompare`` mapped ``false`` to ``critical``, and the ``reason``
+    was dropped at the assertion select — so a reverted allowlist was
+    indistinguishable from a genuine outage. The refusal is now a
+    ``connector_probe_refused`` dispatch error, so the runner's existing
+    non-``ok`` mapping persists ``unknown`` with the allowlist named in
+    the stored evidence.
+
+    Uses TEST-NET-1 (RFC 5737 ``192.0.2.1``, the address from the incident
+    report). Nothing is dialed: the guard refuses before any socket opens.
+    """
+    # Unset ⇒ deny-all (the allowlist's inverted semantics). Pinned
+    # explicitly so an ambient value in the developer's shell cannot turn
+    # this into a real dial against TEST-NET-1.
+    monkeypatch.delenv(PROBE_ALLOWLIST_ENV, raising=False)
+    embedding = AsyncMock()
+    embedding.encode_one.return_value = [0.1] * 384
+    embedding.encode.return_value = [[0.1] * 384]
+    embedding.dimension = 384
+    await register_net_typed_operations(embedding_service=embedding)
+    reset_dispatcher_caches()
+
+    sensor_id = await _create_interval_sensor(
+        interval_seconds=300,
+        connector_id="net-probe-1.x",
+        op_id="net.tcp_check",
+        params={"host": "192.0.2.1", "port": 443},
+        assertion=AssertionSpec.model_validate(
+            {
+                "select": {"path": "$.connected"},
+                "compare": {"type": "bool", "expect": True},
+            }
+        ).model_dump(mode="json"),
+    )
+    await _force_due(sensor_id, datetime.now(UTC) - timedelta(seconds=1))
+
+    await run_one_sensor_tick()
+    await _drain_in_flight()
+
+    row = await _get_sensor(sensor_id)
+    assert row.last_state == "unknown"
+    assert row.last_state != "critical"
+    assert row.last_evidence is not None
+    assert row.last_evidence["reason"] == "dispatch_not_ok"
+    assert row.last_evidence["dispatch_status"] == "error"
+    # The stored evidence names the allowlist, so the dashboard answers
+    # "why" in one glance instead of showing a phantom down host.
+    dispatch_error = row.last_evidence["dispatch_error"]
+    assert "connector_probe_refused" in dispatch_error
+    assert PROBE_ALLOWLIST_ENV in dispatch_error
 
 
 @pytest.mark.asyncio

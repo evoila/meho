@@ -23,7 +23,9 @@ This op inherits the three T1 foundations verbatim:
 
 * **Probe allowlist** — :func:`~meho_backplane.connectors.net.allowlist.assert_probe_allowed`
   screens the dialed ``host`` *before* any socket opens
-  (``MEHO_NETDIAG_PROBE_ALLOWLIST`` empty ⇒ every probe refused).
+  (``MEHO_NETDIAG_PROBE_ALLOWLIST`` empty ⇒ every probe refused). A
+  refusal propagates to the dispatcher's ``connector_probe_refused``
+  arm (#2784) instead of being reported as a failed handshake.
 * **Audit-visible host:port** — the return dict carries the literal
   ``host``/``port``/``server_name`` (a host:port is not a secret), so the
   durable audit row's ``raw_payload`` answers "who inspected what".
@@ -50,15 +52,11 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-import structlog
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from OpenSSL import SSL
 
-from meho_backplane.connectors.net.allowlist import (
-    ProbeNotAllowedError,
-    assert_probe_allowed,
-)
+from meho_backplane.connectors.net.allowlist import assert_probe_allowed
 
 # Reuse the shared probe timeout bounds/clamp from the keystone module.
 # ``ops`` never imports ``tls`` (the __init__ queues each registrar
@@ -80,7 +78,6 @@ __all__ = [
     "register_net_tls_inspect_operation",
 ]
 
-_log = structlog.get_logger(__name__)
 
 NET_TLS_INSPECT_PARAMETER_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -174,8 +171,9 @@ _NET_TLS_INSPECT_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "Null on a completed handshake; otherwise a failure code: "
-                "not_in_probe_allowlist, timeout, refused, dns_failure, "
-                "unreachable, tls_error."
+                "timeout, refused, dns_failure, unreachable, tls_error. A "
+                "host outside MEHO_NETDIAG_PROBE_ALLOWLIST is not reported "
+                "here — it fails the dispatch with connector_probe_refused."
             ),
         },
         "host": {"type": "string", "description": "The dialed host (audit-visible)."},
@@ -255,7 +253,9 @@ _NET_TLS_INSPECT_WHEN_TO_USE = (
     "mismatched cert is inspected and reported, never rejected — the cert "
     "is the answer. A refused, timed-out, or non-TLS endpoint is a normal "
     "result, not an error. The destination must be inside "
-    "MEHO_NETDIAG_PROBE_ALLOWLIST."
+    "MEHO_NETDIAG_PROBE_ALLOWLIST; one that is not fails with "
+    "connector_probe_refused rather than reporting a (false) failed "
+    "handshake."
 )
 
 _NET_TLS_INSPECT_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -282,7 +282,9 @@ _NET_TLS_INSPECT_LLM_INSTRUCTIONS: dict[str, Any] = {
         "expired>, 'host', 'port', 'server_name'}. On a refused / "
         "timed-out / non-TLS endpoint: the same keys with handshake=false, "
         "reason set, chain=[], leaf=null and days_to_expiry=null — still a "
-        "successful (status=ok) op."
+        "successful (status=ok) op. A host outside "
+        "MEHO_NETDIAG_PROBE_ALLOWLIST is NOT a reading: the op fails with "
+        "error_code='connector_probe_refused' and no socket was opened."
     ),
 }
 
@@ -528,7 +530,10 @@ async def net_tls_inspect(
     ``chain_complete`` locally (the stack did not verify). A refused,
     timed-out, DNS-failed, or non-TLS endpoint returns ``handshake=false``
     with ``status="ok"`` (the return-failures contract); a self-signed /
-    expired / mismatched cert is **inspected**, never failed. The return
+    expired / mismatched cert is **inspected**, never failed. An allowlist
+    refusal is the exception (#2784): nothing was dialed, so
+    :exc:`ProbeNotAllowedError` propagates to the dispatcher's
+    ``connector_probe_refused`` arm. The return
     dict carries the literal ``host``/``port``/``server_name`` for the
     durable audit row.
     """
@@ -538,11 +543,7 @@ async def net_tls_inspect(
     server_name = raw_server_name or host
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
 
-    try:
-        assert_probe_allowed(host)
-    except ProbeNotAllowedError:
-        _log.info("net.tls_inspect.refused", host=host, port=port, reason="not_in_probe_allowlist")
-        return _failure(host, port, server_name, "not_in_probe_allowlist")
+    assert_probe_allowed(host)
 
     try:
         chain, protocol, cipher = await asyncio.to_thread(
@@ -611,7 +612,8 @@ async def register_net_tls_inspect_operation(
             "-showcerts' parity. A self-signed / expired / mismatched cert "
             "is inspected and reported, never rejected. The destination "
             "must be inside MEHO_NETDIAG_PROBE_ALLOWLIST or the probe is "
-            "refused before any socket opens. A refused, timed-out, or "
+            "refused before any socket opens, which fails the dispatch "
+            "with connector_probe_refused. A refused-by-peer, timed-out, or "
             "non-TLS endpoint returns handshake=false with a reason code "
             "and status=ok — a failed handshake is the product, never a "
             "connector error."

@@ -2,8 +2,9 @@
 # Copyright (c) 2026 evoila Group
 # code-quality-allow: file-size — pre-existing builder-collection debt (>800
 # lines on main before #1782, which adds only the connector_tls_verify_failed
-# builder alongside its 403/422 siblings); a split into per-error modules is its
-# own refactor task, out of scope for the TLS-verify error-arm.
+# builder alongside its 403/422 siblings; #2784 likewise adds only the
+# connector_probe_refused builder); a split into per-error modules is its
+# own refactor task, out of scope for either error-arm.
 
 """Structured :class:`OperationResult` builders for the G0.6 dispatcher.
 
@@ -19,7 +20,8 @@ Each builder owns one ``error_code`` from the contract documented in
 ``awaiting_approval`` / ``connector_unsupported`` /
 ``connector_http_403`` / ``connector_http_422`` /
 ``connector_auth_failed`` / ``connector_tls_verify_failed`` /
-``connector_vault_forbidden`` / ``connector_error``.
+``connector_vault_forbidden`` / ``connector_probe_refused`` /
+``connector_error``.
 The ``status`` field maps
 to ``OperationResult.status``; the ``error_code`` lives in ``extras``
 so callers can both string-match the ``error`` field
@@ -31,6 +33,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Any, Literal
 
 import httpx
@@ -49,6 +52,7 @@ __all__ = [
     "result_connector_error",
     "result_connector_http_403",
     "result_connector_http_422",
+    "result_connector_probe_refused",
     "result_connector_tls_verify_failed",
     "result_connector_unsupported",
     "result_connector_vault_forbidden",
@@ -531,6 +535,114 @@ def result_connector_error(
         error=f"connector_error: {type(exc).__name__}",
         duration_ms=duration_ms,
         extras=extras,
+    )
+
+
+@lru_cache(maxsize=1)
+def _probe_refused_error_type() -> type[BaseException] | None:
+    """Resolve ``ProbeNotAllowedError`` lazily, or ``None`` if unresolvable.
+
+    The import is deferred (and cached) on purpose. ``connectors.net``'s
+    package ``__init__`` queues every ``net.*`` registrar, which drags in
+    dnspython / pyOpenSSL / httpx *and* ``operations.typed_register`` — so
+    importing it at this module's scope would both weigh the dispatcher's
+    import graph down and close an import cycle back through
+    ``operations/__init__``. By the time an exception needs classifying the
+    connector package is already in ``sys.modules``, so the deferred import
+    is a dict hit.
+
+    Returning ``None`` on failure keeps the dispatcher's never-raises
+    contract intact: a broken connector package must not turn a
+    classifiable error into a crash inside the error path itself.
+    """
+    try:
+        from meho_backplane.connectors.net.allowlist import ProbeNotAllowedError
+    except Exception:  # pragma: no cover -- the package is a runtime dependency
+        return None
+    return ProbeNotAllowedError
+
+
+def is_probe_refused(exc: BaseException) -> bool:
+    """Whether *exc* is a ``net.*`` probe-allowlist refusal (#2784).
+
+    The single source of truth for the narrowing the dispatcher's generic
+    ``except Exception`` arm applies before falling through to
+    :func:`result_connector_error`, mirroring :func:`is_auth_failed_status`'s
+    role for the auth-class statuses. Type-based, not message-based —
+    ``ProbeNotAllowedError`` subclasses :class:`ValueError`, which no earlier
+    dispatcher arm catches.
+    """
+    exc_type = _probe_refused_error_type()
+    return exc_type is not None and isinstance(exc, exc_type)
+
+
+def result_connector_probe_refused(
+    op_id: str,
+    exc: BaseException,
+    duration_ms: float,
+) -> OperationResult:
+    """A ``net.*`` probe was refused by ``MEHO_NETDIAG_PROBE_ALLOWLIST``.
+
+    #2784, the probe-policy sibling of :func:`result_connector_unsupported`
+    (#1627) and :func:`result_connector_vault_forbidden` (#2091): a
+    deliberate "I was blocked from doing this", not an unforeseen crash.
+
+    Before #2784 the ``net.*`` handlers folded a refusal into their
+    return-failures contract — ``{"connected": false, "reason":
+    "not_in_probe_allowlist", ...}`` with ``status="ok"`` — which is
+    reading-shaped output for a probe that never opened a socket. A Sensor
+    asserting on ``$.connected`` therefore read ``false`` and flipped
+    ``critical``, indistinguishable from a genuine outage; a redeploy that
+    reverted the allowlist paged as an 11-hour fleet outage. The refusal now
+    fails the dispatch instead, so the check-runner's existing non-``ok``
+    mapping lands the sensor in ``unknown`` with the cause in its evidence —
+    the same truthful "I can't tell" a denied Vault credential read yields.
+
+    The operator-facing summary names the env var (the operator's own
+    configuration value, not infrastructure topology), states that no probe
+    ran so the result is not a reachability answer, carries the
+    add-the-range-or-hostname remediation plus the chart key that renders
+    it, and cites the two convention docs. It deliberately stays
+    **address-free**: the allowlist's raise sites never echo a destination,
+    keeping the guard from becoming an internal-topology oracle. The
+    caller's own destination string rides ``extras["host"]`` instead, which
+    preserves the connector's audit-visible-host foundation on the durable
+    error row (#2680 threads ``extras`` into ``audit_log.payload``) now that
+    a refusal writes no ``raw_payload``.
+    """
+    # Deferred like :func:`_probe_refused_error_type` (same cycle + weight
+    # argument); single-sourced from the allowlist module so the env-var
+    # name cannot drift between the guard and this message.
+    from meho_backplane.connectors.net.allowlist import PROBE_ALLOWLIST_ENV
+
+    detail = _sanitize_free_text(str(exc))
+    raw_host = getattr(exc, "host", None)
+    host = _sanitize_free_text(raw_host) if isinstance(raw_host, str) and raw_host else None
+    summary = (
+        f"connector_probe_refused: {PROBE_ALLOWLIST_ENV} refused this probe "
+        f"destination, so no socket was opened and this is NOT a reachability "
+        f"answer. Add the destination's CIDR range (or its hostname verbatim) "
+        f"to {PROBE_ALLOWLIST_ENV} — rendered from the chart value "
+        f"netdiag.probeAllowlist on a Helm deploy — and retry; an empty value "
+        f"denies every probe, leaving the net.* connector inert. See "
+        f"docs/codebase/connectors-net-diagnostics.md for the allowlist "
+        f"semantics and docs/codebase/error-message-shape.md for the dispatch "
+        f"error convention."
+    )
+    if detail:
+        summary = f"{summary} Allowlist said: {detail}"
+    return OperationResult(
+        status="error",
+        op_id=op_id,
+        error=summary,
+        duration_ms=duration_ms,
+        extras={
+            "error_code": "connector_probe_refused",
+            "allowlist_env": PROBE_ALLOWLIST_ENV,
+            "host": host,
+            "detail": detail,
+            "exception_class": type(exc).__name__,
+        },
     )
 
 

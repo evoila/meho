@@ -217,6 +217,23 @@ Each surface carries the four verbs — `list` / `create` / `delete` plus the
   `unknown` forever. That is the expected shape on a Vault deploy; on a
   `credentialBackend=gsm` deploy using per-operator WIF it is the failure
   mode `checkRunner.*` exists to fix (see `docs/deploying.md` § GSM).
+- **A connector that refuses to execute must fail the dispatch, not
+  return a reading.** The runner synthesizes only `unknown`, so a
+  connector that answers `status="ok"` with a plausible-looking payload
+  for work it never did makes the sensor state a lie. `net.*` shipped
+  exactly that shape: a probe outside `MEHO_NETDIAG_PROBE_ALLOWLIST`
+  returned `{"connected": false, "reason": "not_in_probe_allowlist"}`
+  with `status="ok"`, so `$.connected` read `false` and the sensor
+  flipped `critical` — indistinguishable from a genuine outage, with the
+  `reason` dropped at the assertion select. Fixed connector-side in
+  #2784 (the refusal is now the `connector_probe_refused` dispatch
+  error, which lands here as `unknown` / `reason: dispatch_not_ok`), but
+  the general hazard is a **connector contract** the checks layer cannot
+  detect: assertion evidence is `{path, aggregate, comparator, expect,
+  observed}` and carries no sibling fields from the payload, so a
+  reading-shaped refusal has no in-band way to announce itself. See
+  `docs/codebase/connectors-net-diagnostics.md` § *Refusal is a dispatch
+  error, not a reading*.
 - The safe-only guard's descriptor read and the insert are in separate
   sessions (a TOCTOU window); acceptable because the dispatch-time policy
   gate is the real boundary.

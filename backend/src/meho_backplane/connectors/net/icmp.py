@@ -9,7 +9,10 @@ These three ops complete local-tool parity (``ping`` / ``traceroute`` /
 diagnosis. They ride the T1 keystone (#2406) foundations verbatim — the
 probe allowlist, the audit-visible host, and the return-failures
 contract — in the ``secret.*`` synthetic-connector mold (no ``Connector``
-class, module-level handlers dispatched with ``target=None``).
+class, module-level handlers dispatched with ``target=None``). As of
+#2784 an allowlist refusal is *not* folded into the return-failures
+contract: nothing was dialed, so it propagates and the dispatcher
+classifies it as ``connector_probe_refused``.
 
 The load-bearing property of this cohort is its **pod-security posture**
 (resolved 2026-07-12, unprivileged + graceful-degrade). Reading ICMP
@@ -60,12 +63,7 @@ import struct
 import time
 from typing import TYPE_CHECKING, Any, Final
 
-import structlog
-
-from meho_backplane.connectors.net.allowlist import (
-    ProbeNotAllowedError,
-    assert_probe_allowed,
-)
+from meho_backplane.connectors.net.allowlist import assert_probe_allowed
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -82,7 +80,6 @@ __all__ = [
     "register_net_icmp_operations",
 ]
 
-_log = structlog.get_logger(__name__)
 
 # --- Linux socket ABI constants (not exposed by stdlib ``socket``) ---------
 # Values from linux/in.h, linux/errqueue.h, linux/icmp.h. Stable kernel
@@ -477,10 +474,11 @@ def _path_mtu_unavailable(host: str, port: int) -> dict[str, Any]:
 async def net_ping(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Measure ICMP-echo reachability + RTT to ``host`` (op-id ``net.ping``).
 
-    Screens ``host`` against the probe allowlist, then runs the
-    unprivileged ICMP-datagram probe off the event loop. Where the pod's
-    GID is outside ``net.ipv4.ping_group_range`` the socket cannot open
-    and the op returns ``available=false`` with reason
+    Screens ``host`` against the probe allowlist (a refusal propagates to
+    the dispatcher's ``connector_probe_refused`` arm — #2784), then runs
+    the unprivileged ICMP-datagram probe off the event loop. Where the
+    pod's GID is outside ``net.ipv4.ping_group_range`` the socket cannot
+    open and the op returns ``available=false`` with reason
     ``icmp_echo_unprivileged_unavailable`` (``status="ok"``) rather than
     crashing — a graceful degrade, not a ``connector_*`` error.
     """
@@ -488,13 +486,7 @@ async def net_ping(operator: Operator, target: Any, params: dict[str, Any]) -> d
     count = _clamp_int(params.get("count"), _DEFAULT_PROBE_COUNT, 1, _MAX_PROBE_COUNT)
     timeout = _clamp_float(params.get("timeout_seconds"), _DEFAULT_PING_TIMEOUT, _MAX_PING_TIMEOUT)
 
-    try:
-        assert_probe_allowed(host)
-    except ProbeNotAllowedError:
-        _log.info("net.ping.refused", host=host, reason="not_in_probe_allowlist")
-        result = _ping_unavailable(host)
-        result["reason"] = "not_in_probe_allowlist"
-        return result
+    assert_probe_allowed(host)
 
     return await asyncio.to_thread(_blocking_ping, host, count, timeout)
 
@@ -502,7 +494,8 @@ async def net_ping(operator: Operator, target: Any, params: dict[str, Any]) -> d
 async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Trace the hop path to ``host`` (op-id ``net.trace``).
 
-    Screens ``host`` against the probe allowlist, then walks the path with
+    Screens ``host`` against the probe allowlist (a refusal propagates to
+    the dispatcher's ``connector_probe_refused`` arm — #2784), then walks the path with
     increasing TTL off the event loop, reading ICMP TimeExceeded /
     DestUnreachable via the unprivileged ``IP_RECVERR`` error queue — no
     pod capability required. Each hop reports ``address`` (``null`` for a
@@ -515,13 +508,7 @@ async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> 
         params.get("hop_timeout_seconds"), _DEFAULT_HOP_TIMEOUT, _MAX_HOP_TIMEOUT
     )
 
-    try:
-        assert_probe_allowed(host)
-    except ProbeNotAllowedError:
-        _log.info("net.trace.refused", host=host, reason="not_in_probe_allowlist")
-        result = _trace_unavailable(host, port)
-        result["reason"] = "not_in_probe_allowlist"
-        return result
+    assert_probe_allowed(host)
 
     return await asyncio.to_thread(_blocking_trace, host, port, max_hops, hop_timeout)
 
@@ -529,7 +516,8 @@ async def net_trace(operator: Operator, target: Any, params: dict[str, Any]) -> 
 async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) -> dict[str, Any]:
     """Discover the largest unfragmented packet to ``host`` (``net.path_mtu``).
 
-    Screens ``host`` against the probe allowlist, then runs the
+    Screens ``host`` against the probe allowlist (a refusal propagates to
+    the dispatcher's ``connector_probe_refused`` arm — #2784), then runs the
     unprivileged DF-probe PMTU discovery off the event loop (``IP_RECVERR``
     + ``IP_PMTUDISC_DO``, next-hop MTU read from ``getsockopt(IP_MTU)``) —
     no pod capability required. Returns the discovered ``mtu`` in bytes.
@@ -538,13 +526,7 @@ async def net_path_mtu(operator: Operator, target: Any, params: dict[str, Any]) 
     port = _clamp_int(params.get("port"), _DEFAULT_TRACE_PORT, 1, 65535)
     timeout = _clamp_float(params.get("timeout_seconds"), _DEFAULT_PING_TIMEOUT, _MAX_HOP_TIMEOUT)
 
-    try:
-        assert_probe_allowed(host)
-    except ProbeNotAllowedError:
-        _log.info("net.path_mtu.refused", host=host, reason="not_in_probe_allowlist")
-        result = _path_mtu_unavailable(host, port)
-        result["reason"] = "not_in_probe_allowlist"
-        return result
+    assert_probe_allowed(host)
 
     return await asyncio.to_thread(_blocking_path_mtu, host, port, timeout)
 
@@ -660,8 +642,10 @@ _NET_PING_RESPONSE_SCHEMA: dict[str, Any] = {
         "reason": {
             "type": ["string", "null"],
             "description": (
-                "Null on success; otherwise not_in_probe_allowlist, timeout, "
-                "or icmp_echo_unprivileged_unavailable."
+                "Null on success; otherwise timeout or "
+                "icmp_echo_unprivileged_unavailable. A host outside "
+                "MEHO_NETDIAG_PROBE_ALLOWLIST is not reported here — it "
+                "fails the dispatch with connector_probe_refused."
             ),
         },
         "packets_sent": {"type": "integer", "description": "Echo requests sent."},
@@ -713,8 +697,10 @@ _NET_TRACE_RESPONSE_SCHEMA: dict[str, Any] = {
         "reason": {
             "type": ["string", "null"],
             "description": (
-                "Null on a completed walk; else not_in_probe_allowlist / "
-                "trace_mechanism_unavailable."
+                "Null on a completed walk; else "
+                "trace_mechanism_unavailable. A host outside "
+                "MEHO_NETDIAG_PROBE_ALLOWLIST is not reported here — it "
+                "fails the dispatch with connector_probe_refused."
             ),
         },
         "reached": {"type": "boolean", "description": "True iff a hop was the destination host."},
@@ -744,8 +730,10 @@ _NET_PATH_MTU_RESPONSE_SCHEMA: dict[str, Any] = {
         "reason": {
             "type": ["string", "null"],
             "description": (
-                "Null on success; else not_in_probe_allowlist / "
-                "path_mtu_mechanism_unavailable / no_path_mtu."
+                "Null on success; else path_mtu_mechanism_unavailable / "
+                "no_path_mtu. A host outside MEHO_NETDIAG_PROBE_ALLOWLIST "
+                "is not reported here — it fails the dispatch with "
+                "connector_probe_refused."
             ),
         },
         "host": {"type": "string", "description": "The probed host (audit-visible)."},

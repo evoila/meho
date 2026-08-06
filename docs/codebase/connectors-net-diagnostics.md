@@ -35,7 +35,8 @@ parallel task branches from colliding on one shared file.
 `net.tcp_check(host, port, timeout_seconds?)`:
 
 1. screens `host` against the probe allowlist (`assert_probe_allowed`)
-   **before** any socket opens;
+   **before** any socket opens — a refusal fails the dispatch with
+   `connector_probe_refused` (#2784), it is not a reading;
 2. `asyncio.open_connection(host, port)` under `asyncio.wait_for` with a
    bounded timeout;
 3. measures the connect latency and closes the connection immediately;
@@ -80,8 +81,10 @@ and `dig +trace` are out of scope, #2409).
 through `assert_probe_allowed` before any query (a hostname matched
 verbatim, an IP by range), and a custom `resolver` IP is gated the same
 way — querying an internal resolver or resolving internal names is itself
-mild recon. Both must be allowlisted or the lookup is refused with
-`reason="not_in_probe_allowlist"`.
+mild recon. Both must be allowlisted; either being unlisted fails the
+dispatch with `connector_probe_refused` (no query is sent, so there is no
+`resolved=false` reading to report — see *Refusal is a dispatch error*
+below).
 
 **Return-failures:** `NXDOMAIN` / `NoAnswer` / `NoNameservers` (SERVFAIL)
 / `dns.exception.Timeout` map to `{resolved: false, reason:
@@ -138,14 +141,62 @@ the literal `host`/`port` in its return value so the durable row answers
 
 ### 3. Return-failures contract
 
-A refused, timed-out, or DNS-failed connect is the **product**, not an
-error. The handler catches `asyncio.TimeoutError` / `socket.gaierror` /
-`ConnectionRefusedError` / `OSError` and returns
+A refused-by-peer, timed-out, or DNS-failed connect is the **product**,
+not an error. The handler catches `asyncio.TimeoutError` /
+`socket.gaierror` / `ConnectionRefusedError` / `OSError` and returns
 `{"connected": false, "reason": <code>, "latency_ms": null, host, port}`
 with the dispatch `status="ok"`. It never raises a `connector_*` error
 for a failed connection — only an unexpected bug would propagate. Reason
-codes: `not_in_probe_allowlist`, `timeout`, `refused`, `dns_failure`,
-`unreachable`. This is the shared mold T2–T4 follow.
+codes: `timeout`, `refused`, `dns_failure`, `unreachable`. This is the
+shared mold T2–T4 follow.
+
+The contract covers probes that **ran**. See the next section for the
+one case it deliberately excludes.
+
+### Refusal is a dispatch error, not a reading (#2784)
+
+An allowlist refusal is **not** part of the return-failures contract. The
+contract's rationale is "a failed probe is the product"; a probe the
+allowlist refused never opened a socket, so it produced no product.
+`ProbeNotAllowedError` therefore **propagates** out of every `net.*`
+handler and the dispatcher classifies it as the structured
+`connector_probe_refused` error (the `connector_vault_forbidden` /
+`connector_unsupported` mould — `operations/_errors.py`,
+`is_probe_refused` + `result_connector_probe_refused`). The reason code
+`not_in_probe_allowlist` no longer exists on any `net.*` response.
+
+Why it matters, and the incident that forced it: the refusal used to
+return `status="ok"` with `{"connected": false, "reason":
+"not_in_probe_allowlist"}`. A Sensor asserting on `$.connected` reads a
+scalar, so `false` mapped straight to `critical` and the `reason` sibling
+was dropped at the assertion select — a redeploy that reverted
+`MEHO_NETDIAG_PROBE_ALLOWLIST` paged as an 11-hour fleet outage
+indistinguishable from a real one. As a dispatch error it now rides the
+check-runner's existing non-`ok` mapping (`checks/runner.py`) into
+`unknown` with `reason: dispatch_not_ok` and the allowlist named in
+`dispatch_error` — the same truthful "I can't tell" a denied Vault
+credential read yields. No checks-layer code changed.
+
+The error's `extras` carry `error_code` / `allowlist_env` / `host` /
+`detail` / `exception_class`; the operator-facing message names the env
+var, states that no probe ran, and carries the
+add-the-range-or-hostname remediation plus the `netdiag.probeAllowlist`
+chart key. The message stays **address-free** (the allowlist's raise
+sites never echo a destination); the caller's own destination string
+rides `extras.host` instead, which keeps the audit-visible-host
+foundation intact on the durable error row (#2680 threads `extras` into
+`audit_log.payload`) now that a refusal writes no `raw_payload`.
+
+**The one carve-out** is `net.http_probe`'s mid-chain redirect re-gate: a
+refused *redirect* hop keeps `status="ok"` with `reachable: true` and
+`reason: "blocked_redirect"`, because the prior hop did answer — that is
+a genuine observation. Only the **initial** destination's refusal fails
+the dispatch.
+
+Agent-visible consequence: a `net.*` call against a non-allowlisted
+destination now returns an error envelope rather than a `connected=false`
+/ `reachable=false` / `resolved=false` body. Treat it as *unknown*
+reachability, not *down*.
 
 Exception-ordering note: `asyncio.TimeoutError` is the builtin
 `TimeoutError` on Python 3.11+, and `TimeoutError`, `socket.gaierror`,
@@ -180,7 +231,9 @@ It reuses the same three foundations plus two probe-specific rules:
    "blocked_redirect": "<host>"}` and is **never dialed** — the concern
    noted at `adapters/http.py:260`. The redirect count is bounded
    (`_MAX_REDIRECTS`) and the whole walk runs under one
-   `asyncio.wait_for(timeout)` ceiling.
+   `asyncio.wait_for(timeout)` ceiling. This mid-chain refusal stays a
+   `status="ok"` observation — the #2784 carve-out; only the **initial**
+   host's refusal fails the dispatch.
 
 The body is streamed chunk-by-chunk only to accumulate a running length
 and SHA-256 (`_consume_body_size_and_hash`); the full body is never
@@ -215,7 +268,7 @@ maps it). Every connection-level failure additionally carries
 mapped exception chain (exception type + message only, never the response
 body) — so a caller sees the actual inner error without re-running the
 probe under instrumentation. `error_detail` is `null` on a clean response
-or a pre-dial refusal (`not_in_probe_allowlist` / `invalid_url`).
+or a pre-dial rejection (`invalid_url`).
 
 Because it issues an HTTP request, `net.http_probe` adds **`httpx`** to
 the family's dependency surface (already a project dep). It also imports
@@ -278,7 +331,8 @@ server's dotted IPv4 at stratum ≥2.
 **Return-failures:** a timeout, DNS failure, a refused/unreachable peer,
 a malformed or origin-mismatched reply, or a **kiss-o'-death** (stratum-0)
 packet return `{reachable: false, reason}` with `status="ok"` — reason
-codes extend the T1 set with `kod` and `invalid_response`. A KoD reply
+codes extend the T1 set with `kod` and `invalid_response` (an allowlist
+refusal is not among them; it fails the dispatch). A KoD reply
 also surfaces the 4-char `kiss_code` (e.g. `RATE`, `DENY`). None are
 raised as `connector_*` errors; the `host`/`port` in the return dict are
 audit-visible via `raw_payload`.
@@ -348,8 +402,9 @@ Derived top-level fields:
 It shares the same synthetic natural key as `net.tcp_check`
 (`net-probe-1.x`), reuses the return-failures contract (a refused /
 timed-out / DNS-failed / non-TLS endpoint returns `handshake=false` with
-a reason code — `not_in_probe_allowlist` / `timeout` / `refused` /
-`dns_failure` / `unreachable` / `tls_error` — and `status="ok"`), and is
+a reason code — `timeout` / `refused` / `dns_failure` / `unreachable` /
+`tls_error` — and `status="ok"`; an allowlist refusal instead fails the
+dispatch), and is
 `safety_level="safe"` + `requires_approval=False`. A completed handshake
 sends **no** application bytes.
 
@@ -410,7 +465,9 @@ not expose them.
   socket raises `PermissionError` on creation and the op returns
   `{available: false, reason: "icmp_echo_unprivileged_unavailable"}`
   (`status="ok"`), pointing the caller at `net.tcp_check` — it **degrades,
-  never crashes**, and never forces a capability grant.
+  never crashes**, and never forces a capability grant. (A *refused* host
+  is a different case and fails the dispatch — see *Refusal is a dispatch
+  error* above.)
 
 Result shapes (all `status="ok"`, all audit-visible host via
 `raw_payload`):
@@ -509,12 +566,20 @@ connectors' ops.
   registrar (`register_net_icmp_operations` upserts all three).
 - `connectors/net/allowlist.py` — `PROBE_ALLOWLIST_ENV`,
   `parse_probe_allowlist`, `assert_probe_allowed`,
-  `ProbeNotAllowedError`.
+  `ProbeNotAllowedError` (carries the caller's `host` for the
+  dispatcher's `extras`).
+- `operations/_errors.py` — `is_probe_refused` (the dispatcher's
+  narrowing predicate, a deferred import so `operations` keeps no
+  module-scope dependency on `connectors.net`) and
+  `result_connector_probe_refused` (the structured error builder).
 
 Dispatch path: `dispatch(connector_id="net-probe-1.x",
 op_id="net.tcp_check", target=None, params=...)` → param-schema
 validation → module-level handler (`connector_instance=None`) → redact →
-audit (`raw_payload` = handler return) → broadcast (`read` class).
+audit (`raw_payload` = handler return) → broadcast (`read` class). A
+handler that raises `ProbeNotAllowedError` short-circuits into the
+dispatcher's `connector_probe_refused` arm instead, which writes an error
+audit row carrying the structured envelope in `payload.error`.
 
 ## Dependencies
 
@@ -553,6 +618,9 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
   are explicitly out of scope (#2407). `chain_complete` is a
   "did the server send a self-signed root" signal, not a trust decision.
 - No port-scoped allowlist (v1 scopes hosts only).
+- A refusal is reported per-dispatch, not per-destination: `net.dns_lookup`
+  gates both the queried `name` and a custom `resolver`, and the error's
+  `extras.host` names whichever one was refused first, not the full set.
 - Hostname allowlisting is verbatim; an operator who allowlists a CIDR
   cannot probe a hostname that merely resolves into it (list the name).
 - Egress rate-limiting and raw-socket ops (D3) are deferred.

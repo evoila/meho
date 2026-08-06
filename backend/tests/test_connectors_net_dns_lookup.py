@@ -393,17 +393,15 @@ async def test_empty_allowlist_refuses_before_any_query(
 
     result = await _dispatch_lookup({"name": "internal.example", "type": "A"})
 
-    assert result.status == "ok", result.error
-    assert result.result == {
-        "resolved": False,
-        "name": "internal.example",
-        "type": "A",
-        "resolver": "system",
-        "records": [],
-        "authoritative": None,
-        "authenticated_data": None,
-        "reason": "not_in_probe_allowlist",
-    }
+    # #2784: a refused lookup sent no query, so it fails the dispatch rather
+    # than returning a reading-shaped ``resolved=false`` payload.
+    assert result.status == "error"
+    assert result.result is None
+    assert result.extras["error_code"] == "connector_probe_refused"
+    assert result.extras["host"] == "internal.example"
+    assert result.error is not None
+    assert PROBE_ALLOWLIST_ENV in result.error
+    assert "internal.example" not in result.error
 
 
 async def test_unlisted_custom_resolver_is_refused(
@@ -415,10 +413,10 @@ async def test_unlisted_custom_resolver_is_refused(
 
     result = await _dispatch_lookup({"name": "probe.example", "type": "A", "resolver": "8.8.8.8"})
 
-    assert result.status == "ok", result.error
-    assert result.result["resolved"] is False
-    assert result.result["reason"] == "not_in_probe_allowlist"
-    assert result.result["resolver"] == "8.8.8.8"
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_probe_refused"
+    # The refused destination is the resolver, not the (listed) name.
+    assert result.extras["host"] == "8.8.8.8"
 
 
 async def test_non_ip_custom_resolver_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

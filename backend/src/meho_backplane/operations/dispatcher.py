@@ -166,6 +166,24 @@ Detail payloads land in ``extras``. Codes:
   ``exception_class`` / ``exception_message``. Login-phase denials are
   wrapped into the ``VaultClientError`` family before the handler sees
   them and still fall through to ``connector_error``.
+* ``connector_probe_refused`` -- a ``net.*`` handler raised
+  :exc:`~meho_backplane.connectors.net.allowlist.ProbeNotAllowedError`:
+  ``MEHO_NETDIAG_PROBE_ALLOWLIST`` does not cover the destination it was
+  asked to dial, so no socket was opened. #2784, extending the
+  #1627/#2091 structured-cause pattern to the probe-policy sibling.
+  Until #2784 the handlers converted this into a reading-shaped
+  ``status="ok"`` result (``connected=false``,
+  ``reason="not_in_probe_allowlist"``), so a Sensor asserting on the
+  reading read a refused probe as a **down host** and flipped
+  ``critical``; failing the dispatch instead lands it in the truthful
+  ``unknown`` alongside the credential-denied case. The ``error`` names
+  the env var, states that no probe ran, and carries the
+  add-the-range-or-hostname remediation; ``extras`` carries
+  ``allowlist_env`` / ``host`` (the caller's own destination string, never
+  a resolved address) / ``detail`` / ``exception_class``. The one refusal
+  that is *not* classified here is ``net.http_probe``'s mid-chain redirect
+  re-gate -- the prior hop answered, so that stays a ``status="ok"``
+  ``blocked_redirect`` observation and never reaches the dispatcher.
 * ``connector_error`` -- the connector / handler raised any other
   exception (any :exc:`httpx.HTTPStatusError` whose status is none of
   403 / 422 / the auth-class set, any non-TLS :exc:`httpx.ConnectError`
@@ -250,12 +268,14 @@ from meho_backplane.operations._branches import (
 )
 from meho_backplane.operations._errors import (
     is_auth_failed_status,
+    is_probe_refused,
     result_ambiguous_connector,
     result_awaiting_approval,
     result_connector_auth_failed,
     result_connector_error,
     result_connector_http_403,
     result_connector_http_422,
+    result_connector_probe_refused,
     result_connector_tls_verify_failed,
     result_connector_unsupported,
     result_connector_vault_forbidden,
@@ -1130,9 +1150,24 @@ async def _run_branch_with_error_handling(
             duration_ms=duration_ms,
         )
     except Exception as exc:
+        # #2784: a ``net.*`` probe the allowlist refused never opened a
+        # socket, so it produced no observation -- the same "blocked from
+        # observing" category as the #2091 Vault denial, and the opposite of
+        # the return-failures contract's "a failed probe is the product".
+        # ``ProbeNotAllowedError`` subclasses ``ValueError``, which no earlier
+        # arm catches, so it is narrowed out of the generic arm here rather
+        # than in a dedicated ``except``: the exception type is only
+        # resolvable through a deferred import (``is_probe_refused``), because
+        # importing ``connectors.net`` at module scope would close a cycle
+        # back through ``operations/__init__``.
         duration_ms = _elapsed_ms(started)
+        exc_result = (
+            result_connector_probe_refused(op_id, exc, duration_ms)
+            if is_probe_refused(exc)
+            else result_connector_error(op_id, exc, duration_ms)
+        )
         return await _audit_error_and_return(
-            result_connector_error(op_id, exc, duration_ms),
+            exc_result,
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,

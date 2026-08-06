@@ -17,6 +17,9 @@ the handler built.
 Coverage:
 
 * the ``_pwsh`` encode helper round-trips the documented convention;
+* ``windns.zone.list`` builds the ``$ErrorActionPreference = 'Stop'`` +
+  hashtable-envelope script and surfaces a zone-less server as the
+  documented ``{rows: [], total: 0}`` (never an empty-stdout error);
 * ``windns.record.get`` builds ``Get-DnsServerResourceRecord`` with the
   quoted zone / name / RRType and parses the sample JSON rows (plus the
   empty-match and single-quote-injection cases);
@@ -27,7 +30,10 @@ Coverage:
 * the connector's registry-v2 triple round-trips (the invariant the
   registry enforces at import time), and the op set carries the expected
   safety levels;
-* ``windns.about`` maps the fingerprint into the flat identity dict.
+* ``windns.about`` maps the fingerprint into the flat identity dict;
+* ``probe``'s post-connect phase maps a transport failure (connection
+  drop / ``asyncssh.Error`` / timeout) to a non-ok ``command_failed``
+  :class:`ProbeResult` instead of leaking the exception (#986).
 """
 
 from __future__ import annotations
@@ -39,6 +45,7 @@ from dataclasses import dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncssh
 import pytest
 
 import meho_backplane.connectors.windows_dns  # noqa: F401 -- registers connector at import
@@ -51,6 +58,7 @@ from meho_backplane.connectors.windows_dns.ops_record import (
     windows_dns_record_get,
     windows_dns_record_remove,
 )
+from meho_backplane.connectors.windows_dns.ops_zone import windows_dns_zone_list
 from meho_backplane.settings import get_settings
 
 
@@ -146,6 +154,63 @@ def test_encode_pwsh_command_round_trips_utf16le_base64() -> None:
 def test_ps_single_quote_doubles_embedded_quotes() -> None:
     assert ps_single_quote("evba.lab") == "'evba.lab'"
     assert ps_single_quote("o'brien") == "'o''brien'"
+
+
+# ---------------------------------------------------------------------------
+# zone.list
+# ---------------------------------------------------------------------------
+
+
+async def test_zone_list_builds_envelope_script_and_parses_rows() -> None:
+    """The script uses ``record.get``'s hashtable envelope under a loud EAP.
+
+    ``Get-DnsServerZone | ConvertTo-Json`` emits nothing on a zero-object
+    pipeline (tripping the pwsh helper's empty-stdout guard), and a cmdlet
+    failure under the default ``$ErrorActionPreference`` also surfaces as
+    empty stdout with exit 0. The ``@{ rows; total }`` envelope keeps
+    stdout JSON-shaped in every case, and ``'Stop'`` turns a cmdlet error
+    into a non-zero exit carrying the real stderr.
+    """
+    connector = WindowsDnsConnector()
+    sample = {
+        "rows": [
+            {
+                "ZoneName": "evba.lab",
+                "ZoneType": "Primary",
+                "IsDsIntegrated": True,
+                "IsReverseLookupZone": False,
+            }
+        ],
+        "total": 1,
+    }
+    run_mock = AsyncMock(return_value=_completed_process(stdout=json.dumps(sample)))
+    with patch.object(connector, "_run_command", run_mock):
+        result = await windows_dns_zone_list(connector, _TARGET, {})
+    script = _script_from_call(run_mock)
+    assert "$ErrorActionPreference = 'Stop'" in script
+    assert "$zones = @(Get-DnsServerZone)" in script
+    assert "ConvertTo-Json -Depth 4 -InputObject @{ rows = $zones; total = $zones.Count }" in script
+    assert result["total"] == 1
+    assert result["rows"][0]["ZoneName"] == "evba.lab"
+
+
+@pytest.mark.parametrize("rows_json", ["[]", "null"])
+async def test_zone_list_returns_empty_rows_when_server_hosts_no_zones(rows_json: str) -> None:
+    """A zone-less server yields the documented ``{rows: [], total: 0}``.
+
+    The envelope keeps stdout non-empty on a zero-zone read, so the
+    documented empty-inventory contract is satisfiable (previously the
+    bare pipeline produced empty stdout → ``PwshRunError``). Both
+    renderings of an empty array are accepted (Windows PowerShell 5.1
+    serialises empty/absent collections inconsistently across shapes).
+    """
+    connector = WindowsDnsConnector()
+    run_mock = AsyncMock(
+        return_value=_completed_process(stdout=f'{{"rows":{rows_json},"total":0}}')
+    )
+    with patch.object(connector, "_run_command", run_mock):
+        result = await windows_dns_zone_list(connector, _TARGET, {})
+    assert result == {"rows": [], "total": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +413,40 @@ async def test_about_maps_fingerprint_into_identity_dict() -> None:
     assert result["version"] == "2.0.0.0"
     assert result["hostname"] == "DNS01"
     assert result["dnsserver_module_present"] is True
+
+
+# ---------------------------------------------------------------------------
+# probe -- post-connect guard (#986)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "boom",
+    [
+        OSError("connection reset by peer"),
+        asyncssh.ConnectionLost("channel closed mid-command"),
+        TimeoutError("probe script timed out"),
+    ],
+)
+async def test_probe_command_failed_when_run_command_raises_after_connect(
+    boom: Exception,
+) -> None:
+    """``_run_command`` raising after a successful ``_connect`` → ``command_failed``.
+
+    The #986 discipline the bind9 sibling documents: a mid-probe failure
+    (connection drop, ``asyncssh.Error``, or timeout after the handshake)
+    must map to a non-ok :class:`ProbeResult` -- no exception escapes
+    ``probe``. ``TimeoutError`` is an ``OSError`` subclass so the
+    ``(OSError, asyncssh.Error)`` catch tuple covers the timeout case.
+    """
+    connector = WindowsDnsConnector()
+    with (
+        patch.object(connector, "_connect", AsyncMock(return_value=MagicMock())),
+        patch.object(connector, "_run_command", AsyncMock(side_effect=boom)),
+    ):
+        result = await connector.probe(_TARGET)
+    assert result.ok is False
+    assert result.reason == "command_failed"
 
 
 # ---------------------------------------------------------------------------

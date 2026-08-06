@@ -22,7 +22,7 @@ that exact wire shape for the Windows DNS role. It is kept package-local
 (rather than importing Holodeck's private ``_pwsh`` module) so the
 package mirrors the repo's per-connector-transport-helper convention
 (bind9 owns ``_atomic``; Holodeck owns ``_pwsh``); a future refactor may
-hoist a shared ``_pwsh`` into ``_shared`` (noted for #windows-dns).
+hoist a shared ``_pwsh`` into ``_shared`` (noted in #2759).
 
 Wire shape
 ----------

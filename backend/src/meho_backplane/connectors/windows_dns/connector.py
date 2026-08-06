@@ -28,9 +28,9 @@ This module ships:
   Unreachable / SSH-failed / cmdlet-failed targets surface as
   ``reachable=False`` + ``extras["error"]``.
 * :meth:`WindowsDnsConnector.probe` -- TCP + SSH handshake + pwsh
-  reachability + DnsServer-module presence check, surfacing four distinct
+  reachability + DnsServer-module presence check, surfacing five distinct
   ``ProbeResult.reason`` values: ``tcp_unreachable``, ``ssh_auth_failed``,
-  ``pwsh_unavailable``, ``dnsserver_module_missing``.
+  ``pwsh_unavailable``, ``command_failed``, ``dnsserver_module_missing``.
 * :meth:`WindowsDnsConnector.about` -- operator-facing wrapper around
   :meth:`fingerprint`, registered as the ``windns.about`` typed op.
 * the bound-method op shims (zone / record) + the dispatcher
@@ -261,6 +261,12 @@ class WindowsDnsConnector(SshConnector):
           remediation is the same as for a rejected password.
         * ``pwsh_unavailable`` -- SSH succeeded but the ``pwsh`` reachability
           script failed (pwsh not installed, or the SSH shell can't run it).
+        * ``command_failed`` -- the probe script could not be executed at
+          the transport level after a successful handshake: the connection
+          dropped (``asyncssh.Error``), or the command timed out /
+          the socket failed (``OSError``, which covers
+          ``asyncio.wait_for``'s ``TimeoutError``). Mirrors bind9's
+          post-connect guard (#986).
         * ``dnsserver_module_missing`` -- pwsh runs but the ``DnsServer``
           module is not installed (not a DNS server, or the RSAT / role
           tooling is absent).
@@ -288,10 +294,18 @@ class WindowsDnsConnector(SshConnector):
         except (ValueError, VaultClientError, CredentialsReadError):
             return _result(False, "ssh_auth_failed")
 
+        # Post-connect commands are guarded (#986): a connection drop, an
+        # ``asyncssh.Error``, or a timeout after a successful handshake
+        # maps to ``command_failed`` rather than propagating an unhandled
+        # exception out of ``probe``. ``TimeoutError`` is an ``OSError``
+        # subclass, so ``_run_command``'s ``asyncio.wait_for`` expiry is
+        # covered. Mirrors bind9's post-connect guard.
         try:
             payload = await pwsh_run(self, target, _PROBE_SCRIPT)
         except PwshRunError:
             return _result(False, "pwsh_unavailable")
+        except (OSError, asyncssh.Error):
+            return _result(False, "command_failed")
 
         present = payload.get("present") if isinstance(payload, dict) else None
         if present is not True:

@@ -68,17 +68,35 @@ async def windows_dns_zone_list(
 ) -> dict[str, Any]:
     """Handler for ``windns.zone.list``.
 
-    Runs ``Get-DnsServerZone | ConvertTo-Json -Depth 4`` on the Windows
-    host via the pwsh helper and returns ``{rows, total}``. ``rows`` is
-    the list of zone objects the cmdlet emitted (each carrying
-    ``ZoneName``, ``ZoneType``, ``IsDsIntegrated``, ``IsReverseLookupZone``,
-    …); ``total`` is the row count. Read-only; ``Get-DnsServerZone`` never
-    mutates server state.
+    Runs ``Get-DnsServerZone`` on the Windows host via the pwsh helper
+    and returns ``{rows, total}``. ``rows`` is the list of zone objects
+    the cmdlet emitted (each carrying ``ZoneName``, ``ZoneType``,
+    ``IsDsIntegrated``, ``IsReverseLookupZone``, …); ``total`` is the row
+    count. Read-only; ``Get-DnsServerZone`` never mutates server state.
+
+    The script wraps the cmdlet output in the same
+    ``@{ rows = ...; total = ... }`` hashtable envelope ``record.get``
+    uses, so a zone-less server yields the documented
+    ``{rows: [], total: 0}`` instead of an empty stdout tripping the
+    pwsh helper's guard. Unlike ``record.get`` (where a missing zone is
+    a legitimate empty read under ``SilentlyContinue``), the envelope
+    runs under ``$ErrorActionPreference = 'Stop'``: ``Get-DnsServerZone``
+    takes no narrowing parameters here, so any cmdlet error (DNS service
+    stopped, insufficient rights) is a real failure that must terminate
+    the process non-zero and surface as a
+    :class:`~meho_backplane.connectors.windows_dns._pwsh.PwshRunError`
+    carrying the actual stderr -- not be swallowed into a false empty
+    inventory.
     """
     del params  # declared empty in schema; intentionally ignored
-    script = "Get-DnsServerZone | ConvertTo-Json -Depth 4"
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$zones = @(Get-DnsServerZone); "
+        "ConvertTo-Json -Depth 4 -InputObject @{ rows = $zones; total = $zones.Count }"
+    )
     payload = await pwsh_run(connector, target, script, operator=operator)
-    rows = normalise_json_rows(payload)
+    raw_rows = payload.get("rows") if isinstance(payload, dict) else payload
+    rows = normalise_json_rows(raw_rows)
     return {"rows": rows, "total": len(rows)}
 
 
@@ -124,12 +142,13 @@ ZONE_OPS: tuple[WindowsDnsOp, ...] = (
         handler_attr="windows_dns_zone_list",
         summary="List the zones the Windows DNS server hosts via ``Get-DnsServerZone``.",
         description=(
-            "Runs ``Get-DnsServerZone | ConvertTo-Json`` on the Windows "
-            "host and returns one row per hosted zone (zone name, type, "
-            "AD-integration flag, reverse-lookup flag). Read-only; never "
-            "mutates server state. The right op when the agent doesn't "
-            "yet know which zone to target, or needs the zone-level "
-            "context before drilling into records."
+            "Runs ``Get-DnsServerZone`` on the Windows host and returns "
+            "one row per hosted zone (zone name, type, AD-integration "
+            "flag, reverse-lookup flag). A zone-less server returns "
+            "``rows: []``. Read-only; never mutates server state. The "
+            "right op when the agent doesn't yet know which zone to "
+            "target, or needs the zone-level context before drilling "
+            "into records."
         ),
         parameter_schema=WINDOWS_DNS_ZONE_LIST_PARAMETER_SCHEMA,
         response_schema=_WINDOWS_DNS_ZONE_LIST_RESPONSE_SCHEMA,

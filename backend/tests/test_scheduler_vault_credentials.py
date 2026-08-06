@@ -229,6 +229,26 @@ async def test_write_unreachable_maps_to_broker_error(fake_kv: _FakeKvV2) -> Non
     assert fake_kv.token_api.lookup_calls == 0
 
 
+async def test_write_non_connection_transport_error_maps_to_broker_error(
+    fake_kv: _FakeKvV2,
+) -> None:
+    """Any requests transport error maps to the broker error, not just Connection/Timeout.
+
+    The self-heal seam catches the ``RequestException`` base (mirroring the
+    retry leg), so an exotic transport failure never escapes the broker-error
+    mapping into the generic tick-failure handler.
+    """
+
+    def _boom(**_: Any) -> None:
+        raise requests.exceptions.TooManyRedirects("redirect loop")
+
+    fake_kv.create_or_update_secret = _boom  # type: ignore[method-assign]
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+    assert excinfo.value.token_invalid is False
+    assert fake_kv.token_api.lookup_calls == 0
+
+
 # --- write-failure disposition: dead token vs. under-scoped policy (#2652) ---
 
 

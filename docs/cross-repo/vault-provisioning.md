@@ -346,8 +346,9 @@ RUNNER_JWT=$(curl -sS -X POST \
   | jq -r .access_token)
 
 # 2. Vault jwt_login under the runner role -> fresh Vault token
-#    (auth/jwt/ is the dedicated mount from surface 1).
-vault write -field=token auth/jwt/login \
+#    (auth/<mount>/ is the dedicated JWT mount from surface 1;
+#    VAULT_OIDC_MOUNT_PATH selects it, default `jwt`).
+vault write -field=token "auth/${VAULT_OIDC_MOUNT_PATH:-jwt}/login" \
   role="${VAULT_CHECK_RUNNER_ROLE:-$VAULT_OIDC_ROLE}" jwt="$RUNNER_JWT"
 ```
 

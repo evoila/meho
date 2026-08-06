@@ -339,12 +339,13 @@ async def renew_scheduler_token(*, reason: str = "periodic") -> None:
     :func:`read_agent_secret` / :func:`write_agent_secret` stays as a cheap
     extra for a busy scheduler.
 
-    Never raises. An unconfigured token (the documented env-var-fallback
-    opt-out) or a Vault-unconfigured install returns quietly; a renewal that
-    reaches Vault and fails is logged loudly by
-    :func:`_maybe_renew_scheduler_token`. Issues **no** read or write — the
-    renewal is independent of agent-secret traffic by construction. No token
-    value ever enters a log event.
+    Never raises. An unconfigured token (no ``VAULT_SCHEDULER_TOKEN`` — the
+    documented env-var-fallback opt-out) returns silently. A token configured
+    on a Vault-unconfigured install (no ``VAULT_ADDR``) is a misconfiguration
+    and logs a loud ``ERROR`` before returning. A renewal that reaches Vault
+    and fails is logged loudly by :func:`_maybe_renew_scheduler_token`. Issues
+    **no** read or write — the renewal is independent of agent-secret traffic
+    by construction. No token value ever enters a log event.
     """
     settings = get_settings()
     token = _current_scheduler_token(settings)
@@ -446,7 +447,14 @@ async def _execute_with_self_heal[T](
         return await asyncio.to_thread(operation, client), client
     except hvac.exceptions.InvalidPath:
         raise
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+    except requests.exceptions.RequestException as exc:
+        # Any transport-layer failure (connection refused, timeout, TLS,
+        # redirect loop, ...) is "Vault unreachable" — catch the
+        # RequestException base, mirroring the retry leg below and the rest
+        # of this module (``_scheduler_token_rejected``,
+        # ``_maybe_renew_scheduler_token``) rather than only its
+        # Connection/Timeout subclasses, so no exotic transport error escapes
+        # the broker-error mapping.
         raise SchedulerVaultBrokerError(
             f"vault unreachable for {check} at {api_path!r}: {type(exc).__name__}"
         ) from exc
@@ -516,11 +524,12 @@ async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
     SchedulerVaultBrokerError
         Vault is unreachable or rejected the write. On a **403** the broker
         runs ``lookup-self``: a **dead** token triggers the #2668 self-heal
-        (re-mint via runner JWT + retry the write once) and only surfaces
-        here — with ``token_invalid=True`` — when the re-mint *itself* fails;
-        a **live** token leaves the policy scope at fault
-        (``token_invalid=False``, #2652). No other status is evidence about
-        the token, so each keeps ``False``.
+        (re-mint via runner JWT + retry the write once) and surfaces here —
+        with ``token_invalid=True`` — only when the self-heal cannot recover:
+        the re-mint fails, *or* the retry against the re-minted token also
+        fails (e.g. an under-scoped runner-role policy). A **live** token
+        leaves the policy scope at fault (``token_invalid=False``, #2652). No
+        other status is evidence about the token, so each keeps ``False``.
     """
     settings = get_settings()
     api_path = vault_path_for_client_id(identity_ref, settings=settings)
@@ -569,7 +578,8 @@ async def read_agent_secret(identity_ref: str) -> str | None:
         Vault is unreachable, or rejected the read for a reason other than a
         missing path. A **403** that ``lookup-self`` confirms is a dead token
         triggers the #2668 self-heal (re-mint via runner JWT + retry the read
-        once) and only surfaces here when the re-mint *itself* fails.
+        once) and surfaces here only when the self-heal cannot recover — the
+        re-mint fails, *or* the retry against the re-minted token also fails.
     """
     settings = get_settings()
     api_path = vault_path_for_client_id(identity_ref, settings=settings)

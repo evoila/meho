@@ -61,12 +61,15 @@ event (`--event-filter`) rather than a clock. The knobs worth knowing:
 
 - `--inputs` — a JSON object rendered into the agent's prompt at fire
   time.
-- `--identity-sub` — the subject the run acts under (this is what makes
-  a scheduled run park its writes under an *agent* principal, distinct
-  from your own, so four-eyes stays intact — see the
-  [approvals guide](approvals-and-break-glass.md)).
-- `--in-flight-policy` — what to do when a fire is due while the
-  previous run of the same trigger is still going.
+- `--identity-sub` — the identity the scheduler impersonates at fire
+  time (default `__scheduler__`); an override you rarely set. What keeps
+  four-eyes intact for a scheduled write is the **bound agent
+  definition's own subject** on an autonomous run, not this flag — see
+  the [approvals guide](approvals-and-break-glass.md).
+- `--in-flight-policy` — `fail_into_audit` (default) or `resume`: what
+  happens to a run the scheduler was killed in the middle of.
+  `fail_into_audit` records the interrupted run as failed on the audit
+  ledger; `resume` picks it back up on restart.
 - `--work-ref` — a change-ticket reference stamped onto the run's audit
   and broadcast lineage.
 
@@ -150,6 +153,6 @@ this page is its agent-run twin.
 | `403 insufficient_role` on `scheduler create` / `cancel` | Creating and cancelling triggers need **tenant_admin**; listing is operator. | Use a tenant_admin session to author triggers. |
 | A cron trigger never fires | The `--cron-expr` didn't parse, or `--timezone` is wrong, so `next_fire_at` was never set to a reachable instant. | Check `meho scheduler list` for `next_fire_at`; fix the 5-field expression / IANA timezone and recreate. |
 | A scheduled write is stuck `awaiting_approval` | Working as designed — an autonomous run's `requires_approval` write parks under the agent's subject. | Approve it as yourself; because the requester is the agent, four-eyes is satisfied ([approvals](approvals-and-break-glass.md)). |
-| Overlapping runs of the same trigger | A fire came due while the previous run was still going. | Set `--in-flight-policy` to the behavior you want (skip / queue) at create time. |
+| A run interrupted mid-flight (scheduler restart) shows as failed | The default `--in-flight-policy=fail_into_audit` records a killed-mid-run trigger as a failure rather than silently resuming it. | Set `--in-flight-policy=resume` at create time if you want interrupted runs picked back up on restart. |
 
 **Next:** [Satellite gateway](satellite-gateway.md).

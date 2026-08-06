@@ -206,9 +206,11 @@ Bound the role first if it isn't:
 - **Preferred** — give the runner client a **distinct** audience *instead
   of* the backplane audience mapper (Keycloak audience mappers add to `aud`
   rather than replace it, so a client carrying both still passes
-  `meho-mcp`'s `bound_audiences`) and provision it a **separate**, narrower
-  Vault JWT role whose policy covers only the secrets your Sensors
-  evaluate.
+  `meho-mcp`'s `bound_audiences`), provision it a **separate**, narrower
+  Vault JWT role whose policy covers only the secrets your Sensors evaluate,
+  and point the backplane at that role with `VAULT_CHECK_RUNNER_ROLE` (#2757)
+  so only background dispatch uses it while interactive logins keep
+  `VAULT_OIDC_ROLE`.
 - **Otherwise** — add an **exact-match** `bound_claims` to `meho-mcp` keyed
   on a claim value only operator tokens carry, e.g. a dedicated
   `meho-operator` realm role. A `bound_claims_type=glob` `"*"` is not a

@@ -315,6 +315,12 @@ async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
     authenticates. ``principal_kind`` defaults to ``USER``, so the policy gate
     auto-executes the ``safe`` op #2503's registration guard restricts sensors
     to (minting a token does not change the policy path).
+
+    The operator additionally carries ``check_runner_dispatch=True`` -- the
+    internal-only marker (#2757) that routes its Vault JWT logins to
+    ``vault_check_runner_role`` when an operator has provisioned a dedicated
+    bounded role; unset, that marker is a no-op and the login keeps
+    ``vault_oidc_role``. It is the *only* site that sets the marker.
     """
     return Operator(
         sub=snap.identity_sub,
@@ -323,6 +329,11 @@ async def _sensor_operator(snap: _SensorSnapshot) -> Operator:
         raw_jwt=await check_runner_jwt(),
         tenant_id=snap.tenant_id,
         tenant_role=TenantRole.OPERATOR,
+        # #2757 -- internal-only marker: routes this synthetic dispatch
+        # operator's Vault JWT logins to ``vault_check_runner_role`` when one
+        # is configured, so a bounded role can scope background dispatch.
+        # principal_kind stays USER (see above) so the policy gate is unchanged.
+        check_runner_dispatch=True,
     )
 
 

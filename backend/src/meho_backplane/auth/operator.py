@@ -63,6 +63,22 @@ Field choices reflect what G2.2 / G2.3 / G0.1 consumers actually need:
   The gateway guard (:func:`~meho_backplane.auth.runner_guard.assert_runner_scope`)
   binds this value to the runner named by the route so a runner token can
   only fetch its own assignment and submit its own results.
+* ``check_runner_dispatch`` — internal-only marker that this operator is the
+  in-process check-runner's synthetic *background-dispatch* identity
+  (#2757). Set to ``True`` **solely** by
+  :func:`~meho_backplane.checks.runner._sensor_operator`; defaults ``False``
+  for every other construction site (fail-closed). It selects the dedicated
+  :attr:`~meho_backplane.settings.Settings.vault_check_runner_role`, when one
+  is configured, at the single Vault JWT-login site
+  (:func:`~meho_backplane.auth.vault.vault_client_for_operator`) so an
+  operator can bound background dispatch to a Vault role scoped to just the
+  secrets Sensors read. **Never lifted from a JWT claim** —
+  :func:`~meho_backplane.auth.jwt.verify_jwt` constructs every
+  :class:`Operator` with explicit keyword arguments and never sets this
+  field, so no token can forge check-runner dispatch. Deliberately *not*
+  modelled as a :class:`PrincipalKind` value: the synthetic operator keeps
+  ``principal_kind=user`` so the policy gate still auto-executes the ``safe``
+  ops sensors are restricted to.
 
 Email validation uses pydantic's ``EmailStr`` (powered by
 ``email-validator``); a malformed ``email`` claim from Keycloak is a
@@ -169,3 +185,4 @@ class Operator(BaseModel):
     capabilities: frozenset[str] = frozenset()
     platform_admin: bool = False
     runner_id: UUID | None = None
+    check_runner_dispatch: bool = False

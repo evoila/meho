@@ -325,11 +325,12 @@ carve-out the rest of the credential layer is built around.
 
 Pick one of two guardrails before enabling the flag.
 
-**Option A (preferred) — a distinct audience and a dedicated role.** Give
-the runner client its own audience mapper (e.g. `meho-check-runner`)
-**instead of** the backplane audience mapper the realm recipe asks for, and
-provision a separate role + policy scoped to the secrets Sensors actually
-evaluate. *Instead of*, not *in addition to*: Keycloak's Audience protocol
+**Option A (preferred) — a distinct audience, a dedicated role, and
+`VAULT_CHECK_RUNNER_ROLE`.** Give the runner client its own audience mapper
+(e.g. `meho-check-runner`) **instead of** the backplane audience mapper the
+realm recipe asks for, provision a separate role + policy scoped to the
+secrets Sensors actually evaluate, and point the backplane at that role with
+`VAULT_CHECK_RUNNER_ROLE` (#2757). *Instead of*, not *in addition to*: Keycloak's Audience protocol
 mapper calls `token.addAudience(...)`, so mappers accumulate — a runner
 client carrying both mappers still emits `aud` containing
 `<keycloak-audience>`, and `meho-mcp` keeps accepting it because
@@ -354,12 +355,40 @@ vault write auth/jwt/role/meho-check-runner \
   token_ttl=1h
 ```
 
-Substitute the subtree your Sensors' `secret_ref`s actually live under.
-Note the backplane resolves one role name from `VAULT_OIDC_ROLE` for every
-JWT login, so Option A currently requires either a per-deployment split or
-that you point `VAULT_OIDC_ROLE` at the narrower role and widen it back for
-the interactive path — until MEHO grows a per-principal role setting,
-Option B is the operationally simpler answer on a single-role install.
+Substitute the subtree your Sensors' `secret_ref`s actually live under. Then
+set `VAULT_CHECK_RUNNER_ROLE=meho-check-runner` on the backplane (the runner
+already stores its service-account `sub` next to its secret, ready for the
+`bound_subject` line above). The backplane resolves this role **only** for
+the in-process check-runner's background dispatch (#2757); interactive and
+operator logins keep `VAULT_OIDC_ROLE` (`meho-mcp`) untouched. That removes
+the old single-role tradeoff — the shared role never sees the runner, and the
+interactive path never sees the narrow role, so neither has to be widened for
+the other. Every mis-wiring fails closed: the runner token is rejected by
+`meho-mcp` on audience once the mapper is swapped, an operator token is
+rejected by the dedicated role's `bound_subject`, and either denial surfaces
+`VaultRoleDeniedError` so the Sensor evaluates `unknown` — never a silent
+fall back to the wide role.
+
+Verify the split end-to-end (this is the #2757 acceptance check):
+
+```bash
+# 1. A credentialed Sensor evaluates to a real state (not `unknown`) under
+#    the scoped role. After a dispatch tick, read the Sensor's latest state
+#    from the console (`/ui/checks`) or `GET /api/v1/sensors`: an evaluated
+#    `ok` / `degraded` / `critical` proves the dedicated role resolved and
+#    read the secret. An `unknown` whose evidence names a Vault role denial
+#    means the dedicated policy or `bound_subject` is still too narrow.
+
+# 2. The interactive path still logs in under the wide role — expect a token,
+#    then a normal operator-context read of any target credential:
+vault write auth/jwt/login role=meho-mcp jwt="$OPERATOR_TOKEN"
+
+# 3. The dedicated role cannot read outside the Sensors' subtree — least
+#    privilege holds. Log in as the runner, then attempt an out-of-subtree
+#    read; expect a 403 permission-denied:
+vault write auth/jwt/login role=meho-check-runner jwt="$RUNNER_TOKEN"
+VAULT_TOKEN=<issued-runner-token> vault kv get secret/meho/targets/<a-target>
+```
 
 **Option B — tighten `meho-mcp` so it does not accept the runner.** Vault's
 `bound_*` parameters are allowlists and have no negation, so "reject the

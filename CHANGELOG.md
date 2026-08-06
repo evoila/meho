@@ -157,6 +157,15 @@ connector-related release-notes line.
 
 ### Added
 
+- **`windows_dns` connector** — typed connector for Windows AD-DNS
+  record management over SSH → PowerShell 5.1 (`DnsServer` module),
+  registered as `("windns", "2016.x", "windns-ssh")`. Five ops:
+  `windns.about`, `windns.zone.list`, `windns.record.get` (safe reads)
+  and `windns.record.add` / `windns.record.remove` (caution writes,
+  A + CNAME). Windows AD-DNS exposes no record-management REST API;
+  this replaces ad-hoc `ssh <dc> powershell Add-DnsServerResourceRecord…`
+  with MEHO's audited, safety-classified op path (#2759 / #2760).
+
 - **Checks evaluation-loop watchdog + queryable runner liveness**
   (#2763): the sensor runner now stamps every completed tick, and a
   sibling watchdog task detects the loop going quiet — no completed

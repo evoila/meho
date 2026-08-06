@@ -46,35 +46,48 @@ The secret payload shape is ``{"client_secret": "<value>"}``. No secret
 value ever enters a log event or an error message — only the path and
 the field *name* do.
 
-Token lifetime — renew-on-use + self-lookup (#2328)
-===================================================
+Token lifetime — renew, self-lookup, and self-heal (#2328, #2668)
+================================================================
 
 The documented scheduler token is a Vault **periodic** token
 (``-period=768h`` in the onboarding guidance). A periodic token expires
 ``period`` after its *last renewal*, so a long-running scheduler that
 never renews carries a built-in ~32-day fuse: once it blows, every
-Vault-first read returns 403 and the scheduler silently skips. Two
-mechanisms defuse it here:
+Vault-first read returns 403 and the scheduler silently skips. Four
+mechanisms keep the credential alive — and the failure survivable when
+it dies anyway:
 
 * :func:`_maybe_renew_scheduler_token` fires a best-effort
   ``auth/token/renew-self`` after every successful read/write, at
-  scheduler-tick frequency, so a periodic token with any sane
-  ``period`` never expires while the process runs. A failed renewal is
-  logged and swallowed — the read/write it follows already succeeded.
+  scheduler-tick frequency, so a *busy* periodic token never expires. A
+  failed renewal is logged and swallowed — the read/write it follows
+  already succeeded.
+* :func:`renew_scheduler_token` is that same renew on a **dedicated
+  tick-loop cadence** (#2668), so an *idle* scheduler — no agent-secret
+  traffic for longer than ``period`` — still renews independent of
+  read/write traffic. The on-use renew stays as a cheap extra.
 * :func:`verify_scheduler_token` runs ``auth/token/lookup-self`` at
-  scheduler startup and on a slow cadence from the tick loop. It does
-  not fix the fuse — it shortens time-to-notice from weeks to minutes
-  by logging a dead/unreachable token as a loud ``ERROR``. Sibling
-  #2327 consumes the same signal for its ``/ready features.scheduler``
-  skip-state surface.
+  startup and on a slow cadence, logging a dead/unreachable token as a
+  loud ``ERROR`` and — the periodic guard (#2668) — a loud ``ERROR``
+  when the token is non-renewable or carries an ``explicit_max_ttl``
+  (it will die despite renewal). Sibling #2327 consumes the status for
+  its ``/ready features.scheduler`` skip-state surface.
+* :func:`_remint_scheduler_client` **self-heals** (#2668): when a read
+  or write draws a 403 that ``lookup-self`` confirms is a dead token,
+  the broker mints a fresh Vault token by ``jwt_login`` as the runner
+  principal (:func:`~meho_backplane.auth.runner_identity.check_runner_jwt`
+  + ``role = vault_check_runner_role or vault_oidc_role``, the #2757
+  fallback) and retries the failed operation **once** against it — no
+  operator, no sidecar in the loop. Only when the re-mint *itself* fails
+  does the broker fall back to the loud failure below.
 
-The same ``lookup-self`` primitive also disambiguates the *write*
-failure path (#2652): a dead token and a live token on an under-scoped
-policy both draw a **403**, but the fixes are opposites (re-mint vs.
-widen the policy). :func:`write_agent_secret` probes
-:func:`_scheduler_token_rejected` on that 403 — and only that 403 — and
+The ``lookup-self`` probe still disambiguates that 403 (#2652): a dead
+token and a live token on an under-scoped policy both draw a **403**,
+but the fixes are opposites (self-heal / re-mint vs. widen the policy).
+:func:`_execute_with_self_heal` probes :func:`_scheduler_token_rejected`
+on that 403 — and only that 403 — attempts the self-heal above, and
 stamps ``token_invalid`` on the raised
-:class:`SchedulerVaultBrokerError`. Diagnosis only: no retry.
+:class:`SchedulerVaultBrokerError` only when it could not heal.
 
 The token is resolved from its live source on **every** use
 (:func:`_current_scheduler_token`) rather than frozen at process start,
@@ -85,6 +98,7 @@ so a Vault-Agent sidecar (or an operator) that re-mints the token into
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -93,7 +107,8 @@ import hvac.exceptions
 import requests.exceptions
 import structlog
 
-from meho_backplane.auth.vault import _build_client
+from meho_backplane.auth.runner_identity import check_runner_jwt
+from meho_backplane.auth.vault import VaultClientError, _build_client, _to_thread_jwt_login
 from meho_backplane.settings import Settings, get_settings
 
 __all__ = [
@@ -104,6 +119,7 @@ __all__ = [
     "SchedulerVaultBrokerError",
     "SchedulerVaultNotConfiguredError",
     "read_agent_secret",
+    "renew_scheduler_token",
     "split_kv_v2_api_path",
     "vault_path_for_client_id",
     "verify_scheduler_token",
@@ -313,6 +329,172 @@ async def _maybe_renew_scheduler_token(client: hvac.Client) -> None:
     _log.debug("scheduler_vault_token_renewed")
 
 
+async def renew_scheduler_token(*, reason: str = "periodic") -> None:
+    """Renew the scheduler's periodic Vault token on a dedicated cadence (#2668).
+
+    Approach item 2: renewal is lifted off the read/write hot path onto a
+    dedicated tick-loop timer (:mod:`meho_backplane.scheduler.loop`) so an
+    **idle** scheduler — one with no agent-secret reads for longer than the
+    token's ``period`` — still renews and never ages out. The on-use renew in
+    :func:`read_agent_secret` / :func:`write_agent_secret` stays as a cheap
+    extra for a busy scheduler.
+
+    Never raises. An unconfigured token (the documented env-var-fallback
+    opt-out) or a Vault-unconfigured install returns quietly; a renewal that
+    reaches Vault and fails is logged loudly by
+    :func:`_maybe_renew_scheduler_token`. Issues **no** read or write — the
+    renewal is independent of agent-secret traffic by construction. No token
+    value ever enters a log event.
+    """
+    settings = get_settings()
+    token = _current_scheduler_token(settings)
+    if not token:
+        return
+    try:
+        client = _build_client(settings, token=token)
+    except VaultClientError as exc:
+        _log.error(
+            "scheduler_vault_token_renew_unconfigured",
+            reason=type(exc).__name__,
+            check=reason,
+        )
+        return
+    await _maybe_renew_scheduler_token(client)
+
+
+async def _remint_scheduler_client(settings: Settings) -> hvac.Client | None:
+    """Self-heal a dead scheduler token: mint a fresh Vault client (#2668).
+
+    Approach item 1. Reuses the runner-principal identity (#2642) and the
+    check-runner Vault role (#2757) — **no scheduler-specific role knob**:
+    mint the runner's OAuth token
+    (:func:`~meho_backplane.auth.runner_identity.check_runner_jwt`), then
+    ``jwt_login`` under ``role = vault_check_runner_role or vault_oidc_role``
+    (the same fallback #2757 shipped for the check-runner dispatch operator).
+
+    Fail-closed: returns ``None`` — never raises, never a half-built client —
+    when the runner principal is unconfigured (empty JWT), no role resolves,
+    Vault is unconfigured, or the login is refused. The caller then falls back
+    to the loud-fail path so a dead credential is never silently no-op'd. No
+    secret, JWT, or token value ever enters a log event — only the failure
+    reason class and which role source was used.
+    """
+    jwt = await check_runner_jwt()
+    if not jwt:
+        _log.error("scheduler_vault_remint_unavailable", reason="runner_identity_unconfigured")
+        return None
+    role = settings.vault_check_runner_role or settings.vault_oidc_role
+    if not role:
+        _log.error("scheduler_vault_remint_unavailable", reason="no_vault_role")
+        return None
+    try:
+        client = _build_client(settings)
+        await _to_thread_jwt_login(
+            client,
+            role=role,
+            jwt=jwt,
+            mount_path=settings.vault_oidc_mount_path,
+        )
+    except (
+        VaultClientError,
+        hvac.exceptions.VaultError,
+        requests.exceptions.RequestException,
+    ) as exc:
+        _log.error("scheduler_vault_remint_failed", reason=type(exc).__name__)
+        return None
+    _log.info(
+        "scheduler_vault_reminted",
+        role_source="check_runner_role" if settings.vault_check_runner_role else "oidc_role",
+    )
+    return client
+
+
+async def _execute_with_self_heal[T](
+    settings: Settings,
+    operation: Callable[[hvac.Client], T],
+    *,
+    check: str,
+    api_path: str,
+) -> tuple[T, hvac.Client]:
+    """Run *operation* under the scheduler token; self-heal a dead token once.
+
+    The single execution seam for both :func:`read_agent_secret` and
+    :func:`write_agent_secret` (#2668). *operation* is a callable taking an
+    hvac client and performing the KV read/write; it is offloaded to a worker
+    thread. Returns ``(payload, client)`` where *client* is the token that
+    actually succeeded — the original, or the re-minted one — so the caller
+    renews the right token.
+
+    Failure mapping (fail-loud, never silent):
+
+    * Vault unreachable → :class:`SchedulerVaultBrokerError` (``token_invalid``
+      stays ``False`` — an outage is not a dead token).
+    * 403 + ``lookup-self`` says the token is **live** (under-scoped policy) →
+      :class:`SchedulerVaultBrokerError` with ``token_invalid=False``.
+    * 403 + ``lookup-self`` confirms the token is **dead** → self-heal via
+      :func:`_remint_scheduler_client` and retry *operation* once; on success
+      return the healed result. If the re-mint or the retry fails, raise
+      :class:`SchedulerVaultBrokerError` with ``token_invalid=True`` (today's
+      loud-fail behaviour).
+    * Any other Vault status (sealed/500/502/429) → describes Vault, not the
+      token → :class:`SchedulerVaultBrokerError`, ``token_invalid=False``.
+    * :class:`hvac.exceptions.InvalidPath` (KV-v2 404) propagates unwrapped so
+      :func:`read_agent_secret` can map it to its "not in Vault" ``None``.
+    """
+    client = _scheduler_client(settings)
+    try:
+        return await asyncio.to_thread(operation, client), client
+    except hvac.exceptions.InvalidPath:
+        raise
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
+        raise SchedulerVaultBrokerError(
+            f"vault unreachable for {check} at {api_path!r}: {type(exc).__name__}"
+        ) from exc
+    except hvac.exceptions.Forbidden as exc:
+        # 403 is the one ambiguous rejection: a dead token and a live-but-
+        # under-scoped policy look identical, yet the remediations are
+        # opposites. Split them with one ``lookup-self`` on the *same* client
+        # that just failed (#2652), then self-heal a confirmed-dead token
+        # rather than only diagnosing it (#2668).
+        token_invalid = await _scheduler_token_rejected(client, check=check)
+        if not token_invalid:
+            raise SchedulerVaultBrokerError(
+                f"vault rejected {check} at {api_path!r}: {type(exc).__name__}",
+                token_invalid=False,
+            ) from exc
+        _log.error("scheduler_vault_token_dead", reason=type(exc).__name__, check=check)
+        healed = await _remint_scheduler_client(settings)
+        if healed is None:
+            # Re-mint unavailable/refused — fall back to today's loud fail so
+            # the dead credential surfaces instead of silently skipping.
+            raise SchedulerVaultBrokerError(
+                f"vault rejected {check} at {api_path!r}: {type(exc).__name__}",
+                token_invalid=True,
+            ) from exc
+        try:
+            payload = await asyncio.to_thread(operation, healed)
+        except hvac.exceptions.InvalidPath:
+            # A missing path on the healed client is a legitimate result for a
+            # read, not a heal failure — let the caller map it to ``None``.
+            raise
+        except (requests.exceptions.RequestException, hvac.exceptions.VaultError) as retry_exc:
+            _log.error(
+                "scheduler_vault_self_heal_retry_failed",
+                reason=type(retry_exc).__name__,
+                check=check,
+            )
+            raise SchedulerVaultBrokerError(
+                f"vault rejected {check} at {api_path!r} after re-mint: {type(retry_exc).__name__}",
+                token_invalid=True,
+            ) from retry_exc
+        _log.info("scheduler_vault_self_healed", check=check)
+        return payload, healed
+    except hvac.exceptions.VaultError as exc:
+        raise SchedulerVaultBrokerError(
+            f"vault rejected {check} at {api_path!r}: {type(exc).__name__}"
+        ) from exc
+
+
 async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
     """Persist *client_secret* for *identity_ref* to Vault; return the path.
 
@@ -332,55 +514,34 @@ async def write_agent_secret(identity_ref: str, client_secret: str) -> str:
         with a warning (env-var fallback remains); the read caller treats
         it as "fall back to the env var".
     SchedulerVaultBrokerError
-        Vault is unreachable or rejected the write. On a **403** the
-        error carries ``token_invalid=True`` when a follow-up
-        ``lookup-self`` also 403s (the token is dead — re-mint it) and
-        ``False`` when the token is live, leaving the policy scope at
-        fault (#2652). No other status is evidence about the token, so
-        each keeps ``False``.
+        Vault is unreachable or rejected the write. On a **403** the broker
+        runs ``lookup-self``: a **dead** token triggers the #2668 self-heal
+        (re-mint via runner JWT + retry the write once) and only surfaces
+        here — with ``token_invalid=True`` — when the re-mint *itself* fails;
+        a **live** token leaves the policy scope at fault
+        (``token_invalid=False``, #2652). No other status is evidence about
+        the token, so each keeps ``False``.
     """
     settings = get_settings()
     api_path = vault_path_for_client_id(identity_ref, settings=settings)
     mount, logical = split_kv_v2_api_path(api_path)
-    client = _scheduler_client(settings)
-    try:
-        await asyncio.to_thread(
-            client.secrets.kv.v2.create_or_update_secret,
+
+    def _write(client: hvac.Client) -> None:
+        client.secrets.kv.v2.create_or_update_secret(
             path=logical,
             secret={SECRET_FIELD: client_secret},
             mount_point=mount,
         )
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-        raise SchedulerVaultBrokerError(
-            f"vault unreachable writing agent secret at {api_path!r}: {type(exc).__name__}"
-        ) from exc
-    except hvac.exceptions.Forbidden as exc:
-        # 403 is the one ambiguous rejection: a dead token and a live-but-
-        # under-scoped policy look identical, yet the remediations are
-        # opposites (re-mint vs. widen the policy). Split them with one
-        # ``lookup-self`` on the *same* client that just failed and carry
-        # the disposition so all four register surfaces inherit it
-        # (#2652). Diagnosis only — the write is never retried.
-        token_invalid = await _scheduler_token_rejected(client)
-        if token_invalid:
-            _log.error(
-                "scheduler_vault_token_dead",
-                reason=type(exc).__name__,
-                check="agent_secret_write",
-            )
-        raise SchedulerVaultBrokerError(
-            f"vault rejected agent-secret write at {api_path!r}: {type(exc).__name__}",
-            token_invalid=token_invalid,
-        ) from exc
-    except hvac.exceptions.VaultError as exc:
-        # Every other status hvac maps onto ``VaultError`` (429, 500, 502,
-        # 503 sealed/down …) describes Vault, not the token — nothing to
-        # disambiguate, so no probe; the policy-scope remediation stands.
-        raise SchedulerVaultBrokerError(
-            f"vault rejected agent-secret write at {api_path!r}: {type(exc).__name__}"
-        ) from exc
-    # The token just authenticated a write — renew it so the periodic
-    # token never ages out (#2328). Best-effort; never raises.
+
+    # #2652 (403 disambiguation) + #2668 (self-heal a confirmed-dead token,
+    # retry once) both live in the shared seam. A non-403 rejection describes
+    # Vault, not the token, so it is never probed or healed.
+    _, client = await _execute_with_self_heal(
+        settings, _write, check="agent_secret_write", api_path=api_path
+    )
+    # The token that succeeded (original or re-minted) just authenticated a
+    # write — renew it so a periodic token never ages out (#2328).
+    # Best-effort; never raises.
     await _maybe_renew_scheduler_token(client)
     _log.info(
         "scheduler_agent_secret_written",
@@ -405,35 +566,35 @@ async def read_agent_secret(identity_ref: str) -> str | None:
         ``VAULT_SCHEDULER_TOKEN`` is unset — the caller treats this as
         "Vault not available, try the env-var fallback".
     SchedulerVaultBrokerError
-        Vault is unreachable or rejected the read for a reason other than
-        a missing path.
+        Vault is unreachable, or rejected the read for a reason other than a
+        missing path. A **403** that ``lookup-self`` confirms is a dead token
+        triggers the #2668 self-heal (re-mint via runner JWT + retry the read
+        once) and only surfaces here when the re-mint *itself* fails.
     """
     settings = get_settings()
     api_path = vault_path_for_client_id(identity_ref, settings=settings)
     mount, logical = split_kv_v2_api_path(api_path)
-    client = _scheduler_client(settings)
-    try:
-        payload = await asyncio.to_thread(
-            client.secrets.kv.v2.read_secret_version,
+
+    def _read(client: hvac.Client) -> object:
+        return client.secrets.kv.v2.read_secret_version(
             path=logical,
             mount_point=mount,
             raise_on_deleted_version=False,
         )
+
+    try:
+        payload, client = await _execute_with_self_heal(
+            settings, _read, check="agent_secret_read", api_path=api_path
+        )
     except hvac.exceptions.InvalidPath:
-        # KV-v2 read of a non-existent path raises InvalidPath (404). This
-        # is the "agent secret not in Vault yet" case — return None so the
-        # resolver falls back to the env var rather than failing the fire.
+        # KV-v2 read of a non-existent path raises InvalidPath (404) — the
+        # "agent secret not in Vault yet" case, on the original token or a
+        # re-minted one. Return None so the resolver falls back to the env
+        # var rather than failing the fire.
         return None
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as exc:
-        raise SchedulerVaultBrokerError(
-            f"vault unreachable reading agent secret at {api_path!r}: {type(exc).__name__}"
-        ) from exc
-    except hvac.exceptions.VaultError as exc:
-        raise SchedulerVaultBrokerError(
-            f"vault rejected agent-secret read at {api_path!r}: {type(exc).__name__}"
-        ) from exc
-    # The token just authenticated a read — renew it so the periodic
-    # token never ages out (#2328). Best-effort; never raises.
+    # The token that succeeded (original or re-minted) just authenticated a
+    # read — renew it so a periodic token never ages out (#2328).
+    # Best-effort; never raises.
     await _maybe_renew_scheduler_token(client)
     secret = _unwrap_secret(payload)
     if not secret:
@@ -452,7 +613,10 @@ class SchedulerTokenStatus:
     when the token is dead (403 / expired) or Vault was unreachable.
     ``ttl_seconds`` and ``expire_time`` echo Vault's own view so an
     operator (or #2327's ``/ready`` surface) can watch ``expire_time``
-    advance across renewals. Never carries a token value.
+    advance across renewals. ``will_expire_reason`` is the periodic-guard
+    verdict (#2668): ``None`` when the token renews indefinitely, or a
+    comma-joined reason string (``non_renewable`` / ``explicit_max_ttl``)
+    when it will die despite the renewal timer. Never carries a token value.
     """
 
     configured: bool
@@ -460,6 +624,7 @@ class SchedulerTokenStatus:
     detail: str
     ttl_seconds: int | None = None
     expire_time: str | None = None
+    will_expire_reason: str | None = None
 
 
 def _lookup_self_blocking(client: hvac.Client) -> object:
@@ -467,13 +632,17 @@ def _lookup_self_blocking(client: hvac.Client) -> object:
     return client.auth.token.lookup_self()
 
 
-async def _scheduler_token_rejected(client: hvac.Client) -> bool:
+async def _scheduler_token_rejected(
+    client: hvac.Client, *, check: str = "agent_secret_write"
+) -> bool:
     """Is *client*'s token itself dead, rather than merely under-scoped?
 
-    Called from the write-failure path (#2652) after Vault answered a
-    write with 403. A revoked / expired / lost-lease token and a live
-    token on a policy without ``create``+``update`` both produce that
-    403, so the write response alone cannot name the remediation.
+    Called from the shared read/write 403 seam (:func:`_execute_with_self_heal`,
+    #2652) after Vault answered with 403; *check* labels the calling
+    operation in the inconclusive/unreachable log events. A revoked /
+    expired / lost-lease token and a live token on a policy without the
+    needed capabilities both produce that 403, so the response alone cannot
+    name the remediation.
     ``auth/token/lookup-self`` can: Vault answers it for a live token
     granted ``read`` there (``meho-scheduler`` grants it — load-bearing,
     see ``docs/cross-repo/vault-provisioning.md``) and 403s an invalid one.
@@ -497,11 +666,11 @@ async def _scheduler_token_rejected(client: hvac.Client) -> bool:
         _log.warning(
             "scheduler_vault_token_lookup_inconclusive",
             reason=type(exc).__name__,
-            check="agent_secret_write",
+            check=check,
         )
         return False
     except requests.exceptions.RequestException:
-        _log.warning("scheduler_vault_token_lookup_unreachable", check="agent_secret_write")
+        _log.warning("scheduler_vault_token_lookup_unreachable", check=check)
         return False
     return False
 
@@ -524,12 +693,47 @@ def _unwrap_token_lifetime(payload: object) -> tuple[int | None, str | None]:
     return ttl_int, expire_str
 
 
+def _token_expiry_warning(payload: object) -> str | None:
+    """Periodic guard (#2668): reason the token dies despite renewal, or None.
+
+    Two ``lookup-self`` signals mean the renewal timer cannot keep the token
+    alive forever, so no amount of ``renew-self`` will save it:
+
+    * ``renewable == False`` — the token cannot be renewed at all; it dies at
+      its current ``ttl``.
+    * ``explicit_max_ttl > 0`` — a hard lifetime cap renewal cannot cross; the
+      token dies at the cap even while being renewed.
+
+    Returns a comma-joined reason string (stable tokens for log / alert
+    matching) or ``None`` when neither holds. ``period`` is *inspected and
+    logged* by the caller for operator visibility but does not alone condemn
+    the token here: Vault only emits ``period`` for periodic tokens, its
+    presence in ``lookup-self`` is version-dependent, and the #2668 self-heal
+    makes a merely non-periodic token survivable regardless. Malformed
+    payloads return ``None`` — the caller has already logged liveness.
+    """
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return None
+    reasons: list[str] = []
+    if data.get("renewable") is False:
+        reasons.append("non_renewable")
+    max_ttl = data.get("explicit_max_ttl")
+    if isinstance(max_ttl, (int, float)) and not isinstance(max_ttl, bool) and max_ttl > 0:
+        reasons.append("explicit_max_ttl")
+    return ",".join(reasons) if reasons else None
+
+
 async def verify_scheduler_token(*, reason: str = "check") -> SchedulerTokenStatus:
     """Self-lookup the scheduler Vault token; log loudly when it's dead.
 
     Called at scheduler startup and on a slow cadence from the tick loop
-    (:mod:`meho_backplane.scheduler.loop`). It does **not** fix the fuse
-    (that is :func:`_maybe_renew_scheduler_token`; see the module docstring).
+    (:mod:`meho_backplane.scheduler.loop`). It does **not** renew (that is the
+    dedicated :func:`renew_scheduler_token` timer, #2668) — it is the
+    *visibility* backstop. It raises two loud signals: a dead / unreachable
+    token (``ok=False``), and the periodic guard (#2668) — a token that is
+    live now but will die despite renewal (``will_expire_reason`` set, ``ok``
+    stays ``True``).
 
     Never raises. An unconfigured token returns ``configured=False``
     (the documented env-var-fallback opt-out) and any Vault failure is
@@ -565,18 +769,32 @@ async def verify_scheduler_token(*, reason: str = "check") -> SchedulerTokenStat
             configured=True, ok=False, detail=f"denied:{type(exc).__name__}"
         )
     ttl, expire_time = _unwrap_token_lifetime(payload)
-    _log.info(
-        "scheduler_vault_token_verified",
-        check=reason,
-        ttl_seconds=ttl,
-        expire_time=expire_time,
-    )
+    expiry_warning = _token_expiry_warning(payload)
+    if expiry_warning is not None:
+        # Periodic guard (#2668): the token is live now but will die despite
+        # the renewal timer. Loud ERROR — a background credential must never
+        # silently count down to a dead token.
+        _log.error(
+            "scheduler_vault_token_will_expire",
+            check=reason,
+            reasons=expiry_warning,
+            ttl_seconds=ttl,
+            expire_time=expire_time,
+        )
+    else:
+        _log.info(
+            "scheduler_vault_token_verified",
+            check=reason,
+            ttl_seconds=ttl,
+            expire_time=expire_time,
+        )
     return SchedulerTokenStatus(
         configured=True,
         ok=True,
         detail="ok",
         ttl_seconds=ttl,
         expire_time=expire_time,
+        will_expire_reason=expiry_warning,
     )
 
 

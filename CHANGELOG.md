@@ -90,6 +90,31 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Fixed — scheduler self-heals its Vault credential so background features survive unattended (#2668)
+
+- The scheduler authenticates to Vault with a **static periodic token**
+  (`VAULT_SCHEDULER_TOKEN`) that has died in the field, after which every
+  Vault-first credential read 403s and the scheduler **silently skips its
+  fires**. The broker previously *detected* a dead token but could not
+  recover without an operator re-minting one. It now **self-heals**: on a
+  `lookup-self`-confirmed dead token it mints a fresh Vault token by
+  `jwt_login` as the runner principal (runner JWT + `VAULT_CHECK_RUNNER_ROLE`,
+  falling back to `VAULT_OIDC_ROLE`) and retries the failed read/write once —
+  no operator, no sidecar in the loop. If the re-mint *itself* fails it falls
+  back to the existing loud failure, never a silent skip.
+- **Renewal moved onto a timer.** `auth/token/renew-self` previously fired
+  only on agent-secret read/write traffic, so an *idle* scheduler never
+  renewed and aged its periodic token out. A dedicated tick-loop cadence now
+  renews independent of traffic; the on-use renew stays as a cheap extra.
+- **Periodic guard.** Startup and the hourly `lookup-self` now log a loud
+  `ERROR` (`scheduler_vault_token_will_expire`) when the token is
+  non-renewable or carries an `explicit_max_ttl` — it will die despite
+  renewal, so it must be minted `-period=768h`.
+- The headless `client_credentials` → runner-JWT → Vault `jwt_login` mint
+  (no interactive session) is documented in
+  `docs/cross-repo/vault-provisioning.md` for adopters whose scheduled
+  dispatch has no durable identity.
+
 ### Added — check-runner can use a dedicated Vault JWT role (`VAULT_CHECK_RUNNER_ROLE`) (#2757)
 
 - The in-process check-runner's **background dispatch** can now log in to

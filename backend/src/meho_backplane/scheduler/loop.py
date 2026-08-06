@@ -196,6 +196,17 @@ _CLAIM_BATCH_LIMIT: int = 50
 #: alive) runs at tick frequency; this is only the visibility backstop.
 _TOKEN_CHECK_INTERVAL_SECONDS: float = 3600.0
 
+#: Dedicated cadence (seconds) for the scheduler Vault-token
+#: ``auth/token/renew-self`` (#2668). Renewal used to ride only on
+#: agent-secret read/write traffic (``_maybe_renew_scheduler_token``), so an
+#: *idle* scheduler -- no agent-secret reads for longer than the token's
+#: ``period`` -- never renewed and aged its periodic token out. This timer
+#: renews independent of traffic. Hourly is far more frequent than any sane
+#: token ``period`` (the documented mint is ``-period=768h``); the on-use
+#: renew still covers a busy scheduler at tick frequency, so this is the
+#: idle-scheduler backstop.
+_TOKEN_RENEW_INTERVAL_SECONDS: float = 3600.0
+
 
 #: Consecutive precondition-skips a trigger tolerates before the loop
 #: parks it (``status='paused'``) with its ``last_skip_reason`` (#2327).
@@ -953,6 +964,29 @@ async def _check_scheduler_vault_token(*, reason: str) -> None:
         _log.warning("scheduler_vault_token_check_errored", reason=reason, exc_info=True)
 
 
+async def _renew_scheduler_vault_token(*, reason: str) -> None:
+    """Renew the scheduler Vault token on a dedicated cadence (#2668).
+
+    Thin, never-raising wrapper around
+    :func:`~meho_backplane.scheduler.vault_credentials.renew_scheduler_token`
+    so a renewal (which reaches Vault) can never stall or crash the tick
+    loop. Approach item 2: this dedicated timer keeps an *idle* scheduler's
+    periodic token alive independent of agent-secret traffic; the on-use
+    renew inside the broker stays as a cheap extra for a busy scheduler.
+    ``renew_scheduler_token`` already swallows Vault errors loudly; this only
+    guards against an unexpected error escaping it. An unconfigured token is
+    a silent no-op there (the documented env-var-fallback opt-out).
+    """
+    from meho_backplane.scheduler.vault_credentials import renew_scheduler_token
+
+    try:
+        await renew_scheduler_token(reason=reason)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        _log.warning("scheduler_vault_token_renew_errored", reason=reason, exc_info=True)
+
+
 async def _scheduler_loop() -> None:
     """The forever loop: reconcile once, then sleep one cadence, tick, repeat.
 
@@ -965,7 +999,10 @@ async def _scheduler_loop() -> None:
     A Vault-token ``lookup-self`` runs once at startup and then on a
     slow cadence (:data:`_TOKEN_CHECK_INTERVAL_SECONDS`) so a dead
     scheduler token surfaces as a loud log within minutes rather than
-    weeks (#2328).
+    weeks (#2328). A dedicated ``renew-self`` timer
+    (:data:`_TOKEN_RENEW_INTERVAL_SECONDS`, #2668) renews the token
+    independent of agent-secret traffic, so an idle scheduler never ages
+    its periodic token out.
     """
     interval = get_settings().scheduler_tick_interval_seconds
     _log.info("scheduler_started", interval_seconds=interval)
@@ -979,7 +1016,9 @@ async def _scheduler_loop() -> None:
         _log.warning("scheduler_event_reconcile_failed", exc_info=True)
 
     await _check_scheduler_vault_token(reason="startup")
+    await _renew_scheduler_vault_token(reason="startup")
     last_token_check = time.monotonic()
+    last_token_renew = time.monotonic()
     while True:
         # Sleep first so the very first tick does not race the rest of
         # the lifespan startup; CancelledError here unwinds cleanly.
@@ -993,6 +1032,11 @@ async def _scheduler_loop() -> None:
         if time.monotonic() - last_token_check >= _TOKEN_CHECK_INTERVAL_SECONDS:
             last_token_check = time.monotonic()
             await _check_scheduler_vault_token(reason="periodic")
+        # Dedicated renewal timer (#2668): renew independent of agent-secret
+        # traffic so an idle scheduler still keeps its periodic token alive.
+        if time.monotonic() - last_token_renew >= _TOKEN_RENEW_INTERVAL_SECONDS:
+            last_token_renew = time.monotonic()
+            await _renew_scheduler_vault_token(reason="periodic")
 
 
 def start_scheduler() -> asyncio.Task[None]:

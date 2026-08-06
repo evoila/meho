@@ -254,7 +254,7 @@ async def vault_client_for_operator(operator: Operator) -> AsyncIterator[hvac.Cl
     # dedicated-role login surfaces ``VaultRoleDeniedError`` (Sensor ->
     # ``unknown``), never a silent widen back to the wide role.
     role = (
-        settings.vault_check_runner_role or settings.vault_oidc_role
+        (settings.vault_check_runner_role or settings.vault_oidc_role)
         if operator.check_runner_dispatch
         else settings.vault_oidc_role
     )

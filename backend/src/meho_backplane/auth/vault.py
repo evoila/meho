@@ -247,10 +247,22 @@ async def vault_client_for_operator(operator: Operator) -> AsyncIterator[hvac.Cl
     settings = get_settings()
     client = _build_client(settings)
 
+    # #2757 -- only the check-runner's synthetic dispatch operator
+    # (``check_runner_dispatch``) uses the dedicated ``vault_check_runner_role``
+    # when set; every other operator, and the unset case, keeps
+    # ``vault_oidc_role`` byte-for-byte. No fallback on denial: a refused
+    # dedicated-role login surfaces ``VaultRoleDeniedError`` (Sensor ->
+    # ``unknown``), never a silent widen back to the wide role.
+    role = (
+        settings.vault_check_runner_role or settings.vault_oidc_role
+        if operator.check_runner_dispatch
+        else settings.vault_oidc_role
+    )
+
     try:
         await _to_thread_jwt_login(
             client,
-            role=settings.vault_oidc_role,
+            role=role,
             jwt=operator.raw_jwt,
             mount_path=settings.vault_oidc_mount_path,
         )

@@ -90,6 +90,28 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — check-runner can use a dedicated Vault JWT role (`VAULT_CHECK_RUNNER_ROLE`) (#2757)
+
+- The in-process check-runner's **background dispatch** can now log in to
+  Vault under a **dedicated JWT role**, so an operator can bound what
+  scheduled Sensor evaluations read to just the secrets those Sensors
+  reference — instead of inheriting the wide `meho-mcp` role every
+  interactive login uses. New optional setting `VAULT_CHECK_RUNNER_ROLE`
+  (env; `vault_check_runner_role`, default unset): when set, the
+  check-runner's synthetic-operator Vault logins resolve this role while
+  interactive/operator logins keep `VAULT_OIDC_ROLE`; **unset preserves
+  today's single-role behaviour byte-for-byte**. The selection is driven by
+  an internal-only `Operator.check_runner_dispatch` marker set solely by the
+  sensor runner and never lifted from a JWT claim, so a token cannot forge
+  it. Enforcement stays Vault-side (`bound_audiences` + `bound_subject` on
+  the dedicated role) and **fails closed**: a denial on the dedicated role
+  surfaces `VaultRoleDeniedError` and the Sensor evaluates `unknown` — it
+  never silently falls back to the wide role. The provisioning recipe (with
+  an end-to-end verification) is in
+  `docs/cross-repo/vault-provisioning.md` § "Bounding the check-runner
+  principal"; `docs/deploying.md`'s background-dispatch note points at the
+  new setting.
+
 ### Breaking changes — `GET /api/v1/checks/dashboards` + `GET /api/v1/sensors` converged on the `{items, next_cursor}` envelope (#2742)
 
 - **BREAKING.** The two check-plane `GET`-list routes that still wrapped

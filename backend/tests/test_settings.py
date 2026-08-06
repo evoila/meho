@@ -687,3 +687,66 @@ def test_gsm_wif_subject_token_type_blank_falls_back_to_jwt(
         assert get_settings().gsm_wif_subject_token_type == "urn:ietf:params:oauth:token-type:jwt"
     finally:
         get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# #2757 — VAULT_CHECK_RUNNER_ROLE optional per-principal role for the
+# check-runner's background dispatch
+# ---------------------------------------------------------------------------
+
+
+def test_vault_check_runner_role_defaults_to_none_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``VAULT_CHECK_RUNNER_ROLE`` → ``None`` (AC1).
+
+    The whole point of the setting is that an install that never sets it is
+    byte-for-byte unchanged: the role selection in
+    ``vault_client_for_operator`` falls back to ``vault_oidc_role`` for every
+    login, exactly as before this setting existed. Assert the wide role still
+    resolves to its documented default alongside the ``None`` marker.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.delenv("VAULT_CHECK_RUNNER_ROLE", raising=False)
+    get_settings.cache_clear()
+    try:
+        settings = get_settings()
+        assert settings.vault_check_runner_role is None
+        assert settings.vault_oidc_role == "meho-mcp"
+    finally:
+        get_settings.cache_clear()
+
+
+def test_vault_check_runner_role_reads_from_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A set ``VAULT_CHECK_RUNNER_ROLE`` populates the dedicated-role setting (AC1)."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", "meho-check-runner")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().vault_check_runner_role == "meho-check-runner"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.parametrize("raw", ["", "   "])
+def test_vault_check_runner_role_blank_normalises_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+    raw: str,
+) -> None:
+    """A blank/whitespace-only value normalises to ``None`` (AC1).
+
+    ``None`` and empty are deliberately the same "unset" state: the role
+    selection uses ``vault_check_runner_role or vault_oidc_role``, so a blank
+    value must not become a truthy role name that would send every background
+    login to an empty role. Normalising at ingest keeps the unset-preserves-
+    behaviour contract from depending on the ``or`` alone.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", raw)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().vault_check_runner_role is None
+    finally:
+        get_settings.cache_clear()

@@ -169,8 +169,13 @@ def _install_fake_client(
     return fake
 
 
-def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
-    """Build a minimal :class:`Operator` for the forward-auth tests."""
+def _make_operator(jwt: str = "fake.jwt.value", *, check_runner_dispatch: bool = False) -> Operator:
+    """Build a minimal :class:`Operator` for the forward-auth tests.
+
+    ``check_runner_dispatch`` models the in-process check-runner's synthetic
+    dispatch operator (#2757) — the only operator whose Vault JWT login
+    resolves ``vault_check_runner_role`` instead of ``vault_oidc_role``.
+    """
     return Operator(
         sub="op-1",
         name="Alice",
@@ -178,6 +183,7 @@ def _make_operator(jwt: str = "fake.jwt.value") -> Operator:
         raw_jwt=jwt,
         tenant_id="00000000-0000-0000-0000-00000000a0a0",
         tenant_role="operator",
+        check_runner_dispatch=check_runner_dispatch,
     )
 
 
@@ -561,3 +567,103 @@ async def test_readiness_probe_skips_when_vault_unconfigured(
     assert result.name == "vault"
     assert result.ok is True
     assert result.detail == "not_configured"
+
+
+# ---------------------------------------------------------------------------
+# #2757 — per-principal role selection for the check-runner's dispatch
+# ---------------------------------------------------------------------------
+
+
+async def test_check_runner_dispatch_operator_uses_dedicated_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ``check_runner_dispatch`` operator logs in under ``vault_check_runner_role`` (AC2).
+
+    With ``VAULT_CHECK_RUNNER_ROLE`` set, background Sensor dispatch — the
+    only path that carries the marker — resolves the dedicated bounded role,
+    so an operator can scope it to just the secrets Sensors read.
+    """
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", "meho-check-runner")
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="runner-jwt", check_runner_dispatch=True)
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-check-runner", "jwt": "runner-jwt", "path": "jwt"},
+    ]
+
+
+async def test_interactive_operator_keeps_oidc_role_when_dedicated_role_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ordinary operator keeps ``vault_oidc_role`` even when the dedicated
+    role is configured (AC2).
+
+    The dedicated role is opt-in *for the runner only*; the interactive /
+    operator credential-read path must stay on the wide role or every human
+    Vault read (and the ``/api/v1/health`` federation proof) would break.
+    """
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", "meho-check-runner")
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="op-jwt", check_runner_dispatch=False)
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp", "jwt": "op-jwt", "path": "jwt"},
+    ]
+
+
+async def test_check_runner_dispatch_falls_back_to_oidc_role_when_setting_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With ``VAULT_CHECK_RUNNER_ROLE`` unset, even a runner-dispatch operator
+    keeps ``vault_oidc_role`` — today's behaviour byte-for-byte (AC2).
+    """
+    monkeypatch.delenv("VAULT_CHECK_RUNNER_ROLE", raising=False)
+    get_settings.cache_clear()
+    fake = _install_fake_client(monkeypatch)
+    operator = _make_operator(jwt="runner-jwt", check_runner_dispatch=True)
+
+    async with vault_client_for_operator(operator):
+        pass
+
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-mcp", "jwt": "runner-jwt", "path": "jwt"},
+    ]
+
+
+async def test_check_runner_role_denial_fails_closed_without_falling_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A denial on the dedicated role surfaces ``VaultRoleDeniedError`` and
+    never retries under the wide role (AC4 — fail-closed).
+
+    This is the security core of #2757: a mis-scoped dedicated role must make
+    the Sensor evaluate ``unknown`` (the caller maps ``VaultRoleDeniedError``
+    to a structured error), *not* silently widen background dispatch back to
+    ``vault_oidc_role``. The single login call, pinned to the dedicated role,
+    is the proof there is no fallback.
+    """
+    monkeypatch.setenv("VAULT_CHECK_RUNNER_ROLE", "meho-check-runner")
+    get_settings.cache_clear()
+    fake = _install_fake_client(
+        monkeypatch,
+        login_exc=hvac.exceptions.Forbidden("role denied"),
+    )
+    operator = _make_operator(jwt="runner-jwt", check_runner_dispatch=True)
+
+    with pytest.raises(VaultRoleDeniedError):
+        async with vault_client_for_operator(operator):
+            pass
+
+    # Exactly one login attempt, against the dedicated role — no retry under
+    # ``meho-mcp``.
+    assert fake.auth.jwt.login_calls == [
+        {"role": "meho-check-runner", "jwt": "runner-jwt", "path": "jwt"},
+    ]

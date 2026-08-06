@@ -1383,6 +1383,21 @@ class Settings(BaseModel):
     # authenticates MEHO's own background dispatch **outward**.
     check_runner_client_id: str = Field(default="")
     check_runner_client_secret: str = Field(default="", repr=False)
+    # #2757 -- optional dedicated Vault JWT role for the in-process
+    # check-runner's background dispatch. Unset (the default) keeps every
+    # Vault JWT login on ``vault_oidc_role`` byte-for-byte, so interactive
+    # and background logins share one role exactly as they do today. Set it
+    # and only the check-runner's synthetic-operator logins
+    # (``vault_client_for_operator`` when ``Operator.check_runner_dispatch``
+    # is set -- i.e. background Sensor dispatch) resolve *this* role, while
+    # interactive/operator logins keep ``vault_oidc_role``. That lets an
+    # operator provision a role bounded by ``bound_audiences`` +
+    # ``bound_subject`` scoped to just the secrets Sensors read
+    # (docs/cross-repo/vault-provisioning.md § "Bounding the check-runner
+    # principal"). Enforcement stays Vault-side and fails closed: a login the
+    # dedicated role denies surfaces ``VaultRoleDeniedError`` (the Sensor
+    # evaluates ``unknown``) -- it never falls back to the wide role.
+    vault_check_runner_role: str | None = Field(default=None)
     # Initiative #2416 (#2507) — tiered-triage investigator wiring. A Dashboard
     # green→non-green transition (detected at #2505's persist seam) fires a
     # diagnose-only agent run via ``AgentInvoker.run_scheduled`` against the
@@ -1984,6 +1999,10 @@ def get_settings() -> Settings:
         ),
         check_runner_client_id=os.environ.get("CHECK_RUNNER_CLIENT_ID", "").strip(),
         check_runner_client_secret=os.environ.get("CHECK_RUNNER_CLIENT_SECRET", "").strip(),
+        # #2757 -- unset/blank normalises to None so the role selection in
+        # ``vault_client_for_operator`` falls back to ``vault_oidc_role``,
+        # preserving today's single-role behaviour byte-for-byte.
+        vault_check_runner_role=(os.environ.get("VAULT_CHECK_RUNNER_ROLE", "").strip() or None),
         checks_investigator_agent=os.environ.get(
             "CHECKS_INVESTIGATOR_AGENT",
             "checks-investigator",

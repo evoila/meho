@@ -1306,3 +1306,39 @@ def test_non_runner_tokens_authenticate_with_runner_id_none(extra: dict[str, str
     expected_kind = extra["principal_kind"] if extra else PrincipalKind.USER.value
     assert body["principal_kind"] == expected_kind
     assert body["runner_id"] is None
+
+
+def test_verified_operator_never_carries_check_runner_dispatch() -> None:
+    """A JWT can never set ``check_runner_dispatch`` (#2757, AC3 — internal-only).
+
+    The marker that routes a Vault login to ``vault_check_runner_role`` is set
+    *solely* by ``checks.runner._sensor_operator``; ``verify_jwt`` constructs
+    every Operator with explicit keyword arguments and never reads a claim into
+    it. A forged ``check_runner_dispatch: true`` claim must therefore
+    materialise as ``False`` — otherwise a token could escalate its own
+    background-dispatch role.
+    """
+    key = _make_rsa_keypair("kid-A")
+    jwks = _public_jwks(key)
+    token = _mint_token(
+        key,
+        sub="op-attacker",
+        extra_claims={"check_runner_dispatch": True},
+    )
+
+    app = FastAPI()
+
+    @app.get("/whoami")
+    async def whoami(operator: Operator = Depends(verify_jwt)) -> dict[str, Any]:
+        return {"check_runner_dispatch": operator.check_runner_dispatch}
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, jwks)
+        client = TestClient(app)
+        response = client.get(
+            "/whoami",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"check_runner_dispatch": False}

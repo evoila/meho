@@ -90,6 +90,22 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — compressed dev-Vault soak for the scheduler credential's renewal timer + periodic guard (#2827)
+
+- New integration-lane coverage boots a real dev-mode Vault
+  (testcontainers) and drives #2668's scheduler-credential lifecycle over
+  a **seconds-long compressed timeline** — de-risking the multi-day
+  deployed soak (#2826) before it is attempted. A real **periodic token**
+  with a short period is kept alive across repeated
+  `renew_scheduler_token` cycles spanning more than one period
+  (`verify_scheduler_token` stays `ok`, `scheduler_vault_token_renewed`
+  observed, `scheduler_vault_token_dead` never), and a real
+  `explicit_max_ttl` token trips the periodic guard
+  (`scheduler_vault_token_will_expire`, ERROR) against the live
+  `lookup-self` payload — behaviour the unit layer could only mock.
+  Test-only; Docker-socket-absent sandboxes skip cleanly; no production
+  code change.
+
 ### Fixed — scheduler self-heals its Vault credential so background features survive unattended (#2668)
 
 - The scheduler authenticates to Vault with a **static periodic token**

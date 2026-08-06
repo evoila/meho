@@ -444,14 +444,14 @@ async def test_empty_allowlist_refuses_before_any_socket_opens(
 
     monkeypatch.setattr(net_tls.socket, "create_connection", _boom)
     result = await _dispatch_inspect({"host": "10.1.2.3", "port": 8443})
-    assert result.status == "ok", result.error
-    body = result.result
-    assert body["handshake"] is False
-    assert body["reason"] == "not_in_probe_allowlist"
-    assert body["host"] == "10.1.2.3"
-    assert body["port"] == 8443
-    assert body["chain"] == []
-    assert body["leaf"] is None
+    # #2784: no socket opened, so the refusal fails the dispatch rather than
+    # reporting an (unfounded) failed handshake.
+    assert result.status == "error"
+    assert result.result is None
+    assert result.extras["error_code"] == "connector_probe_refused"
+    assert result.extras["host"] == "10.1.2.3"
+    assert result.error is not None
+    assert PROBE_ALLOWLIST_ENV in result.error
 
 
 async def test_audit_row_records_literal_host_and_port(
@@ -693,9 +693,13 @@ async def test_success_and_failure_results_validate_against_response_schema(
     assert success.status == "ok", success.error
     validator.validate(success.result)  # raises ValidationError on non-conformance
 
-    # Empty allowlist (the autouse env clears it) ⇒ a refused, cert-less failure.
-    monkeypatch.delenv(PROBE_ALLOWLIST_ENV, raising=False)
-    failure = await _dispatch_inspect({"host": "10.9.9.9", "port": 8443})
+    # A closed port ⇒ a cert-less failure body (an allowlist refusal no
+    # longer produces one: since #2784 it fails the dispatch instead).
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    closed_port = probe.getsockname()[1]
+    probe.close()
+    failure = await _dispatch_inspect({"host": "127.0.0.1", "port": closed_port})
     assert failure.status == "ok", failure.error
     assert failure.result["handshake"] is False
     assert failure.result["days_to_expiry"] is None

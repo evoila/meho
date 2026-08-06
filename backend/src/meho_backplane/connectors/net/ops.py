@@ -24,17 +24,22 @@ Three foundations every later ``net.*`` op reuses land here:
   :func:`~meho_backplane.connectors.net.allowlist.assert_probe_allowed`
   on the exact dialed host *before* opening a socket.
   ``MEHO_NETDIAG_PROBE_ALLOWLIST`` empty ⇒ every probe refused (the
-  connector is inert).
+  connector is inert). A refusal **propagates**: the dispatcher
+  classifies it as the structured ``connector_probe_refused`` error
+  (#2784), so a blocked probe reads as "policy refused" rather than as
+  an observation.
 * **Audit-visible host:port** — the handler's return dict carries the
   literal ``host``/``port`` (unlike ``secret.move``'s refs, a
   host:port is not a secret), so the durable audit row's
   ``raw_payload`` answers "who probed what". The dispatcher stores the
   handler's return value as ``raw_payload`` verbatim.
-* **Return-failures contract** — a refused, refused-by-peer, timed-out,
-  or DNS-failed probe is the **product**, not an error: the handler
-  returns ``{"connected": false, "reason": <code>, ...}`` with the
-  dispatch ``status="ok"``. It never raises a ``connector_*`` error for
-  a failed connection. Only an unexpected bug would propagate.
+* **Return-failures contract** — a refused-by-peer, timed-out, or
+  DNS-failed probe is the **product**, not an error: the handler returns
+  ``{"connected": false, "reason": <code>, ...}`` with the dispatch
+  ``status="ok"``. It never raises a ``connector_*`` error for a failed
+  connection. The contract covers probes that *ran*; an allowlist
+  refusal (no socket opened, no product) is the deliberate exception and
+  fails the dispatch instead (#2784).
 
 ``safety_level="safe"`` + ``requires_approval=False`` make the probe
 agent-auto-runnable and ungated, so the probe allowlist is the sole
@@ -57,12 +62,8 @@ import dns.flags
 import dns.rdatatype
 import dns.resolver
 import dns.reversename
-import structlog
 
-from meho_backplane.connectors.net.allowlist import (
-    ProbeNotAllowedError,
-    assert_probe_allowed,
-)
+from meho_backplane.connectors.net.allowlist import assert_probe_allowed
 from meho_backplane.operations.typed_register import register_typed_operation
 
 if TYPE_CHECKING:
@@ -77,7 +78,6 @@ __all__ = [
     "register_net_typed_operations",
 ]
 
-_log = structlog.get_logger(__name__)
 
 #: Default connect timeout when the caller omits ``timeout_seconds``.
 _DEFAULT_TIMEOUT_SECONDS: Final[float] = 5.0
@@ -131,7 +131,9 @@ _NET_TCP_CHECK_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "Null on success; otherwise a failure code: "
-                "not_in_probe_allowlist, timeout, refused, dns_failure, unreachable."
+                "timeout, refused, dns_failure, unreachable. A destination "
+                "outside MEHO_NETDIAG_PROBE_ALLOWLIST is not reported here — "
+                "it fails the dispatch with connector_probe_refused."
             ),
         },
         "latency_ms": {
@@ -151,7 +153,9 @@ _NET_TCP_CHECK_WHEN_TO_USE = (
     "balancer's 443 open from here?'. A non-mutating reachability probe: "
     "it opens a connection, measures latency, and closes immediately. A "
     "failed connect (refused/timeout/DNS) is a normal result, not an "
-    "error. The destination must be inside MEHO_NETDIAG_PROBE_ALLOWLIST."
+    "error. The destination must be inside MEHO_NETDIAG_PROBE_ALLOWLIST; "
+    "one that is not fails with connector_probe_refused instead of "
+    "reporting a (false) unreachable reading."
 )
 
 _NET_TCP_CHECK_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -168,11 +172,13 @@ _NET_TCP_CHECK_LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": (
         "On success: {'connected': true, 'reason': null, 'latency_ms': "
-        "<float>, 'host': <str>, 'port': <int>}. On a failed or refused "
-        "probe: {'connected': false, 'reason': "
-        "'<not_in_probe_allowlist|timeout|refused|dns_failure|unreachable>', "
-        "'latency_ms': null, 'host': <str>, 'port': <int>} — still a "
-        "successful (status=ok) op."
+        "<float>, 'host': <str>, 'port': <int>}. On a failed probe: "
+        "{'connected': false, 'reason': "
+        "'<timeout|refused|dns_failure|unreachable>', 'latency_ms': null, "
+        "'host': <str>, 'port': <int>} — still a successful (status=ok) op. "
+        "A host outside MEHO_NETDIAG_PROBE_ALLOWLIST is NOT a reading: the "
+        "op fails with error_code='connector_probe_refused' and nothing was "
+        "dialed, so treat reachability as unknown, not down."
     ),
 }
 
@@ -214,19 +220,18 @@ async def net_tcp_check(operator: Operator, target: Any, params: dict[str, Any])
     connection under :func:`asyncio.wait_for` → measure latency → close.
     A refused/timed-out/DNS-failed connect returns a structured
     ``connected=false`` payload with ``status="ok"`` (the return-failures
-    contract); the value is never raised as a ``connector_*`` error. The
-    returned dict carries the literal ``host``/``port`` so the durable
+    contract); the value is never raised as a ``connector_*`` error. An
+    allowlist refusal is the exception (#2784): nothing was dialed, so
+    :exc:`ProbeNotAllowedError` propagates and the dispatcher renders it
+    as ``connector_probe_refused`` rather than as ``connected=false``.
+    The returned dict carries the literal ``host``/``port`` so the durable
     audit row's ``raw_payload`` records what was probed.
     """
     host = str(params["host"])
     port = int(params["port"])
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
 
-    try:
-        assert_probe_allowed(host)
-    except ProbeNotAllowedError:
-        _log.info("net.tcp_check.refused", host=host, port=port, reason="not_in_probe_allowlist")
-        return _refusal(host, port, "not_in_probe_allowlist")
+    assert_probe_allowed(host)
 
     started = time.perf_counter()
     try:
@@ -369,8 +374,10 @@ _NET_DNS_LOOKUP_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "Null on success; otherwise a failure code: "
-                "not_in_probe_allowlist, bad_resolver, nxdomain, no_answer, "
-                "servfail, timeout, no_resolver."
+                "bad_resolver, nxdomain, no_answer, servfail, timeout, "
+                "no_resolver. A name or resolver outside "
+                "MEHO_NETDIAG_PROBE_ALLOWLIST is not reported here — it "
+                "fails the dispatch with connector_probe_refused."
             ),
         },
     },
@@ -418,8 +425,10 @@ _NET_DNS_LOOKUP_LLM_INSTRUCTIONS: dict[str, Any] = {
         "'authoritative': <bool>, 'authenticated_data': <bool>, 'reason': "
         "null}. On failure: the same shape with 'resolved': false, empty "
         "'records', null flags, and 'reason': "
-        "'<not_in_probe_allowlist|bad_resolver|nxdomain|no_answer|servfail|"
-        "timeout|no_resolver>' — still a successful (status=ok) op."
+        "'<bad_resolver|nxdomain|no_answer|servfail|timeout|no_resolver>' — "
+        "still a successful (status=ok) op. A name or resolver outside "
+        "MEHO_NETDIAG_PROBE_ALLOWLIST is NOT a reading: the op fails with "
+        "error_code='connector_probe_refused' and no query was sent."
     ),
 }
 
@@ -532,7 +541,10 @@ async def net_dns_lookup(operator: Operator, target: Any, params: dict[str, Any]
     literal → resolve under the timeout as the query deadline. NXDOMAIN /
     no-answer / SERVFAIL / timeout return a structured ``resolved=false``
     payload with ``status="ok"`` (the return-failures contract); none are
-    raised as ``connector_*`` errors. The returned dict carries the
+    raised as ``connector_*`` errors. An allowlist refusal is the
+    exception (#2784): no query was sent, so
+    :exc:`ProbeNotAllowedError` propagates to the dispatcher's
+    ``connector_probe_refused`` arm. The returned dict carries the
     literal ``name``/``type``/``resolver`` so the durable audit row's
     ``raw_payload`` records what was looked up and against which server.
     """
@@ -558,14 +570,11 @@ async def net_dns_lookup(operator: Operator, target: Any, params: dict[str, Any]
 
     # One guard applied uniformly (#1177): the queried name is gated, and
     # a custom resolver IP is gated too — querying an internal resolver or
-    # resolving internal names is itself mild recon.
-    try:
-        assert_probe_allowed(name)
-        if resolver_ip is not None:
-            assert_probe_allowed(resolver_ip)
-    except ProbeNotAllowedError:
-        _log.info("net.dns_lookup.refused", name=name, reason="not_in_probe_allowlist")
-        return _dns_refusal(name, requested_type, resolver_label, "not_in_probe_allowlist")
+    # resolving internal names is itself mild recon. A refusal propagates
+    # to the dispatcher's ``connector_probe_refused`` arm (#2784).
+    assert_probe_allowed(name)
+    if resolver_ip is not None:
+        assert_probe_allowed(resolver_ip)
 
     # Reverse (PTR) form when the name is an IP literal — mirrors ``dig -x``.
     ip_literal = _as_ip_literal(name)
@@ -629,9 +638,11 @@ async def register_net_typed_operations(
             "immediately — a non-mutating reachability probe. The "
             "destination must be inside MEHO_NETDIAG_PROBE_ALLOWLIST or "
             "the probe is refused before any socket opens (empty "
-            "allowlist ⇒ the connector is inert). A refused, timed-out, "
-            "or DNS-failed connect returns connected=false with a reason "
-            "code and status=ok — a failed probe is the product, never a "
+            "allowlist ⇒ the connector is inert), which fails the dispatch "
+            "with connector_probe_refused — no socket opened, so it is not "
+            "a reachability answer. A refused-by-peer, timed-out, or "
+            "DNS-failed connect returns connected=false with a reason code "
+            "and status=ok — a failed probe is the product, never a "
             "connector error."
         ),
         parameter_schema=NET_TCP_CHECK_PARAMETER_SCHEMA,
@@ -659,7 +670,9 @@ async def register_net_typed_operations(
             "operator can compare the pod resolver against an "
             "authoritative/other nameserver (split-horizon). The queried "
             "name and any chosen resolver must be inside "
-            "MEHO_NETDIAG_PROBE_ALLOWLIST. NXDOMAIN, no-answer, SERVFAIL "
+            "MEHO_NETDIAG_PROBE_ALLOWLIST; one that is not fails the "
+            "dispatch with connector_probe_refused, since no query was "
+            "sent. NXDOMAIN, no-answer, SERVFAIL "
             "and timeout return resolved=false with a reason code and "
             "status=ok — a failed lookup is the product, never a "
             "connector error."

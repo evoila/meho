@@ -28,7 +28,9 @@ This op inherits the three T1 foundations verbatim:
 
 * **Probe allowlist** — :func:`~meho_backplane.connectors.net.allowlist.assert_probe_allowed`
   screens the dialed ``host`` *before* any socket opens
-  (``MEHO_NETDIAG_PROBE_ALLOWLIST`` empty ⇒ every probe refused).
+  (``MEHO_NETDIAG_PROBE_ALLOWLIST`` empty ⇒ every probe refused). A
+  refusal propagates to the dispatcher's ``connector_probe_refused``
+  arm (#2784) instead of being reported as an unreachable server.
 * **Audit-visible host:port** — the return dict carries the literal
   ``host``/``port`` (a host:port is not a secret), so the durable audit
   row's ``raw_payload`` answers "who probed what".
@@ -53,10 +55,7 @@ from typing import TYPE_CHECKING, Any, Final, NamedTuple
 
 import structlog
 
-from meho_backplane.connectors.net.allowlist import (
-    ProbeNotAllowedError,
-    assert_probe_allowed,
-)
+from meho_backplane.connectors.net.allowlist import assert_probe_allowed
 
 # Reuse the shared probe timeout bounds/clamp from the keystone module.
 # ``ops`` never imports ``ntp`` (the __init__ queues each registrar
@@ -147,8 +146,10 @@ _NET_NTP_CHECK_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["string", "null"],
             "description": (
                 "Null on success; otherwise a failure code: "
-                "not_in_probe_allowlist, timeout, refused, dns_failure, "
-                "unreachable, kod, invalid_response."
+                "timeout, refused, dns_failure, unreachable, kod, "
+                "invalid_response. A host outside "
+                "MEHO_NETDIAG_PROBE_ALLOWLIST is not reported here — it "
+                "fails the dispatch with connector_probe_refused."
             ),
         },
         "host": {"type": "string", "description": "The queried host (audit-visible)."},
@@ -227,7 +228,9 @@ _NET_NTP_CHECK_WHEN_TO_USE = (
     "probe. Read-only: it queries the time, it never sets a clock. A "
     "timeout, a refused query, or a kiss-o'-death reply is a normal "
     "result, not an error. The destination must be inside "
-    "MEHO_NETDIAG_PROBE_ALLOWLIST."
+    "MEHO_NETDIAG_PROBE_ALLOWLIST; one that is not fails with "
+    "connector_probe_refused rather than reporting a (false) unreachable "
+    "server."
 )
 
 _NET_NTP_CHECK_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -249,7 +252,9 @@ _NET_NTP_CHECK_LLM_INSTRUCTIONS: dict[str, Any] = {
         "'root_dispersion_ms': <float>, 'kiss_code': null, 'host', 'port'}. "
         "On a refused / timed-out / KoD query: the same keys with "
         "reachable=false, reason set, and the clock fields null — still a "
-        "successful (status=ok) op."
+        "successful (status=ok) op. A host outside "
+        "MEHO_NETDIAG_PROBE_ALLOWLIST is NOT a reading: the op fails with "
+        "error_code='connector_probe_refused' and no packet was sent."
     ),
 }
 
@@ -489,18 +494,17 @@ async def net_ntp_check(operator: Operator, target: Any, params: dict[str, Any])
     timed-out, DNS-failed, kiss-o'-death, or malformed reply returns a
     structured ``reachable=false`` payload with ``status="ok"`` (the
     return-failures contract); it is never raised as a ``connector_*``
-    error. The returned dict carries the literal ``host``/``port`` so the
+    error. An allowlist refusal is the exception (#2784): no packet was
+    sent, so :exc:`ProbeNotAllowedError` propagates to the dispatcher's
+    ``connector_probe_refused`` arm. The returned dict carries the
+    literal ``host``/``port`` so the
     durable audit row's ``raw_payload`` records what was probed.
     """
     host = str(params["host"])
     port = int(params.get("port", _DEFAULT_NTP_PORT))
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
 
-    try:
-        assert_probe_allowed(host)
-    except ProbeNotAllowedError:
-        _log.info("net.ntp_check.refused", host=host, port=port, reason="not_in_probe_allowlist")
-        return _failure(host, port, "not_in_probe_allowlist")
+    assert_probe_allowed(host)
 
     try:
         data, t1, t4, sent = await _query_ntp(host, port, timeout)
@@ -564,7 +568,8 @@ async def register_net_ntp_check_operation(
             "'sntp' parity. Read-only: it reads the time, it never sets a "
             "clock, and it needs no raw socket or added pod capability. The "
             "destination must be inside MEHO_NETDIAG_PROBE_ALLOWLIST or the "
-            "probe is refused before any socket opens. A refused, timed-out, "
+            "probe is refused before any socket opens, which fails the "
+            "dispatch with connector_probe_refused. A refused-by-peer, timed-out, "
             "DNS-failed, or kiss-o'-death query returns reachable=false with "
             "a reason code and status=ok — a failed probe is the product, "
             "never a connector error."

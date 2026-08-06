@@ -340,6 +340,11 @@ async def test_redirect_to_non_allowlisted_host_is_blocked_and_never_dialed(
     points at the ``127.0.0.1`` server (NOT allowlisted — verbatim
     hostname allowlist has no IP entry). The metadata/credential server's
     hit-list must stay empty: the re-gate refuses it before any socket.
+
+    #2784 carve-out: unlike an *initial*-host refusal (which fails the
+    dispatch as ``connector_probe_refused``), this stays ``status="ok"``
+    with ``reachable=true`` — the prior hop answered, so the result is a
+    genuine observation, not a probe that never ran.
     """
     metadata = await _start_http_server(
         {"/creds": _Route(status=200, body=b"SECRET")}, host="127.0.0.1"
@@ -366,6 +371,8 @@ async def test_redirect_to_non_allowlisted_host_is_blocked_and_never_dialed(
             await srv.server.wait_closed()
 
     assert result.status == "ok", result.error
+    # NOT reclassified as a dispatch error — the #2784 carve-out.
+    assert result.extras.get("error_code") is None
     body = result.result
     assert body["reachable"] is True
     assert body["reason"] == "blocked_redirect"
@@ -393,10 +400,15 @@ async def test_initial_host_outside_allowlist_refused_before_socket(
     monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "10.0.0.0/8")
 
     result = await _dispatch_probe({"url": "http://192.168.1.5/health"})
-    assert result.status == "ok", result.error
-    assert result.result["reachable"] is False
-    assert result.result["reason"] == "not_in_probe_allowlist"
-    assert result.result["status"] is None
+    # #2784: nothing was dialed, so the *initial*-host refusal fails the
+    # dispatch. (The mid-chain redirect re-gate keeps status=ok — see
+    # test_redirect_to_non_allowlisted_host_is_blocked_and_never_dialed.)
+    assert result.status == "error"
+    assert result.result is None
+    assert result.extras["error_code"] == "connector_probe_refused"
+    assert result.extras["host"] == "192.168.1.5"
+    assert result.error is not None
+    assert PROBE_ALLOWLIST_ENV in result.error
 
 
 async def test_audit_row_records_url_and_final_url(

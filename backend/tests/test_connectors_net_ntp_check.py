@@ -382,21 +382,14 @@ async def test_empty_allowlist_refuses_before_any_socket(
 
     result = await _dispatch_ntp({"host": "10.0.0.1"})
 
-    assert result.status == "ok", result.error
-    assert result.result == {
-        "reachable": False,
-        "reason": "not_in_probe_allowlist",
-        "host": "10.0.0.1",
-        "port": 123,
-        "stratum": None,
-        "ref_id": None,
-        "leap": None,
-        "offset_ms": None,
-        "round_trip_ms": None,
-        "root_delay_ms": None,
-        "root_dispersion_ms": None,
-        "kiss_code": None,
-    }
+    # #2784: no packet was sent, so the refusal fails the dispatch rather
+    # than reporting an (unfounded) unreachable server.
+    assert result.status == "error"
+    assert result.result is None
+    assert result.extras["error_code"] == "connector_probe_refused"
+    assert result.extras["host"] == "10.0.0.1"
+    assert result.error is not None
+    assert PROBE_ALLOWLIST_ENV in result.error
 
 
 # ---------------------------------------------------------------------------

@@ -53,13 +53,30 @@ PROBE_ALLOWLIST_ENV: Final[str] = "MEHO_NETDIAG_PROBE_ALLOWLIST"
 class ProbeNotAllowedError(ValueError):
     """A probe destination is not inside :data:`PROBE_ALLOWLIST_ENV`.
 
-    Subclasses :class:`ValueError`. The ``net.*`` handlers catch it and
-    convert it into the connector's structured refusal
-    (``{"connected": false, "reason": "not_in_probe_allowlist", ...}``,
-    ``status="ok"``) — a refused probe is a normal result, never a
-    ``connector_*`` error (the return-failures contract). The message
-    never echoes a resolved address (no internal-topology oracle).
+    Subclasses :class:`ValueError`. A ``net.*`` handler asked to dial its
+    **initial** destination lets this **propagate**, and the dispatcher
+    classifies it as the structured ``connector_probe_refused`` error
+    (#2784). It is deliberately *not* folded into the return-failures
+    contract: that contract's rationale is "a failed probe is the
+    product", and a probe the allowlist refused never ran, so it produced
+    no product. Emitting it as a reading (``connected=false``) made a
+    reverted allowlist read as a down host — a Sensor asserting on the
+    reading flipped ``critical`` instead of the truthful ``unknown``.
+    ``net.http_probe``'s mid-chain redirect re-gate is the one caller
+    that still catches it: there the prior hop *did* answer, so
+    ``blocked_redirect`` stays a ``status="ok"`` observation.
+
+    The message never echoes a resolved address (no internal-topology
+    oracle). *host* carries the caller's own destination string verbatim
+    — :func:`assert_probe_allowed` resolves nothing, so handing it back
+    reveals nothing the caller did not supply. The dispatcher surfaces it
+    as ``extras["host"]``, which keeps the connector's audit-visible-host
+    foundation intact now that a refusal writes no ``raw_payload``.
     """
+
+    def __init__(self, message: str, *, host: str | None = None) -> None:
+        super().__init__(message)
+        self.host = host
 
 
 def parse_probe_allowlist() -> tuple[
@@ -124,11 +141,12 @@ def assert_probe_allowed(host: str) -> None:
     if not networks and not hostnames:
         raise ProbeNotAllowedError(
             f"probe destination refused: {PROBE_ALLOWLIST_ENV} is empty, so "
-            "the net.* connector is inert; add the range or hostname to probe"
+            "the net.* connector is inert; add the range or hostname to probe",
+            host=host,
         )
     candidate = host.strip()
     if not candidate:
-        raise ProbeNotAllowedError("probe destination refused: empty host")
+        raise ProbeNotAllowedError("probe destination refused: empty host", host=host)
     literal = (
         candidate[1:-1] if candidate.startswith("[") and candidate.endswith("]") else candidate
     )
@@ -138,10 +156,12 @@ def assert_probe_allowed(host: str) -> None:
         if candidate.rstrip(".").lower() in hostnames:
             return
         raise ProbeNotAllowedError(
-            f"probe destination refused: host is not listed in {PROBE_ALLOWLIST_ENV}"
+            f"probe destination refused: host is not listed in {PROBE_ALLOWLIST_ENV}",
+            host=host,
         ) from None
     if any(addr in network for network in networks):
         return
     raise ProbeNotAllowedError(
-        f"probe destination refused: address is not listed in {PROBE_ALLOWLIST_ENV}"
+        f"probe destination refused: address is not listed in {PROBE_ALLOWLIST_ENV}",
+        host=host,
     )

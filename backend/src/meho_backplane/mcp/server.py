@@ -85,7 +85,6 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, ValidationError
 
-from meho_backplane import __version__
 from meho_backplane.auth.operator import Operator
 from meho_backplane.mcp.auth import verify_mcp_jwt_and_bind
 from meho_backplane.mcp.maturity import FEATURE_MATURITY_BAND
@@ -106,6 +105,7 @@ from meho_backplane.mcp.schemas import (
     ServerCapabilities,
 )
 from meho_backplane.settings import Settings, get_settings
+from meho_backplane.version import deployed_version_label
 
 __all__ = [
     "RESOURCES_SUBSCRIBE_ENABLED",
@@ -447,7 +447,12 @@ async def _initialize(
                 "subscribe": RESOURCES_SUBSCRIBE_ENABLED,
             },
         ),
-        serverInfo={"name": _SERVER_NAME, "version": __version__},
+        # ``version`` reports the *deployed* build (CHART_VERSION / GIT_SHA
+        # via deployed_version_label, #1698 precedent), not the static
+        # package ``__version__`` — which is pinned to ``0.1.0-dev`` and never
+        # tracks a release, so the Step-4 upgrade-verify guidance in
+        # docs/cross-repo/mcp-client-setup.md could not work off it (#2746).
+        serverInfo={"name": _SERVER_NAME, "version": deployed_version_label()},
         instructions=await _session_instructions(operator),
     )
 

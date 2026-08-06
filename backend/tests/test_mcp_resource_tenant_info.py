@@ -7,8 +7,11 @@ Covers acceptance criteria 5-8 on issue #249:
 
 * ``resources/templates/list`` returns the tenant-info template entry.
   (The AC text says ``resources/list``, but per T3's spec-correctness
-  decision templated resources surface via ``resources/templates/list``;
-  concrete ``resources/list`` is empty in v0.2.)
+  decision templated resources surface via ``resources/templates/list``.)
+* ``resources/list`` publishes the caller's own concrete
+  ``meho://tenant/<tenant_id>/info`` resource (#2746) — the server derives
+  it from the JWT so a discovery-driven client can offer the verify-step
+  resource without the operator knowing their tenant UUID.
 * ``resources/read`` with the operator's own tenant_id returns
   ``{id, slug, name, operator_role}``.
 * ``resources/read`` with a *different* tenant's id returns
@@ -56,6 +59,70 @@ def test_resources_templates_list_exposes_tenant_info(
     assert tenant_info[0]["mimeType"] == "application/json"
     # MEHO-internal RBAC field stripped from the wire shape.
     assert "required_role" not in tenant_info[0]
+
+
+def test_resources_list_publishes_callers_own_tenant_info(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """#2746: ``resources/list`` publishes the caller's own tenant-info resource.
+
+    A discovery-driven MCP client (Claude Desktop's attachment picker calls
+    ``resources/list`` at handshake) must be able to reach the documented
+    Step-4 verify resource. The server materialises the caller's own
+    ``meho://tenant/<tenant_id>/info`` from the JWT, so the operator never
+    needs to know their tenant UUID.
+    """
+    client, op = client_with_operator
+    expected_uri = f"meho://tenant/{op.tenant_id}/info"
+
+    response = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 5, "method": "resources/list"},
+    )
+
+    assert response.status_code == 200
+    resources = response.json()["result"]["resources"]
+    listed = [r for r in resources if r["uri"] == expected_uri]
+    assert len(listed) == 1
+    assert listed[0]["mimeType"] == "application/json"
+    assert listed[0]["name"] == "Tenant identity"
+    # MEHO-internal RBAC field stripped from the concrete wire shape.
+    assert "required_role" not in listed[0]
+
+
+@pytest.mark.asyncio
+async def test_resources_list_uri_is_readable_round_trip(
+    client_with_operator: tuple[TestClient, Operator],
+    seeded_operator_tenant: None,
+) -> None:
+    """#2746: the URI ``resources/list`` publishes is directly readable.
+
+    Proves the discovery path is executable end-to-end: list the concrete
+    resource, then ``resources/read`` the exact URI the listing returned
+    and get the tenant identity bundle back — the Step-4 verify step a
+    discovery-driven client performs.
+    """
+    client, op = client_with_operator
+
+    listing = post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 6, "method": "resources/list"},
+    )
+    uri = listing.json()["result"]["resources"][0]["uri"]
+    assert uri == f"meho://tenant/{op.tenant_id}/info"
+
+    read = post_mcp(
+        client,
+        {
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "resources/read",
+            "params": {"uri": uri},
+        },
+    )
+    bundle = json.loads(read.json()["result"]["contents"][0]["text"])
+    assert bundle["id"] == str(op.tenant_id)
+    assert bundle["operator_role"] == TenantRole.READ_ONLY.value
 
 
 @pytest.mark.asyncio

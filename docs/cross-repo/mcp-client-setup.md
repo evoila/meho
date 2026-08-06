@@ -173,8 +173,8 @@ Opening RFC 7591 DCR on the realm side is **not** the right fix: a public DCR en
 
 After the client is wired:
 
-- Run `meho_status` from the connected client. The response should carry the operator's identity (sub, tenant_id, role) plus the Vault federation status and DB migration state.
-- Read the operator's tenant info: ask the client to read the resource at `meho://tenant/<your-tenant-id>/info`. The response should be the operator's tenant identity bundle (id, slug, name, role).
+- Run `meho_status` from the connected client. The response should carry the operator's identity (sub, name, email, tenant_id, tenant_role) plus the Vault federation status and DB migration state.
+- Read the operator's tenant info: the backplane lists the caller's own `meho://tenant/<your-tenant-id>/info` under `resources/list`, so a discovery-driven client (e.g. Claude Desktop's attachment picker) surfaces it directly — pick it there, or read the URI by hand (`tenant_id` from `meho_status` above fills `<your-tenant-id>`). The response should be the operator's tenant identity bundle (id, slug, name, role).
 - On the backplane, `SELECT method, path, operator_sub, status_code, occurred_at FROM audit_log ORDER BY occurred_at DESC LIMIT 10` should show the two operations with `method='MCP'` and `path='/mcp/tools/call/meho_status'` / `path='/mcp/resources/read/meho://tenant/<id>/info'`.
 
 If any of these don't appear, walk the troubleshooting section.

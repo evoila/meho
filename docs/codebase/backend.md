@@ -675,9 +675,13 @@ this stage it exposes:
   `resources/list`, `resources/templates/list`, `resources/read`.
   Spec correctness note: the MCP 2025-06-18 spec separates concrete
   resources (`resources/list`) from templated ones
-  (`resources/templates/list`); v0.2 ships only templates so
-  `resources/list` returns an empty list while
-  `resources/templates/list` carries the registry. `tools/call`
+  (`resources/templates/list`). Templated resources surface via
+  `resources/templates/list`; `resources/list` publishes the concrete,
+  operator-specific resources a template opts into via its `list_uris`
+  provider (registry `all_listed_resources_for`, #2746) — in practice the
+  caller's own `meho://tenant/<tenant_id>/info`, so a discovery-driven
+  client can offer the documented verify-step resource without knowing the
+  tenant UUID. `tools/call`
   validates `arguments` against the tool's JSON Schema 2020-12
   `inputSchema` via `jsonschema` (4.26+); a violation surfaces as
   `INVALID_PARAMS` through `McpInvalidParamsError`.

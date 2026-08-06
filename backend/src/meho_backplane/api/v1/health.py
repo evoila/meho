@@ -79,6 +79,7 @@ per-operator Vault tenant-scope exemption in
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -132,11 +133,22 @@ _FEDERATION_PROOF_TARGET_NAME: str = "health-federation-proof"
 
 
 class OperatorIdentity(BaseModel):
-    """Operator identity surface exposed to the CLI.
+    """Operator identity surface exposed to the CLI and MCP ``meho_status``.
 
     Excludes ``raw_jwt`` deliberately — the bearer token must never
     appear in a response body, and the :class:`Operator` model carries
     it for downstream Vault forward-auth only.
+
+    ``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session
+    confirm *which tenant and role it runs as* from inside the session —
+    the check the clean-room program's "logged in as operator, not
+    tenant_admin" discipline needs, and the identity the ``meho_status``
+    tool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)
+    already promises. Both are always present on the validated
+    :class:`Operator` (JWT claims), so the surface can never omit them;
+    they serialise as a UUID string / role value under
+    ``model_dump(mode="json")`` — the same wire shape the
+    ``meho://tenant/<id>/info`` resource returns.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -144,6 +156,8 @@ class OperatorIdentity(BaseModel):
     sub: str
     name: str | None
     email: str | None
+    tenant_id: UUID
+    tenant_role: TenantRole
 
 
 class VaultStatus(BaseModel):
@@ -556,6 +570,8 @@ async def build_health_response(operator: Operator) -> HealthResponse:
             sub=operator.sub,
             name=operator.name,
             email=operator.email,
+            tenant_id=operator.tenant_id,
+            tenant_role=operator.tenant_role,
         ),
         vault=vault_status,
         db=DbStatus(migrated=db_probe_result.ok),
@@ -587,6 +603,8 @@ async def liveness(
             sub=operator.sub,
             name=operator.name,
             email=operator.email,
+            tenant_id=operator.tenant_id,
+            tenant_role=operator.tenant_role,
         ),
         db=DbStatus(migrated=db_probe_result.ok),
         sensor_runner=_sensor_runner_status(),

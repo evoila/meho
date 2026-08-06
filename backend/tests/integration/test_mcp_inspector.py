@@ -287,20 +287,22 @@ async def test_full_mcp_lifecycle_succeeds(
             assert payload["db"]["migrated"] is True
 
             # 5. resources/list — concrete (non-templated) resources.
-            # v0.2 registers only templated resources, so the list MUST
-            # be empty. AC #2 lists ``resources/list`` explicitly; a
-            # spec-conformant client may call either method and both
-            # have to return well-formed envelopes. Asserting the empty
-            # contract here keeps the surface honest if a future change
-            # accidentally routes templated resources through the
-            # concrete endpoint.
+            # #2746: the tenant-info resource now publishes the caller's own
+            # concrete ``meho://tenant/<id>/info`` here so a discovery-driven
+            # client (Claude Desktop's attachment picker) can offer the
+            # documented verify-step resource. The listed URI is exactly the
+            # caller's own tenant (op-mcp-e2e → TENANT_A) — no cross-tenant
+            # leak, and templated resources still surface only via
+            # ``resources/templates/list``.
             list_resources = await client.post(
                 "/mcp",
                 json={"jsonrpc": "2.0", "id": 4, "method": "resources/list"},
                 headers=auth_headers,
             )
             assert list_resources.status_code == 200
-            assert list_resources.json()["result"]["resources"] == []
+            listed = list_resources.json()["result"]["resources"]
+            assert [r["uri"] for r in listed] == [f"meho://tenant/{TENANT_A_ID}/info"]
+            assert listed[0]["mimeType"] == "application/json"
 
             # 6. resources/templates/list — every MEHO resource is
             # templated, so the tenant-info template MUST appear here.

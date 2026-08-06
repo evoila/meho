@@ -77,10 +77,12 @@ from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.features import FEATURE_MATURITY
 
 __all__ = [
+    "ConcreteUriProvider",
     "ResourceHandler",
     "ResourceTemplateDefinition",
     "ToolDefinition",
     "ToolHandler",
+    "all_listed_resources_for",
     "all_resource_templates_for",
     "all_tools_for",
     "capability_satisfied",
@@ -112,6 +114,15 @@ ToolHandler = Callable[[Operator, dict[str, Any]], Awaitable[dict[str, Any]]]
 #: A resource handler receives the operator and the URI-template variables
 #: bound from the concrete URI, and returns the resource contents.
 ResourceHandler = Callable[[Operator, dict[str, str]], Awaitable[dict[str, Any]]]
+
+#: A concrete-URI provider materialises the operator-specific concrete
+#: resource URIs a template contributes to ``resources/list`` (#2746). Most
+#: templates contribute none — they are discoverable only via
+#: ``resources/templates/list``. The tenant-info resource returns the
+#: caller's own ``meho://tenant/<tenant_id>/info`` so a discovery-driven MCP
+#: client (Claude Desktop's attachment picker lists via ``resources/list``)
+#: can offer it without the operator knowing their tenant UUID.
+ConcreteUriProvider = Callable[[Operator], list[str]]
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +374,25 @@ class ResourceTemplateDefinition(BaseModel):
             out["title"] = self.title
         return out
 
+    def to_listed_wire(self, uri: str) -> dict[str, Any]:
+        """Serialise as a concrete ``Resource`` (``resources/list`` wire shape).
+
+        Same descriptive fields as :meth:`to_wire` but keyed by a concrete
+        ``uri`` instead of ``uriTemplate`` — the MCP 2025-06-18 ``Resource``
+        object a discovery-driven client renders as a selectable item. The
+        name / description / mimeType stay single-sourced on the template so
+        the listed and templated views can never drift.
+        """
+        out: dict[str, Any] = {
+            "uri": uri,
+            "name": self.name,
+            "description": self.description,
+            "mimeType": self.mimeType,
+        }
+        if self.title is not None:
+            out["title"] = self.title
+        return out
+
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -371,6 +401,10 @@ class ResourceTemplateDefinition(BaseModel):
 
 _TOOLS: dict[str, tuple[ToolDefinition, ToolHandler]] = {}
 _RESOURCES: dict[str, tuple[ResourceTemplateDefinition, ResourceHandler]] = {}
+#: Concrete-URI providers keyed by the owning template's ``uriTemplate``
+#: (#2746). Populated by :func:`register_mcp_resource` when a resource opts
+#: into ``resources/list`` visibility; read by :func:`all_listed_resources_for`.
+_LISTED_URI_PROVIDERS: dict[str, ConcreteUriProvider] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +459,8 @@ def register_mcp_tool(definition: ToolDefinition, handler: ToolHandler) -> None:
 def register_mcp_resource(
     definition: ResourceTemplateDefinition,
     handler: ResourceHandler,
+    *,
+    list_uris: ConcreteUriProvider | None = None,
 ) -> None:
     """Register a resource template keyed by :attr:`ResourceTemplateDefinition.uriTemplate`.
 
@@ -432,6 +468,10 @@ def register_mcp_resource(
     raise immediately because the registry is populated at module-import
     time and a collision indicates two modules trying to own the same
     URI namespace.
+
+    ``list_uris`` (#2746, optional) opts the resource into ``resources/list``
+    visibility — a provider ``(operator) -> [uri, ...]`` yielding the concrete
+    URIs the template exposes (default: template-only, off ``resources/list``).
 
     Three flavours of bad input are rejected:
 
@@ -472,6 +512,8 @@ def register_mcp_resource(
                 "match shape is identical)",
             )
     _RESOURCES[definition.uriTemplate] = (definition, handler)
+    if list_uris is not None:
+        _LISTED_URI_PROVIDERS[definition.uriTemplate] = list_uris
     _log.info("mcp_resource_registered", uri_template=definition.uriTemplate)
 
 
@@ -530,6 +572,33 @@ def all_resource_templates_for(
         if role_at_least(operator.tenant_role, defn.required_role)
         and capability_satisfied(operator, defn.required_capability)
     ]
+
+
+def all_listed_resources_for(operator: Operator) -> list[dict[str, Any]]:
+    """Return concrete ``resources/list`` entries the operator may see.
+
+    Each registered template may contribute zero or more concrete URIs via
+    the ``list_uris`` provider passed to :func:`register_mcp_resource`
+    (default: none). For every contributed URI the concrete
+    :class:`Resource` wire object is built from the owning template
+    (:meth:`ResourceTemplateDefinition.to_listed_wire`). The same two-gate
+    (role AND capability) filter as :func:`all_resource_templates_for` is
+    applied on the *owning template*, so a concrete resource never leaks
+    past the gate its template enforces. Registration order is preserved
+    (the Python dict guarantee) for a deterministic wire shape (#2746).
+    """
+    listed: list[dict[str, Any]] = []
+    for template, (defn, _handler) in _RESOURCES.items():
+        provider = _LISTED_URI_PROVIDERS.get(template)
+        if provider is None:
+            continue
+        if not (
+            role_at_least(operator.tenant_role, defn.required_role)
+            and capability_satisfied(operator, defn.required_capability)
+        ):
+            continue
+        listed.extend(defn.to_listed_wire(uri) for uri in provider(operator))
+    return listed
 
 
 # ---------------------------------------------------------------------------
@@ -673,3 +742,4 @@ def clear_registries() -> None:
     """
     _TOOLS.clear()
     _RESOURCES.clear()
+    _LISTED_URI_PROVIDERS.clear()

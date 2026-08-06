@@ -26079,16 +26079,26 @@
             "type": "string",
             "nullable": true,
             "title": "Email"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "tenant_role": {
+            "$ref": "#/components/schemas/TenantRole"
           }
         },
         "type": "object",
         "required": [
           "sub",
           "name",
-          "email"
+          "email",
+          "tenant_id",
+          "tenant_role"
         ],
         "title": "OperatorIdentity",
-        "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
+        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns."
       },
       "PermissionVerdict": {
         "type": "string",

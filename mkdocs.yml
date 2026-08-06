@@ -72,6 +72,13 @@ nav:
       - guides/first-operations.md
       - guides/sensors-quickstart.md
       - Approvals and break-glass: guides/approvals-and-break-glass.md
+      - Topology: guides/topology.md
+      - Broadcast: guides/broadcast.md
+      - Memory and knowledge: guides/memory-and-knowledge.md
+      - Audit forensics: guides/audit-forensics.md
+      - Runbooks: guides/runbooks.md
+      - Scheduler: guides/scheduler.md
+      - Satellite gateway: guides/satellite-gateway.md
   - Reference:
       - reference/index.md
       # Generated from the feature-maturity registry by

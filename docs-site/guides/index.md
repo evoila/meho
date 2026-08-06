@@ -20,11 +20,20 @@ Then, when an operation needs a second pair of eyes:
 |---|---|
 | [Approvals and break-glass](approvals-and-break-glass.md) | A clear path through the four-eyes rule, including the two ways a **single operator** clears a gated write — the recommended agent-requester pattern and the audited emergency break-glass — and how to prove to an auditor which one your deploy runs. |
 
-## Coming to this section
+## Go deeper
 
-- Later guides — topology, broadcast, memory / knowledge, audit
-  forensics, runbooks, scheduler, satellite gateway — land as the
-  evaluation program shows where the pain is.
+Once the core loop is second nature, these guides cover the rest of the
+backplane — reach for whichever the task in front of you needs:
+
+| Guide | What it covers |
+|---|---|
+| [Topology](topology.md) | The dependency graph: blast-radius (`dependents`), reachability (`path`), and how a resource gets into the graph. |
+| [Broadcast](broadcast.md) | The cross-operator activity feed — read it, announce intent, watch it live, and the read-before-start discipline. |
+| [Memory and knowledge](memory-and-knowledge.md) | Two durable stores: scoped, TTL'd memory and the tenant knowledge base, and which belongs where. |
+| [Audit forensics](audit-forensics.md) | Reconstructing "who did X to Y and when" from the append-only ledger, and tracing an agent session end to end. |
+| [Runbooks](runbooks.md) | Authoring versioned, multi-step procedures and running them one gated step at a time. |
+| [Scheduler](scheduler.md) | Firing agent runs on cron / one-off triggers, and the durable-credential behavior that keeps them running unattended. |
+| [Satellite gateway](satellite-gateway.md) | Remote check execution for networks the central instance cannot dial. |
 
 !!! tip "When a guide and your deploy disagree"
 

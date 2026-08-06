@@ -234,7 +234,7 @@ meho approvals reject  <approval_request_id> --reason "wrong target"
 By default you cannot approve your own request (the four-eyes rule),
 and parked requests expire on a TTL. The full story — including the
 audited single-operator break-glass — is the
-[approvals & break-glass guide](index.md#coming-to-this-section).
+[approvals & break-glass guide](approvals-and-break-glass.md).
 
 Before approving *any* fan-out write: open the approval payload and
 verify the resolved object list first. An unconstrained filter is how

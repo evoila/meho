@@ -23,14 +23,26 @@ Vault. The live round-trip is covered by the integration suite.
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from typing import Any
 
 import hvac.exceptions
 import pytest
 import requests.exceptions
+from structlog.testing import capture_logs
 
 import meho_backplane.scheduler.vault_credentials as vc
 from meho_backplane.settings import get_settings
+
+
+def _async_return(value: Any) -> Callable[..., Any]:
+    """Build an async stand-in that ignores its args and returns *value*."""
+
+    async def _f(*_args: Any, **_kwargs: Any) -> Any:
+        return value
+
+    return _f
 
 
 @pytest.fixture(autouse=True)
@@ -213,6 +225,26 @@ async def test_write_unreachable_maps_to_broker_error(fake_kv: _FakeKvV2) -> Non
         await vc.write_agent_secret("agent:reporter", "s")
     # An unreachable Vault is already an unambiguous diagnosis; the
     # write path must not spend a lookup-self on it (#2652).
+    assert excinfo.value.token_invalid is False
+    assert fake_kv.token_api.lookup_calls == 0
+
+
+async def test_write_non_connection_transport_error_maps_to_broker_error(
+    fake_kv: _FakeKvV2,
+) -> None:
+    """Any requests transport error maps to the broker error, not just Connection/Timeout.
+
+    The self-heal seam catches the ``RequestException`` base (mirroring the
+    retry leg), so an exotic transport failure never escapes the broker-error
+    mapping into the generic tick-failure handler.
+    """
+
+    def _boom(**_: Any) -> None:
+        raise requests.exceptions.TooManyRedirects("redirect loop")
+
+    fake_kv.create_or_update_secret = _boom  # type: ignore[method-assign]
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
     assert excinfo.value.token_invalid is False
     assert fake_kv.token_api.lookup_calls == 0
 
@@ -518,3 +550,308 @@ async def test_verify_unreachable(fake_kv_any_token: _FakeKvV2) -> None:
     assert status.configured is True
     assert status.ok is False
     assert status.detail.startswith("unreachable:")
+
+
+# --- self-heal re-mint (#2668) ---------------------------------------
+
+
+async def test_write_dead_token_self_heals_and_retries(
+    fake_kv_any_token: _FakeKvV2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead static token re-mints via runner JWT and the write is retried.
+
+    Pins AC #1 for the write path: a 403 write + a 403 ``lookup-self`` ⇒ mint a
+    runner JWT and ``jwt_login`` ⇒ retry the write once against the re-minted
+    client, no operator in the loop.
+    """
+    kv = fake_kv_any_token
+    kv.token_api.lookup_raises = hvac.exceptions.Forbidden("dead token")
+
+    state = {"healed": False}
+    real_write = kv.create_or_update_secret
+
+    def _write(**kwargs: Any) -> Any:
+        if not state["healed"]:
+            raise hvac.exceptions.Forbidden("permission denied")
+        return real_write(**kwargs)
+
+    kv.create_or_update_secret = _write  # type: ignore[method-assign]
+
+    jwt_calls: list[dict[str, Any]] = []
+
+    async def _fake_jwt_login(_client: Any, *, role: str, jwt: str, mount_path: str) -> None:
+        jwt_calls.append({"role": role, "jwt": jwt, "mount_path": mount_path})
+        state["healed"] = True
+
+    monkeypatch.setattr(vc, "check_runner_jwt", _async_return("runner-jwt"))
+    monkeypatch.setattr(vc, "_to_thread_jwt_login", _fake_jwt_login)
+
+    api_path = await vc.write_agent_secret("agent:reporter", "s3cr3t")
+
+    assert api_path == "secret/data/agents/AGENT_REPORTER/credentials"
+    assert len(jwt_calls) == 1  # a jwt_login occurred
+    assert jwt_calls[0]["role"] == "meho-mcp"  # vault_oidc_role fallback (#2757)
+    assert jwt_calls[0]["jwt"] == "runner-jwt"
+    assert jwt_calls[0]["mount_path"] == "jwt"
+    assert len(kv.writes) == 1  # the write was retried and committed
+    assert kv.token_api.lookup_calls == 1  # a single dead-token probe
+
+
+async def test_read_dead_token_self_heals_and_retries(
+    fake_kv_any_token: _FakeKvV2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dead static token re-mints via runner JWT and the read is retried.
+
+    Pins AC #1 for the read path — the scheduler's hot path on every fire.
+    """
+    kv = fake_kv_any_token
+    kv.token_api.lookup_raises = hvac.exceptions.Forbidden("dead token")
+
+    state = {"healed": False}
+
+    def _read(**_kwargs: Any) -> Any:
+        if not state["healed"]:
+            raise hvac.exceptions.Forbidden("permission denied")
+        return {"data": {"data": {vc.SECRET_FIELD: "gen-secret"}, "metadata": {}}}
+
+    kv.read_secret_version = _read  # type: ignore[method-assign]
+
+    jwt_calls: list[str] = []
+
+    async def _fake_jwt_login(_client: Any, *, role: str, jwt: str, mount_path: str) -> None:
+        jwt_calls.append(role)
+        state["healed"] = True
+
+    monkeypatch.setattr(vc, "check_runner_jwt", _async_return("runner-jwt"))
+    monkeypatch.setattr(vc, "_to_thread_jwt_login", _fake_jwt_login)
+
+    secret = await vc.read_agent_secret("agent:reporter")
+
+    assert secret == "gen-secret"  # the retry against the re-minted client won
+    assert len(jwt_calls) == 1
+    assert kv.token_api.lookup_calls == 1
+
+
+async def test_dead_token_remint_unavailable_falls_back_loud(fake_kv: _FakeKvV2) -> None:
+    """No runner principal configured ⇒ loud fail, never a silent skip (#2668).
+
+    ``check_runner_jwt`` returns ``""`` when the check-runner client is unset
+    (the default test env), so the re-mint cannot proceed and the broker falls
+    back to today's loud ``token_invalid=True`` failure — the write is never
+    silently retried against a dead token.
+    """
+    _deny_write(fake_kv)
+    fake_kv.token_api.lookup_raises = hvac.exceptions.Forbidden("dead token")
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is True
+    assert fake_kv.writes == []
+
+
+async def test_selfheal_retry_failure_fails_loud(
+    fake_kv_any_token: _FakeKvV2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If the re-minted client also fails the write, surface it loudly (#2668)."""
+    kv = fake_kv_any_token
+    kv.token_api.lookup_raises = hvac.exceptions.Forbidden("dead token")
+
+    def _always_forbidden(**_kwargs: Any) -> Any:
+        raise hvac.exceptions.Forbidden("still denied after re-mint")
+
+    kv.create_or_update_secret = _always_forbidden  # type: ignore[method-assign]
+
+    async def _fake_jwt_login(_client: Any, *, role: str, jwt: str, mount_path: str) -> None:
+        return None
+
+    monkeypatch.setattr(vc, "check_runner_jwt", _async_return("runner-jwt"))
+    monkeypatch.setattr(vc, "_to_thread_jwt_login", _fake_jwt_login)
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is True
+    assert kv.writes == []
+
+
+async def test_remint_login_denied_falls_back_loud(
+    fake_kv_any_token: _FakeKvV2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused ``jwt_login`` during re-mint ⇒ None ⇒ loud fail (#2668)."""
+    _deny_write(fake_kv_any_token)
+    fake_kv_any_token.token_api.lookup_raises = hvac.exceptions.Forbidden("dead token")
+
+    async def _login_denied(_client: Any, *, role: str, jwt: str, mount_path: str) -> None:
+        raise hvac.exceptions.Forbidden("role denied")
+
+    monkeypatch.setattr(vc, "check_runner_jwt", _async_return("runner-jwt"))
+    monkeypatch.setattr(vc, "_to_thread_jwt_login", _login_denied)
+
+    with pytest.raises(vc.SchedulerVaultBrokerError) as excinfo:
+        await vc.write_agent_secret("agent:reporter", "s")
+
+    assert excinfo.value.token_invalid is True
+    assert fake_kv_any_token.writes == []
+
+
+# --- dedicated renewal timer (#2668) ---------------------------------
+
+
+async def test_renew_scheduler_token_issues_renew_without_read_or_write(
+    fake_kv: _FakeKvV2,
+) -> None:
+    """The renewal primitive fires renew-self and touches no agent secret.
+
+    Pins AC #2's "independent of agent-secret traffic": the dedicated timer's
+    primitive issues ``renew-self`` with zero reads and zero writes.
+    """
+    await vc.renew_scheduler_token(reason="periodic")
+
+    assert fake_kv.token_api.renew_calls == 1
+    assert fake_kv.writes == []
+    assert fake_kv.last_read is None
+
+
+async def test_renew_scheduler_token_unconfigured_is_noop(
+    fake_kv: _FakeKvV2, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unset token is the documented opt-out — renew is a silent no-op."""
+    monkeypatch.delenv("VAULT_SCHEDULER_TOKEN", raising=False)
+    get_settings.cache_clear()
+
+    await vc.renew_scheduler_token()
+
+    assert fake_kv.token_api.renew_calls == 0
+
+
+async def test_renew_scheduler_token_swallows_failure(fake_kv: _FakeKvV2) -> None:
+    """A failed renew is swallowed — the dedicated timer path never raises."""
+    fake_kv.token_api.renew_raises = hvac.exceptions.Forbidden("not renewable")
+
+    await vc.renew_scheduler_token()  # must not raise
+
+    assert fake_kv.token_api.renew_calls == 1
+
+
+async def test_scheduler_loop_renews_vault_token_on_dedicated_timer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tick loop renews on its own cadence, with zero agent-secret fires.
+
+    Pins AC #2's "fires from a dedicated tick-loop timer": drive
+    :func:`_scheduler_loop` through startup + one iteration with ``run_one_tick``
+    doing nothing (zero reads/writes), and observe the renewal wrapper called on
+    both the startup and the periodic cadence.
+    """
+    from meho_backplane.scheduler import loop
+
+    async def _anoop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def _tick_noop(*_args: Any, **_kwargs: Any) -> int:
+        return 0
+
+    monkeypatch.setattr(loop, "reconcile_active_event_triggers", _anoop)
+    monkeypatch.setattr(loop, "run_one_tick", _tick_noop)
+    monkeypatch.setattr(loop, "_check_scheduler_vault_token", _anoop)
+    # Trip the renewal cadence on the first post-tick check.
+    monkeypatch.setattr(loop, "_TOKEN_RENEW_INTERVAL_SECONDS", 0.0)
+
+    renew_reasons: list[str] = []
+
+    async def _fake_renew(*, reason: str) -> None:
+        renew_reasons.append(reason)
+        if len(renew_reasons) >= 2:
+            # startup + one periodic fire is enough — stop the forever loop.
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(loop, "_renew_scheduler_vault_token", _fake_renew)
+    monkeypatch.setenv("SCHEDULER_TICK_INTERVAL_SECONDS", "1")
+    get_settings.cache_clear()
+
+    with pytest.raises(asyncio.CancelledError):
+        await loop._scheduler_loop()
+
+    assert "startup" in renew_reasons
+    assert "periodic" in renew_reasons
+
+
+# --- periodic guard (#2668) ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("data", "expected"),
+    [
+        ({"renewable": True, "explicit_max_ttl": 0}, None),
+        ({"renewable": False, "explicit_max_ttl": 0}, "non_renewable"),
+        ({"renewable": True, "explicit_max_ttl": 7200}, "explicit_max_ttl"),
+        ({"renewable": False, "explicit_max_ttl": 7200}, "non_renewable,explicit_max_ttl"),
+        # A healthy periodic token: renewable, no cap, carries a period.
+        ({"renewable": True, "explicit_max_ttl": 0, "period": 2764800}, None),
+        ({}, None),
+    ],
+)
+def test_token_expiry_warning(data: dict[str, Any], expected: str | None) -> None:
+    assert vc._token_expiry_warning({"data": data}) == expected
+
+
+def test_token_expiry_warning_malformed_payload_is_none() -> None:
+    assert vc._token_expiry_warning("nonsense") is None
+    assert vc._token_expiry_warning({"data": "nope"}) is None
+
+
+async def test_verify_flags_explicit_max_ttl_with_loud_error(
+    fake_kv_any_token: _FakeKvV2,
+) -> None:
+    """A live token carrying an explicit_max_ttl logs a loud ERROR (AC #3)."""
+    fake_kv_any_token.token_api.lookup_result = {
+        "data": {
+            "ttl": 3600,
+            "expire_time": "2026-08-06T15:00:00Z",
+            "renewable": True,
+            "explicit_max_ttl": 7200,
+        }
+    }
+
+    with capture_logs() as logs:
+        status = await vc.verify_scheduler_token(reason="startup")
+
+    assert status.ok is True  # live right now …
+    assert status.will_expire_reason == "explicit_max_ttl"  # … but doomed despite renewal
+    warn = next(e for e in logs if e["event"] == "scheduler_vault_token_will_expire")
+    assert warn["log_level"] == "error"
+    assert warn["reasons"] == "explicit_max_ttl"
+
+
+async def test_verify_flags_non_renewable_token(fake_kv_any_token: _FakeKvV2) -> None:
+    fake_kv_any_token.token_api.lookup_result = {
+        "data": {"ttl": 3600, "expire_time": None, "renewable": False, "explicit_max_ttl": 0}
+    }
+
+    status = await vc.verify_scheduler_token()
+
+    assert status.ok is True
+    assert status.will_expire_reason == "non_renewable"
+
+
+async def test_verify_healthy_periodic_token_no_warning(fake_kv_any_token: _FakeKvV2) -> None:
+    """A proper periodic token draws no periodic-guard warning."""
+    fake_kv_any_token.token_api.lookup_result = {
+        "data": {
+            "ttl": 2764800,
+            "expire_time": "2026-09-07T00:00:00Z",
+            "renewable": True,
+            "explicit_max_ttl": 0,
+            "period": 2764800,
+        }
+    }
+
+    with capture_logs() as logs:
+        status = await vc.verify_scheduler_token()
+
+    assert status.ok is True
+    assert status.will_expire_reason is None
+    events = [e["event"] for e in logs]
+    assert "scheduler_vault_token_will_expire" not in events
+    assert "scheduler_vault_token_verified" in events

@@ -291,14 +291,82 @@ is picked up without a restart. When both are set the file wins; an
 unreadable/empty file falls through to `VAULT_SCHEDULER_TOKEN`.
 
 **When the fuse has already blown.** Renewal and the startup/hourly
-self-lookup shorten time-to-notice, but they do not resurrect a token
-that is already dead — and until #2652 the *registration* path did not
-say so: a dead token and an under-scoped policy both produced the
-policy-widening message, sending operators to verify a policy that was
-already correct. Registration now runs the same `auth/token/lookup-self`
-probe whenever Vault answers the write with a 403 and emits
-`scheduler_vault_token_invalid` with the re-mint remediation instead.
-The two rows in *Failure modes* below are the decision table.
+self-lookup shorten time-to-notice; since #2668 the broker also
+**self-heals** a dead token rather than only diagnosing it. When a
+Vault-first read or the registration write draws a 403 that
+`auth/token/lookup-self` confirms is a dead token, the broker mints a
+fresh Vault token by `jwt_login` as the runner principal and retries the
+operation once (see *Self-heal* below), so a scheduled fire survives a
+dead static token with no operator in the loop. It falls back to the loud
+`scheduler_vault_token_invalid` failure — the re-mint remediation,
+distinct from the under-scoped-policy message since #2652 — only when the
+re-mint *itself* cannot proceed (no runner principal configured, or its
+role is refused). The two rows in *Failure modes* below are the decision
+table for that fallback.
+
+Also since #2668, renewal no longer rides only on agent-secret traffic:
+a dedicated tick-loop timer fires `auth/token/renew-self` on its own
+cadence, so an **idle** scheduler still renews. And the startup/hourly
+`lookup-self` now also emits a loud `scheduler_vault_token_will_expire`
+`ERROR` when the token is non-renewable or carries an `explicit_max_ttl`
+— it will die despite renewal, so mint it `-period=768h` as above.
+
+#### Self-heal — headless re-mint via the runner principal (#2668)
+
+The self-heal above needs a Vault identity the scheduler can obtain
+**without an operator or an interactive session** — background dispatch
+runs unattended. It reuses the check-runner principal (surface 7 below,
+#2642): a confidential Keycloak client whose OAuth `client_credentials`
+grant mints a runner JWT with no human in the loop, which Vault's JWT auth
+method exchanges for a fresh token. The whole chain is headless:
+
+1. **Keycloak `client_credentials`** — the backplane mints the runner
+   principal's access token from `CHECK_RUNNER_CLIENT_ID` /
+   `CHECK_RUNNER_CLIENT_SECRET`
+   ([`auth/runner_identity.py`](../../backend/src/meho_backplane/auth/runner_identity.py)),
+   the same grant the agent-principal path uses. No user session, no
+   `gcloud` / browser login, nothing that expires out from under a
+   long-running loop.
+2. **Vault `jwt_login`** — the broker logs that JWT into Vault's JWT auth
+   method under `role = VAULT_CHECK_RUNNER_ROLE or VAULT_OIDC_ROLE` (the
+   #2757 fallback), yielding a fresh Vault token.
+3. **Retry once** — the failed read/write re-runs against the re-minted
+   token; only if the re-mint itself fails does the loud
+   `scheduler_vault_token_invalid` path stand.
+
+Reproduce it by hand — no interactive session at any step:
+
+```bash
+# 1. Keycloak client_credentials -> runner JWT (confidential client).
+RUNNER_JWT=$(curl -sS -X POST \
+  "$KEYCLOAK_ISSUER_URL/protocol/openid-connect/token" \
+  -d grant_type=client_credentials \
+  -d client_id="$CHECK_RUNNER_CLIENT_ID" \
+  -d client_secret="$CHECK_RUNNER_CLIENT_SECRET" \
+  | jq -r .access_token)
+
+# 2. Vault jwt_login under the runner role -> fresh Vault token
+#    (auth/<mount>/ is the dedicated JWT mount from surface 1;
+#    VAULT_OIDC_MOUNT_PATH selects it, default `jwt`).
+vault write -field=token "auth/${VAULT_OIDC_MOUNT_PATH:-jwt}/login" \
+  role="${VAULT_CHECK_RUNNER_ROLE:-$VAULT_OIDC_ROLE}" jwt="$RUNNER_JWT"
+```
+
+**Provision the runner role to reach the agent-credentials path.** The
+re-minted token authenticates as the runner principal, so the role it logs
+in with (`VAULT_CHECK_RUNNER_ROLE`, else `VAULT_OIDC_ROLE`) must itself
+grant the scheduler's capabilities — `create` / `read` / `update` on
+`secret/data/agents/*/credentials` — or the retry 403s just like the dead
+static token did. The scheduler adds **no** dedicated role knob (#2668
+reuses the landed identity); when you scope a dedicated
+`VAULT_CHECK_RUNNER_ROLE` (surface 7, Option A), attach the
+`meho-scheduler` policy's agent-credentials grants to its policy so the
+self-heal can complete the read/write it re-mints for.
+
+This is the supported answer for an adopter whose scheduled dispatch has
+no durable identity — e.g. a scheduled investigator that today ties its
+JWT to an interactive user session that expires (pm-tnt/MFC.ClaudeOps#277):
+point it at the `client_credentials` runner principal instead.
 
 ### 7. Bounding the check-runner principal (#2642)
 

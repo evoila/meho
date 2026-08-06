@@ -193,8 +193,37 @@ subject/issuer/`notAfter` (public identity, never private material);
 before the handler runs. Reason codes extend the T1 set with
 `invalid_url`, `blocked_redirect`, `too_many_redirects`, and `tls_error`.
 
+**Transport-failure classification (#2771).** A connection-level failure
+is mapped to its reason code by walking the caught `httpx.TransportError`
+*tree* — both the `__cause__` chain **and** any `ExceptionGroup`
+children (`.exceptions`, PEP 654) — not just `__cause__`. This matters
+because anyio's happy-eyeballs connect raises `OSError("All connection
+attempts failed") from ExceptionGroup(...)` on a multi-address (dual-stack
+A+AAAA) host, so the real per-attempt errors (`ConnectionRefusedError`,
+`socket.gaierror`, `ssl.SSLError`) sit in the group's children, invisible
+to a `__cause__`-only walk — which is why they used to collapse to
+`unreachable`. When several inner causes disagree, the most
+specific/actionable wins: `tls_error` > `dns_failure` > `refused` >
+`timeout` > `unreachable`. TLS-phase failures that carry **no**
+`ssl.SSLError` are also caught: httpcore's `start_tls` maps
+`anyio.EndOfStream` / `anyio.BrokenResourceError` to `ConnectError` when
+the peer closes or sends an alert mid-handshake; `EndOfStream` is
+start_tls-only, and `BrokenResourceError` is disambiguated by the probe
+scheme (it only reads `tls_error` on `https`, since `connect_tcp` also
+maps it). Every connection-level failure additionally carries
+`error_detail` — a bounded, innermost-first `[{type, message}]` of the
+mapped exception chain (exception type + message only, never the response
+body) — so a caller sees the actual inner error without re-running the
+probe under instrumentation. `error_detail` is `null` on a clean response
+or a pre-dial refusal (`not_in_probe_allowlist` / `invalid_url`).
+
 Because it issues an HTTP request, `net.http_probe` adds **`httpx`** to
-the family's dependency surface (already a project dep — no new dep).
+the family's dependency surface (already a project dep). It also imports
+**`anyio`** directly (httpx's async transport backend) to `isinstance`
+the TLS-phase stream exceptions above; anyio is already present
+transitively via httpx and is now declared a direct dependency in
+`backend/pyproject.toml` so the requirement is explicit (same pattern as
+`dnspython` / `cryptography`).
 
 ## `net.ntp_check` — clock offset/skew + stratum (T5, #2410)
 
@@ -286,15 +315,28 @@ Control flow (`connectors/net/tls.py`):
    by `select`-waiting under a single `deadline` derived from the
    clamped timeout, so a stalled peer cannot pin the worker thread.
 4. Each presented cert is flattened to
-   `{subject, issuer, san, not_before, not_after, serial, self_signed}`
-   (leaf-first). `serial` is stringified (a serial is a large integer a
-   JSON number consumer would truncate); timestamps use the tz-aware
-   `not_valid_*_utc` accessors.
+   `{subject, issuer, san, not_before, not_after, days_to_expiry, serial,
+   self_signed}` (leaf-first). `serial` is stringified (a serial is a
+   large integer a JSON number consumer would truncate); timestamps use
+   the tz-aware `not_valid_*_utc` accessors. `days_to_expiry` is
+   `(not_valid_after_utc - now) / 86400` as a float (negative once
+   expired), computed against a single probe-time `now = datetime.now(UTC)`
+   the handler captures once and threads into `_cert_to_dict`, so every
+   cert in one chain shares the same reference instant. This is the
+   module's only wall-clock read (its other clock use is `time.monotonic()`
+   for the handshake deadline).
 
 Derived top-level fields:
 
 - `leaf` — convenience alias for `chain[0]`; `not_after` — the leaf's,
   for the common "is it expiring" read.
+- `days_to_expiry` — the leaf's `days_to_expiry` (float; `null` on a
+  failed handshake). A **numeric** cert-expiry signal a `threshold`
+  assertion can bite on, added by #2772: `not_after` is an ISO string
+  (nothing to compare numerically) and `FreshnessCompare` is
+  past-oriented (`age = now - timestamp`, so a future `not_after` reads
+  `ok` until the cert has *already* expired). See the cert-expiry sensor
+  recipe below.
 - `hostname_match` — computed **independently** of the (disabled) stack
   verification: `server_name` vs the leaf SAN dNSNames (wildcard-aware,
   RFC 6125 single-leftmost-label), SAN iPAddresses for an IP
@@ -310,6 +352,29 @@ a reason code — `not_in_probe_allowlist` / `timeout` / `refused` /
 `dns_failure` / `unreachable` / `tls_error` — and `status="ok"`), and is
 `safety_level="safe"` + `requires_approval=False`. A completed handshake
 sends **no** application bytes.
+
+### Cert-expiry early-warning sensor (#2772)
+
+`days_to_expiry` makes the classic "warn at 30 days, page at 7"
+cert-expiry sensor expressible with the **existing** assertion machinery —
+no new comparator. Point a `threshold` assertion at the field:
+
+```json
+{
+  "select": {"path": "$.days_to_expiry"},
+  "compare": {"type": "threshold", "op": "lt", "degraded": 30, "critical": 7}
+}
+```
+
+`ThresholdCompare` (`checks/evaluate.py`) bands it — `op=lt` is a strict
+`<` and `critical` is checked before `degraded`, so the more-severe band
+wins: `days_to_expiry >= 30` ⇒ `ok`, `7 <= days_to_expiry < 30` ⇒
+`degraded`, `days_to_expiry < 7` ⇒ `critical`. Because the field is on
+every chain entry, `{"select": {"path": "$.chain[*].days_to_expiry",
+"aggregate": "min"}, ...}` watches the soonest-expiring cert in the chain
+(an intermediate included) with the same comparator. `FreshnessCompare`
+stays untouched and past-oriented; the two are complementary, not
+alternatives.
 
 ## ICMP cohort — `net.ping` / `net.trace` / `net.path_mtu` (T6, #2411)
 
@@ -462,8 +527,12 @@ audit (`raw_payload` = handler return) → broadcast (`read` class).
   declared runtime dependency (the handler imports `cryptography.x509`
   directly).
 - `net.http_probe`: `httpx` (already a project dependency) for the HTTP
-  request and its `network_stream` TLS extension — no **new** runtime
-  dependency is added.
+  request and its `network_stream` TLS extension, plus **`anyio`**
+  (httpx's async backend, promoted from transitive to a declared direct
+  dependency, #2771) — imported to `isinstance` the TLS-phase stream
+  exceptions (`anyio.EndOfStream` / `anyio.BrokenResourceError`) when
+  classifying a transport failure. No **new** package enters the resolved
+  set (anyio was already installed via httpx).
 - `net.dns_lookup`: **dnspython** (ISC-licensed, already present
   transitively via `email-validator` / `pymongo`; pinned direct in
   `backend/pyproject.toml` so the connector's requirement is explicit) —

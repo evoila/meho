@@ -79,6 +79,7 @@ per-operator Vault tenant-scope exemption in
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 import structlog
 from fastapi import APIRouter, Depends
@@ -86,6 +87,7 @@ from pydantic import BaseModel, ConfigDict
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import require_role
+from meho_backplane.checks.watchdog import sensor_runner_liveness
 from meho_backplane.connectors._shared.credential_backend import (
     UnknownCredentialBackendError,
     resolve_credential_backend,
@@ -131,11 +133,22 @@ _FEDERATION_PROOF_TARGET_NAME: str = "health-federation-proof"
 
 
 class OperatorIdentity(BaseModel):
-    """Operator identity surface exposed to the CLI.
+    """Operator identity surface exposed to the CLI and MCP ``meho_status``.
 
     Excludes ``raw_jwt`` deliberately — the bearer token must never
     appear in a response body, and the :class:`Operator` model carries
     it for downstream Vault forward-auth only.
+
+    ``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session
+    confirm *which tenant and role it runs as* from inside the session —
+    the check the clean-room program's "logged in as operator, not
+    tenant_admin" discipline needs, and the identity the ``meho_status``
+    tool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)
+    already promises. Both are always present on the validated
+    :class:`Operator` (JWT claims), so the surface can never omit them;
+    they serialise as a UUID string / role value under
+    ``model_dump(mode="json")`` — the same wire shape the
+    ``meho://tenant/<id>/info`` resource returns.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -143,6 +156,8 @@ class OperatorIdentity(BaseModel):
     sub: str
     name: str | None
     email: str | None
+    tenant_id: UUID
+    tenant_role: TenantRole
 
 
 class VaultStatus(BaseModel):
@@ -190,21 +205,53 @@ class DbStatus(BaseModel):
     migrated: bool | None
 
 
+class SensorRunnerStatus(BaseModel):
+    """Liveness of this process's sensor evaluation loop (#2763).
+
+    The queryable half of the checks-runner watchdog: an external prober
+    ("how we monitor the monitoring") alerts when
+    ``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` — or
+    simply on ``stalled``, which is that comparison server-side.
+    ``stalled`` is derived live from the in-process tick stamp on every
+    read (never from the watchdog task's emission latch), so it stays
+    truthful even if the watchdog task itself has died.
+
+    ``seconds_since_last_tick`` is ``None`` only in the window between
+    process start and runner start — once the lifespan is up it is
+    always a number. The value is per-process: each replica reports its
+    own loop, which is exactly the failure mode observed (one process's
+    loop coroutine going quiet).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    seconds_since_last_tick: float | None
+    stalled: bool
+    stall_threshold_seconds: float
+
+
 class HealthResponse(BaseModel):
     """``GET /api/v1/health`` response body.
 
     ``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's
     audit-replay capture mode in a single field:
 
-    * ``"always"`` — any ``Mcp-Session-Id`` header the client sends is
-      captured into ``audit_log.agent_session_id``; a missing header is
-      accepted (the row's session id lands as NULL). This is the
-      default and what G8.2 audit-replay needs to light up on a stock
-      deploy.
+    * ``"when_negotiated"`` — a ``Mcp-Session-Id`` header is captured
+      into ``audit_log.agent_session_id`` only when the client
+      negotiated a session via the ``initialize`` handshake and echoes
+      the server-issued id; a header-less call is accepted and its row's
+      session id lands as NULL (invisible to session-lineage replay).
+      This is the default. It reads ``"when_negotiated"`` rather than
+      ``"always"`` because capture is not a guarantee — #2700 reported
+      the former ``"always"`` label as misleading, since header-less
+      callers stay out of lineage. Distinguish an empty forest from an
+      empty history via the replay surface's
+      ``excluded_null_session_count``.
     * ``"enforced"`` — capture works the same way **plus** a missing
       header is a JSON-RPC ``-32600`` reject before any audit row is
-      written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in
-      compliance deploys that forbid header-less calls.
+      written, so every accepted MCP call carries a session id. Flipped
+      on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that
+      forbid header-less calls.
 
     The field is the canonical operator-facing surface for the
     capture state until T7 #1148's ``/ready`` features block ships
@@ -212,6 +259,13 @@ class HealthResponse(BaseModel):
     the same
     :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
     helper so both surfaces stay consistent).
+
+    ``sensor_runner`` (#2763) carries the checks evaluation-loop's
+    liveness (:class:`SensorRunnerStatus`), and is ``None`` exactly
+    when ``SENSOR_RUNNER_ENABLED=false`` — a deliberately disabled
+    runner must not read as stalled. The ``None`` default keeps
+    response decoders generated against the pre-#2763 shape working;
+    the handler always populates it on an enabled runner.
 
     ``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's
     pinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.
@@ -231,6 +285,7 @@ class HealthResponse(BaseModel):
     db: DbStatus
     mcp_session_id_capture: str
     mcp_protocol_version: str = PROTOCOL_VERSION
+    sensor_runner: SensorRunnerStatus | None = None
 
 
 class LivenessResponse(BaseModel):
@@ -245,12 +300,21 @@ class LivenessResponse(BaseModel):
     :class:`HealthResponse` route so a low-privilege monitoring
     principal can never drive a per-operator Vault credential
     federation from the liveness path.
+
+    ``sensor_runner`` (#2763) rides here as well as on the deep check:
+    the external prober that watches the evaluation loop is precisely
+    the ``read_only`` monitoring principal this route exists for, and
+    polling the deep route instead would federate a Vault credential
+    and write an audit row per poll. The facet honours this handler's
+    constraints — an in-memory clock read; no connector, no credential,
+    no secret.
     """
 
     model_config = ConfigDict(frozen=True)
 
     operator: OperatorIdentity
     db: DbStatus
+    sensor_runner: SensorRunnerStatus | None = None
 
 
 router = APIRouter(prefix="/api/v1", tags=["health"])
@@ -468,6 +532,24 @@ async def _probe_federation(operator: Operator, log: Any) -> VaultStatus:
     return await _probe_backend_federation(operator, log, backend_kind)
 
 
+def _sensor_runner_status() -> SensorRunnerStatus | None:
+    """Map the watchdog's liveness view onto the wire model.
+
+    ``None`` when ``SENSOR_RUNNER_ENABLED=false`` — the facet's absence
+    *is* the "deliberately disabled" signal, distinct from a present
+    facet with a stale stamp (#2763 acceptance: a disabled runner must
+    not read as stalled).
+    """
+    if not get_settings().sensor_runner_enabled:
+        return None
+    liveness = sensor_runner_liveness()
+    return SensorRunnerStatus(
+        seconds_since_last_tick=liveness.seconds_since_last_tick,
+        stalled=liveness.stalled,
+        stall_threshold_seconds=liveness.stall_threshold_seconds,
+    )
+
+
 async def build_health_response(operator: Operator) -> HealthResponse:
     """Assemble the :class:`HealthResponse` for a validated operator.
 
@@ -488,11 +570,14 @@ async def build_health_response(operator: Operator) -> HealthResponse:
             sub=operator.sub,
             name=operator.name,
             email=operator.email,
+            tenant_id=operator.tenant_id,
+            tenant_role=operator.tenant_role,
         ),
         vault=vault_status,
         db=DbStatus(migrated=db_probe_result.ok),
         mcp_session_id_capture=mcp_session_id_capture_mode(),
         mcp_protocol_version=PROTOCOL_VERSION,
+        sensor_runner=_sensor_runner_status(),
     )
 
 
@@ -518,8 +603,11 @@ async def liveness(
             sub=operator.sub,
             name=operator.name,
             email=operator.email,
+            tenant_id=operator.tenant_id,
+            tenant_role=operator.tenant_role,
         ),
         db=DbStatus(migrated=db_probe_result.ok),
+        sensor_runner=_sensor_runner_status(),
     )
 
 

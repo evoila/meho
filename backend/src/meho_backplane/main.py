@@ -123,7 +123,12 @@ from meho_backplane.broadcast.announcement_retention import (
     start_announcement_retention_sweeper,
     stop_announcement_retention_sweeper,
 )
+from meho_backplane.checks.evidence_retention import (
+    start_evidence_retention_sweeper,
+    stop_evidence_retention_sweeper,
+)
 from meho_backplane.checks.runner import start_sensor_runner, stop_sensor_runner
+from meho_backplane.checks.watchdog import start_checks_watchdog, stop_checks_watchdog
 from meho_backplane.connectors.registry import _eager_import_connectors, registered_product_tokens
 from meho_backplane.db.engine import dispose_engine, get_engine
 from meho_backplane.db.migrations import db_migration_probe
@@ -449,15 +454,25 @@ class _BackgroundTasks:
     memory_expiry: asyncio.Task[None] | None
     topology_history: asyncio.Task[None] | None
     announcement_retention: asyncio.Task[None] | None
+    evidence_retention: asyncio.Task[None] | None
     grant_expiry: asyncio.Task[None] | None
     approval_expiry: asyncio.Task[None] | None
     scheduler: asyncio.Task[None] | None
     sensor_runner: asyncio.Task[None] | None
+    sensor_watchdog: asyncio.Task[None] | None
     agent_run_reaper: asyncio.Task[None] | None
     event_drain: asyncio.Task[None] | None
     gateway_deadman: asyncio.Task[None] | None
 
 
+# Deliberately-flat lifespan task registry: the length is per-task
+# documentation (each loop's ticket, gate flag, 0-semantics), not logic —
+# N individually-rationalised background loops, one block each, mirrored 1:1 by
+# the _BackgroundTasks dataclass and _stop_background_tasks' reverse-order
+# teardown. Collapsing the blocks into a gated-start helper would delete that
+# documentation and break the structural mirror; a holistic split of main.py
+# rides its own (pre-existing) file-size warning.
+# code-quality-allow: flat N-loop lifespan registry; length is per-task docs.
 def _start_background_tasks() -> _BackgroundTasks:
     """Start every lifespan-owned background loop, return their handles.
 
@@ -490,6 +505,12 @@ def _start_background_tasks() -> _BackgroundTasks:
     announcement_retention: asyncio.Task[None] | None = None
     if settings.broadcast_announcement_prune_enabled:
         announcement_retention = start_announcement_retention_sweeper()
+    # #2756 (Initiative #2780) — per-tick sensor-evidence retention prune.
+    # Gated on CHECKS_EVIDENCE_PRUNE_ENABLED; ``RETENTION_DAYS=0`` disables the
+    # feature (no rows written) — the divergent 0-semantics the setting docs.
+    evidence_retention: asyncio.Task[None] | None = None
+    if settings.checks_evidence_prune_enabled:
+        evidence_retention = start_evidence_retention_sweeper()
     # G11.2-T6 #819 — gated on GRANT_EXPIRY_ENABLED so operators using
     # an external cleanup mechanism don't double-sweep.
     grant_expiry: asyncio.Task[None] | None = None
@@ -514,6 +535,14 @@ def _start_background_tasks() -> _BackgroundTasks:
     sensor_runner: asyncio.Task[None] | None = None
     if settings.sensor_runner_enabled:
         sensor_runner = start_sensor_runner()
+    # #2763 — evaluation-loop watchdog. Same gate as the runner it
+    # watches, never its own: a watchdog with an independent kill switch
+    # is how the silent-stall class stays invisible. Started right after
+    # the runner so the staleness baseline is set before the first
+    # cadence sleep elapses.
+    sensor_watchdog: asyncio.Task[None] | None = None
+    if settings.sensor_runner_enabled:
+        sensor_watchdog = start_checks_watchdog()
     # G11.3-T4 #825 — gated on AGENT_RUN_REAPER_ENABLED so operators
     # running an external lease-reclaim mechanism (DBOS Transact, a
     # workflow engine) can disable the in-tree reaper without
@@ -540,10 +569,12 @@ def _start_background_tasks() -> _BackgroundTasks:
         memory_expiry=memory_expiry,
         topology_history=topology_history,
         announcement_retention=announcement_retention,
+        evidence_retention=evidence_retention,
         grant_expiry=grant_expiry,
         approval_expiry=approval_expiry,
         scheduler=scheduler,
         sensor_runner=sensor_runner,
+        sensor_watchdog=sensor_watchdog,
         agent_run_reaper=agent_run_reaper,
         event_drain=event_drain,
         gateway_deadman=gateway_deadman,
@@ -564,6 +595,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_event_drain(tasks.event_drain)
     if tasks.agent_run_reaper is not None:
         await stop_agent_run_reaper(tasks.agent_run_reaper)
+    if tasks.sensor_watchdog is not None:
+        await stop_checks_watchdog(tasks.sensor_watchdog)
     if tasks.sensor_runner is not None:
         await stop_sensor_runner(tasks.sensor_runner)
     if tasks.scheduler is not None:
@@ -572,6 +605,8 @@ async def _stop_background_tasks(tasks: _BackgroundTasks) -> None:
         await stop_approval_expiry_sweeper(tasks.approval_expiry)
     if tasks.grant_expiry is not None:
         await stop_grant_expiry_sweeper(tasks.grant_expiry)
+    if tasks.evidence_retention is not None:
+        await stop_evidence_retention_sweeper(tasks.evidence_retention)
     if tasks.announcement_retention is not None:
         await stop_announcement_retention_sweeper(tasks.announcement_retention)
     if tasks.topology_history is not None:

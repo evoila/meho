@@ -21,8 +21,10 @@ Coverage matrix
 * **Cadence discriminated-union CHECK rejects malformed rows.**
 * **tenant FK enforced** + **unique (tenant_id, name) enforced.**
 * **Drift guards.** The model enums and the migration's frozen literals
-  agree; the migration's frozen CHECK bodies equal the ORM's; and the
-  ``ck_sensor_last_state`` value set equals #2504's :data:`CheckState`.
+  agree; the migration's frozen CHECK bodies equal the ORM's; the
+  ``ck_sensor_last_state`` value set equals #2504's :data:`CheckState`;
+  and migration ``0070``'s frozen ``pending_state`` vocabulary equals the
+  ORM's ``_SENSOR_PENDING_STATES`` (``CheckState`` minus ``skip``).
 
 The tests run against ``sqlite+aiosqlite`` via the shared engine the
 autouse ``_default_database_url`` fixture pre-migrates to head.
@@ -46,6 +48,7 @@ from meho_backplane.db.models import (
     _SENSOR_CADENCE_FIELDS_CHECK,
     _SENSOR_CADENCE_KINDS,
     _SENSOR_LAST_STATES,
+    _SENSOR_PENDING_STATES,
     _SENSOR_SEVERITIES,
     _SENSOR_STATUSES,
     Sensor,
@@ -125,7 +128,11 @@ async def test_interval_sensor_round_trip_persists_every_field() -> None:
                 next_fire_at=now,
                 severity=SensorSeverity.DEGRADED.value,
                 for_seconds=300,
+                retry_times=2,
+                retry_backoff_seconds=30,
                 last_state="ok",
+                pending_state="degraded",
+                pending_count=1,
                 created_by_sub="user-admin",
             )
         )
@@ -146,7 +153,11 @@ async def test_interval_sensor_round_trip_persists_every_field() -> None:
     assert row.cron_expr is None
     assert row.severity == "degraded"
     assert row.for_seconds == 300
+    assert row.retry_times == 2
+    assert row.retry_backoff_seconds == 30
     assert row.last_state == "ok"
+    assert row.pending_state == "degraded"
+    assert row.pending_count == 1
     assert row.status == "active"
 
 
@@ -213,6 +224,9 @@ async def test_orm_defaults_fire_on_sqlite() -> None:
         assert sensor.severity == SensorSeverity.CRITICAL.value
         assert sensor.last_state == "unknown"
         assert sensor.for_seconds == 0
+        assert sensor.retry_times == 0
+        assert sensor.retry_backoff_seconds == 15
+        assert sensor.pending_count == 0
         assert sensor.identity_sub == "__sensor__"
         assert sensor.timezone == "UTC"
         assert sensor.created_at is not None
@@ -227,6 +241,7 @@ async def test_orm_defaults_fire_on_sqlite() -> None:
     assert row.last_value is None
     assert row.last_evidence is None
     assert row.state_since is None
+    assert row.pending_state is None
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +302,29 @@ async def test_last_state_check_rejects_unknown() -> None:
             "cadence_kind": SensorCadenceKind.INTERVAL.value,
             "interval_seconds": 60,
             "last_state": "warn",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_state_check_rejects_out_of_vocabulary() -> None:
+    await _seed_and_add(
+        {
+            "cadence_kind": SensorCadenceKind.INTERVAL.value,
+            "interval_seconds": 60,
+            "pending_state": "warn",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_state_check_rejects_skip() -> None:
+    """``skip`` is a rollup-side derivation, never a confirmation candidate."""
+    await _seed_and_add(
+        {
+            "cadence_kind": SensorCadenceKind.INTERVAL.value,
+            "interval_seconds": 60,
+            "pending_state": "skip",
         }
     )
 
@@ -452,6 +490,30 @@ def test_migration_last_state_literal_matches_checkstate() -> None:
     """The migration's frozen ``last_state`` literal is a snapshot of ``CheckState``."""
     migration = _load_migration_by_name("0064_create_sensor")
     assert set(migration._SENSOR_LAST_STATES) == set(get_args(CheckState))  # type: ignore[attr-defined]
+
+
+def test_pending_states_equal_checkstate_minus_skip() -> None:
+    """``_SENSOR_PENDING_STATES`` is ``CheckState`` minus ``skip`` (#2799).
+
+    ``skip`` is #2506's rollup-side derivation for paused members, never an
+    evaluation outcome, so it can never be a confirmation candidate.
+    """
+    assert set(_SENSOR_PENDING_STATES) == set(get_args(CheckState)) - {"skip"}
+    pending_body = _orm_check_bodies()["ck_sensor_pending_state"]
+    for member in _SENSOR_PENDING_STATES:
+        assert f"'{member}'" in pending_body
+    assert "'skip'" not in pending_body
+
+
+def test_migration_0070_pending_states_literal_matches_model() -> None:
+    """Migration ``0070``'s frozen vocabulary + CHECK body equal the ORM's."""
+    migration = _load_migration_by_name("0070_add_sensor_confirmation_retries")
+    assert set(migration._SENSOR_PENDING_STATES) == set(_SENSOR_PENDING_STATES)  # type: ignore[attr-defined]
+    orm = _orm_check_bodies()
+    assert orm["ck_sensor_pending_state"] == migration._check_in(  # type: ignore[attr-defined]
+        "pending_state",
+        migration._SENSOR_PENDING_STATES,  # type: ignore[attr-defined]
+    )
 
 
 def test_migration_check_bodies_equal_orm() -> None:

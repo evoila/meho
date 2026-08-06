@@ -302,13 +302,15 @@ surfaced two ways:
    jq '.runs[0].results | length' trivy-results.sarif
    ```
 
-**v0.1 is report-only.** The workflow stays green even on critical CVEs — the
-deliberate split per Goal #11 is "scan now, gate later" so the team can
-establish a baseline before committing to a remediation policy. v0.2 will
-flip on a severity-based gate (likely `exit-code: 1` on `CRITICAL`) once the
-noise level is known. Until then, treat the Security tab as the working
-backlog: triage findings, file follow-ups, but do not expect builds to break
-on them.
+**The scan gates main/tag builds.** `exit-code: '1'` fails the run on any
+fixable CRITICAL/HIGH CVE — a red-main alarm against silent CVE accumulation
+on a stale base image (`ignore-unfixed: true` drops CVEs with no upstream
+fix). It runs post-push on main and tags only; the step is skipped on
+pull_request, so it is not a PR merge gate. Because the two SARIF uploads are
+guarded on the scan step's outcome rather than the default `success()` gate,
+a failing scan still publishes its findings to the Security tab and the
+30-day artefact — so a red run's CVE list is one click away. Treat a red run
+as "bump the base-image digest and re-push", not "this merge is blocked".
 
 ## What this skeleton intentionally omits
 

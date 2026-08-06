@@ -108,6 +108,10 @@ def test_tools_call_meho_status_returns_health_response_shape(
     assert payload["operator"]["sub"] == op.sub
     assert payload["operator"]["name"] == op.name
     assert payload["operator"]["email"] is None
+    # #2746: tenant identity now rides the operator bundle so a connected
+    # session can confirm which tenant/role it runs as.
+    assert payload["operator"]["tenant_id"] == str(op.tenant_id)
+    assert payload["operator"]["tenant_role"] == op.tenant_role.value
 
     # Vault federation status is structurally present. The test environment
     # has no real Vault — the probe is designed to fail closed, returning

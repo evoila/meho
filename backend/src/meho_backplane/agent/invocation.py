@@ -684,6 +684,7 @@ class AgentInvoker:
         output: dict[str, object] | None,
         error: str | None,
         usage: TokenUsage | None = None,
+        turns: int | None = None,
     ) -> None:
         """Record a run's terminal state on its durable row, committed.
 
@@ -693,6 +694,14 @@ class AgentInvoker:
         operator cancelled it mid-flight) is left untouched —
         :class:`~meho_backplane.operations.agent_run.IllegalTransitionError`
         is swallowed because the cancel already wrote the terminal state.
+
+        *turns* is the loop's model-request turn total (#2743). It is
+        threaded to ``succeed_run`` so a succeeded run's durable row
+        carries the count every read surface reports; the failure path
+        ignores it, so a run that never reached the model (the #2644
+        model-init-failure class) keeps ``turns == 0``. ``None`` (the
+        non-success callers: refusals, child finalize) leaves the column
+        untouched.
 
         When *usage* is supplied (the success path), the function also:
 
@@ -730,7 +739,9 @@ class AgentInvoker:
                     if usage is not None:
                         model_id = _full_model_id(row.provider, row.model)
                         cost = identity_budget.compute_cost(usage, model_id)
-                    await run_lifecycle.succeed_run(session, row, output=output or {}, cost=cost)
+                    await run_lifecycle.succeed_run(
+                        session, row, output=output or {}, cost=cost, turns=turns
+                    )
                     if usage is not None and cost is not None:
                         await identity_budget.apply_consumption(
                             session,
@@ -824,6 +835,7 @@ class AgentInvoker:
                 output=_project_output(result.output),
                 error=None,
                 usage=usage,
+                turns=result.request_count,
             )
         finally:
             # Stop the heartbeat sidecar before resetting the contextvars:
@@ -1501,6 +1513,9 @@ class AgentInvoker:
 
         terminal_output: dict[str, object] | None = None
         terminal_error: str | None = None
+        # Tally ``TURN`` events (one per model-request node, so == the
+        # non-streamed ``request_count``) to persist at finalize (#2743).
+        turns = 0
         # Bind the lineage contextvar so an ``invoke_agent`` call inside the
         # streamed run records its child against this run (G11.1-T7 #1067). The
         # stream runs inline in the SSE response coroutine, so the token reset
@@ -1530,6 +1545,8 @@ class AgentInvoker:
                     terminal_output = _project_output(event.data.get("output"))
                 elif event.kind is AgentRunEventKind.ERROR:
                     terminal_error = str(event.data.get("error"))
+                elif event.kind is AgentRunEventKind.TURN:
+                    turns += 1
                 yield run_id, event
         finally:
             heartbeat.cancel()
@@ -1538,7 +1555,9 @@ class AgentInvoker:
             agent_run_audit_meta_var.reset(meta_token)
             agent_session_id_var.reset(session_token)
             current_agent_run_id_var.reset(run_token)
-            await self._finalize_run(run_id, output=terminal_output, error=terminal_error)
+            await self._finalize_run(
+                run_id, output=terminal_output, error=terminal_error, turns=turns
+            )
 
 
 async def _resolve_child_definition(

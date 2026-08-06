@@ -59,12 +59,19 @@ nav:
       - TLS and ingress: install/tls-ingress.md
       - Upgrades: install/upgrades.md
       - Local kind quickstart: install/kind-quickstart.md
-  - Connect clients: clients/index.md
+  - Connect clients:
+      - clients/index.md
+      - The meho CLI: clients/cli.md
+      - Claude Desktop: clients/claude-desktop.md
+      - Claude Code: clients/claude-code.md
+      - Other MCP clients (mcp-remote shim): clients/mcp-remote-shim.md
+      - Troubleshooting auth walls: clients/troubleshooting.md
   - Do real work:
       - guides/index.md
       - guides/targets-and-secrets.md
       - guides/first-operations.md
       - guides/sensors-quickstart.md
+      - Approvals and break-glass: guides/approvals-and-break-glass.md
   - Reference:
       - reference/index.md
       # Generated from the feature-maturity registry by

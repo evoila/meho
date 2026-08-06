@@ -214,10 +214,55 @@ func TestResolveAuthConfigDiscoveryFailureMentionsFlags(t *testing.T) {
 func TestLoginCommandHelpListsFlags(t *testing.T) {
 	cmd := newLoginCmd()
 	out := cmd.UsageString()
-	for _, want := range []string{"--issuer", "--client-id", "--scope", "--resolve"} {
+	for _, want := range []string{"--issuer", "--client-id", "--scope", "--resolve", "--print-token"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("usage missing flag %s:\n%s", want, out)
 		}
+	}
+}
+
+// TestLoginPrintTokenEmitsExactlyTheToken pins the --print-token stdout
+// contract (#2782 AC #1 / #3): on the print path stdout must carry the
+// access token and nothing else, so `TOKEN=$(meho login --print-token
+// <url>)` captures the bare credential and `... | wc -l` is exactly 1.
+// printAccessToken is the sole writer to stdout on that path, so pinning
+// its output pins the contract — mirroring status_test.go's redaction
+// test, which pins the isolated redaction helper rather than driving the
+// whole command.
+func TestLoginPrintTokenEmitsExactlyTheToken(t *testing.T) {
+	const token = "eyJ.PRINT-TOKEN-TEST.SIGNATURE"
+	var stdout bytes.Buffer
+	printAccessToken(&stdout, token)
+
+	got := stdout.String()
+	// `$(...)` strips trailing newlines — the captured value must be
+	// the token verbatim.
+	if capd := strings.TrimRight(got, "\n"); capd != token {
+		t.Errorf("subshell-captured stdout = %q, want %q", capd, token)
+	}
+	// `... | wc -l` must be exactly 1.
+	if n := strings.Count(got, "\n"); n != 1 {
+		t.Errorf("stdout newline count = %d, want 1", n)
+	}
+	// Nothing but the token + one newline may reach stdout.
+	if got != token+"\n" {
+		t.Errorf("stdout = %q, want exactly the token followed by one newline", got)
+	}
+}
+
+// TestLoginHumanWriterDivertsChromeUnderPrintToken pins the other half
+// of the stdout contract: every operator-facing line (prompt, success
+// message, migration nudge, warnings) is routed through humanWriter,
+// which must send it to stderr under --print-token so it never
+// contaminates the captured token — and to stdout otherwise, preserving
+// the default login UX.
+func TestLoginHumanWriterDivertsChromeUnderPrintToken(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	if w := humanWriter(&stdout, &stderr, true); w != &stderr {
+		t.Error("--print-token must divert chrome to stderr so stdout carries only the token")
+	}
+	if w := humanWriter(&stdout, &stderr, false); w != &stdout {
+		t.Error("default login must keep operator-facing output on stdout")
 	}
 }
 

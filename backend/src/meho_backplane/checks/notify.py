@@ -8,7 +8,11 @@ detector (:mod:`meho_backplane.checks.investigate`) already compare-and-swaps
 ``check_dashboards.last_rollup_state`` exactly once per rollup edge, replica-
 safe; until now that claim only ever reached the diagnose-only investigator.
 This module is the second, independent consumer of the same claim: it mails
-the Dashboard's configured recipient.
+the Dashboard's configured recipient(s). Since #2764 ``notify_email`` may
+carry more than one comma-separated address; the identical mail fans out to
+every recipient in one send, each screened individually against the
+deployment allowlist (:func:`_allowed_recipients`) so one refused entry
+drops only itself.
 
 Two notice kinds, one delivery seam
 ===================================
@@ -139,6 +143,10 @@ from typing import Final, cast
 import structlog
 
 from meho_backplane.broadcast.client import get_broadcast_client
+from meho_backplane.connectors.mail.allowlist import (
+    RecipientNotAllowedError,
+    assert_recipient_allowed,
+)
 from meho_backplane.connectors.mail.transport import send_email
 from meho_backplane.settings import get_settings
 
@@ -270,10 +278,12 @@ class FindingNotice:
     :class:`NotifyMember` is one: this module must not import
     :mod:`meho_backplane.checks.investigate`, which imports *it*.
 
-    :attr:`recipient` is resolved from the Dashboard's ``notify_email`` by
-    the investigator, so an unconfigured Dashboard arrives here as ``None``
-    and short-circuits in :func:`notify_finding` rather than being filtered
-    at the call site -- the skip is then logged in one place.
+    :attr:`recipient` is the Dashboard's ``notify_email`` (one or more
+    comma-separated addresses since #2764) resolved by the investigator, so an
+    unconfigured Dashboard arrives here as ``None`` and short-circuits in
+    :func:`notify_finding` rather than being filtered at the call site -- the
+    skip is then logged in one place. :func:`notify_finding` fans the identical
+    mail out to every allowlisted entry, the same seam the transition mail uses.
     """
 
     dashboard_id: uuid.UUID
@@ -303,9 +313,11 @@ def _suppression_key(tenant_id: uuid.UUID, dashboard_id: uuid.UUID, state: str) 
     """Valkey key bounding one ``(tenant, dashboard, state)`` per window (#2732).
 
     Unlike the #2718 advisory's key there is no caller segment: the
-    notification's audience is the Dashboard's single configured recipient,
-    not whoever happens to dispatch. Every segment is a UUID or a
-    CHECK-constrained vocabulary word, so the ``:`` delimiter cannot alias
+    notification's audience is the Dashboard's configured recipient(s), not
+    whoever happens to dispatch. Nor is there a recipient segment: the claim
+    is per edge, so one claim covers every recipient of a multi-recipient
+    Dashboard (#2764) -- it cannot burn N windows. Every segment is a UUID or
+    a CHECK-constrained vocabulary word, so the ``:`` delimiter cannot alias
     two keys.
     """
     return f"meho:checks:notify:{tenant_id}:{dashboard_id}:{state}"
@@ -432,16 +444,51 @@ def _body(notice: DashboardNotice) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def _deliver(notice: DashboardNotice, recipient: str) -> None:
-    """Send one mail and record its outcome; swallow every failure.
+def _allowed_recipients(raw: str, **log_fields: object) -> list[str]:
+    """Split a comma-joined ``notify_email`` and keep the allowlisted entries.
+
+    The wire schema stores one or more recipients comma-joined (#2764). Each
+    entry is screened **individually** against the deployment recipient
+    allowlist -- the same
+    :func:`~meho_backplane.connectors.mail.allowlist.assert_recipient_allowed`
+    floor the transport enforces, reused here so one refused entry drops only
+    itself. A refused entry warn-logs ``checks_notify_recipient_refused`` and
+    is skipped; the survivors are returned for a single
+    :func:`~meho_backplane.connectors.mail.transport.send_email` fan-out. A
+    refused recipient must never silence delivery to the allowlisted rest --
+    the missed-alert-is-worse posture the module holds elsewhere.
+
+    ``send_email``'s own all-or-nothing screen is deliberately left untouched
+    (its audit-honesty rationale stands for the dispatched ``mail.send`` path);
+    it re-screens this already-clean survivor set and passes it as a whole.
+    """
+    survivors: list[str] = []
+    for entry in (part.strip() for part in raw.split(",")):
+        if not entry:
+            continue
+        try:
+            assert_recipient_allowed(entry)
+        except RecipientNotAllowedError:
+            _log().warning("checks_notify_recipient_refused", recipient=entry, **log_fields)
+            continue
+        survivors.append(entry)
+    return survivors
+
+
+async def _deliver(notice: DashboardNotice, recipients: list[str]) -> None:
+    """Fan the identical mail out to *recipients*; swallow every failure.
 
     Split out of :func:`notify_dashboard_transition` so that function reads
-    as the two gates it is, and so the never-raise guard wraps exactly the
-    I/O rather than the gates too.
+    as the gates it is, and so the never-raise guard wraps exactly the I/O
+    rather than the gates too. One
+    :func:`~meho_backplane.connectors.mail.transport.send_email` call delivers
+    the same message to every recipient (#2764); *recipients* is the
+    already-allowlisted survivor set from :func:`_allowed_recipients`, so the
+    transport's own all-or-nothing floor passes them as a whole.
     """
     try:
         result = await send_email(
-            to=[recipient],
+            to=recipients,
             subject=_subject(notice),
             body=_body(notice),
         )
@@ -468,11 +515,12 @@ async def _deliver(notice: DashboardNotice, recipient: str) -> None:
         previous_state=notice.previous_state,
         current_state=notice.current_state,
         member_count=len(notice.members),
+        recipient_count=len(recipients),
     )
 
 
 async def notify_dashboard_transition(notice: DashboardNotice) -> None:
-    """Mail the Dashboard's recipient about one claimed transition.
+    """Mail the Dashboard's recipient(s) about one claimed transition.
 
     Never raises. Short-circuits, in order:
 
@@ -482,16 +530,18 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
       :func:`_crosses_threshold`);
     * a same-state notification already claimed this edge's flap window
       (#2732, see :func:`_claim_suppression`; skipped entirely when the
-      window is ``0`` or the crossing is into a rank-0 state).
+      window is ``0`` or the crossing is into a rank-0 state);
+    * every configured recipient is refused by the allowlist, so there is
+      nothing to send (``checks_notify_no_allowed_recipients``).
 
     A rank-0 crossing (recovery) additionally clears the Dashboard's
     suppression keys before the floor gate -- the incident is over whether
     or not the recovery edge itself mails.
 
-    Otherwise :func:`_deliver` runs one
-    :func:`~meho_backplane.connectors.mail.transport.send_email` call,
-    screened by the deployment-level recipient allowlist floor that function
-    owns.
+    Otherwise the configured recipients are screened individually
+    (:func:`_allowed_recipients`) and :func:`_deliver` fans one
+    :func:`~meho_backplane.connectors.mail.transport.send_email` call out to
+    the allowlisted survivors (#2764).
     """
     if not notice.notify_email:
         _log().info(
@@ -525,7 +575,14 @@ async def notify_dashboard_transition(notice: DashboardNotice) -> None:
             window_minutes=window_minutes,
         )
         return
-    await _deliver(notice, notice.notify_email)
+    recipients = _allowed_recipients(notice.notify_email, dashboard_id=str(notice.dashboard_id))
+    if not recipients:
+        _log().warning(
+            "checks_notify_no_allowed_recipients",
+            dashboard_id=str(notice.dashboard_id),
+        )
+        return
+    await _deliver(notice, recipients)
 
 
 def schedule_dashboard_notification(notice: DashboardNotice) -> None:
@@ -599,10 +656,15 @@ def _finding_body(notice: FindingNotice) -> str:
 
 
 async def notify_finding(notice: FindingNotice) -> None:
-    """Mail one persisted investigator finding to the Dashboard's recipient.
+    """Mail one persisted investigator finding to the Dashboard's recipient(s).
 
     Never raises. Short-circuits when the Dashboard has no ``notify_email``
-    (the state every pre-#2719 row backfills to).
+    (the state every pre-#2719 row backfills to) or when every configured
+    recipient is refused by the allowlist
+    (``checks_finding_email_no_allowed_recipients``). Since #2764 the identical
+    finding mail fans out to every allowlisted recipient in one send, each
+    screened individually via :func:`_allowed_recipients` -- the same seam the
+    transition mail uses.
 
     There is deliberately **no** ``notify_min_state`` gate here.
     ``notify_min_state`` is a floor on a transition *edge* --
@@ -626,9 +688,21 @@ async def notify_finding(notice: FindingNotice) -> None:
             run_id=str(notice.run_id),
         )
         return
+    recipients = _allowed_recipients(
+        notice.recipient,
+        dashboard_id=str(notice.dashboard_id),
+        run_id=str(notice.run_id),
+    )
+    if not recipients:
+        _log().warning(
+            "checks_finding_email_no_allowed_recipients",
+            dashboard_id=str(notice.dashboard_id),
+            run_id=str(notice.run_id),
+        )
+        return
     try:
         result = await send_email(
-            to=[notice.recipient],
+            to=recipients,
             subject=_finding_subject(notice),
             body=_finding_body(notice),
         )
@@ -656,6 +730,7 @@ async def notify_finding(notice: FindingNotice) -> None:
         dashboard_id=str(notice.dashboard_id),
         run_id=str(notice.run_id),
         verdict=notice.verdict,
+        recipient_count=len(recipients),
     )
 
 

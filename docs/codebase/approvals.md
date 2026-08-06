@@ -313,6 +313,26 @@ and it is the difference between the two agent-run entry points in
 |---|---|---|
 | `approve` returns `self_approval_forbidden` and you are the tenant's only operator | The write was parked under **your own** `sub` — a direct human op, or a human-initiated delegated agent run (where RFC 8693 keeps you the subject). | Re-park the write under an **agent-requester**: wire it as a scheduled trigger under an agent definition (the four-step recipe above) so `run_scheduled` parks it with `principal_sub=<agent-sub>`. Then approve as yourself — your distinct `sub` clears the gate. Reserve `APPROVAL_ALLOW_SELF_APPROVAL` for genuine emergencies; it re-opens the #1401 single-account hole posture-wide. |
 
+### Operator-facing discoverability of this story (#2669)
+
+This section is the contributor reference; the same two single-operator
+patterns now have three **operator-facing** surfaces so a solo deployer
+finds them without reading source:
+
+- **Docs-site guide** — `docs-site/guides/approvals-and-break-glass.md`
+  ("Do real work → Approvals and break-glass"), the deployer-persona
+  distillation of this section.
+- **Console guidance** — the approvals modal
+  (`ui/templates/approvals/_modal.html`) renders both patterns + a
+  deep link to that guide when the Approve button is disabled *and* on a
+  rejected self-approval 403 (routes' `_SINGLE_OPERATOR_DOCS_URL`,
+  mirroring `ui/maturity.py`'s `MATURITY_INDEX_URL` convention). The wire
+  `403` / MCP-error text still names the flag and stays authoritative.
+- **Chart value** — `config.approvalAllowSelfApproval` (rendered into
+  `APPROVAL_ALLOW_SELF_APPROVAL` by `configmap.yaml`) exposes the
+  break-glass as a first-class, schema-documented value
+  (`values.schema.json`, `enum: ["true","false"]`, default `"false"`).
+
 ## G0.20-T3 — execute a parked direct op on approve via every surface (#1503)
 
 Before #1503 the **only** execute-after-approve path for a parked
@@ -521,6 +541,44 @@ marker. The `op_class` / `preview` / marker envelope built by
 top. The only path that does **not** carry it is the bare identifier
 default the caller stores when `_build_proposed_effect` returns `None`
 (connector-resolution / hook fault) — that degraded path is unchanged.
+
+## Uniform op-identity envelope (#2681)
+
+The preview base varies by outcome — a bespoke `{op_class, preview}`, the
+generic `{op_class, params_echo}`, the `preview_unavailable` marker, or the
+empty base when the op declines. Before #2681 the identifier fields
+(`op_id` / `connector_id` / `target_id`) rode **only** the
+declines/raises paths, so the parked `proposed_effect` field-set swung with
+runtime state: an `argocd.app.delete` parked against a *nonexistent* app
+(cascade builder raises → identifier fields present) had a different schema
+from the same op against a *live* app (builder succeeds → identifier fields
+absent). A consumer could not rely on one schema per connector.
+
+`dispatcher._build_proposed_effect` now stamps the op-identity fields
+(`op_id` / `connector_id` / `target_id`) **and** `op_class` onto **every**
+non-`None` envelope via `setdefault`, alongside `preview_populated` /
+`safety_level`. `setdefault` never overrides a value the preview hook
+already supplied (its own `op_class`, or an identifier a builder chose to
+echo). The bespoke `preview` XOR generic `params_echo` **content** key
+legitimately still varies and is *not* unified — so the contract is "the
+op-identity + metadata field-set is uniform," not "`set(effect.keys())` is
+identical." `target_id` is present only when the target carries a UUID id
+(a targetless op omits it uniformly). This is verified by the park-envelope
+parametrisation over all seven ArgoCD write ops plus the nonexistent-app
+delete case in `tests/test_connectors_argocd_write_e2e.py`.
+
+Relatedly, `classify_op` gained the ArgoCD write verbs so all seven ops
+classify `op_class: write` rather than four of them falling through to
+`other`. All four verbs that were misclassified — `argocd.app.set` /
+`.sync` / `.rollback` / `.refresh` — are pinned by **exact op-id** in
+`_WRITE_OPS` rather than added to the global write-suffix set. A `.set` /
+`.sync` / `.rollback` suffix would classify the dotted argocd op-ids
+correctly, but `_MEHO_FLAT_WRITE_SUFFIXES` is auto-derived from
+`_WRITE_SUFFIXES` (`.` → `_`), so it would also relabel `meho_`-prefixed
+MCP-tool ops such as `meho_broadcast_overrides_set` from `other` to
+`write`; a `.refresh` suffix would likewise relabel the read-class
+`topology.refresh` at render time. Exact-pinning the dotted argocd op-ids
+avoids both collisions. See [`events.md`](events.md).
 
 ## Permission preflight hook (#1504)
 

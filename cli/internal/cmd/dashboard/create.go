@@ -48,9 +48,9 @@ func newCreateCmd() *cobra.Command {
 			"empty member set is legal and rolls up 'unknown' (the zero-member " +
 			"rule); duplicate ids are de-duplicated server-side. --tenant " +
 			"targets another tenant (platform_admin cross-tenant create).\n\n" +
-			"--notify-email is the single address that receives one mail per " +
-			"rollup transition crossing --notify-min-state; leaving it unset " +
-			"keeps notifications off. --notify-min-state is degraded or " +
+			"--notify-email is one or more comma-separated addresses that each " +
+			"receive one mail per rollup transition crossing --notify-min-state; " +
+			"leaving it unset keeps notifications off. --notify-min-state is degraded or " +
 			"critical (default critical): an edge notifies when the worse of " +
 			"its two states reaches the floor, so at 'critical' a recovery " +
 			"from critical back to ok sends the all-clear while ok -> " +
@@ -87,7 +87,7 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&sensorIDs, "sensor-id", nil,
 		"member sensor UUID (repeatable; empty set rolls up 'unknown')")
 	cmd.Flags().StringVar(&notifyEmail, "notify-email", "",
-		"address that receives transition mail (unset = notifications off)")
+		"comma-separated recipient(s) for transition mail (unset = notifications off)")
 	cmd.Flags().StringVar(&notifyMinState, "notify-min-state", "",
 		"notification floor: degraded or critical (server default: critical)")
 	cmd.Flags().StringVar(&investigatorPrompt, "investigator-prompt", "",
@@ -218,8 +218,10 @@ func validateNotifyMinState(value string) error {
 // both are `str | None` server-side, where null and absent read alike, so the
 // row keeps notifications off and keeps the pre-#2721 briefing respectively.
 // An unset --notify-email leaves the field nil rather than sending an empty
-// openapi_types.Email, whose MarshalJSON would reject the empty string before
-// the request goes out.
+// string; a set value is forwarded verbatim as a plain string, and the server
+// splits it on commas and validates each recipient individually (#2764), so no
+// client-side email-format guess is needed (and the multi-recipient form no
+// longer trips a single-address client-side marshal check).
 //
 // investigator_prompt's 4096-character cap is deliberately NOT re-checked
 // here: unlike --notify-min-state's closed vocabulary (a typo the CLI can
@@ -244,7 +246,7 @@ func buildCreateBody(
 		body.TenantId = tenantID
 	}
 	if opts.NotifyEmail != "" {
-		email := openapi_types.Email(opts.NotifyEmail)
+		email := opts.NotifyEmail
 		body.NotifyEmail = &email
 	}
 	if opts.NotifyMinState != "" {

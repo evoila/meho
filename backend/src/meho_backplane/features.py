@@ -38,9 +38,11 @@ box on my deploy?". Each entry carries:
   instead).
 
 The audit-replay entry additionally exposes ``capture_mode`` —
-``"enforced"`` until G0.14-T6 (#1147) decouples capture from
-enforcement, ``"always"`` after. The shape is forward-compatible: T6
-flips this from ``"enforced"`` to ``"always"`` and adds nothing else.
+``"when_negotiated"`` on a default deploy, ``"enforced"`` when
+``MCP_REQUIRE_SESSION_ID=true``. It is resolved from the same
+:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode` helper
+the ``/status`` health surface uses (passed this block's
+:class:`Settings` snapshot), so the two surfaces cannot drift (#2700).
 
 Feature-maturity registry (#2674)
 ---------------------------------
@@ -93,8 +95,10 @@ References
 * Convention anchor: :doc:`docs/codebase/error-message-shape.md`
   (G0.14-T11) — the missing-env messages here mirror the convention's
   diagnostic-values + remediation + doc-reference shape.
-* Sibling: G0.14-T6 (#1147) flips ``audit_replay.capture_mode`` from
-  ``"enforced"`` to ``"always"`` once it lands.
+* Sibling: G0.14-T6 (#1147) landed the shared
+  :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
+  helper; ``audit_replay.capture_mode`` reads it, and #2700 retired
+  the misleading ``"always"`` label in favour of ``"when_negotiated"``.
 * Maturity program: #2664 (initiative — classification table + entry
   criteria), #2674 (this registry), #2675-#2678 (surface propagation),
   Goal #2661 milestone plan (v0.28 reclassification, v1.0.0 GA set).
@@ -300,40 +304,44 @@ def _ui_surface_block(settings: Settings) -> dict[str, Any]:
     }
 
 
-def _audit_replay_block() -> dict[str, Any]:
+def _audit_replay_block(settings: Settings) -> dict[str, Any]:
     """Whether MCP audit replay captures session ids.
 
-    Today (pre-T6) the capture is gated by
-    :attr:`Settings.mcp_require_session_id`: the session id is only
-    written into the audit row when the operator has flipped
-    ``MCP_REQUIRE_SESSION_ID=true`` (which also flips the surface
-    behaviour: a missing header now returns ``-32600`` Invalid
-    Request, instead of falling back to a single-call ``uuid4()``).
-    This module surfaces ``capture_mode="enforced"`` to convey that
-    "captured iff enforcement is on" coupling.
+    ``capture_mode`` is resolved from the **same helper** the
+    ``/status`` health surface uses —
+    :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode` —
+    passed this block's :class:`Settings` snapshot so the two surfaces
+    can never disagree (#2700). It reads:
 
-    G0.14-T6 (#1147) decouples capture from enforcement — once it
-    lands, capture-if-present becomes unconditional, and
-    ``capture_mode`` flips to ``"always"``. Operators reading the
-    ``/ready`` payload before T6 lands see the coupling; readers
-    after T6 lands see the post-decouple state. The schema is
-    forward-compatible across the change: only the string value
-    flips.
+    * ``"when_negotiated"`` — the default. A ``Mcp-Session-Id`` header
+      is captured into ``audit_log.agent_session_id`` only when the
+      client negotiated a session via the ``initialize`` handshake and
+      echoes the server-issued id; a header-less call is accepted and
+      its row's session id lands as NULL (invisible to session-lineage
+      replay). The honest label #2700 landed in place of the earlier
+      ``"always"``, which read as a guarantee that every ``method=MCP``
+      row carries a session id when in fact header-less callers stay
+      out of lineage.
+    * ``"enforced"`` — capture works the same way **plus** a missing
+      header is rejected with ``-32600`` before any audit row is
+      written, so every accepted MCP call carries a session id. Flipped
+      on by ``MCP_REQUIRE_SESSION_ID=true``
+      (:attr:`Settings.mcp_require_session_id`).
 
-    No env var is "missing" for this feature — the capture is
-    feature-coupled to MCP itself, not to an admin-configurable
-    knob. ``missing_env`` is always ``[]`` and ``configured`` is
-    always ``True``; the ``capture_mode`` field is the operative
-    discriminant. The pre-T6 value of ``capture_mode`` is the
-    constant ``"enforced"`` — not derived from
-    :attr:`Settings.mcp_require_session_id` — because *capture* and
-    *enforcement* are the same knob today, regardless of how the
-    operator has it wired. T6 will flip this constant to
-    ``"always"`` in a one-line edit.
+    No env var is "missing" for this feature — capture is
+    feature-coupled to MCP itself, not to an admin-configurable knob.
+    ``missing_env`` is always ``[]`` and ``configured`` is always
+    ``True``; the ``capture_mode`` field is the operative discriminant.
     """
+    # Function-local import to break the same features -> mcp import
+    # cycle documented on :func:`_mcp_block` (``mcp/__init__`` eagerly
+    # pulls ``handlers -> broadcast -> health -> features``). Reached at
+    # request time, so the ``import`` is already cached and cheap.
+    from meho_backplane.mcp.server import mcp_session_id_capture_mode
+
     return {
         "configured": True,
-        "capture_mode": "enforced",
+        "capture_mode": mcp_session_id_capture_mode(settings),
         "missing_env": [],
     }
 
@@ -473,7 +481,7 @@ def build_features_block(settings: Settings) -> dict[str, dict[str, Any]]:
     block: dict[str, dict[str, Any]] = {
         "agent_runtime": _agent_runtime_block(settings),
         "ui_surface": _ui_surface_block(settings),
-        "audit_replay": _audit_replay_block(),
+        "audit_replay": _audit_replay_block(settings),
         "approval_queue": _approval_queue_block(settings),
         "mcp": _mcp_block(),
     }

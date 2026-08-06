@@ -151,17 +151,25 @@ The [DCO bot](https://github.com/apps/dco) checks every PR on
 `evoila/meho`. A missing `Signed-off-by:` on any commit fails the
 `DCO` required check, which blocks merge under main branch protection.
 
-Backfilling a sign-off after-the-fact requires rewriting history — for
-a single missing commit:
+Backfilling a missed sign-off does **not** require rewriting history:
+[`.github/dco.yml`](./.github/dco.yml) enables the DCO app's
+*individual remediation commits* (see
+[`docs/decisions/automation-review-identity.md`](./docs/decisions/automation-review-identity.md)).
+Push a follow-up commit — itself signed off — whose body contains one
+line per unsigned commit, in exactly this form:
 
 ```bash
-git commit --amend --signoff
-git push --force-with-lease
+git commit -s --allow-empty \
+  -m "DCO remediation" \
+  -m "I, Your Name <your@email>, hereby add my Signed-off-by to this commit: <full-sha>"
 ```
 
-For a multi-commit PR, an interactive rebase with
-`git rebase --signoff <base>` re-signs every commit in the range. Both
-flows are noisy; the easier discipline is to make `-s` the default.
+The name/email must match the unsigned commit's author, and `<full-sha>`
+is that commit's hash. The DCO check re-runs and turns green without a
+force-push. Rewriting instead (`git commit --amend --signoff`, or
+`git rebase --signoff <base>` for a range, then
+`git push --force-with-lease`) still works but destroys review anchors
+on an open PR; the easier discipline is to make `-s` the default.
 
 There is no CLA. Apache 2.0 §5 ("inbound = outbound": contributions
 flow in under the same Apache 2.0 terms the project ships under) plus

@@ -22,6 +22,11 @@
 #   Branch: gh-pages / root. The gh-pages branch exists after the
 #   first tag-triggered run. The site then serves at
 #   https://evoila.github.io/meho/.
+# The deploy job's final step enforces this: it polls the version URL
+# just published and fails the run if Pages never serves it, so a
+# missing one-time setup goes red instead of publishing an unservable
+# site silently (#2741 — the v0.26.0 deploy reported success while the
+# site returned 404).
 #
 # mike's CI requirements (https://github.com/jimporter/mike):
 #   * the gh-pages branch must be fetched locally before deploying —
@@ -102,6 +107,10 @@ jobs:
     # to publish under.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    # mike build/push runs a few minutes and the reachability gate below
+    # waits up to 10; 20 keeps a genuinely stuck job from burning the
+    # 6-hour default while leaving healthy runs ample head-room.
+    timeout-minutes: 20
     permissions:
       contents: write
     concurrency:
@@ -135,6 +144,7 @@ jobs:
         working-directory: backend
 
       - name: Deploy versioned docs
+        id: deploy
         # One docs version per minor: v0.26.3 publishes as "0.26" and
         # re-points `latest`. `--update-aliases` lets `latest` move
         # off the previous minor; `set-default latest` (idempotent)
@@ -151,9 +161,49 @@ jobs:
               VERSION=$(printf '%s' "${GITHUB_REF_NAME#v}" | sed -E 's/^([0-9]+\.[0-9]+).*/\1/')
               uv run --project backend --no-sync mike deploy --push --update-aliases "${VERSION}" latest
               uv run --project backend --no-sync mike set-default --push latest
+              # Hand the just-published MAJOR.MINOR to the reachability
+              # gate below so it polls THIS run's version path, not the
+              # site root.
+              printf 'version=%s\n' "${VERSION}" >> "${GITHUB_OUTPUT}"
               ;;
             *)
               echo "Ref '${GITHUB_REF_NAME}' is not a vMAJOR.MINOR[.PATCH] tag — nothing to deploy." >&2
               exit 1
               ;;
           esac
+
+      - name: Verify published docs are reachable
+        # A green `mike deploy` only means the built site was committed
+        # to gh-pages — not that anything serves it. GitHub Pages must
+        # be enabled once by a maintainer (see this file's one-time-setup
+        # header); until then gh-pages is committed but unserved and the
+        # publish is silently unservable (#2741 — the v0.26.0 run
+        # reported success while the site returned 404). Poll the version
+        # path THIS run published — not the site root, whose redirect to
+        # `latest` returns 200 and would mask a failed version publish —
+        # until Pages serves it.
+        env:
+          VERSION: ${{ steps.deploy.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${VERSION}" ]; then
+            echo "::error::No published version resolved from the deploy step; cannot verify reachability." >&2
+            exit 1
+          fi
+          url="https://evoila.github.io/meho/${VERSION}/"
+          deadline=$(( SECONDS + 600 ))  # 10 min budget — legacy Pages builds take ~1-3 min
+          interval=15
+          echo "Polling ${url} for HTTP 200 (up to 10 min)..."
+          while true; do
+            code=$(curl -sSL --max-time 30 -o /dev/null -w '%{http_code}' "${url}") || code="000"
+            if [ "${code}" = "200" ]; then
+              echo "Reachable: ${url} returned HTTP 200."
+              exit 0
+            fi
+            if [ "${SECONDS}" -ge "${deadline}" ]; then
+              echo "::error::Published docs never became reachable: ${url} last returned HTTP ${code} after 10 min. GitHub Pages is likely not enabled (or not serving gh-pages) — a maintainer must set Settings -> Pages -> Deploy from a branch -> gh-pages / root (one-time; see this workflow's header)." >&2
+              exit 1
+            fi
+            echo "  ${url} -> HTTP ${code}; retrying in ${interval}s..."
+            sleep "${interval}"
+          done

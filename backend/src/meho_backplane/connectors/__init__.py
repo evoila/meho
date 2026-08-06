@@ -43,6 +43,7 @@ from meho_backplane.connectors.resolver import (
     ResolutionLabel,
     resolve_connector,
     resolve_connector_or_label,
+    resolve_target_version,
 )
 from meho_backplane.connectors.schemas import (
     AuthModel,
@@ -99,6 +100,7 @@ __all__ = [
     "register_connector_v2",
     "resolve_connector",
     "resolve_connector_or_label",
+    "resolve_target_version",
     "shim_kind",
     "split_version",
     "validate_execution_profile",

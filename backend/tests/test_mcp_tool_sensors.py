@@ -156,6 +156,32 @@ async def test_mcp_create_over_non_safe_op_surfaces_code() -> None:
 
 
 @pytest.mark.asyncio
+async def test_mcp_create_foreign_identity_sub_surfaces_code() -> None:
+    """#2699: identity_sub the caller does not own surfaces as invalid-params.
+
+    ``_admin()`` has ``sub="mcp-admin"``; ``"svc:foreign"`` is neither that nor
+    the ``"__sensor__"`` sentinel, so the create choke point rejects it.
+    """
+    from meho_backplane.mcp.server import McpInvalidParamsError
+
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    await _seed_descriptor(op_id=_SAFE_OP, safety_level="safe")
+    with pytest.raises(McpInvalidParamsError, match="sensor_identity_sub_forbidden"):
+        await _sensor_tools._create_handler(
+            _admin(),
+            {
+                "name": "spoofed",
+                "connector_id": _SAFE_CONNECTOR,
+                "op_id": _SAFE_OP,
+                "assertion": _ASSERTION,
+                "cadence_kind": "interval",
+                "interval_seconds": 60,
+                "identity_sub": "svc:foreign",
+            },
+        )
+
+
+@pytest.mark.asyncio
 async def test_mcp_delete_cross_tenant_not_found() -> None:
     """meho_sensor_delete against a cross-tenant id surfaces as sensor_not_found."""
     from meho_backplane.mcp.server import McpInvalidParamsError

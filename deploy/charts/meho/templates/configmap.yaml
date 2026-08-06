@@ -169,6 +169,15 @@ data:
   {{- if .Values.config.ingestJobTimeoutSeconds }}
   INGEST_JOB_TIMEOUT_SECONDS: {{ .Values.config.ingestJobTimeoutSeconds | quote }}
   {{- end }}
+  # Self-approval audited break-glass switch (#1401, #2669). Rendered
+  # unconditionally: the fail-closed default `"false"` is a genuine no-op
+  # (`parse_bool_env` in settings.py reads it), and always emitting the key
+  # keeps the env-var contract stable + the flag first-class/discoverable.
+  # `"true"` lifts the requester != approver guard posture-wide — an
+  # emergency escape, not the single-operator answer (see
+  # `deploy/charts/meho/values.yaml` (`config.approvalAllowSelfApproval`)
+  # and `docs/codebase/approvals.md`).
+  APPROVAL_ALLOW_SELF_APPROVAL: {{ .Values.config.approvalAllowSelfApproval | quote }}
   # G0.8-T4 (#633) — the /mcp router is mounted unconditionally; an MCP
   # request's Bearer token must carry `aud == MCP_RESOURCE_URI`. The
   # documented default is `${BACKPLANE_URL}/mcp`, but on a deploy that

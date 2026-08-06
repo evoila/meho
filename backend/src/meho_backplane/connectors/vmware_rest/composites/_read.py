@@ -129,6 +129,8 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 
+from .schemas import DATASTORE_USAGE_MAX_VM_NAMES
+
 if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
@@ -532,6 +534,13 @@ async def datastore_usage_composite(
         are ``None`` and the row carries an ``enrichment_note`` string
         describing the skipped enrichment; on success the row has no
         ``enrichment_note`` key.
+
+        ``vm_count`` is the exact VM total; ``vm_names`` is bounded to a
+        sample of at most
+        :data:`~meho_backplane.connectors.vmware_rest.composites.schemas.DATASTORE_USAGE_MAX_VM_NAMES`
+        names, so a one-name ``filter_names`` result stays inline under the
+        JSONFlux byte threshold and a per-datastore Sensor can select
+        ``$.datastores[0].free_space`` (#2758).
     """
     filter_names: list[str] = list(params.get("filter_names") or [])
 
@@ -615,8 +624,13 @@ async def datastore_usage_composite(
                 for v in vm_entries
                 if isinstance(v, dict) and isinstance(v.get("name"), str)
             ]
+            # vm_count is the exact total, taken before the cap; vm_names is
+            # bounded to a sample so a one-name filter_names result stays
+            # inline under the dispatcher's 4096-byte JSONFlux threshold and
+            # a per-datastore Sensor can still select free_space (#2758).
+            # vm_count > len(vm_names) is the truncation signal.
             row["vm_count"] = len(vm_names)
-            row["vm_names"] = vm_names
+            row["vm_names"] = vm_names[:DATASTORE_USAGE_MAX_VM_NAMES]
         aggregated.append(row)
     return {"datastores": aggregated}
 

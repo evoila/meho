@@ -58,15 +58,15 @@ MEHO doesn't implement RFC 7591 Dynamic Client Registration; operators register 
 # PKCE for the OAuth 2.1 authorization-code flow. PKCE on a public
 # client is what the spec calls out as the v0.2 default.
 kcadm.sh create clients -r <realm> -b '{
-  "clientId": "meho-mcp-client",
+  "clientId": "meho-mcp",
   "name": "MEHO MCP client (static)",
   "protocol": "openid-connect",
   "publicClient": true,
   "standardFlowEnabled": true,
   "directAccessGrantsEnabled": false,
   "redirectUris": [
-    "https://claude.ai/api/mcp/auth_callback",
-    "http://localhost:*"
+    "http://localhost:*",
+    "http://127.0.0.1:*"
   ],
   "webOrigins": ["+"],
   "attributes": {
@@ -77,10 +77,10 @@ kcadm.sh create clients -r <realm> -b '{
 # Attach the audience mapper from Step 1 to this client.
 ```
 
-`redirectUris` covers two patterns:
+`redirectUris` is loopback-only — MEHO is internal-only, so there is no public `claude.ai` Custom Connector redirect (see the callout at the top of this doc). Both loopback hosts are registered:
 
-- `https://claude.ai/api/mcp/auth_callback` for the Claude.ai Custom Connector flow.
 - `http://localhost:*` for MCP Inspector and other CLI / desktop clients that listen on an ephemeral local port.
+- `http://127.0.0.1:*` — the loopback twin the `mcp-remote` shim needs. Keycloak matches redirect hosts literally, so `localhost` and `127.0.0.1` are distinct and both must be registered.
 
 A future-proof alternative is to make this client a *Dynamic Client Registration* template once Keycloak's DCR support and the v0.2.next MEHO RFC 7591 work land; for v0.2, the static recipe above is the path.
 
@@ -118,7 +118,7 @@ The remote Custom Connector path (paste a `/mcp` URL into claude.ai → Settings
 # Obtain a token via the realm's preferred flow — for the dogfood
 # consumer, `meho login` is the simplest path; for direct Keycloak
 # device-code, `kcadm.sh` works too.
-TOKEN=$(meho login --print-token)
+TOKEN=$(meho login --print-token https://meho.example.com)
 
 # List tools (smoke test).
 npx @modelcontextprotocol/inspector --cli \
@@ -157,7 +157,7 @@ OAuth handling is client-specific; refer to each client's docs for the token-acq
 
 Claude Code's native HTTP-MCP support and Cursor's MCP wire-up, as of 2026-05, follow the RFC 9728 metadata trail correctly: they fetch `/.well-known/oauth-protected-resource`, read the `authorization_servers` field, then attempt OAuth 2.1 + PKCE against the Keycloak realm. The problem is the next step: **neither `.mcp.json` shape exposes a `client_id` field**, so both clients fall back to dynamic client registration (RFC 7591). Keycloak's default Trusted Hosts policy ships with an empty whitelist — anonymous DCR is de-facto disabled — so the registration POST returns `HTTP 403 {"error":"insufficient_scope","error_description":"Policy 'Trusted Hosts' rejected request to client-registration service. Details: Host not trusted."}` and the wire-up never completes.
 
-Pre-registering `meho-mcp-client` on the realm side (Step 2 above + the [auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)) is necessary but **not sufficient** for these clients: they have no place to put the resulting `client_id`.
+Pre-registering `meho-mcp` on the realm side (Step 2 above + the [auth onramp recipe](../../deploy/values-examples/README.md#auth-onramp-recipe-cli--mcp)) is necessary but **not sufficient** for these clients: they have no place to put the resulting `client_id`.
 
 Three workarounds today:
 
@@ -173,8 +173,8 @@ Opening RFC 7591 DCR on the realm side is **not** the right fix: a public DCR en
 
 After the client is wired:
 
-- Run `meho_status` from the connected client. The response should carry the operator's identity (sub, tenant_id, role) plus the Vault federation status and DB migration state.
-- Read the operator's tenant info: ask the client to read the resource at `meho://tenant/<your-tenant-id>/info`. The response should be the operator's tenant identity bundle (id, slug, name, role).
+- Run `meho_status` from the connected client. The response should carry the operator's identity (sub, name, email, tenant_id, tenant_role) plus the Vault federation status and DB migration state.
+- Read the operator's tenant info: the backplane lists the caller's own `meho://tenant/<your-tenant-id>/info` under `resources/list`, so a discovery-driven client (e.g. Claude Desktop's attachment picker) surfaces it directly — pick it there, or read the URI by hand (`tenant_id` from `meho_status` above fills `<your-tenant-id>`). The response should be the operator's tenant identity bundle (id, slug, name, role).
 - On the backplane, `SELECT method, path, operator_sub, status_code, occurred_at FROM audit_log ORDER BY occurred_at DESC LIMIT 10` should show the two operations with `method='MCP'` and `path='/mcp/tools/call/meho_status'` / `path='/mcp/resources/read/meho://tenant/<id>/info'`.
 
 If any of these don't appear, walk the troubleshooting section.

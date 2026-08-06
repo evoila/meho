@@ -205,13 +205,13 @@ func getList(
 // printListTable renders the sensors as a compact table:
 // ID, NAME, STATUS, LAST_STATE, CADENCE, NEXT_FIRE_AT, SEVERITY.
 func printListTable(w io.Writer, r *api.SensorListResponse) {
-	if r == nil || len(r.Sensors) == 0 {
+	if r == nil || len(r.Items) == 0 {
 		fmt.Fprintln(w, "no sensors in this tenant")
 		return
 	}
 	fmt.Fprintf(w, "%-36s %-20s %-8s %-10s %-22s %-24s %s\n",
 		"ID", "NAME", "STATUS", "LAST_STATE", "CADENCE", "NEXT_FIRE_AT", "SEVERITY")
-	for _, s := range r.Sensors {
+	for _, s := range r.Items {
 		cadence := string(s.CadenceKind)
 		switch string(s.CadenceKind) {
 		case "interval":

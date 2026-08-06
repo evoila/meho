@@ -530,12 +530,23 @@ jobs:
     #     Remove the label once validated; routine PRs never carry it.
     #   * NON-REQUIRED + whole-job continue-on-error (#1987 AC5) — it is NOT
     #     in branch protection's required contexts, AND continue-on-error
-    #     means a coverage OOM/timeout reports the JOB as success, so it
-    #     never fails the overall CI run conclusion. That matters twice: a
-    #     red coverage job must not block merge (it can't — push runs after
-    #     merge — but defence in depth), and it must not flip the CI run's
-    #     `conclusion` to `failure`, which would suppress quality-gate.yml's
-    #     `workflow_run` (it only runs on `conclusion == 'success'`).
+    #     means a coverage-job FAILURE (OOM, red tests, step timeout) is
+    #     absorbed: the job itself still reports conclusion `failure` (jobs
+    #     API, observed on run 30925197316), but it never fails the overall
+    #     CI run conclusion. That matters twice: a red coverage job must not
+    #     block merge (it can't — push runs after merge — but defence in
+    #     depth), and it must not flip the CI run's `conclusion` to
+    #     `failure`, which would suppress quality-gate.yml's `workflow_run`
+    #     (it only runs on `conclusion == 'success'`).
+    #     CAUTION (#2800): continue-on-error absorbs *failure* only —
+    #     cancellation leaks through. A JOB-level `timeout-minutes` expiry
+    #     CANCELS the job, and the `cancelled` conclusion propagated to the
+    #     whole run (observed three times on 2026-08-04, run 30902356757),
+    #     suppressing quality-gate.yml exactly like a `failure` would and
+    #     tripping docs/RELEASING.md's "cancelled ≠ green" pre-flight.
+    #     Hence the hang backstop lives on the pytest STEP (step timeout →
+    #     step failure → job failure → absorbed); the job-level cap is only
+    #     the outer backstop — see the timeout-minutes comment below.
     #
     # WHY OFFLINE COMBINE + LOW PARALLELISM (the memory story, measured for
     # #1987; methodology = #1982's: systemd-run --user --scope, cgroup
@@ -576,10 +587,20 @@ jobs:
     # Move this `runs-on:` to the new pool once provisioned. Until then an OOM
     # skips one coverage upload; quality-gate.yml now makes that skip
     # fail-visible via an error annotation (#2513).
-    # ~36-min serial wall + headroom. This job is push-only and non-blocking,
-    # so a long wall is acceptable (it never gates a PR). The cap is a hang
-    # backstop, not a perf budget.
-    timeout-minutes: 50
+    # Two-layer timeout (#2800). The hang backstop is the pytest step's own
+    # `timeout-minutes: 45` (~36-min serial wall + creep headroom): a step
+    # timeout is a step FAILURE (the runner kills the process and annotates
+    # "timed out after 45 minutes"), which the whole-job continue-on-error
+    # absorbs — run conclusion stays `success`. This job-level cap is
+    # strictly the OUTER backstop for a wedged non-pytest step (checkout /
+    # uv sync / model warm — never observed; both 2026-08-04 hangs were in
+    # pytest). It must stay comfortably above step cap + pre-pytest setup
+    # (35–75 s observed) + combine/upload (~15 s) so the step timeout
+    # always fires first for a pytest hang — a job-level expiry CANCELS
+    # the job, and `cancelled` leaks past continue-on-error into the run
+    # conclusion. Neither cap is a perf budget: the job is push-only and
+    # non-blocking, so a long wall never gates a PR.
+    timeout-minutes: 55
     continue-on-error: true
     env:
       # Surfaced as a job-level env var purely so the Docker Hub login
@@ -644,6 +665,12 @@ jobs:
             uv run python -c "from meho_backplane.redaction import get_engines; get_engines('en')"
 
       - name: Pytest (unit) with offline coverage data
+        # Hang backstop ON THE STEP (#2800): a step timeout kills the
+        # process and marks the step FAILED, which the job's
+        # continue-on-error absorbs. A job-level timeout would instead
+        # cancel the job and flip the whole run conclusion to `cancelled`
+        # (see the job-level timeout-minutes comment above).
+        timeout-minutes: 45
         env:
           MEHO_REDACTION_SPACY_MODEL: en_core_web_sm
           # Each xdist worker is a subprocess; coverage's a1_coverage.pth hook

@@ -13,6 +13,14 @@ dependencies = [
     "prometheus-client>=0.26.0",
     "authlib>=1.3",
     "httpx>=0.27",
+    # httpx's async transport (httpcore) runs on anyio; the
+    # net.http_probe diagnostic op imports it directly to classify
+    # TLS-phase connect failures — httpcore's start_tls maps
+    # anyio.EndOfStream / anyio.BrokenResourceError to ConnectError with
+    # no ssl.SSLError in the cause chain (#2771). Already present
+    # transitively via httpx; declared direct so the connector's runtime
+    # requirement is explicit (same pattern as dnspython / cryptography).
+    "anyio>=4.0",
     "hvac>=2.4.0",
     "sqlalchemy[asyncio]>=2.0.51",
     "asyncpg>=0.29",
@@ -118,7 +126,9 @@ dependencies = [
     # presented cert via ``cryptography.x509`` (subject/SAN/issuer/validity
     # extraction). Previously a dev-only + transitive (pyjwt[crypto],
     # pyopenssl) install; declared here because the app imports it directly.
-    "cryptography>=49.0.0",
+    # Floor at 50.0.0: CVE-2026-69247 (PKCS#7 EnvelopedData Bleichenbacher
+    # oracle) is fixed there and the trivy image gate fails on anything older.
+    "cryptography>=50.0.0",
 ]
 
 [dependency-groups]

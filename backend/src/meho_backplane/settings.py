@@ -439,6 +439,44 @@ class Settings(BaseModel):
         running as a cheap heartbeat; ``enabled=False`` skips starting the
         loop entirely (no audit-row noise, no log line). Read once at
         lifespan startup; toggling post-start requires a pod restart.
+    checks_evidence_retention_days:
+        Maximum age (in days) of ``sensor_results`` per-tick evidence rows
+        the #2756 retention prune task preserves. Rows whose
+        ``evaluated_at`` is older than
+        ``now() - checks_evidence_retention_days`` are deleted in one
+        bounded batch per run. Default 7 -- the conservative single-digit
+        window the ops report asked for ("nobody's DB grows
+        surprisingly"). Range ``[0, 3650]`` (10-year ceiling).
+
+        **``0`` disables the feature entirely** -- no history rows are
+        written at all (``record_sensor_result`` skips the append), so the
+        latest-only projection behaviour that predates #2756 is restored
+        and the table stays empty. This DELIBERATELY DIVERGES from the
+        ``broadcast_announcement_retention_days=0`` /
+        ``topology_history_retention_days=0`` keep-forever sentinel: an
+        evidence history that grows forever is exactly the surprise the
+        report wanted the default to avoid, so ``0`` here means "off", not
+        "unbounded". Read once per prune-tick, and once per persist, through
+        :func:`get_settings`'s cache.
+    checks_evidence_prune_interval_seconds:
+        Cadence of the #2756 evidence retention prune background loop, in
+        seconds. The task (registered in the FastAPI lifespan) sleeps this
+        long between scans of ``sensor_results``. Default 604800 (7 d /
+        weekly), matching the announcement + topology-history prune
+        cadences. Range ``[60, 604800]``: below one minute the prune
+        competes with the runner's persist load; the ceiling is the weekly
+        cadence. Tests override to sub-second values via env-var monkeypatch
+        + :func:`get_settings` cache-clear.
+    checks_evidence_prune_enabled:
+        Whether to start the #2756 evidence retention prune background task
+        in the FastAPI lifespan. Default ``True``. Operators running an
+        external retention mechanism (k8s CronJob, archive-then-delete) flip
+        ``CHECKS_EVIDENCE_PRUNE_ENABLED=false`` so the chassis does not race
+        the external job. Distinct from
+        ``checks_evidence_retention_days=0``: ``0`` turns the *feature* off
+        (no writes, nothing to prune) while a running loop still heartbeats;
+        ``enabled=False`` skips starting the loop entirely. Read once at
+        lifespan startup; toggling post-start requires a pod restart.
     result_handle_max_spill_rows:
         Upper bound on how many rows the reducer spills into the
         :class:`~meho_backplane.connectors.result_handle_store.ResultHandleStore`
@@ -1091,6 +1129,15 @@ class Settings(BaseModel):
     broadcast_announcement_retention_days: int = Field(default=90, ge=0, le=3650)
     broadcast_announcement_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
     broadcast_announcement_prune_enabled: bool = True
+    # Checks per-tick evidence retention (#2756, Initiative #2780) -- the
+    # sensor_results history table + its retention sweeper. Same mould as the
+    # broadcast-announcement knobs above, with ONE deliberate divergence: here
+    # ``days=0`` DISABLES the feature (no history rows written -- the
+    # latest-only behaviour predating #2756), where the other sweepers treat
+    # ``0`` as keep-forever. See the class docstring for the rationale.
+    checks_evidence_retention_days: int = Field(default=7, ge=0, le=3650)
+    checks_evidence_prune_interval_seconds: int = Field(default=604800, ge=60, le=604800)
+    checks_evidence_prune_enabled: bool = True
     result_handle_max_spill_rows: int = Field(default=10000, gt=0)
     jsonflux_sample_byte_budget: int = Field(default=4096, gt=0)
     composite_max_depth: int = Field(default=8, gt=0)
@@ -1313,6 +1360,15 @@ class Settings(BaseModel):
     # evaluator (or the test path without a runner) can opt out.
     sensor_runner_enabled: bool = True
     sensor_runner_tick_interval_seconds: int = Field(default=10, ge=1, le=3600)
+    # #2763 — evaluation-loop watchdog. A stall is "no completed runner tick
+    # for stall_after_ticks x tick_interval_seconds" (default 6 x 10 s = 60 s);
+    # the threshold scales with the tick grid so a deployment that slows the
+    # cadence widens the stall window with it. Floor of 2: a threshold at or
+    # below one tick interval would flag every ordinary sleep-then-tick gap.
+    # The watchdog itself has no enable flag -- it starts and stops with
+    # SENSOR_RUNNER_ENABLED (a watchdog with its own kill switch is how the
+    # silent-stall class stays invisible).
+    sensor_runner_stall_after_ticks: int = Field(default=6, ge=2, le=1000)
     # #2642 (G0.37) — the in-process check-runner's own service-principal
     # identity for background dispatch. Both empty (the default) keeps
     # today's behaviour bit-for-bit: the runner's synthetic operator carries
@@ -1774,6 +1830,15 @@ def get_settings() -> Settings:
         broadcast_announcement_prune_enabled=parse_bool_env(
             os.environ.get("BROADCAST_ANNOUNCEMENT_PRUNE_ENABLED", "true"),
         ),
+        checks_evidence_retention_days=int(
+            os.environ.get("CHECKS_EVIDENCE_RETENTION_DAYS", "7"),
+        ),
+        checks_evidence_prune_interval_seconds=int(
+            os.environ.get("CHECKS_EVIDENCE_PRUNE_INTERVAL_SECONDS", "604800"),
+        ),
+        checks_evidence_prune_enabled=parse_bool_env(
+            os.environ.get("CHECKS_EVIDENCE_PRUNE_ENABLED", "true"),
+        ),
         result_handle_max_spill_rows=int(
             os.environ.get("RESULT_HANDLE_MAX_SPILL_ROWS", "10000"),
         ),
@@ -1913,6 +1978,9 @@ def get_settings() -> Settings:
         ),
         sensor_runner_enabled=parse_bool_env(
             os.environ.get("SENSOR_RUNNER_ENABLED", "true"),
+        ),
+        sensor_runner_stall_after_ticks=int(
+            os.environ.get("SENSOR_RUNNER_STALL_AFTER_TICKS", "6"),
         ),
         check_runner_client_id=os.environ.get("CHECK_RUNNER_CLIENT_ID", "").strip(),
         check_runner_client_secret=os.environ.get("CHECK_RUNNER_CLIENT_SECRET", "").strip(),

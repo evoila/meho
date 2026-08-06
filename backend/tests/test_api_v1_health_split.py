@@ -49,6 +49,7 @@ from meho_backplane.main import app
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
@@ -175,6 +176,8 @@ def test_operator_rank_health_reaches_federation_probe(
         "sub": f"op-{role}",
         "name": "Alice",
         "email": "alice@example.com",
+        "tenant_id": _DEFAULT_TENANT_ID,
+        "tenant_role": role,
     }
     assert body["vault"] == {"reachable": True, "read_ok": True, "detail": "version=7"}
     assert body["db"] == {"migrated": True}
@@ -214,8 +217,21 @@ def test_read_only_liveness_returns_200_without_vault_touch(
             "sub": "op-monitor",
             "name": "Monitor",
             "email": "monitor@example.com",
+            "tenant_id": _DEFAULT_TENANT_ID,
+            "tenant_role": "read_only",
         },
         "db": {"migrated": True},
+        # #2763: the runner-liveness facet rides the low-privilege
+        # liveness route — an in-memory clock read honouring this
+        # handler's no-Vault/no-connector constraint — so the external
+        # prober that watches the evaluation loop polls here, not the
+        # per-poll-Vault-federating deep check. No lifespan ran, so it
+        # reads the enabled-but-not-started shape.
+        "sensor_runner": {
+            "seconds_since_last_tick": None,
+            "stalled": False,
+            "stall_threshold_seconds": 60.0,
+        },
     }
     assert probe_mock.await_count == 0
     assert dispatch_mock.await_count == 0

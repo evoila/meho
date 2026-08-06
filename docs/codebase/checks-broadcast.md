@@ -9,6 +9,17 @@ feed (`meho:feed:{tenant_id}`) as one `BroadcastEvent` with op-id
 `/ui/broadcast/stream?op_class=checks` — see check state changes the way
 they already see `approval.*` lifecycle events (#2720).
 
+The module also carries the evaluation-loop watchdog's liveness events
+(#2763): `checks.scheduler_stalled` (the runner's tick loop went quiet
+past the stall threshold; fanned out per tenant with an active Sensor)
+and `checks.scheduler_recovered` (first completed tick after a stall,
+carrying `stalled_for_seconds`), published via
+`publish_scheduler_liveness_event` on the same mould — `__checks__`
+principal, nil-UUID `audit_id`, fail-open
+(`checks_scheduler_broadcast_failed`). Producer-side mechanics live in
+`docs/codebase/checks-runner.md`; this page owns the op-id/classifier
+contract.
+
 This is the **third** independent consumer of #2507's transition claim,
 beside the diagnose-only investigator
 (`docs/codebase/checks-investigator.md`, worsening edges only) and the
@@ -21,14 +32,27 @@ Unlike the notifier, the publish has **no floor**. A feed event costs one
 `XADD` against a `MAXLEN ~`-trimmed stream, so narrowing belongs to the
 consumer (`op_class=checks`), not to the producer.
 
+Since #2799, a sensor with `retry_times > 0` commits a state change only
+after consecutive confirming re-checks (`docs/codebase/sensor.md`), so
+transient one-reading flaps never reach the rollup CAS — the feed sees
+**fewer raw edges**, each one a confirmed transition. No change to this
+module; the gate is upstream of the claim all three consumers share.
+
 ## Key types
 
 - `publish_check_transition_event(*, tenant_id, dashboard_id,
   dashboard_name, previous_state, new_state)` — the awaitable that builds
   and publishes the event. **Never raises.**
+- `publish_scheduler_liveness_event(*, tenant_id, op_id, detail)` — the
+  #2763 sibling for the watchdog's stall/recovery pair. **Never
+  raises.**
 - `CHECK_TRANSITION_OP_ID` — the `"checks.transition"` literal.
+- `SCHEDULER_STALLED_OP_ID` / `SCHEDULER_RECOVERED_OP_ID` — the
+  `"checks.scheduler_stalled"` / `"checks.scheduler_recovered"`
+  literals (#2763).
 - `_CHECK_EVENT_OPS` (in `broadcast/events.py`) — the classifier's
-  allowlist, the other half of the op-id contract.
+  allowlist (all three op-ids above), the other half of the op-id
+  contract.
 
 ## Control flow
 

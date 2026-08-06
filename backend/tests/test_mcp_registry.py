@@ -636,18 +636,83 @@ def test_resources_templates_list_endpoint_returns_registered_templates(
     [TenantRole.OPERATOR],
     indirect=True,
 )
-def test_resources_list_endpoint_returns_empty_in_v02(
+def test_resources_list_endpoint_returns_empty_when_no_listable_resources(
     client_with_operator: tuple[TestClient, Operator],
 ) -> None:
-    """``resources/list`` is spec-conformant but empty in v0.2 (only templates exist)."""
+    """``resources/list`` returns a well-formed empty envelope, not an error.
+
+    A spec-conformant client may call ``resources/list`` even when the
+    server exposes no concrete resources (only templates); it must get an
+    empty array back, never ``METHOD_NOT_FOUND``. No resource in this
+    isolated registry opts into concrete listing, so the list is empty.
+    """
     client, _op = client_with_operator
     response = _post_mcp(
         client,
         {"jsonrpc": "2.0", "id": 11, "method": "resources/list"},
     )
     assert response.status_code == 200
-    body = response.json()
-    assert body["result"]["resources"] == []
+    assert response.json()["result"]["resources"] == []
+
+
+@pytest.mark.parametrize(
+    "client_with_operator",
+    [TenantRole.OPERATOR],
+    indirect=True,
+)
+def test_resources_list_publishes_only_list_uris_providers(
+    client_with_operator: tuple[TestClient, Operator],
+) -> None:
+    """``resources/list`` publishes only resources that opt in via ``list_uris`` (#2746).
+
+    The concrete-vs-templated split: a resource registered without a
+    ``list_uris`` provider is discoverable only through
+    ``resources/templates/list`` and MUST NOT appear on ``resources/list``;
+    a resource that supplies a provider contributes the operator-specific
+    concrete URIs the provider returns (here the caller's own tenant).
+    """
+    client, op = client_with_operator
+
+    async def _stub(_op: Operator, _params: dict[str, str]) -> dict[str, Any]:
+        return {}
+
+    def _listed_provider(operator: Operator) -> list[str]:
+        return [f"meho://listed/{operator.tenant_id}/info"]
+
+    # Opts in: publishes the caller's own concrete URI to resources/list.
+    register_mcp_resource(
+        ResourceTemplateDefinition(
+            uriTemplate="meho://listed/{tenant_id}/info",
+            name="listed info",
+            description="A listed resource",
+            mimeType="application/json",
+        ),
+        _stub,
+        list_uris=_listed_provider,
+    )
+    # Does not opt in: template-only, must stay off resources/list.
+    register_mcp_resource(
+        ResourceTemplateDefinition(
+            uriTemplate="meho://templated/{slug}",
+            name="templated only",
+            description="A template-only resource",
+            mimeType="application/json",
+        ),
+        _stub,
+    )
+
+    response = _post_mcp(
+        client,
+        {"jsonrpc": "2.0", "id": 11, "method": "resources/list"},
+    )
+
+    assert response.status_code == 200
+    resources = response.json()["result"]["resources"]
+    assert [r["uri"] for r in resources] == [f"meho://listed/{op.tenant_id}/info"]
+    assert resources[0]["name"] == "listed info"
+    assert resources[0]["mimeType"] == "application/json"
+    # MEHO-internal RBAC field never rides the wire shape.
+    assert "required_role" not in resources[0]
 
 
 @pytest.mark.parametrize(

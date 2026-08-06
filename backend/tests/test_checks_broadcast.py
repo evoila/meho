@@ -74,6 +74,9 @@ def _settings_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("VAULT_ADDR", "https://vault.test")
     monkeypatch.setenv("SCHEDULER_ENABLED", "false")
     monkeypatch.setenv("SENSOR_RUNNER_ENABLED", "false")
+    # The notifier pre-screens recipients against this floor (#2764); allowlist
+    # the ``example.com`` domain the seeded Dashboard mails to.
+    monkeypatch.setenv("MAIL_RECIPIENT_ALLOWLIST", "example.com")
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()

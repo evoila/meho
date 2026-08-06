@@ -320,7 +320,7 @@ async def test_rest_create_list_delete_round_trip(client: TestClient) -> None:
 
         listed = client.get("/api/v1/checks/dashboards", headers=headers)
         assert listed.status_code == 200
-        rows = listed.json()["dashboards"]
+        rows = listed.json()["items"]
         assert [d["id"] for d in rows] == [dashboard_id]
         assert rows[0]["state"] == "ok"
 
@@ -394,7 +394,7 @@ async def test_rest_cross_tenant_dashboard_id_is_404(client: TestClient) -> None
         assert got.status_code == 404
         assert got.json()["detail"] == "dashboard_not_found"
         # And B's list does not include A's dashboard.
-        assert client.get("/api/v1/checks/dashboards", headers=b_headers).json()["dashboards"] == []
+        assert client.get("/api/v1/checks/dashboards", headers=b_headers).json()["items"] == []
 
 
 @pytest.mark.asyncio
@@ -534,7 +534,7 @@ async def test_rest_create_round_trips_notify_config(client: TestClient) -> None
         assert detail.json()["notify_min_state"] == "degraded"
 
         listed = client.get("/api/v1/checks/dashboards", headers=headers)
-        row = next(d for d in listed.json()["dashboards"] if d["id"] == dashboard_id)
+        row = next(d for d in listed.json()["items"] if d["id"] == dashboard_id)
         assert row["notify_email"] == "oncall@example.com"
         assert row["notify_min_state"] == "degraded"
 
@@ -543,6 +543,38 @@ async def test_rest_create_round_trips_notify_config(client: TestClient) -> None
         assert persisted is not None
         assert persisted.notify_email == "oncall@example.com"
         assert persisted.notify_min_state == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_rest_create_accepts_multiple_notify_recipients(client: TestClient) -> None:
+    """A comma-separated ``notify_email`` lands normalised + comma-joined (#2764)."""
+    await _seed_tenant(_TENANT_A, "tenant-a")
+    sid = await _seed_sensor(name="multi-notify-sensor", last_state="ok")
+    key = make_rsa_keypair("kid-multi-notify")
+    with respx.mock as r:
+        mock_discovery_and_jwks(r, public_jwks(key))
+        headers = {"Authorization": f"Bearer {_token(key)}"}
+        created = client.post(
+            "/api/v1/checks/dashboards",
+            json={
+                "name": "multi-notified",
+                "sensor_ids": [str(sid)],
+                # Surrounding whitespace is normalised away on the way in.
+                "notify_email": "oncall@example.com, team@example.com",
+            },
+            headers=headers,
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["notify_email"] == "oncall@example.com,team@example.com"
+
+        dashboard_id = created.json()["id"]
+        detail = client.get(f"/api/v1/checks/dashboards/{dashboard_id}", headers=headers)
+        assert detail.json()["notify_email"] == "oncall@example.com,team@example.com"
+
+    async with get_sessionmaker()() as session:
+        persisted = await session.get(CheckDashboard, UUID(dashboard_id))
+        assert persisted is not None
+        assert persisted.notify_email == "oncall@example.com,team@example.com"
 
 
 @pytest.mark.asyncio
@@ -569,6 +601,10 @@ async def test_rest_create_defaults_notify_off_at_critical(client: TestClient) -
     [
         pytest.param("notify_email", "not-an-address", id="malformed-email"),
         pytest.param("notify_email", "oncall@", id="empty-domain"),
+        # #2764: one malformed entry in an otherwise-valid list is a 422.
+        pytest.param("notify_email", "ok@example.com,not-an-address", id="malformed-in-list"),
+        # #2764: a present-but-blank recipient is refused (omit to disable).
+        pytest.param("notify_email", "   ", id="blank-recipient"),
         pytest.param("notify_min_state", "ok", id="floor-outside-vocabulary"),
         pytest.param("notify_min_state", "warn", id="floor-not-a-state"),
     ],
@@ -619,7 +655,7 @@ async def test_rest_create_round_trips_investigator_prompt(client: TestClient) -
         assert detail.json()["investigator_prompt"] == prompt
 
         listed = client.get("/api/v1/checks/dashboards", headers=headers)
-        row = next(d for d in listed.json()["dashboards"] if d["id"] == dashboard_id)
+        row = next(d for d in listed.json()["items"] if d["id"] == dashboard_id)
         assert row["investigator_prompt"] == prompt
 
     async with get_sessionmaker()() as session:

@@ -103,7 +103,6 @@ __all__ = [
     "fail_run",
     "get_run",
     "heartbeat",
-    "increment_turns",
     "list_runs",
     "release_lease",
     "snapshot_in_flight_policy",
@@ -791,25 +790,13 @@ async def snapshot_in_flight_policy(
     return row
 
 
-async def increment_turns(session: AsyncSession, row: AgentRun) -> AgentRun:
-    """Increment the run's observable tool-use turn counter.
-
-    The runtime calls this once per loop turn. ``turns`` is purely
-    observational -- the actual turn *budget* is enforced by the loop
-    (``UsageLimits.request_limit``, G11.1-T1), not this counter. No
-    status change; flushed, not committed.
-    """
-    row.turns += 1
-    await session.flush()
-    return row
-
-
 async def succeed_run(
     session: AsyncSession,
     row: AgentRun,
     *,
     output: dict[str, object],
     cost: Decimal | None = None,
+    turns: int | None = None,
 ) -> AgentRun:
     """Transition a run to ``succeeded`` and record its output.
 
@@ -820,11 +807,22 @@ async def succeed_run(
     the parameter exists now so C3 lands without a service-signature
     change.
 
+    ``turns`` is the loop's model-request turn total, lifted from the
+    framework usage accounting at finalize (#2743). It is written only
+    on this success path, so a run that never reached the model (the
+    #2644 model-init-failure class) keeps the default ``turns == 0`` --
+    the outage fingerprint stays meaningful. A succeeded run always
+    made at least one model request, so it reports ``turns >= 1``. When
+    ``None`` (a caller that does not track the count), the column is
+    left untouched.
+
     Args:
         session: Open :class:`AsyncSession`; flushed, not committed.
         row: The ``running`` :class:`AgentRun`.
         output: The run's structured final result.
         cost: Computed cost (G11.5/C3). ``None`` in v0.2.
+        turns: Model-request turn total to persist. ``None`` leaves the
+            column unchanged.
 
     Returns:
         The mutated, flushed row.
@@ -836,6 +834,8 @@ async def succeed_run(
     row.output = output
     if cost is not None:
         row.cost = cost
+    if turns is not None:
+        row.turns = turns
     return await transition(session, row, AgentRunStatus.SUCCEEDED)
 
 

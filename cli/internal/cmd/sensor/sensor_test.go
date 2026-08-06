@@ -123,7 +123,9 @@ func TestNewRootCmd_Subcommands(t *testing.T) {
 	if cmd.Use != "sensor" {
 		t.Fatalf("expected Use=sensor, got %q", cmd.Use)
 	}
-	want := map[string]bool{"list": true, "create": true, "delete <sensor_id>": true}
+	want := map[string]bool{
+		"list": true, "create": true, "delete <sensor_id>": true, "results <sensor_id>": true,
+	}
 	for _, sub := range cmd.Commands() {
 		if !want[sub.Use] {
 			t.Errorf("unexpected subcommand %q", sub.Use)
@@ -242,14 +244,16 @@ func TestListQueryParamsForwardsFilters(t *testing.T) {
 func TestBuildCreateBodyInterval(t *testing.T) {
 	body := buildCreateBody(
 		createOptions{
-			Name:            "disk",
-			ConnectorID:     "vmware-rest-9.0",
-			OpID:            "vmware.vm.list",
-			CadenceKind:     "interval",
-			IntervalSeconds: 60,
-			Severity:        "degraded",
-			ForSeconds:      300,
-			IdentitySub:     "svc",
+			Name:                "disk",
+			ConnectorID:         "vmware-rest-9.0",
+			OpID:                "vmware.vm.list",
+			CadenceKind:         "interval",
+			IntervalSeconds:     60,
+			Severity:            "degraded",
+			ForSeconds:          300,
+			RetryTimes:          2,
+			RetryBackoffSeconds: 30,
+			IdentitySub:         "svc",
 		},
 		mustAssertion(t, stubAssertion), nil, nil, nil,
 	)
@@ -270,6 +274,12 @@ func TestBuildCreateBodyInterval(t *testing.T) {
 	}
 	if body.ForSeconds == nil || *body.ForSeconds != 300 {
 		t.Errorf("for_seconds not forwarded; got %+v", body.ForSeconds)
+	}
+	if body.RetryTimes == nil || *body.RetryTimes != 2 {
+		t.Errorf("retry_times not forwarded; got %+v", body.RetryTimes)
+	}
+	if body.RetryBackoffSeconds == nil || *body.RetryBackoffSeconds != 30 {
+		t.Errorf("retry_backoff_seconds not forwarded; got %+v", body.RetryBackoffSeconds)
 	}
 	if body.IdentitySub == nil || *body.IdentitySub != "svc" {
 		t.Errorf("identity_sub not forwarded; got %+v", body.IdentitySub)
@@ -309,6 +319,13 @@ func TestBuildCreateBodyCron(t *testing.T) {
 	if body.TenantId == nil || body.TenantId.String() != stubOtherTenant {
 		t.Errorf("tenant_id not forwarded; got %+v", body.TenantId)
 	}
+	// Unset confirmation knobs stay omitted so the server defaults apply.
+	if body.RetryTimes != nil {
+		t.Errorf("retry_times should stay nil when unset; got %+v", body.RetryTimes)
+	}
+	if body.RetryBackoffSeconds != nil {
+		t.Errorf("retry_backoff_seconds should stay nil when unset; got %+v", body.RetryBackoffSeconds)
+	}
 }
 
 // ---------------------------------------------------------------
@@ -323,7 +340,7 @@ func TestRunListHappyPath(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(api.SensorListResponse{
-			Sensors: []api.SensorRead{fakeSensor(t, "interval")},
+			Items: []api.SensorRead{fakeSensor(t, "interval")},
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -343,7 +360,7 @@ func TestRunListEmptyResponse(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/sensors", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(api.SensorListResponse{Sensors: nil})
+		_ = json.NewEncoder(w).Encode(api.SensorListResponse{Items: nil})
 	})
 	srv := httptest.NewServer(mux)
 	defer srv.Close()

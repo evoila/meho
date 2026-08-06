@@ -213,11 +213,13 @@ one transaction):
   it) and `ended_at` on any terminal state.
 - `start_run(session, row, *, provider, model)` — records the resolved
   provider+model, then `pending`/`awaiting_approval` -> `running`.
-- `increment_turns(session, row)` — bumps the observable turn counter;
-  no status change. The turn *budget* is enforced by the loop
+- `succeed_run(session, row, *, output, cost=None, turns=None)` — records
+  output (+ optional C3 cost) and the loop's model-request `turns` total
+  (#2743; lifted from `AgentRunResult.request_count` and persisted at run
+  finalize, written only on this succeed path so a run that failed before
+  reaching the model — the #2644 model-init class — keeps `turns == 0`),
+  -> `succeeded`. The turn *budget* is enforced by the loop
   (`UsageLimits.request_limit`, G11.1-T1), not this column.
-- `succeed_run(session, row, *, output, cost=None)` — records output (+
-  optional C3 cost), -> `succeeded`.
 - `fail_run(session, row, *, error)` — records the failure reason
   (kept distinct from `output` so diagnostics never masquerade as a
   result), -> `failed`.

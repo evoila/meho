@@ -28,7 +28,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from meho_backplane.checks.assertions import AssertionSpec
+from meho_backplane.checks.assertions import AssertionSpec, CheckState
 from meho_backplane.db.models import SensorCadenceKind, SensorSeverity, SensorStatus
 from meho_backplane.scheduler.cron import is_valid_cron_expr, resolve_timezone
 
@@ -36,6 +36,9 @@ __all__ = [
     "SensorCreate",
     "SensorListResponse",
     "SensorRead",
+    "SensorResultListResponse",
+    "SensorResultRead",
+    "SensorResultsQuery",
 ]
 
 #: Max length of an operator-supplied Sensor name. Sensors are referenced
@@ -71,6 +74,16 @@ _INTERVAL_SECONDS_MAX = 86400
 #: any realistic bounded assertion.
 _ASSERTION_MAX_SERIALIZED_BYTES = 8192
 
+#: Confirmation-retry bounds (#2799). ``retry_times`` is capped at 5 --
+#: Nagios deployments rarely exceed ``max_check_attempts`` 3-5, and each
+#: retry adds a full backoff to worst-case detection latency.
+#: ``retry_backoff_seconds`` is floored at 5 s (the same
+#: hammer-the-target floor as ``interval_seconds``) and capped at 300 s
+#: (a confirmation slower than that should just ride the cadence).
+_RETRY_TIMES_MAX = 5
+_RETRY_BACKOFF_SECONDS_MIN = 5
+_RETRY_BACKOFF_SECONDS_MAX = 300
+
 
 class SensorCreate(BaseModel):
     """Request body for ``POST /api/v1/sensors``.
@@ -89,8 +102,15 @@ class SensorCreate(BaseModel):
     ``extra="forbid"`` a body carrying ``status`` is a 422.
 
     *identity_sub* defaults to ``"__sensor__"`` (the sentinel #2505's
-    runner dispatches under). *tenant_id* (optional) lets a platform-admin
-    caller target another tenant; the boundary enforces the RBAC.
+    runner dispatches under). It is the ``sub`` every scheduled dispatch is
+    audit-attributed to (``AuditLog.operator_sub`` / broadcast
+    ``principal_sub``), so :meth:`SensorAdminService.create` accepts only the
+    sentinel or the creating operator's own sub -- any other value is refused
+    with ``sensor_identity_sub_forbidden`` (#2699). The wire model only
+    length-caps it here; the ownership check lives at the service choke point
+    because Pydantic has no access to the authenticated operator.
+    *tenant_id* (optional) lets a platform-admin caller target another tenant;
+    the boundary enforces the RBAC.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -110,6 +130,11 @@ class SensorCreate(BaseModel):
     timezone: Annotated[str, Field(max_length=_TIMEZONE_MAX_LENGTH)] = "UTC"
     severity: SensorSeverity = SensorSeverity.CRITICAL
     for_seconds: Annotated[int, Field(ge=0)] = 0
+    retry_times: Annotated[int, Field(ge=0, le=_RETRY_TIMES_MAX)] = 0
+    retry_backoff_seconds: Annotated[
+        int,
+        Field(ge=_RETRY_BACKOFF_SECONDS_MIN, le=_RETRY_BACKOFF_SECONDS_MAX),
+    ] = 15
     identity_sub: Annotated[str, Field(max_length=_IDENTITY_SUB_MAX_LENGTH)] = "__sensor__"
     tenant_id: uuid.UUID | None = None
 
@@ -180,11 +205,20 @@ class SensorRead(BaseModel):
     next_fire_at: datetime | None
     severity: SensorSeverity
     for_seconds: int
+    retry_times: int
+    retry_backoff_seconds: int
     last_state: Literal["ok", "degraded", "critical", "unknown", "skip"]
     last_value: Any
     last_evidence: dict[str, object] | None
     last_evaluated_at: datetime | None
     state_since: datetime | None
+    # Soft-state window (#2799): the unconfirmed candidate state (never
+    # ``skip`` -- a rollup-side derivation, not an evaluation outcome)
+    # and how many consecutive readings have agreed on it. Exposed so
+    # the pending window is observable, the way Prometheus exposes
+    # ``pending`` alerts via ``ALERTS``.
+    pending_state: Literal["ok", "degraded", "critical", "unknown"] | None
+    pending_count: int
     identity_sub: str
     created_by_sub: str
     created_at: datetime
@@ -192,17 +226,19 @@ class SensorRead(BaseModel):
 
 
 class SensorListResponse(BaseModel):
-    """Response envelope for ``GET /api/v1/sensors``.
+    """Unified list envelope for ``GET /api/v1/sensors``.
 
-    Wrapped in ``{"sensors": [...]}`` so a future paging / cursor field
-    can land non-breakingly -- the same shape
-    :class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`
-    adopted.
+    The `{items, next_cursor}` shape codified in
+    ``docs/codebase/api-shape-conventions.md`` §2. The listing is not
+    cursor-paginated (``limit`` / ``offset`` truncate), so ``next_cursor``
+    is always ``None`` but present so the endpoint can grow pagination
+    later without a further breaking change.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    sensors: list[SensorRead]
+    items: list[SensorRead]
+    next_cursor: str | None = None
 
 
 #: Re-exported sentinel status literal for query-string filter handling at
@@ -212,3 +248,71 @@ SensorStatusFilter = Literal["active", "paused"]
 
 #: Re-exported sentinel cadence-kind literal for query-string filtering.
 SensorCadenceFilter = Literal["interval", "cron"]
+
+
+# ---------------------------------------------------------------------------
+# Per-tick evidence trend query (#2756)
+# ---------------------------------------------------------------------------
+
+#: Default / max page size for the evidence trend query. Mirrors the sensor
+#: list bounds (``SensorAdminService.DEFAULT_LIST_LIMIT`` / ``MAX_LIST_LIMIT``)
+#: for surface consistency; larger windows page via the keyset ``cursor``.
+_RESULTS_DEFAULT_LIMIT = 100
+_RESULTS_MAX_LIMIT = 500
+
+
+class SensorResultRead(BaseModel):
+    """Response shape for one ``sensor_results`` evidence row (#2756).
+
+    Mirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the
+    wire types the JSON renderer serialises: the raw ``(evaluated_at, state,
+    value, evidence, reason)`` the runner computed, plus the owning
+    ``sensor_id``. ``frozen=True`` so a route handler cannot mutate a row after
+    returning it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    sensor_id: uuid.UUID
+    evaluated_at: datetime
+    state: Literal["ok", "degraded", "critical", "unknown", "skip"]
+    value: Any
+    evidence: dict[str, object] | None
+    reason: str | None
+
+
+class SensorResultListResponse(BaseModel):
+    """Response envelope for ``GET /api/v1/sensors/{sensor_id}/results``.
+
+    The ``{items, next_cursor}`` keyset-pagination shape (#2742): ``items`` is
+    the page of evidence rows in ``evaluated_at ASC`` order; ``next_cursor`` is
+    the opaque continuation token to pass back as ``?cursor=`` for the next
+    page, or ``null`` when this is the final page. No aggregate / rollup fields
+    -- the client aggregates raw rows (#2756's determinism bound).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    items: list[SensorResultRead]
+    next_cursor: str | None = None
+
+
+class SensorResultsQuery(BaseModel):
+    """Query-parameter model for the evidence trend query (#2756).
+
+    ``extra="forbid"`` is load-bearing: FastAPI otherwise silently ignores
+    unknown query parameters, but the task pins "no aggregation knobs" -- an
+    unknown filter (``smoothing=``, ``downsample=``, ``aggregate=``) must be
+    *rejected* with a 422, not quietly dropped. Binary filters only: an exact
+    ``state``, an inclusive ``[from, to]`` window, a bounded ``limit``, and the
+    opaque keyset ``cursor``. ``from`` is aliased because it is a Python
+    keyword. All optional except the implicit path ``sensor_id``.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
+    state: CheckState | None = None
+    limit: int = Field(default=_RESULTS_DEFAULT_LIMIT, ge=1, le=_RESULTS_MAX_LIMIT)
+    cursor: str | None = None

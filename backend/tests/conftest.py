@@ -321,6 +321,27 @@ def _default_retrieval_model_cache_dir(
 
 
 @pytest.fixture(autouse=True)
+def _reset_checks_watchdog_state() -> Iterator[None]:
+    """Clear the #2763 watchdog's per-process state around every test.
+
+    :mod:`meho_backplane.checks.watchdog` keeps module-level liveness
+    state (last-tick stamp, start baseline, stall latch). Any app-boot
+    test whose lifespan runs with the default ``SENSOR_RUNNER_ENABLED``
+    starts the runner + watchdog and stamps that state; without this
+    sweep a later test's health-response assertion would see the stale
+    stamp (worse: a long-lived xdist worker could age it past the stall
+    threshold and flip ``stalled`` mid-suite). Both brackets, so a test
+    neither inherits nor bequeaths a stamp — the same hygiene
+    ``reset_sensor_runner_state`` gives the runner's own module state.
+    """
+    from meho_backplane.checks.watchdog import reset_watchdog_state
+
+    reset_watchdog_state()
+    yield
+    reset_watchdog_state()
+
+
+@pytest.fixture(autouse=True)
 def _stub_descriptor_embedding(
     monkeypatch: pytest.MonkeyPatch,
     request: pytest.FixtureRequest,

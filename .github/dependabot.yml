@@ -43,6 +43,14 @@ updates:
   # fail with `dependency_file_not_found: { "file-path": "/" }` (Dependabot
   # job 1360360077). The `uv` ecosystem covers the uv.lock format the
   # project uses (Dependabot supports it natively since 2025).
+  #
+  # A second, similar-looking failure had no config fix: after the
+  # 2026-05-09 history re-init the dependency graph kept the pre-pivot
+  # root uv.lock snapshot, so grouped security-update jobs kept spawning
+  # at `/.` (the manifest directory recorded on the 89 phantom alerts)
+  # and dying with `No files found in /` — a security-update job runs at
+  # its alerts' recorded path, which no dependabot.yml entry can change.
+  # Resolved 2026-08-04 by dismissing the phantom alerts (#2801).
   - package-ecosystem: "uv"
     directory: "/backend"
     schedule:
@@ -55,6 +63,16 @@ updates:
       - "python"
     commit-message:
       prefix: "chore(deps)"
+    ignore:
+      # presidio-anonymizer >=2.2.363 caps cryptography below 49, which
+      # conflicts with the repo's cryptography>=50.0.0 floor
+      # (backend/pyproject.toml:123, raised by security bumps #1768 + #2798).
+      # Every weekly bump attempt fails dependency_file_not_resolvable (e.g.
+      # Actions runs 30800676016, 30253401120). Remove this ignore when
+      # upstream presidio supports the repo's cryptography floor — and note
+      # that ignore also suppresses future *security*-update PRs for this
+      # package (none open today), so drop it immediately if an alert lands.
+      - dependency-name: "presidio-anonymizer"
 
   # The backplane image's base is `FROM python:3.12-slim@sha256:…` in
   # backend/Dockerfile. Dependabot's docker ecosystem bumps that literal,

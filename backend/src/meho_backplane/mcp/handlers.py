@@ -19,7 +19,9 @@ This module wires the registry primitives in
   tool list per MCP 2025-06-18 §Listing Tools.
 * ``tools/call`` — :func:`handle_tools_call`. Validates arguments
   against the tool's ``inputSchema`` (jsonschema), dispatches to the
-  registered handler, packs the result into the MCP ``content`` array.
+  registered handler, packs the result into the MCP ``content`` array
+  (plus ``structuredContent`` for tools declaring an ``outputSchema``,
+  #2774).
 * ``resources/list`` — :func:`handle_resources_list`. Returns the
   list of concrete (non-templated) resources. v0.2 ships only templated
   resources, so this always returns an empty list — present for spec
@@ -96,6 +98,7 @@ from meho_backplane.mcp.audit import compute_params_hash, write_mcp_audit_row
 from meho_backplane.mcp.registry import (
     ResourceTemplateDefinition,
     ToolDefinition,
+    all_listed_resources_for,
     all_resource_templates_for,
     all_tools_for,
     capability_satisfied,
@@ -227,8 +230,18 @@ async def handle_tools_call(
 
     Handler return value is packed into the MCP ``content`` array as
     a single ``text`` block containing the JSON-serialised dict, per
-    spec §Tools/Tool Result. Structured content (``structuredContent``
-    field) is a future polish.
+    spec §Tools/Tool Result. When the tool declares an ``outputSchema``,
+    the same dict is additionally emitted as ``structuredContent``
+    (#2774): MCP 2025-06-18 §Tools/Output Schema mandates that a tool
+    declaring an ``outputSchema`` "MUST return structured results that
+    conform to this schema", and Claude's frontend enforces it
+    client-side — without the field, every declaring tool hard-fails
+    in Claude Desktop with "Tool execution failed" while the server
+    logs 200. The text block stays alongside per the spec's
+    backwards-compatibility recommendation. Conformance of each
+    declaring handler's payload to its schema is machine-checked in
+    ``tests/test_mcp_output_schema_conformance.py`` (emission-time in
+    tests, not per-request in prod).
 
     Audit row writing
     -----------------
@@ -350,13 +363,20 @@ async def handle_tools_call(
         status_code = 200
 
         # MCP §Tool Result: every successful tools/call response carries a
-        # ``content`` array. v0.2 ships unstructured content only — a single
-        # text block with the JSON-serialised result. Structured content
-        # (``structuredContent``) lands when a downstream tool needs it.
-        return {
+        # ``content`` array — a single text block with the JSON-serialised
+        # result. A tool that declares an ``outputSchema`` MUST also return
+        # the dict as ``structuredContent`` (MCP 2025-06-18 §Tools/Output
+        # Schema; #2774) — Claude's frontend enforces this client-side, so
+        # omitting it hard-fails every declaring tool in Claude Desktop
+        # while the server logs 200. The text block is kept alongside per
+        # the spec's backwards-compatibility recommendation.
+        response: dict[str, Any] = {
             "content": [{"type": "text", "text": json.dumps(result)}],
             "isError": False,
         }
+        if defn.outputSchema is not None:
+            response["structuredContent"] = result
+        return response
     except McpInvalidParamsError:
         # Class-wide audit-status correction (#1481). A tool handler can
         # raise ``McpInvalidParamsError`` *after* all the explicit
@@ -545,18 +565,24 @@ def _operator_meets_required_role(
 
 
 async def handle_resources_list(
-    _operator: Operator,
+    operator: Operator,
     _params: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """Return concrete (non-templated) resources.
+    """Return concrete (non-templated) resources for the operator.
 
-    v0.2 registers only templated resources (every URI carries at least
-    one ``{var}``), so this always returns an empty list. The method is
-    present for MCP spec conformance: clients that call ``resources/list``
-    expect an empty array, not ``METHOD_NOT_FOUND``. Templated resources
-    surface via :func:`handle_resources_templates_list`.
+    Concrete resources are the operator-specific URIs registered templates
+    opt into publishing via their ``list_uris`` provider (#2746) — RBAC +
+    capability filtered on the owning template by
+    :func:`~meho_backplane.mcp.registry.all_listed_resources_for`. In v0.2
+    the sole contributor is the tenant-info resource, which lists the
+    caller's own ``meho://tenant/<tenant_id>/info`` so a discovery-driven
+    client (Claude Desktop's attachment picker) can offer the documented
+    verify-step resource without the operator knowing their tenant UUID.
+    Templated resources still surface via
+    :func:`handle_resources_templates_list`; the two lists are disjoint per
+    the MCP 2025-06-18 concrete-vs-templated split.
     """
-    return {"resources": []}
+    return {"resources": all_listed_resources_for(operator)}
 
 
 async def handle_resources_templates_list(

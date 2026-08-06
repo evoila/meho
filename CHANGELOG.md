@@ -90,6 +90,71 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes — `GET /api/v1/checks/dashboards` + `GET /api/v1/sensors` converged on the `{items, next_cursor}` envelope (#2742)
+
+- **BREAKING.** The two check-plane `GET`-list routes that still wrapped
+  their list under a resource-named key now return the unified
+  `{items, next_cursor?}` list envelope
+  (`docs/codebase/api-shape-conventions.md` §2) — the same convention the
+  seven #2338 reference routes adopted, so the API no longer diverges from
+  its own standard on its newest routes. Both listings are unpaginated, so
+  `next_cursor` is always `null` (present so the field can grow a real
+  cursor later without a further breaking change). Both are now pinned by
+  the platform-wide contract test
+  (`backend/tests/test_api_v1_list_envelope_contract.py`) so the
+  divergence cannot recur. Affected endpoints and the wire-shape change
+  adopters must migrate:
+  - `GET /api/v1/checks/dashboards` — was `{"dashboards": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+  - `GET /api/v1/sensors` — was `{"sensors": [...]}` → now
+    `{"items": [...], "next_cursor": null}`.
+
+  **Migration recipe.** Read the list from `response["items"]` instead of
+  the old key (`dashboards` / `sensors`); read `response["next_cursor"]`
+  for pagination (always `null` on these routes today). The bundled `meho`
+  CLI and the generated Go client already read the new envelope — this
+  change ships them together. The MCP `meho.sensors.*` tool payload is
+  unchanged (governed by its own conventions test, not §2).
+
+### Single-operator approval break-glass is now discoverable (#2669)
+
+- The single-operator approval story gained three operator-facing
+  surfaces so a solo deployer clears a gated `requires_approval` write
+  without reading source. The four-eyes rule (requester ≠ approver) and
+  its two single-operator escapes were already shipped (#1401, #1483,
+  #2087) — this edition makes them findable:
+  - **New operator guide** — "Do real work → Approvals and break-glass"
+    on the docs site covers both patterns: the recommended
+    **agent-requester** (a scheduled agent run's distinct subject clears
+    the gate with no flag) and the audited emergency break-glass, plus
+    how to prove which posture a deploy runs (`GET /ready` →
+    `features.approval_queue.effective_posture`).
+  - **Operator console** — the `/ui/approvals` modal now renders that
+    guidance inline (both patterns + a deep link to the guide) when the
+    Approve button is disabled and when a self-approval is rejected,
+    instead of a bare error.
+  - **Helm chart** — `config.approvalAllowSelfApproval` exposes the
+    `APPROVAL_ALLOW_SELF_APPROVAL` break-glass as a first-class,
+    schema-documented value (default `"false"`, fail-closed; the schema
+    constrains it to `"true"` / `"false"`).
+
+  No approval semantics changed — this is discoverability only.
+
+### Added — GSM per-operator-WIF values example (#2667)
+
+- A copy-pasteable **GSM per-operator-Workload-Identity-Federation**
+  chart-values example, `deploy/values-examples/values-gsm-wif-example.yaml`,
+  so a WIF adopter expresses the whole credential-backend configuration
+  (`GSM_WIF_*` plus `GSM_PROJECT` / `GSM_IMPERSONATE_SA`) through first-class
+  chart values with **zero `extraEnv`** (#2667). It populates
+  `gsm.workloadIdentityFederation.*` and enables the `checkRunner` service
+  principal the on-prem/no-ambient-identity shape needs, and the GSM deploy
+  docs (`docs/deploying.md` § Per-operator WIF) now reference it. The
+  `GSM_WIF_*` first-class ConfigMap rendering itself shipped in #2659; this
+  closes the remaining example-and-docs surface and corrects the `gsm` block's
+  `values.schema.json` description, which still called
+  `workloadIdentityFederation` a stub "no template consumes."
+
 ### Added
 
 - **`windows_dns` connector** — typed connector for Windows AD-DNS
@@ -101,7 +166,166 @@ connector-related release-notes line.
   this replaces ad-hoc `ssh <dc> powershell Add-DnsServerResourceRecord…`
   with MEHO's audited, safety-classified op path (#2759 / #2760).
 
-### Changed
+- **Checks evaluation-loop watchdog + queryable runner liveness**
+  (#2763): the sensor runner now stamps every completed tick, and a
+  sibling watchdog task detects the loop going quiet — no completed
+  tick for `SENSOR_RUNNER_STALL_AFTER_TICKS` (new setting, default 6)
+  × the tick interval emits a structured `checks_scheduler_stalled`
+  log plus a `checks.scheduler_stalled` broadcast event (op-class
+  `checks`, once per continuous stall, fanned out to every tenant with
+  an active Sensor); the first completed tick after a stall emits
+  `checks_scheduler_recovered` carrying the stall duration. Both
+  `GET /api/v1/health` and `GET /api/v1/health/live` now carry a
+  `sensor_runner` liveness facet (`seconds_since_last_tick`,
+  `stalled`, `stall_threshold_seconds`; `null` when
+  `SENSOR_RUNNER_ENABLED=false`) so an external prober — the
+  dead-man's-switch consumer — catches a stalled evaluation loop in
+  minutes instead of discovering it from a wall of degraded
+  dashboards. Motivated by a 37-minute fleet-wide silent stall on
+  v0.26.0 that recurred on v0.27.0.
+
+- **Docs site — the *Connect clients* section** (#2672): a CLI-first
+  onboarding path plus the full internal-only MCP client matrix. New
+  pages cover the `meho` CLI (cosign-verified binary, device-code
+  login, internal-CA and split-DNS walls), Claude Desktop via the
+  `mcp-remote` stdio shim (the empirically-observed
+  [#2666](https://github.com/evoila/meho/issues/2666) flow, including
+  the underscore-tool-name and `structuredContent` build requirements
+  and the finding that `meho://` resources are not discoverable through
+  the shim), Claude Code (`.mcp.json` HTTP + loopback PKCE), the
+  generic `mcp-remote` static-token shim for clients that cannot carry
+  a `client_id`, and a symptom-first troubleshooting page promoting the
+  auth-wall matrix. Every page is internal-only with no public-exposure
+  guidance — the remote Custom Connector is documented as *not
+  applicable*. Also aligns the site + install pages onto the settled
+  `meho-mcp` public-client name.
+
+### Fixed
+
+- **Phantom root `uv.lock` purged from the Dependabot alert surface**
+  (#2801): the dependency graph still carried the repo's pre-pivot root
+  `uv.lock` (history re-initialized 2026-05-09), so new advisories kept
+  minting alerts for packages that exist nowhere in today's tree — 89
+  open ghost alerts — and every grouped `uv in /.` security-update job
+  died with `No files found in /` (17/17 retained runs red). All 89
+  phantom alerts are dismissed as `not_used` after verifying each
+  package is absent from `backend/uv.lock` or present there only at a
+  non-vulnerable version; the real `backend/uv.lock` alert surface is
+  untouched. `.github/dependabot.yml` now records the incident in-file.
+  The stale graph snapshot itself still lists the phantom packages —
+  the re-index maneuver is documented on #2801 as an operator
+  follow-up.
+- **`net.http_probe` classifies transport failures instead of
+  collapsing them to `unreachable`** (#2771). The reason classifier now
+  walks the whole `httpx.TransportError` tree — both the `__cause__`
+  chain and `ExceptionGroup` children (PEP 654) — so a dual-stack
+  (happy-eyeballs) connect failure, whose real per-attempt errors anyio
+  nests in an `ExceptionGroup`, is mapped to `refused` / `dns_failure` /
+  `tls_error` rather than the uninformative `unreachable` it used to
+  return. When several inner causes disagree the most actionable wins
+  (`tls_error` > `dns_failure` > `refused` > `timeout` > `unreachable`).
+  TLS-phase handshake failures that carry no `ssl.SSLError` — the peer
+  closes or sends an alert, which httpcore's `start_tls` maps to
+  `ConnectError` via `anyio.EndOfStream` / `anyio.BrokenResourceError` —
+  now read `tls_error` on `https` probes, so an endpoint behind a
+  private CA the chart trust bundle does not know is finally
+  distinguishable from an unreachable host. Every connection-level
+  failure also carries a new bounded, innermost-first `error_detail`
+  (`[{type, message}]`) exposing the actual mapped exception chain —
+  evidence the op previously discarded, forcing operators to offer an
+  instrumented repro. `anyio` is promoted to a declared direct
+  dependency (already present transitively via httpx).
+
+- **MCP tools declaring an `outputSchema` now emit conforming
+  `structuredContent`** (#2774). MCP 2025-06-18 §Tools/Output Schema
+  mandates structured results for declaring tools, and Claude's frontend
+  enforces it client-side — all 17 declaring tools (12 on v0.27.0:
+  `query_audit`, `meho_audit_replay`, the doc-collections trio,
+  `query_topology`, `list_targets`, and the five topology writes; plus
+  the five operation/JSONFlux tools that declared since) hard-failed in
+  Claude Desktop with "Tool execution failed" while the server logged
+  200 and wrote its audit row. The `tools/call` dispatcher now emits the
+  handler's result as `structuredContent` alongside the serialised text
+  block (the spec's backwards-compatibility shape); a new registry-wide
+  test family validates every declaring tool's real handler payload
+  against its declared schema (companion to the #2745 name-conformance
+  guard). The sweep also corrected drifted declarations:
+  `query_audit`'s schema now covers its `shape="tree"` replay envelope
+  (a `oneOf` flat|replay union — the old declaration made every tree
+  result violate the published contract), `call_operation`'s schema now
+  names the always-present JSONFlux `handle` field, and
+  `create_doc_collections`'s schema now lists the full collection wire
+  model. Payload shapes are unchanged — additive `structuredContent` +
+  schema corrections only.
+
+- MCP session-lineage honesty: `/status` (`GET /api/v1/health`) now
+  reports `mcp_session_id_capture: "when_negotiated"` instead of the
+  misleading `"always"` — a session id is captured only when the client
+  negotiated one via the `initialize` handshake, so header-less callers
+  write NULL-session audit rows that no session replay can see. The
+  replay surfaces now also return `excluded_null_session_count`, the
+  tenant-wide tally of un-negotiated `method=MCP` rows, so an empty
+  replay forest is distinguishable from an empty history — first on REST
+  (`GET /api/v1/audit/sessions/{id}/replay`, #2700), now at parity on the
+  MCP `meho_audit_replay` and `query_audit` (`shape="tree"`) forensic
+  tools (#2776).
+- **A failed dispatch now surfaces the upstream vendor detail to both the
+  caller and the durable audit row** (#2680). Two connector-agnostic gaps
+  are closed. (1) A non-4xx-classified upstream HTTP status (404 / 429 /
+  any 5xx) reaching the generic `connector_error` builder now carries
+  `http_status` + the extracted `upstream_message` in `extras` — before
+  this, `str(HTTPStatusError)` (the status line + URL) was the only
+  free-text, so a 5xx discarded the vendor body (e.g. an ArgoCD
+  `"application dry-run failed: <detail>"` on an approved
+  `argocd.app.sync` dry-run). The `error_code` stays `connector_error`
+  and the summary is unchanged; the detail is additive. (2) The DISPATCH
+  `audit_log.payload` for an error row now persists the **same** structured
+  envelope the caller receives (under a nested `error` key), not merely
+  `result_status='error'` — the dispatcher builds the structured result
+  first and threads its already-redacted extras through
+  `audit_and_broadcast_safe` → `write_audit_row` → `_build_audit_payload`,
+  applied uniformly to every error arm. The params-only broadcast frame is
+  unchanged; the never-raises and audit-fail-open contracts are preserved.
+- **A hung coverage-job pytest can no longer flip the whole CI run to
+  `cancelled`** (#2800): the push-only `python-coverage` job's hang backstop
+  moves from the job-level `timeout-minutes` — whose expiry *cancels* the job,
+  and cancellation (unlike failure) leaks past `continue-on-error` into the run
+  conclusion, suppressing quality-gate.yml's `workflow_run` trigger and
+  tripping the release pre-flight's "cancelled ≠ green" gate (observed three
+  times on 2026-08-04, run 30902356757) — to a step-level `timeout-minutes: 45`
+  on the pytest step. A step timeout is a step *failure*, absorbed by the job's
+  `continue-on-error: true`, so the run conclusion stays `success` and a
+  skipped coverage upload stays loud via the #2513 missing-artifact
+  annotation. The job-level cap rises to 55 min as the strictly-outer
+  backstop; the job stays non-required and non-blocking (#1987 AC5).
+
+- The weekly `uv in /backend` Dependabot version-update run no longer
+  concludes red (#2802): every `presidio-anonymizer` release above the
+  pinned 2.2.362 caps `cryptography` below 49, which is unsatisfiable
+  against the repo's `cryptography>=50.0.0` security floor, so the weekly
+  2.2.362 → 2.2.364 bump attempt failed `dependency_file_not_resolvable`
+  on every run since 2026-06-29 (the other backend bumps still flowed).
+  `.github/dependabot.yml` now carries an `ignore` rule for
+  `presidio-anonymizer` with the removal conditions documented in-file:
+  drop it when upstream supports the repo's cryptography floor, or
+  immediately if a security advisory lands (the ignore also suppresses
+  security-update PRs for the package — none open today).
+
+### Security
+
+- Bump `aiohttp` 3.14.1 → 3.14.3 (CVE-2026-69244, out-of-bounds heap
+  read in the C HTTP response parser error path) and `cryptography`
+  49.0.0 → 50.0.0 (CVE-2026-69247, PKCS#7 EnvelopedData Bleichenbacher
+  oracle) — both fixable HIGH findings that turned the image trivy gate
+  red on every `main` push from 2026-08-04. `pyopenssl` rides along
+  26.3.0 → 26.4.0 for the new cryptography major, and the
+  `cryptography` floor in `backend/pyproject.toml` rises to `>=50.0.0`
+  so downstream installs cannot resolve back onto the vulnerable
+  version. (#2798)
+
+## [0.27.0] - 2026-08-03
+
+### Breaking changes
 
 - **BREAKING: all 62 dotted `meho.*` MCP tool names renamed to
   underscore-only names** (`meho.broadcast.watch` →
@@ -203,6 +427,20 @@ connector-related release-notes line.
   | `meho.topology.create_node` | `meho_topology_create_node` |
   | `meho.topology.delete_node` | `meho_topology_delete_node` |
   | `meho.topology.unannotate` | `meho_topology_unannotate` |
+
+### Changed
+
+- MCP client-setup recipe corrected to the internal-only deployment
+  model: the backplane is never publicly exposed, so the cloud-brokered
+  claude.ai / Claude Desktop remote Custom Connector path (which
+  requires public reachability for the RFC 9728 metadata fetch) is
+  documented as not applicable and replaced by the local `mcp-remote`
+  stdio-shim setup for Claude Desktop; the Step-5 troubleshooting
+  guidance to "expose the backplane via a public ingress or a tunnel"
+  is reversed to keep-it-internal (#2744).
+- Docs-site Project section de-stubbed — feature-maturity model,
+  versioning policy, security posture, and roadmap pages are now real
+  content instead of placeholders (#2747).
 
 ## [0.26.0] - 2026-08-02
 

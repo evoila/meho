@@ -105,7 +105,7 @@ The budget does **not** cover:
   acceptance does **not** drive `meho login` end-to-end, but the
   realm-side prerequisites the CLI and MCP onramp share — a
   public `meho-cli` Keycloak client (device-grant enabled) and a
-  public `meho-mcp-client` (auth-code + PKCE), each with the same
+  public `meho-mcp` (auth-code + PKCE), each with the same
   5 protocol mappers and 4 default client scopes — are
   consumer-side provisioning steps that must precede `meho login`
   and the MCP-client wire-up. The consolidated recipe lives in

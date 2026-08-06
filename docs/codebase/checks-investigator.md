@@ -63,6 +63,17 @@ rollup (no LLM), and the *deep tier* is the scheduled agent run.
    because the investigator does not. The two consumers are independent:
    the notifier applies its own per-Dashboard `notify_min_state` floor and
    never reaches this module's correlation, suppression, or agent path.
+
+   **What counts as an edge, since #2799:** on a sensor with
+   `retry_times > 0`, an unconfirmed (pending soft-state) evaluation
+   never changes the sensor's `last_state`, so the fold this hook
+   recomputes cannot see it — the memo CAS is a cheap no-op and no edge
+   is claimed. Only a *confirmed* sensor transition (or a `for:` hold
+   expiring / stale derivation, which are fold-side) can move the
+   rollup, so the investigator fires on confirmed edges only. The hook
+   still runs on every persist; confirmation just changes which
+   persists can produce an edge (`docs/codebase/sensor.md` §Result
+   recording).
 2. **Correlation** (`_correlate`). Each non-green member maps to its topology
    anchor via its registered target's name (`kind="target"`), and
    `topology.query.find_dependencies` returns the forward closure. Members

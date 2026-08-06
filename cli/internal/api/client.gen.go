@@ -385,6 +385,23 @@ const (
 	SensorReadLastStateUnknown  SensorReadLastState = "unknown"
 )
 
+// Defines values for SensorReadPendingState.
+const (
+	SensorReadPendingStateCritical SensorReadPendingState = "critical"
+	SensorReadPendingStateDegraded SensorReadPendingState = "degraded"
+	SensorReadPendingStateOk       SensorReadPendingState = "ok"
+	SensorReadPendingStateUnknown  SensorReadPendingState = "unknown"
+)
+
+// Defines values for SensorResultReadState.
+const (
+	SensorResultReadStateCritical SensorResultReadState = "critical"
+	SensorResultReadStateDegraded SensorResultReadState = "degraded"
+	SensorResultReadStateOk       SensorResultReadState = "ok"
+	SensorResultReadStateSkip     SensorResultReadState = "skip"
+	SensorResultReadStateUnknown  SensorResultReadState = "unknown"
+)
+
 // Defines values for SensorSeverity.
 const (
 	SensorSeverityCritical SensorSeverity = "critical"
@@ -637,6 +654,15 @@ const (
 const (
 	ListSensorsApiV1SensorsGetParamsCadenceKindCron     ListSensorsApiV1SensorsGetParamsCadenceKind = "cron"
 	ListSensorsApiV1SensorsGetParamsCadenceKindInterval ListSensorsApiV1SensorsGetParamsCadenceKind = "interval"
+)
+
+// Defines values for ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState.
+const (
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateCritical ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "critical"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateDegraded ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "degraded"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateOk       ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "ok"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateSkip     ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "skip"
+	ListSensorResultsApiV1SensorsSensorIdResultsGetParamsStateUnknown  ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState = "unknown"
 )
 
 // Defines values for RunbooksIndexUiRunbooksGetParamsStatus.
@@ -1385,12 +1411,25 @@ type AuditQueryResult struct {
 // across tenants (the same non-leakage posture
 // “GET /show/{audit_id}“ takes).
 //
+// “excluded_null_session_count“ (#2700) is the tenant-scoped tally
+// of “method=MCP“ audit rows whose “agent_session_id“ is NULL —
+// calls from clients that never negotiated a session via the
+// “initialize“ handshake. Such rows can never anchor or be walked by
+// *any* session replay, so a “row_count=0“ response with a non-zero
+// “excluded_null_session_count“ tells an investigator the empty
+// forest is not the same as an empty history: there is un-negotiated
+// MCP traffic this forensic surface structurally cannot see. It is a
+// tenant-wide count, independent of “session_id“ (the un-negotiated
+// rows belong to no session), and mirrors the honest
+// “when_negotiated“ capture label the deploy's “/status“ reports.
+//
 // Frozen like the substrate models it carries.
 type AuditReplayResult struct {
-	Root      []ReplayNode       `json:"root"`
-	RowCount  int                `json:"row_count"`
-	SessionId openapi_types.UUID `json:"session_id"`
-	TenantId  openapi_types.UUID `json:"tenant_id"`
+	ExcludedNullSessionCount int                `json:"excluded_null_session_count"`
+	Root                     []ReplayNode       `json:"root"`
+	RowCount                 int                `json:"row_count"`
+	SessionId                openapi_types.UUID `json:"session_id"`
+	TenantId                 openapi_types.UUID `json:"tenant_id"`
 }
 
 // AuthConfigResponse OAuth discovery surface returned to “meho login“.
@@ -3441,10 +3480,13 @@ type DailyUsageBucketSurface string
 //
 // “notify_email“ / “notify_min_state“ are the #2719 notification config,
 // set at create only like membership. Omitting “notify_email“ leaves
-// notifications off for this Dashboard. The address is validated with
-// pydantic's “EmailStr“ (“email-validator“), so a malformed one is a
-// boundary 422 rather than a delivery failure discovered hours later on the
-// first transition.
+// notifications off for this Dashboard. Since #2764 it carries **one or more**
+// comma-separated recipients: each entry is validated individually with
+// pydantic's “EmailStr“ (“email-validator“), so a single malformed entry
+// is a boundary 422 naming it rather than a delivery failure discovered hours
+// later on the first transition. The normalised, comma-joined form is what
+// persists (the existing “text“ column from migration “0068“, no new
+// migration), and a lone address is stored and read back unchanged.
 //
 // “investigator_prompt“ is the #2721 operator context appended to the
 // diagnose-only investigator's briefing. Bounded at
@@ -3455,7 +3497,7 @@ type DashboardCreate struct {
 	Description        *string                        `json:"description"`
 	InvestigatorPrompt *string                        `json:"investigator_prompt"`
 	Name               string                         `json:"name"`
-	NotifyEmail        *openapi_types.Email           `json:"notify_email"`
+	NotifyEmail        *string                        `json:"notify_email"`
 	NotifyMinState     *DashboardCreateNotifyMinState `json:"notify_min_state,omitempty"`
 	SensorIds          *[]openapi_types.UUID          `json:"sensor_ids,omitempty"`
 	TenantId           *openapi_types.UUID            `json:"tenant_id"`
@@ -3494,12 +3536,16 @@ type DashboardDetailNotifyMinState string
 // DashboardDetailState defines model for DashboardDetail.State.
 type DashboardDetailState string
 
-// DashboardListResponse Response envelope for “GET /api/v1/checks/dashboards“.
+// DashboardListResponse Unified list envelope for “GET /api/v1/checks/dashboards“.
 //
-// Wrapped in “{"dashboards": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- the same shape the Sensor list adopts.
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. The listing is not
+// cursor-paginated (“limit“ / “offset“ truncate), so “next_cursor“
+// is always “None“ but present so the endpoint can grow pagination
+// later without a further breaking change.
 type DashboardListResponse struct {
-	Dashboards []DashboardRead `json:"dashboards"`
+	Items      []DashboardRead `json:"items"`
+	NextCursor *string         `json:"next_cursor"`
 }
 
 // DashboardMemberView One member Sensor as rendered on a Dashboard detail read.
@@ -4195,15 +4241,22 @@ type HTTPValidationError struct {
 // “mcp_session_id_capture“ (G0.14-T6 #1147) reports the deploy's
 // audit-replay capture mode in a single field:
 //
-//   - “"always"“ — any “Mcp-Session-Id“ header the client sends is
-//     captured into “audit_log.agent_session_id“; a missing header is
-//     accepted (the row's session id lands as NULL). This is the
-//     default and what G8.2 audit-replay needs to light up on a stock
-//     deploy.
+//   - “"when_negotiated"“ — a “Mcp-Session-Id“ header is captured
+//     into “audit_log.agent_session_id“ only when the client
+//     negotiated a session via the “initialize“ handshake and echoes
+//     the server-issued id; a header-less call is accepted and its row's
+//     session id lands as NULL (invisible to session-lineage replay).
+//     This is the default. It reads “"when_negotiated"“ rather than
+//     “"always"“ because capture is not a guarantee — #2700 reported
+//     the former “"always"“ label as misleading, since header-less
+//     callers stay out of lineage. Distinguish an empty forest from an
+//     empty history via the replay surface's
+//     “excluded_null_session_count“.
 //   - “"enforced"“ — capture works the same way **plus** a missing
 //     header is a JSON-RPC “-32600“ reject before any audit row is
-//     written. Flipped on by “MCP_REQUIRE_SESSION_ID=true“ in
-//     compliance deploys that forbid header-less calls.
+//     written, so every accepted MCP call carries a session id. Flipped
+//     on by “MCP_REQUIRE_SESSION_ID=true“ in compliance deploys that
+//     forbid header-less calls.
 //
 // The field is the canonical operator-facing surface for the
 // capture state until T7 #1148's “/ready“ features block ships
@@ -4211,6 +4264,13 @@ type HTTPValidationError struct {
 // the same
 // :func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`
 // helper so both surfaces stay consistent).
+//
+// “sensor_runner“ (#2763) carries the checks evaluation-loop's
+// liveness (:class:`SensorRunnerStatus`), and is “None“ exactly
+// when “SENSOR_RUNNER_ENABLED=false“ — a deliberately disabled
+// runner must not read as stalled. The “None“ default keeps
+// response decoders generated against the pre-#2763 shape working;
+// the handler always populates it on an enabled runner.
 //
 // “mcp_protocol_version“ (G0.14-T13 #1202) reports the server's
 // pinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.
@@ -4238,12 +4298,40 @@ type HealthResponse struct {
 	McpProtocolVersion  *string  `json:"mcp_protocol_version,omitempty"`
 	McpSessionIdCapture string   `json:"mcp_session_id_capture"`
 
-	// Operator Operator identity surface exposed to the CLI.
+	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
 	// Excludes ``raw_jwt`` deliberately — the bearer token must never
 	// appear in a response body, and the :class:`Operator` model carries
 	// it for downstream Vault forward-auth only.
+	//
+	// ``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session
+	// confirm *which tenant and role it runs as* from inside the session —
+	// the check the clean-room program's "logged in as operator, not
+	// tenant_admin" discipline needs, and the identity the ``meho_status``
+	// tool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)
+	// already promises. Both are always present on the validated
+	// :class:`Operator` (JWT claims), so the surface can never omit them;
+	// they serialise as a UUID string / role value under
+	// ``model_dump(mode="json")`` — the same wire shape the
+	// ``meho://tenant/<id>/info`` resource returns.
 	Operator OperatorIdentity `json:"operator"`
+
+	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
+	//
+	// The queryable half of the checks-runner watchdog: an external prober
+	// ("how we monitor the monitoring") alerts when
+	// ``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` — or
+	// simply on ``stalled``, which is that comparison server-side.
+	// ``stalled`` is derived live from the in-process tick stamp on every
+	// read (never from the watchdog task's emission latch), so it stays
+	// truthful even if the watchdog task itself has died.
+	//
+	// ``seconds_since_last_tick`` is ``None`` only in the window between
+	// process start and runner start — once the lifespan is up it is
+	// always a number. The value is per-process: each replica reports its
+	// own loop, which is exactly the failure mode observed (one process's
+	// loop coroutine going quiet).
+	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 
 	// Vault Federation-chain status for the deployment's credential backend.
 	//
@@ -4661,6 +4749,14 @@ type KindFilterValue string
 // :class:`HealthResponse` route so a low-privilege monitoring
 // principal can never drive a per-operator Vault credential
 // federation from the liveness path.
+//
+// “sensor_runner“ (#2763) rides here as well as on the deep check:
+// the external prober that watches the evaluation loop is precisely
+// the “read_only“ monitoring principal this route exists for, and
+// polling the deep route instead would federate a Vault credential
+// and write an audit row per poll. The facet honours this handler's
+// constraints — an in-memory clock read; no connector, no credential,
+// no secret.
 type LivenessResponse struct {
 	// Db Database migration status.
 	//
@@ -4676,12 +4772,40 @@ type LivenessResponse struct {
 	// handler now always populates it from the probe.
 	Db DbStatus `json:"db"`
 
-	// Operator Operator identity surface exposed to the CLI.
+	// Operator Operator identity surface exposed to the CLI and MCP ``meho_status``.
 	//
 	// Excludes ``raw_jwt`` deliberately — the bearer token must never
 	// appear in a response body, and the :class:`Operator` model carries
 	// it for downstream Vault forward-auth only.
+	//
+	// ``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session
+	// confirm *which tenant and role it runs as* from inside the session —
+	// the check the clean-room program's "logged in as operator, not
+	// tenant_admin" discipline needs, and the identity the ``meho_status``
+	// tool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)
+	// already promises. Both are always present on the validated
+	// :class:`Operator` (JWT claims), so the surface can never omit them;
+	// they serialise as a UUID string / role value under
+	// ``model_dump(mode="json")`` — the same wire shape the
+	// ``meho://tenant/<id>/info`` resource returns.
 	Operator OperatorIdentity `json:"operator"`
+
+	// SensorRunner Liveness of this process's sensor evaluation loop (#2763).
+	//
+	// The queryable half of the checks-runner watchdog: an external prober
+	// ("how we monitor the monitoring") alerts when
+	// ``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` — or
+	// simply on ``stalled``, which is that comparison server-side.
+	// ``stalled`` is derived live from the in-process tick stamp on every
+	// read (never from the watchdog task's emission latch), so it stays
+	// truthful even if the watchdog task itself has died.
+	//
+	// ``seconds_since_last_tick`` is ``None`` only in the window between
+	// process start and runner start — once the lifespan is up it is
+	// always a number. The value is per-process: each replica reports its
+	// own loop, which is exactly the failure mode observed (one process's
+	// loop coroutine going quiet).
+	SensorRunner *SensorRunnerStatus `json:"sensor_runner,omitempty"`
 }
 
 // ManualStep A step the operator performs off-MEHO (SSH, web UI, console).
@@ -4925,15 +5049,45 @@ type OperationDescriptor struct {
 	Version           string                  `json:"version"`
 }
 
-// OperatorIdentity Operator identity surface exposed to the CLI.
+// OperatorIdentity Operator identity surface exposed to the CLI and MCP “meho_status“.
 //
 // Excludes “raw_jwt“ deliberately — the bearer token must never
 // appear in a response body, and the :class:`Operator` model carries
 // it for downstream Vault forward-auth only.
+//
+// “tenant_id“ + “tenant_role“ (#2746) let a connected MCP session
+// confirm *which tenant and role it runs as* from inside the session —
+// the check the clean-room program's "logged in as operator, not
+// tenant_admin" discipline needs, and the identity the “meho_status“
+// tool's own doc (“docs/cross-repo/mcp-client-setup.md“ Step 4)
+// already promises. Both are always present on the validated
+// :class:`Operator` (JWT claims), so the surface can never omit them;
+// they serialise as a UUID string / role value under
+// “model_dump(mode="json")“ — the same wire shape the
+// “meho://tenant/<id>/info“ resource returns.
 type OperatorIdentity struct {
-	Email *string `json:"email"`
-	Name  *string `json:"name"`
-	Sub   string  `json:"sub"`
+	Email    *string            `json:"email"`
+	Name     *string            `json:"name"`
+	Sub      string             `json:"sub"`
+	TenantId openapi_types.UUID `json:"tenant_id"`
+
+	// TenantRole Per-tenant role granted to the operator by the JWT issuer.
+	//
+	// The set is intentionally small in v0.2: a closed three-value enum
+	// lets the RBAC primitive (Task #234, ``require_role``) make
+	// exhaustive comparisons without leaking arbitrary string handling
+	// into route code. A richer policy engine — topology-aware
+	// permissions, ABAC, approval workflows — is a separate v0.2.next
+	// Goal; widening this enum is the only ratcheting mechanism in the
+	// interim.
+	//
+	// Values are the literal strings the Keycloak protocol-mapper recipe
+	// (Task #235) emits, so a JWT carrying ``"tenant_admin"`` materialises
+	// cleanly as :attr:`TENANT_ADMIN`. ``StrEnum`` (PEP 663, stdlib in
+	// 3.11+) gives the members ``str`` semantics for free, so
+	// ``f"role={role}"`` renders as ``"role=tenant_admin"`` rather than
+	// ``"role=TenantRole.TENANT_ADMIN"``.
+	TenantRole TenantRole `json:"tenant_role"`
 }
 
 // PermissionVerdict Three-state verdict returned by the permission resolver.
@@ -6247,8 +6401,15 @@ type SensorCadenceKind string
 // “extra="forbid"“ a body carrying “status“ is a 422.
 //
 // *identity_sub* defaults to “"__sensor__"“ (the sentinel #2505's
-// runner dispatches under). *tenant_id* (optional) lets a platform-admin
-// caller target another tenant; the boundary enforces the RBAC.
+// runner dispatches under). It is the “sub“ every scheduled dispatch is
+// audit-attributed to (“AuditLog.operator_sub“ / broadcast
+// “principal_sub“), so :meth:`SensorAdminService.create` accepts only the
+// sentinel or the creating operator's own sub -- any other value is refused
+// with “sensor_identity_sub_forbidden“ (#2699). The wire model only
+// length-caps it here; the ownership check lives at the service choke point
+// because Pydantic has no access to the authenticated operator.
+// *tenant_id* (optional) lets a platform-admin caller target another tenant;
+// the boundary enforces the RBAC.
 type SensorCreate struct {
 	// Assertion A full assertion: one select stage feeding one typed comparator.
 	//
@@ -6275,15 +6436,17 @@ type SensorCreate struct {
 	// Closed enum: widening it is a coordinated DB + model change so the
 	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
 	// ``0064``'s frozen tuple cannot drift.
-	CadenceKind     SensorCadenceKind       `json:"cadence_kind"`
-	ConnectorId     string                  `json:"connector_id"`
-	CronExpr        *string                 `json:"cron_expr"`
-	ForSeconds      *int                    `json:"for_seconds,omitempty"`
-	IdentitySub     *string                 `json:"identity_sub,omitempty"`
-	IntervalSeconds *int                    `json:"interval_seconds"`
-	Name            string                  `json:"name"`
-	OpId            string                  `json:"op_id"`
-	Params          *map[string]interface{} `json:"params,omitempty"`
+	CadenceKind         SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId         string                  `json:"connector_id"`
+	CronExpr            *string                 `json:"cron_expr"`
+	ForSeconds          *int                    `json:"for_seconds,omitempty"`
+	IdentitySub         *string                 `json:"identity_sub,omitempty"`
+	IntervalSeconds     *int                    `json:"interval_seconds"`
+	Name                string                  `json:"name"`
+	OpId                string                  `json:"op_id"`
+	Params              *map[string]interface{} `json:"params,omitempty"`
+	RetryBackoffSeconds *int                    `json:"retry_backoff_seconds,omitempty"`
+	RetryTimes          *int                    `json:"retry_times,omitempty"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -6298,14 +6461,16 @@ type SensorCreate struct {
 	Timezone *string                 `json:"timezone,omitempty"`
 }
 
-// SensorListResponse Response envelope for “GET /api/v1/sensors“.
+// SensorListResponse Unified list envelope for “GET /api/v1/sensors“.
 //
-// Wrapped in “{"sensors": [...]}“ so a future paging / cursor field
-// can land non-breakingly -- the same shape
-// :class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`
-// adopted.
+// The `{items, next_cursor}` shape codified in
+// “docs/codebase/api-shape-conventions.md“ §2. The listing is not
+// cursor-paginated (“limit“ / “offset“ truncate), so “next_cursor“
+// is always “None“ but present so the endpoint can grow pagination
+// later without a further breaking change.
 type SensorListResponse struct {
-	Sensors []SensorRead `json:"sensors"`
+	Items      []SensorRead `json:"items"`
+	NextCursor *string      `json:"next_cursor"`
 }
 
 // SensorRead Response shape for one “sensor“ row.
@@ -6338,23 +6503,27 @@ type SensorRead struct {
 	// Closed enum: widening it is a coordinated DB + model change so the
 	// enum, the :data:`_SENSOR_CADENCE_KINDS` literal, and migration
 	// ``0064``'s frozen tuple cannot drift.
-	CadenceKind     SensorCadenceKind       `json:"cadence_kind"`
-	ConnectorId     string                  `json:"connector_id"`
-	CreatedAt       time.Time               `json:"created_at"`
-	CreatedBySub    string                  `json:"created_by_sub"`
-	CronExpr        *string                 `json:"cron_expr"`
-	ForSeconds      int                     `json:"for_seconds"`
-	Id              openapi_types.UUID      `json:"id"`
-	IdentitySub     string                  `json:"identity_sub"`
-	IntervalSeconds *int                    `json:"interval_seconds"`
-	LastEvaluatedAt *time.Time              `json:"last_evaluated_at"`
-	LastEvidence    *map[string]interface{} `json:"last_evidence"`
-	LastState       SensorReadLastState     `json:"last_state"`
-	LastValue       interface{}             `json:"last_value"`
-	Name            string                  `json:"name"`
-	NextFireAt      *time.Time              `json:"next_fire_at"`
-	OpId            string                  `json:"op_id"`
-	Params          map[string]interface{}  `json:"params"`
+	CadenceKind         SensorCadenceKind       `json:"cadence_kind"`
+	ConnectorId         string                  `json:"connector_id"`
+	CreatedAt           time.Time               `json:"created_at"`
+	CreatedBySub        string                  `json:"created_by_sub"`
+	CronExpr            *string                 `json:"cron_expr"`
+	ForSeconds          int                     `json:"for_seconds"`
+	Id                  openapi_types.UUID      `json:"id"`
+	IdentitySub         string                  `json:"identity_sub"`
+	IntervalSeconds     *int                    `json:"interval_seconds"`
+	LastEvaluatedAt     *time.Time              `json:"last_evaluated_at"`
+	LastEvidence        *map[string]interface{} `json:"last_evidence"`
+	LastState           SensorReadLastState     `json:"last_state"`
+	LastValue           interface{}             `json:"last_value"`
+	Name                string                  `json:"name"`
+	NextFireAt          *time.Time              `json:"next_fire_at"`
+	OpId                string                  `json:"op_id"`
+	Params              map[string]interface{}  `json:"params"`
+	PendingCount        int                     `json:"pending_count"`
+	PendingState        *SensorReadPendingState `json:"pending_state"`
+	RetryBackoffSeconds int                     `json:"retry_backoff_seconds"`
+	RetryTimes          int                     `json:"retry_times"`
 
 	// Severity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 	//
@@ -6384,6 +6553,61 @@ type SensorRead struct {
 
 // SensorReadLastState defines model for SensorRead.LastState.
 type SensorReadLastState string
+
+// SensorReadPendingState defines model for SensorRead.PendingState.
+type SensorReadPendingState string
+
+// SensorResultListResponse Response envelope for “GET /api/v1/sensors/{sensor_id}/results“.
+//
+// The “{items, next_cursor}“ keyset-pagination shape (#2742): “items“ is
+// the page of evidence rows in “evaluated_at ASC“ order; “next_cursor“ is
+// the opaque continuation token to pass back as “?cursor=“ for the next
+// page, or “null“ when this is the final page. No aggregate / rollup fields
+// -- the client aggregates raw rows (#2756's determinism bound).
+type SensorResultListResponse struct {
+	Items      []SensorResultRead `json:"items"`
+	NextCursor *string            `json:"next_cursor"`
+}
+
+// SensorResultRead Response shape for one “sensor_results“ evidence row (#2756).
+//
+// Mirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the
+// wire types the JSON renderer serialises: the raw “(evaluated_at, state,
+// value, evidence, reason)“ the runner computed, plus the owning
+// “sensor_id“. “frozen=True“ so a route handler cannot mutate a row after
+// returning it.
+type SensorResultRead struct {
+	EvaluatedAt time.Time               `json:"evaluated_at"`
+	Evidence    *map[string]interface{} `json:"evidence"`
+	Reason      *string                 `json:"reason"`
+	SensorId    openapi_types.UUID      `json:"sensor_id"`
+	State       SensorResultReadState   `json:"state"`
+	Value       interface{}             `json:"value"`
+}
+
+// SensorResultReadState defines model for SensorResultRead.State.
+type SensorResultReadState string
+
+// SensorRunnerStatus Liveness of this process's sensor evaluation loop (#2763).
+//
+// The queryable half of the checks-runner watchdog: an external prober
+// ("how we monitor the monitoring") alerts when
+// “seconds_since_last_tick“ exceeds “stall_threshold_seconds“ — or
+// simply on “stalled“, which is that comparison server-side.
+// “stalled“ is derived live from the in-process tick stamp on every
+// read (never from the watchdog task's emission latch), so it stays
+// truthful even if the watchdog task itself has died.
+//
+// “seconds_since_last_tick“ is “None“ only in the window between
+// process start and runner start — once the lifespan is up it is
+// always a number. The value is per-process: each replica reports its
+// own loop, which is exactly the failure mode observed (one process's
+// loop coroutine going quiet).
+type SensorRunnerStatus struct {
+	SecondsSinceLastTick  *float32 `json:"seconds_since_last_tick"`
+	StallThresholdSeconds float32  `json:"stall_threshold_seconds"`
+	Stalled               bool     `json:"stalled"`
+}
 
 // SensorSeverity Worst dashboard state a failing assertion on a :class:`Sensor` may drive.
 //
@@ -8318,6 +8542,19 @@ type DeleteSensorApiV1SensorsSensorIdDeleteParams struct {
 	TenantFilter  *openapi_types.UUID `form:"tenant_filter,omitempty" json:"tenant_filter,omitempty"`
 	Authorization *string             `json:"authorization,omitempty"`
 }
+
+// ListSensorResultsApiV1SensorsSensorIdResultsGetParams defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
+type ListSensorResultsApiV1SensorsSensorIdResultsGetParams struct {
+	From          *time.Time                                                  `form:"from,omitempty" json:"from,omitempty"`
+	To            *time.Time                                                  `form:"to,omitempty" json:"to,omitempty"`
+	State         *ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState `form:"state,omitempty" json:"state,omitempty"`
+	Limit         *int                                                        `form:"limit,omitempty" json:"limit,omitempty"`
+	Cursor        *string                                                     `form:"cursor,omitempty" json:"cursor,omitempty"`
+	Authorization *string                                                     `json:"authorization,omitempty"`
+}
+
+// ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState defines parameters for ListSensorResultsApiV1SensorsSensorIdResultsGet.
+type ListSensorResultsApiV1SensorsSensorIdResultsGetParamsState string
 
 // ListTargetsApiV1TargetsGetParams defines parameters for ListTargetsApiV1TargetsGet.
 type ListTargetsApiV1TargetsGetParams struct {
@@ -11014,6 +11251,9 @@ type ClientInterface interface {
 
 	// DeleteSensorApiV1SensorsSensorIdDelete request
 	DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSensorResultsApiV1SensorsSensorIdResultsGet request
+	ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// ListTargetsApiV1TargetsGet request
 	ListTargetsApiV1TargetsGet(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -13837,6 +14077,18 @@ func (c *Client) CreateSensorApiV1SensorsPost(ctx context.Context, params *Creat
 
 func (c *Client) DeleteSensorApiV1SensorsSensorIdDelete(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(c.Server, sensorId, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(c.Server, sensorId, params)
 	if err != nil {
 		return nil, err
 	}
@@ -25483,6 +25735,141 @@ func NewDeleteSensorApiV1SensorsSensorIdDeleteRequest(server string, sensorId op
 	}
 
 	req, err := http.NewRequest("DELETE", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+
+		if params.Authorization != nil {
+			var headerParam0 string
+
+			headerParam0, err = runtime.StyleParamWithLocation("simple", false, "authorization", runtime.ParamLocationHeader, *params.Authorization)
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("authorization", headerParam0)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest generates requests for ListSensorResultsApiV1SensorsSensorIdResultsGet
+func NewListSensorResultsApiV1SensorsSensorIdResultsGetRequest(server string, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithLocation("simple", false, "sensor_id", runtime.ParamLocationPath, sensorId)
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/api/v1/sensors/%s/results", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.From != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "from", runtime.ParamLocationQuery, *params.From); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.To != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "to", runtime.ParamLocationQuery, *params.To); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.State != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "state", runtime.ParamLocationQuery, *params.State); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "limit", runtime.ParamLocationQuery, *params.Limit); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Cursor != nil {
+
+			if queryFrag, err := runtime.StyleParamWithLocation("form", true, "cursor", runtime.ParamLocationQuery, *params.Cursor); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -37813,6 +38200,9 @@ type ClientWithResponsesInterface interface {
 	// DeleteSensorApiV1SensorsSensorIdDeleteWithResponse request
 	DeleteSensorApiV1SensorsSensorIdDeleteWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *DeleteSensorApiV1SensorsSensorIdDeleteParams, reqEditors ...RequestEditorFn) (*DeleteSensorApiV1SensorsSensorIdDeleteResponse, error)
 
+	// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request
+	ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error)
+
 	// ListTargetsApiV1TargetsGetWithResponse request
 	ListTargetsApiV1TargetsGetWithResponse(ctx context.Context, params *ListTargetsApiV1TargetsGetParams, reqEditors ...RequestEditorFn) (*ListTargetsApiV1TargetsGetResponse, error)
 
@@ -41354,6 +41744,29 @@ func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) Status() string {
 
 // StatusCode returns HTTPResponse.StatusCode
 func (r DeleteSensorApiV1SensorsSensorIdDeleteResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ListSensorResultsApiV1SensorsSensorIdResultsGetResponse struct {
+	Body         []byte
+	HTTPResponse *http.Response
+	JSON200      *SensorResultListResponse
+	JSON422      *HTTPValidationError
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSensorResultsApiV1SensorsSensorIdResultsGetResponse) StatusCode() int {
 	if r.HTTPResponse != nil {
 		return r.HTTPResponse.StatusCode
 	}
@@ -47737,6 +48150,15 @@ func (c *ClientWithResponses) DeleteSensorApiV1SensorsSensorIdDeleteWithResponse
 		return nil, err
 	}
 	return ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp)
+}
+
+// ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse request returning *ListSensorResultsApiV1SensorsSensorIdResultsGetResponse
+func (c *ClientWithResponses) ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse(ctx context.Context, sensorId openapi_types.UUID, params *ListSensorResultsApiV1SensorsSensorIdResultsGetParams, reqEditors ...RequestEditorFn) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
+	rsp, err := c.ListSensorResultsApiV1SensorsSensorIdResultsGet(ctx, sensorId, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp)
 }
 
 // ListTargetsApiV1TargetsGetWithResponse request returning *ListTargetsApiV1TargetsGetResponse
@@ -54404,6 +54826,39 @@ func ParseDeleteSensorApiV1SensorsSensorIdDeleteResponse(rsp *http.Response) (*D
 	}
 
 	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest HTTPValidationError
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON422 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse parses an HTTP response from a ListSensorResultsApiV1SensorsSensorIdResultsGetWithResponse call
+func ParseListSensorResultsApiV1SensorsSensorIdResultsGetResponse(rsp *http.Response) (*ListSensorResultsApiV1SensorsSensorIdResultsGetResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSensorResultsApiV1SensorsSensorIdResultsGetResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SensorResultListResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
 		var dest HTTPValidationError
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {

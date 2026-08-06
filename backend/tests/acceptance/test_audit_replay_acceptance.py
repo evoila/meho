@@ -426,7 +426,13 @@ async def test_scenario_1_rest_replay_returns_multi_level_tree(
             )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert set(body.keys()) == {"root", "session_id", "tenant_id", "row_count"}
+    assert set(body.keys()) == {
+        "root",
+        "session_id",
+        "tenant_id",
+        "row_count",
+        "excluded_null_session_count",
+    }
     assert body["session_id"] == str(agent_session_id)
     assert body["tenant_id"] == TENANT_A_ID
     # row_count is the session's anchor-row count (all four share the session).
@@ -479,6 +485,16 @@ async def test_scenario_1_mcp_replay_returns_multi_level_tree(
             )
     result = envelope["result"]
     structured = result.get("structuredContent") or json.loads(result["content"][0]["text"])
+    # #2776: the MCP envelope carries the same key-set as REST, including
+    # excluded_null_session_count (0 here — no header-less MCP rows seeded).
+    assert set(structured.keys()) == {
+        "root",
+        "session_id",
+        "tenant_id",
+        "row_count",
+        "excluded_null_session_count",
+    }
+    assert structured["excluded_null_session_count"] == 0
     assert structured["session_id"] == str(agent_session_id)
     assert structured["tenant_id"] == TENANT_A_ID
     # The MCP envelope's row_count is the assembled node count (all 4 nodes).
@@ -1062,7 +1078,13 @@ async def test_e2e_cli_wire_contract_replay_envelope_against_seeded_db(
     body = resp.json()
 
     # Envelope shape the Go ReplayResult struct decodes.
-    assert set(body.keys()) == {"root", "session_id", "tenant_id", "row_count"}
+    assert set(body.keys()) == {
+        "root",
+        "session_id",
+        "tenant_id",
+        "row_count",
+        "excluded_null_session_count",
+    }
     assert isinstance(body["root"], list)
     assert isinstance(body["row_count"], int)
 

@@ -44,12 +44,14 @@ from pydantic import ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.auth.rbac import authorize_tenant_scope
-from meho_backplane.checks.schemas import SensorCreate, SensorRead
+from meho_backplane.checks.schemas import SensorCreate, SensorRead, SensorResultsQuery
 from meho_backplane.checks.service import (
     SensorAdminService,
+    SensorIdentitySubForbiddenError,
     SensorNameConflictError,
     SensorOperationNotFoundError,
     SensorRequiresSafeOperationError,
+    SensorResultsCursorError,
 )
 from meho_backplane.mcp.registry import ToolDefinition, register_mcp_tool
 from meho_backplane.mcp.server import McpInvalidParamsError
@@ -61,6 +63,7 @@ _SENSOR_OP_IDS: Final[dict[str, str]] = {
     "list": "sensor.list",
     "create": "sensor.create",
     "delete": "sensor.delete",
+    "results": "sensor.results",
 }
 
 
@@ -210,6 +213,8 @@ async def _create_handler(
             created_by_sub=operator.sub,
             payload=payload,
         )
+    except SensorIdentitySubForbiddenError as exc:
+        raise McpInvalidParamsError(exc.error_code) from exc
     except SensorOperationNotFoundError as exc:
         raise McpInvalidParamsError(exc.error_code) from exc
     except SensorRequiresSafeOperationError as exc:
@@ -238,8 +243,15 @@ register_mcp_tool(
             "interval_seconds (5..86400) or cron_expr (+ optional timezone). "
             "Optional: target (dispatch target object), params (op params "
             "object), severity ('degraded'|'critical', default 'critical'), "
-            "for_seconds (hold-time hysteresis, default 0), identity_sub "
-            "(default '__sensor__'), tenant_id (platform-admin-only "
+            "for_seconds (hold-time hysteresis, default 0), retry_times "
+            "(consecutive confirming re-checks required before a state "
+            "change commits + notifies, 0..5, default 0 = off) with "
+            "retry_backoff_seconds (accelerated re-check spacing while "
+            "pending, 5..300, default 15), identity_sub "
+            "(the sub the runner dispatches -- and audit-attributes -- each "
+            "evaluation under; only the '__sensor__' sentinel (default) or "
+            "your own sub is accepted, any other value is refused with "
+            "'sensor_identity_sub_forbidden'), tenant_id (platform-admin-only "
             "cross-tenant target; a non-platform tenant-admin naming "
             "another tenant is refused with "
             "'cross_tenant_requires_platform_admin'). A duplicate name -> "
@@ -300,10 +312,38 @@ register_mcp_tool(
                     "minimum": 0,
                     "description": "Hold-time hysteresis seconds (default 0).",
                 },
+                "retry_times": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 5,
+                    "description": (
+                        "Consecutive confirming re-evaluations required "
+                        "after the first differing reading before a state "
+                        "change commits + notifies (Nagios soft/hard "
+                        "states; default 0 = off, every reading commits "
+                        "immediately)."
+                    ),
+                },
+                "retry_backoff_seconds": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 300,
+                    "description": (
+                        "Accelerated re-check spacing in seconds while a "
+                        "state change is pending confirmation (default "
+                        "15; inert while retry_times is 0)."
+                    ),
+                },
                 "identity_sub": {
                     "type": "string",
                     "maxLength": 256,
-                    "description": "Identity sub the runner dispatches under (default __sensor__).",
+                    "description": (
+                        "Identity sub the runner dispatches under and "
+                        "audit-attributes each evaluation to (default "
+                        "__sensor__). Only the __sensor__ sentinel or your own "
+                        "sub is accepted; any other value is refused with "
+                        "sensor_identity_sub_forbidden (#2699)."
+                    ),
                 },
                 "tenant_id": {
                     "type": ["string", "null"],
@@ -376,4 +416,105 @@ register_mcp_tool(
         op_class="write",
     ),
     handler=_delete_handler,
+)
+
+
+# ---------------------------------------------------------------------------
+# meho_sensor_results (#2756)
+# ---------------------------------------------------------------------------
+
+
+async def _results_handler(
+    operator: Operator,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    sensor_id = _require_sensor_id(arguments)
+    structlog.contextvars.bind_contextvars(
+        audit_op_id=_SENSOR_OP_IDS["results"],
+        audit_op_class="read",
+        audit_sensor_id=str(sensor_id),
+    )
+    # Re-validate the filter args through the frozen query model: this is the
+    # MCP-side "schema refusal" for an unknown param (``extra="forbid"``
+    # rejects an aggregation knob), and it applies the same date-time / enum /
+    # bounds parsing the REST route gets. ``sensor_id`` is the path arg, not a
+    # filter field, so it is stripped before validation.
+    filter_args = {k: v for k, v in arguments.items() if k != "sensor_id"}
+    try:
+        query = SensorResultsQuery.model_validate(filter_args)
+    except ValidationError as exc:
+        raise McpInvalidParamsError(str(exc)) from exc
+    service = SensorAdminService()
+    try:
+        page = await service.list_results(operator.tenant_id, sensor_id, query)
+    except SensorResultsCursorError as exc:
+        raise McpInvalidParamsError(exc.error_code) from exc
+    if page is None:
+        raise McpInvalidParamsError("sensor_not_found")
+    structlog.contextvars.bind_contextvars(audit_row_count=len(page.items))
+    return page.model_dump(mode="json")
+
+
+register_mcp_tool(
+    definition=ToolDefinition(
+        feature="sensors",
+        name="meho_sensor_results",
+        description=(
+            "Per-tick evidence trend query for one sensor (Initiative #2780, "
+            "#2756). Operator-level read -- the forensic 'when did this start "
+            "degrading / how fast is it filling' history the latest-result "
+            "projection discards. Returns {items: [{sensor_id, evaluated_at, "
+            "state, value, evidence, reason}, ...], next_cursor} in "
+            "evaluated_at ASC order. Binary filters only: from / to (inclusive "
+            "ISO-8601 window), state (exact), limit (bounded); page via the "
+            "opaque cursor (echo next_cursor back). Raw rows -- no smoothing, "
+            "downsampling, or aggregation (the client aggregates). "
+            "Tenant-scoped via the JWT; a cross-tenant / absent sensor id -> "
+            "'sensor_not_found'."
+        ),
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "sensor_id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "description": "UUID of the sensor whose evidence history to read.",
+                },
+                "from": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Inclusive lower bound on evaluated_at (ISO 8601). Optional.",
+                },
+                "to": {
+                    "type": "string",
+                    "format": "date-time",
+                    "description": "Inclusive upper bound on evaluated_at (ISO 8601). Optional.",
+                },
+                "state": {
+                    "type": "string",
+                    "enum": ["ok", "degraded", "critical", "unknown", "skip"],
+                    "description": "Optional exact state filter.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500,
+                    "default": 100,
+                    "description": "Max rows per page. Default 100; max 500.",
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": (
+                        "Opaque keyset pagination token; echo the response's "
+                        "next_cursor back here to fetch the next page. Optional."
+                    ),
+                },
+            },
+            "required": ["sensor_id"],
+            "additionalProperties": False,
+        },
+        required_role=TenantRole.OPERATOR,
+        op_class="read",
+    ),
+    handler=_results_handler,
 )

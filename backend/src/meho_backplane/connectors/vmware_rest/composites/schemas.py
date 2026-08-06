@@ -42,6 +42,7 @@ __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
+    "DATASTORE_USAGE_MAX_VM_NAMES",
     "DATASTORE_USAGE_PARAMETER_SCHEMA",
     "DATASTORE_USAGE_RESPONSE_SCHEMA",
     "EVENT_TAIL_PARAMETER_SCHEMA",
@@ -194,6 +195,20 @@ PERFORMANCE_SUMMARY_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: Upper bound on the ``vm_names`` sample carried by a single
+#: ``datastore.usage`` row (the response-schema ``maxItems``; the handler
+#: slices to it). ``vm_count`` stays exact -- ``vm_names`` is a bounded
+#: sample, not the full set. The bound keeps a one-name ``filter_names``
+#: result serialising under the dispatcher's 4096-byte JSONFlux threshold,
+#: so it passes through inline (unsampled) and a per-datastore Sensor can
+#: select ``$.datastores[0].free_space``; an unbounded list on a VM-dense
+#: datastore (a vSAN with hundreds of VMs) pushes the row past the
+#: threshold, the whole ``{"datastores": [row]}`` collapses to a sampled
+#: envelope, and the assertion loses its selector (#2758). 20 leaves a
+#: single row well under 4096 bytes even at maximum VM-name length.
+DATASTORE_USAGE_MAX_VM_NAMES = 20
+
+
 #: ``vmware.composite.datastore.usage`` parameter schema.
 #:
 #: Lists datastores with capacity + free + VM placement aggregation.
@@ -209,9 +224,14 @@ DATASTORE_USAGE_PARAMETER_SCHEMA: dict[str, Any] = {
             "items": {"type": "string", "minLength": 1},
             "description": (
                 "Optional list of datastore names. When supplied, only "
-                "datastores whose name appears in this list are surfaced. "
-                "Empty / absent returns every datastore the operator can "
-                "see."
+                "datastores whose name appears in this list are surfaced; "
+                "the ``GET:/vcenter/datastore`` listing forwards them as "
+                "``filter.names`` (exact match, no fuzzy matching). Empty / "
+                "absent returns every datastore the operator can see. "
+                "For a per-datastore Sensor, pass exactly one name: the "
+                "single-row result returns inline (unsampled), so the "
+                "assertion can select ``$.datastores[0].free_space`` (bytes) "
+                "and threshold it."
             ),
         },
     },
@@ -443,10 +463,15 @@ DATASTORE_USAGE_RESPONSE_SCHEMA: dict[str, Any] = {
                     "vm_names": {
                         "type": ["array", "null"],
                         "items": {"type": "string"},
+                        "maxItems": DATASTORE_USAGE_MAX_VM_NAMES,
                         "description": (
-                            "Names of VMs placed on this datastore; ``null`` when "
-                            "the best-effort VM-placement enrichment was skipped "
-                            "(see ``enrichment_note``)."
+                            "Names of VMs placed on this datastore, bounded to the "
+                            "sample size in ``maxItems`` (``vm_count`` is the exact "
+                            "total; ``vm_count`` greater than ``len(vm_names)`` means "
+                            "the sample was truncated to keep the row inline under "
+                            "the JSONFlux byte threshold). ``null`` when the "
+                            "best-effort VM-placement enrichment was skipped (see "
+                            "``enrichment_note``)."
                         ),
                     },
                     "enrichment_note": {

@@ -285,11 +285,20 @@ def result_ambiguous_target(
 def result_no_connector(
     op_id: str,
     product: str,
-    version: str,
+    version: str | None,
     duration_ms: float,
     exception_message: str | None = None,
 ) -> OperationResult:
     """Resolver miss -- no registered impl for *(product, version)*.
+
+    ``product`` / ``version`` name the **failing input** the resolver
+    rejected -- i.e. the *target's* registered product and the version
+    the resolver read off it (which may be ``None`` when the target
+    carries no fingerprint or operator-asserted version), **not** the
+    ``connector_id`` the caller passed. The dispatcher's connector_id
+    already resolved a valid descriptor before this builder is reached
+    (else ``result_unknown_op`` fires), so echoing it here would blame
+    the wrong input (evoila/meho#2701).
 
     ``exception_message`` (added by G0.14-T1 #1142) carries the
     :exc:`~meho_backplane.connectors.NoMatchingConnector` exception text
@@ -490,18 +499,38 @@ def result_connector_error(
     credentials, a header dump, or a driver DSN, so the message runs
     through :func:`_sanitize_free_text` (Tier-1 redaction, then the
     length cap) before it reaches the envelope.
+
+    #2680: when the raised exception is an :exc:`httpx.HTTPStatusError`
+    the generic arm still owns -- every non-2xx status
+    :func:`_classify_http_status_error` does *not* route to a dedicated
+    builder (404, 429, and the whole 5xx family) -- the extras also carry
+    ``http_status`` and the extracted ``upstream_message``. ``str(exc)``
+    on an ``HTTPStatusError`` is only the status line + URL, so the
+    vendor's response body (an ArgoCD ``"application dry-run failed:
+    <detail>"`` on a 500, say) was discarded, leaving a 5xx as opaque as
+    the #1649 pre-fix 403/422. The enrichment is connector-agnostic (it
+    reads ``exc.response`` exactly as the 403/422/auth builders do via
+    :func:`_http_upstream_message`, which Tier-1-redacts + caps the body)
+    so every connector's 5xx now surfaces its detail. The top-level
+    ``error`` summary is unchanged (``connector_error: HTTPStatusError``)
+    so existing string matchers keep working; the new detail is additive
+    in ``extras``.
     """
     msg = _sanitize_free_text(str(exc))
+    extras: dict[str, Any] = {
+        "error_code": "connector_error",
+        "exception_class": type(exc).__name__,
+        "exception_message": msg,
+    }
+    if isinstance(exc, httpx.HTTPStatusError):
+        extras["http_status"] = exc.response.status_code
+        extras["upstream_message"] = _http_upstream_message(exc.response)
     return OperationResult(
         status="error",
         op_id=op_id,
         error=f"connector_error: {type(exc).__name__}",
         duration_ms=duration_ms,
-        extras={
-            "error_code": "connector_error",
-            "exception_class": type(exc).__name__,
-            "exception_message": msg,
-        },
+        extras=extras,
     )
 
 

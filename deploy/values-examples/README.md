@@ -39,7 +39,8 @@ request.
 | File | Targets | Backed by |
 | --- | --- | --- |
 | [`values-rdc-example.yaml`](./values-rdc-example.yaml) | The RDC Hetzner lab (`*.evba.lab` hosts, rke2-infra ingress-nginx, cluster-internal Postgres + Vault + Keycloak). | The actual, private file lives in [`evoila-bosnia/claude-rdc-hetzner-dc`](https://github.com/evoila-bosnia/claude-rdc-hetzner-dc)'s `manifests/meho/values-rdc.yaml`; this file is the sanitized template for other Vault-+-Keycloak-+-Postgres-shaped labs. |
-| [`values-gsm-example.yaml`](./values-gsm-example.yaml) | A **Vault-free, GCP-native** install (Initiative #2227) — credentials + the `/api/v1/health` federation proof resolve through GCP Secret Manager (`config.credentialBackend: gsm`) instead of Vault. `vault.address` is left blank; the schema requires it only when `credentialBackend: vault`. | The GSM SA-direct backend (#2230). Per-operator GCP token exchange (Workload Identity Federation) is Phase 2 (#2232); the `gsm.workloadIdentityFederation.*` keys are inert stubs until then. |
+| [`values-gsm-example.yaml`](./values-gsm-example.yaml) | A **Vault-free, GCP-native** install (Initiative #2227) — credentials + the `/api/v1/health` federation proof resolve through GCP Secret Manager (`config.credentialBackend: gsm`) instead of Vault. `vault.address` is left blank; the schema requires it only when `credentialBackend: vault`. | The GSM SA-direct backend (#2230, Phase 1). `gsm.workloadIdentityFederation.*` is left empty here — for the per-operator token-exchange (WIF) shape see `values-gsm-wif-example.yaml`. |
+| [`values-gsm-wif-example.yaml`](./values-gsm-wif-example.yaml) | The GSM backend with **per-operator Workload Identity Federation** (#2232, Phase 2) — credential reads run under the calling operator's Keycloak identity, and the `gsm.workloadIdentityFederation.*` keys render first-class as `GSM_WIF_*` (no `extraEnv`, #2667). Targets the on-prem/no-ambient-identity shape, so it also enables the `checkRunner` service principal (#2642) that background dispatch needs. | The GSM WIF path (#2232); the `GSM_WIF_*` chart rendering landed in #2659. |
 
 ## Using `values-rdc-example.yaml`
 
@@ -574,6 +575,9 @@ genuine last resort it is framed as here.
 > target still trusts public CAs too.
 
 ```bash
+# Capture the token once and reuse it across the calls below.
+TOKEN=$(meho login --print-token https://meho.example.com)
+
 # Create a target that trusts a specific appliance CA — verification
 # stays ON (chain + hostname), against the pinned CA. PEM goes in the
 # tls_ca_pin field; --rawfile keeps the multi-line cert intact as a JSON
@@ -582,7 +586,7 @@ jq -n --rawfile pin /path/to/appliance-ca.pem \
   '{name:"vcf-logs-lab", product:"vmware-rest", host:"vrli.nested.lab",
     auth_model:"shared_service_account", tls_ca_pin:$pin}' \
 | curl -sf -X POST https://meho.example.com/api/v1/targets \
-    -H "Authorization: Bearer $(meho status --print-token)" \
+    -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' -d @-
 
 # Rotate the pin (e.g. the appliance cert was re-issued): PATCH the new
@@ -590,12 +594,12 @@ jq -n --rawfile pin /path/to/appliance-ca.pem \
 # client-pool cache key, so the old client is never reused.
 jq -n --rawfile pin /path/to/new-appliance-ca.pem '{tls_ca_pin:$pin}' \
 | curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
-    -H "Authorization: Bearer $(meho status --print-token)" \
+    -H "Authorization: Bearer $TOKEN" \
     -H 'Content-Type: application/json' -d @-
 
 # Clear the pin (the CA is now in the global bundle, say): send null.
 curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"tls_ca_pin": null}'
 ```
@@ -614,9 +618,12 @@ and a WARN log line, exactly like the `verify_tls` toggle.
 settable on both create and update (the route is `tenant_admin`-only):
 
 ```bash
+# Capture the token once and reuse it across the calls below.
+TOKEN=$(meho login --print-token https://meho.example.com)
+
 # Create a target with verification off (self-signed lab appliance).
 curl -sf -X POST https://meho.example.com/api/v1/targets \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{
         "name": "vcf-logs-lab",
@@ -628,7 +635,7 @@ curl -sf -X POST https://meho.example.com/api/v1/targets \
 
 # Flip an existing target back to secure once its CA is in the bundle.
 curl -sf -X PATCH https://meho.example.com/api/v1/targets/vcf-logs-lab \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"verify_tls": true}'
 ```
@@ -878,12 +885,15 @@ array, e.g. `["meho-docs", "meho-docs:vmware"]`.
 
 **Verify the claim is present on the audience that's failing.** Decode the
 token each surface validates and confirm both the audience and the
-capability. Using `meho status --print-token` (the CLI/REST audience):
+capability. Using `meho login --print-token` (the CLI/REST audience):
 
 ```bash
+# Capture the token once and reuse it across the calls below.
+TOKEN=$(meho login --print-token https://meho.example.com)
+
 # 1. The capabilities claim carries the per-collection key on the REST/UI
 #    audience token. (jwt-cli `jwt decode`, or jq over the base64 payload.)
-meho status --print-token \
+echo "$TOKEN" \
   | jwt decode --json - \
   | jq '{aud: .payload.aud, capabilities: .payload.capabilities}'
 # Expect aud to include "meho-backplane" AND capabilities to include
@@ -893,7 +903,7 @@ meho status --print-token \
 # 2. Probe the REST surface directly: a 403 names the missing claim + the
 #    identity it checked, so you can grant exactly that capability.
 curl -s -X POST https://meho.example.com/api/v1/search_docs \
-  -H "Authorization: Bearer $(meho status --print-token)" \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"query":"x","collection":"vmware"}' | jq .detail
 # {
@@ -907,7 +917,7 @@ curl -s -X POST https://meho.example.com/api/v1/search_docs \
 # }
 ```
 
-For the MCP-audience token (minted via the `meho-mcp-client` browser flow),
+For the MCP-audience token (minted via the `meho-mcp` browser flow),
 decode that token the same way and confirm `aud` includes
 `<backplane-url>/mcp` **and** the same `capabilities` array — both audiences
 must carry it for all three surfaces to agree.
@@ -955,18 +965,18 @@ The user's `email_verified` flag does not need to be true for
 device-code to complete; if your realm enforces verified email
 elsewhere, set it true on this user.
 
-### MCP onramp — public `meho-mcp-client` (Claude.ai / Claude Desktop / MCP Inspector)
+### MCP onramp — public `meho-mcp` (Claude.ai / Claude Desktop / MCP Inspector)
 
 Repeat Steps 2–4 for a second public client used by MCP clients
 that **can** carry `client_id` in their config (Claude.ai Custom
-Connector, MCP Inspector). Suggested client ID `meho-mcp-client`;
+Connector, MCP Inspector). Suggested client ID `meho-mcp`;
 client-shape contrast with `meho-cli`:
 
-| Setting | `meho-mcp-client` | Why differs from `meho-cli` |
+| Setting | `meho-mcp` | Why differs from `meho-cli` |
 | --- | --- | --- |
 | Standard flow (authorization-code + PKCE) | **On** | MCP 2025-06-18 mandates OAuth 2.1 authorization-code + PKCE for the `/mcp` path; the device grant is a CLI-only convenience. |
 | Device grant | Off | Not needed; MCP clients run the browser-redirect flow. |
-| Valid redirect URIs | `https://claude.ai/api/mcp/auth_callback`, `http://localhost:*` | Covers the Claude.ai Custom Connector and any localhost MCP Inspector. |
+| Valid redirect URIs | `http://localhost:*`, `http://127.0.0.1:*` | Loopback only — `localhost` for a local MCP Inspector / Claude Code, plus the `127.0.0.1` twin the `mcp-remote` shim needs (Keycloak matches redirect hosts literally, so `localhost` ≠ `127.0.0.1`). MEHO is internal-only, so there is **no** public `claude.ai` Custom-Connector redirect. |
 | Web origins | `+` (or a tight allow-list) | CORS for the browser flow. |
 | PKCE challenge method | `S256` | Spec-required for public-client PKCE. |
 | **Optional client scopes** | **`offline_access`** | Claude Code's MCP client **always** requests `offline_access` in its scope parameter to obtain a refresh token; if the scope isn't assigned on the client, Keycloak rejects the authorization request with `invalid_scope` (Wall #7). Assign as **optional** rather than default — only flows that ask for a refresh token (browser MCP clients) should mint one. The CLI device-code client deliberately doesn't get this scope (RFC 8628 device-code clients re-run the device dance instead of holding a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than a fresh dance prompt). |
@@ -996,7 +1006,7 @@ documents the per-client configuration step for each MCP client.
 > doesn't help these clients until they expose `client_id` in
 > `.mcp.json`. Two workarounds today: (a) use Claude.ai
 > Custom Connector or MCP Inspector for first-class wire-up
-> against `meho-mcp-client`; (b) shim Claude Code / Cursor
+> against `meho-mcp`; (b) shim Claude Code / Cursor
 > through `mcp-remote` (or an equivalent stdio→HTTP proxy)
 > and bake the Bearer token into the wrapper. The right
 > long-term fix is upstream MCP-client `client_id` support,
@@ -1126,7 +1136,7 @@ pre-registration recipe's Step 3 mappers exist to prevent.
 > (`audience-meho-backplane`, `meho-mcp-audience`, `tenant-id`,
 > `tenant-role`, `groups-claim`) to each client **directly**
 > (per-client protocol mappers cloned from `meho-backplane`
-> onto `meho-cli` / `meho-mcp-client`). That mechanism does
+> onto `meho-cli` / `meho-mcp`). That mechanism does
 > **not** carry forward to a CIMD-resolved client — there is
 > no per-client mapper-cloning step in CIMD because the client
 > isn't pre-registered. A CIMD-capable client picks up its
@@ -1155,7 +1165,7 @@ pre-registration recipe's Step 3 mappers exist to prevent.
 >   MEHO's tenant-claim shape.
 >
 > Do **not** rely on the per-client mappers Step 3 attaches
-> to `meho-cli` / `meho-mcp-client` to reach a CIMD-resolved
+> to `meho-cli` / `meho-mcp` to reach a CIMD-resolved
 > client. They won't — and the failure presents as the same
 > `invalid_audience` / `missing_tenant_claim` wall a deployer
 > running the pre-registration recipe without Step 3 would
@@ -1279,7 +1289,7 @@ parser maps to the OAuth `client_id`. The CLI also accepts
 deployer publishes multiple public clients (e.g. `meho-cli-prod`,
 `meho-cli-staging`) and the chart value pins one default.
 
-The MCP public client (`meho-mcp-client`) is not chart-wired today
+The MCP public client (`meho-mcp`) is not chart-wired today
 — Claude.ai's Custom Connector and MCP Inspector both ask the
 operator to paste a client_id at config time. Auto-discovery via
 RFC 9728 advertises the authorization server but not the
@@ -1304,7 +1314,8 @@ meho login https://meho.evba.lab
 # Logged in to https://meho.evba.lab; token stored in keyring.
 
 # 3. Authenticated REST call succeeds.
-curl -sf -H "Authorization: Bearer $(meho status --print-token)" \
+TOKEN=$(meho login --print-token https://meho.evba.lab)
+curl -sf -H "Authorization: Bearer $TOKEN" \
   https://meho.evba.lab/api/v1/health
 # {"status": "ok"}
 
@@ -1332,7 +1343,7 @@ numbered for cross-reference with the originating dogfood reports.
 | **W2** | Token issuance succeeds; every backend call 401s with a structured `detail` code (post-[#797](https://github.com/evoila/meho/issues/797) + [#1131](https://github.com/evoila/meho/issues/1131): `invalid_audience` / `missing_tenant_claim` / `missing_tenant_role_claim` / `malformed_jws` if the `Authorization` header carries a non-JWT value at all). | The public client mints tokens with a different claim shape than `meho-backplane` validates against — missing the `audience-meho-backplane` mapper (wrong `aud`), the `meho-mcp-audience` mapper (no MCP audience), the `tenant-id` mapper, or the `tenant-role` mapper. A `malformed_jws` instead means the `Authorization` header is not a JWT (typo, copy/paste truncation, or a probe like `Bearer not-a-real-jwt`). | Clone all 5 mappers from the `meho-backplane` client onto the public client per Step 3. After the fix, decode the issued token (`jwt.io` or `kcadm.sh evaluate-protocol-mappers`) and confirm `aud` is an array containing both `meho-backplane` and `<backplane-url>/mcp`, plus `tenant_id`, `tenant_role`, `groups` are present. For `malformed_jws`: paste the bearer into `jwt.io` — if it doesn't decode, the header was sent with the wrong value, not the issued token. |
 | **W3** | Token issuance succeeds; every backend call 401s with `{"detail":"invalid_token"}` even after Wall #2 is closed; decoded token has `aud`, `tenant_id`, `tenant_role`, `groups` but **no `sub` claim**. | The `basic` client scope wasn't assigned. Keycloak 25 moved `sub` into the Subject (sub) protocol mapper inside the `basic` scope; clients created via the admin REST API don't auto-inherit realm default-default scopes the way the admin-console UI populates them. RFC 9068 §2.2.1 makes `sub` REQUIRED on JWT access tokens, so rejection is spec-correct — the diagnostic is the opaque part. | Add `basic`, `roles`, `web-origins`, `acr` to the public client's **default** client scopes per Step 4. Re-issue (logout and re-login; existing tokens are stale) and confirm `sub` is now present. After [#797](https://github.com/evoila/meho/issues/797) lands the symptom is `{"detail":"missing_sub"}` instead of the opaque form. |
 | **W4** | `meho login` fails with `meho: token exchange failed: context deadline exceeded`, often before the human has a chance to approve the verification URL. | Not the device-code TTL (which is already 10 minutes per `cli/internal/auth/devicecode.go:355`'s `PollTimeout = 10 * time.Minute` — longer than Keycloak's default 600 s `expires_in`). The real cause is an **ambient parent deadline** on `cmd.Context()` (CI step timeout, `claude` bash-tool timeout, IDE-task wrapper) that truncates the approval wait far below the device-code lifetime. | (Until [#798](https://github.com/evoila/meho/issues/798) lands) run `meho login` in a real interactive terminal without a short wrapper deadline; or raise the wrapper timeout to ≥ `expires_in` + headroom. After #798 lands the message distinguishes "parent deadline fired" from "device code expired" and the device-flow approval wait detaches from a too-short parent context. |
-| **W7** | Browser-flow MCP client (Claude Code, MCP Inspector) authorization request 400s with `{"error":"invalid_scope","error_description":"Invalid scopes: openid profile email offline_access"}` (or just `offline_access` in the failed-scopes list). Token endpoint never reached; the user never sees a Keycloak login page. | The MCP client requested `offline_access` to obtain a refresh token (Claude Code **always** includes it; OIDC Core §11 makes it the spec-defined signal for a refresh token), but the `meho-mcp-client` public client doesn't have `offline_access` in either its default or optional client-scope list. Keycloak rejects unknown / unassigned scopes per OAuth 2.0 [RFC 6749 §5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2). The realm-built-in `offline_access` scope exists; it just isn't attached to the public MCP client. | Assign the realm's built-in `offline_access` client scope to `meho-mcp-client` as an **optional** scope (not default — only flows that ask for a refresh token should mint one). In the Keycloak admin console: `meho-mcp-client` → Client scopes → Add client scope → pick `offline_access` → **Optional**. `meho admin keycloak bootstrap-clients` does this automatically from the next release after v0.6.0 ([#912](https://github.com/evoila/meho/issues/912)). The CLI device-code client (`meho-cli`) deliberately is **not** given `offline_access` — device-code clients re-run the device dance rather than hold a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than re-prompting the operator. |
+| **W7** | Browser-flow MCP client (Claude Code, MCP Inspector) authorization request 400s with `{"error":"invalid_scope","error_description":"Invalid scopes: openid profile email offline_access"}` (or just `offline_access` in the failed-scopes list). Token endpoint never reached; the user never sees a Keycloak login page. | The MCP client requested `offline_access` to obtain a refresh token (Claude Code **always** includes it; OIDC Core §11 makes it the spec-defined signal for a refresh token), but the `meho-mcp` public client doesn't have `offline_access` in either its default or optional client-scope list. Keycloak rejects unknown / unassigned scopes per OAuth 2.0 [RFC 6749 §5.2](https://www.rfc-editor.org/rfc/rfc6749#section-5.2). The realm-built-in `offline_access` scope exists; it just isn't attached to the public MCP client. | Assign the realm's built-in `offline_access` client scope to `meho-mcp` as an **optional** scope (not default — only flows that ask for a refresh token should mint one). In the Keycloak admin console: `meho-mcp` → Client scopes → Add client scope → pick `offline_access` → **Optional**. `meho admin keycloak bootstrap-clients` does this automatically from the next release after v0.6.0 ([#912](https://github.com/evoila/meho/issues/912)). The CLI device-code client (`meho-cli`) deliberately is **not** given `offline_access` — device-code clients re-run the device dance rather than hold a long-lived refresh token; a stolen device-code refresh token has worse blast-radius than re-prompting the operator. |
 
 ### Out of scope for this recipe
 

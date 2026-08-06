@@ -136,7 +136,7 @@ backplane can be logged into, the realm needs:
    identity MEHO validates tokens against;
 2. a **public `meho-cli` client** with the device-code grant — what
    `meho login` uses;
-3. a **public `meho-mcp-client`** with authorization-code + PKCE —
+3. a **public `meho-mcp`** client with authorization-code + PKCE —
    what browser-capable MCP clients use;
 4. five **protocol mappers** and four **default client scopes** on the
    public clients, so issued tokens carry the claims MEHO validates;

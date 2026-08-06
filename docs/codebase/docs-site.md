@@ -57,6 +57,16 @@ One docs version **per minor**, with a `latest` alias:
 4. GitHub Pages serves the branch. A job-level concurrency group
    (`docs-site-gh-pages`, no cancel) serialises publishes so two tags
    can't race the branch update.
+5. A final **reachability gate** polls the freshly-published
+   `https://evoila.github.io/meho/<MAJOR.MINOR>/` (the version path
+   this run wrote, passed from the deploy step via a `version` output —
+   *not* the site root, whose redirect to `latest` would return 200 and
+   mask a failed version publish) until it returns HTTP 200, up to a
+   10-minute deadline at 15 s intervals. If the deadline passes the job
+   fails with an error naming the one-time Pages setup. This turns a
+   publish onto a repo where Pages was never enabled — which used to
+   report `success` while the site 404'd (#2741, the v0.26.0 incident)
+   — into a red run.
 
 PRs touching the site (or the toolchain lock) get a `mkdocs build
 --strict` check instead; nothing deploys from PRs or main pushes.
@@ -91,7 +101,9 @@ GitHub Pages must be enabled once by a maintainer (CI cannot safely
 mutate repo settings — same custody rule as image.yml's GHCR
 visibility flip): **Settings → Pages → Deploy from a branch →
 `gh-pages` / root**. The branch exists after the first tag-triggered
-deploy.
+deploy. The deploy job's reachability gate (control-flow step 5) makes
+skipping this setup fail loudly: the run goes red instead of publishing
+a site that returns 404 (#2741).
 
 ## Known issues / gotchas
 

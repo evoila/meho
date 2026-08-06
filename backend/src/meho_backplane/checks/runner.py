@@ -116,7 +116,7 @@ import asyncio
 import contextlib
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import structlog
@@ -132,11 +132,13 @@ from meho_backplane.checks.assertions import AssertionOutcome, AssertionSpec
 from meho_backplane.checks.evaluate import evaluate_assertion
 from meho_backplane.checks.investigate import investigate_on_transition
 from meho_backplane.checks.repository import (
+    accelerate_sensor_next_fire,
     advance_sensor_next_fire,
     claim_due_sensors,
     park_sensor,
     record_sensor_result,
 )
+from meho_backplane.checks.watchdog import note_tick_completed, reset_watchdog_state
 from meho_backplane.db.engine import get_sessionmaker
 from meho_backplane.db.models import Sensor
 from meho_backplane.operations.dispatcher import dispatch
@@ -221,10 +223,12 @@ def _eval_semaphore() -> asyncio.Semaphore:
 def reset_sensor_runner_state() -> None:
     """Drop all per-process runner state (test seam).
 
-    Clears the in-flight registry, the lazily-built semaphore, and the
-    check-runner principal's cached token, so a fresh test starts with no
-    leftover tasks, a semaphore bound to its own event loop, and no token
-    minted against another test's settings. Mirrors
+    Clears the in-flight registry, the lazily-built semaphore, the
+    check-runner principal's cached token, and the #2763 watchdog's
+    tick-stamp/stall state, so a fresh test starts with no leftover
+    tasks, a semaphore bound to its own event loop, no token minted
+    against another test's settings, and no stall latched from a prior
+    test's clock. Mirrors
     :func:`meho_backplane.db.engine.reset_engine_for_testing`'s role as an
     explicit reset for module-level state.
     """
@@ -232,6 +236,7 @@ def reset_sensor_runner_state() -> None:
     global _EVAL_SEMAPHORE
     _EVAL_SEMAPHORE = None
     reset_check_runner_token_cache()
+    reset_watchdog_state()
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,15 +426,35 @@ async def _run_evaluation(snap: _SensorSnapshot) -> AssertionOutcome:
 async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> None:
     """Write *outcome* onto the sensor's latest-state projection (own session).
 
+    When the persist leaves a confirmation window open (#2799 --
+    ``record_sensor_result`` held the reading as a pending soft state
+    instead of committing it), pull the row's ``next_fire_at`` to
+    ``min(next_fire_at, evaluated_at + retry_backoff_seconds)`` so the
+    confirming re-evaluation runs on the accelerated schedule. The
+    re-check then rides the existing claim/advance/overlap machinery
+    unchanged -- no in-process sleep loop (which would die on
+    :func:`stop_sensor_runner` and pin ``_IN_FLIGHT``), and effective
+    spacing quantizes up to the tick grid like any sub-tick cadence.
+    This acceleration is runner-local: satellite-posted results share
+    the same commit gate but re-check at their own posting cadence.
+
     After the projection commits, hand off to #2507's transition detector: it
     recomputes the rollup for the Dashboards holding this sensor, maintains the
     ``last_rollup_state`` memo, and fires a diagnose-only investigator on a
     green->non-green edge. The hook never raises (its contract), so the persist
     path is unaffected by any investigation-side failure -- and it runs on every
     result (not only state changes) because a ``for:`` hold expiring flips a
-    Dashboard non-green with no sensor-state change.
+    Dashboard non-green with no sensor-state change. An *unconfirmed*
+    reading never changes ``last_state``, so the fold the detector
+    recomputes sees no edge from it.
     """
     evaluated_at = datetime.now(UTC)
+    # #2756: persist a per-tick evidence-history row alongside the projection
+    # when retention is enabled. ``CHECKS_EVIDENCE_RETENTION_DAYS == 0``
+    # disables the feature (no history rows -- the pre-#2756 latest-only
+    # behaviour); the append rides ``record_sensor_result``'s own transaction
+    # so it commits or rolls back atomically with the projection update.
+    record_history = get_settings().checks_evidence_retention_days > 0
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
         await record_sensor_result(
@@ -439,7 +464,18 @@ async def _persist_outcome(snap: _SensorSnapshot, outcome: AssertionOutcome) -> 
             value=outcome.value,
             evidence=outcome.evidence,
             evaluated_at=evaluated_at,
+            record_history=record_history,
         )
+        # Identity-map read (record_sensor_result already loaded the row;
+        # a missing row means it was deleted mid-evaluation -- nothing to
+        # accelerate).
+        row = await session.get(Sensor, snap.id)
+        if row is not None and row.pending_state is not None:
+            await accelerate_sensor_next_fire(
+                session,
+                snap.id,
+                not_later_than=evaluated_at + timedelta(seconds=row.retry_backoff_seconds),
+            )
         await session.commit()
     await investigate_on_transition(sensor_id=snap.id, tenant_id=snap.tenant_id)
 
@@ -515,7 +551,20 @@ async def run_one_sensor_tick() -> int:
     backgrounded evaluation per claimed row (subject to the overlap guard). The
     tick never awaits the evaluations, so it returns promptly and the lock is
     held for the DB work only.
+
+    Every *completed* tick -- including the lock-not-acquired no-op -- stamps
+    the #2763 watchdog via :func:`~meho_backplane.checks.watchdog.note_tick_completed`
+    (which also emits the recovery event when a stall was flagged, and never
+    raises). A tick that raises deliberately does not stamp: a loop that fails
+    every tick is a stalled evaluation plane and must trip the watchdog.
     """
+    dispatched = await _claim_and_spawn_due()
+    await note_tick_completed()
+    return dispatched
+
+
+async def _claim_and_spawn_due() -> int:
+    """The tick body: claim + advance under the lock, then spawn evaluations."""
     now = datetime.now(UTC)
     to_dispatch: list[_SensorSnapshot] = []
     sessionmaker = get_sessionmaker()

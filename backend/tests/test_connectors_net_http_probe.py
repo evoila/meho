@@ -28,6 +28,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import socket
+import ssl
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,6 +37,8 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import anyio
+import httpx
 import pytest
 from sqlalchemy import select
 
@@ -265,6 +269,8 @@ async def test_probe_reports_surface_and_never_returns_a_body(
     assert body["body_size"] == len(b"hello-body")
     assert body["body_sha256"] == hashlib.sha256(b"hello-body").hexdigest()
     assert body["final_url"] == f"{srv.origin}/health"
+    # A clean response carries no failure evidence.
+    assert body["error_detail"] is None
 
 
 async def test_head_probe_reports_no_body_bytes(
@@ -448,6 +454,10 @@ async def test_connection_refused_is_ok_status_with_reason(
     assert body["reachable"] is False
     assert body["reason"] in {"refused", "unreachable"}
     assert body["status"] is None
+    # AC3: a connection-level failure carries the mapped exception chain
+    # as bounded innermost-first {type, message} evidence.
+    assert isinstance(body["error_detail"], list) and body["error_detail"]
+    assert all({"type", "message"} == set(entry) for entry in body["error_detail"])
 
 
 @pytest.mark.parametrize(
@@ -504,3 +514,171 @@ async def test_method_enum_rejects_non_head_get_at_schema_boundary(
     result = await _dispatch_probe({"url": "http://127.0.0.1/x", "method": "POST"})
     assert result.status == "error"
     assert result.extras.get("error_code") == "invalid_params"
+
+
+# ---------------------------------------------------------------------------
+# Transport-failure taxonomy (#2771): classify through ExceptionGroup
+# children + TLS-phase mappings instead of collapsing to 'unreachable'
+# ---------------------------------------------------------------------------
+
+_classify = net_http_probe_mod._reason_for_transport_error
+_detail = net_http_probe_mod._error_detail
+
+
+def _anyio_multi_connect_error(children: list[Exception]) -> httpx.ConnectError:
+    """Rebuild the anyio happy-eyeballs multi-address failure shape.
+
+    ``httpx.ConnectError ← OSError("All connection attempts failed") ←
+    ExceptionGroup(children)`` — exactly what anyio 4.13 raises when more
+    than one address (dual-stack A+AAAA) is tried and every attempt
+    fails, then httpcore/httpx re-wrap. The per-attempt errors live in
+    the group's ``.exceptions``, not on ``__cause__``.
+    """
+    group = ExceptionGroup("multiple connection attempts failed", children)
+    os_err = OSError("All connection attempts failed")
+    os_err.__cause__ = group
+    connect_err = httpx.ConnectError("All connection attempts failed")
+    connect_err.__cause__ = os_err
+    return connect_err
+
+
+@pytest.mark.parametrize(
+    ("children", "expected"),
+    [
+        pytest.param(
+            [ConnectionRefusedError(111, "refused"), ConnectionRefusedError(111, "refused")],
+            "refused",
+            id="dual-stack-refused",
+        ),
+        pytest.param(
+            [socket.gaierror(-2, "Name or service not known")],
+            "dns_failure",
+            id="gaierror",
+        ),
+        pytest.param([ssl.SSLError("handshake failure")], "tls_error", id="sslerror"),
+    ],
+)
+def test_group_children_are_classified_not_collapsed(
+    children: list[Exception], expected: str
+) -> None:
+    """A ConnectError whose real causes sit in an ExceptionGroup gets the
+    specific code (refused/dns_failure/tls_error), never 'unreachable'.
+
+    ``tls=False`` proves the classification comes from the group
+    children, not from the https TLS-phase hint.
+    """
+    assert _classify(_anyio_multi_connect_error(children), tls=False) == expected
+
+
+@pytest.mark.parametrize(
+    ("children", "expected"),
+    [
+        pytest.param(
+            [ConnectionRefusedError(111, "refused"), ssl.SSLError("alert")],
+            "tls_error",
+            id="tls-beats-refused",
+        ),
+        pytest.param(
+            [ConnectionRefusedError(111, "refused"), socket.gaierror(-2, "nxdomain")],
+            "dns_failure",
+            id="dns-beats-refused",
+        ),
+    ],
+)
+def test_priority_picks_most_actionable_when_children_disagree(
+    children: list[Exception], expected: str
+) -> None:
+    """Children disagreeing → priority tls_error > dns_failure > refused
+    > timeout > unreachable decides (the reporter's v6-refused +
+    v4-TLS-error case)."""
+    assert _classify(_anyio_multi_connect_error(children), tls=False) == expected
+
+
+@pytest.mark.parametrize(
+    "cert_error",
+    [
+        ssl.SSLCertVerificationError("certificate verify failed: unable to get local issuer"),
+        ssl.SSLError("certificate verify failed"),
+    ],
+)
+def test_untrusted_ca_classifies_tls_error(cert_error: ssl.SSLError) -> None:
+    """AC4: an https endpoint behind a private CA the trust bundle does
+    not know reads tls_error, whether the verify failure arrives as a
+    dual-stack group child or a direct ``__cause__``."""
+    assert _classify(_anyio_multi_connect_error([cert_error]), tls=True) == "tls_error"
+
+    direct = httpx.ConnectError("verify failed")
+    direct.__cause__ = cert_error
+    assert _classify(direct, tls=True) == "tls_error"
+
+
+@pytest.mark.parametrize("inner", [anyio.BrokenResourceError(), anyio.EndOfStream()])
+def test_tls_phase_stream_failure_on_https_is_tls_error(inner: Exception) -> None:
+    """AC2: a start_tls-phase failure (peer closed / sent an alert
+    mid-handshake) reaches us as a ConnectError wrapping anyio
+    BrokenResourceError / EndOfStream with no ssl.SSLError — on an https
+    probe that is tls_error, not unreachable."""
+    exc = httpx.ConnectError("")
+    exc.__cause__ = inner
+    assert _classify(exc, tls=True) == "tls_error"
+
+
+def test_broken_resource_on_plain_http_stays_unreachable() -> None:
+    """The scheme gate: httpcore's connect_tcp also maps
+    BrokenResourceError, so on a plain-HTTP probe (no handshake) it must
+    NOT read tls_error."""
+    exc = httpx.ConnectError("")
+    exc.__cause__ = anyio.BrokenResourceError()
+    assert _classify(exc, tls=False) == "unreachable"
+
+
+def test_plain_oserror_connect_failure_is_unreachable_not_tls() -> None:
+    """A generic connect OSError (e.g. EHOSTUNREACH 'no route to host')
+    on https stays unreachable — the TLS-phase logic must not sweep every
+    unrecognised https failure into tls_error."""
+    exc = httpx.ConnectError("")
+    exc.__cause__ = OSError(113, "No route to host")
+    assert _classify(exc, tls=True) == "unreachable"
+
+
+def test_cause_cycle_terminates() -> None:
+    """The id-based seen-set guards a ``__cause__`` cycle (no hang)."""
+    outer = httpx.ConnectError("outer")
+    inner = OSError("inner")
+    outer.__cause__ = inner
+    inner.__cause__ = outer
+    assert _classify(outer, tls=False) == "unreachable"
+
+
+def test_error_detail_is_innermost_first_bounded_and_shaped() -> None:
+    """AC3: error_detail is innermost-first {type, message} evidence."""
+    detail = _detail(
+        _anyio_multi_connect_error([ConnectionRefusedError(111, "Connection refused")])
+    )
+    assert detail
+    assert all(set(entry) == {"type", "message"} for entry in detail)
+    # Leaf cause first (most actionable), outer httpx wrapper last.
+    assert detail[0]["type"] == "ConnectionRefusedError"
+    assert detail[-1]["type"] == "httpx.ConnectError"
+
+
+def test_error_detail_caps_entries_and_truncates_messages() -> None:
+    """Deep chains and long messages are bounded so a probe result never
+    carries an unbounded exception dump."""
+    current: BaseException = OSError("x" * 500)
+    for _ in range(20):
+        wrapper = OSError("wrap")
+        wrapper.__cause__ = current
+        current = wrapper
+    detail = _detail(current)
+    assert len(detail) <= net_http_probe_mod._MAX_ERROR_DETAIL_ENTRIES
+    # Innermost (the long leaf message) is first and truncated.
+    assert detail[0]["message"].endswith("...")
+    assert len(detail[0]["message"]) <= net_http_probe_mod._MAX_ERROR_DETAIL_MESSAGE_CHARS + 3
+
+
+def test_response_schema_declares_error_detail() -> None:
+    """The evidence field is part of the documented result contract."""
+    schema = net_http_probe_mod._NET_HTTP_PROBE_RESPONSE_SCHEMA
+    assert "error_detail" in schema["properties"]
+    assert "error_detail" in schema["required"]

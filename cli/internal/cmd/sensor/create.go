@@ -30,22 +30,24 @@ import (
 // Role: tenant_admin.
 func newCreateCmd() *cobra.Command {
 	var (
-		name              string
-		connectorID       string
-		opID              string
-		assertionArg      string
-		cadenceKind       string
-		intervalSeconds   int
-		cronExpr          string
-		timezone          string
-		severity          string
-		forSeconds        int
-		targetArg         string
-		paramsArg         string
-		identitySub       string
-		tenant            string
-		jsonOut           bool
-		backplaneOverride string
+		name                string
+		connectorID         string
+		opID                string
+		assertionArg        string
+		cadenceKind         string
+		intervalSeconds     int
+		cronExpr            string
+		timezone            string
+		severity            string
+		forSeconds          int
+		retryTimes          int
+		retryBackoffSeconds int
+		targetArg           string
+		paramsArg           string
+		identitySub         string
+		tenant              string
+		jsonOut             bool
+		backplaneOverride   string
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -64,10 +66,14 @@ func newCreateCmd() *cobra.Command {
 			"--timezone is the IANA zone for cron evaluation (default 'UTC'). " +
 			"--severity is the worst rollup state a failure drives " +
 			"(degraded|critical, default critical). --for-seconds is the " +
-			"hold-time hysteresis (default 0). --target / --params are " +
-			"optional JSON objects. --identity-sub overrides the default " +
-			"runner identity. --tenant targets another tenant (platform_admin " +
-			"cross-tenant).\n\nA non-safe op returns 422 " +
+			"hold-time hysteresis (default 0). --retry-times is the number " +
+			"of consecutive confirming re-checks required before a state " +
+			"change commits + notifies (0..5, default 0 = off; Nagios " +
+			"soft/hard states), spaced by --retry-backoff-seconds (5..300, " +
+			"default 15; inert while --retry-times is 0). --target / " +
+			"--params are optional JSON objects. --identity-sub overrides " +
+			"the default runner identity. --tenant targets another tenant " +
+			"(platform_admin cross-tenant).\n\nA non-safe op returns 422 " +
 			"sensor_requires_safe_operation; an unknown op 422 " +
 			"sensor_operation_not_found; a duplicate name 409 " +
 			"sensor_name_conflict.",
@@ -76,22 +82,24 @@ func newCreateCmd() *cobra.Command {
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runCreate(cmd, createOptions{
-				Name:              name,
-				ConnectorID:       connectorID,
-				OpID:              opID,
-				AssertionArg:      assertionArg,
-				CadenceKind:       cadenceKind,
-				IntervalSeconds:   intervalSeconds,
-				CronExpr:          cronExpr,
-				Timezone:          timezone,
-				Severity:          severity,
-				ForSeconds:        forSeconds,
-				TargetArg:         targetArg,
-				ParamsArg:         paramsArg,
-				IdentitySub:       identitySub,
-				Tenant:            tenant,
-				JSONOut:           jsonOut,
-				BackplaneOverride: backplaneOverride,
+				Name:                name,
+				ConnectorID:         connectorID,
+				OpID:                opID,
+				AssertionArg:        assertionArg,
+				CadenceKind:         cadenceKind,
+				IntervalSeconds:     intervalSeconds,
+				CronExpr:            cronExpr,
+				Timezone:            timezone,
+				Severity:            severity,
+				ForSeconds:          forSeconds,
+				RetryTimes:          retryTimes,
+				RetryBackoffSeconds: retryBackoffSeconds,
+				TargetArg:           targetArg,
+				ParamsArg:           paramsArg,
+				IdentitySub:         identitySub,
+				Tenant:              tenant,
+				JSONOut:             jsonOut,
+				BackplaneOverride:   backplaneOverride,
 			})
 		},
 	}
@@ -111,6 +119,11 @@ func newCreateCmd() *cobra.Command {
 		"worst rollup state a failing assertion drives: degraded | critical (default critical)")
 	cmd.Flags().IntVar(&forSeconds, "for-seconds", 0,
 		"hold-time hysteresis in seconds a failing state must persist (default 0)")
+	cmd.Flags().IntVar(&retryTimes, "retry-times", 0,
+		"consecutive confirming re-checks required before a state change commits, 0..5 (default 0 = off)")
+	cmd.Flags().IntVar(&retryBackoffSeconds, "retry-backoff-seconds", 0,
+		"accelerated re-check spacing in seconds while a state change is pending, 5..300 "+
+			"(omitted when unset; the server then applies its default of 15)")
 	cmd.Flags().StringVar(&targetArg, "target", "",
 		"optional dispatch-target JSON object (inline JSON, @<path>, or @-)")
 	cmd.Flags().StringVar(&paramsArg, "params", "",
@@ -131,22 +144,24 @@ func newCreateCmd() *cobra.Command {
 }
 
 type createOptions struct {
-	Name              string
-	ConnectorID       string
-	OpID              string
-	AssertionArg      string
-	CadenceKind       string
-	IntervalSeconds   int
-	CronExpr          string
-	Timezone          string
-	Severity          string
-	ForSeconds        int
-	TargetArg         string
-	ParamsArg         string
-	IdentitySub       string
-	Tenant            string
-	JSONOut           bool
-	BackplaneOverride string
+	Name                string
+	ConnectorID         string
+	OpID                string
+	AssertionArg        string
+	CadenceKind         string
+	IntervalSeconds     int
+	CronExpr            string
+	Timezone            string
+	Severity            string
+	ForSeconds          int
+	RetryTimes          int
+	RetryBackoffSeconds int
+	TargetArg           string
+	ParamsArg           string
+	IdentitySub         string
+	Tenant              string
+	JSONOut             bool
+	BackplaneOverride   string
 }
 
 func runCreate(cmd *cobra.Command, opts createOptions) error {
@@ -171,6 +186,19 @@ func runCreate(cmd *cobra.Command, opts createOptions) error {
 		return output.RenderError(cmd.ErrOrStderr(),
 			output.Unexpected(fmt.Sprintf(
 				"--for-seconds must be non-negative; got %d", opts.ForSeconds)),
+			opts.JSONOut)
+	}
+	if opts.RetryTimes < 0 {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"--retry-times must be non-negative; got %d", opts.RetryTimes)),
+			opts.JSONOut)
+	}
+	if opts.RetryBackoffSeconds < 0 {
+		return output.RenderError(cmd.ErrOrStderr(),
+			output.Unexpected(fmt.Sprintf(
+				"--retry-backoff-seconds must be non-negative; got %d",
+				opts.RetryBackoffSeconds)),
 			opts.JSONOut)
 	}
 	// Per-cadence discriminator pre-check (the backend's Pydantic validator
@@ -298,6 +326,14 @@ func buildCreateBody(
 	if opts.ForSeconds > 0 {
 		fs := opts.ForSeconds
 		body.ForSeconds = &fs
+	}
+	if opts.RetryTimes > 0 {
+		rt := opts.RetryTimes
+		body.RetryTimes = &rt
+	}
+	if opts.RetryBackoffSeconds > 0 {
+		rb := opts.RetryBackoffSeconds
+		body.RetryBackoffSeconds = &rb
 	}
 	if target != nil {
 		t := map[string]interface{}(target)

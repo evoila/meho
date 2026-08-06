@@ -64,6 +64,7 @@ from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
 from ._oidc_jwt_helpers import AUDIENCE as _AUDIENCE
+from ._oidc_jwt_helpers import DEFAULT_TENANT_ID as _DEFAULT_TENANT_ID
 from ._oidc_jwt_helpers import ISSUER as _ISSUER
 from ._oidc_jwt_helpers import make_rsa_keypair as _make_rsa_keypair
 from ._oidc_jwt_helpers import mint_token as _mint_token
@@ -354,17 +355,35 @@ def test_happy_path_returns_full_federation_response(
     # migration applied at fixture setup, so the probe reports healthy
     # and ``migrated`` is True. ``mcp_session_id_capture`` reports the
     # G8.2 audit-replay capture mode (G0.14-T6 #1147); default mode is
-    # ``"always"`` because ``MCP_REQUIRE_SESSION_ID`` is unset in this
-    # test fixture's env. ``mcp_protocol_version`` reports the server's
+    # ``"when_negotiated"`` because ``MCP_REQUIRE_SESSION_ID`` is unset
+    # in this test fixture's env (#2700 — capture is negotiated, not
+    # guaranteed). ``mcp_protocol_version`` reports the server's
     # build-time pinned MCP revision (G0.14-T13 #1202).
     from meho_backplane.mcp.schemas import PROTOCOL_VERSION
 
     assert body == {
-        "operator": {"sub": "op-100", "name": "Alice", "email": "alice@example.com"},
+        # #2746: OperatorIdentity now carries tenant_id + tenant_role, so the
+        # federation health response echoes the caller's tenant identity too.
+        "operator": {
+            "sub": "op-100",
+            "name": "Alice",
+            "email": "alice@example.com",
+            "tenant_id": _DEFAULT_TENANT_ID,
+            "tenant_role": "operator",
+        },
         "vault": {"reachable": True, "read_ok": True, "detail": "version=11"},
         "db": {"migrated": True},
-        "mcp_session_id_capture": "always",
+        "mcp_session_id_capture": "when_negotiated",
         "mcp_protocol_version": PROTOCOL_VERSION,
+        # #2763: the runner is enabled by default but this TestClient never
+        # runs the lifespan, so no tick has stamped and no baseline is set —
+        # the facet reads unknown-not-stalled (the enabled-but-not-started
+        # shape; the conftest autouse reset guarantees a clean slate).
+        "sensor_runner": {
+            "seconds_since_last_tick": None,
+            "stalled": False,
+            "stall_threshold_seconds": 60.0,
+        },
     }
 
     # Vault was hit with the configured role / mount and the operator's
@@ -615,24 +634,25 @@ def test_vault_malformed_payload_returns_200_with_read_failed_detail(
 # ---------------------------------------------------------------------------
 
 
-def test_mcp_session_id_capture_default_always(
+def test_mcp_session_id_capture_default_when_negotiated(
     client: TestClient,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default deploy → ``mcp_session_id_capture == "always"``.
+    """Default deploy → ``mcp_session_id_capture == "when_negotiated"`` (#2700).
 
-    Unset ``MCP_REQUIRE_SESSION_ID`` → the capture-vs-enforcement
-    decouple (G0.14-T6 #1147) reports ``"always"``: any
-    ``Mcp-Session-Id`` header the client sends is captured, and a
-    missing header is accepted (the audit row's ``agent_session_id``
-    lands as NULL). This is the mode G8.2 audit-replay needs to light
-    up on a stock deploy.
+    Unset ``MCP_REQUIRE_SESSION_ID`` → the field reports
+    ``"when_negotiated"``, **not** ``"always"``: a ``Mcp-Session-Id``
+    header is captured only when the client negotiated a session via the
+    handshake, while a header-less call is accepted and its row's
+    ``agent_session_id`` lands as NULL (invisible to session-lineage
+    replay). #2700 reported the old ``"always"`` label as a false
+    guarantee; the honest label is asserted here.
     """
     monkeypatch.delenv("MCP_REQUIRE_SESSION_ID", raising=False)
     get_settings.cache_clear()
 
-    key = _make_rsa_keypair("kid-capture-always")
-    token = _mint_token(key, sub="op-capture-always")
+    key = _make_rsa_keypair("kid-capture-negotiated")
+    token = _mint_token(key, sub="op-capture-negotiated")
     _install_fake_vault(monkeypatch, version=1)
 
     with respx.mock as mock_router:
@@ -643,7 +663,9 @@ def test_mcp_session_id_capture_default_always(
         )
 
     assert response.status_code == 200
-    assert response.json()["mcp_session_id_capture"] == "always"
+    capture = response.json()["mcp_session_id_capture"]
+    assert capture == "when_negotiated"
+    assert capture != "always"
 
 
 def test_mcp_session_id_capture_enforced_when_env_set(
@@ -712,3 +734,120 @@ def test_mcp_protocol_version_reports_server_pinned_revision(
 
     assert response.status_code == 200
     assert response.json()["mcp_protocol_version"] == PROTOCOL_VERSION
+
+
+# ---------------------------------------------------------------------------
+# #2763 — sensor_runner liveness facet
+# ---------------------------------------------------------------------------
+
+
+def test_sensor_runner_facet_healthy_when_stamp_is_fresh(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recently completed tick reads as healthy on ``GET /api/v1/health``.
+
+    Acceptance criterion (#2763): the health response carries the
+    checks-runner liveness facet so an external prober can watch the
+    evaluation loop. The tick stamp is injected directly onto the
+    watchdog module (the stamp-writing path is covered by
+    ``tests/test_checks_watchdog.py``; this test owns the route surface).
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import meho_backplane.checks.watchdog as watchdog
+
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_TICK_COMPLETED_AT",
+        datetime.now(UTC) - timedelta(seconds=1),
+    )
+    key = _make_rsa_keypair("kid-runner-healthy")
+    token = _mint_token(key, sub="op-runner-healthy")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    facet = response.json()["sensor_runner"]
+    assert facet["stalled"] is False
+    assert facet["stall_threshold_seconds"] == 60.0
+    assert 0.0 <= facet["seconds_since_last_tick"] < 30.0
+
+
+def test_sensor_runner_facet_stalled_when_stamp_is_stale(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stamp older than the stall threshold reads ``stalled: true``.
+
+    The facet derives staleness live from the stamp on every request —
+    no watchdog-task involvement — so the external prober catches a
+    stall even if the watchdog task itself died with the loop.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import meho_backplane.checks.watchdog as watchdog
+
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_TICK_COMPLETED_AT",
+        datetime.now(UTC) - timedelta(seconds=120),
+    )
+    key = _make_rsa_keypair("kid-runner-stalled")
+    token = _mint_token(key, sub="op-runner-stalled")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    facet = response.json()["sensor_runner"]
+    assert facet["stalled"] is True
+    assert facet["seconds_since_last_tick"] >= 120.0
+
+
+def test_sensor_runner_facet_absent_when_runner_disabled(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``SENSOR_RUNNER_ENABLED=false`` → ``sensor_runner: null``, never stalled.
+
+    Acceptance criterion (#2763): a deliberately disabled runner must not
+    read as stalled. The ancient stamp injected here would read as a
+    deep stall on an enabled runner; with the runner disabled the facet
+    is absent entirely.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    import meho_backplane.checks.watchdog as watchdog
+
+    monkeypatch.setenv("SENSOR_RUNNER_ENABLED", "false")
+    get_settings.cache_clear()
+    monkeypatch.setattr(
+        watchdog,
+        "_LAST_TICK_COMPLETED_AT",
+        datetime.now(UTC) - timedelta(hours=6),
+    )
+    key = _make_rsa_keypair("kid-runner-disabled")
+    token = _mint_token(key, sub="op-runner-disabled")
+    _install_fake_vault(monkeypatch, version=1)
+
+    with respx.mock as mock_router:
+        _mock_discovery_and_jwks(mock_router, _public_jwks(key))
+        response = client.get(
+            "/api/v1/health",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["sensor_runner"] is None

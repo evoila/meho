@@ -310,6 +310,38 @@ def test_checks_notify_suppression_window_env_override_takes_effect(
         get_settings.cache_clear()
 
 
+def test_sensor_runner_stall_after_ticks_defaults_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unset ``SENSOR_RUNNER_STALL_AFTER_TICKS`` → the 6-tick default (#2763)."""
+    _base_env(monkeypatch)
+    monkeypatch.delenv("SENSOR_RUNNER_STALL_AFTER_TICKS", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert get_settings().sensor_runner_stall_after_ticks == 6
+    finally:
+        get_settings.cache_clear()
+
+
+def test_sensor_runner_stall_after_ticks_env_override_takes_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``SENSOR_RUNNER_STALL_AFTER_TICKS`` flows through ``get_settings()``.
+
+    The same inert-mapping trap the suppression-window round-trip pins:
+    ``Settings`` is a plain pydantic ``BaseModel``, so a field declared
+    without its hand-mapped env read would leave the documented watchdog
+    knob (#2763) a silent no-op.
+    """
+    _base_env(monkeypatch)
+    monkeypatch.setenv("SENSOR_RUNNER_STALL_AFTER_TICKS", "12")
+    get_settings.cache_clear()
+    try:
+        assert get_settings().sensor_runner_stall_after_ticks == 12
+    finally:
+        get_settings.cache_clear()
+
+
 def test_result_handle_max_spill_rows_defaults_when_env_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

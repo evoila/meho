@@ -232,6 +232,7 @@ from meho_backplane.connectors import (
     ResolutionLabel,
     ResultHandle,
     resolve_connector_or_label,
+    resolve_target_version,
 )
 from meho_backplane.connectors._shared.vcf_auth import ConnectorAuthError
 from meho_backplane.connectors.base import Connector, shim_kind
@@ -682,17 +683,16 @@ async def _execute_and_audit(
         op_id=op_id,
     )
     if isinstance(redaction, OperationResult):
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            redaction,
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=_elapsed_ms(started),
         )
-        return redaction
 
     return await _reduce_and_audit_success(
         op_id=op_id,
@@ -876,17 +876,16 @@ async def _run_branch_with_error_handling(
         )
     except (ImportError, TypeError) as exc:
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
         )
-        return result_handler_unreachable(op_id, descriptor.handler_ref or "", exc, duration_ms)
     except NotImplementedError as nie_exc:
         # G0.23-T1 (#1627): a connector raising NotImplementedError is a
         # deliberate "I don't do this" -- VmwareRestConnector.auth_headers
@@ -935,25 +934,24 @@ async def _run_branch_with_error_handling(
                 exclude_impl_id=connector_instance.impl_id,
             )
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_connector_unsupported(
+                op_id,
+                nie_exc,
+                cause=cause,
+                connector_class=(
+                    type(connector_instance).__name__ if connector_instance is not None else None
+                ),
+                duration_ms=duration_ms,
+                sibling_impl_id=sibling_impl_id,
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
-        )
-        return result_connector_unsupported(
-            op_id,
-            nie_exc,
-            cause=cause,
-            connector_class=(
-                type(connector_instance).__name__ if connector_instance is not None else None
-            ),
-            duration_ms=duration_ms,
-            sibling_impl_id=sibling_impl_id,
         )
     except httpx.HTTPStatusError as http_exc:
         return await _handle_http_status_error(
@@ -998,22 +996,24 @@ async def _run_branch_with_error_handling(
         # fall through to ``result_connector_error`` -- never mislabelled
         # as a TLS fault.
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
+            "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
+        )
+        conn_result = (
+            result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
+            if is_tls_verify_failure
+            else result_connector_error(op_id, conn_exc, duration_ms)
+        )
+        return await _audit_error_and_return(
+            conn_result,
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
         )
-        is_tls_verify_failure = isinstance(conn_exc.__cause__, ssl.SSLCertVerificationError) or (
-            "CERTIFICATE_VERIFY_FAILED" in str(conn_exc)
-        )
-        if is_tls_verify_failure:
-            return result_connector_tls_verify_failed(op_id, conn_exc, target, duration_ms)
-        return result_connector_error(op_id, conn_exc, duration_ms)
     except hvac.exceptions.Forbidden as vault_exc:
         # #2091: Vault answering "permission denied" during dispatch is a
         # classifiable authorization failure, not an unforeseen crash. The
@@ -1035,16 +1035,6 @@ async def _run_branch_with_error_handling(
         # this arm — ``vault_client_for_operator`` wraps them into the
         # ``VaultClientError`` family before the handler sees them.
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            result_status="error",
-            duration_ms=duration_ms,
-        )
         # #2331: a typed KV-v2 *write* (``vault.kv.put`` / ``patch`` /
         # ``delete``) that Vault denies is the post-approval write-identity
         # gap, not a credential-resolution read. The read-oriented
@@ -1070,33 +1060,44 @@ async def _run_branch_with_error_handling(
                 # presence, but stay defensive inside the never-raises arm) —
                 # omit the path rather than fault.
                 write_path = None
-            return result_connector_vault_write_forbidden(
+            vault_result = result_connector_vault_write_forbidden(
                 op_id,
                 vault_exc,
                 duration_ms,
                 write_path=write_path,
                 identity_hint=operator.sub,
             )
-        expected_secret_ref: str | None = None
-        target_name = getattr(target, "name", None)
-        if target_name:
-            # Call-time import on purpose (the ingest-arm precedent above):
-            # ``tenant_paths`` drags the vault ops module in via its
-            # imports, and the dispatcher must stay import-light.
-            from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
+        else:
+            expected_secret_ref: str | None = None
+            target_name = getattr(target, "name", None)
+            if target_name:
+                # Call-time import on purpose (the ingest-arm precedent above):
+                # ``tenant_paths`` drags the vault ops module in via its
+                # imports, and the dispatcher must stay import-light.
+                from meho_backplane.connectors.vault.tenant_paths import tenant_secret_ref
 
-            try:
-                expected_secret_ref = tenant_secret_ref(operator.tenant_id, target_name)
-            except ValueError:
-                # Whitespace/slash-only target identity — no derivable
-                # leaf; the builder falls back to the convention template.
-                expected_secret_ref = None
-        return result_connector_vault_forbidden(
-            op_id,
-            vault_exc,
-            target,
-            duration_ms,
-            expected_secret_ref=expected_secret_ref,
+                try:
+                    expected_secret_ref = tenant_secret_ref(operator.tenant_id, target_name)
+                except ValueError:
+                    # Whitespace/slash-only target identity — no derivable
+                    # leaf; the builder falls back to the convention template.
+                    expected_secret_ref = None
+            vault_result = result_connector_vault_forbidden(
+                op_id,
+                vault_exc,
+                target,
+                duration_ms,
+                expected_secret_ref=expected_secret_ref,
+            )
+        return await _audit_error_and_return(
+            vault_result,
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
         )
     except ConnectorAuthError as auth_exc:
         # #2329: a session *establish* rejected the credential (401/403 at the
@@ -1117,32 +1118,48 @@ async def _run_branch_with_error_handling(
         # without a backplane restart (duck-typed; no-op for connectors with no
         # credential cache).
         await _evict_connector_credentials(connector_instance, target)
-        duration_ms = await _audit_error(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            started=started,
-        )
-        return result_connector_auth_failed(op_id, auth_exc, target, duration_ms)
-    except Exception as exc:
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_connector_auth_failed(op_id, auth_exc, target, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
         )
-        return result_connector_error(op_id, exc, duration_ms)
+    except Exception as exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_error(op_id, exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
 
-async def _audit_error(
+def _error_extras_for_audit(result: OperationResult) -> dict[str, Any] | None:
+    """The structured error envelope to persist on the DISPATCH audit row (#2680).
+
+    A plain-dict copy of the built error result's ``extras`` -- the same
+    envelope the caller receives (``error_code``, plus ``http_status`` +
+    ``upstream_message`` on an upstream HTTP error, and every per-builder
+    diagnostic field). ``operations/_errors.py`` already Tier-1-redacts +
+    caps every free-text leaf, so the copy is durable-ledger-safe as is.
+    ``None`` when the result carries no extras (nothing to persist), which
+    keeps ``payload["error"]`` absent rather than writing an empty dict.
+    """
+    extras = result.extras
+    return dict(extras) if extras else None
+
+
+async def _audit_error_and_return(
+    result: OperationResult,
     *,
     audit_id: uuid.UUID,
     operator: Operator,
@@ -1150,15 +1167,32 @@ async def _audit_error(
     target: Any,
     params: dict[str, Any],
     params_hash: str,
-    started: float,
-) -> float:
-    """Write the dispatch's ``result_status='error'`` audit row + broadcast.
+    duration_ms: float,
+    raw_payload: Any | None = None,
+    redaction_manifest: list[dict[str, Any]] | None = None,
+    redaction_policy_id: str | None = None,
+) -> OperationResult:
+    """Write the ``result_status='error'`` audit row for a built result, then return it.
 
-    Returns the elapsed-milliseconds value the calling error arm threads into
-    the structured :class:`OperationResult` builder, so the audited duration
-    and the returned duration are the same measurement.
+    #2680: inverts the legacy audit-then-build ordering. Every error arm now
+    builds its structured :class:`OperationResult` **first** so the envelope
+    is in scope for the audit write; this helper threads that envelope
+    (:func:`_error_extras_for_audit`) into ``audit_and_broadcast_safe`` ->
+    ``write_audit_row`` -> ``_build_audit_payload`` so the durable DISPATCH
+    row records the same ``error_code`` / ``http_status`` / ``upstream_message``
+    detail the caller received, not merely ``result_status='error'``. The
+    audited duration equals the returned result's duration because the arm
+    passes the one ``duration_ms`` it built the result with. The broadcast
+    frame is untouched (params-only) -- the envelope rides the audit row alone.
+
+    *raw_payload* / *redaction_manifest* / *redaction_policy_id* carry the
+    connector-boundary redaction artefacts through for the one error arm that
+    has them (the post-redaction reducer failure in :func:`_reduce_or_error`);
+    ``None`` for the pre-response error arms. Fail-open on the audit write is
+    preserved: ``audit_and_broadcast_safe`` swallows its own internal failures,
+    so the never-raises contract holds and the built ``result`` is always
+    returned.
     """
-    duration_ms = _elapsed_ms(started)
     await audit_and_broadcast_safe(
         audit_id=audit_id,
         operator=operator,
@@ -1168,8 +1202,12 @@ async def _audit_error(
         params_hash=params_hash,
         result_status="error",
         duration_ms=duration_ms,
+        raw_payload=raw_payload,
+        redaction_manifest=redaction_manifest,
+        redaction_policy_id=redaction_policy_id,
+        error_extras=_error_extras_for_audit(result),
     )
-    return duration_ms
+    return result
 
 
 async def _evict_connector_credentials(connector_instance: Connector | None, target: Any) -> None:
@@ -1324,20 +1362,21 @@ async def _handle_http_status_error(
         )
         return recovered
 
-    duration_ms = await _audit_error(
+    duration_ms = _elapsed_ms(started)
+    return await _audit_error_and_return(
+        _classify_http_status_error(
+            http_exc=http_exc,
+            op_id=op_id,
+            connector_instance=connector_instance,
+            target=target,
+            duration_ms=duration_ms,
+        ),
         audit_id=audit_id,
         operator=operator,
         descriptor=descriptor,
         target=target,
         params=params,
         params_hash=params_hash,
-        started=started,
-    )
-    return _classify_http_status_error(
-        http_exc=http_exc,
-        op_id=op_id,
-        connector_instance=connector_instance,
-        target=target,
         duration_ms=duration_ms,
     )
 
@@ -1386,25 +1425,26 @@ async def _retry_after_session_invalidation(
             audit_id=audit_id,
         )
     except httpx.HTTPStatusError as retry_exc:
-        duration_ms = await _audit_error(
+        duration_ms = _elapsed_ms(started)
+        # #2400: the re-login SUCCEEDED (invalidate_session ran, the re-dispatch
+        # re-established a fresh session) yet the fresh session was still
+        # rejected -- ``reestablished`` stamps ``session_dispatch_<s>_after_relogin``.
+        return await _audit_error_and_return(
+            _classify_http_status_error(
+                http_exc=retry_exc,
+                op_id=op_id,
+                connector_instance=connector_instance,
+                target=target,
+                duration_ms=duration_ms,
+                relogin="reestablished",
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            started=started,
-        )
-        # #2400: the re-login SUCCEEDED (invalidate_session ran, the re-dispatch
-        # re-established a fresh session) yet the fresh session was still
-        # rejected -- ``reestablished`` stamps ``session_dispatch_<s>_after_relogin``.
-        return _classify_http_status_error(
-            http_exc=retry_exc,
-            op_id=op_id,
-            connector_instance=connector_instance,
-            target=target,
             duration_ms=duration_ms,
-            relogin="reestablished",
         )
     except ConnectorAuthError as retry_exc:
         # #2329 convergence with #2067: the one-shot re-dispatch forces a
@@ -1420,32 +1460,34 @@ async def _retry_after_session_invalidation(
         # the session token ``invalidate_session`` already dropped) so the next
         # dispatch after a restage re-reads the store without a restart.
         await _evict_connector_credentials(connector_instance, target)
-        duration_ms = await _audit_error(
-            audit_id=audit_id,
-            operator=operator,
-            descriptor=descriptor,
-            target=target,
-            params=params,
-            params_hash=params_hash,
-            started=started,
-        )
+        duration_ms = _elapsed_ms(started)
         # #2400: the forced re-login POST was itself rejected -- an establish
         # failure (``session_establish_<s>``), narrowed by ``attempted_failed``
         # to the "re-login after a mid-session expiry" sub-case in the summary.
-        return result_connector_auth_failed(
-            op_id, retry_exc, target, duration_ms, relogin="attempted_failed"
-        )
-    except Exception as retry_exc:
-        duration_ms = await _audit_error(
+        return await _audit_error_and_return(
+            result_connector_auth_failed(
+                op_id, retry_exc, target, duration_ms, relogin="attempted_failed"
+            ),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            started=started,
+            duration_ms=duration_ms,
         )
-        return result_connector_error(op_id, retry_exc, duration_ms)
+    except Exception as retry_exc:
+        duration_ms = _elapsed_ms(started)
+        return await _audit_error_and_return(
+            result_connector_error(op_id, retry_exc, duration_ms),
+            audit_id=audit_id,
+            operator=operator,
+            descriptor=descriptor,
+            target=target,
+            params=params,
+            params_hash=params_hash,
+            duration_ms=duration_ms,
+        )
 
 
 def _apply_redaction_middleware(
@@ -1647,20 +1689,19 @@ async def _reduce_or_error(
         )
     except Exception as exc:
         duration_ms = _elapsed_ms(started)
-        await audit_and_broadcast_safe(
+        return await _audit_error_and_return(
+            result_connector_error(op_id, exc, duration_ms),
             audit_id=audit_id,
             operator=operator,
             descriptor=descriptor,
             target=target,
             params=params,
             params_hash=params_hash,
-            result_status="error",
             duration_ms=duration_ms,
             raw_payload=raw_payload_for_audit,
             redaction_manifest=redaction_manifest_for_audit,
             redaction_policy_id=redaction_policy_id,
         )
-        return result_connector_error(op_id, exc, duration_ms)
 
 
 def _identifier_default_effect(
@@ -1711,25 +1752,33 @@ async def _build_proposed_effect(
       for credential-class ops and is merged under the
       ``"permission_preflight"`` key.
 
-    Always returns a dict on the normal path: the merged envelope when a
-    hook produced one, otherwise the identifier-only base shaped exactly
-    like the :func:`~meho_backplane.operations.approval_queue.create_pending_request`
-    default. Onto that base it stamps the catalog
+    Always returns a dict on the normal path with **one uniform envelope
+    schema per connector** (#2681): the op-identity fields (``op_id`` /
+    ``connector_id`` / ``target_id``) and ``op_class`` are stamped onto
+    whatever base the preview hook produced — a computed
+    ``{op_class, preview}``, the generic ``{op_class, params_echo}``, the
+    ``preview_unavailable`` fail-soft marker, or the empty base when the op
+    declined — so the field-set no longer swings with the per-op preview
+    outcome (previously the identifier fields rode only the declines/raises
+    paths, e.g. an ``app.delete`` parked against a nonexistent app carried
+    them while one against a live app did not). The bespoke ``preview`` XOR
+    generic ``params_echo`` content key legitimately still varies and is not
+    unified. Onto that base it also stamps the catalog
     ``descriptor.safety_level`` (#1855) so *every* parked op carries its
     severity (``safe`` / ``caution`` / ``dangerous``) — a ``dangerous``
     op and a ``caution`` op are distinguishable on the reviewer-facing
     row even when neither registers a preview builder. The severity is
     read straight off the descriptor, never recomputed.
 
-    When only the preflight fired, its result is merged onto the
-    identifier base so the reviewer still sees the denial banner. A
+    When only the preflight fired, its result rides alongside the uniform
+    identity fields so the reviewer still sees the denial banner. A
     *failed* preview (the hook's ``preview_unavailable`` marker, #1628)
-    is likewise merged onto the identifier base — the reviewer keeps the
-    op identity and additionally sees that the blast radius could not be
-    resolved, instead of a bare identifier default indistinguishable
-    from a small action. The ``op_class`` / ``preview`` / fail-soft-marker
-    envelope built by :func:`build_proposed_effect` itself is unchanged;
-    ``safety_level`` is layered on here.
+    keeps the op identity and additionally surfaces that the blast radius
+    could not be resolved, instead of a bare identifier default
+    indistinguishable from a small action. The ``op_class`` / ``preview`` /
+    fail-soft-marker envelope built by :func:`build_proposed_effect` itself
+    is unchanged; the identity fields and ``safety_level`` are layered on
+    here (``setdefault``, so a value the hook already supplied always wins).
 
     Returns ``None`` only when connector resolution / hook execution
     raises: those faults degrade to "no preview" (the caller stores its
@@ -1750,26 +1799,14 @@ async def _build_proposed_effect(
             connector_id=connector_id,
         )
         preview = await build_proposed_effect(ctx)
-        if preview is not None and preview.get("preview_unavailable") is True:
-            # The registered builder *failed* (vs. declined) — keep the
-            # identifier fields the default would have carried and ride
-            # the marker + reason alongside them (#1628).
-            marked = _identifier_default_effect(
-                op_id=op_id, connector_id=connector_id, target=target
-            )
-            marked.update(preview)
-            preview = marked
         preflight = await build_permission_preflight(ctx)
-        # The preflight fired; attach it to whatever base the preview
-        # produced. When there is no preview (the common case: a
-        # suppressed credential-class write, or an op with no registered
-        # builder), use the same identifier-only shape
-        # ``create_pending_request`` would default to so the row still
-        # names the op alongside the severity / denial banner.
-        if preview is not None:
-            base = dict(preview)
-        else:
-            base = _identifier_default_effect(op_id=op_id, connector_id=connector_id, target=target)
+        # Whatever the preview hook produced becomes the starting base: a
+        # computed ``{op_class, preview}``, the generic ``{op_class,
+        # params_echo}`` default, a ``{op_class, preview_unavailable,
+        # preview_error}`` fail-soft marker, or ``None`` when the op
+        # declined / is a suppressed credential-class write. The uniform
+        # op-identity + metadata fields are stamped on below.
+        base = dict(preview) if preview is not None else {}
         if preflight is not None:
             base["permission_preflight"] = preflight
             # #2331: promote a will-be-denied preflight to a named,
@@ -1788,13 +1825,31 @@ async def _build_proposed_effect(
         # sparse — a deliberately-redacted credential write vs a connector
         # that never populated one — so the approval surface can style the
         # blind case as elevated-risk. Read from the value
-        # :func:`build_proposed_effect` produced (``preview``), so the
-        # identifier-only default that ``base`` may hold is classified
-        # correctly rather than mislabelled populated.
+        # :func:`build_proposed_effect` produced (``preview``), BEFORE the
+        # identifier fields are merged below, so an identifier-only
+        # (declined) envelope is classified not-populated rather than
+        # mislabelled by the merged ``op_id``.
         preview_populated, preview_reason = describe_preview_provenance(preview, op_id=op_id)
         base["preview_populated"] = preview_populated
         if preview_reason is not None:
             base["preview_reason"] = preview_reason
+        # Uniform op-identity + metadata envelope (#2681). The identifier
+        # fields (``op_id`` / ``connector_id`` / ``target_id``) and
+        # ``op_class`` are stamped onto EVERY parked envelope — builder
+        # success, generic params-echo, decline-to-identifier, or fail-soft
+        # marker — so a consumer reads one schema per connector regardless of
+        # the per-op preview outcome (runtime state, e.g. whether a delete's
+        # target app exists, no longer swings the field-set). Before this,
+        # the identifier fields leaked onto only the declines/raises paths.
+        # ``setdefault`` never overrides a value the preview hook already
+        # supplied (its own ``op_class``, or an identifier a builder chose to
+        # echo). The bespoke/generic content key (``preview`` XOR
+        # ``params_echo``) legitimately still varies and is NOT unified.
+        for _key, _value in _identifier_default_effect(
+            op_id=op_id, connector_id=connector_id, target=target
+        ).items():
+            base.setdefault(_key, _value)
+        base.setdefault("op_class", classify_op(op_id))
         # Promote the catalog severity onto every parked op's envelope
         # (#1855). ``safety_level`` is op-identity metadata read straight
         # off the descriptor -- not recomputed -- so a parked ``dangerous``
@@ -2091,10 +2146,28 @@ async def dispatch(
             # faults, which only arise when a target *was* supplied).
             return result_target_required(op_id, _elapsed_ms(started))
         if resolution_error == "no_connector":
+            # #2701: the resolver miss is on the TARGET's product/version,
+            # not the ``connector_id`` the caller passed. That connector_id
+            # already resolved a valid descriptor at Step 2 (else
+            # ``result_unknown_op`` fired), so echoing its parsed
+            # ``(product, version)`` here names the wrong input and reads as
+            # "your connector_id is wrong" -- the exact misattribution that
+            # sent the reporter chasing connector ids. Name the target's
+            # registered product and the version the resolver actually read
+            # (which may be ``None``). Fall back to the connector_id pair
+            # only when there is no target product to name (e.g. an ingested
+            # op dispatched with ``target=None``).
+            target_product = getattr(target, "product", None)
+            if isinstance(target_product, str) and target_product:
+                miss_product = target_product
+                miss_version: str | None = resolve_target_version(target)
+            else:
+                miss_product = product
+                miss_version = version
             return result_no_connector(
                 op_id,
-                product,
-                version,
+                miss_product,
+                miss_version,
                 _elapsed_ms(started),
                 exception_message=exception_message,
             )

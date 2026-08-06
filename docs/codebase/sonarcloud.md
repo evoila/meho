@@ -33,7 +33,12 @@ the ~8.3k-test suite and barely moves with xdist worker count — see #1987 for 
 peak-memory measurement table. The coverage job is **job-level
 `continue-on-error: true`** so an OOM degrades to "no coverage for this push" and
 never fails the CI run conclusion (which would also suppress this gate's
-`workflow_run` trigger).
+`workflow_run` trigger). A pytest *hang* degrades the same way: the pytest step
+carries its own `timeout-minutes: 45` (step timeout → step failure → absorbed),
+because `continue-on-error` absorbs failure only — a job-level timeout expiry
+*cancels* the job, and a `cancelled` run conclusion leaks through and suppresses
+this gate just like a failure would (#2800, observed 2026-08-04). The job-level
+cap (55 min) is only the outer backstop for a wedged non-pytest step.
 
 | Concern | Where |
 |---|---|
@@ -67,7 +72,8 @@ chip is the only symptom.
 **24.9%** — and it stayed collapsed for 3+ weeks. Root cause: the
 `python-coverage` job was OOM-killed / evicted (runner lost, null step
 conclusions) at ~47 min on the memory-limited `meho-runners-ci-heavy` pool —
-*before* its 50-min timeout, so raising `timeout-minutes` is a no-op. The unit
+*before* its then-50-min job timeout (since #2800: a 45-min pytest step timeout
+inside a 55-min job cap), so raising `timeout-minutes` is a no-op. The unit
 lane had already dropped `--cov` for the same OOM reason (#1982), so this
 dedicated job was the sole coverage producer and nothing else caught the gap.
 

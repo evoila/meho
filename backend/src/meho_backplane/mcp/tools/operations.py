@@ -536,6 +536,21 @@ register_mcp_tool(
                 },
                 "error": {"type": ["string", "null"]},
                 "duration_ms": {"type": "number"},
+                # ``handle`` was missing from the declared properties
+                # (#2774 schema-honesty sweep): the payload is
+                # ``OperationResult.model_dump`` verbatim, which always
+                # carries the JSONFlux spill signal — null when the
+                # response was inlined, a ResultHandle object when the
+                # full set-shaped payload is addressable via
+                # ``result_query`` instead.
+                "handle": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "JSONFlux result handle. Non-null when the raw "
+                        "response was set-shaped and spilled out-of-band; "
+                        "drill in via `result_query` with `handle_id`."
+                    ),
+                },
                 "extras": {"type": "object"},
             },
             "required": ["status", "op_id", "duration_ms"],

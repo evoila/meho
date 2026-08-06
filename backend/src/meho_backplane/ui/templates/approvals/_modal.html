@@ -54,6 +54,10 @@
                              decided_at / expires_at
     self_approval_blocked -- bool: disable the Approve button
     self_approval_setting -- str: the break-glass env-var name to name in the label
+    self_approval_docs_url -- str: operator-docs deep link the single-operator
+                             guidance points at (#2669)
+    self_approval_error   -- bool: the failed decision was a self-approval 403 —
+                             render the actionable guidance, not the bare error (#2669)
     operator_sub          -- str: the reviewing operator's subject
     status_pill_class     -- dict[str, str]: status -> DaisyUI badge modifier
     csrf_token            -- str: minted double-submit token
@@ -77,6 +81,33 @@
     <span class="badge badge-ghost badge-sm" title="Safe — read or non-impacting">{{ level }}</span>
   {%- endif -%}
 {%- endmacro -%}
+{#- Single-operator guidance (#2669). Named the same two patterns the docs
+    page and the settings.py flag docstring carry, so a solo operator who
+    hits ``self_approval_forbidden`` reaches an informed choice without
+    reading source: the recommended agent-requester (a distinct requester
+    subject, no flag) and the audited emergency break-glass. ``docs_url`` is
+    the console's UI-only deep link (the wire 403 text stays authoritative);
+    ``setting`` names the break-glass env var. Shared by the proactive
+    disabled-button note and the post-403 error banner so both read the
+    same. -#}
+{%- macro single_operator_choices(docs_url, setting) -%}
+  <p class="mt-1 opacity-90">On a single-operator deploy you have two ways forward:</p>
+  <ul class="mt-1 list-disc space-y-1 pl-5 opacity-90">
+    <li>
+      <span class="font-semibold">Recommended —</span> re-park the write under an
+      <span class="font-semibold">agent-requester</span>: a scheduled agent run whose
+      distinct subject makes the request, so you can approve it yourself with no flag.
+    </li>
+    <li>
+      <span class="font-semibold">Emergency —</span> a deployment admin enables
+      <code>{{ setting }}</code> for an audited, posture-wide break-glass.
+    </li>
+  </ul>
+  <p class="mt-2">
+    <a href="{{ docs_url }}" class="link link-primary" target="_blank" rel="noopener">
+      Approvals &amp; break-glass guide &rarr;</a>
+  </p>
+{%- endmacro -%}
 <dialog id="meho-approvals-modal" class="modal" aria-label="Review approval request">
   <div class="modal-box max-w-2xl">
     <div class="flex items-start justify-between gap-4">
@@ -96,12 +127,29 @@
     {% if error_status %}
       {# A recoverable decision failure (self-approval 403, already-decided
          409, role 403) re-rendered this modal with the typed banner. #}
-      <div class="alert alert-error mt-4" role="alert" aria-live="assertive">
-        <div>
-          <h4 class="font-semibold">Could not complete ({{ error_status }})</h4>
-          <p class="text-sm opacity-90">{{ error_message | default("The decision could not be completed.") }}</p>
+      {% if self_approval_error %}
+        {# #2669: a rejected self-approval is the one failure worth more than a
+           bare error — surface the actionable single-operator guidance (both
+           patterns + docs link) so the solo operator reaches an informed
+           choice in place, not a dead end. Warning, not error: there is a way
+           forward. #}
+        <div class="alert alert-warning mt-4 items-start" role="alert" aria-live="assertive">
+          <div class="text-sm">
+            <h4 class="font-semibold">You cannot approve your own request</h4>
+            <p class="mt-1 opacity-90">
+              Requester and approver must differ (the four-eyes rule). You may still deny it.
+            </p>
+            {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
+          </div>
         </div>
-      </div>
+      {% else %}
+        <div class="alert alert-error mt-4" role="alert" aria-live="assertive">
+          <div>
+            <h4 class="font-semibold">Could not complete ({{ error_status }})</h4>
+            <p class="text-sm opacity-90">{{ error_message | default("The decision could not be completed.") }}</p>
+          </div>
+        </div>
+      {% endif %}
     {% endif %}
 
     {% if request.status != "pending" %}
@@ -272,13 +320,17 @@
       </details>
     </div>
 
-    {% if request.status == "pending" and self_approval_blocked %}
-      <p class="mt-3 text-xs text-base-content/55" role="note">
-        You requested this action, so you cannot approve it
-        (requester and approver must differ). Another operator must approve,
-        or a deployment admin can enable <code>{{ self_approval_setting }}</code>
-        for an audited single-operator break-glass. You may still deny it.
-      </p>
+    {% if request.status == "pending" and self_approval_blocked and not self_approval_error %}
+      {#- #2669: the Approve button is disabled because the reviewer is the
+          requester. Name the way forward inline — a second operator, or, on a
+          solo deploy, the two single-operator patterns — instead of leaving the
+          operator to infer it from a greyed-out button. Suppressed when the
+          post-403 banner above already carries the same guidance. -#}
+      <div class="mt-3 rounded-box border border-base-300 bg-base-200/40 p-3 text-sm" role="note">
+        <h4 class="font-semibold">You requested this — you cannot approve it</h4>
+        <p class="mt-1 opacity-90">On a team, another operator approves it.</p>
+        {{ single_operator_choices(self_approval_docs_url, self_approval_setting) }}
+      </div>
     {% endif %}
 
     {% if request.status == "pending" %}

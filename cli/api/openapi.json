@@ -5766,7 +5766,7 @@
           "audit"
         ],
         "summary": "Replay",
-        "description": "Replay one agent session as a tenant-scoped parent/child tree.\n\n**RBAC (#1843): ``tenant_admin`` required.** This route takes an\n*arbitrary* ``session_id`` and reconstructs another principal's full\nsession trace \u2014 a privileged forensic act, not self-service. It\ntherefore gates at ``tenant_admin`` (``read_only`` / ``operator`` \u2192\n403), matching the MCP ``meho_audit_replay`` tool and\n``docs/cross-repo/audit-replay.md``. An operator replaying *their\nown* session uses the MCP ``query_audit`` ``shape=\"tree\"`` path\ninstead (operator-level, self-session-only). Cross-tenant isolation\nis unchanged and orthogonal to this gate (see below).\n\nDispatches through\n:func:`~meho_backplane.audit_query.replay_session`. ``tenant_id``\nis always ``operator.tenant_id`` from the JWT, never client input,\nso a session belonging to another tenant \u2014 or one that does not\nexist \u2014 yields ``root=[]`` / ``row_count=0`` (never 404; a foreign\nsession is indistinguishable from an empty one, the same\nnon-leakage posture :func:`show` takes).\n\nA session larger than :data:`_REPLAY_ROW_CAP` anchor rows returns\n413 from a count-first guard. The count runs *before*\n:func:`replay_session`, so a runaway session never materializes its\ntree just to be rejected \u2014 the recursive build is skipped entirely.",
+        "description": "Replay one agent session as a tenant-scoped parent/child tree.\n\n**RBAC (#1843): ``tenant_admin`` required.** This route takes an\n*arbitrary* ``session_id`` and reconstructs another principal's full\nsession trace \u2014 a privileged forensic act, not self-service. It\ntherefore gates at ``tenant_admin`` (``read_only`` / ``operator`` \u2192\n403), matching the MCP ``meho_audit_replay`` tool and\n``docs/cross-repo/audit-replay.md``. An operator replaying *their\nown* session uses the MCP ``query_audit`` ``shape=\"tree\"`` path\ninstead (operator-level, self-session-only). Cross-tenant isolation\nis unchanged and orthogonal to this gate (see below).\n\nDispatches through\n:func:`~meho_backplane.audit_query.replay_session`. ``tenant_id``\nis always ``operator.tenant_id`` from the JWT, never client input,\nso a session belonging to another tenant \u2014 or one that does not\nexist \u2014 yields ``root=[]`` / ``row_count=0`` (never 404; a foreign\nsession is indistinguishable from an empty one, the same\nnon-leakage posture :func:`show` takes).\n\nA session larger than :data:`_REPLAY_ROW_CAP` anchor rows returns\n413 from a count-first guard. The count runs *before*\n:func:`replay_session`, so a runaway session never materializes its\ntree just to be rejected \u2014 the recursive build is skipped entirely.\n\nThe 200 body also carries ``excluded_null_session_count`` (#2700):\nthe tenant-wide tally of ``method=MCP`` rows with a NULL\n``agent_session_id`` (clients that never negotiated a session).\nThose rows can never be part of any replay, so surfacing the count\nkeeps an empty forest (``row_count=0``) distinguishable from an\nempty history \u2014 see :func:`_count_excluded_null_session_rows`.",
         "operationId": "replay_api_v1_audit_sessions__session_id__replay_get",
         "parameters": [
           {
@@ -8124,6 +8124,121 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/sensors/{sensor_id}/results": {
+      "get": {
+        "tags": [
+          "sensors"
+        ],
+        "summary": "List Sensor Results",
+        "description": "Return a page of a sensor's per-tick evidence history, ``evaluated_at ASC``.\n\nThe forensic trend query (#2756) -- \"when did this start degrading / how\nfast is it filling\". ``operator`` role. Binary filters only: an inclusive\n``from`` / ``to`` window, an exact ``state``, a bounded ``limit``, and an\nopaque keyset ``cursor`` (echo ``next_cursor`` back to page). An unknown\nquery param is a 422 (the :class:`SensorResultsQuery` model forbids extras)\nso \"no aggregation knobs\" holds at the wire; a malformed ``cursor`` is a 422\n``sensor_results_invalid_cursor``. An absent sensor id (or one owned by\nanother tenant) returns 404 ``sensor_not_found`` -- never 403 -- so neither\na sensor's existence nor its history leaks across the tenant boundary.\n\nScoped to the caller's own tenant: unlike ``list`` / ``delete`` there is no\nplatform-admin ``tenant_filter`` here. Cross-tenant forensic history is not\na stated need, the MCP ``meho_sensor_results`` tool is likewise\nown-tenant-only, and folding a standalone cross-tenant query param in beside\nthe :class:`SensorResultsQuery` model would collapse the flattened OpenAPI\nquery parameters into a single opaque object -- breaking the typed Go CLI\nclient the ``meho sensor results`` verb is generated from.",
+        "operationId": "list_sensor_results_api_v1_sensors__sensor_id__results_get",
+        "parameters": [
+          {
+            "name": "sensor_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "title": "Sensor Id"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "nullable": true,
+              "title": "To"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "ok",
+                "degraded",
+                "critical",
+                "unknown",
+                "skip"
+              ],
+              "type": "string",
+              "nullable": true,
+              "title": "State"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 100,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Cursor"
+            }
+          },
+          {
+            "name": "authorization",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "nullable": true,
+              "title": "Authorization"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SensorResultListResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -20479,6 +20594,10 @@
           "row_count": {
             "type": "integer",
             "title": "Row Count"
+          },
+          "excluded_null_session_count": {
+            "type": "integer",
+            "title": "Excluded Null Session Count"
           }
         },
         "type": "object",
@@ -20486,10 +20605,11 @@
           "root",
           "session_id",
           "tenant_id",
-          "row_count"
+          "row_count",
+          "excluded_null_session_count"
         ],
         "title": "AuditReplayResult",
-        "description": "200 body for ``GET /api/v1/audit/sessions/{session_id}/replay``.\n\nWraps the substrate's :class:`ReplayNode` forest with the echoed\nrequest identity. ``tenant_id`` is always the operator's tenant\n(lifted from the JWT by the route), never client-supplied, so the\necho is a confirmation of the boundary the query ran under \u2014 not a\nvalue the caller chose.\n\n``row_count`` is the count of *anchor* rows in the session \u2014 rows\nwhose ``agent_session_id`` equals ``session_id`` within the\noperator's tenant. It is the same number the route's count-first\n413 guard evaluates, so a session that returns 200 reports a\n``row_count`` identical to what its over-cap sibling would report\nat 413. NULL-session lineage children pulled into ``root`` by the\nreplay closure (a composite ``dispatch_child`` whose own\n``agent_session_id`` is NULL but whose ``parent_audit_id`` links\ninto the session) are present in the tree but are not counted \u2014\n\"session rows\" are defined by the ``agent_session_id`` anchor, not\nby tree membership.\n\nAn unknown session id, or one belonging to another tenant, yields\n``root=[]`` / ``row_count=0`` \u2014 never a 404 \u2014 so a foreign session\nis indistinguishable from an empty one and existence never leaks\nacross tenants (the same non-leakage posture\n``GET /show/{audit_id}`` takes).\n\nFrozen like the substrate models it carries."
+        "description": "200 body for ``GET /api/v1/audit/sessions/{session_id}/replay``.\n\nWraps the substrate's :class:`ReplayNode` forest with the echoed\nrequest identity. ``tenant_id`` is always the operator's tenant\n(lifted from the JWT by the route), never client-supplied, so the\necho is a confirmation of the boundary the query ran under \u2014 not a\nvalue the caller chose.\n\n``row_count`` is the count of *anchor* rows in the session \u2014 rows\nwhose ``agent_session_id`` equals ``session_id`` within the\noperator's tenant. It is the same number the route's count-first\n413 guard evaluates, so a session that returns 200 reports a\n``row_count`` identical to what its over-cap sibling would report\nat 413. NULL-session lineage children pulled into ``root`` by the\nreplay closure (a composite ``dispatch_child`` whose own\n``agent_session_id`` is NULL but whose ``parent_audit_id`` links\ninto the session) are present in the tree but are not counted \u2014\n\"session rows\" are defined by the ``agent_session_id`` anchor, not\nby tree membership.\n\nAn unknown session id, or one belonging to another tenant, yields\n``root=[]`` / ``row_count=0`` \u2014 never a 404 \u2014 so a foreign session\nis indistinguishable from an empty one and existence never leaks\nacross tenants (the same non-leakage posture\n``GET /show/{audit_id}`` takes).\n\n``excluded_null_session_count`` (#2700) is the tenant-scoped tally\nof ``method=MCP`` audit rows whose ``agent_session_id`` is NULL \u2014\ncalls from clients that never negotiated a session via the\n``initialize`` handshake. Such rows can never anchor or be walked by\n*any* session replay, so a ``row_count=0`` response with a non-zero\n``excluded_null_session_count`` tells an investigator the empty\nforest is not the same as an empty history: there is un-negotiated\nMCP traffic this forensic surface structurally cannot see. It is a\ntenant-wide count, independent of ``session_id`` (the un-negotiated\nrows belong to no session), and mirrors the honest\n``when_negotiated`` capture label the deploy's ``/status`` reports.\n\nFrozen like the substrate models it carries."
       },
       "AuthConfigResponse": {
         "properties": {
@@ -23505,7 +23625,6 @@
           },
           "notify_email": {
             "type": "string",
-            "format": "email",
             "nullable": true,
             "title": "Notify Email"
           },
@@ -23531,7 +23650,7 @@
           "name"
         ],
         "title": "DashboardCreate",
-        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. The address is validated with\npydantic's ``EmailStr`` (``email-validator``), so a malformed one is a\nboundary 422 rather than a delivery failure discovered hours later on the\nfirst transition.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
+        "description": "Request body for ``POST /api/v1/checks/dashboards``.\n\nMembership is set at create only (no PUT; \"edit\" is delete + recreate,\nthe trigger-immutability posture). An empty ``sensor_ids`` is permitted --\na member-less Dashboard rolls up to ``unknown`` (the zero-member rule) --\nbut duplicates are de-duplicated by the service before insert. A foreign\nor absent sensor id is refused 422 ``sensor_not_found`` at the boundary.\n\n*tenant_id* (optional) lets a platform-admin caller target another\ntenant; the boundary enforces the RBAC via ``authorize_tenant_scope``.\n\n``notify_email`` / ``notify_min_state`` are the #2719 notification config,\nset at create only like membership. Omitting ``notify_email`` leaves\nnotifications off for this Dashboard. Since #2764 it carries **one or more**\ncomma-separated recipients: each entry is validated individually with\npydantic's ``EmailStr`` (``email-validator``), so a single malformed entry\nis a boundary 422 naming it rather than a delivery failure discovered hours\nlater on the first transition. The normalised, comma-joined form is what\npersists (the existing ``text`` column from migration ``0068``, no new\nmigration), and a lone address is stored and read back unchanged.\n\n``investigator_prompt`` is the #2721 operator context appended to the\ndiagnose-only investigator's briefing. Bounded at\n``_INVESTIGATOR_PROMPT_MAX_LENGTH``; oversize is a structured 422\n(``string_too_long`` with the limit in ``ctx``) rather than a truncation\nthe operator never learns about."
       },
       "DashboardDetail": {
         "properties": {
@@ -23643,20 +23762,25 @@
       },
       "DashboardListResponse": {
         "properties": {
-          "dashboards": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/DashboardRead"
             },
             "type": "array",
-            "title": "Dashboards"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "dashboards"
+          "items"
         ],
         "title": "DashboardListResponse",
-        "description": "Response envelope for ``GET /api/v1/checks/dashboards``.\n\nWrapped in ``{\"dashboards\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape the Sensor list adopts."
+        "description": "Unified list envelope for ``GET /api/v1/checks/dashboards``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. The listing is not\ncursor-paginated (``limit`` / ``offset`` truncate), so ``next_cursor``\nis always ``None`` but present so the endpoint can grow pagination\nlater without a further breaking change."
       },
       "DashboardMemberView": {
         "properties": {
@@ -24887,6 +25011,10 @@
             "type": "string",
             "title": "Mcp Protocol Version",
             "default": "2025-06-18"
+          },
+          "sensor_runner": {
+            "$ref": "#/components/schemas/SensorRunnerStatus",
+            "nullable": true
           }
         },
         "type": "object",
@@ -24897,7 +25025,7 @@
           "mcp_session_id_capture"
         ],
         "title": "HealthResponse",
-        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"always\"`` \u2014 any ``Mcp-Session-Id`` header the client sends is\n  captured into ``audit_log.agent_session_id``; a missing header is\n  accepted (the row's session id lands as NULL). This is the\n  default and what G8.2 audit-replay needs to light up on a stock\n  deploy.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written. Flipped on by ``MCP_REQUIRE_SESSION_ID=true`` in\n  compliance deploys that forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
+        "description": "``GET /api/v1/health`` response body.\n\n``mcp_session_id_capture`` (G0.14-T6 #1147) reports the deploy's\naudit-replay capture mode in a single field:\n\n* ``\"when_negotiated\"`` \u2014 a ``Mcp-Session-Id`` header is captured\n  into ``audit_log.agent_session_id`` only when the client\n  negotiated a session via the ``initialize`` handshake and echoes\n  the server-issued id; a header-less call is accepted and its row's\n  session id lands as NULL (invisible to session-lineage replay).\n  This is the default. It reads ``\"when_negotiated\"`` rather than\n  ``\"always\"`` because capture is not a guarantee \u2014 #2700 reported\n  the former ``\"always\"`` label as misleading, since header-less\n  callers stay out of lineage. Distinguish an empty forest from an\n  empty history via the replay surface's\n  ``excluded_null_session_count``.\n* ``\"enforced\"`` \u2014 capture works the same way **plus** a missing\n  header is a JSON-RPC ``-32600`` reject before any audit row is\n  written, so every accepted MCP call carries a session id. Flipped\n  on by ``MCP_REQUIRE_SESSION_ID=true`` in compliance deploys that\n  forbid header-less calls.\n\nThe field is the canonical operator-facing surface for the\ncapture state until T7 #1148's ``/ready`` features block ships\nthe richer enumeration (T7's ``audit_replay`` block pulls from\nthe same\n:func:`~meho_backplane.mcp.server.mcp_session_id_capture_mode`\nhelper so both surfaces stay consistent).\n\n``sensor_runner`` (#2763) carries the checks evaluation-loop's\nliveness (:class:`SensorRunnerStatus`), and is ``None`` exactly\nwhen ``SENSOR_RUNNER_ENABLED=false`` \u2014 a deliberately disabled\nrunner must not read as stalled. The ``None`` default keeps\nresponse decoders generated against the pre-#2763 shape working;\nthe handler always populates it on an enabled runner.\n\n``mcp_protocol_version`` (G0.14-T13 #1202) reports the server's\npinned :data:`~meho_backplane.mcp.schemas.PROTOCOL_VERSION`.\nMirrors the ``mcp_session_id_capture`` precedent: single-field\noperator visibility into the MCP layer's runtime state. The\nmatching ``mcp.protocol_version`` entry on ``/ready``'s features\nblock (see :func:`meho_backplane.features.build_features_block`)\nsurfaces the same value on the unauthenticated readiness probe so\na deploy operator can answer \"which MCP revision will this server\nnegotiate with my clients?\" without an authenticated GET."
       },
       "InCompare": {
         "properties": {
@@ -25427,6 +25555,10 @@
           },
           "db": {
             "$ref": "#/components/schemas/DbStatus"
+          },
+          "sensor_runner": {
+            "$ref": "#/components/schemas/SensorRunnerStatus",
+            "nullable": true
           }
         },
         "type": "object",
@@ -25435,7 +25567,7 @@
           "db"
         ],
         "title": "LivenessResponse",
-        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path."
+        "description": "``GET /api/v1/health/live`` response body.\n\nThe cheap, low-privilege liveness surface: operator identity (from\nthe already-validated JWT \u2014 zero extra cost) plus DB-migration\nliveness from\n:func:`~meho_backplane.db.migrations.db_migration_probe`. No Vault\nfield on purpose \u2014 this model must never grow one. The federation\nproof lives exclusively on the OPERATOR-gated\n:class:`HealthResponse` route so a low-privilege monitoring\nprincipal can never drive a per-operator Vault credential\nfederation from the liveness path.\n\n``sensor_runner`` (#2763) rides here as well as on the deep check:\nthe external prober that watches the evaluation loop is precisely\nthe ``read_only`` monitoring principal this route exists for, and\npolling the deep route instead would federate a Vault credential\nand write an audit row per poll. The facet honours this handler's\nconstraints \u2014 an in-memory clock read; no connector, no credential,\nno secret."
       },
       "ManualStep": {
         "properties": {
@@ -25947,16 +26079,26 @@
             "type": "string",
             "nullable": true,
             "title": "Email"
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Tenant Id"
+          },
+          "tenant_role": {
+            "$ref": "#/components/schemas/TenantRole"
           }
         },
         "type": "object",
         "required": [
           "sub",
           "name",
-          "email"
+          "email",
+          "tenant_id",
+          "tenant_role"
         ],
         "title": "OperatorIdentity",
-        "description": "Operator identity surface exposed to the CLI.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only."
+        "description": "Operator identity surface exposed to the CLI and MCP ``meho_status``.\n\nExcludes ``raw_jwt`` deliberately \u2014 the bearer token must never\nappear in a response body, and the :class:`Operator` model carries\nit for downstream Vault forward-auth only.\n\n``tenant_id`` + ``tenant_role`` (#2746) let a connected MCP session\nconfirm *which tenant and role it runs as* from inside the session \u2014\nthe check the clean-room program's \"logged in as operator, not\ntenant_admin\" discipline needs, and the identity the ``meho_status``\ntool's own doc (``docs/cross-repo/mcp-client-setup.md`` Step 4)\nalready promises. Both are always present on the validated\n:class:`Operator` (JWT claims), so the surface can never omit them;\nthey serialise as a UUID string / role value under\n``model_dump(mode=\"json\")`` \u2014 the same wire shape the\n``meho://tenant/<id>/info`` resource returns."
       },
       "PermissionVerdict": {
         "type": "string",
@@ -27843,6 +27985,20 @@
             "title": "For Seconds",
             "default": 0
           },
+          "retry_times": {
+            "type": "integer",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Retry Times",
+            "default": 0
+          },
+          "retry_backoff_seconds": {
+            "type": "integer",
+            "maximum": 300.0,
+            "minimum": 5.0,
+            "title": "Retry Backoff Seconds",
+            "default": 15
+          },
           "identity_sub": {
             "type": "string",
             "maxLength": 256,
@@ -27866,24 +28022,29 @@
           "cadence_kind"
         ],
         "title": "SensorCreate",
-        "description": "Request body for ``POST /api/v1/sensors``.\n\nDiscriminated by *cadence_kind*: exactly one of ``interval_seconds``\n(interval cadence, 5..86400 s) / ``cron_expr`` + ``timezone`` (cron\ncadence) must be set, matching the DB-side ``ck_sensor_cadence_fields``\ninvariant. The :meth:`_validate_cadence_and_assertion` validator\nenforces this at the wire, validates the cron expression + timezone\nexactly as :mod:`meho_backplane.scheduler.schemas` does, and caps the\nserialized assertion size.\n\n``status`` is deliberately **not** a field: sensors are\nset-at-create-only (like scheduled triggers), and a row is only ever\nparked (``status='paused'``) by #2505's runner, never at create. With\n``extra=\"forbid\"`` a body carrying ``status`` is a 422.\n\n*identity_sub* defaults to ``\"__sensor__\"`` (the sentinel #2505's\nrunner dispatches under). *tenant_id* (optional) lets a platform-admin\ncaller target another tenant; the boundary enforces the RBAC."
+        "description": "Request body for ``POST /api/v1/sensors``.\n\nDiscriminated by *cadence_kind*: exactly one of ``interval_seconds``\n(interval cadence, 5..86400 s) / ``cron_expr`` + ``timezone`` (cron\ncadence) must be set, matching the DB-side ``ck_sensor_cadence_fields``\ninvariant. The :meth:`_validate_cadence_and_assertion` validator\nenforces this at the wire, validates the cron expression + timezone\nexactly as :mod:`meho_backplane.scheduler.schemas` does, and caps the\nserialized assertion size.\n\n``status`` is deliberately **not** a field: sensors are\nset-at-create-only (like scheduled triggers), and a row is only ever\nparked (``status='paused'``) by #2505's runner, never at create. With\n``extra=\"forbid\"`` a body carrying ``status`` is a 422.\n\n*identity_sub* defaults to ``\"__sensor__\"`` (the sentinel #2505's\nrunner dispatches under). It is the ``sub`` every scheduled dispatch is\naudit-attributed to (``AuditLog.operator_sub`` / broadcast\n``principal_sub``), so :meth:`SensorAdminService.create` accepts only the\nsentinel or the creating operator's own sub -- any other value is refused\nwith ``sensor_identity_sub_forbidden`` (#2699). The wire model only\nlength-caps it here; the ownership check lives at the service choke point\nbecause Pydantic has no access to the authenticated operator.\n*tenant_id* (optional) lets a platform-admin caller target another tenant;\nthe boundary enforces the RBAC."
       },
       "SensorListResponse": {
         "properties": {
-          "sensors": {
+          "items": {
             "items": {
               "$ref": "#/components/schemas/SensorRead"
             },
             "type": "array",
-            "title": "Sensors"
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
           }
         },
         "type": "object",
         "required": [
-          "sensors"
+          "items"
         ],
         "title": "SensorListResponse",
-        "description": "Response envelope for ``GET /api/v1/sensors``.\n\nWrapped in ``{\"sensors\": [...]}`` so a future paging / cursor field\ncan land non-breakingly -- the same shape\n:class:`~meho_backplane.scheduler.schemas.ScheduledTriggerListResponse`\nadopted."
+        "description": "Unified list envelope for ``GET /api/v1/sensors``.\n\nThe `{items, next_cursor}` shape codified in\n``docs/codebase/api-shape-conventions.md`` \u00a72. The listing is not\ncursor-paginated (``limit`` / ``offset`` truncate), so ``next_cursor``\nis always ``None`` but present so the endpoint can grow pagination\nlater without a further breaking change."
       },
       "SensorRead": {
         "properties": {
@@ -27963,6 +28124,14 @@
             "type": "integer",
             "title": "For Seconds"
           },
+          "retry_times": {
+            "type": "integer",
+            "title": "Retry Times"
+          },
+          "retry_backoff_seconds": {
+            "type": "integer",
+            "title": "Retry Backoff Seconds"
+          },
           "last_state": {
             "type": "string",
             "enum": [
@@ -27994,6 +28163,21 @@
             "format": "date-time",
             "nullable": true,
             "title": "State Since"
+          },
+          "pending_state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown"
+            ],
+            "nullable": true,
+            "title": "Pending State"
+          },
+          "pending_count": {
+            "type": "integer",
+            "title": "Pending Count"
           },
           "identity_sub": {
             "type": "string",
@@ -28033,11 +28217,15 @@
           "next_fire_at",
           "severity",
           "for_seconds",
+          "retry_times",
+          "retry_backoff_seconds",
           "last_state",
           "last_value",
           "last_evidence",
           "last_evaluated_at",
           "state_since",
+          "pending_state",
+          "pending_count",
           "identity_sub",
           "created_by_sub",
           "created_at",
@@ -28045,6 +28233,103 @@
         ],
         "title": "SensorRead",
         "description": "Response shape for one ``sensor`` row.\n\nMirrors :class:`~meho_backplane.db.models.Sensor`'s column set,\nprojected to the wire types the JSON renderer can serialise. Includes\nthe latest-result projection (``last_state`` / ``last_value`` /\n``last_evidence`` / ``last_evaluated_at`` / ``state_since``) so the\nlist response carries the current status view (there is no REST\nGET-by-id -- the mould exposes none). ``frozen=True`` so a route\nhandler cannot mutate the row after returning it."
+      },
+      "SensorResultListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/SensorResultRead"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "next_cursor": {
+            "type": "string",
+            "nullable": true,
+            "title": "Next Cursor"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "SensorResultListResponse",
+        "description": "Response envelope for ``GET /api/v1/sensors/{sensor_id}/results``.\n\nThe ``{items, next_cursor}`` keyset-pagination shape (#2742): ``items`` is\nthe page of evidence rows in ``evaluated_at ASC`` order; ``next_cursor`` is\nthe opaque continuation token to pass back as ``?cursor=`` for the next\npage, or ``null`` when this is the final page. No aggregate / rollup fields\n-- the client aggregates raw rows (#2756's determinism bound)."
+      },
+      "SensorResultRead": {
+        "properties": {
+          "sensor_id": {
+            "type": "string",
+            "format": "uuid",
+            "title": "Sensor Id"
+          },
+          "evaluated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Evaluated At"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "ok",
+              "degraded",
+              "critical",
+              "unknown",
+              "skip"
+            ],
+            "title": "State"
+          },
+          "value": {
+            "title": "Value"
+          },
+          "evidence": {
+            "additionalProperties": true,
+            "type": "object",
+            "nullable": true,
+            "title": "Evidence"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "title": "Reason"
+          }
+        },
+        "type": "object",
+        "required": [
+          "sensor_id",
+          "evaluated_at",
+          "state",
+          "value",
+          "evidence",
+          "reason"
+        ],
+        "title": "SensorResultRead",
+        "description": "Response shape for one ``sensor_results`` evidence row (#2756).\n\nMirrors :class:`~meho_backplane.db.models.SensorResult`, projected to the\nwire types the JSON renderer serialises: the raw ``(evaluated_at, state,\nvalue, evidence, reason)`` the runner computed, plus the owning\n``sensor_id``. ``frozen=True`` so a route handler cannot mutate a row after\nreturning it."
+      },
+      "SensorRunnerStatus": {
+        "properties": {
+          "seconds_since_last_tick": {
+            "type": "number",
+            "nullable": true,
+            "title": "Seconds Since Last Tick"
+          },
+          "stalled": {
+            "type": "boolean",
+            "title": "Stalled"
+          },
+          "stall_threshold_seconds": {
+            "type": "number",
+            "title": "Stall Threshold Seconds"
+          }
+        },
+        "type": "object",
+        "required": [
+          "seconds_since_last_tick",
+          "stalled",
+          "stall_threshold_seconds"
+        ],
+        "title": "SensorRunnerStatus",
+        "description": "Liveness of this process's sensor evaluation loop (#2763).\n\nThe queryable half of the checks-runner watchdog: an external prober\n(\"how we monitor the monitoring\") alerts when\n``seconds_since_last_tick`` exceeds ``stall_threshold_seconds`` \u2014 or\nsimply on ``stalled``, which is that comparison server-side.\n``stalled`` is derived live from the in-process tick stamp on every\nread (never from the watchdog task's emission latch), so it stays\ntruthful even if the watchdog task itself has died.\n\n``seconds_since_last_tick`` is ``None`` only in the window between\nprocess start and runner start \u2014 once the lifespan is up it is\nalways a number. The value is per-process: each replica reports its\nown loop, which is exactly the failure mode observed (one process's\nloop coroutine going quiet)."
       },
       "SensorSeverity": {
         "type": "string",

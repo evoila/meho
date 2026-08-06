@@ -58,7 +58,10 @@
 #     fixed CVE fails the run as a red-main alarm against silent CVE
 #     accumulation on a stale base image (it is not a PR merge gate — the step
 #     is skipped on pull_request). SARIF results land both on the GitHub
-#     Security tab (Code scanning alerts) and as a 30-day workflow artefact.
+#     Security tab (Code scanning alerts) and as a 30-day workflow artefact —
+#     and, because the two upload steps are guarded on the scan step's outcome
+#     (not the default success() gate), they publish even when the scan FAILS,
+#     so a red run's CVE list is one click away instead of lost to the skip.
 
 name: image
 
@@ -277,7 +280,8 @@ jobs:
             --type spdxjson \
             "ghcr.io/evoila/meho@${DIGEST}"
 
-      - name: Vulnerability scan (trivy, report-only)
+      - name: Vulnerability scan (trivy — fails on fixable CRITICAL/HIGH)
+        id: trivy
         # trivy scans the pushed image (OS packages + language deps,
         # including the uv-installed Python wheels in /app/.venv). Emits
         # SARIF for upload to the GitHub Security tab.
@@ -313,7 +317,14 @@ jobs:
         # SARIF upload surfaces findings under repo -> Security -> Code
         # scanning alerts. Requires `security-events: write` at the job or
         # workflow level — granted in the top-level permissions block.
-        if: github.event_name != 'pull_request'
+        #
+        # Publish on a FAILED scan too — a red scan is exactly when the CVE
+        # list must reach the Security tab — but stay skipped when the scan
+        # step was SKIPPED (the pull_request path, where it never ran). A bare
+        # `if:` is implicitly success()-gated, so the previous condition
+        # dropped this upload on every red scan; the explicit `!cancelled()`
+        # opts out of that default and the outcome check restores the PR skip.
+        if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
         uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81  # v4.37.3
         with:
           sarif_file: trivy-results.sarif
@@ -325,8 +336,10 @@ jobs:
       - name: Upload trivy SARIF as workflow artefact
         # Mirrors the SARIF upload as a downloadable artefact (30-day
         # retention) so operators can pull it via `gh run download` without
-        # needing Security-tab access.
-        if: github.event_name != 'pull_request'
+        # needing Security-tab access. Same fail-visible guard as the
+        # Security-tab upload above: publishes on a red scan, skips on the
+        # pull_request path where the scan step never ran.
+        if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: trivy-results

@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Breaking changes — `net.*` allowlist refusals move from a `status="ok"` body to a dispatch error (#2784)
+
+- A `net.*` probe whose destination is outside
+  `MEHO_NETDIAG_PROBE_ALLOWLIST` now returns `status="error"` with
+  `extras.error_code == "connector_probe_refused"`. It previously returned
+  `status="ok"` with a reading-shaped body carrying `reason:
+  "not_in_probe_allowlist"` — which, as the `Fixed` entry below explains,
+  was indistinguishable from a real outage. Affects `net.tcp_check`,
+  `net.dns_lookup`, `net.tls_inspect`, `net.http_probe`, `net.ntp_check`,
+  `net.ping`, `net.trace`, `net.path_mtu`. The reason code
+  `not_in_probe_allowlist` no longer appears on any `net.*` response.
+- **Migration:** replace a check of `result["reason"] ==
+  "not_in_probe_allowlist"` on an `ok` body with
+  `result["extras"]["error_code"] == "connector_probe_refused"` on an
+  `error` envelope. Sensors need no change — the check-runner already maps
+  any non-`ok` dispatch to `unknown`.
+- **Unchanged:** `net.http_probe`'s mid-chain **redirect** re-gate still
+  returns `status="ok"` with `reachable: true` / `reason:
+  "blocked_redirect"` — the prior hop answered, so that remains a real
+  observation.
+
 ### Fixed — a refused `net.*` probe no longer reads as a down host (#2784)
 
 - **Behaviour change (agent- and sensor-visible).** A `net.*` probe whose
@@ -118,13 +139,8 @@ connector-related release-notes line.
   regression now surfaces as a truthful "can't tell" (which the rollup
   reads as `degraded`) with the allowlist named in `dispatch_error`,
   instead of a false page. No checks-layer code changed.
-- **Adopters:** a caller that branched on `result.reason ==
-  "not_in_probe_allowlist"` on a `status="ok"` body now sees
-  `status="error"` with `extras.error_code == "connector_probe_refused"`;
-  switch the check to the error envelope. `net.http_probe`'s mid-chain
-  **redirect** re-gate is unchanged and still returns `status="ok"` with
-  `reachable: true` / `reason: "blocked_redirect"` — the prior hop
-  answered, so that remains a real observation.
+- **Adopters:** the envelope change and its migration recipe are under
+  *Breaking changes* above.
 - The `net.*.refused` structlog lines are gone; the refusal is now
   recorded on the durable audit row instead (`payload.error` carries the
   structured envelope).

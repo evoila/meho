@@ -90,6 +90,24 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)
+
+- Seven new task-first guides under `docs-site/guides/` complete the
+  "Do real work" section shaped by the #2663 initiative: **topology**
+  (the dependency graph — blast-radius, reachability, and how a resource
+  gets an anchor), **broadcast** (the cross-operator activity feed plus
+  the read-before-start discipline), **memory & knowledge** (the two
+  durable stores, memory scopes and TTL, and which belongs where),
+  **audit forensics** (`query_audit` filters, the broadcast/audit
+  correlation — pivot via the event's `audit_id` — and end-to-end
+  agent-session replay), **runbooks** (authoring and running versioned
+  multi-step procedures), **scheduler** (cron / one-off agent triggers,
+  including the #2668 durable-credential self-heal that keeps unattended
+  runs firing), and **satellite gateway** (remote check execution for
+  networks the central instance cannot dial). Each shows the CLI and MCP
+  surfaces against the same dispatch path and wires into the MkDocs nav;
+  the strict-build PR gate keeps the pages link-clean.
+
 ### Breaking changes — `net.*` allowlist refusals move from a `status="ok"` body to a dispatch error (#2784)
 
 - A `net.*` probe whose destination is outside

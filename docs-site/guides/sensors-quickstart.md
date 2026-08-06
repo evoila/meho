@@ -254,5 +254,5 @@ is also the sensors feature's road-to-GA tracker.
 
 **Where next:** compose sensors with the approvals workflow (a red
 dashboard, an investigator finding, a gated remediation) — the
-[approvals & break-glass guide](index.md#coming-to-this-section)
+[approvals & break-glass guide](approvals-and-break-glass.md)
 covers the gated half.

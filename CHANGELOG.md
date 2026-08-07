@@ -90,6 +90,8 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-07
+
 ### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)
 
 - Seven new task-first guides under `docs-site/guides/` complete the
@@ -336,6 +338,186 @@ connector-related release-notes line.
   applicable*. Also aligns the site + install pages onto the settled
   `meho-mcp` public-client name.
 
+- **Per-tick sensor evidence history + retention-bounded trend query** —
+  sensors kept only a latest-state projection: every tick overwrote
+  `last_state` / `last_value` / `last_evidence`, so a post-incident
+  review could not answer "when did this first flap / how fast is it
+  filling". Each non-stale evaluation now also appends one
+  `(sensor_id, evaluated_at, state, value, evidence, reason)` row to the
+  new append-only `sensor_results` table (migration `0071`), in the
+  **same transaction** as the projection update so history and
+  projection cannot diverge; deleting a sensor cascades its history
+  away. Retention is deploy-level: `CHECKS_EVIDENCE_RETENTION_DAYS`
+  (default 7) bounds row age via a lifespan-owned weekly sweeper
+  (`CHECKS_EVIDENCE_PRUNE_INTERVAL_SECONDS`, default 604800;
+  `CHECKS_EVIDENCE_PRUNE_ENABLED=false` hands retention to an external
+  job), and each prune records a summary audit row. `0` disables the
+  feature entirely — no rows written, today's behaviour, zero surprise
+  DB growth — a deliberate, documented divergence from the
+  announcement / topology sweepers' `0`-keeps-forever. The trend query
+  ships on all three surfaces — REST
+  `GET /api/v1/sensors/{id}/results`, MCP tool `meho_sensor_results`,
+  CLI `meho sensor results <sensor_id>` — with binary filters only
+  (`from` / `to`, optional `state`, bounded `limit`), deterministic
+  `evaluated_at ASC` ordering, an opaque keyset `cursor`, and the
+  `{items, next_cursor}` envelope (#2742). No smoothing / downsampling /
+  scoring knobs: unknown params are rejected (422 on REST, schema
+  refusal on MCP) and clients aggregate raw rows. Own-tenant-scoped on
+  every transport (cross-tenant read → 404). Supersedes the Sensor
+  model's recorded "not a results table" decision;
+  `docs/codebase/sensor.md` covers the history surface (#2756 / #2810).
+
+- **Sensor state-confirmation retries (Nagios soft/hard states)** — a
+  sensor state change now commits — and notifies — only after it is
+  confirmed (#2799 / #2805). Two new create-time knobs: `retry_times`
+  (0..5, default `0` = off, today's behaviour) is the number of
+  consecutive confirming re-evaluations required after the first
+  differing reading before the transition commits;
+  `retry_backoff_seconds` (5..300, default `15`) paces the accelerated
+  re-checks while a candidate state is pending — a pending persist
+  pulls `next_fire_at` to
+  `min(next_fire_at, evaluated_at + retry_backoff_seconds)` via a
+  conditional UPDATE (`accelerate_sensor_next_fire`), restart-safe with
+  no in-process sleeps, riding the existing claim/advance machinery.
+  The commit gate lives in `record_sensor_result`, so runner-local and
+  satellite-gateway batch-posted results are confirmed identically, and
+  an unconfirmed reading never reaches the projection — the rollup CAS,
+  notifier, broadcaster, investigator, and advisory are all gated
+  upstream for free. Confirmation is symmetric (recovery to `ok` is
+  confirmed too) and `unknown` participates like any state, so a
+  transient dispatch timeout cannot flip a sensor. The soft-state
+  window is observable via new `pending_state` / `pending_count`
+  projection columns on `SensorRead`. All three transports accept the
+  knobs: REST `SensorCreate`, MCP `meho_sensor_create`, and the Go CLI
+  `--retry-times` / `--retry-backoff-seconds`. Migration `0070`
+  backfills `retry_times=0`, keeping every existing sensor
+  behaviour-identical. Motivated by an observed flap where one flaky
+  `free_space` reading mailed `critical -> degraded` and `degraded ->
+  ok` within the same minute.
+
+- **Dashboard `notify_email` accepts a list of recipients** (#2764 /
+  #2812): the checks notification address now carries one or more
+  comma-separated recipients, so a Dashboard can page a channel ingest
+  address *and* a specific on-call individual — the combination the
+  single-address field could not express. Each entry is individually
+  `EmailStr`-validated (a malformed entry is a 422 naming it),
+  normalised, bounded at 16 recipients, and stored comma-joined in the
+  existing column — no migration, and a single-address Dashboard keeps
+  working unchanged. Both notice kinds — the transition mail and the
+  investigator finding mail — fan the identical message out to every
+  recipient in one `send_email` call. Each entry is pre-screened
+  individually against `MAIL_RECIPIENT_ALLOWLIST`: a refused entry is
+  dropped with a `checks_notify_recipient_refused` warning and never
+  silences delivery to the allowlisted rest (`send_email`'s own
+  all-or-nothing screen for the dispatched `mail.send` path is
+  untouched). The #2732 flap-suppression claim stays per
+  `(tenant, dashboard, state)`, so a multi-recipient Dashboard makes
+  exactly one claim per edge and cannot burn N windows. `meho dashboard
+  create --notify-email` accepts the same comma-separated form. Flat
+  fan-out only — no routing rules, per-recipient `notify_min_state`, or
+  templating.
+
+- **Cert-expiry early warning: `net.tls_inspect` now derives a numeric
+  `days_to_expiry`** (#2772 / #2808): the op reported certificate
+  validity only as the ISO string `not_after`, so the classic "warn at
+  30 days, page at 7" sensor was inexpressible — `ThresholdCompare` had
+  nothing numeric to bite on, and the only time-aware comparator,
+  `FreshnessCompare`, is deliberately past-oriented (`age = now -
+  timestamp`), staying `ok` until the cert had *already* expired.
+  Success results now carry a derived `days_to_expiry` float
+  (`(not_after - now) / 86400`, negative once expired) on the leaf and
+  on **every** chain entry — computed against a single probe-time `now`
+  the handler captures once, so a whole chain shares one reference
+  instant and an intermediate-expiry sensor becomes possible for free —
+  plus a top-level alias of the leaf's value beside the existing
+  `not_after`. The failure shape carries `days_to_expiry: null`
+  (handshake failed, so no cert), and the response schema is extended
+  in lockstep (staying `additionalProperties: false`) so
+  `search_operations` surfaces the field. No new comparator: the
+  classic sensor works end-to-end with the existing machinery —
+  `{select: {path: "$.days_to_expiry"}, compare: {type: threshold, op:
+  lt, degraded: 30, critical: 7}}` — and `FreshnessCompare` plus
+  everything under `checks/` is untouched. The field and the
+  cert-expiry sensor recipe (including the `$.chain[*].days_to_expiry`
+  + `min` intermediate-watch variant) are documented in
+  `docs/codebase/connectors-net-diagnostics.md`.
+
+- **gh Projects-v2 board ops + sub-issue linkage composites** — four new
+  direct-session composites on the `gh-rest-3` connector let an agent file
+  a **board-complete ticket** (create → add to board → set Status → link
+  sub-issue) through MEHO's dispatch path (auth + policy + audit +
+  JSONFlux + broadcast) instead of dropping to the `gh` CLI, which
+  bypassed all of it. Projects-v2 is GraphQL-only (`addProjectV2ItemById`
+  / `updateProjectV2ItemFieldValue` have no REST equivalent), so a shared
+  `_graphql.py` helper POSTs to `/graphql` and raises `GitHubGraphQlError`
+  on the `errors` array GitHub returns with **HTTP 200** (invisible to
+  `raise_for_status`); all dynamic values ride the GraphQL `variables`
+  map. The ops: `gh.composite.project_view` (`board` group,
+  `safety_level="safe"`) reads the board in one round trip — node id,
+  fields with single-select `options {id name}`, and items — handing back
+  the `project_id` / `field_id` / `option_id` node ids the writes
+  consume, so an agent never shells out to `gh project` to discover them;
+  `gh.composite.project_item_add` and `gh.composite.project_item_set_field`
+  (`board` group) are the two Projects-v2 GraphQL writes; and
+  `gh.composite.sub_issue_add` (`issues` group) is the sub-issue linkage
+  REST write (`POST /repos/{owner}/{repo}/issues/{issue_number}/sub_issues`,
+  taking the sub-issue's **database id**, not its issue number; optional
+  `replace_parent` moves an already-linked sub-issue). The three writes
+  are `safety_level="caution"` / `requires_approval=False`: each is a
+  single logical mutation, so the composite itself is the reviewed unit —
+  a human/service operator auto-executes a board write while an agent
+  principal routes to the approval queue via the `caution` default,
+  exactly the governance a raw CLI fallback bypasses. Ship state: these
+  land on the **loader-wired** `gh-rest-3` connector
+  (`shared_service_account` — its only accepted auth model — live via the
+  operator-context Vault read, GitHub App or PAT secret shapes) and
+  dispatch through the connector's own session, so they work on a fresh
+  deploy with zero gh catalog ingest. Scope: `project_item_set_field`
+  sets single-select fields only (iteration / text / number / date value
+  shapes deferred); github.com only, no GHES. End-to-end flow is covered
+  by a deterministic unit-lane test
+  (`test_github_board_composite_flow.py`); the OpenAPI/CLI surface is
+  unchanged — composites dispatch through the stable `call_operation`
+  meta-tool, not per-op routes. (#2081 / #2823)
+
+- **`meho login --print-token`** (#2782 / #2786): after a successful
+  device-code flow the new flag writes **only** the freshly minted
+  access token to stdout (one trailing newline), diverting every other
+  line — the device-code prompt, success message, warnings — to stderr,
+  so `TOKEN=$(meho login --print-token <url>)` captures exactly the
+  bearer (precedent: `gcloud auth print-access-token`, `gh auth token`).
+  `meho status` keeps redacting the token by design — raw-token
+  retrieval is homed on `login`, and default `meho login` output is
+  byte-identical when the flag is off; `--help` carries a
+  live-credential caution. Also repoints all 12 phantom
+  `meho status --print-token` doc references (a flag `status` never
+  had) at the real command — 9 in `deploy/values-examples/README.md`,
+  3 in `docs/cross-repo/mcp-client-setup.md` — with
+  `docs/codebase/cli.md` updated to match.
+
+- **Machine review identity for automated reviews + DCO remediation
+  commits** (#2733 / #2788): lands the repo-side half of the dedicated
+  second identity — the `meho-review` GitHub App, chosen over a PAT
+  machine user in `docs/decisions/automation-review-identity.md` — that
+  lets the autonomous review skills post a formal APPROVE /
+  REQUEST_CHANGES whose `reviewDecision` flip satisfies branch
+  protection's `required_approving_review_count: 1` honestly, instead
+  of degrading to a comment on PRs their own author identity opened.
+  Ships `scripts/setup/mint-review-app-token.sh` (App credentials → a
+  1-hour installation token; token on stdout only, every failure a loud
+  non-zero exit so the skills degrade explicitly instead of faking an
+  approval) and the identity/custody/rotation doc with a
+  copy-pasteable org-admin provisioning runbook
+  (`docs/codebase/automation-review-identity.md`) — creating and
+  installing the App is an org-admin action still tracked on #2733.
+  Alongside, `.github/dco.yml` enables the DCO app's **individual
+  remediation commits**: a missed `Signed-off-by` is now repaired with
+  a follow-up signed-off commit (recipe in CONTRIBUTING.md) instead of
+  a branch rewrite + force-push that destroys review anchors — two of
+  those during Initiative #2716. Sign-off stays mandatory for every
+  commit (`require.members: false` is deliberately not set), and
+  third-party remediation stays disabled.
+
 ### Fixed
 
 - **Phantom root `uv.lock` purged from the Dependabot alert surface**
@@ -446,6 +628,266 @@ connector-related release-notes line.
   drop it when upstream supports the repo's cryptography floor, or
   immediately if a security advisory lands (the ignore also suppresses
   security-update PRs for the package — none open today).
+
+- **`turns` in agent run status is no longer a constant 0 — the run row
+  now persists the loop's model-request turn total at finalize**
+  (#2743 / #2818). The `agent_run.turns` column shipped with the
+  lifecycle service (#1031) but was never wired: its lone writer,
+  `increment_turns`, had zero production callers, so every read surface
+  (MCP `meho_agents_run_status`, REST, `/ui`) reported `turns: 0` for
+  every run — tool-using or not. That constant was exactly the
+  pre-#2644 model-init-failure fingerprint, so any consumer keying on
+  "did the run reach turn 1" (a deployed verification probe did)
+  mis-verdicted perfectly healthy runs as never-started. `turns` now
+  means **model-request turns**: the non-streamed path persists
+  `AgentRunResult.request_count`, the SSE path tallies `TURN` events
+  (one per model-request node, the same count), and both write through
+  `succeed_run` so the total lands atomically with the terminal
+  transition. It is written **only on the success path** — a run that
+  fails before reaching the model (the #2644 class) keeps `turns == 0`,
+  so the outage fingerprint stays meaningful, and a succeeded run
+  always reports `turns >= 1`. The dead `increment_turns` helper is
+  removed (no second dead path), and the column docstring plus the
+  `meho_agents_run_status` tool description now state the
+  model-request-turn semantics on the wire surface agents read. Known
+  gap: agent-invoked **child** runs still report `turns == 0` — the
+  child-finalize protocol does not carry the count; file separately if
+  a consumer needs it.
+
+- **`vmware.composite.datastore.usage` is now reliably assertable
+  per-entity — the unbounded `vm_names` enrichment is capped so a one-name
+  `filter_names` result stays inline** (#2758 / #2811). The exact-match
+  `filter_names` param has existed since #524, but a VM-dense datastore
+  could break the per-entity Sensor pattern anyway: measured with the
+  reducer's real `msgspec` encoder, an uncapped single row crosses the
+  4096-byte JSONFlux threshold at ~150 VMs — a routine vSAN datastore —
+  collapsing `{"datastores": [row]}` into the sampled
+  `{row_count, …, source_key}` envelope and stripping the Sensor's
+  `$.datastores[0].free_space` selector. `vm_names` is now bounded to a
+  20-name sample (`DATASTORE_USAGE_MAX_VM_NAMES`, mirrored as the row's
+  response-schema `maxItems`) while `vm_count` stays the **exact** total,
+  so `vm_count > len(vm_names)` signals truncation; the global JSONFlux
+  thresholds are untouched. The pattern is also discoverable now: the
+  `filter_names` description and `docs/codebase/connectors-vmware-rest.md`
+  spell it out ("pass exactly one name, select
+  `$.datastores[0].free_space`") — a live v0.26.0 probe had guessed
+  `datastore`/`name`/`filter` and concluded the op took no params. An E2E
+  regression test drives the real handler → JSONFlux reducer →
+  `evaluate_assertion` chain across all three threshold bands, plus a
+  guard pinning that the capped row serialises under the reducer's byte
+  threshold while the uncapped shape provably does not. Param surface
+  unchanged: `filter_names` only, description-only schema change apart
+  from the `vm_names` bound.
+
+- **The `no_connector` dispatch error now names the target's product, not
+  the caller's `connector_id`** (#2701 / #2766). A target registered under
+  a `product` no connector advertises (the classic `product: kubernetes`
+  where the connector advertises `k8s`) misses at connector resolution on
+  every dispatch — and the residual error echoed the `(product, version)`
+  parsed from the caller's `connector_id`, reading as "your `connector_id`
+  is wrong" and sending the reporter chasing connector ids instead of the
+  mis-registered target row. The error (and `extras['product']` /
+  `extras['version']`) now carries the target's registered product and the
+  version the resolver actually read (which may be `None`), falling back
+  to the `connector_id` pair only when there is no target product to name
+  (an ingested op dispatched with `target=None`). Diagnosability-only:
+  register-time rejection of an unadvertised `product` already shipped
+  (#1144); this makes the residual runtime failure name itself.
+
+- **Sensor `identity_sub` can no longer name a principal the creator does
+  not own** (#2699 / #2767). `identity_sub` is the `sub` the check runner
+  dispatches every scheduled evaluation under, stamped verbatim onto
+  `AuditLog.operator_sub` and `BroadcastEvent.principal_sub` — yet it was
+  caller-supplied free text with only a length cap, so a tenant admin
+  could attribute a high-volume recurring dispatch stream to any principal
+  they named, corrupting the audit ledger. `SensorAdminService.create` —
+  the choke point REST, MCP, and CLI all route through — now accepts only
+  the `"__sensor__"` sentinel or the creating operator's own sub; any
+  other value is refused with **422 `sensor_identity_sub_forbidden`** (the
+  MCP tool surfaces the same code). Attribution-only, not privilege
+  escalation: `identity_sub` selects no credentials. The guard is
+  create-time only — rows persisted by pre-guard builds keep dispatching
+  under their stored value, so such deployments should re-audit existing
+  sensors' `identity_sub`.
+
+- **ArgoCD write ops now park with a uniform `op_class` and
+  `proposed_effect` envelope** (#2681 / #2769). Both defects lived in
+  the shared park-time machinery, not the connector. (1) `classify_op`
+  keyed purely off the op-id verb suffix, so `argocd.app.set` / `.sync`
+  / `.rollback` / `.refresh` classified `other` while their `.delete` /
+  `appproject.create` / `appproject.update` siblings classified
+  `write`; the four are now exact-pinned `write` in a new `_WRITE_OPS`
+  frozenset rather than added as global suffixes — a `.set` / `.sync` /
+  `.rollback` suffix would bleed into the auto-derived flat MCP-tool
+  mirror (relabelling e.g. `meho_broadcast_overrides_set`), and since
+  `classify_op` re-runs at render time a `.refresh` suffix would
+  relabel every historical read-class `topology.refresh` row. All seven
+  approval-gated argocd writes now classify `write`; `argocd.app.refresh`
+  earns it despite its GET verb because `?refresh=hard` forces a
+  cluster-side reconcile — an approval-gated side effect. (2) The
+  op-identity fields (`op_id` / `connector_id` / `target_id`) rode only
+  the preview-declined/failed paths, so the same op parked against a
+  nonexistent vs. a live app produced a different field-set; the
+  dispatcher now stamps the identity fields plus `op_class` onto every
+  parked envelope (`setdefault` — a hook-supplied value wins), so an
+  approver reads one schema per connector regardless of the per-op
+  preview outcome. The bespoke `preview` XOR generic `params_echo`
+  content key legitimately still varies; the reported
+  `preview_populated: true` on `argocd.app.refresh` was confirmed
+  working-as-designed (#1856 / #2332 — the content lives under
+  `params_echo`). Contract documented in `docs/codebase/approvals.md`
+  § "Uniform op-identity envelope".
+
+- **Three MCP-surface conformance gaps from the #2666 Claude Desktop
+  smoke test closed** (#2746 / #2820) — the secondary findings from the
+  same run as the #2745 tool-name and #2774 `structuredContent`
+  blockers, filed separately; all three are posture-independent and
+  each broke a documented behavior or verify step in
+  `docs/cross-repo/mcp-client-setup.md`. (1) `resources/list` published
+  zero concrete resources, so a discovery-driven client (Claude
+  Desktop's attachment picker lists via `resources/list` at handshake)
+  had nothing to offer for the documented Step-4 verify resource. It
+  now publishes the caller's **own** `meho://tenant/<tenant_id>/info`,
+  derived server-side from the JWT — the operator never needs to know
+  their tenant UUID. Implemented as an opt-in `list_uris` provider on
+  the resource registry (`all_listed_resources_for`, RBAC + capability
+  filtered on the owning template); no new resource kinds, and
+  templated resources still surface only via
+  `resources/templates/list`. (2) `meho_status` omitted tenant
+  identity — `OperatorIdentity` (shared with `GET /api/v1/health` and
+  `/health/live`, wire-identical by design, so those REST payloads gain
+  the same two additive fields) now carries `tenant_id` +
+  `tenant_role`, letting a connected session confirm which tenant and
+  role it runs as (the clean-room "operator, not tenant_admin" check).
+  (3) `serverInfo.version` reported the static `0.1.0-dev` package
+  stub; it is now wired to `deployed_version_label()` (`CHART_VERSION`
+  / `GIT_SHA`, the #1698 precedent), so the upgrade-verify guidance can
+  read the live build. Docs updated to match (`mcp-client-setup.md`
+  Step 4, `docs/codebase/backend.md`).
+
+- **`meho admin keycloak bootstrap-clients` now provisions the settled
+  `meho-mcp` client name** (#2783 / #2785; docs drift resolved in #2779).
+  Docs said `meho-mcp-client`, but both real adopters had registered
+  `meho-mcp` (verified live against the evba realm during the #2666
+  smoke runs) — #2779 adopted deployed reality across the four affected
+  docs (a pure string rename, no code), and this release lands the
+  deferred code leg: the `--mcp-client-id` flag default and the
+  programmatic bootstrap default both become `meho-mcp`, so a fresh
+  bootstrap no longer provisions a client that contradicts the shipped
+  docs. Note for realms bootstrapped by an older CLI: clients reconcile
+  **by client id**, so a re-run creates a new `meho-mcp` client and
+  leaves the stale `meho-mcp-client` in place — a one-time manual
+  cleanup of the stale client is expected there.
+
+- **MCP browser-flow redirect URIs default to loopback-only** (#2793 /
+  #2795; manual recipes aligned in #2796 / #2797).
+  `meho admin keycloak bootstrap-clients` now defaults the public MCP
+  client's redirect allowlist to `http://localhost:*` +
+  `http://127.0.0.1:*` (was `https://claude.ai/api/mcp/auth_callback` +
+  `http://localhost:*`). The `claude.ai` cloud callback is the remote
+  Custom-Connector path, which needs a publicly reachable backplane —
+  internal-only MEHO never is (#2744) — so it could never be exercised;
+  the `127.0.0.1` twin is needed because Keycloak matches redirect
+  hosts **literally**, so `http://localhost:*` does not cover the
+  `127.0.0.1` host `mcp-remote`'s `/oauth/callback` uses. A fresh
+  bootstrap now yields a client a VPN-connected Claude Desktop
+  (`mcp-remote` shim) or Claude Code can use with no manual redirect
+  edits — closing the gap the #2666 smoke test had patched by hand.
+  Re-runs self-heal: the MCP client is reconciled via a
+  full-representation `PUT`, so the next default re-run drops a stale
+  `claude.ai` entry and adds the twin. The manual hand-registration
+  recipes (`deploy/values-examples/README.md`,
+  `docs/cross-repo/mcp-client-setup.md`) now register the same
+  loopback-only set as the CLI default and the canonical
+  `docs-site/install/keycloak-realm.md` example.
+
+- **The docs-site tag deploy no longer reports `success` while the
+  published site 404s** (#2741 / #2821). A green `mike deploy` only
+  proves the built site was committed to `gh-pages` — not that GitHub
+  Pages serves it, and Pages needs a one-time maintainer setup that was
+  not done on `evoila/meho` until 2026-08-02: every "successful" docs
+  publish before then was silently unservable (the v0.26.0 deploy, run
+  30747603545, concluded `success` while the site returned HTTP 404).
+  The deploy job in `.github/workflows/docs-site.yml` now ends with a
+  **post-publish reachability gate**: it polls the exact `MAJOR.MINOR`
+  version path this run published (handed from the deploy step via a
+  `version` output — never the site root, whose redirect to `latest`
+  returns 200 and would mask a failed version publish; an empty-version
+  guard closes the `//` → root-200 hole) until it returns HTTP 200, up
+  to a 10-minute deadline at 15 s intervals, then fails the run with an
+  error naming the one-time fix (Settings → Pages → Deploy from a
+  branch → `gh-pages` / root). A first-ever deploy on a repo without
+  Pages enabled therefore goes red instead of green. The workflow
+  header and `docs/codebase/docs-site.md` document the enforcement, and
+  a job-level `timeout-minutes: 20` keeps a genuinely stuck gate from
+  burning the 6-hour default.
+
+- **Trivy scan step drops its "report-only" misnomer, and a red scan
+  now publishes its SARIF** (#2740 / #2803): the image workflow's scan
+  step was named `Vulnerability scan (trivy, report-only)` but runs
+  with `exit-code: '1'` — it hard-fails main/tag builds on a fixable
+  CRITICAL/HIGH CVE, and the misnomer twice invited reading a genuine
+  red run as a flake (2026-08-01 and 2026-08-04 incidents). Renamed to
+  `Vulnerability scan (trivy — fails on fixable CRITICAL/HIGH)`. Both
+  SARIF upload steps also inherited the implicit `success()` gate, so
+  on a red scan — exactly when the CVE list is needed — nothing reached
+  the Security tab or the 30-day artefact. The scan step now carries
+  `id: trivy` and both uploads are gated on
+  `if: ${{ !cancelled() && steps.trivy.outcome != 'skipped' }}`, which
+  publishes on a failed scan yet keeps the `pull_request`-path skip
+  (where the scan step never runs). The gate itself is byte-for-byte
+  unchanged (`exit-code: '1'`, `severity: CRITICAL,HIGH`,
+  `ignore-unfixed: true`); `backend/README.md` and
+  `docs/codebase/backend.md` shed the stale report-only / "stays
+  green" wording that fed the exact misconception behind the
+  incidents.
+
+- **Values-examples curl recipes capture the login token once per
+  block** (#2787 / #2789): the auth-onramp recipes in
+  `deploy/values-examples/README.md` embedded
+  `$(meho login --print-token <host>)` inline in every curl's
+  `Authorization: Bearer` header — seven redundant `meho login`
+  invocations that, with no cached session, could each re-trigger the
+  device-code flow mid-recipe. Each of the four recipe blocks now
+  captures `TOKEN=$(meho login --print-token <host>)` once and reuses
+  `$TOKEN` (the entitlement block's `jwt decode` step included),
+  matching the capture-once idiom already used in
+  `docs/cross-repo/mcp-client-setup.md`.
+
+- **`meho admin keycloak bootstrap-clients` no longer frames its MCP
+  client for the Claude.ai Custom Connector** (#2792 / #2794): the
+  `MCPClientID` struct comment, the registered Keycloak client
+  Description, and the post-run "paste this client_id" help line all
+  named the Custom Connector — invalid under the internal-only
+  invariant (#2744, proven by the #2666 smoke test), since the Custom
+  Connector backend runs in Anthropic's cloud and needs a publicly
+  reachable backplane, which MEHO never is. All three sites now name
+  the real browser-flow consumers: the `mcp-remote` stdio shim
+  (Claude Desktop), MCP Inspector, and Claude Code / Cursor via
+  loopback PKCE. Wording only; no behavior change.
+
+- **vCenter targets no longer fingerprint permanently unreachable** —
+  `VmwareRestConnector.fingerprint()` probed only `GET /api/about`, which
+  is the **ESXi host** REST surface; vCenter's Automation API has no such
+  path and answers HTTP 404, so every vCenter target read
+  `reachable=false` no matter how healthy it was. The probe now runs a
+  fallback chain: `GET /api/about` stays first (richest for ESXi,
+  regression-pinned); on a **404 specifically** it reads the
+  unauthenticated version-discovery document
+  `GET /sdk/vimServiceVersions.xml` (served by both vCenter and ESXi
+  since the SOAP era), yielding `reachable=true` plus the vim25 API
+  version; then a best-effort authenticated
+  `GET /api/appliance/system/version` (VCSA-only) supplies the
+  authoritative `version` / `build` and the observed
+  `product="vcenter"` — any failure there is swallowed, so a missing
+  enrichment never turns a reachable fingerprint red. The unreachable
+  arm no longer hardcodes `product="vcenter"` (a failed probe observed
+  nothing; it now reports the target's registered product, else
+  `"unknown"`), and `probe_method` truthfully names every endpoint the
+  chain used or attempted. The same discovery read also backs
+  `_about_version` on an `/api/about` 404, so the VI-JSON `{release}`
+  derivation (`/sdk/vim25/{release}`, #2466) now works on vCenter too.
+  (#2765 / #2790)
 
 ### Security
 

@@ -26,10 +26,11 @@ refused before any token is built. This is not a soft warning — it raises
 
 ## Typed ops (G3.7-T5 #848)
 
-Eight read-only ops registered via `register_gcloud_typed_operations()`
-at lifespan startup. All ops have `safety_level="safe"` and
-`requires_approval=False`. They land in the `endpoint_descriptor` table
-under `connector_id="gcloud-rest-1.0"`.
+Nine read-only ops registered via `register_gcloud_typed_operations()`
+at lifespan startup (eight from G3.7-T5 #848; the ninth,
+`gcloud.iam.service_account_keys.list`, added by #2846). All ops have
+`safety_level="safe"` and `requires_approval=False`. They land in the
+`endpoint_descriptor` table under `connector_id="gcloud-rest-1.0"`.
 
 | Op ID | API surface | HTTP verb | Notes |
 |---|---|---|---|
@@ -41,6 +42,7 @@ under `connector_id="gcloud-rest-1.0"`.
 | `gcloud.compute.networks.list` | Compute v1 global networks | GET | Follows `nextPageToken` |
 | `gcloud.compute.subnetworks.list` | Compute v1 `aggregatedList` | GET | Follows `nextPageToken`; `region` param |
 | `gcloud.iam.policy.read` | CRM v1 `getIamPolicy` | POST | Returns `version`, `etag`, `bindings` |
+| `gcloud.iam.service_account_keys.list` | IAM v1 `serviceAccounts.keys.list` | GET | Per-SA key inventory; required `service_account_email`, optional `key_types` → `keyTypes[]` filter; row carries `key_type` (USER_MANAGED/SYSTEM_MANAGED) + `valid_before_time` expiry; never returns key material; single GET (no pagination) |
 
 Groups and `when_to_use` blurbs are defined in `_WHEN_TO_USE_BY_GROUP`
 in `connector.py`: `identity`, `project`, `services`, `iam`, `compute`.
@@ -65,7 +67,7 @@ and return a `ResultHandle` without any connector-side changes.
   `op_id`, `handler_attr`, `summary`, `description`, `parameter_schema`,
   `response_schema`, `group_key`, `tags`, `safety_level`,
   `requires_approval`, `llm_instructions`.
-- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 8 `GcloudOp` entries.
+- **`GCLOUD_OPS`** (`ops.py`) — tuple of all 9 `GcloudOp` entries.
   `register_gcloud_typed_operations()` walks this tuple.
 - **`GcloudTargetLike`** (`session.py`) — runtime-checkable Protocol
   capturing the minimum target shape the connector reads: `name`,
@@ -210,7 +212,9 @@ is required and threaded to `_ensure_token` for the SA-JSON-key gate.
 
 ## CLI verbs (G3.7-T6 #851)
 
-All 8 ops are reachable via `meho gcloud …`. Source:
+The eight G3.7-T5 ops are reachable via `meho gcloud …` (the ninth,
+`gcloud.iam.service_account_keys.list`, is dispatchable via
+`call_operation` but has no CLI verb yet). Source:
 `cli/internal/cmd/gcloud/`.
 
 | File | Commands |
@@ -231,7 +235,7 @@ to a single zone/region.
 ## E2E tests (G3.7-T6 #851)
 
 `backend/tests/test_connectors_gcloud_e2e.py` — httpx_mock (respx) unit-
-level E2E tests covering all 8 ops. A `_StubTarget` dataclass satisfies
+level E2E tests covering all 9 ops. A `_StubTarget` dataclass satisfies
 `GcloudTargetLike`; `google.auth` calls are patched so no live GCP
 credentials are needed.
 
@@ -250,10 +254,13 @@ Key tests:
 | `test_gcloud_e2e_compute_networks_list` | VPC network inventory |
 | `test_gcloud_e2e_compute_subnetworks_list_region_filter` | `--region` sends per-region URL |
 | `test_gcloud_e2e_iam_policy_read` | IAM policy bindings |
-| `test_gcloud_e2e_audit_params_hash_field_present_in_all_ops` | All 8 handlers return non-None results |
-| `test_gcloud_e2e_all_ops_have_op_id_registered` | All 8 op IDs registered, handler methods exist |
+| `test_gcloud_e2e_iam_service_account_keys_list_returns_key_rows` | Per-SA key rows: `key_type` (USER_MANAGED/SYSTEM_MANAGED) + expiry, no key material |
+| `test_gcloud_e2e_iam_service_account_keys_list_requires_email` | Missing/blank `service_account_email` raises before any HTTP call |
+| `test_gcloud_e2e_iam_service_account_keys_list_forwards_key_types_filter` | `key_types` → repeated `keyTypes[]` query filter |
+| `test_gcloud_e2e_audit_params_hash_field_present_in_all_ops` | All 9 handlers return non-None results |
+| `test_gcloud_e2e_all_ops_have_op_id_registered` | All 9 op IDs registered, handler methods exist |
 | `test_gcloud_live_integration_about` _(gated)_ | Live GCP probe; skips unless `CI_GCLOUD_CREDENTIALS_PRESENT=1` |
-| `test_gcloud_live_integration_all_8_ops_return_ok_status` _(gated)_ | Live 8-ops sweep |
+| `test_gcloud_live_integration_all_9_ops_return_ok_status` _(gated)_ | Live 9-ops sweep |
 
 **Design note:** The always-on tests use handler method calls directly
 (not `call_operation`) because the `Target` ORM model does not yet have

@@ -3,10 +3,11 @@
 
 """Typed operations exposed by :class:`GcloudConnector`.
 
-G3.7-T5 (#848) adds eight read-only typed ops registered against the
-GCP REST surfaces (cloudresourcemanager, compute, iam, serviceusage).
-All ops are registered via ``register_typed_operation()`` at lifespan
-startup through :meth:`GcloudConnector.register_gcloud_typed_operations`.
+G3.7-T5 (#848) added eight read-only typed ops registered against the
+GCP REST surfaces (cloudresourcemanager, compute, iam, serviceusage);
+#2846 adds a ninth (per-SA key inventory). All ops are registered via
+``register_typed_operation()`` at lifespan startup through
+:meth:`GcloudConnector.register_gcloud_typed_operations`.
 
 Ops
 ---
@@ -21,6 +22,9 @@ Ops
 * ``gcloud.compute.networks.list`` — VPC networks.
 * ``gcloud.compute.subnetworks.list`` — subnet inventory.
 * ``gcloud.iam.policy.read`` — project IAM policy via CRM ``getIamPolicy``.
+* ``gcloud.iam.service_account_keys.list`` — per-SA key inventory
+  (``USER_MANAGED`` vs ``SYSTEM_MANAGED`` + expiry) via IAM
+  ``serviceAccounts.keys.list``; surfaces org-policy key violations.
 
 GCP REST URL references
 -----------------------
@@ -30,6 +34,8 @@ GCP REST URL references
   https://cloud.google.com/service-usage/docs/reference/rest/v1/services/list
 * IAM v1 (service accounts):
   https://cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts/list
+* IAM v1 (service-account keys):
+  https://cloud.google.com/iam/docs/reference/rest/v1/projects.serviceAccounts.keys/list
 * Compute Engine v1 (instances.aggregatedList, networks.list,
   subnetworks.aggregatedList):
   https://cloud.google.com/compute/docs/reference/rest/v1
@@ -623,12 +629,124 @@ _GCLOUD_IAM_POLICY_READ_OP = GcloudOp(
 
 
 # ---------------------------------------------------------------------------
+# gcloud.iam.service_account_keys.list
+# ---------------------------------------------------------------------------
+
+_GCLOUD_IAM_SERVICE_ACCOUNT_KEYS_LIST_OP = GcloudOp(
+    op_id="gcloud.iam.service_account_keys.list",
+    handler_attr="gcloud_iam_service_account_keys_list",
+    summary="List a service account's keys (USER_MANAGED vs SYSTEM_MANAGED + expiry).",
+    description=(
+        "Calls ``GET https://iam.googleapis.com/v1/projects/<id>/serviceAccounts/"
+        "<email>/keys`` (IAM v1 ``projects.serviceAccounts.keys.list``) for a "
+        "single service account. Each row carries the key name, key_type "
+        "(``USER_MANAGED`` / ``SYSTEM_MANAGED``), key_origin, valid_after_time, "
+        "valid_before_time (the expiry), and whether the key is disabled. The "
+        "list endpoint returns no private or public key material. Optional "
+        "``key_types`` maps to the API's ``keyTypes[]`` filter; omit it to "
+        "return both managed types. Use to audit whether an SA still carries an "
+        "operator-minted ``USER_MANAGED`` key — a violation of the org policy "
+        "``constraints/iam.disableServiceAccountKeyCreation`` — and when it "
+        "expires. This endpoint is per-SA: enumerate SAs with "
+        "``gcloud.iam.service_accounts.list`` first, then call this op per SA."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "service_account_email": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Email (or unique numeric ID) of the service account whose "
+                    "keys to list, e.g. 'svc@<project>.iam.gserviceaccount.com'. "
+                    "Obtain candidates from gcloud.iam.service_accounts.list."
+                ),
+            },
+            "key_types": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "enum": ["USER_MANAGED", "SYSTEM_MANAGED", "KEY_TYPE_UNSPECIFIED"],
+                },
+                "description": (
+                    "Optional keyTypes[] filter. Omit to return both "
+                    "USER_MANAGED and SYSTEM_MANAGED keys. Pass ['USER_MANAGED'] "
+                    "to narrow to operator-minted keys only."
+                ),
+            },
+        },
+        "required": ["service_account_email"],
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "rows": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "key_type": {"type": ["string", "null"]},
+                        "key_origin": {"type": ["string", "null"]},
+                        "valid_after_time": {"type": ["string", "null"]},
+                        "valid_before_time": {"type": ["string", "null"]},
+                        "disabled": {"type": "boolean"},
+                    },
+                    "required": ["name", "disabled"],
+                    "additionalProperties": False,
+                },
+            },
+            "total": {"type": "integer"},
+        },
+        "required": ["rows", "total"],
+        "additionalProperties": False,
+    },
+    group_key="iam",
+    tags=("read-only", "iam", "gcloud", "service-accounts", "keys"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call to inventory the keys on ONE service account — the compliance "
+            "read for 'does this SA still carry a USER_MANAGED (operator-minted) "
+            "key, and when does it expire?'. On this org, USER_MANAGED keys "
+            "violate constraints/iam.disableServiceAccountKeyCreation; "
+            "SYSTEM_MANAGED keys are Google-rotated and expected. The endpoint "
+            "is per-SA: first call gcloud.iam.service_accounts.list to enumerate "
+            "SAs, then call this op per SA of interest — the same two-step "
+            "discovery pattern as keycloak.client.list -> keycloak.client.get. "
+            "Pair with gcloud.iam.policy.read for a full access-review report. "
+            "The response never contains private or public key material, only "
+            "key metadata."
+        ),
+        "parameter_hints": {
+            "service_account_email": (
+                "The SA to inspect, e.g. 'svc@<project>.iam.gserviceaccount.com'. "
+                "Get candidates from gcloud.iam.service_accounts.list."
+            ),
+            "key_types": (
+                "Omit to list both USER_MANAGED and SYSTEM_MANAGED keys. Pass "
+                "['USER_MANAGED'] to narrow to operator-minted keys only."
+            ),
+        },
+        "output_shape": (
+            "{'rows': [{name, key_type, key_origin, valid_after_time, "
+            "valid_before_time, disabled}], 'total': <int>}. ``key_type`` is "
+            "'USER_MANAGED' or 'SYSTEM_MANAGED'; ``valid_before_time`` is the "
+            "RFC3339 expiry. No key material is ever returned."
+        ),
+    },
+)
+
+
+# ---------------------------------------------------------------------------
 # Merged tuple
 # ---------------------------------------------------------------------------
 
 
 def _gcloud_ops() -> tuple[GcloudOp, ...]:
-    """Return the full registration tuple for all G3.7-T5 gcloud ops."""
+    """Return the full registration tuple for all gcloud typed ops."""
     return (
         _GCLOUD_ABOUT_OP,
         _GCLOUD_PROJECT_DESCRIBE_OP,
@@ -638,14 +756,16 @@ def _gcloud_ops() -> tuple[GcloudOp, ...]:
         _GCLOUD_COMPUTE_NETWORKS_LIST_OP,
         _GCLOUD_COMPUTE_SUBNETWORKS_LIST_OP,
         _GCLOUD_IAM_POLICY_READ_OP,
+        _GCLOUD_IAM_SERVICE_ACCOUNT_KEYS_LIST_OP,
     )
 
 
 #: The ops :class:`GcloudConnector` registers at lifespan startup.
 #:
-#: G3.7-T5 (#848) ships all eight read-only ops:
+#: G3.7-T5 (#848) shipped eight read-only ops; #2846 adds a ninth
+#: (``gcloud.iam.service_account_keys.list``):
 #: ``gcloud.about``, ``gcloud.project.describe``, ``gcloud.services.list``,
 #: ``gcloud.iam.service_accounts.list``, ``gcloud.compute.instances.list``,
 #: ``gcloud.compute.networks.list``, ``gcloud.compute.subnetworks.list``,
-#: ``gcloud.iam.policy.read``.
+#: ``gcloud.iam.policy.read``, ``gcloud.iam.service_account_keys.list``.
 GCLOUD_OPS: tuple[GcloudOp, ...] = _gcloud_ops()

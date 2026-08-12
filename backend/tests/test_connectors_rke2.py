@@ -22,17 +22,25 @@ Coverage matrix (per Task #2221 acceptance criteria):
   probe (never a ``cat`` of the token path); the token entry carries
   ``redacted: true`` and no secret material bleeds into the result
   envelope or logs.
-* ``RKE2_OPS`` registration shape -- 6 ops: two read (``rke2.about`` /
-  ``rke2.posture.show``, T1 #2221), three approval-gated write
-  (``rke2.token.rotate`` T2 #2429, ``rke2.node.service.restart`` /
-  ``rke2.node.config.update`` T3 #2430), and one safe non-gated snapshot
-  (``rke2.etcd-snapshot.save`` T4 #2431). Read ops are safe / read-only /
-  no-approval and take no params; write ops are dangerous / approval-gated;
-  the snapshot op is safe / no-approval but neither read-only nor write and
-  takes an optional charset-bounded ``name``. Every op has
-  ``additionalProperties=False`` on its parameter schema, a non-empty
-  SSH-transport ``when_to_use``, and a ``rke2.`` op_id with a handler method
-  on the class.
+* :func:`build_service_status_command` / :func:`parse_service_status` -- the
+  service-state read (``rke2.node.service.status``, #2833 / #2852): the
+  read-only ``systemctl show`` probe over the fixed ``rke2-server`` /
+  ``rke2-agent`` pair, and the ``UNIT=`` / ``KEY=VALUE`` parser that reports
+  each unit's load / active / sub state, start time, and restart count.
+  ``LoadState=not-found`` nulls the live-state fields; a non-zero
+  ``NRestarts`` surfaces as the crash-loop signal; the probe raises
+  :class:`Rke2ServiceStatusProbeError` when ``systemctl`` is absent.
+* ``RKE2_OPS`` registration shape -- 7 ops: three read (``rke2.about`` /
+  ``rke2.posture.show``, T1 #2221; ``rke2.node.service.status``, #2852),
+  three approval-gated write (``rke2.token.rotate`` T2 #2429,
+  ``rke2.node.service.restart`` / ``rke2.node.config.update`` T3 #2430), and
+  one safe non-gated snapshot (``rke2.etcd-snapshot.save`` T4 #2431). Read
+  ops are safe / read-only / no-approval and take no params; write ops are
+  dangerous / approval-gated; the snapshot op is safe / no-approval but
+  neither read-only nor write and takes an optional charset-bounded
+  ``name``. Every op has ``additionalProperties=False`` on its parameter
+  schema, a non-empty SSH-transport ``when_to_use``, and a ``rke2.`` op_id
+  with a handler method on the class.
 * ``rke2.etcd-snapshot.save`` handler -- name charset re-check
   (fail-closed), the embedded-etcd-server precondition guard, and a
   bounded-name save parsed from the RKE2 ``Snapshot <name> saved.`` log.
@@ -57,13 +65,18 @@ from meho_backplane.connectors.rke2.connector import (
 from meho_backplane.connectors.rke2.ops_read import (
     POSTURE_CONFIG_PATHS,
     RKE2_TOKEN_PATH,
+    SERVICE_STATUS_PROPERTIES,
+    SERVICE_UNITS,
     STATUS_ABSENT,
     STATUS_PRESENT,
     STATUS_UNKNOWN,
     Rke2PostureProbeError,
+    Rke2ServiceStatusProbeError,
     build_posture_probe_command,
+    build_service_status_command,
     parse_posture,
     parse_posture_probe_output,
+    parse_service_status,
 )
 from meho_backplane.connectors.rke2.ops_snapshot import (
     SNAPSHOT_DEFAULT_DIR,
@@ -533,13 +546,184 @@ async def test_posture_show_never_leaks_secret_material(
 
 
 # ---------------------------------------------------------------------------
+# build_service_status_command / parse_service_status (#2833 / #2852)
+# ---------------------------------------------------------------------------
+
+
+# A server node: rke2-server active, rke2-agent not installed. systemd still
+# prints inactive/dead + NRestarts=0 for the not-found unit under `--all`; the
+# parser must null those live-state fields off the LoadState=not-found verdict.
+_SERVICE_STATUS_SERVER_ACTIVE = (
+    "UNIT=rke2-server\n"
+    "LoadState=loaded\n"
+    "ActiveState=active\n"
+    "SubState=running\n"
+    "ExecMainStartTimestamp=Fri 2026-08-01 09:12:03 UTC\n"
+    "NRestarts=0\n"
+    "UNIT=rke2-agent\n"
+    "LoadState=not-found\n"
+    "ActiveState=inactive\n"
+    "SubState=dead\n"
+    "ExecMainStartTimestamp=\n"
+    "NRestarts=0\n"
+)
+
+# A crash-looping server: systemd auto-restarting, NRestarts non-zero.
+_SERVICE_STATUS_SERVER_CRASHLOOP = (
+    "UNIT=rke2-server\n"
+    "LoadState=loaded\n"
+    "ActiveState=activating\n"
+    "SubState=auto-restart\n"
+    "ExecMainStartTimestamp=Sat 2026-08-02 14:03:11 UTC\n"
+    "NRestarts=7\n"
+    "UNIT=rke2-agent\n"
+    "LoadState=not-found\n"
+)
+
+
+def test_build_service_status_command_probes_both_units_read_only() -> None:
+    cmd = build_service_status_command(SERVICE_UNITS)
+    # Both fixed units are probed; the caller supplies no unit name.
+    for unit in ("rke2-server", "rke2-agent"):
+        assert unit in cmd
+    # Every requested property is in the -p selection.
+    for prop in SERVICE_STATUS_PROPERTIES:
+        assert prop in cmd
+    # Read-only: `systemctl show`, never a mutating systemctl verb.
+    assert "systemctl show" in cmd
+    for verb in ("restart", "start", "stop", "reload", "kill", "enable", "disable"):
+        assert f"systemctl {verb}" not in cmd
+    assert "is-active" not in cmd
+    # --all so NRestarts=0 / an empty start-time are not suppressed.
+    assert "--all" in cmd
+    # Fails closed when the node has no systemctl (infra failure != verdict).
+    assert "command -v systemctl" in cmd
+    assert "exit 127" in cmd
+
+
+def test_parse_service_status_active_server_and_not_found_agent() -> None:
+    units = parse_service_status(_SERVICE_STATUS_SERVER_ACTIVE)
+    by_unit = {u["unit"]: u for u in units}
+    server = by_unit["rke2-server"]
+    assert server["load_state"] == "loaded"
+    assert server["active_state"] == "active"
+    assert server["sub_state"] == "running"
+    assert server["since"] == "Fri 2026-08-01 09:12:03 UTC"
+    assert server["restart_count"] == 0
+    # The agent unit is not installed on a server node: not-found nulls the
+    # live-state fields even though systemd prints inactive/dead defaults.
+    agent = by_unit["rke2-agent"]
+    assert agent["load_state"] == "not-found"
+    assert agent["active_state"] is None
+    assert agent["sub_state"] is None
+    assert agent["since"] is None
+    assert agent["restart_count"] is None
+
+
+def test_parse_service_status_preserves_probe_order() -> None:
+    units = parse_service_status(_SERVICE_STATUS_SERVER_ACTIVE)
+    assert [u["unit"] for u in units] == ["rke2-server", "rke2-agent"]
+
+
+def test_parse_service_status_surfaces_nonzero_restart_count() -> None:
+    """AC: a non-zero NRestarts surfaces as the crash-loop signal."""
+    units = parse_service_status(_SERVICE_STATUS_SERVER_CRASHLOOP)
+    server = next(u for u in units if u["unit"] == "rke2-server")
+    assert server["restart_count"] == 7
+    assert server["active_state"] == "activating"
+    assert server["sub_state"] == "auto-restart"
+
+
+def test_parse_service_status_ignores_banner_and_blank_lines() -> None:
+    noisy = "login banner line\n\n" + _SERVICE_STATUS_SERVER_ACTIVE
+    units = parse_service_status(noisy)
+    assert {u["unit"] for u in units} == {"rke2-server", "rke2-agent"}
+
+
+def test_parse_service_status_loaded_but_never_started_has_null_since() -> None:
+    """A loaded-but-stopped unit reports restart_count 0 and a null since."""
+    stdout = (
+        "UNIT=rke2-server\n"
+        "LoadState=loaded\n"
+        "ActiveState=inactive\n"
+        "SubState=dead\n"
+        "ExecMainStartTimestamp=\n"
+        "NRestarts=0\n"
+    )
+    entry = parse_service_status(stdout)[0]
+    assert entry["load_state"] == "loaded"
+    assert entry["active_state"] == "inactive"
+    assert entry["since"] is None
+    assert entry["restart_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# service_status shim (service-state read tier)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_service_status_runs_systemctl_show_and_returns_units() -> None:
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_SERVICE_STATUS_SERVER_ACTIVE)
+        result = await connector.service_status(_TARGET, {})
+    by_unit = {u["unit"]: u for u in result["units"]}
+    assert by_unit["rke2-server"]["active_state"] == "active"
+    assert by_unit["rke2-agent"]["load_state"] == "not-found"
+    # Exactly one read-only systemctl-show round-trip; never a mutation.
+    issued = [call.args[1] for call in mock_cmd.await_args_list]
+    assert len(issued) == 1
+    assert "systemctl show" in issued[0]
+    assert "systemctl restart" not in issued[0]
+
+
+@pytest.mark.asyncio
+async def test_service_status_missing_systemctl_raises_probe_error() -> None:
+    """A node with no systemctl (guard exit 127) is an infra failure, not a verdict."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="", stderr="", exit_status=127)
+        with pytest.raises(Rke2ServiceStatusProbeError, match="no `systemctl` on the node"):
+            await connector.service_status(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_service_status_accepts_output_with_no_exit_status() -> None:
+    """``exit_status=None`` + parsed unit blocks is a complete run, not a failure.
+
+    ``asyncssh`` reports ``None`` when the peer closed the channel without
+    sending an exit status; the per-unit markers give independent evidence the
+    probe finished, so this must not fail a status read that worked.
+    """
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_SERVICE_STATUS_SERVER_ACTIVE, exit_status=None)
+        result = await connector.service_status(_TARGET, {})
+    assert {u["unit"] for u in result["units"]} == {"rke2-server", "rke2-agent"}
+
+
+@pytest.mark.asyncio
+async def test_service_status_propagates_ssh_failure() -> None:
+    """A transport failure escapes so the dispatcher reports connector_error."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = OSError("connection refused")
+        with pytest.raises(OSError, match="connection refused"):
+            await connector.service_status(_TARGET, {})
+
+
+# ---------------------------------------------------------------------------
 # RKE2_OPS registration shape
 # ---------------------------------------------------------------------------
 
 
-#: The read-only tier (T1 #2221). Every entry is safe-tier / no-approval and
-#: takes no operator parameters.
-_READ_OP_IDS: frozenset[str] = frozenset({"rke2.about", "rke2.posture.show"})
+#: The read-only tier: ``rke2.about`` + ``rke2.posture.show`` (T1 #2221) and
+#: ``rke2.node.service.status`` (Initiative #2833 / #2852). Every entry is
+#: safe-tier / no-approval and takes no operator parameters.
+_READ_OP_IDS: frozenset[str] = frozenset(
+    {"rke2.about", "rke2.posture.show", "rke2.node.service.status"}
+)
 
 #: The approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus the
 #: node-write ops ``rke2.node.service.restart`` / ``rke2.node.config.update``
@@ -558,8 +742,9 @@ _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | _SNAPSHOT_OP_I
 
 
 def test_rke2_ops_count_matches_expected() -> None:
-    # Two read ops (#2221) + three approval-gated write ops (#2429 / #2430)
-    # + one safe non-gated snapshot op (#2431) = six.
+    # Three read ops (#2221 posture/about + #2852 service.status) + three
+    # approval-gated write ops (#2429 / #2430) + one safe non-gated snapshot
+    # op (#2431) = seven.
     assert len(RKE2_OPS) == len(_EXPECTED_OP_IDS)
 
 

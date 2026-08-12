@@ -78,11 +78,37 @@ T4 (#2431) adds the lone **safe, non-gated snapshot op** (in the
   `sudo` argv) — the connector already authenticates as root, so no sudo
   construction is needed and the repo-wide sudo-guard stays satisfied.
 
-Six ops total: two safe read-only (T1), three `dangerous` /
-`requires_approval=true` write ops (T2 + T3), and one safe non-gated snapshot
-op (T4). The snapshot op is safe / no-approval like the read ops but is
-neither read-only-tagged nor in the dangerous write tier — it belongs to
-neither sweep set.
+Initiative #2833 (read-op coverage wave 2, #2852) adds a **second safe
+read-only op** alongside the posture tier, in a new `rke2-service-read` group:
+
+- `rke2.node.service.status` — reports the **live systemd state** of the
+  `rke2-server` / `rke2-agent` units without mutating anything. Runs one
+  read-only `systemctl show --all -p LoadState,ActiveState,SubState,ExecMainStartTimestamp,NRestarts <unit>`
+  round-trip over the fixed unit pair and returns, per unit, `load_state`
+  (`loaded` vs `not-found`), `active_state` / `sub_state` (the running
+  signal), `since` (the systemd `ExecMainStartTimestamp` string), and
+  `restart_count` (systemd `NRestarts`, the crash-loop counter). A node runs
+  exactly one of the two units; the other reports `load_state: not-found`
+  (every other field null), so the result also reveals the node's role. It
+  answers "is `rke2-server` actually up, since when, and is it crash-looping?"
+  when the Kubernetes API server itself is down and `kubernetes.*` ops cannot
+  help. `safety_level="safe"` / `requires_approval=false`, no params, and the
+  probed unit set is the fixed `("rke2-server", "rke2-agent")` pair — there is
+  **no** operator-supplied unit, so no arbitrary-unit or shell-injection
+  surface. This is the read-only sibling of the approval-gated
+  `rke2.node.service.restart`: `systemctl show` never restarts/starts/stops a
+  unit. `--all` un-suppresses the `NRestarts=0` / empty-`ExecMainStartTimestamp`
+  properties `systemctl show` drops by default, so a healthy unit reports
+  `restart_count: 0` rather than a missing field. A node with no `systemctl`
+  makes the probe exit non-zero (guarded), which raises
+  `Rke2ServiceStatusProbeError` rather than being served as a service-state
+  answer — the same infrastructure-failure discipline `rke2.posture.show` uses.
+
+Seven ops total: three safe read-only (T1 `about` / `posture.show` + the
+#2852 `node.service.status`), three `dangerous` / `requires_approval=true`
+write ops (T2 + T3), and one safe non-gated snapshot op (T4). The snapshot op
+is safe / no-approval like the read ops but is neither read-only-tagged nor in
+the dangerous write tier — it belongs to neither sweep set.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -93,7 +119,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   Inherits the per-target asyncssh connection pool, `_auth_config`,
   `_run_command`, `_assert_reachable`, and `aclose()` from the adapter.
   Ships `fingerprint`, `probe`, `execute`, `about`, `posture_show`,
-  `register_operations`. Two module-level pure parsers live here:
+  `service_status`, `register_operations`. Two module-level pure parsers live here:
   `parse_rke2_version` (release string from `rke2 --version`) and
   `parse_os_pretty_name` (`PRETTY_NAME` from `/etc/os-release`).
 
@@ -106,6 +132,17 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   and `RKE2_TOKEN_PATH` are fixed code constants — there is **no** operator
   path parameter, so no path-traversal / shell-injection surface.
   `Rke2PostureProbeError` fires when the probe itself could not run.
+
+- **Service-state handler + parsers** (`ops_read.py`, #2833 / #2852) —
+  `rke2_service_status` (the async handler, bound via the `service_status`
+  shim), `build_service_status_command` (assembles the single-round-trip
+  `systemctl show --all` probe over the fixed `SERVICE_UNITS` pair), and
+  `parse_service_status` (`UNIT=` / `KEY=VALUE` marker stream → one entry per
+  unit; a `LoadState=not-found` unit nulls its live-state fields, and
+  `NRestarts` becomes `restart_count`). `SERVICE_UNITS` and
+  `SERVICE_STATUS_PROPERTIES` are fixed code constants — no operator-supplied
+  unit, so no arbitrary-unit surface. `Rke2ServiceStatusProbeError` fires when
+  the probe cannot run (no `systemctl` on the node).
 
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
@@ -173,9 +210,11 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
    `connector_id="rke2-ssh-1.x"` + the target, runs the policy gate, and
    invokes the bound handler. `about` reuses `fingerprint` and asserts
    reachability (#986); `posture_show` runs one probe round-trip and returns
-   the redacted envelope. Transport/auth failures propagate to the
-   dispatcher's `connector_error` branch; a merely-absent file surfaces as
-   `present: false`, and an undeterminable one as `present: null`.
+   the redacted envelope; `service_status` runs one `systemctl show` probe and
+   returns the per-unit systemd state (`{units: [...]}`). Transport/auth
+   failures propagate to the dispatcher's `connector_error` branch; a
+   merely-absent file surfaces as `present: false`, and an undeterminable one
+   as `present: null`.
 
 ## Posture tri-state (#2698)
 

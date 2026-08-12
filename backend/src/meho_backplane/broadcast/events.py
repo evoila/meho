@@ -337,7 +337,16 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: #2857): a non-mutating supply-chain read whose noun suffix (like
 #: ``.health`` / ``.versions``) would otherwise fall through to the
 #: full-detail ``other`` class rather than broadcast at the same ``read``
-#: sensitivity as its ``harbor.artifact.info`` sibling.
+#: sensitivity as its ``harbor.artifact.info`` sibling. ``.summary`` is the
+#: Harbor project storage-occupancy read (``harbor.project.summary`` — #2858):
+#: a non-mutating quota/usage read whose noun suffix (like ``.health`` /
+#: ``.versions``) would otherwise fall through to the full-detail
+#: ``other`` class rather than broadcast at the same ``read`` sensitivity
+#: as its ``harbor.project.info`` sibling. Adding it also reclassifies
+#: the ``vmware.composite.performance.summary`` metrics composite from
+#: ``other`` to ``read`` — the correct class for a non-mutating read;
+#: neither class is sensitive (:data:`~meho_backplane.broadcast.overrides._SENSITIVE_OP_CLASSES`),
+#: so the broadcast detail level is unchanged for it.
 _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".list",
     ".info",
@@ -348,6 +357,7 @@ _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".seal_status",
     ".versions",
     ".vulnerabilities",
+    ".summary",
 )
 
 #: Underscore-spelled mirrors of the dotted verb suffixes, applied only to
@@ -570,7 +580,7 @@ def classify_op(op_id: str) -> str:
        patch) keeps its ``credential_write`` class.
     7. ``read`` — non-mutating verb suffixes (``.list`` / ``.info`` /
        ``.get`` / ``.about`` / ``.ls`` / ``.health`` / ``.seal_status``
-       / ``.versions``). ``.read`` is deliberately **not** a read
+       / ``.versions`` / ``.summary``). ``.read`` is deliberately **not** a read
        suffix: it would over-match the ``credential_read``-allowlisted
        ``vault.kv.read`` (the allowlist wins, but the exclusion keeps
        the policy single-sourced) and would reclassify the auth-config

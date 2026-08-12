@@ -366,7 +366,8 @@ class Rke2SshConnector(SshConnector):
 
         Delegates to
         :func:`~meho_backplane.connectors.rke2.ops_read.rke2_config_get`,
-        which ``cat``s a bounded ``/etc/rancher/rke2/*.yaml`` file over SSH and
+        which ``cat``s the RKE2 server ``config.yaml`` (or a ``config.yaml.d``
+        drop-in) over SSH and
         returns its parsed content with the join tokens + etcd S3 credentials
         redacted. Read-only / safe -- the write-side reader lives in
         ``config_update``.
@@ -664,8 +665,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "rke2-config-read": (
         "Use to read an RKE2 node's ``config.yaml`` CONTENT (not just its "
         "permission modes) before or after an ``rke2.node.config.update`` "
-        "patch: ``rke2.node.config.get`` ``cat``s one bounded "
-        "``/etc/rancher/rke2/*.yaml`` file and returns the parsed top-level "
+        "patch: ``rke2.node.config.get`` ``cat``s the server ``config.yaml`` "
+        "(or a ``config.yaml.d/*.yaml`` drop-in) and returns the parsed "
+        "top-level "
         "mapping so an operator can verify ``tls-san`` / ``datastore-endpoint`` "
         "/ ``node-taint``. The join tokens and etcd S3 credentials are "
         "redacted (names surfaced in ``redacted_keys``, values never), so it "

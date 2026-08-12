@@ -94,6 +94,7 @@ __all__ = [
     "STATUS_UNKNOWN",
     "Rke2PostureProbeError",
     "Rke2ServiceStatusProbeError",
+    "bound_read_config_path",
     "build_posture_probe_command",
     "build_service_status_command",
     "parse_posture",
@@ -822,6 +823,52 @@ def redact_config_content(content: dict[str, Any]) -> tuple[dict[str, Any], list
     return redacted, sorted(touched)
 
 
+#: ``rke2.node.config.get`` is confined to the RKE2 *server config* only: the
+#: main ``config.yaml`` and its documented drop-in directory
+#: ``config.yaml.d/*.yaml`` (both read by RKE2 in alphabetical order --
+#: https://docs.rke2.io/install/configuration). Sibling files under
+#: ``/etc/rancher/rke2/`` -- the admin kubeconfig ``rke2.yaml`` and
+#: ``registries.yaml`` -- keep their credentials in NESTED keys the flat
+#: top-level redaction set (:func:`redact_config_content`) never reaches, so
+#: this read op refuses them outright rather than return a cleartext secret.
+_READ_CONFIG_PATH: str = "/etc/rancher/rke2/config.yaml"
+_READ_CONFIG_DROPIN_PREFIX: str = "/etc/rancher/rke2/config.yaml.d/"
+
+
+def bound_read_config_path(raw_path: Any) -> str:
+    """Return the read-confined config path, or raise ``ConfigPathRejectedError``.
+
+    Layers the read op's tighter allow-set on top of the write op's
+    :func:`~meho_backplane.connectors.rke2.ops_write.bound_config_path`
+    traversal / root / ``.yaml`` checks: the resolved path must be exactly
+    ``/etc/rancher/rke2/config.yaml`` or a single-level
+    ``/etc/rancher/rke2/config.yaml.d/<name>.yaml`` drop-in. Every other
+    ``*.yaml`` under the root -- notably the admin kubeconfig ``rke2.yaml`` and
+    ``registries.yaml``, whose secrets live in nested keys
+    :func:`redact_config_content` cannot mask -- is rejected before any SSH
+    round trip, so a ``safe`` / no-approval call can never spill a cluster-admin
+    private key or a registry password in cleartext.
+    """
+    from meho_backplane.connectors.rke2.ops_write import (
+        ConfigPathRejectedError,
+        bound_config_path,
+    )
+
+    path = bound_config_path(raw_path)
+    if path == _READ_CONFIG_PATH:
+        return path
+    if path.startswith(_READ_CONFIG_DROPIN_PREFIX):
+        leaf = path[len(_READ_CONFIG_DROPIN_PREFIX) :]
+        if leaf and "/" not in leaf:
+            return path
+    raise ConfigPathRejectedError(
+        f"path {path!r} is not the RKE2 server config: only "
+        "/etc/rancher/rke2/config.yaml and config.yaml.d/*.yaml drop-ins are "
+        "readable (sibling files such as rke2.yaml / registries.yaml hold "
+        "nested secrets this read op cannot redact)"
+    )
+
+
 async def rke2_config_get(
     connector: Rke2SshConnector,
     target: Target,
@@ -830,7 +877,8 @@ async def rke2_config_get(
 ) -> dict[str, Any]:
     """Handler for ``rke2.node.config.get`` -- redacted config.yaml read (#2854).
 
-    Reads a single bounded ``/etc/rancher/rke2/*.yaml`` file over SSH with the
+    Reads the RKE2 server ``config.yaml`` (or a ``config.yaml.d/*.yaml``
+    drop-in) over SSH with the
     same ``cat`` + :func:`yaml.safe_load` step ``rke2.node.config.update``
     already runs, and returns the parsed top-level mapping with secret-bearing
     keys redacted (:func:`redact_config_content`) -- so an operator can verify
@@ -838,19 +886,18 @@ async def rke2_config_get(
     config patch without an untracked ``ssh cat`` that would spill the join
     token into shell history.
 
-    The path is confined by :func:`~meho_backplane.connectors.rke2.ops_write.bound_config_path`
-    (the same ``/etc/rancher/rke2/*.yaml`` filter the write op uses), so a
-    traversal attempt is rejected before any SSH round trip. Non-mapping or
-    unparseable YAML surfaces a structured ``error`` rather than crashing the
-    dispatch. Never mutates the node.
+    The path is confined by :func:`bound_read_config_path` to the RKE2 server
+    config only -- ``config.yaml`` or a ``config.yaml.d/*.yaml`` drop-in -- so a
+    traversal attempt *and* a sibling file whose nested secrets this op cannot
+    redact (the admin kubeconfig ``rke2.yaml``, ``registries.yaml``) are
+    rejected before any SSH round trip. Non-mapping or unparseable YAML surfaces
+    a structured ``error`` rather than crashing the dispatch. Never mutates the
+    node.
     """
-    from meho_backplane.connectors.rke2.ops_write import (
-        Rke2WriteSafetyError,
-        bound_config_path,
-    )
+    from meho_backplane.connectors.rke2.ops_write import Rke2WriteSafetyError
 
     try:
-        path = bound_config_path(params.get("path"))
+        path = bound_read_config_path(params.get("path"))
     except Rke2WriteSafetyError as exc:
         return {"error": f"config.get path check: {exc}"}
 
@@ -879,8 +926,8 @@ _RKE2_CONFIG_GET_OP = Rke2Op(
     handler_attr="config_get",
     summary="Read an RKE2 config.yaml file's content with join/S3 secrets redacted.",
     description=(
-        "Reads a single ``/etc/rancher/rke2/*.yaml`` file (default "
-        "``config.yaml``) over SSH -- the same ``cat`` + YAML parse "
+        "Reads the RKE2 server ``config.yaml`` (or a ``config.yaml.d/*.yaml`` "
+        "drop-in) over SSH -- the same ``cat`` + YAML parse "
         "``rke2.node.config.update`` runs -- and returns the parsed top-level "
         "mapping so an operator can verify ``tls-san`` / ``datastore-endpoint`` "
         "/ ``node-taint`` before or after a config patch. Secret-bearing keys "
@@ -889,8 +936,10 @@ _RKE2_CONFIG_GET_OP = Rke2Op(
         "``etcd-s3-session-token``) are replaced with ``***redacted***``, and "
         "``datastore-endpoint`` has only its ``user:pass@`` DSN userinfo "
         "masked (host/port/db preserved). The masked key NAMES are listed in "
-        "``redacted_keys``. The path is confined to ``/etc/rancher/rke2/*.yaml`` "
-        "(traversal rejected before any SSH); non-mapping / invalid YAML "
+        "``redacted_keys``. The path is confined to the server config "
+        "``config.yaml`` + ``config.yaml.d/*.yaml`` drop-ins -- sibling files "
+        "like ``rke2.yaml`` / ``registries.yaml`` and traversal are rejected "
+        "before any SSH; non-mapping / invalid YAML "
         "returns a structured ``error``. safety_level=safe, "
         "requires_approval=False, read-only."
     ),
@@ -899,11 +948,13 @@ _RKE2_CONFIG_GET_OP = Rke2Op(
         "properties": {
             "path": {
                 "type": "string",
-                "pattern": r"^/etc/rancher/rke2/[^\x00\n\r]*\.yaml$",
+                "pattern": r"^/etc/rancher/rke2/config\.yaml(\.d/[^/\x00\n\r]+\.yaml)?$",
                 "description": (
-                    "Absolute path to the RKE2 config file to read. Must be a "
-                    ".yaml file under /etc/rancher/rke2/ (default "
-                    "/etc/rancher/rke2/config.yaml). Omit for the default."
+                    "Absolute path to the RKE2 server config to read: "
+                    "/etc/rancher/rke2/config.yaml or a "
+                    "/etc/rancher/rke2/config.yaml.d/<name>.yaml drop-in. Omit "
+                    "for the default config.yaml. Sibling files such as "
+                    "rke2.yaml / registries.yaml are not readable here."
                 ),
             },
         },
@@ -936,12 +987,15 @@ _RKE2_CONFIG_GET_OP = Rke2Op(
             "S3 credentials so they never reach the transcript. It reports "
             "content, not permission modes -- use ``rke2.posture.show`` for "
             "file modes / token presence. Transport: plain SSH (read-only "
-            "``cat`` of one bounded ``/etc/rancher/rke2/*.yaml`` path)."
+            "``cat`` of the server ``config.yaml`` / a ``config.yaml.d`` "
+            "drop-in)."
         ),
         "parameter_hints": {
             "path": (
-                "Optional; a .yaml file under /etc/rancher/rke2/ (e.g. a "
-                "config.yaml.d drop-in). Omit for /etc/rancher/rke2/config.yaml."
+                "Optional; the server config.yaml or a config.yaml.d/<name>.yaml "
+                "drop-in under /etc/rancher/rke2/. Omit for "
+                "/etc/rancher/rke2/config.yaml. Sibling files (rke2.yaml, "
+                "registries.yaml) are rejected."
             ),
         },
         "output_shape": (

@@ -87,6 +87,7 @@ from meho_backplane.connectors.rke2.ops_read import (
     STATUS_UNKNOWN,
     Rke2PostureProbeError,
     Rke2ServiceStatusProbeError,
+    bound_read_config_path,
     build_posture_probe_command,
     build_service_status_command,
     parse_posture,
@@ -154,6 +155,36 @@ _CONFIG_YAML_FIXTURE = (
     "node-taint:\n"
     "  - dedicated=infra:NoSchedule\n"
     f"datastore-endpoint: postgres://dbuser:{_CONFIG_DSN_PASS_CANARY}@db.lab.example:5432/kine\n"
+)
+
+# Nested-secret canaries for the sibling files config.get must REJECT (#2854 B1).
+# The flat top-level redaction set only covers config.yaml's schema, so these
+# secrets -- the admin kubeconfig's cluster-admin private key and a registry
+# password, both nested -- would leak verbatim if the op ever read the file.
+# The op must therefore refuse rke2.yaml / registries.yaml before any SSH read.
+_KUBECONFIG_KEY_CANARY = "RKE2-ADMIN-KEY-MARKER-DONOTLEAK-8842"  # gitleaks:allow NOSONAR
+_REGISTRIES_PASSWORD_CANARY = "registryPassDONOTLEAKggg777"  # gitleaks:allow NOSONAR
+# /etc/rancher/rke2/rke2.yaml -- the admin kubeconfig; client-key-data is nested
+# under users[].user, not a top-level config.yaml key.
+_RKE2_KUBECONFIG_FIXTURE = (
+    "apiVersion: v1\n"
+    "clusters:\n"
+    "  - name: default\n"
+    "    cluster:\n"
+    "      server: https://127.0.0.1:6443\n"
+    "users:\n"
+    "  - name: default\n"
+    "    user:\n"
+    f"      client-key-data: {_KUBECONFIG_KEY_CANARY}\n"
+)
+# /etc/rancher/rke2/registries.yaml -- the private-registry config; the password
+# is nested under configs.<registry>.auth, not a top-level config.yaml key.
+_REGISTRIES_YAML_FIXTURE = (
+    "configs:\n"
+    "  registry.lab.example:\n"
+    "    auth:\n"
+    "      username: admin\n"
+    f"      password: {_REGISTRIES_PASSWORD_CANARY}\n"
 )
 
 
@@ -866,6 +897,77 @@ async def test_config_get_rejects_path_traversal_before_ssh() -> None:
     assert "path check" in result["error"]
 
 
+def test_bound_read_config_path_confines_to_server_config() -> None:
+    """B1: only config.yaml + config.yaml.d/*.yaml pass; sibling files are rejected."""
+    # The server config and a single-level drop-in are accepted.
+    assert bound_read_config_path(None) == "/etc/rancher/rke2/config.yaml"
+    assert (
+        bound_read_config_path("/etc/rancher/rke2/config.yaml") == "/etc/rancher/rke2/config.yaml"
+    )
+    assert (
+        bound_read_config_path("/etc/rancher/rke2/config.yaml.d/10-tls.yaml")
+        == "/etc/rancher/rke2/config.yaml.d/10-tls.yaml"
+    )
+    # Sibling files (nested secrets the flat redaction set cannot mask) and a
+    # nested drop-in subdir are rejected outright.
+    for rejected in (
+        "/etc/rancher/rke2/rke2.yaml",
+        "/etc/rancher/rke2/registries.yaml",
+        "/etc/rancher/rke2/config.yaml.d/nested/dir.yaml",
+        "/etc/rancher/rke2/config.yaml.d/../rke2.yaml",
+    ):
+        with pytest.raises(ConfigPathRejectedError):
+            bound_read_config_path(rejected)
+
+
+@pytest.mark.asyncio
+async def test_config_get_rejects_sibling_files_before_ssh() -> None:
+    """B1: rke2.yaml / registries.yaml -- whose nested secrets the flat redaction
+    set cannot mask -- are rejected before any SSH read, so a safe/no-approval call
+    never returns the cluster-admin private key or the registry password.
+    """
+    connector = Rke2SshConnector()
+    cases = (
+        (
+            "/etc/rancher/rke2/rke2.yaml",
+            _RKE2_KUBECONFIG_FIXTURE,
+            _KUBECONFIG_KEY_CANARY,
+        ),
+        (
+            "/etc/rancher/rke2/registries.yaml",
+            _REGISTRIES_YAML_FIXTURE,
+            _REGISTRIES_PASSWORD_CANARY,
+        ),
+    )
+    for path, fixture, canary in cases:
+        with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+            # Even if the file WOULD read back with a nested secret, the op must
+            # refuse it before the `cat` ever runs.
+            mock_cmd.return_value = _proc(stdout=fixture)
+            result = await connector.config_get(_TARGET, {"path": path})
+        mock_cmd.assert_not_awaited()
+        assert "content" not in result
+        assert "path check" in result["error"]
+        assert "server config" in result["error"]
+        assert canary not in repr(result), f"{canary!r} leaked for {path}"
+
+
+@pytest.mark.asyncio
+async def test_config_get_accepts_config_yaml_d_dropin() -> None:
+    """A config.yaml.d/*.yaml drop-in stays in scope (same flat schema, redacted)."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout=_CONFIG_YAML_FIXTURE)
+        result = await connector.config_get(
+            _TARGET, {"path": "/etc/rancher/rke2/config.yaml.d/99-custom.yaml"}
+        )
+    mock_cmd.assert_awaited_once()
+    cmd = mock_cmd.await_args.args[1]
+    assert "cat -- /etc/rancher/rke2/config.yaml.d/99-custom.yaml" in cmd
+    assert result["path"] == "/etc/rancher/rke2/config.yaml.d/99-custom.yaml"
+    assert result["content"]["token"] == REDACTED_SENTINEL
+
+
 @pytest.mark.asyncio
 async def test_config_get_non_mapping_yaml_returns_structured_error() -> None:
     """AC: a YAML sequence/scalar (not a mapping) surfaces an error, not a crash."""
@@ -1081,11 +1183,16 @@ def test_rke2_read_ops_parameter_schemas_closed() -> None:
     for op_id in _PARAMETERLESS_READ_OP_IDS:
         assert by_id[op_id].parameter_schema.get("properties") == {}
     # rke2.node.config.get (#2854) exposes exactly one optional param -- a path
-    # bounded to /etc/rancher/rke2/*.yaml (the write op's confinement pattern).
+    # bounded to the server config.yaml + its config.yaml.d/*.yaml drop-ins
+    # (sibling files like rke2.yaml / registries.yaml are rejected; the
+    # handler-side bound_read_config_path check is authoritative).
     get_schema = by_id["rke2.node.config.get"].parameter_schema
     get_props = get_schema.get("properties", {})
     assert set(get_props) == {"path"}
-    assert get_props["path"].get("pattern") == r"^/etc/rancher/rke2/[^\x00\n\r]*\.yaml$"
+    assert (
+        get_props["path"].get("pattern")
+        == r"^/etc/rancher/rke2/config\.yaml(\.d/[^/\x00\n\r]+\.yaml)?$"
+    )
     assert get_schema.get("required", []) == []  # path is optional
     # The snapshot op exposes exactly one optional, charset-bounded param.
     save_schema = by_id["rke2.etcd-snapshot.save"].parameter_schema

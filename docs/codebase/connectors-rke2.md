@@ -30,8 +30,8 @@ T1 (#2221) ships the **connector scaffold + the read-only posture tier only**:
 
 A later read op (#2854) reads config **content** rather than modes:
 
-- `rke2.node.config.get` — the redacted **config-content** read. `cat`s one
-  bounded `/etc/rancher/rke2/*.yaml` file (default `config.yaml`) over SSH —
+- `rke2.node.config.get` — the redacted **config-content** read. `cat`s the
+  RKE2 server `config.yaml` (or a `config.yaml.d/*.yaml` drop-in) over SSH —
   the same read + `yaml.safe_load` step `rke2.node.config.update` runs — and
   returns the parsed top-level mapping so an operator can verify `tls-san` /
   `datastore-endpoint` / `node-taint` before or after a patch (the
@@ -41,8 +41,11 @@ A later read op (#2854) reads config **content** rather than modes:
   `etcd-s3-session-token`) become `***redacted***`, and `datastore-endpoint`
   keeps its host/port/db while masking only the `user:pass@` DSN userinfo. The
   masked key **names** are surfaced in `redacted_keys`. The `path` is confined
-  by the write op's own `bound_config_path` (traversal rejected before any SSH
-  round-trip — no new confinement logic); non-mapping / invalid YAML returns a
+  by `bound_read_config_path` to the server config's flat schema — `config.yaml`
+  and its `config.yaml.d/*.yaml` drop-ins — so sibling files whose secrets live
+  in nested keys the flat redaction set cannot mask (the admin kubeconfig
+  `rke2.yaml`, `registries.yaml`) and traversal are both rejected before any SSH
+  round-trip; non-mapping / invalid YAML returns a
   structured `error`. See [Redaction guarantee](#redaction-guarantee).
 
 All three `safety_level="safe"` / `requires_approval=false`. `rke2.about` and
@@ -181,14 +184,16 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   the probe cannot run (no `systemctl` on the node).
 
 - **Config-content read + redaction** (`ops_read.py`, #2854) —
-  `rke2_config_get` (the async handler: `bound_config_path` confinement →
+  `rke2_config_get` (the async handler: `bound_read_config_path` confinement →
   `cat` + `yaml.safe_load` → redact), and `redact_config_content` (the pure
   redaction step). `SECRET_CONFIG_KEYS` is the frozenset of fully-masked
   secret keys (`token` / `agent-token` / the three `etcd-s3-*` credentials);
   `REDACTED_SENTINEL` (`***redacted***`) is the replacement value; the
   `datastore-endpoint` DSN userinfo is masked via a scheme-anchored regex that
-  leaves host/port/db intact. It reuses the write op's `bound_config_path`
-  rather than re-deriving the `/etc/rancher/rke2/*.yaml` filter.
+  leaves host/port/db intact. `bound_read_config_path` layers the read op's
+  tighter allow-set (`config.yaml` + `config.yaml.d/*.yaml` only, sibling files
+  like `rke2.yaml` / `registries.yaml` rejected) on top of the write op's
+  `bound_config_path` traversal/root/`.yaml` checks.
 
 - **Op metadata** (`ops.py`) — `Rke2Op` frozen dataclass (mirrors
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
@@ -362,9 +367,16 @@ envelope, the `raw_payload`, or the logs. Redaction is names-not-values: the
 masked key names are disclosed in `redacted_keys` (the `changed_config_keys`
 precedent) while the values are gone. The secret-key set is grounded in the
 RKE2 server-config reference, not just the two join tokens — the etcd S3
-credentials are equally secret-bearing and equally masked. Custom, non-standard
-keys an operator hand-added are out of scope (this is not a general secret
-scanner); the bounded single-file read never enumerates drop-ins.
+credentials are equally secret-bearing and equally masked. The guarantee holds
+because the read is confined to the server config's flat schema — `config.yaml`
+and its `config.yaml.d/*.yaml` drop-ins (same top-level keys) — by
+`bound_read_config_path`: sibling files whose secrets live in nested keys the
+flat redaction set cannot reach (the admin kubeconfig `rke2.yaml`'s
+`client-key-data`, `registries.yaml`'s `configs.<reg>.auth.password`) are
+rejected before any SSH round-trip, not read-and-partially-redacted. Custom,
+non-standard keys an operator hand-added to `config.yaml` are out of scope
+(this is not a general secret scanner); the bounded single-file read never
+enumerates drop-ins.
 
 `rke2.token.rotate` (T2) is the write-side application of the same rule. The
 dispatcher persists the **raw** handler result on the audit row and

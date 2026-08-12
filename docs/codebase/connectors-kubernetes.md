@@ -152,7 +152,7 @@ real operator through the same loader.
 | `k8s.pod.info`         | safe   | Full pod detail; exact name or unique prefix.                     |
 | `k8s.deployment.list`  | safe   | Deployments with live replica counts + image + strategy.          |
 | `k8s.deployment.info`  | safe   | Full deployment detail; exact name or unique prefix.              |
-| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector + `label_selector`. |
+| `k8s.service.list`     | safe   | `CoreV1Api.list_namespaced_service()` / `list_service_for_all_namespaces()` -- type / cluster_ip / ports / selector / lb_ingress (LoadBalancer VIP from `status.loadBalancer.ingress`, `[]` otherwise) + `label_selector`. |
 | `k8s.ingress.list`     | safe   | `NetworkingV1Api.list_namespaced_ingress()` / `list_ingress_for_all_namespaces()` -- class / hosts / TLS / rules + `label_selector`. |
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
 | `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |

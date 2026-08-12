@@ -126,16 +126,29 @@ def service_row(svc: V1Service) -> dict[str, Any]:
     """Project a :class:`V1Service` into the wire dict shape.
 
     ``external_ips`` is the static list operators set on
-    ``spec.externalIPs``; LoadBalancer-assigned IPs live under
-    ``status.loadBalancer.ingress`` and are out of v0.2 scope (the
-    operator question "what IP routes to this service?" is answered by
-    the type + cluster_ip combination plus the namespace's Ingress
-    rows). ``selector`` is forwarded verbatim; an absent selector
-    (``None`` on a headless / ExternalName service) surfaces as ``{}``
-    so downstream consumers see a stable dict type.
+    ``spec.externalIPs``. ``lb_ingress`` surfaces the
+    LoadBalancer-assigned VIPs from ``status.loadBalancer.ingress`` --
+    one ``{ip, hostname}`` entry per :class:`V1LoadBalancerIngress` -- so
+    the "which VIP does this service hold?" question (MetalLB pool
+    occupancy, DNS-target verification, IPAM reconciliation) is
+    answerable without falling back to ``kubectl``. It is ``[]`` for
+    non-LoadBalancer services and for LoadBalancer services with no
+    assignment yet; each level of the status chain (``status`` /
+    ``status.load_balancer`` / ``.ingress``) is None-guarded. Widened
+    from the G3.2 v0.2 cut once RDC dogfooding showed the type +
+    cluster_ip + Ingress rows could not answer VIP occupancy.
+    ``selector`` is forwarded verbatim; an absent selector (``None`` on a
+    headless / ExternalName service) surfaces as ``{}`` so downstream
+    consumers see a stable dict type.
     """
     metadata = svc.metadata
     spec = svc.spec
+    status = svc.status
+    load_balancer = status.load_balancer if status is not None else None
+    ingress = load_balancer.ingress if load_balancer is not None else None
+    lb_ingress: list[dict[str, Any]] = [
+        {"ip": entry.ip, "hostname": entry.hostname} for entry in (ingress or [])
+    ]
     return {
         "name": metadata.name if metadata is not None else None,
         "namespace": metadata.namespace if metadata is not None else None,
@@ -144,6 +157,7 @@ def service_row(svc: V1Service) -> dict[str, Any]:
         "external_ips": (list(spec.external_ips or []) if spec is not None else []),
         "ports": ([service_port_row(p) for p in (spec.ports or [])] if spec is not None else []),
         "selector": (dict(spec.selector or {}) if spec is not None else {}),
+        "lb_ingress": lb_ingress,
     }
 
 
@@ -278,6 +292,17 @@ K8S_SERVICE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                         },
                     },
                     "selector": {"type": "object"},
+                    "lb_ingress": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "ip": {"type": ["string", "null"]},
+                                "hostname": {"type": ["string", "null"]},
+                            },
+                            "additionalProperties": False,
+                        },
+                    },
                 },
                 "required": [
                     "name",
@@ -287,6 +312,7 @@ K8S_SERVICE_LIST_RESPONSE_SCHEMA: dict[str, Any] = {
                     "external_ips",
                     "ports",
                     "selector",
+                    "lb_ingress",
                 ],
                 "additionalProperties": False,
             },
@@ -319,10 +345,15 @@ K8S_SERVICE_LIST_LLM_INSTRUCTIONS: dict[str, Any] = {
     },
     "output_shape": (
         "{'rows': [{name, namespace, type, cluster_ip, external_ips, "
-        "ports: [{name, port, target_port, protocol}], selector}], "
-        "'total': <int>}. ``type`` is the Service type "
+        "ports: [{name, port, target_port, protocol}], selector, "
+        "lb_ingress: [{ip, hostname}]}], 'total': <int>}. ``type`` is "
+        "the Service type "
         "('ClusterIP' / 'NodePort' / 'LoadBalancer' / 'ExternalName'); "
-        "``cluster_ip`` is the stable in-cluster VIP. Each row "
+        "``cluster_ip`` is the stable in-cluster VIP; ``lb_ingress`` is "
+        "the LoadBalancer-assigned external VIP(s) from "
+        "``status.loadBalancer.ingress`` (``[]`` for non-LoadBalancer "
+        "services or before assignment) -- the field that answers "
+        "MetalLB pool occupancy. Each row "
         "carries its own ``namespace`` so cross-namespace rows under "
         "``all_namespaces=true`` stay distinguishable."
     ),
@@ -436,7 +467,8 @@ NETWORK_OPS: tuple[KubernetesOp, ...] = (
             "``CoreV1Api.list_service_for_all_namespaces(...)`` "
             "(``all_namespaces=true``) and projects each Service into "
             "{name, namespace, type, cluster_ip, external_ips, ports, "
-            "selector}. ``type`` is the Service type ('ClusterIP' / "
+            "selector, lb_ingress}. ``type`` is the Service type "
+            "('ClusterIP' / "
             "'NodePort' / 'LoadBalancer' / 'ExternalName'); "
             "``cluster_ip`` is the stable in-cluster VIP (may be 'None' "
             "for ExternalName services or headless services with "
@@ -444,6 +476,10 @@ NETWORK_OPS: tuple[KubernetesOp, ...] = (
             "{name, port, target_port, protocol}; ``target_port`` may "
             "be either an integer or a named-port string. ``selector`` "
             "is the label map the service uses to pick pods. "
+            "``lb_ingress`` is the LoadBalancer-assigned external VIP "
+            "list ({ip, hostname} from ``status.loadBalancer.ingress`` "
+            "-- e.g. a MetalLB-assigned address); ``[]`` for "
+            "non-LoadBalancer services or before assignment. "
             "``label_selector`` is forwarded server-side. Read-only."
         ),
         parameter_schema=K8S_SERVICE_LIST_PARAMETER_SCHEMA,

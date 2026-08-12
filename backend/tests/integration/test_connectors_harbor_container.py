@@ -6,7 +6,7 @@
 Boots a real Harbor 2.x stack (harbor-db + redis + harbor-core) via
 testcontainers, then dispatches typed robot ops (``harbor.robot.create``
 and ``harbor.robot.delete``) and a pair of read-only ops
-(``GET:/api/v2.0/systeminfo``, ``GET:/api/v2.0/robots``) through the
+(``harbor.about``, ``harbor.robot.list``) through the
 **real G0.6 dispatcher** with a live Postgres audit store.
 
 What this harness proves (issue #622 DoD)
@@ -28,9 +28,9 @@ What this harness proves (issue #622 DoD)
   :func:`~meho_backplane.broadcast.events.classify_op`).
 * ``harbor.robot.delete`` (typed op, ``safety_level="caution"``) removes
   the robot created in the step above; classified ``write``; audited.
-* ``GET:/api/v2.0/systeminfo`` (ingested read op) returns the Harbor
+* ``harbor.about`` (typed read op) returns the Harbor
   version string from the live container; classified ``read``.
-* ``GET:/api/v2.0/robots`` (ingested read op, ``source_kind='ingested'``)
+* ``harbor.robot.list`` (typed read op, ``source_kind='typed'``)
   returns the robot list **without** a ``secret`` field on any entry
   (Harbor's list-response-never-has-secret invariant holds in the
   real container, not just the acceptance mocks).
@@ -72,7 +72,6 @@ Skip conditions
 from __future__ import annotations
 
 import os
-import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
@@ -88,13 +87,12 @@ import meho_backplane.operations._audit as _audit_module
 from meho_backplane.broadcast import BroadcastEvent
 from meho_backplane.connectors.harbor import (
     HARBOR_CONNECTOR_ID,
-    HARBOR_CORE_GROUPS,
-    HARBOR_CORE_OPS,
     HARBOR_IMPL_ID,
     HARBOR_PRODUCT,
     HARBOR_VERSION,
     HarborConnector,
     HarborTargetLike,
+    register_harbor_typed_operations,
 )
 from meho_backplane.connectors.harbor.ops import register_harbor_robot_operations
 from meho_backplane.connectors.registry import (
@@ -103,7 +101,7 @@ from meho_backplane.connectors.registry import (
 )
 from meho_backplane.connectors.schemas import OperationResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import AuditLog, EndpointDescriptor, OperationGroup
+from meho_backplane.db.models import AuditLog
 from meho_backplane.db.models import Target as TargetORM
 from meho_backplane.operations import dispatch, reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
@@ -370,8 +368,8 @@ async def harbor_e2e(
 ) -> AsyncIterator[tuple[_HarborTarget, str]]:
     """Wire a HarborConnector against the live container + real PG audit store.
 
-    * Inserts the 9 curated ``EndpointDescriptor`` rows for the ingested
-      core ops so :func:`dispatch` can look them up.
+    * Registers the 9 typed read ops (``harbor.about`` … ``harbor.robot.list``)
+      so :func:`dispatch` looks them up on a fresh boot with zero catalog ingest.
     * Registers ``harbor.robot.create`` and ``harbor.robot.delete`` typed ops.
     * Patches ``HarborConnector._credentials_loader`` to return admin
       credentials for the throwaway container.
@@ -388,7 +386,7 @@ async def harbor_e2e(
         cls=HarborConnector,
     )
 
-    await _insert_harbor_descriptors()
+    await register_harbor_typed_operations(embedding_service=stub_embedding_service)
     await register_harbor_robot_operations(embedding_service=stub_embedding_service)
 
     # Parse host:port from the container address (strips http:// prefix).
@@ -537,104 +535,6 @@ async def _create_robot_via_approve_resume(
     )
 
 
-_PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
-
-
-async def _insert_harbor_descriptors() -> None:
-    """Seed the 9 curated Harbor core ops as enabled EndpointDescriptor rows.
-
-    Idempotent: skips rows that already exist. The ``pg_engine`` fixture is
-    module-scoped so the same PG container is shared across every test in the
-    module; naively inserting on every ``harbor_e2e`` setup call would raise a
-    ``UniqueViolationError`` on the second test's setup because the first
-    test's commit is still visible.
-    """
-    sessionmaker = get_sessionmaker()
-    group_ids: dict[str, uuid.UUID] = {}
-    async with sessionmaker() as session:
-        for group in HARBOR_CORE_GROUPS:
-            result = await session.execute(
-                select(OperationGroup).where(
-                    OperationGroup.tenant_id.is_(None),
-                    OperationGroup.product == HARBOR_PRODUCT,
-                    OperationGroup.version == HARBOR_VERSION,
-                    OperationGroup.impl_id == HARBOR_IMPL_ID,
-                    OperationGroup.group_key == group.group_key,
-                )
-            )
-            existing_group = result.scalar_one_or_none()
-            if existing_group is not None:
-                group_ids[group.group_key] = existing_group.id
-                continue
-            group_row = OperationGroup(
-                tenant_id=None,
-                product=HARBOR_PRODUCT,
-                version=HARBOR_VERSION,
-                impl_id=HARBOR_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
-                review_status="enabled",
-            )
-            session.add(group_row)
-            await session.flush()
-            group_ids[group.group_key] = group_row.id
-
-        for op in HARBOR_CORE_OPS:
-            existing_desc = (
-                await session.execute(
-                    select(EndpointDescriptor).where(
-                        EndpointDescriptor.tenant_id.is_(None),
-                        EndpointDescriptor.product == HARBOR_PRODUCT,
-                        EndpointDescriptor.version == HARBOR_VERSION,
-                        EndpointDescriptor.impl_id == HARBOR_IMPL_ID,
-                        EndpointDescriptor.op_id == op.op_id,
-                    )
-                )
-            ).scalar_one_or_none()
-            if existing_desc is not None:
-                continue
-
-            method, path = op.op_id.split(":", 1)
-            placeholders = _PATH_VAR_RE.findall(path)
-            param_schema: dict[str, object]
-            if placeholders:
-                param_schema = {
-                    "type": "object",
-                    "properties": {
-                        name: {"type": "string", "x-meho-param-loc": "path"}
-                        for name in placeholders
-                    },
-                    "required": list(placeholders),
-                }
-            else:
-                param_schema = {"type": "object", "properties": {}}
-
-            descriptor = EndpointDescriptor(
-                tenant_id=None,
-                product=HARBOR_PRODUCT,
-                version=HARBOR_VERSION,
-                impl_id=HARBOR_IMPL_ID,
-                op_id=op.op_id,
-                source_kind="ingested",
-                method=method,
-                path=path,
-                handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"Harbor core op {op.op_id}.",
-                description=f"Harbor core op {op.op_id}.",
-                parameter_schema=param_schema,
-                response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
-                safety_level="safe",
-                requires_approval=False,
-                is_enabled=True,
-                tags=["spec:harbor-2.x/swagger.yaml"],
-            )
-            session.add(descriptor)
-        await session.commit()
-
-
 # ---------------------------------------------------------------------------
 # Audit assertion helper
 # ---------------------------------------------------------------------------
@@ -693,13 +593,13 @@ async def test_systeminfo_returns_harbor_version(
     harbor_e2e: tuple[_HarborTarget, str],
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``GET:/api/v2.0/systeminfo`` returns harbor_version from the live container."""
+    """``harbor.about`` returns harbor_version from the live container."""
     target, _ = harbor_e2e
     operator = _make_operator(sub="e2e-systeminfo")
     result = await dispatch(
         operator=operator,
         connector_id=HARBOR_CONNECTOR_ID,
-        op_id="GET:/api/v2.0/systeminfo",
+        op_id="harbor.about",
         target=target,
         params={},
     )
@@ -711,10 +611,10 @@ async def test_systeminfo_returns_harbor_version(
         f"unexpected harbor_version: {result.result['harbor_version']!r}"
     )
     await _assert_audited(
-        "GET:/api/v2.0/systeminfo",
+        "harbor.about",
         operator_sub="e2e-systeminfo",
         expected_op_class="read",
-        expected_source_kind="ingested",
+        expected_source_kind="typed",
         events=captured_events,
     )
 
@@ -724,19 +624,19 @@ async def test_robot_list_never_returns_secret(
     harbor_e2e: tuple[_HarborTarget, str],
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """``GET:/api/v2.0/robots`` list response contains no ``secret`` field."""
+    """``harbor.robot.list`` list response contains no ``secret`` field."""
     target, _ = harbor_e2e
     operator = _make_operator(sub="e2e-robot-list")
     result = await dispatch(
         operator=operator,
         connector_id=HARBOR_CONNECTOR_ID,
-        op_id="GET:/api/v2.0/robots",
+        op_id="harbor.robot.list",
         target=target,
         params={},
     )
     assert result.status == "ok", result.error
     assert isinstance(result.result, list), (
-        f"GET:/api/v2.0/robots must return a list, got "
+        f"harbor.robot.list must return a list, got "
         f"{type(result.result).__name__}: {result.result!r}"
     )
     robots: list[dict[str, object]] = result.result
@@ -746,10 +646,10 @@ async def test_robot_list_never_returns_secret(
             f"robot list entry {robot.get('name')!r} must not expose 'secret'"
         )
     await _assert_audited(
-        "GET:/api/v2.0/robots",
+        "harbor.robot.list",
         operator_sub="e2e-robot-list",
         expected_op_class="read",
-        expected_source_kind="ingested",
+        expected_source_kind="typed",
         events=captured_events,
     )
 

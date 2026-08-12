@@ -7,15 +7,15 @@
 // lifecycle typed ops, each pre-baking connector_id="harbor-rest-2.x"
 // so operators don't type the connector ID on every dispatch:
 //
-//   - `meho harbor about [--target T]`                         — GET:/api/v2.0/systeminfo
-//   - `meho harbor health [--target T]`                        — GET:/api/v2.0/health
-//   - `meho harbor project list [--target T]`                  — GET:/api/v2.0/projects
-//   - `meho harbor project info <name> [--target T]`           — GET:/api/v2.0/projects/{project_name}
-//   - `meho harbor repository list <project> [--target T]`     — GET:/api/v2.0/projects/{project_name}/repositories
-//   - `meho harbor repository info <project> <repo> [--target T]` — per-repo detail
-//   - `meho harbor artifact list <project> <repo> [--target T]`   — artifact list (tags+digests)
-//   - `meho harbor artifact info <project> <repo> <ref> [--target T]` — artifact full metadata
-//   - `meho harbor robot list [--target T]`                    — GET:/api/v2.0/robots
+//   - `meho harbor about [--target T]`                         — harbor.about
+//   - `meho harbor health [--target T]`                        — harbor.health
+//   - `meho harbor project list [--target T]`                  — harbor.project.list
+//   - `meho harbor project info <name> [--target T]`           — harbor.project.info
+//   - `meho harbor repository list <project> [--target T]`     — harbor.repository.list
+//   - `meho harbor repository info <project> <repo> [--target T]` — harbor.repository.info
+//   - `meho harbor artifact list <project> <repo> [--target T]`   — harbor.artifact.list
+//   - `meho harbor artifact info <project> <repo> <ref> [--target T]` — harbor.artifact.info
+//   - `meho harbor robot list [--target T]`                    — harbor.robot.list
 //   - `meho harbor robot create --name <n> --project <p> --duration <d>` — harbor.robot.create
 //   - `meho harbor robot delete --project <p> --id <id>`       — harbor.robot.delete
 //   - `meho harbor operation search "<query>"`                  — search pre-scoped

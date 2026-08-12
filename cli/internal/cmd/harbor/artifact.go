@@ -34,7 +34,7 @@ func newArtifactListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list <project_name> <repository_name>",
 		Short: "List artifacts (tags + digests) in a Harbor repository",
-		Long: "list dispatches GET:.../artifacts against connector_id=\"harbor-rest-2.x\"\n" +
+		Long: "list dispatches harbor.artifact.list against connector_id=\"harbor-rest-2.x\"\n" +
 			"and renders a table of tags, digests, and push times.\n" +
 			"--json emits the full OperationResult envelope.",
 		Example: "  meho harbor artifact list library ubuntu --target prod-harbor\n" +
@@ -58,7 +58,7 @@ func runArtifactList(cmd *cobra.Command, projectName, repoName, targetName strin
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	opID := "GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts"
+	opID := "harbor.artifact.list"
 	params := map[string]any{
 		"project_name":    projectName,
 		"repository_name": repoName,
@@ -71,7 +71,7 @@ func runArtifactList(cmd *cobra.Command, projectName, repoName, targetName strin
 }
 
 func printArtifactList(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:.../artifacts — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s harbor.artifact.list — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return
@@ -119,7 +119,7 @@ func newArtifactInfoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info <project_name> <repository_name> <reference>",
 		Short: "Show full metadata for a Harbor artifact by tag or digest",
-		Long: "info dispatches GET:.../artifacts/{reference} against\n" +
+		Long: "info dispatches harbor.artifact.list/{reference} against\n" +
 			"connector_id=\"harbor-rest-2.x\" and renders full artifact metadata\n" +
 			"including tags, digest, accessories (SBOM, signature), and scan overview.\n" +
 			"<reference> is a tag name or digest (sha256:...).\n" +
@@ -145,7 +145,7 @@ func runArtifactInfo(cmd *cobra.Command, projectName, repoName, reference, targe
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	opID := "GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}"
+	opID := "harbor.artifact.info"
 	params := map[string]any{
 		"project_name":    projectName,
 		"repository_name": repoName,
@@ -159,7 +159,7 @@ func runArtifactInfo(cmd *cobra.Command, projectName, repoName, reference, targe
 }
 
 func printArtifactInfo(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:.../artifacts/{ref} — status=%s (%.0fms)\n",
+	fmt.Fprintf(w, "%s harbor.artifact.info — status=%s (%.0fms)\n",
 		ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

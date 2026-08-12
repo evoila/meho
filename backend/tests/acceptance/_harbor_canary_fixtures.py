@@ -7,11 +7,11 @@ Two Harbor acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.harbor.HarborConnector` instance with a
 stub credentials loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 9 curated
-:class:`~meho_backplane.db.models.EndpointDescriptor` rows from
-:data:`~meho_backplane.connectors.harbor.core_ops.HARBOR_CORE_OPS`, and a
-:mod:`respx`-mocked Harbor REST surface answering each of the 9 curated
-read ops.
+:class:`~meho_backplane.db.models.Target` row, the 9 **typed** read ops
+registered via
+:func:`~meho_backplane.connectors.harbor.typed_ops.register_harbor_typed_operations`
+(``source_kind="typed"`` — zero ingest / catalog state), and a
+:mod:`respx`-mocked Harbor REST surface answering each of the 9 reads.
 
 Harbor uses HTTP Basic auth on every request — no session establish
 or XSRF-token dance is needed. The stub credentials loader bypasses the
@@ -27,32 +27,30 @@ deliberately constructed with no ``secret`` key on any entry so the
 dispatch smoke and JSONFlux force-handle tests exercise the same invariant
 the acceptance bar requires.
 
-Why a minimal direct-insert path (not full G0.7 canary ingest)
-==============================================================
+Why typed registration (not full G0.7 canary ingest)
+====================================================
 
-The full Harbor 2.x spec ingest via :class:`IngestionPipelineService`
-needs the Harbor OpenAPI spec reachable on the CI runner plus a live LLM
-for the grouping pass. Until the spec-shelf is wired to the meho-runners
-pool, the dispatch leg is exercised against a minimal direct-insert path
-that seeds the 9 curated endpoint_descriptor rows by hand. Same pattern
-:mod:`tests.acceptance._nsx_canary_fixtures` and
-:mod:`tests.acceptance._sddc_canary_fixtures` established.
+The read core ships as typed ops (#2856): running the code-shipped typed
+registrar populates the ``endpoint_descriptor`` rows on a fresh boot with
+zero catalog ingest — the #2358 conversion the NSX and SDDC Manager
+connectors already carry. The fixture therefore calls
+:func:`register_harbor_typed_operations` directly rather than seeding
+ingested rows by hand or standing up the (not-yet-wired) spec-canary
+ingest pipeline.
 
-``EndpointDescriptor.product`` note
-====================================
+``product`` note
+================
 
-Rows are inserted with ``product=HARBOR_PRODUCT="harbor"`` — the value
-:func:`~meho_backplane.operations._lookup.parse_connector_id` derives from
-``"harbor-rest-2.x"`` (first hyphen-segment of impl_id). The
-:class:`Target` row also uses ``product="harbor"`` so the resolver finds
+The :class:`Target` row uses ``product="harbor"`` so the resolver finds
 :class:`HarborConnector` (registered with ``product="harbor"`` in the v2
-registry). Unlike the SDDC Manager case, no product-key discrepancy exists
-for Harbor.
+registry — the value
+:func:`~meho_backplane.operations._lookup.parse_connector_id` derives from
+``"harbor-rest-2.x"``). Unlike the SDDC Manager case, no product-key
+discrepancy exists for Harbor.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,22 +62,19 @@ import respx
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors.harbor import (
     HARBOR_CONNECTOR_ID,
-    HARBOR_CORE_GROUPS,
-    HARBOR_CORE_OPS,
     HARBOR_IMPL_ID,
     HARBOR_PRODUCT,
     HARBOR_VERSION,
     HarborConnector,
     HarborTargetLike,
+    register_harbor_typed_operations,
 )
 from meho_backplane.connectors.registry import all_connectors_v2
 from meho_backplane.connectors.schemas import FingerprintResult
 from meho_backplane.db.engine import get_sessionmaker
-from meho_backplane.db.models import EndpointDescriptor, OperationGroup, Target
+from meho_backplane.db.models import Target
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.operations._handler_resolve import get_or_create_connector_instance
-
-_PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 
 __all__ = [
     "HARBOR_CANARY_ARTIFACTS",
@@ -91,9 +86,9 @@ __all__ = [
     "HARBOR_CANARY_ROBOTS",
     "HARBOR_FORCE_HANDLE_LIST_OP_ID",
     "HARBOR_TARGET_NAME",
-    "IngestedHarborCanary",
+    "TypedHarborCanary",
     "harbor_acceptance_operator",
-    "ingested_harbor_canary",
+    "typed_harbor_canary",
 ]
 
 #: Tenant the Harbor dispatch tests act under.
@@ -125,9 +120,7 @@ HARBOR_CANARY_FINGERPRINT: dict[str, object] = FingerprintResult(
 #: The list op the JSONFlux force-handle test dispatches. Artifact list is
 #: the largest surface in a real Harbor deployment (many tags / digests per
 #: repository), mirroring the NSX segment-list and SDDC host-list choices.
-HARBOR_FORCE_HANDLE_LIST_OP_ID: str = (
-    "GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts"
-)
+HARBOR_FORCE_HANDLE_LIST_OP_ID: str = "harbor.artifact.list"
 
 #: Smoke-test path parameters for ``HARBOR_FORCE_HANDLE_LIST_OP_ID``.
 HARBOR_FORCE_HANDLE_PARAMS: dict[str, str] = {
@@ -356,88 +349,13 @@ HARBOR_CANARY_ROBOTS: list[dict[str, object]] = [
 
 
 @dataclass(frozen=True)
-class IngestedHarborCanary:
-    """Bundle returned by :func:`ingested_harbor_canary`."""
+class TypedHarborCanary:
+    """Bundle returned by :func:`typed_harbor_canary`."""
 
     operator: Operator
     connector_id: str
     target_name: str
     base_url: str
-
-
-async def _insert_harbor_descriptors() -> None:
-    """Seed the 9 curated Harbor core ops + their groups as enabled rows.
-
-    One :class:`OperationGroup` per entry in :data:`HARBOR_CORE_GROUPS`
-    (``review_status='enabled'``), one :class:`EndpointDescriptor` per
-    entry in :data:`HARBOR_CORE_OPS` (``is_enabled=True``,
-    ``source_kind='ingested'``, ``handler_ref=None``).
-
-    Rows use ``product=HARBOR_PRODUCT="harbor"`` matching the connector
-    class's ``product`` attribute (no discrepancy unlike SDDC Manager).
-    """
-    sessionmaker = get_sessionmaker()
-    group_ids: dict[str, UUID] = {}
-    async with sessionmaker() as session:
-        for group in HARBOR_CORE_GROUPS:
-            group_row = OperationGroup(
-                tenant_id=None,
-                product=HARBOR_PRODUCT,
-                version=HARBOR_VERSION,
-                impl_id=HARBOR_IMPL_ID,
-                group_key=group.group_key,
-                name=group.name,
-                when_to_use=group.when_to_use,
-                review_status="enabled",
-            )
-            session.add(group_row)
-            await session.flush()
-            group_ids[group.group_key] = group_row.id
-
-        for op in HARBOR_CORE_OPS:
-            method, path = op.op_id.split(":", 1)
-            descriptor = EndpointDescriptor(
-                tenant_id=None,
-                product=HARBOR_PRODUCT,
-                version=HARBOR_VERSION,
-                impl_id=HARBOR_IMPL_ID,
-                op_id=op.op_id,
-                source_kind="ingested",
-                method=method,
-                path=path,
-                handler_ref=None,
-                group_id=group_ids[op.group_key],
-                summary=f"Harbor core op {op.op_id} (curated read).",
-                description=f"Harbor core op {op.op_id} (curated read).",
-                parameter_schema=_param_schema_for(path),
-                response_schema={"type": "object"},
-                llm_instructions=op.llm_instructions,
-                safety_level="safe",
-                requires_approval=False,
-                is_enabled=True,
-                tags=["spec:harbor-2.x/swagger.yaml"],
-            )
-            session.add(descriptor)
-        await session.commit()
-
-
-def _param_schema_for(path: str) -> dict[str, object]:
-    """Build a minimal ``parameter_schema`` for each ``{var}`` in *path*.
-
-    Mirrors :func:`tests.acceptance._sddc_canary_fixtures._param_schema_for`.
-    Harbor paths carry up to three path variables:
-    ``{project_name}``, ``{repository_name}``, and ``{reference}``.
-    """
-    placeholders = _PATH_VAR_RE.findall(path)
-    if not placeholders:
-        return {"type": "object", "properties": {}}
-    return {
-        "type": "object",
-        "properties": {
-            name: {"type": "string", "x-meho-param-loc": "path"} for name in placeholders
-        },
-        "required": list(placeholders),
-    }
 
 
 async def _harbor_credentials_loader(
@@ -494,16 +412,17 @@ def harbor_acceptance_operator() -> Operator:
 
 
 @pytest.fixture
-async def ingested_harbor_canary(
+async def typed_harbor_canary(
     pg_engine: None,
     harbor_acceptance_operator: Operator,
-) -> AsyncIterator[IngestedHarborCanary]:
+) -> AsyncIterator[TypedHarborCanary]:
     """Yield a dispatcher-ready Harbor setup over a respx-mocked registry.
 
-    Setup mirrors :func:`tests.acceptance._sddc_canary_fixtures.ingested_sddc_canary`:
+    No ingest / catalog state — the 9 reads dispatch as typed ops:
 
-    1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
-       rows for the 9 curated Harbor core ops.
+    1. Run :func:`register_harbor_typed_operations` — the code-shipped
+       typed registrar that lands the 9 read descriptors
+       (``source_kind="typed"``) on a fresh boot.
     2. Seed a :class:`Target` with ``product="harbor"`` and the
        :data:`HARBOR_CANARY_FINGERPRINT` so the resolver binds
        :class:`HarborConnector`.
@@ -512,7 +431,7 @@ async def ingested_harbor_canary(
     4. Activate a respx router for :data:`HARBOR_CANARY_BASE_URL` and
        register the Harbor REST surface.
     """
-    await _insert_harbor_descriptors()
+    await register_harbor_typed_operations()
 
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as session:
@@ -529,7 +448,7 @@ async def ingested_harbor_canary(
             vpn_required=False,
             extras={},
             fingerprint=HARBOR_CANARY_FINGERPRINT,
-            notes="seeded by tests.acceptance._harbor_canary_fixtures.ingested_harbor_canary",
+            notes="seeded by tests.acceptance._harbor_canary_fixtures.typed_harbor_canary",
         )
         session.add(target)
         await session.commit()
@@ -560,7 +479,7 @@ async def ingested_harbor_canary(
     ) as mock:
         _register_harbor_routes(mock)
         try:
-            yield IngestedHarborCanary(
+            yield TypedHarborCanary(
                 operator=harbor_acceptance_operator,
                 connector_id=HARBOR_CONNECTOR_ID,
                 target_name=HARBOR_TARGET_NAME,

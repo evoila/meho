@@ -1,80 +1,55 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
+#
+# code-quality-allow: file-size — the connector hosts fingerprint / probe /
+# auth + the two robot write handlers, and #2856 adds the nine typed-read
+# shims. The read *bodies* already live in ``typed_reads`` (this file keeps
+# only the thin shims); the shims must be methods on the connector class
+# because the dispatcher binds the resolved handler to the connector
+# instance. Matches the NSX/SDDC on-connector shim placement and the other
+# >600-line connectors in this package.
 
 """HarborConnector — hand-rolled HttpConnector subclass for Harbor 2.x.
 
-Skeleton-only — auth + fingerprint + probe + the G0.6 dispatch shim.
-Operations arrive in #620 via G0.7 spec ingestion against the Harbor 2.x
-OpenAPI spec into the ``endpoint_descriptor`` table.
-
-Registered against the v2 registry at module-import time via
-:func:`~meho_backplane.connectors.registry.register_connector_v2` in
-:mod:`meho_backplane.connectors.harbor.__init__`. The G0.7 auto-shim's
-idempotency check (in
-:func:`~meho_backplane.operations.ingest.connector_registration.ensure_connector_class_registered`
-once #408's pipeline lands in main) no-ops on subsequent ingests against the
-same ``(product="harbor", version="2.x", impl_id="harbor-rest")`` triple.
-
-Auth
-----
-
-Harbor uses HTTP Basic auth sent on every request — no session cookie or
-XSRF token is established. The connector caches the raw service-account
-credentials (loaded once from Vault via an injectable loader) and computes
-the ``Authorization: Basic`` header on each :meth:`auth_headers` call.
-
-Harbor supports two account forms:
-
-* **Admin account**: plain username (e.g. ``"admin"``).
-* **Robot account**: Harbor-formatted username (e.g. ``"robot$project+name"``
-  for a project-scoped robot or ``"robot$name"`` for a system-level robot).
-
-Both forms are stored verbatim in Vault under the target's ``secret_ref``
-path. No reformatting is applied; the stored username is sent as-is.
-
-This differs from the SDDC Manager precedent in that no ``sso_realm`` suffix
-is appended — Harbor's Basic auth header carries ``username:password`` directly.
-
-Auth model gating
------------------
-
-v0.2 locks the connector to :attr:`AuthModel.SHARED_SERVICE_ACCOUNT` (or
-``None`` for pre-G0.3 targets where the column hasn't been populated yet).
-:meth:`auth_headers` rejects any other ``target.auth_model`` value with a
-clear :exc:`NotImplementedError` naming both the target and the requested mode.
-
-Fingerprint
------------
-
-``GET /api/v2.0/systeminfo`` returns a ``GeneralInfo`` object. The
-``harbor_version`` field carries the full version string (e.g.
-``"v2.11.0-abc1234"``); the connector splits on the first ``-`` to extract
-separate ``version`` (``"v2.11.0"``) and ``build`` (``"abc1234"``) values.
-``extras["auth_mode"]`` carries the Harbor auth mode (e.g. ``"db_auth"``,
-``"ldap_auth"``, ``"oidc_auth"``).
-
-Probe
------
-
-``GET /api/v2.0/health`` is Harbor's own composite healthcheck covering DB,
-redis, registry, jobservice, and related subsystems. The connector maps the
-per-component ``status`` fields to a single ``ok`` boolean + a ``reason``
-string listing any unhealthy component names.
-
-This differs from the SDDC Manager / NSX precedents that delegate ``probe()``
-to ``fingerprint()``. Harbor's health endpoint is purpose-built for
-reachability checks and covers subsystem state that ``systeminfo`` does not
-expose, making the dedicated endpoint the better choice.
+Auth + fingerprint + probe + the G0.6 dispatch shim, plus the bound-method
+handlers backing the typed operations. Registered against the v2 registry at
+import time via :func:`~meho_backplane.connectors.registry.register_connector_v2`
+in :mod:`meho_backplane.connectors.harbor.__init__`.
 
 Operations
 ----------
 
-This module ships zero operations — the G0.6 dispatch shim :meth:`execute`
-exists for ABC compatibility but operations land in the ``endpoint_descriptor``
-table via #620's spec ingestion. Until then, the connector is registered and
-discoverable but ``execute(target, op_id, ...)`` against any ``op_id``
-resolves to "unknown operation" at the dispatcher layer — which is the correct
-behaviour for a registered-but-empty connector at this Task's stage.
+The audited read core (``harbor.about`` / ``harbor.health`` /
+``harbor.project.*`` / ``harbor.repository.*`` / ``harbor.artifact.*`` /
+``harbor.robot.list``) ships as **typed** ops (#2856): the bodies live in
+:mod:`meho_backplane.connectors.harbor.typed_reads`, the metadata + registrar
+in :mod:`meho_backplane.connectors.harbor.typed_ops`, and the thin shims
+:meth:`about` … :meth:`robot_list` below delegate to them. The robot
+**writes** (:meth:`robot_create` / :meth:`robot_delete`) are registered from
+:mod:`meho_backplane.connectors.harbor.ops`. All dispatch on a fresh boot
+with zero catalog ingest — the #2358 typed-op conversion the NSX and SDDC
+Manager connectors already carry.
+
+Auth
+----
+
+Harbor uses HTTP Basic auth on every request — no session cookie or XSRF
+token is established. The connector caches the raw service-account
+credentials (loaded once from Vault via an injectable loader) and computes
+the ``Authorization: Basic`` header on each :meth:`auth_headers` call; both
+admin (``"admin"``) and robot (``"robot$project+name"``) usernames are sent
+verbatim, with no ``sso_realm`` suffix. :attr:`AuthModel.SHARED_SERVICE_ACCOUNT`
+(or ``None`` for pre-G0.3 targets) is the only accepted ``auth_model``; any
+other value raises :exc:`NotImplementedError`.
+
+Fingerprint / probe
+-------------------
+
+:meth:`fingerprint` reads ``GET /api/v2.0/systeminfo`` and splits
+``harbor_version`` into separate ``version`` + ``build`` values;
+:meth:`probe` reads Harbor's purpose-built ``GET /api/v2.0/health`` composite
+healthcheck (DB / redis / registry / jobservice), mapping the per-component
+status fields to a single ``ok`` boolean + a ``reason`` string.
 """
 
 from __future__ import annotations
@@ -552,6 +527,82 @@ class HarborConnector(HttpConnector):
         resp = await client.request("DELETE", path, headers=headers)
         resp.raise_for_status()
         return {"id": robot_id, "deleted": True}
+
+    # Typed read ops (#2856): thin bound-method shims delegating to the
+    # ``harbor.typed_reads`` bodies (kept in a sibling module for the
+    # file-length budget). All read-only, safety_level=safe.
+
+    async def about(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.about`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_about_impl
+
+        return await harbor_about_impl(self, operator, target, params)
+
+    async def health(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.health`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_health_impl
+
+        return await harbor_health_impl(self, operator, target, params)
+
+    async def project_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.project.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_project_list_impl
+
+        return await harbor_project_list_impl(self, operator, target, params)
+
+    async def project_info(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.project.info`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_project_info_impl
+
+        return await harbor_project_info_impl(self, operator, target, params)
+
+    async def repository_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.repository.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_repository_list_impl
+
+        return await harbor_repository_list_impl(self, operator, target, params)
+
+    async def repository_info(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.repository.info`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_repository_info_impl
+
+        return await harbor_repository_info_impl(self, operator, target, params)
+
+    async def artifact_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.artifact.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_artifact_list_impl
+
+        return await harbor_artifact_list_impl(self, operator, target, params)
+
+    async def artifact_info(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``harbor.artifact.info`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_artifact_info_impl
+
+        return await harbor_artifact_info_impl(self, operator, target, params)
+
+    async def robot_list(
+        self, operator: Operator, target: HarborTargetLike, params: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """``harbor.robot.list`` shim (#2856)."""
+        from meho_backplane.connectors.harbor.typed_reads import harbor_robot_list_impl
+
+        return await harbor_robot_list_impl(self, operator, target, params)
 
     async def invalidate_credentials(self, target: HarborTargetLike) -> None:
         """Duck-typed credential-eviction hook for the dispatch path (#2396).

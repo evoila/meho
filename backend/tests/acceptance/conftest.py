@@ -66,9 +66,9 @@ from tests.acceptance._canary_fixtures import (
 )
 from tests.acceptance._harbor_canary_fixtures import (
     HARBOR_CANARY_OPERATOR_TENANT,
-    IngestedHarborCanary,
+    TypedHarborCanary,
     harbor_acceptance_operator,
-    ingested_harbor_canary,
+    typed_harbor_canary,
 )
 from tests.acceptance._nsx_canary_fixtures import (
     NSX_CANARY_OPERATOR_TENANT,
@@ -121,18 +121,17 @@ __all__ = [
     "SKIP_REASON",
     "VROPS_CANARY_OPERATOR_TENANT",
     "IngestedCanaryVcsim",
-    "IngestedHarborCanary",
     "IngestedNsxCanary",
     "IngestedRobotCanary",
     "IngestedSddcCanary",
     "IngestedVropsCanary",
+    "TypedHarborCanary",
     "VcsimEndpoint",
     "VcsimTopology",
     "acceptance_operator",
     "async_pg_url",
     "harbor_acceptance_operator",
     "ingested_canary_vcsim",
-    "ingested_harbor_canary",
     "ingested_nsx_canary",
     "ingested_robot_canary",
     "ingested_robot_canary_sandbox",
@@ -144,6 +143,7 @@ __all__ = [
     "prewarmed_embeddings",
     "robot_acceptance_operator",
     "sddc_acceptance_operator",
+    "typed_harbor_canary",
     "vcsim_endpoint",
     "vrops_acceptance_operator",
 ]

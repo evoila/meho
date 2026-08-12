@@ -31,6 +31,10 @@ This module ships:
 * :meth:`Rke2SshConnector.etcd_snapshot_save` -- the safe, non-gated
   ``rke2.etcd-snapshot.save`` op (T4 #2431): an on-demand managed-etcd
   snapshot on a server node, returning a snapshot name + path.
+* :meth:`Rke2SshConnector.etcd_snapshot_list` -- the safe, read-only
+  ``rke2.etcd-snapshot.list`` op (#2853): enumerates the managed-etcd
+  snapshots that already exist on a server node (the ``.save`` read
+  counterpart), returning name / location / size / timestamp rows.
 * :meth:`Rke2SshConnector.execute` -- the G0.6 dispatcher shim (same
   shape as :meth:`Bind9Connector.execute` / :meth:`HolodeckConnector.execute`).
 
@@ -44,8 +48,9 @@ the bind9 anti-shape.
 The approval-gated write ops (``rke2.token.rotate`` /
 ``rke2.node.service.restart`` / ``rke2.node.config.update``) land in
 :mod:`~meho_backplane.connectors.rke2.ops_write` (sibling Tasks
-#2429/#2430) and the safe, non-gated ``rke2.etcd-snapshot.save`` (T4
-#2431) in :mod:`~meho_backplane.connectors.rke2.ops_snapshot`; all are
+#2429/#2430) and the safe, non-gated snapshot ops
+``rke2.etcd-snapshot.save`` (T4 #2431) + ``rke2.etcd-snapshot.list``
+(#2853) in :mod:`~meho_backplane.connectors.rke2.ops_snapshot`; all are
 composed onto :data:`~meho_backplane.connectors.rke2.ops.RKE2_OPS` and
 their bound-method shims live here. The dispatcher shim does not change.
 """
@@ -432,6 +437,29 @@ class Rke2SshConnector(SshConnector):
 
         return await _rke2_etcd_snapshot_save(self, target, params, operator)
 
+    async def etcd_snapshot_list(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``rke2.etcd-snapshot.list`` (#2853).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.rke2.ops_snapshot.rke2_etcd_snapshot_list`,
+        which runs the shared embedded-etcd-server precondition guard and
+        enumerates the existing managed-etcd snapshots over the shared SSH
+        adapter. Safe tier, non-gated, and genuinely read-only -- the result
+        carries snapshot names / locations / sizes / timestamps only, never
+        etcd contents. Set-shaped, so the JSONFlux reducer materialises a
+        result handle above threshold.
+        """
+        from meho_backplane.connectors.rke2.ops_snapshot import (
+            rke2_etcd_snapshot_list as _rke2_etcd_snapshot_list,
+        )
+
+        return await _rke2_etcd_snapshot_list(self, target, params, operator)
+
     @classmethod
     async def register_operations(cls) -> None:
         """Upsert every op in :data:`RKE2_OPS` into ``endpoint_descriptor``.
@@ -613,14 +641,18 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "``rke2.node.service.restart``. Transport: plain SSH."
     ),
     "rke2-etcd-snapshot": (
-        "Use to capture an on-demand managed-etcd snapshot on an RKE2 "
-        "server node before a risky change: ``rke2.etcd-snapshot.save`` "
-        "runs ``rke2 etcd-snapshot save`` as root over SSH and returns the "
-        "snapshot name + on-disk path (never etcd contents). Refuses "
-        "non-server or external-datastore nodes with a structured error. "
-        "Safe and non-mutating to running cluster state -- it copies etcd "
-        "to disk. Pair it ahead of the approval-gated node-write ops "
-        "(token rotate / config update / service restart) as the recovery "
-        "point. Transport: plain SSH."
+        "Use for managed-etcd snapshots on an RKE2 server node. "
+        "``rke2.etcd-snapshot.save`` runs ``rke2 etcd-snapshot save`` as "
+        "root over SSH and returns the snapshot name + on-disk path (never "
+        "etcd contents) -- capture one before a risky change as the "
+        "recovery point, ahead of the approval-gated node-write ops (token "
+        "rotate / config update / service restart). "
+        "``rke2.etcd-snapshot.list`` runs ``rke2 etcd-snapshot list`` and "
+        "returns the existing snapshots as ``{name, location, size_bytes, "
+        "created_at}`` rows -- read-only, and the way to CONFIRM a fresh "
+        "snapshot landed after a rotation (a snapshot taken before the "
+        "rotation was made with the retired token). Both refuse non-server "
+        "or external-datastore nodes with a structured error and are safe / "
+        "non-mutating to running cluster state. Transport: plain SSH."
     ),
 }

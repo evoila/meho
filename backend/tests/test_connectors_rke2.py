@@ -30,20 +30,25 @@ Coverage matrix (per Task #2221 acceptance criteria):
   ``LoadState=not-found`` nulls the live-state fields; a non-zero
   ``NRestarts`` surfaces as the crash-loop signal; the probe raises
   :class:`Rke2ServiceStatusProbeError` when ``systemctl`` is absent.
-* ``RKE2_OPS`` registration shape -- 7 ops: three read (``rke2.about`` /
+* ``RKE2_OPS`` registration shape -- 8 ops: three read (``rke2.about`` /
   ``rke2.posture.show``, T1 #2221; ``rke2.node.service.status``, #2852),
   three approval-gated write (``rke2.token.rotate`` T2 #2429,
   ``rke2.node.service.restart`` / ``rke2.node.config.update`` T3 #2430), and
-  one safe non-gated snapshot (``rke2.etcd-snapshot.save`` T4 #2431). Read
-  ops are safe / read-only / no-approval and take no params; write ops are
-  dangerous / approval-gated; the snapshot op is safe / no-approval but
-  neither read-only nor write and takes an optional charset-bounded
-  ``name``. Every op has ``additionalProperties=False`` on its parameter
-  schema, a non-empty SSH-transport ``when_to_use``, and a ``rke2.`` op_id
-  with a handler method on the class.
+  two safe non-gated snapshot (``rke2.etcd-snapshot.save`` T4 #2431,
+  ``rke2.etcd-snapshot.list`` #2853). Read ops are safe / read-only /
+  no-approval and take no params; write ops are dangerous / approval-gated;
+  ``.save`` is safe / no-approval but active (neither read-only nor write)
+  and takes an optional charset-bounded ``name``; ``.list`` is safe /
+  no-approval / read-only and takes no params. Every op has
+  ``additionalProperties=False`` on its parameter schema, a non-empty
+  SSH-transport ``when_to_use``, and a ``rke2.`` op_id with a handler method
+  on the class.
 * ``rke2.etcd-snapshot.save`` handler -- name charset re-check
-  (fail-closed), the embedded-etcd-server precondition guard, and a
+  (fail-closed), the shared embedded-etcd-server precondition guard, and a
   bounded-name save parsed from the RKE2 ``Snapshot <name> saved.`` log.
+* ``rke2.etcd-snapshot.list`` handler -- the *same* shared precondition
+  guard, and a version-drift-resilient parse of the RKE2 ``Name / Location
+  / Size / Created`` table into ``{snapshots: [...]}`` rows.
 """
 
 from __future__ import annotations
@@ -83,6 +88,7 @@ from meho_backplane.connectors.rke2.ops_snapshot import (
     Rke2SnapshotNameError,
     Rke2SnapshotPreconditionError,
     parse_saved_snapshot_name,
+    parse_snapshot_list,
 )
 from meho_backplane.settings import get_settings
 from tests._ssh_vault_stub import stub_ssh_vault_secrets
@@ -732,19 +738,27 @@ _WRITE_OP_IDS: frozenset[str] = frozenset(
     {"rke2.token.rotate", "rke2.node.service.restart", "rke2.node.config.update"}
 )
 
-#: The safe, non-gated snapshot tier (T4 #2431): ``rke2.etcd-snapshot.save``.
-#: Safe-tier / no-approval like the read ops, but it is active (it copies etcd
-#: to disk), so it carries NEITHER the read-only tag NOR the dangerous/write
-#: tier -- it belongs to neither sweep set.
-_SNAPSHOT_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save"})
+#: The safe, non-gated snapshot tier: ``.save`` (T4 #2431) + ``.list``
+#: (#2853). Both are safe-tier / no-approval like the read ops.
+_SNAPSHOT_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save", "rke2.etcd-snapshot.list"})
+
+#: The *active* snapshot op: ``.save`` copies etcd to disk, so it carries
+#: NEITHER the read-only tag NOR the dangerous/write tier -- it belongs to
+#: neither sweep set. (``.list``, by contrast, is a genuine read.)
+_SNAPSHOT_ACTIVE_OP_IDS: frozenset[str] = frozenset({"rke2.etcd-snapshot.save"})
+
+#: Every op that must carry the ``read-only`` tag: the identity/posture read
+#: tier plus the read-only ``.list`` snapshot op (#2853). ``.save`` is
+#: deliberately excluded (it is active).
+_READ_ONLY_TAGGED_OP_IDS: frozenset[str] = _READ_OP_IDS | frozenset({"rke2.etcd-snapshot.list"})
 
 _EXPECTED_OP_IDS: frozenset[str] = _READ_OP_IDS | _WRITE_OP_IDS | _SNAPSHOT_OP_IDS
 
 
 def test_rke2_ops_count_matches_expected() -> None:
     # Three read ops (#2221 posture/about + #2852 service.status) + three
-    # approval-gated write ops (#2429 / #2430) + one safe non-gated snapshot
-    # op (#2431) = seven.
+    # approval-gated write ops (#2429 / #2430) + two safe non-gated snapshot
+    # ops (.save #2431, .list #2853) = eight.
     assert len(RKE2_OPS) == len(_EXPECTED_OP_IDS)
 
 
@@ -772,30 +786,52 @@ def test_rke2_read_ops_all_safe_read_only_no_approval() -> None:
 
 
 def test_rke2_read_ops_tagged_read_only() -> None:
-    """The read-tier ops carry the read-only tag; the snapshot op does not."""
+    """Read-tier ops + ``.list`` carry the read-only tag; ``.save`` does not."""
     by_id = {op.op_id: op for op in RKE2_OPS}
-    for op_id in _READ_OP_IDS:
+    for op_id in _READ_ONLY_TAGGED_OP_IDS:
         assert "read-only" in by_id[op_id].tags, f"{op_id!r} missing read-only tag"
-    # The snapshot op is active (copies etcd to disk), so it is NOT read-only.
-    assert "read-only" not in by_id["rke2.etcd-snapshot.save"].tags
+    # ``.save`` is active (copies etcd to disk), so it is NOT read-only.
+    for op_id in _SNAPSHOT_ACTIVE_OP_IDS:
+        assert "read-only" not in by_id[op_id].tags, f"{op_id!r} must not be read-only"
 
 
 def test_rke2_snapshot_op_safe_active_not_gated() -> None:
-    """AC: the snapshot op is safe-tier / no-approval, but neither read nor write.
+    """AC: the active snapshot op is safe-tier / no-approval, neither read nor write.
 
     ``rke2.etcd-snapshot.save`` copies etcd to disk -- it is active on the node
     filesystem yet does not mutate running cluster state, so it is deliberately
     safe-tier and non-gated. It must sit in NEITHER sweep set: not read-only
-    (no ``read-only`` tag) and not the dangerous/approval write tier.
+    (no ``read-only`` tag) and not the dangerous/approval write tier. (``.list``
+    is a genuine read and IS read-only -- covered separately.)
     """
     by_id = {op.op_id: op for op in RKE2_OPS}
-    for op_id in _SNAPSHOT_OP_IDS:
+    for op_id in _SNAPSHOT_ACTIVE_OP_IDS:
         op = by_id[op_id]
         assert op.safety_level == "safe", f"{op_id!r} is not safe-tier"
         assert op.requires_approval is False, f"{op_id!r} requires approval"
         assert "read-only" not in op.tags, f"{op_id!r} must not be read-only-tagged"
         assert op_id not in _READ_OP_IDS
         assert op_id not in _WRITE_OP_IDS
+
+
+def test_rke2_snapshot_list_is_read_only_safe_no_approval() -> None:
+    """AC: ``.list`` is safe-tier / no-approval / read-only (unlike ``.save``).
+
+    Unlike ``.save`` (active), ``rke2.etcd-snapshot.list`` only enumerates
+    existing snapshots -- a genuine read -- so it carries the ``read-only`` tag
+    and is counted in the snapshot tier, but it is NOT in the dangerous/approval
+    write set.
+    """
+    by_id = {op.op_id: op for op in RKE2_OPS}
+    op = by_id["rke2.etcd-snapshot.list"]
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    assert "read-only" in op.tags, "'.list' must be read-only-tagged"
+    assert "rke2.etcd-snapshot.list" in _SNAPSHOT_OP_IDS
+    assert "rke2.etcd-snapshot.list" not in _WRITE_OP_IDS
+    # No operator params: the local snapshot store is fixed.
+    assert op.parameter_schema.get("properties") == {}
+    assert op.parameter_schema.get("additionalProperties") is False
 
 
 def test_rke2_write_ops_all_dangerous_approval_gated() -> None:
@@ -992,6 +1028,169 @@ async def test_etcd_snapshot_save_never_leaks_credentials(
         mock_cmd.side_effect = sequence
         with caplog.at_level("DEBUG"):
             result = await connector.etcd_snapshot_save(_TARGET, {})
+    rendered = repr(result)
+    for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
+        assert canary not in rendered
+        assert canary not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# etcd-snapshot.list handler (#2853)
+# ---------------------------------------------------------------------------
+
+
+# A realistic ``rke2 etcd-snapshot list`` transcript: a header row and three
+# snapshot rows (two local ``file://``, one ``s3://``). The first row's size is
+# non-trivial (50 MiB) per the acceptance criterion; sizes are the documented
+# raw-byte integers. Each row is split across adjacent string literals (the
+# real vendor lines exceed the 100-col lint limit); they concatenate at compile
+# time, and the parser is whitespace-count-insensitive.
+_LIST_TABLE_OK = (
+    "Name  Location  Size  Created\n"
+    "on-demand-srv-0-1754471523  "
+    "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754471523  "
+    "52428800  2026-08-06T09:12:03Z\n"
+    "on-demand-srv-0-1754385123  "
+    "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754385123  "
+    "51380224  2026-08-05T09:12:03Z\n"
+    "etcd-snapshot-srv-0-1754298723  "
+    "s3://rke2-backups/etcd-snapshot-srv-0-1754298723  "
+    "50331648  2026-08-04T09:12:03Z\n"
+)
+
+
+def test_parse_snapshot_list_parses_rows() -> None:
+    rows = parse_snapshot_list(_LIST_TABLE_OK)
+    assert rows == [
+        {
+            "name": "on-demand-srv-0-1754471523",
+            "location": (
+                "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754471523"
+            ),
+            "size_bytes": 52428800,
+            "created_at": "2026-08-06T09:12:03Z",
+        },
+        {
+            "name": "on-demand-srv-0-1754385123",
+            "location": (
+                "file:///var/lib/rancher/rke2/server/db/snapshots/on-demand-srv-0-1754385123"
+            ),
+            "size_bytes": 51380224,
+            "created_at": "2026-08-05T09:12:03Z",
+        },
+        {
+            "name": "etcd-snapshot-srv-0-1754298723",
+            "location": "s3://rke2-backups/etcd-snapshot-srv-0-1754298723",
+            "size_bytes": 50331648,
+            "created_at": "2026-08-04T09:12:03Z",
+        },
+    ]
+
+
+def test_parse_snapshot_list_skips_header_regardless_of_casing() -> None:
+    # An UPPERCASE header (some versions) and a "no snapshots" notice are both
+    # skipped: neither ends in an ISO-8601 timestamp.
+    out = "NAME  LOCATION  SIZE  CREATED\nNo snapshots found\n"
+    assert parse_snapshot_list(out) == []
+
+
+def test_parse_snapshot_list_empty_output() -> None:
+    assert parse_snapshot_list("") == []
+    assert parse_snapshot_list("\n  \n") == []
+
+
+def test_parse_snapshot_list_non_integer_size_is_null() -> None:
+    # Version drift: a human-readable ``Size`` column parses to size_bytes=None
+    # (fail-closed) rather than a guessed byte conversion; the row survives.
+    out = "legacy-snap-1  local  50 MiB  2026-08-01T00:00:00Z\n"
+    rows = parse_snapshot_list(out)
+    assert rows == [
+        {
+            "name": "legacy-snap-1",
+            "location": "local",
+            "size_bytes": None,
+            "created_at": "2026-08-01T00:00:00Z",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_success_parses_and_no_sudo() -> None:
+    connector = Rke2SshConnector()
+    # side_effect order: precondition guard, then the list command.
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stdout=_LIST_TABLE_OK, exit_status=0),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        result = await connector.etcd_snapshot_list(_TARGET, {})
+    assert [s["name"] for s in result["snapshots"]] == [
+        "on-demand-srv-0-1754471523",
+        "on-demand-srv-0-1754385123",
+        "etcd-snapshot-srv-0-1754298723",
+    ]
+    assert result["snapshots"][0]["size_bytes"] == 52428800
+    issued = [call.args[1] for call in mock_cmd.await_args_list]
+    # Guard runs first (plain, as root -- no sudo argv); then the list by
+    # absolute binary path. No command constructs a sudo argv.
+    assert issued[0].startswith("sh -c ")
+    assert "datastore-endpoint" in issued[0]
+    assert issued[1] == "/var/lib/rancher/rke2/bin/rke2 etcd-snapshot list"
+    assert not any("sudo" in cmd for cmd in issued)
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_reuses_guard_refuses_external_datastore() -> None:
+    """AC: ``.list`` raises the SAME precondition error as ``.save`` (shared guard)."""
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="external-datastore\n")
+        with pytest.raises(Rke2SnapshotPreconditionError, match="external datastore"):
+            await connector.etcd_snapshot_list(_TARGET, {})
+    # Guard ran; the list command never did (single await).
+    mock_cmd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_reuses_guard_refuses_non_server_node() -> None:
+    connector = Rke2SshConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.return_value = _proc(stdout="no-embedded-etcd\n")
+        with pytest.raises(Rke2SnapshotPreconditionError, match="embedded-etcd server"):
+            await connector.etcd_snapshot_list(_TARGET, {})
+    mock_cmd.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_nonzero_exit_raises() -> None:
+    from meho_backplane.connectors.rke2.ops_snapshot import Rke2SnapshotError
+
+    connector = Rke2SshConnector()
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stderr="FATA[0000] failed to list snapshots\n", exit_status=1),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        with pytest.raises(Rke2SnapshotError, match="list exited 1"):
+            await connector.etcd_snapshot_list(_TARGET, {})
+
+
+@pytest.mark.asyncio
+async def test_etcd_snapshot_list_never_leaks_credentials(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No SSH/sudo credential material appears in the result or logs."""
+    connector = Rke2SshConnector()
+    sequence = [
+        _proc(stdout="ok\n"),
+        _proc(stdout=_LIST_TABLE_OK, exit_status=0),
+    ]
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = sequence
+        with caplog.at_level("DEBUG"):
+            result = await connector.etcd_snapshot_list(_TARGET, {})
     rendered = repr(result)
     for canary in (_CANARY_PASSWORD, _CANARY_SSH_KEY, _CANARY_TOKEN_VALUE):
         assert canary not in rendered

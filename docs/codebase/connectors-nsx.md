@@ -14,12 +14,17 @@ verbs + MCP review + recorded-fixture E2E arrive in G3.5-T3 (#615).
 
 **Audited reads are typed ops (#2302).** The audited operational read
 set -- node/cluster status+version, backup config+status,
-transport-zones list, tier-1 list, and alarms -- is registered as
+transport-zones list, tier-1 list, segment list (`nsx.segment.list`,
+#2835), and alarms -- is registered as
 **typed** ops (`source_kind="typed"`, `typed_ops.py` metadata +
 `typed_reads.py` bodies + bound-method shims on `NsxConnector`), so it
 dispatches on a fresh boot with **zero catalog ingest** (avoiding the
-#2247 per-deploy catalog-state failure class). The remaining reads
-(transport-node listing, segments, tier-0 gateways, distributed-firewall
+#2247 per-deploy catalog-state failure class). `nsx.segment.list`
+(`GET /policy/api/v1/infra/segments`) passes the vendor
+`{results, result_count}` envelope through unmodified so the operator can
+read each segment's `subnets[].gateway_address` (subnet/CIDR occupancy)
+before carving a new segment. The remaining reads
+(transport-node listing, tier-0 gateways, distributed-firewall
 policies + rules) stay as ordinary `source_kind="ingested"` breadth, enabled
 generically via `ReviewService.enable_reads`, so the wider ingested breadth
 remains browsable. `nsx.backup.config` is
@@ -87,7 +92,7 @@ Source: `backend/src/meho_backplane/connectors/nsx/`.
   typed-read / VCF-9-ingest tests one importable source of truth. Relocated
   here from the retired `core_ops` module in #2358.
 - **Ingested browse breadth** -- the reads outside the typed set
-  (transport-node listing, segments, tier-0 gateways, distributed-firewall
+  (transport-node listing, tier-0 gateways, distributed-firewall
   policies + rules, and the wider NSX catalog) land as ordinary
   `source_kind="ingested"` `endpoint_descriptor` rows via G0.7 spec ingestion
   and are enabled through the generic review flow
@@ -229,7 +234,7 @@ concern, same posture vSphere takes for proactive refresh.
 
 The audited operational reads are typed ops (see the Overview) and dispatch on
 a fresh boot with zero catalog state. The remaining reads (transport-node
-listing, segments, tier-0 gateways, distributed-firewall policies + rules) and
+listing, tier-0 gateways, distributed-firewall policies + rules) and
 the wider NSX catalog land as ordinary `source_kind="ingested"`
 `endpoint_descriptor` rows after a G0.7 ingest of the NSX `policy.yaml` +
 `manager.yaml` corpus (every row `is_enabled=False` until enabled).
@@ -293,8 +298,10 @@ The hand-curated ingested-enable apparatus (the `core_ops.py` module with its
   lane with no Docker dependency.
 - Acceptance tests:
   - `backend/tests/acceptance/test_g35_nsx_dispatch_smoke.py` —
-    dispatch the 9 NSX core ops against a respx-mocked NSX REST
-    surface; one parametrised case per op.
+    dispatch the ingested NSX core ops against a respx-mocked NSX REST
+    surface (one parametrised case per op), plus a typed-op case that
+    registers `nsx.segment.list` (#2835) and dispatches it over the same
+    mocked `/policy/api/v1/infra/segments` route.
   - `backend/tests/acceptance/test_g35_nsx_jsonflux_force_handle.py`
     — install a test-only `ForceHandleReducer`, dispatch the
     segment-list op, assert `OperationResult.handle` is populated

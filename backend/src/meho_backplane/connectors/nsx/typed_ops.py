@@ -18,13 +18,13 @@ The dataclass + tuple + module-level registrar shape mirrors
 :mod:`meho_backplane.connectors.argocd.ops` and
 :mod:`meho_backplane.connectors.vmware_rest.typed_ops`.
 
-Ops NOT in the audited set (transport-node listing, segment listing,
-tier-0 gateways, distributed-firewall policies + rules) stay as ingested
-browse breadth -- enable-able through the generic review flow
+Ops NOT in the audited set (transport-node listing, tier-0 gateways,
+distributed-firewall policies + rules) stay as ingested browse breadth
+-- enable-able through the generic review flow
 (``ReviewService.enable_reads``); only the audited operational reads are
-promoted to first-class typed ops. ``tier-1 gateway create`` (a write) is
-out of scope: the first write on a read-only connector is its own
-approval-gated G3.x write-surface initiative.
+promoted to first-class typed ops. Segment / tier-1 gateway *create*
+(a write) is out of scope: the first write on a read-only connector is
+its own approval-gated G3.x write-surface initiative.
 """
 
 from __future__ import annotations
@@ -107,8 +107,10 @@ NSX_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     _GROUP_INVENTORY: (
         "Use to list the NSX routing/overlay inventory the operator asks "
         "about most: transport zones under the default enforcement point "
-        "(nsx.transport_zone.list) and per-tenant tier-1 gateways "
-        "(nsx.tier1.list). Read-only."
+        "(nsx.transport_zone.list), per-tenant tier-1 gateways "
+        "(nsx.tier1.list), and overlay/VLAN segments with their "
+        "subnet/CIDR occupancy (nsx.segment.list) -- the pre-flight read "
+        "before carving a new segment. Read-only."
     ),
     _GROUP_ALARMS: (
         "Use to read NSX system alarms (nsx.alarm.list) -- open faults and "
@@ -363,6 +365,48 @@ _TIER1_LIST = NsxTypedOp(
 
 
 # ---------------------------------------------------------------------------
+# nsx.segment.list
+# ---------------------------------------------------------------------------
+
+_SEGMENT_LIST = NsxTypedOp(
+    op_id="nsx.segment.list",
+    handler_attr="segment_list",
+    summary="NSX overlay/VLAN segment inventory with subnet/CIDR occupancy.",
+    description=(
+        "Lists NSX segments via GET /policy/api/v1/infra/segments -- the "
+        "overlay/VLAN segments workloads attach to. Returns {results: [...]} "
+        "where each segment carries id, display_name, resource_type, "
+        "transport_zone_path (the transport zone it backs onto), and subnets "
+        "-- each subnet's gateway_address is the subnet/CIDR occupancy datum. "
+        "The pre-flight read before carving a new segment or attaching a "
+        "workload, to spot which CIDRs are already in use and avoid a "
+        "collision. The vendor {results, result_count} envelope passes "
+        "through unmodified. Read-only inventory: segment create/update/"
+        "delete is a separate approval-gated write and is not registered "
+        "here. Works with zero catalog ingest. safety_level=safe, read-only."
+    ),
+    parameter_schema=_NO_PARAMS,
+    response_schema={"type": "object", "additionalProperties": True},
+    group_key=_GROUP_INVENTORY,
+    tags=("read-only", "nsx", "policy", "segment"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call before carving a new NSX overlay segment or attaching a "
+            "workload, to list existing segments and read which subnet/gateway "
+            "CIDRs are already in use (avoid a CIDR collision)."
+        ),
+        "output_shape": (
+            "{results: [{id, display_name, resource_type, transport_zone_path, "
+            "subnets: [{gateway_address}]}, ...]}. Read subnets[].gateway_address "
+            "across segments for the CIDR occupancy the pre-flight needs."
+        ),
+    },
+)
+
+
+# ---------------------------------------------------------------------------
 # nsx.alarm.list
 # ---------------------------------------------------------------------------
 
@@ -437,6 +481,7 @@ NSX_TYPED_OPS: tuple[NsxTypedOp, ...] = (
     _BACKUP_STATUS,
     _TRANSPORT_ZONE_LIST,
     _TIER1_LIST,
+    _SEGMENT_LIST,
     _ALARM_LIST,
 )
 

@@ -40,6 +40,8 @@ from uuid import UUID
 
 import pytest
 import structlog
+from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -274,6 +276,25 @@ def test_postgres_resolves_versioned_and_wildcard_and_appears_in_registry() -> N
     fresh = _PgTarget()
     fresh.fingerprint = type("_FP", (), {"version": None})()
     assert resolve_connector(fresh) is PostgresConnector
+
+
+def test_supported_version_range_excludes_eol_postgres_12() -> None:
+    """AC: the advertised range starts at 13, not the EOL 12.
+
+    ``postgres.replication`` reads ``pg_stat_wal_receiver.written_lsn`` /
+    ``flushed_lsn`` -- the columns that replaced 12's single ``received_lsn`` in
+    PostgreSQL 13 (https://www.postgresql.org/docs/13/monitoring-stats.html) --
+    so advertising the (EOL) 12 would parse-error that op on a 12 standby.
+    Matched with the same ``SpecifierSet`` the resolver applies, 12 must fall
+    outside the range while the written_lsn/flushed_lsn-bearing releases stay in.
+    """
+    version_range = PostgresConnector.supported_version_range
+    assert version_range is not None
+    spec = SpecifierSet(version_range)
+    assert Version("12") not in spec
+    assert Version("13") in spec
+    assert Version("17") in spec
+    assert Version("18") not in spec
 
 
 def test_every_op_is_safe_read_only_with_closed_schema() -> None:

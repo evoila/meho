@@ -1,4 +1,4 @@
-# Connector: postgres (PostgreSQL 12–17, read-only)
+# Connector: postgres (PostgreSQL 13–17, read-only)
 
 ## Overview
 
@@ -25,7 +25,7 @@ Source: `backend/src/meho_backplane/connectors/postgres/`.
 
 - **`PostgresConnector`** (`connector.py`) — `Connector` subclass. Class
   attributes: `product="postgres"`, `version="16"`, `impl_id="postgres-wire"`,
-  `supported_version_range=">=12,<18"`, `priority=1` (outranks a
+  `supported_version_range=">=13,<18"`, `priority=1` (outranks a
   `GenericRestConnector` auto-shim). Owns the connect/close lifecycle
   (`_connection` async context manager), `fingerprint`, `probe`, the eight op
   handlers, `register_operations`, and the `execute` dispatcher shim.
@@ -134,6 +134,12 @@ operator-less probe path resolves here), `tcp_unreachable` (`OSError`), and
 
 ## Known issues / scope
 
+- **Lower bound is PostgreSQL 13, not 12.** `postgres.replication` reads
+  `pg_stat_wal_receiver.written_lsn` / `flushed_lsn`, the columns that replaced
+  12's single `received_lsn` in PostgreSQL 13
+  (<https://www.postgresql.org/docs/13/monitoring-stats.html>). PostgreSQL 12 is
+  EOL (2024-11-21), so `supported_version_range` starts at `13` rather than
+  carrying a version-branched wal_receiver query.
 - **TLS is not yet wired.** `connect_read_only` passes no `ssl` argument, so it
   connects unencrypted (fine for a trust-auth port-forward or an in-cluster
   instance). A `verify_tls` / SNI-aware SSL path is a follow-up when a

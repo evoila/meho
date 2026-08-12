@@ -25,7 +25,7 @@ Two-phase registration, the same shape as
 * **Asynchronous (lifespan startup)** --
   :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
   invokes :func:`register_mongodb_typed_operations`, which delegates to
-  :meth:`MongoDbConnector.register_operations` to upsert the eight read-only
+  :meth:`MongoDbConnector.register_operations` to upsert the nine read-only
   descriptors. Idempotent on re-call with unchanged op text.
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry point

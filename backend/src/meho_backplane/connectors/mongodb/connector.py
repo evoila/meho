@@ -177,6 +177,14 @@ class MongoDbConnector(Connector):
         async with self._client(target, operator) as client:
             return await queries.fetch_replica_status(client)
 
+    async def current_ops(
+        self, operator: Operator, target: Target, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``mongodb.current_ops`` -- live in-flight operations, query text stripped."""
+        del params  # declared empty in schema
+        async with self._client(target, operator) as client:
+            return await queries.fetch_current_ops(client)
+
     # ------------------------------------------------------------------
     # Fingerprint / probe
     # ------------------------------------------------------------------

@@ -16,6 +16,8 @@ uses, without reaching for ``mongosh`` against ``:27017``:
 * ``mongodb.count`` -- fast metadata document count (``estimatedDocumentCount``).
 * ``mongodb.server_status`` -- slim ``serverStatus`` projection.
 * ``mongodb.replica_status`` -- replica-set health (``hello`` + ``replSetGetStatus``).
+* ``mongodb.current_ops`` -- live in-flight operations (``currentOp``), query
+  text stripped.
 
 Every op is ``safety_level="safe"`` + ``requires_approval=False`` and carries a
 ``read-only`` tag. Read-only is guaranteed by the **fixed command set**: each op
@@ -82,10 +84,13 @@ MONGO_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "mongodb-runtime": (
         "Use to inspect a MongoDB instance's live runtime: a slim serverStatus "
         "projection covering connections, network, opcounters, memory, and the "
-        "storage engine (mongodb.server_status), or replica-set health with each "
-        "member's role and state (mongodb.replica_status). The right group for "
-        "'is this instance under connection pressure?', 'what is the opcounter "
-        "mix?', or 'is the replica set healthy and who is primary?'. Read-only."
+        "storage engine (mongodb.server_status), replica-set health with each "
+        "member's role and state (mongodb.replica_status), or the operations "
+        "running right now with how long each has been going (mongodb.current_ops). "
+        "The right group for 'is this instance under connection pressure?', 'what "
+        "is the opcounter mix?', 'is the replica set healthy and who is primary?', "
+        "or 'which operations have been running longer than N seconds right now?'. "
+        "Read-only."
     ),
 }
 
@@ -363,6 +368,43 @@ _REPLICA_STATUS = MongoOp(
 )
 
 
+_CURRENT_OPS = MongoOp(
+    op_id="mongodb.current_ops",
+    handler_attr="current_ops",
+    summary="Snapshot the operations running right now (currentOp).",
+    description=(
+        "Returns the in-flight operations from currentOp: opid, op type, "
+        "namespace, whether active, how long each has been running "
+        "(secs_running / microsecs_running), client, description, connection id, "
+        "plan summary, yields, and lock-wait state. Idle connections and internal "
+        "system operations are excluded. The op for 'which operations have been "
+        "running longer than N seconds right now, and on which collection?'. The "
+        "query text (the command / originatingCommand documents) is intentionally "
+        "omitted because it can carry literal filter values or secrets. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema=_EMPTY_PARAMS,
+    response_schema=_OBJECT_RESPONSE_SCHEMA,
+    group_key="mongodb-runtime",
+    tags=("read-only", "mongodb", "runtime", "activity"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call to triage live activity: the long-running or lock-waiting "
+            "operations in flight right now. Sort the result by secs_running to "
+            "find the long-runners; there are no filter parameters."
+        ),
+        "parameter_hints": {},
+        "output_shape": (
+            "{operations:[{opid, op, ns, active, secs_running, microsecs_running, "
+            "client, desc, connectionId, planSummary, numYields, waitingForLock, "
+            "currentOpTime}]}. No command / query text is returned."
+        ),
+    },
+)
+
+
 #: The ops :class:`MongoDbConnector` registers at lifespan startup.
 MONGO_OPS: tuple[MongoOp, ...] = (
     _DATABASES,
@@ -373,4 +415,5 @@ MONGO_OPS: tuple[MongoOp, ...] = (
     _COUNT,
     _SERVER_STATUS,
     _REPLICA_STATUS,
+    _CURRENT_OPS,
 )

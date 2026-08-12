@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 9 vmware-rest write-composite handler functions.
+"""Unit tests for the 10 vmware-rest write-composite handler functions.
 
 Post-#2256 the write composites dispatch their sub-ops **directly on the
 connector session** -- ``connector._get_json`` / ``connector._post_json``
@@ -37,14 +37,19 @@ respx-transport parity proof lives in
 
 from __future__ import annotations
 
+import json
+from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
+import respx
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.schemas import AuthModel
+from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._write import (
@@ -53,6 +58,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_evacuate_composite,
     vm_clone_composite,
     vm_create_composite,
+    vm_disk_grow_composite,
     vm_migrate_composite,
     vm_power_bulk_composite,
     vm_power_composite,
@@ -1102,3 +1108,351 @@ async def test_reads_are_never_gated_only_writes(gate: _GateRecorder) -> None:
     read_paths = [c["path"] for c in conn.calls if c["method"] == "GET"]
     assert read_paths == ["/api/vcenter/cluster/c-9/drs/recommendations"]
     assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}?action=relocate"]
+
+
+# ===========================================================================
+# vm.disk.grow (mutating VI-JSON — keystone 2, #2893)
+# ===========================================================================
+
+
+_TEN_GIB = 10 * 1024**3
+_TWENTY_GIB = 20 * 1024**3
+
+
+def _virtual_disk(key: int = 2000, capacity_bytes: int | None = _TEN_GIB) -> dict[str, Any]:
+    """A ``VirtualDisk`` device as ``config.hardware.device`` returns it."""
+    device: dict[str, Any] = {
+        "_typeName": "VirtualDisk",
+        "key": key,
+        "controllerKey": 1000,
+        "unitNumber": 0,
+        "backing": {
+            "_typeName": "VirtualDiskFlatVer2BackingInfo",
+            "fileName": "[datastore1] web-01/web-01.vmdk",
+            "diskMode": "persistent",
+        },
+    }
+    if capacity_bytes is not None:
+        device["capacityInBytes"] = capacity_bytes
+    return device
+
+
+class _DiskGrowConnector:
+    """Recording connector double serving the disk-grow VI-JSON sub-ops.
+
+    ``vm.disk.grow`` reads ``config.hardware.device`` (vmomi
+    ``RetrievePropertiesEx``), writes ``ReconfigVM_Task``, then polls
+    ``Task.info`` (again ``RetrievePropertiesEx``). The config read and the
+    Task poll share the ``RetrievePropertiesEx`` path, so this double
+    distinguishes them by the request body's ``specSet`` object type
+    (``VirtualMachine`` vs ``Task``) -- exactly the seam a real vCenter
+    keys them by.
+    """
+
+    def __init__(
+        self,
+        *,
+        devices: list[Any],
+        task_state: str = "success",
+        task_error: str | None = None,
+        reconfig_task: str = "task-grow-1",
+    ) -> None:
+        self.devices = devices
+        self.task_state = task_state
+        self.task_error = task_error
+        self.reconfig_task = reconfig_task
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/ReconfigVM_Task"):
+            return {"type": "Task", "value": self.reconfig_task}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": "vm-1"},
+                        "propSet": [{"name": "config.hardware.device", "val": self.devices}],
+                    }
+                ]
+            }
+        if spec_type == "Task":
+            info: dict[str, Any] = {"state": self.task_state}
+            if self.task_error is not None:
+                info["error"] = {"localizedMessage": self.task_error}
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "Task", "value": self.reconfig_task},
+                        "propSet": [{"name": "info", "val": info}],
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+
+    @property
+    def reconfig_bodies(self) -> list[Any]:
+        return [body for path, body in self.vmomi_calls if path.endswith("/ReconfigVM_Task")]
+
+
+async def test_vm_disk_grow_happy_path_edits_capacity_and_polls(gate: _GateRecorder) -> None:
+    """Grow: read device -> gated ReconfigVM_Task edit -> poll to success -> status=grown."""
+    conn = _DiskGrowConnector(devices=[_virtual_disk(key=2000, capacity_bytes=_TEN_GIB)])
+    out = await vm_disk_grow_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "grown"
+    assert out["from_capacity_bytes"] == _TEN_GIB
+    assert out["to_capacity_bytes"] == _TWENTY_GIB
+    assert out["delta_bytes"] == _TWENTY_GIB - _TEN_GIB
+    assert out["task"] == "task-grow-1"
+
+    # The single mutating sub-op was gated with its vi-json governance op_id
+    # + the logical params that name the entity the write touches.
+    assert gate.gated_op_ids == ["POST:/VirtualMachine/{moId}/ReconfigVM_Task"]
+    gated = gate.calls[0]
+    assert gated["safety_level"] == "dangerous"
+    assert gated["requires_approval"] is False
+    assert gated["params"] == {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB}
+
+    # The ReconfigVM_Task body is a single-device edit raising capacityInBytes
+    # on the matched device key, with the full VirtualDisk preserved.
+    assert len(conn.reconfig_bodies) == 1
+    change = conn.reconfig_bodies[0]["spec"]["deviceChange"][0]
+    assert change["operation"] == "edit"
+    assert change["device"]["key"] == 2000
+    assert change["device"]["capacityInBytes"] == _TWENTY_GIB
+    assert change["device"]["_typeName"] == "VirtualDisk"
+    # The backing (fully-specified device) is carried through unchanged.
+    assert change["device"]["backing"]["fileName"] == "[datastore1] web-01/web-01.vmdk"
+
+
+async def test_vm_disk_grow_refuses_shrink_before_any_write(gate: _GateRecorder) -> None:
+    """A request <= the current capacity is refused; no ReconfigVM_Task, no gate."""
+    conn = _DiskGrowConnector(devices=[_virtual_disk(key=2000, capacity_bytes=_TWENTY_GIB)])
+    out = await vm_disk_grow_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TEN_GIB},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "invalid_shrink"
+    assert out["from_capacity_bytes"] == _TWENTY_GIB
+    assert out["to_capacity_bytes"] == _TEN_GIB
+    assert out["delta_bytes"] == _TEN_GIB - _TWENTY_GIB
+    assert out["task"] is None
+    # Only the config read fired; the write was never attempted, never gated.
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+async def test_vm_disk_grow_refuses_a_no_op_equal_capacity(gate: _GateRecorder) -> None:
+    """Growing to the exact current size is a no-op -> refused (grow-only contract)."""
+    conn = _DiskGrowConnector(devices=[_virtual_disk(key=2000, capacity_bytes=_TEN_GIB)])
+    out = await vm_disk_grow_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TEN_GIB},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "invalid_shrink"
+    assert conn.reconfig_bodies == []
+
+
+async def test_vm_disk_grow_disk_not_found(gate: _GateRecorder) -> None:
+    """No VirtualDisk with the requested key -> disk_not_found; no write."""
+    conn = _DiskGrowConnector(devices=[_virtual_disk(key=2001, capacity_bytes=_TEN_GIB)])
+    out = await vm_disk_grow_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "disk_not_found"
+    assert out["from_capacity_bytes"] is None
+    assert out["delta_bytes"] is None
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+async def test_vm_disk_grow_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the ReconfigVM_Task write returns verbatim; no write fires."""
+    gate = _install_gate(
+        monkeypatch,
+        _GateRecorder(
+            gate_for={
+                "POST:/VirtualMachine/{moId}/ReconfigVM_Task": _awaiting(
+                    "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+                )
+            }
+        ),
+    )
+    conn = _DiskGrowConnector(devices=[_virtual_disk(key=2000, capacity_bytes=_TEN_GIB)])
+    out = await vm_disk_grow_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+    # The config read fired; the ReconfigVM_Task write was gated off the wire.
+    assert conn.reconfig_bodies == []
+    assert gate.gated_op_ids == ["POST:/VirtualMachine/{moId}/ReconfigVM_Task"]
+
+
+async def test_vm_disk_grow_task_fault_raises(gate: _GateRecorder) -> None:
+    """A terminal task error raises (the dispatcher wraps it connector_error)."""
+    conn = _DiskGrowConnector(
+        devices=[_virtual_disk(key=2000, capacity_bytes=_TEN_GIB)],
+        task_state="error",
+        task_error="Insufficient disk space on datastore.",
+    )
+    with pytest.raises(RuntimeError, match="Insufficient disk space"):
+        await vm_disk_grow_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+async def test_vm_disk_grow_poll_timeout_returns_timeout_status(
+    monkeypatch: pytest.MonkeyPatch, gate: _GateRecorder
+) -> None:
+    """A poll that never sees a terminal state returns status=timeout with the task id."""
+    # Zero the poll bound so a still-``running`` task times out on the first read.
+    monkeypatch.setattr(_write, "_DISK_GROW_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _DiskGrowConnector(
+        devices=[_virtual_disk(key=2000, capacity_bytes=_TEN_GIB)],
+        task_state="running",
+    )
+    out = await vm_disk_grow_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["task"] == "task-grow-1"
+    assert out["to_capacity_bytes"] == _TWENTY_GIB
+
+
+# ---------------------------------------------------------------------------
+# respx-verified ReconfigVM_Task wire body (through a real connector)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _StubTarget:
+    """Minimal target the real connector's transport path reads from."""
+
+    name: str = "vc-grow"
+    host: str = "vc-grow.test.invalid"
+    port: int | None = 443
+    secret_ref: str = "vsphere/vc-grow"
+    auth_model: str | None = AuthModel.SHARED_SERVICE_ACCOUNT.value
+    id: UUID = field(default_factory=uuid4)
+    tenant_id: UUID = field(default_factory=lambda: UUID(int=0))
+
+
+async def _stub_loader(_target: Any, _operator: Operator) -> dict[str, str]:
+    return {"username": "svc-meho", "password": "stub-password"}
+
+
+def _patch_no_revoke_aclose(connector: VmwareRestConnector) -> None:
+    """Skip the session-revoke DELETE at teardown (mirrors the vmomi-mount tests)."""
+
+    async def _aclose() -> None:
+        connector._session_tokens.clear()
+        for client in connector._clients.values():
+            await client.aclose()
+        connector._clients.clear()
+
+    connector.aclose = _aclose  # type: ignore[method-assign]
+
+
+async def test_vm_disk_grow_reconfig_body_reaches_the_wire_respx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """respx-verified: the ReconfigVM_Task POST body carries operation:edit + raised
+    capacityInBytes on the right device key, mounted on the /sdk/vim25 base.
+
+    Drives the real handler through a real ``VmwareRestConnector`` over an
+    httpx (respx) transport, so the assertion is on the actual wire bytes,
+    not a recording double. The #2254 gate is auto-executed here (its own
+    governance is proven end-to-end in the gate + e2e lanes) so the write
+    reaches the wire.
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+
+    base = "https://vc-grow.test.invalid"
+    vijson = "/sdk/vim25/8.0.3.0"
+    device = _virtual_disk(key=2000, capacity_bytes=_TEN_GIB)
+    config_result = {
+        "objects": [
+            {
+                "obj": {"type": "VirtualMachine", "value": "vm-1"},
+                "propSet": [{"name": "config.hardware.device", "val": [device]}],
+            }
+        ]
+    }
+    task_result = {
+        "objects": [
+            {
+                "obj": {"type": "Task", "value": "task-1"},
+                "propSet": [{"name": "info", "val": {"state": "success"}}],
+            }
+        ]
+    }
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=base) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            # config read then Task poll share the RetrievePropertiesEx URL.
+            mock.post(f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+                side_effect=[
+                    httpx.Response(200, json=config_result),
+                    httpx.Response(200, json=task_result),
+                ]
+            )
+            reconfig = mock.post(f"{vijson}/VirtualMachine/vm-1/ReconfigVM_Task").respond(
+                200, json={"type": "Task", "value": "task-1"}
+            )
+            out = await vm_disk_grow_composite(
+                operator=_make_operator(),
+                target=_StubTarget(),
+                params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+                connector=connector,
+            )
+        assert isinstance(out, dict)
+        assert out["status"] == "grown"
+        assert reconfig.called
+        body = json.loads(reconfig.calls[0].request.content)
+        change = body["spec"]["deviceChange"][0]
+        assert change["operation"] == "edit"
+        assert change["device"]["_typeName"] == "VirtualDisk"
+        assert change["device"]["key"] == 2000
+        assert change["device"]["capacityInBytes"] == _TWENTY_GIB
+    finally:
+        await connector.aclose()

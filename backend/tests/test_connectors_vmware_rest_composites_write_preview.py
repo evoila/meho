@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` previews for the 9 vmware write composites.
+"""Park-time ``proposed_effect`` previews for the 10 vmware write composites.
 
 G0.22-T3 (#1608) acceptance criteria, under the post-#2256 direct-session
 model:
@@ -19,8 +19,9 @@ model:
    directly on the connector session (no ``dispatch_child``, no ingested
    descriptor), so the park-time preview works on a fresh boot with zero
    catalog ingest.
-4. All 9 write composites register a builder (4 live-read + 5 param
-   echo); the wiring test pins the full set.
+4. All 10 write composites register a builder (5 live-read + 5 param
+   echo); the wiring test pins the full set. ``vm.disk.grow`` is the fifth
+   live-read builder — its from→to capacity delta is a live vCenter read.
 
 Plus the #1628 follow-up: a *failed* live-read preview parks with the
 identifier fields **and** an explicit ``preview_unavailable`` marker +
@@ -39,6 +40,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 from uuid import UUID
 
+import httpx
 import pytest
 
 import meho_backplane.operations._audit as audit_module
@@ -70,6 +72,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power",
         "vmware.composite.vm.power.bulk",
+        "vmware.composite.vm.disk.grow",
         "vmware.composite.host.evacuate",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",
@@ -287,9 +290,10 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 # ===========================================================================
 
 
-def test_all_nine_write_composites_register_a_preview_builder() -> None:
+def test_all_ten_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 10
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -680,3 +684,139 @@ async def test_vm_create_park_carries_echo_preview_without_any_read(
         "safety_level": "dangerous",
     }
     assert recorder.calls == []
+
+
+# ===========================================================================
+# vm.disk.grow — the from→to capacity delta preview (live-read, #2893)
+# ===========================================================================
+
+
+_TEN_GIB = 10 * 1024**3
+_TWENTY_GIB = 20 * 1024**3
+
+
+async def test_disk_grow_park_carries_from_to_capacity_delta(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked row's preview names the current→requested delta (the decision)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm/vm-1/hardware/disk/2000"] = {
+        "label": "Hard disk 1",
+        "type": "SCSI",
+        "capacity": _TEN_GIB,
+    }
+    recorder.responses["/vcenter/vm/vm-1"] = {"name": "web-01"}
+
+    _, row = await _park(
+        "vmware.composite.vm.disk.grow",
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+    )
+
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.vm.disk.grow") == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-01",
+            "disk": "2000",
+            "disk_label": "Hard disk 1",
+            "current_capacity_bytes": _TEN_GIB,
+            "requested_capacity_bytes": _TWENTY_GIB,
+            "delta_bytes": _TWENTY_GIB - _TEN_GIB,
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Two read-only GETs: the disk detail (load-bearing) + the VM name
+    # (cosmetic). No ReconfigVM_Task mutation fires on the park path.
+    assert recorder.read_calls == [
+        ("/vcenter/vm/vm-1/hardware/disk/2000", None),
+        ("/vcenter/vm/vm-1", None),
+    ]
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_disk_grow_preview_failure_parks_with_unavailable_marker(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failing disk read parks with identifiers + an explicit marker (#1628).
+
+    The current capacity is the load-bearing half of the delta, so a disk
+    read that faults makes the blast radius unknowable — the park is honest
+    about it rather than showing a bare identifier default.
+    """
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm/vm-1/hardware/disk/2000"] = "disk detail unavailable"
+
+    target = _FakeVmwareTarget()
+    _, row = await _park(
+        "vmware.composite.vm.disk.grow",
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+        target=target,
+    )
+
+    effect = row.proposed_effect
+    assert effect["op_id"] == "vmware.composite.vm.disk.grow"
+    assert effect["target_id"] == str(target.id)
+    assert effect["preview_unavailable"] is True
+    assert "disk detail unavailable" in effect["preview_error"]
+    assert "preview" not in effect
+
+
+async def test_disk_grow_preview_declines_without_a_connector_instance() -> None:
+    """A live-read builder with no resolved connector declines to the identifier default."""
+    assert (
+        await _write_preview._vm_disk_grow_preview(
+            _make_preview_ctx(
+                {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+                connector_instance=None,
+            )
+        )
+        is None
+    )
+
+
+async def test_disk_grow_preview_declines_on_malformed_params() -> None:
+    """Missing / wrong-typed params decline (→ identifier-only default), never raise."""
+    recorder = _RecordingConnector()
+    for params in (
+        {},
+        {"vm": "vm-1", "disk": "2000"},  # no capacity
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": "20g"},  # non-int
+        {"vm": "vm-1", "disk": "2000", "capacity_bytes": True},  # bool is not a capacity
+    ):
+        assert (
+            await _write_preview._vm_disk_grow_preview(
+                _make_preview_ctx(params, connector_instance=recorder)
+            )
+            is None
+        )
+
+
+async def test_disk_grow_preview_vm_name_is_best_effort() -> None:
+    """A VM-name read fault nulls the name but still builds the delta preview."""
+
+    class _DiskOkVmFailConnector(_RecordingConnector):
+        async def _get_json(
+            self, target: Any, path: str, *, operator: Any, params: Any = None
+        ) -> Any:
+            spec = self._spec(path)
+            self.calls.append(("GET", spec, params))
+            if spec.endswith("/hardware/disk/2000"):
+                return {"label": "Hard disk 1", "capacity": _TEN_GIB}
+            # The VM summary read faults — best-effort nulls the name.
+            request = httpx.Request("GET", f"https://vc{path}")
+            raise httpx.HTTPStatusError(
+                "boom", request=request, response=httpx.Response(500, request=request)
+            )
+
+    preview = await _write_preview._vm_disk_grow_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+            connector_instance=_DiskOkVmFailConnector(),
+        )
+    )
+    assert preview is not None
+    assert preview["name"] is None
+    assert preview["disk_label"] == "Hard disk 1"
+    assert preview["current_capacity_bytes"] == _TEN_GIB
+    assert preview["delta_bytes"] == _TWENTY_GIB - _TEN_GIB

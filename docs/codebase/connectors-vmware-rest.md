@@ -342,7 +342,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 14 composites (5 reads + 9 writes) land as `source_kind="composite"`
+The 15 composites (5 reads + 10 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -456,6 +456,7 @@ enum) are:
 | `vm.migrate` | `migrated`, `no_recommendation` |
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
+| `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted` |
 | `host.detach_from_vds` | `detached`, `incomplete` |
 | `cluster.patch` | `completed`, `stopped` |
@@ -465,6 +466,69 @@ mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
 revert.
+
+### Mutating VI-JSON write substrate (`vm.disk.grow`, #2893)
+
+Some vim operations have **no REST path** — growing a virtual disk is the
+first: the pinned 9.0 spec's `Disk.UpdateSpec` carries only `backing` (no
+capacity field, spec-verified), so the capacity change is only reachable
+through vim `VirtualMachine.ReconfigVM_Task`. This is the connector's first
+*mutating* VI-JSON call, and it establishes two reusable seams that Tasks D
+(`vm.clone_from_template`, `CloneVM_Task`, #2894) and E (`cluster.drs_rule.create`,
+`ReconfigureComputeResource_Task`, #2895) ride.
+
+**1. Governed mutating vmomi sub-op — `_write_vmomi_sub_op` (in `_write.py`).**
+A mutating vmomi POST is a *write* sub-op, not a transport detail, so it
+flows through the **same** `enforce_subop_policy` gate the REST write
+sub-ops do — the VI-JSON counterpart of `_write_sub_op`. It runs the gate
+with the vim method's canonical governance op_id (the `METHOD:/path` key
+the ingest parser emits from `vi-json.yaml`, e.g.
+`POST:/VirtualMachine/{moId}/ReconfigVM_Task`) + the sub-op's full logical
+params (so the durable `ApprovalRequest` names the entity the write
+touches) under the shared `dangerous` / `requires_approval=False` posture.
+On an `awaiting_approval` / `denied` verdict the `_post_vmomi_json` write
+is **never issued** — a policy-denied vmomi write never reaches the wire.
+On `AUTO_EXECUTE` it POSTs the method through `_post_vmomi_json` (the same
+`/sdk/vim25/{release}` mount the reads use) and returns the parsed payload
+— for a `*_Task` method, the returned `Task` `ManagedObjectReference`.
+`_post_vmomi_json` itself stays a pure transport method (reads use it
+un-gated); the governance lives in the composite-layer seam, symmetric
+with the REST `_write_sub_op`.
+
+**2. Reusable vim Task-poll helper — `poll_vim_task` (in `vim_task.py`).**
+Every `*_Task` method returns a `Task` MoRef rather than the finished
+result; the caller must poll `Task.info` to a terminal state before
+declaring the write done. `poll_vim_task(connector, target, operator, *,
+task, timeout_seconds=600, poll_interval=2)` re-reads `Task.info` (via
+`_post_vmomi_json` + the shared `build_task_info_retrieve_params` request
+builder generalized from `tasks.recent`) on a fixed cadence until the vim
+state is `success` / `error` or the wall-clock deadline elapses, returning
+a `VimTaskResult{task, state, result, error_message, progress}`. It does
+**not** raise on a task *fault* — the outcome is a legible value each
+caller maps to its own status envelope (a clone surfaces `result` as the
+new VM MoRef; disk-grow raises on a fault so the dispatcher wraps it
+`connector_error`, mirroring `vm.clone`'s task-poll; a timeout returns
+`status='timeout'`). A transport `httpx.HTTPError` on the `Task.info` read
+*does* propagate — it is a load-bearing failure, not "still running". The
+600 s bound mirrors the `vm.clone` `GET:/cis/tasks/{task}` convention.
+
+**`vm.disk.grow` flow** (the proving op): read the VM's
+`config.hardware.device` (a *read* `RetrievePropertiesEx`, un-gated) to
+find the full `VirtualDisk` device (the `VirtualDeviceConfigSpec` requires
+the edited device "fully specified") + its current `capacityInBytes`;
+**refuse a shrink** (`status='invalid_shrink'`) for any request ≤ current,
+before any write (vSphere rejects a shrink — fail early and legibly);
+issue a single-device `ReconfigVM_Task` edit (`deviceChange=[{operation:
+"edit", device: {…VirtualDisk…, capacityInBytes: <raised>}}]`) through
+`_write_vmomi_sub_op`; poll the returned Task to terminal via
+`poll_vim_task`. The `disk` param is the REST disk id, which is the string
+form of the vim `VirtualDevice.key` — so the handler matches the device by
+`str(key)` and the REST `GET hardware/disk/{disk}` supplies label +
+capacity for the park-time preview. The preview is a live-read from→to
+capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,
+requested_capacity_bytes, delta_bytes}`) — the delta is the decision the
+approver makes; a failing disk read parks with the #1628
+`preview_unavailable` marker (the delta is unknowable).
 
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 
@@ -660,10 +724,12 @@ they never park.
   header per `docs/vcenter-9.0/MANIFEST.md`. Two of the read
   composites (`event.tail`, `performance.summary`) call vi-json
   sub-ops; the other three call vCenter REST sub-ops only.
-- **VI-JSON mount for vmomi reads — `/sdk/vim25/{release}` (#2466)** —
+- **VI-JSON mount for vmomi reads *and writes* — `/sdk/vim25/{release}`
+  (#2466, mutating writes #2893)** —
   vmomi (VI-JSON) methods (`RetrievePropertiesEx`,
   `VsanQueryVcClusterHealthSummary`, `QueryEvents`,
-  `QueryAvailablePerfMetric`, `QueryPerf`) are served under the
+  `QueryAvailablePerfMetric`, `QueryPerf`, and now the mutating
+  `ReconfigVM_Task`) are served under the
   documented release-versioned base
   `/sdk/vim25/{release}/{MoType}/{moId}/{method}` (Broadcom Web Services
   SDK guide, "Building JSON Request URLs"; available since vCenter 8.0U1,
@@ -683,14 +749,16 @@ they never park.
   best-effort caller's `read_note` is self-explanatory. Legacy/vcsim
   targets (session on `/rest`) skip VI-JSON entirely and mount the vmomi
   method on `/rest` (the pre-#2466 behaviour, so the vcsim integration
-  lane is unchanged). Every typed vmomi read and the composite vmomi
-  POST sub-ops route through `_post_vmomi_json`; only the vSphere
-  Automation `GET /vcenter/*` legs still use `mount_op_path`.
+  lane is unchanged). Every typed vmomi read, the read-composite vmomi
+  POST sub-ops, and the mutating `vm.disk.grow` write route through
+  `_post_vmomi_json`; only the vSphere Automation `GET /vcenter/*` legs
+  still use `mount_op_path`.
 - **All hand-authored composites shipped** — T5 (#508) ships 5 read;
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6
-  (#509) ships 8 write composites, and #2301 adds a 9th (single-VM
-  `vm.power`, incl. Tools soft shutdown) — 14 composites today. The
+  (#509) ships 8 write composites, #2301 adds a 9th (single-VM
+  `vm.power`, incl. Tools soft shutdown), and #2893 adds a 10th (the
+  mutating VI-JSON `vm.disk.grow`) — 15 composites today. The
   "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.

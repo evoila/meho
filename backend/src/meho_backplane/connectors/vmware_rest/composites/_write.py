@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: 8 protocol-driven composite handlers for the
-# vSphere REST write surface ship in one module per the issue body's
-# design; splitting them by group would scatter the shared sub-op_id
-# constants + helpers across files for no readability gain. Each
-# handler's body is the documented orchestration workflow from
-# #509's spec.
+# code-quality-allow: 9 protocol-driven composite handlers for the
+# vSphere REST + VI-JSON write surface ship in one module per the issue
+# body's design; splitting them by group would scatter the shared
+# sub-op_id constants + helpers across files for no readability gain. Each
+# handler's body is the documented orchestration workflow from #509's spec
+# (plus the mutating VI-JSON disk-grow from #2893).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (8 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (9 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -91,6 +91,7 @@ import httpx
 
 from meho_backplane.auth.operator import Operator
 from meho_backplane.connectors import OperationResult
+from meho_backplane.connectors.vmware_rest.vim_task import poll_vim_task
 from meho_backplane.operations.composite import DispatchChild, enforce_subop_policy
 
 if TYPE_CHECKING:
@@ -102,6 +103,7 @@ __all__ = [
     "host_evacuate_composite",
     "vm_clone_composite",
     "vm_create_composite",
+    "vm_disk_grow_composite",
     "vm_migrate_composite",
     "vm_power_bulk_composite",
     "vm_power_composite",
@@ -152,6 +154,61 @@ _OP_GET_TASK = "GET:/cis/tasks/{task}"
 _OP_HOST_PATCH = "POST:/vcenter/host/{host}?action=patch"
 _OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"
 _OP_REMOVE_DVS_HOST = "POST:/vcenter/network/dvs/{dvs}?action=remove_host"
+# REST Disk.Info read — the disk-grow park-time preview reads label +
+# current capacity (bytes) off this; the disk id is the vim device key.
+_OP_GET_VM_DISK = "GET:/vcenter/vm/{vm}/hardware/disk/{disk}"
+
+# vim (VI-JSON) op_ids for the disk-grow write path. These are the
+# canonical ``METHOD:/path`` keys the ingest parser emits from
+# ``vi-json.yaml`` (the moId rides the path as ``{moId}``, mirroring the
+# read composites' ``POST:/EventManager/{moId}/QueryEvents``). They are
+# the *governance* op_ids fed to :func:`enforce_subop_policy`; the
+# concrete path (moId substituted) is what
+# :meth:`VmwareRestConnector._post_vmomi_json` POSTs to. Kept out of the
+# ``_SUB_OPS_*`` namespace so the vCenter-REST ingest-reconcile sweep does
+# not treat a vi-json path as a ``vcenter.yaml`` row; the pinned
+# ``vi-json.yaml`` reconcile asserts them instead.
+#
+# ``ReconfigVM_Task`` is the only route to change a virtual disk's
+# capacity: the pinned 9.0 REST spec's ``Disk.UpdateSpec`` carries only
+# ``backing`` (no capacity field), so vim is the sole write path
+# (spec-verified). ``RetrievePropertiesEx`` reads the VM's
+# ``config.hardware.device`` to obtain the full ``VirtualDisk`` device
+# (its ``key`` + current ``capacityInBytes``) the reconfigure edits, and
+# is re-read by the shared Task-poll helper to drive the returned
+# ``*_Task`` MoRef to a terminal state.
+# Canonical vi-json.yaml path keys (moId as the ``{moId}`` template — the
+# form the ingest parser emits and the pinned-spec reconcile asserts).
+_OP_RECONFIG_VM_TASK = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+_OP_RETRIEVE_PROPERTIES = "POST:/PropertyCollector/{moId}/RetrievePropertiesEx"
+# Concrete runtime path for the config read: the PropertyCollector is a
+# singleton whose moId is the literal ``propertyCollector`` (the same
+# concrete path the typed reads + read composites POST). ``ReconfigVM_Task``
+# substitutes the VM moid inline at call time.
+_VMOMI_RETRIEVE_PROPERTIES_PATH = "/PropertyCollector/propertyCollector/RetrievePropertiesEx"
+
+#: vi-json sub-op manifest for ``vm.disk.grow`` (parallel to the REST
+#: ``_SUB_OPS_*`` tuples, but named out of that namespace so the
+#: vcenter.yaml ingest-reconcile sweep skips it). The pinned
+#: ``vi-json.yaml`` reconcile lane introspects this to assert every
+#: declared vim path exists in the spec.
+_VIM_SUB_OPS_VM_DISK_GROW: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIG_VM_TASK,
+)
+
+# VI-JSON polymorphic-type discriminator (``Any._typeName`` in
+# vi-json.yaml) + the VirtualDisk data-object type name. A device read
+# from ``config.hardware.device`` carries ``_typeName`` so the handler can
+# pick the VirtualDisk out of the mixed device list.
+_VMOMI_TYPE_NAME_KEY = "_typeName"
+_VIRTUAL_DISK_TYPE = "VirtualDisk"
+_VIRTUAL_MACHINE_MO_TYPE = "VirtualMachine"
+_PROP_CONFIG_HARDWARE_DEVICE = "config.hardware.device"
+
+# Default wall-clock bound for the ReconfigVM_Task poll — mirrors the 600s
+# ``vm.clone`` convention.
+_DISK_GROW_TASK_TIMEOUT_SECONDS = 600.0
 
 
 def _power_vm_op_id(action: str) -> str:
@@ -376,6 +433,64 @@ async def _write_sub_op(
     payload = await connector._post_json(
         target, mounted, operator=operator, verb=method, json=body or None
     )
+    return None, payload
+
+
+async def _write_vmomi_sub_op(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    op_id: str,
+    vmomi_path: str,
+    body: dict[str, Any],
+    params: dict[str, Any],
+) -> tuple[OperationResult | None, Any]:
+    """Gate then issue one *mutating* vim (VI-JSON) sub-call on the connector session.
+
+    The VI-JSON counterpart of :func:`_write_sub_op`: a vmomi POST that
+    *mutates* (``ReconfigVM_Task``, ``CloneVM_Task``,
+    ``ReconfigureComputeResource_Task`` …) is a write sub-op, not a
+    transport detail, so it flows through the **same** #2254 governance
+    seam the REST write sub-ops do. Runs
+    :func:`~meho_backplane.operations.composite.enforce_subop_policy` with
+    the vim method's canonical governance *op_id* (the ``METHOD:/path`` key
+    the ingest parser emits from ``vi-json.yaml``, e.g.
+    ``POST:/VirtualMachine/{moId}/ReconfigVM_Task``) and the sub-op's full
+    logical *params* (so the durable
+    :class:`~meho_backplane.db.models.ApprovalRequest` names the entity the
+    write touches) under the shared ``dangerous`` /
+    ``requires_approval=False`` posture.
+
+    When the seam returns a result (``awaiting_approval`` / ``denied``) the
+    vmomi write is **not** issued -- the ``(gate, None)`` tuple signals the
+    caller to return that :class:`OperationResult` verbatim, so a
+    policy-denied vmomi write never reaches the wire. When the seam clears
+    the gate (``None``), the method is POSTed through
+    :meth:`~meho_backplane.connectors.vmware_rest.connector.VmwareRestConnector._post_vmomi_json`
+    (which mounts it on the documented VI-JSON base ``/sdk/vim25/{release}``,
+    single ``/api`` fallback) and the parsed payload -- for a ``*_Task``
+    method, the returned Task :class:`ManagedObjectReference` -- rides back
+    as ``(None, payload)``. Transport failures raise :exc:`httpx.HTTPError`
+    for the caller.
+
+    ``vmomi_path`` is the concrete spec-relative method path (moId
+    substituted, e.g. ``/VirtualMachine/vm-1/ReconfigVM_Task``); ``op_id``
+    is the placeholder governance key so a per-``(principal, op, target)``
+    grant matches regardless of which VM the write targets.
+    """
+    gate = await enforce_subop_policy(
+        operator=operator,
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        safety_level=_WRITE_SAFETY_LEVEL,
+        requires_approval=_WRITE_REQUIRES_APPROVAL,
+        target=target,
+        params=params,
+    )
+    if gate is not None:
+        return gate, None
+    payload = await connector._post_vmomi_json(target, vmomi_path, operator=operator, json=body)
     return None, payload
 
 
@@ -1354,4 +1469,283 @@ async def cluster_patch_composite(
         "failed_host": None,
         "remaining_hosts": [],
         "failure_reason": None,
+    }
+
+
+# ===========================================================================
+# vm.disk.grow (VI-JSON write substrate — keystone 2, #2893)
+# ===========================================================================
+#
+# The first *mutating* VI-JSON composite. Growing a virtual disk has no
+# REST path — the pinned 9.0 spec's ``Disk.UpdateSpec`` carries only
+# ``backing`` (no capacity field, spec-verified), so ``ReconfigVM_Task``
+# is the sole route. The write rides the same governed direct-session seam
+# the REST writes do (:func:`_write_vmomi_sub_op` → the #2254 gate), and
+# the returned ``*_Task`` MoRef is driven to a terminal state via the
+# shared :func:`~meho_backplane.connectors.vmware_rest.vim_task.poll_vim_task`
+# helper before success is reported. Tasks D (#2894 clone) and E (#2895
+# DRS-rule) ride the same two seams.
+
+
+def _coerce_int(value: Any) -> int | None:
+    """Coerce a JSON number / numeric-string to int; reject bools + junk.
+
+    ``VirtualDisk.capacityInBytes`` is ``xsd:long``; some intermediaries
+    render a 64-bit value as a JSON string. ``True`` is an ``int`` subclass
+    and must not read as ``1``.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _build_vm_devices_retrieve_params(vm_moid: str) -> dict[str, Any]:
+    """Build the ``RetrievePropertiesEx`` body reading a VM's device list.
+
+    A single ``PropertyFilterSpec`` scoped directly to the VirtualMachine
+    object requesting ``config.hardware.device`` -- the list of
+    ``VirtualDevice`` objects (disks, controllers, NICs, …), each carrying
+    its VI-JSON ``_typeName`` discriminator so the disk-grow handler can
+    pick the ``VirtualDisk`` out. The singleton ``propertyCollector`` moId
+    rides the path, so the body is only the method args (the shape the
+    typed reads send).
+    """
+    return {
+        "specSet": [
+            {
+                "propSet": [
+                    {"type": _VIRTUAL_MACHINE_MO_TYPE, "pathSet": [_PROP_CONFIG_HARDWARE_DEVICE]}
+                ],
+                "objectSet": [{"obj": {"type": _VIRTUAL_MACHINE_MO_TYPE, "value": vm_moid}}],
+            }
+        ],
+        "options": {},
+    }
+
+
+def _extract_vm_devices(retrieve_result: Any) -> list[Any]:
+    """Pull the ``config.hardware.device`` list off a RetrievePropertiesEx result."""
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    if not isinstance(objects, list):
+        return []
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for prop in obj.get("propSet", []) or []:
+            if isinstance(prop, dict) and prop.get("name") == _PROP_CONFIG_HARDWARE_DEVICE:
+                val = prop.get("val")
+                return val if isinstance(val, list) else []
+    return []
+
+
+def _find_virtual_disk(devices: list[Any], disk_id: str) -> dict[str, Any] | None:
+    """Return the ``VirtualDisk`` device whose key matches *disk_id*, else ``None``.
+
+    The REST disk id (resource type ``com.vmware.vcenter.vm.hardware.Disk``)
+    is the string form of the vim ``VirtualDevice.key``, so the disk-grow
+    ``disk`` param selects the device by ``str(key)`` match. The
+    ``_typeName == "VirtualDisk"`` guard skips the controllers / NICs /
+    CD-ROMs sharing the same ``config.hardware.device`` list.
+    """
+    for dev in devices:
+        if not isinstance(dev, dict):
+            continue
+        if dev.get(_VMOMI_TYPE_NAME_KEY) != _VIRTUAL_DISK_TYPE:
+            continue
+        if str(dev.get("key")) == disk_id:
+            return dev
+    return None
+
+
+async def _resolve_disk_info(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vm: str,
+    disk: str,
+) -> dict[str, Any]:
+    """Resolve the REST ``Disk.Info`` (label + current capacity bytes) for a disk.
+
+    Read-only single ``GET:/vcenter/vm/{vm}/hardware/disk/{disk}`` on the
+    connector session, shared by the disk-grow park-time preview
+    (:mod:`._write_preview`). ``Vcenter.Vm.Hardware.Disk.Info`` carries
+    ``label`` + ``capacity`` (bytes) -- the current-capacity half of the
+    from→to delta the approver decides on. Raises :exc:`httpx.HTTPError` on
+    a transport fault; the preview builder lets it propagate into the #1628
+    ``preview_unavailable`` marker (the delta is unknowable, so the park is
+    honest about it).
+    """
+    info = await _read_sub_op(
+        connector, target, operator, _OP_GET_VM_DISK, {"vm": vm, "disk": disk}
+    )
+    payload = _unwrap_value(info)
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _resolve_vm_name(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    vm: str,
+) -> str | None:
+    """Best-effort VM display name via ``GET:/vcenter/vm/{vm}``.
+
+    Cosmetic for the disk-grow preview -- a transport fault nulls the name
+    rather than sinking the preview, since the current→requested delta (not
+    the name) is the decision. The disk read is the load-bearing one.
+    """
+    try:
+        info = await _read_sub_op(connector, target, operator, _OP_GET_VM, {"vm": vm})
+    except httpx.HTTPError:
+        return None
+    payload = _unwrap_value(info)
+    name = payload.get("name") if isinstance(payload, dict) else None
+    return name if isinstance(name, str) else None
+
+
+async def vm_disk_grow_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Grow a VM's virtual disk to ``capacity_bytes`` via ``ReconfigVM_Task``.
+
+    Op-id: ``vmware.composite.vm.disk.grow``. The proving op for the
+    mutating VI-JSON substrate (#2893): grow has no REST path
+    (``Disk.UpdateSpec`` has only ``backing``), so the capacity change goes
+    through vim ``VirtualMachine.ReconfigVM_Task`` — a single-device
+    ``VirtualDeviceConfigSpec`` with ``operation="edit"`` and the target
+    ``VirtualDisk``'s ``capacityInBytes`` raised (spec-verified against
+    ``vi-json.yaml``).
+
+    Flow:
+
+    1. Read the VM's ``config.hardware.device`` (vmomi ``RetrievePropertiesEx``,
+       a *read* — no governance gate) to obtain the full ``VirtualDisk``
+       device (the spec requires the edited device "fully specified") + its
+       current ``capacityInBytes``.
+    2. **Grow-only by contract**: a request ``<=`` the current capacity is
+       refused with ``status="invalid_shrink"`` *before* any write —
+       vSphere rejects a shrink anyway; fail early and legibly.
+    3. Issue the single ``ReconfigVM_Task`` edit through the governed vmomi
+       write seam (:func:`_write_vmomi_sub_op` → the #2254 gate); a
+       parked/denied gate returns the :class:`OperationResult` verbatim and
+       no reconfigure fires.
+    4. Poll the returned ``*_Task`` MoRef to a terminal state via the shared
+       :func:`~meho_backplane.connectors.vmware_rest.vim_task.poll_vim_task`
+       helper before reporting success. A task fault raises (the dispatcher
+       wraps it ``connector_error``, mirroring ``vm.clone``); a poll timeout
+       returns ``status="timeout"`` with the task id for the operator.
+    """
+    vm_moid = params["vm"]
+    disk_id = params["disk"]
+    requested = int(params["capacity_bytes"])
+
+    devices_result = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_vm_devices_retrieve_params(vm_moid),
+    )
+    device = _find_virtual_disk(_extract_vm_devices(devices_result), disk_id)
+    current = _coerce_int(device.get("capacityInBytes")) if device is not None else None
+    if device is None or current is None:
+        return {
+            "status": "disk_not_found",
+            "vm": vm_moid,
+            "disk": disk_id,
+            "task": None,
+            "from_capacity_bytes": current,
+            "to_capacity_bytes": requested,
+            "delta_bytes": None,
+            "guidance": (
+                f"no VirtualDisk with key {disk_id!r} (or no readable capacity) on "
+                f"vm {vm_moid!r}; list the VM's disks to confirm the disk id"
+            ),
+        }
+
+    delta = requested - current
+    if requested <= current:
+        return {
+            "status": "invalid_shrink",
+            "vm": vm_moid,
+            "disk": disk_id,
+            "task": None,
+            "from_capacity_bytes": current,
+            "to_capacity_bytes": requested,
+            "delta_bytes": delta,
+            "guidance": (
+                "vm.disk.grow is grow-only: requested capacity "
+                f"{requested} <= current {current} (delta {delta}). vSphere rejects "
+                "a disk shrink; re-issue with a capacity greater than the current size"
+            ),
+        }
+
+    reconfig_spec = {
+        "spec": {
+            "deviceChange": [
+                {"operation": "edit", "device": {**device, "capacityInBytes": requested}}
+            ]
+        }
+    }
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_RECONFIG_VM_TASK,
+        vmomi_path=f"/VirtualMachine/{vm_moid}/ReconfigVM_Task",
+        body=reconfig_spec,
+        params={"vm": vm_moid, "disk": disk_id, "capacity_bytes": requested},
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_DISK_GROW_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == "error":
+        raise RuntimeError(
+            f"vm.disk.grow: ReconfigVM_Task on vm {vm_moid!r} disk {disk_id!r} faulted: "
+            f"{outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return {
+            "status": "timeout",
+            "vm": vm_moid,
+            "disk": disk_id,
+            "task": outcome.task,
+            "from_capacity_bytes": current,
+            "to_capacity_bytes": requested,
+            "delta_bytes": delta,
+            "guidance": (
+                f"ReconfigVM_Task {outcome.task} did not reach a terminal state within "
+                f"{int(_DISK_GROW_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the disk "
+                "capacity — the grow may still complete in the background"
+            ),
+        }
+    return {
+        "status": "grown",
+        "vm": vm_moid,
+        "disk": disk_id,
+        "task": outcome.task,
+        "from_capacity_bytes": current,
+        "to_capacity_bytes": requested,
+        "delta_bytes": delta,
+        "guidance": None,
     }

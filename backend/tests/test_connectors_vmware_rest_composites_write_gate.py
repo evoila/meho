@@ -42,6 +42,7 @@ from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_create_composite,
+    vm_disk_grow_composite,
     vm_migrate_composite,
 )
 from meho_backplane.db.engine import get_sessionmaker
@@ -233,5 +234,143 @@ async def test_human_operator_subop_auto_executes(session: AsyncSession) -> None
     # The relocate write executed on the session.
     assert [w["path"] for w in conn.writes] == ["/api/vcenter/vm/vm-1?action=relocate"]
     # No approval row -- the sub-op auto-executed.
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+
+
+# ===========================================================================
+# vm.disk.grow — the mutating VI-JSON write flows through the same gate (#2893)
+# ===========================================================================
+
+
+_RECONFIG_OP_ID = "POST:/VirtualMachine/{moId}/ReconfigVM_Task"
+
+
+class _DiskGrowRecordingConnector:
+    """Recording double for the disk-grow governance tests.
+
+    Serves the ``config.hardware.device`` read + the ``Task.info`` poll
+    (both vmomi ``RetrievePropertiesEx``, distinguished by the request
+    body's ``specSet`` object type) and records every ``ReconfigVM_Task``
+    write so the tests can assert the mutating vmomi POST never fired when
+    the gate parks / denies.
+    """
+
+    def __init__(self, *, capacity_bytes: int = 10 * 1024**3) -> None:
+        self._capacity_bytes = capacity_bytes
+        self.reconfig_writes: list[Any] = []
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        if path.endswith("/ReconfigVM_Task"):
+            self.reconfig_writes.append(json)
+            return {"type": "Task", "value": "task-grow-1"}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            device = {
+                "_typeName": "VirtualDisk",
+                "key": 2000,
+                "capacityInBytes": self._capacity_bytes,
+                "backing": {
+                    "_typeName": "VirtualDiskFlatVer2BackingInfo",
+                    "fileName": "[ds] a.vmdk",
+                },
+            }
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": "vm-1"},
+                        "propSet": [{"name": "config.hardware.device", "val": [device]}],
+                    }
+                ]
+            }
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "Task", "value": "task-grow-1"},
+                    "propSet": [{"name": "info", "val": {"state": "success"}}],
+                }
+            ]
+        }
+
+
+@pytest.mark.asyncio
+async def test_disk_grow_gated_vmomi_write_queues_and_never_reaches_wire(
+    session: AsyncSession,
+) -> None:
+    """An agent-gated ReconfigVM_Task queues for approval; the vmomi write never fires.
+
+    The hard #2893 gate: a *mutating VI-JSON* sub-op is a write, not
+    transport detail — it flows through the same real
+    :func:`enforce_subop_policy` seam the REST writes do. With a
+    ``needs_approval`` grant on the vim method, ``vm.disk.grow`` returns
+    ``awaiting_approval``, writes a durable pending row, and issues no
+    ReconfigVM_Task on the connector session.
+    """
+    await _grant(
+        principal_sub="agent-write-composite",
+        op_pattern=_RECONFIG_OP_ID,
+        verdict=PermissionVerdict.NEEDS_APPROVAL,
+    )
+    conn = _DiskGrowRecordingConnector()
+
+    out = await vm_disk_grow_composite(
+        operator=_operator(),
+        target=None,
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": 20 * 1024**3},
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _RECONFIG_OP_ID
+    request_id = uuid.UUID(out.extras["approval_request_id"])
+    row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.op_id == _RECONFIG_OP_ID
+    assert row.connector_id == "vmware-rest-9.0"
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    # The mutating ReconfigVM_Task never reached the wire.
+    assert conn.reconfig_writes == []
+
+
+@pytest.mark.asyncio
+async def test_disk_grow_dangerous_vmomi_write_denied_without_grant(
+    session: AsyncSession,
+) -> None:
+    """An agent with no grant is denied the dangerous ReconfigVM_Task; it never runs."""
+    conn = _DiskGrowRecordingConnector()
+    out = await vm_disk_grow_composite(
+        operator=_operator(sub="agent-no-grant"),
+        target=None,
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": 20 * 1024**3},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "denied"
+    assert out.op_id == _RECONFIG_OP_ID
+    # No pending row: a deny is not a park.
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+    assert conn.reconfig_writes == []
+
+
+@pytest.mark.asyncio
+async def test_disk_grow_human_operator_vmomi_write_auto_executes(
+    session: AsyncSession,
+) -> None:
+    """A human operator's already-approved composite auto-executes the ReconfigVM_Task."""
+    conn = _DiskGrowRecordingConnector()
+    out = await vm_disk_grow_composite(
+        operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
+        target=None,
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": 20 * 1024**3},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "grown"
+    # The reconfigure write executed on the session; the sub-op auto-executed.
+    assert len(conn.reconfig_writes) == 1
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0

@@ -90,6 +90,27 @@ connector-related release-notes line.
 
 ## [Unreleased]
 
+### Added — vmware `vm.disk.grow` + the governed mutating VI-JSON write substrate (#2893)
+
+- `vmware.composite.vm.disk.grow` grows a virtual disk's capacity — the
+  first vmware write with **no REST path** (the pinned 9.0 spec's
+  `Disk.UpdateSpec` carries only `backing`, no capacity field), so the
+  capacity change goes through vim `VirtualMachine.ReconfigVM_Task`, the
+  connector's first *mutating* VI-JSON call. Grow-only by contract: a
+  request at or below the current capacity is refused
+  (`status='invalid_shrink'`) before any write. `dangerous` +
+  approval-required, with a park-time preview that live-reads the
+  current→requested capacity delta so the approver sees the disk grows
+  (never shrinks) and by how much.
+- The write rides two reusable seams Tasks D/E build on:
+  `_write_vmomi_sub_op` routes a mutating vmomi POST through the same
+  `enforce_subop_policy` gate the REST writes use (a policy-denied vmomi
+  write never reaches the wire), and `poll_vim_task` (in `vim_task.py`)
+  drives the returned `*_Task` MoRef to a terminal state (`success` /
+  `error` / timeout) before success is reported — generalized from the
+  `tasks.recent` `Task.info` read. See
+  `docs/codebase/connectors-vmware-rest.md` for the full substrate.
+
 ## [0.28.0] - 2026-08-07
 
 ### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)

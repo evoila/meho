@@ -13,7 +13,7 @@ The chassis lifespan's
 invokes every registered registrar in registration order after
 :func:`~meho_backplane.connectors.registry._eager_import_connectors`
 has walked every ``connectors/<product>/`` subpackage, so the
-``endpoint_descriptor`` upserts for the 15 composites land before
+``endpoint_descriptor`` upserts for the 16 composites land before
 any dispatch can fire.
 
 Layout mirrors the :mod:`meho_backplane.connectors.vault` pattern: the
@@ -29,13 +29,16 @@ Scope:
   (The former ``host.network_uplinks`` / ``host.vsan_health`` reads
   were re-shipped as ``source_kind="typed"`` ops in #2258; see
   :mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.)
-* 10 write composites (G3.1-T6 / #509, single-VM ``vm.power`` /
-  #2301, and the mutating VI-JSON ``vm.disk.grow`` / #2893) -- inherit
+* 11 write composites (G3.1-T6 / #509, single-VM ``vm.power`` /
+  #2301, the mutating VI-JSON ``vm.disk.grow`` / #2893, and the
+  folder-template ``vm.clone_from_template`` / #2894) -- inherit
   T4's ``safety_level="dangerous"`` +
   ``requires_approval=True`` defaults.
   They cover every state-mutating workflow Goal #214 names as
   required for govc-wrapper retirement: ``vm.create``, ``vm.clone``,
-  ``vm.snapshot.revert``, ``vm.migrate``, ``vm.power`` (single VM,
+  ``vm.clone_from_template`` (folder-template clone via CloneVM_Task,
+  with optional inline guest customization), ``vm.snapshot.revert``,
+  ``vm.migrate``, ``vm.power`` (single VM,
   incl. Tools soft shutdown), ``vm.power.bulk``, ``vm.disk.grow`` (the
   first mutating VI-JSON composite — disk capacity has no REST path),
   ``host.evacuate`` (first recursive composite),
@@ -57,6 +60,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
+    vm_clone_from_template_composite,
     vm_create_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -72,7 +76,7 @@ from meho_backplane.operations.typed_register import register_typed_op_registrar
 # registered by the time the runner iterates.
 register_typed_op_registrar(register_vmware_composite_operations)
 
-# Side-effect import: registers the 10 write composites' park-time
+# Side-effect import: registers the 11 write composites' park-time
 # ``proposed_effect`` preview builders (#1608) onto the per-op hook in
 # :mod:`meho_backplane.operations._preview` — mirrors how
 # ``connectors/argocd/__init__`` wires ``ops_write_preview``.
@@ -89,6 +93,7 @@ __all__ = [
     "performance_summary_composite",
     "register_vmware_composite_operations",
     "vm_clone_composite",
+    "vm_clone_from_template_composite",
     "vm_create_composite",
     "vm_disk_grow_composite",
     "vm_migrate_composite",

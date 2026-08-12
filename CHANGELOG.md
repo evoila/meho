@@ -129,6 +129,32 @@ connector-related release-notes line.
   header-injection / exfil surface on a body-less probe). Existing
   `net.http_probe` calls without the param behave byte-identically.
 
+### Added — vmware `vm.clone_from_template`: folder-template clone via `CloneVM_Task` with inline customization (#2894)
+
+- `vmware.composite.vm.clone_from_template` clones a **folder VM
+  template** (a marked-as-template VM in a VM folder) — the source
+  `vm.clone`'s content-library deploy path cannot serve. Goes through vim
+  `VirtualMachine.CloneVM_Task` (the folder-template deploy API govc and
+  terraform use), which uniquely supports inline guest customization at
+  clone time. Resolves `source_template` by name, asserts `config.template`
+  before any write (a non-template source is refused
+  `status='not_a_template'`, PropertyCollector-asserted), builds the
+  `CloneSpec` placement (folder / resource pool / datastore, optional host
+  pin), and polls the returned `CloneVM_Task` to a terminal state. `dangerous`
+  + approval-required, with a secret-safe param-echo preview naming the full
+  blast radius.
+- **Composes with the GOSC keystone (#2892):** passing
+  `customization_spec_name` resolves the stored spec via vim
+  `CustomizationSpecManager.GetCustomizationSpec` and embeds it inline in
+  `CloneSpec.customization`, so the clone yields a customized VM in one
+  dispatch — no separate customize call. Only the spec *name* ever reaches
+  the reviewer surface or the approval-request params; the resolved spec's
+  sysprep/password contents never serialize (secret hygiene, #1503).
+- Rides the #2893 substrate — the mutating `CloneVM_Task` flows through the
+  same `enforce_subop_policy` gate as the REST writes (`_write_vmomi_sub_op`)
+  and is polled via `poll_vim_task`. See
+  `docs/codebase/connectors-vmware-rest.md` for the two-clone-ops contrast.
+
 ## [0.28.0] - 2026-08-07
 
 ### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)

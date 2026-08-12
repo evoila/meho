@@ -8,12 +8,14 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 14 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 16 hand-authored composites
 that orchestrate cross-spec workflows: 5 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`) and 9 write composites (G3.1-T6 / `#509`, plus the
-single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`). The
+in `#2258`) and 11 write composites (G3.1-T6 / `#509`, plus the
+single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
+mutating VI-JSON `vm.disk.grow` / `#2893`, and the folder-template
+`vm.clone_from_template` / `#2894`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -457,6 +459,7 @@ enum) are:
 | `vm.power` | `ok`, `error`, `tools_unavailable` (single VM; `tools_unavailable` when a soft `guest_shutdown`/`guest_reboot` finds Tools down) |
 | `vm.power.bulk` | (per-VM `results` + aggregate `summary` + `aborted_on_failure`) |
 | `vm.disk.grow` | `grown`, `invalid_shrink`, `disk_not_found`, `timeout` (grow-only; `invalid_shrink` refuses a request ≤ current capacity before any write; `timeout` when the `ReconfigVM_Task` poll gives up) |
+| `vm.clone_from_template` | `cloned`, `template_not_found`, `ambiguous_template`, `not_a_template`, `timeout` (name-resolution refusals + the template assert are pre-write; `timeout` when the `CloneVM_Task` poll gives up; a task *fault* raises `connector_error`) |
 | `host.evacuate` | `evacuated`, `partial`, `aborted` |
 | `host.detach_from_vds` | `detached`, `incomplete` |
 | `cluster.patch` | `completed`, `stopped` |
@@ -529,6 +532,64 @@ capacity diff (`{vm, name, disk, disk_label, current_capacity_bytes,
 requested_capacity_bytes, delta_bytes}`) — the delta is the decision the
 approver makes; a failing disk read parks with the #1628
 `preview_unavailable` marker (the delta is unknowable).
+
+### Two clone ops: content-library vs folder-template (`vm.clone_from_template`, #2894)
+
+The connector ships **two** clone composites, and they deploy from two
+different kinds of source — an operator picks by where the golden image
+lives:
+
+| Op | Source | Path | When |
+| --- | --- | --- | --- |
+| `vm.clone` | a **content-library** template item | REST `POST:/vcenter/vm-template/library-items?action=deploy`, poll `GET:/cis/tasks/{task}` | the golden image is published to a content library |
+| `vm.clone_from_template` | a **folder VM template** (a marked-as-template VM in a VM folder) | vim `POST:/VirtualMachine/{moId}/CloneVM_Task`, poll via `poll_vim_task` | the golden image is a plain marked-as-template VM (govc/terraform's `CloneVM_Task` path) |
+
+`vm.clone`'s content-library deploy path **cannot** clone a folder
+template — a marked-as-template VM has no content-library item to deploy
+— and the REST `POST:/vcenter/vm?action=clone` template-source acceptance
+is undocumented (MEDIUM confidence). The vim `VirtualMachine.CloneVM_Task`
+path is unambiguous (it is what govc/terraform use for a folder-template
+deploy) and it **uniquely** supports inline guest customization at clone
+time. `vm.clone_from_template` (#2894) rides the #2893 substrate: the
+mutating `CloneVM_Task` flows through the governed vmomi write seam
+(`_write_vmomi_sub_op` → the #2254 gate) and the returned `*_Task` MoRef
+is driven to a terminal state via `poll_vim_task`.
+
+**Flow** (spec-verified against the pinned `vi-json.yaml`): resolve
+`source_template` — a display **name** — to a unique VM moid via
+`GET:/vcenter/vm?filter.names=` (refuse `template_not_found` /
+`ambiguous_template`); assert `config.template` is true via a vmomi
+`RetrievePropertiesEx` *read* (refuse `not_a_template` before any clone —
+a regular VM named by mistake never gets cloned); when
+`customization_spec_name` is set, resolve the stored GOSC spec to its full
+`CustomizationSpec` via `CustomizationSpecManager.GetCustomizationSpec`
+(a *read*) and embed it inline in `CloneSpec.customization`; build the
+`CloneVMRequestType` body `{folder: Folder-MoRef, name,
+spec: CloneSpec{location: RelocateSpec(pool + datastore, optional host),
+template: false, powerOn, customization?}}`; issue `CloneVM_Task` through
+the governed seam; poll the returned Task — success reports `cloned` with
+the new VM moid from `TaskInfo.result`, a fault raises (dispatcher wraps
+`connector_error`), a poll timeout returns `timeout` with the task id.
+
+**Composes with the GOSC keystone (#2892).** vim `CloneSpec.customization`
+takes a full `CustomizationSpec` inline, not a by-name reference, so a
+stored GOSC spec (e.g. one created by `guest.customization_spec.create`)
+is resolved to its object form and embedded — the clone yields a
+customized VM in **one** dispatch, no separate `vm.customize` call. The
+`customization_spec_manager_moid` param defaults to the standard
+`ServiceContent.customizationSpecManager` singleton moid and is
+overridable (mirrors the performance composite's `perf_manager_moid`).
+
+The preview is a **param echo** (no I/O — the params name the full blast
+radius): `{source_template, new_vm_name, folder, resource_pool,
+datastore, host, power_on, customization_spec_name}`. Only the
+customization spec **name** is echoed — never the resolved spec's
+secret-bearing sysprep/password contents (#1503); the identity-only gate
+params carry the same, so the durable `ApprovalRequest` names the blast
+radius without leaking credential material. New vim sub-op paths
+(`CloneVM_Task`, `RetrievePropertiesEx`, `GetCustomizationSpec`) are
+declared in `_VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE` and reconciled against
+the pinned `vi-json.yaml`.
 
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 
@@ -757,8 +818,9 @@ they never park.
   #2080 + #2135 add two more reads (`host.network_uplinks` /
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6
   (#509) ships 8 write composites, #2301 adds a 9th (single-VM
-  `vm.power`, incl. Tools soft shutdown), and #2893 adds a 10th (the
-  mutating VI-JSON `vm.disk.grow`) — 15 composites today. The
+  `vm.power`, incl. Tools soft shutdown), #2893 adds a 10th (the
+  mutating VI-JSON `vm.disk.grow`), and #2894 an 11th (the
+  folder-template `vm.clone_from_template`) — 16 composites today. The
   "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.

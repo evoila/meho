@@ -259,7 +259,7 @@ def _seed_connector(recorder: _RecordingVmwareConnector) -> None:
 async def _bootstrap(
     recorder: _RecordingVmwareConnector, stub_embedding_service: AsyncMock
 ) -> None:
-    """Register the connector + all 14 composites and seed the recorder."""
+    """Register the connector + all 15 composites and seed the recorder."""
     _seed_connector(recorder)
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
 
@@ -368,12 +368,19 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
 
 
 # ===========================================================================
-# Guard: the write set is exactly the expected nine
+# Guard: the REST-sub-op write set is exactly the expected nine
 # ===========================================================================
 
 
 def test_write_composite_set_is_the_expected_nine() -> None:
-    """Pins the op_id set so a renamed / dropped composite can't shrink coverage."""
+    """Pins the REST-sub-op write set so a renamed / dropped composite can't shrink coverage.
+
+    Covers the 9 REST-sub-op write composites the parametrized fresh-boot +
+    park machinery below drives. The tenth write composite, the mutating
+    VI-JSON ``vm.disk.grow`` (#2893), is dispatch-shaped differently (vmomi
+    sub-ops keyed by request body, not REST spec-paths) and is covered by
+    its own dedicated section at the end of this module.
+    """
     registrar_write_op_ids = {f"vmware.composite.{name}" for name in _WRITE_COMPOSITES.values()}
     assert set(_WRITE_COMPOSITES) == registrar_write_op_ids
     assert len(_WRITE_COMPOSITES) == 9
@@ -395,7 +402,7 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     """Each composite runs to a benign business status on the direct session.
 
     No ingested ``endpoint_descriptor`` rows exist in the catalog here — only
-    the 14 composite rows the registrar upserts. Reaching a business status
+    the 15 composite rows the registrar upserts. Reaching a business status
     (``created`` / ``no_recommendation`` / ``detached`` / ...) rather than a
     generic execution error proves every raw-REST sub-op resolved via the
     connector session, not a catalog lookup (the two-world / fresh-boot DoD).
@@ -881,3 +888,216 @@ async def test_vm_create_full_queue_approve_resume_execute(
     assert result2.result["status"] == "created"
     assert result2.result["vm_id"] == "vm-789"
     assert recorder.calls == [("GET", "/vcenter/folder"), ("POST", "/vcenter/vm")]
+
+
+# ===========================================================================
+# vm.disk.grow — mutating VI-JSON: park → approve → resume, #2681 envelope
+# ===========================================================================
+
+
+_TEN_GIB = 10 * 1024**3
+_TWENTY_GIB = 20 * 1024**3
+
+
+class _DiskGrowVmwareConnector:
+    """Recording double for the disk-grow park→approve→resume E2E.
+
+    Serves the park-time preview REST reads (``_get_json``: disk detail +
+    VM name) and the dispatch-time VI-JSON sub-ops (``_post_vmomi_json``:
+    the ``config.hardware.device`` read, the ``ReconfigVM_Task`` write, and
+    the ``Task.info`` poll — the two ``RetrievePropertiesEx`` reads keyed
+    apart by the request body's ``specSet`` object type). Records both
+    surfaces so the test can prove the mutating vmomi write fires only on
+    the approved-resume path.
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(self, *, capacity_bytes: int = _TEN_GIB) -> None:
+        self._capacity_bytes = capacity_bytes
+        self.rest_calls: list[tuple[str, str]] = []
+        self.vmomi_calls: list[str] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    def _spec(self, path: str) -> str:
+        return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        spec = self._spec(path)
+        self.rest_calls.append(("GET", spec))
+        if spec.endswith("/hardware/disk/2000"):
+            return {"label": "Hard disk 1", "type": "SCSI", "capacity": self._capacity_bytes}
+        if spec == "/vcenter/vm/vm-1":
+            return {"name": "web-01"}
+        return {"value": {}}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append(path)
+        if path.endswith("/ReconfigVM_Task"):
+            return {"type": "Task", "value": "task-grow-e2e"}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            device = {
+                "_typeName": "VirtualDisk",
+                "key": 2000,
+                "capacityInBytes": self._capacity_bytes,
+                "backing": {
+                    "_typeName": "VirtualDiskFlatVer2BackingInfo",
+                    "fileName": "[ds] a.vmdk",
+                },
+            }
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": "vm-1"},
+                        "propSet": [{"name": "config.hardware.device", "val": [device]}],
+                    }
+                ]
+            }
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "Task", "value": "task-grow-e2e"},
+                    "propSet": [{"name": "info", "val": {"state": "success"}}],
+                }
+            ]
+        }
+
+    @property
+    def reconfig_writes(self) -> list[str]:
+        return [p for p in self.vmomi_calls if p.endswith("/ReconfigVM_Task")]
+
+
+@pytest.mark.asyncio
+async def test_disk_grow_queue_approve_resume_with_2681_envelope(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.disk.grow: park (with the #2681 op-identity envelope) → approve → resume → grow.
+
+    1. A USER dispatch parks at ``awaiting_approval``; the durable row's
+       ``proposed_effect`` carries the uniform #2681 op-identity envelope
+       (``op_id`` / ``connector_id`` / ``target_id`` / ``op_class`` /
+       ``safety_level``) plus the live-read from→to capacity preview. No
+       ReconfigVM_Task fires — only the read-only preview GETs.
+    2. A distinct human reviewer approves.
+    3. The ``_approved=True`` resume executes the composite: the config read
+       + the (now auto-executed) governed ReconfigVM_Task edit + the Task
+       poll run, and the result is ``status='grown'``.
+    """
+    recorder = _DiskGrowVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+    params = {"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB}
+
+    # Step 1: human dispatch -> awaiting_approval; the write never ran.
+    result1 = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.disk.grow",
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.reconfig_writes == [], "no reconfigure before approval"
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+    assert pending is not None
+    assert pending.target_id == target_id
+    # #2681 uniform op-identity + metadata envelope on the parked row.
+    effect = pending.proposed_effect
+    assert effect["op_id"] == "vmware.composite.vm.disk.grow"
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert effect["target_id"] == str(target_id)
+    assert effect["op_class"] == "other"
+    assert effect["safety_level"] == "dangerous"
+    assert effect["preview_populated"] is True
+    # The live-read from→to capacity delta — the decision the approver makes.
+    assert effect["preview"] == {
+        "vm": "vm-1",
+        "name": "web-01",
+        "disk": "2000",
+        "disk_label": "Hard disk 1",
+        "current_capacity_bytes": _TEN_GIB,
+        "requested_capacity_bytes": _TWENTY_GIB,
+        "delta_bytes": _TWENTY_GIB - _TEN_GIB,
+    }
+
+    # Step 2: a distinct human reviewer approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: resume re-dispatch with the gate bypass -> the grow executes.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.disk.grow",
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == "grown"
+    assert result2.result["from_capacity_bytes"] == _TEN_GIB
+    assert result2.result["to_capacity_bytes"] == _TWENTY_GIB
+    assert result2.result["delta_bytes"] == _TWENTY_GIB - _TEN_GIB
+    # The mutating ReconfigVM_Task fired exactly once, on the approved resume.
+    assert recorder.reconfig_writes == ["/VirtualMachine/vm-1/ReconfigVM_Task"]
+
+
+@pytest.mark.asyncio
+async def test_disk_grow_fresh_boot_dispatchable_without_ingest(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.disk.grow runs to ``grown`` on the direct session with ZERO ingested rows."""
+    recorder = _DiskGrowVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({"vmware.composite.vm.disk.grow"}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.disk.grow",
+        target=_FakeVmwareTarget(),
+        params={"vm": "vm-1", "disk": "2000", "capacity_bytes": _TWENTY_GIB},
+    )
+    assert "composite_l2_missing" not in (result.error or ""), result.error
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "grown"
+    assert recorder.reconfig_writes == ["/VirtualMachine/vm-1/ReconfigVM_Task"]

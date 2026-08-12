@@ -25,9 +25,10 @@ Conventions
   schema verbatim on ``describe_operation`` calls.
 * The 5 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 9 write composites inherit T4's
+  each. The 10 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
-  (G3.1-T6 / #509, plus single-VM ``vm.power`` / #2301). The schema
+  (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, and the mutating
+  VI-JSON ``vm.disk.grow`` / #2893). The schema
   text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
@@ -59,6 +60,8 @@ __all__ = [
     "VM_CLONE_RESPONSE_SCHEMA",
     "VM_CREATE_PARAMETER_SCHEMA",
     "VM_CREATE_RESPONSE_SCHEMA",
+    "VM_DISK_GROW_PARAMETER_SCHEMA",
+    "VM_DISK_GROW_RESPONSE_SCHEMA",
     "VM_MIGRATE_PARAMETER_SCHEMA",
     "VM_MIGRATE_RESPONSE_SCHEMA",
     "VM_POWER_BULK_PARAMETER_SCHEMA",
@@ -550,7 +553,7 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 # Write composites (G3.1-T6 / #509)
 # ===========================================================================
 #
-# The 9 write composites inherit T4's ``safety_level="dangerous"`` +
+# The 10 write composites inherit T4's ``safety_level="dangerous"`` +
 # ``requires_approval=True`` defaults. The registrar passes those
 # explicitly anyway to keep the policy posture obvious at the call site
 # alongside the read overrides.
@@ -908,6 +911,48 @@ CLUSTER_PATCH_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["cluster"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.disk.grow`` parameter schema.
+#:
+#: Grow-only virtual-disk capacity change via vim ``ReconfigVM_Task`` (the
+#: pinned 9.0 REST spec's ``Disk.UpdateSpec`` carries only ``backing`` — no
+#: capacity field, so vim is the sole write path). A request ``<=`` the
+#: current capacity is refused (``status="invalid_shrink"``) before any
+#: write. ``disk`` is the REST disk id (== the vim ``VirtualDevice.key``).
+VM_DISK_GROW_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Managed-object ID of the VM owning the disk (e.g. 'vm-42').",
+        },
+        "disk": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Virtual disk identifier — the REST "
+                "``com.vmware.vcenter.vm.hardware.Disk`` id, which is the "
+                "string form of the vim ``VirtualDevice.key`` (e.g. '2000'). "
+                "The handler matches it against the VM's "
+                "``config.hardware.device`` list to select the VirtualDisk to edit."
+            ),
+        },
+        "capacity_bytes": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "Requested new disk capacity in bytes. Grow-only: a value "
+                "less than or equal to the disk's current capacity is refused "
+                "with ``status='invalid_shrink'`` before any reconfigure is "
+                "issued (vSphere rejects a shrink)."
+            ),
+        },
+    },
+    "required": ["vm", "disk", "capacity_bytes"],
     "additionalProperties": False,
 }
 
@@ -1301,4 +1346,58 @@ CLUSTER_PATCH_RESPONSE_SCHEMA: dict[str, Any] = {
         "patched_hosts",
         "remaining_hosts",
     ],
+}
+
+
+#: ``vmware.composite.vm.disk.grow`` response schema.
+VM_DISK_GROW_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["grown", "invalid_shrink", "disk_not_found", "timeout"],
+            "description": (
+                "``'grown'`` — the ReconfigVM_Task edit reached terminal "
+                "success; ``'invalid_shrink'`` — the requested capacity was "
+                "``<=`` the current size (refused before any write); "
+                "``'disk_not_found'`` — no VirtualDisk with the given key (or "
+                "no readable capacity) on the VM; ``'timeout'`` — the "
+                "reconfigure task did not reach a terminal state within the "
+                "poll bound (it may still complete in the background)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the disk belongs to."},
+        "disk": {"type": "string", "description": "Disk id (== vim device key) the grow targeted."},
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "ReconfigVM_Task moid — present once the write was issued "
+                "(``grown`` / ``timeout``); ``null`` on the pre-write refusals."
+            ),
+        },
+        "from_capacity_bytes": {
+            "type": ["integer", "null"],
+            "description": (
+                "The disk's capacity in bytes before the grow; ``null`` on ``disk_not_found``."
+            ),
+        },
+        "to_capacity_bytes": {
+            "type": "integer",
+            "description": "The requested capacity in bytes.",
+        },
+        "delta_bytes": {
+            "type": ["integer", "null"],
+            "description": (
+                "``to_capacity_bytes - from_capacity_bytes`` (positive on a "
+                "grow, ``<= 0`` on ``invalid_shrink``); ``null`` on ``disk_not_found``."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``grown`` status; ``null`` on a grow."
+            ),
+        },
+    },
+    "required": ["status", "vm", "disk", "to_capacity_bytes"],
 }

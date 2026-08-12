@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 14 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 15 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,8 +26,9 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 9 write
-composites (T6 / #509, plus single-VM ``vm.power`` / #2301) inherit the T4
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 10 write
+composites (T6 / #509, single-VM ``vm.power`` / #2301, and the mutating
+VI-JSON ``vm.disk.grow`` / #2893) inherit the T4
 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
 the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -54,6 +55,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_evacuate_composite,
     vm_clone_composite,
     vm_create_composite,
+    vm_disk_grow_composite,
     vm_migrate_composite,
     vm_power_bulk_composite,
     vm_power_composite,
@@ -80,6 +82,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CLONE_RESPONSE_SCHEMA,
     VM_CREATE_PARAMETER_SCHEMA,
     VM_CREATE_RESPONSE_SCHEMA,
+    VM_DISK_GROW_PARAMETER_SCHEMA,
+    VM_DISK_GROW_RESPONSE_SCHEMA,
     VM_MIGRATE_PARAMETER_SCHEMA,
     VM_MIGRATE_RESPONSE_SCHEMA,
     VM_POWER_BULK_PARAMETER_SCHEMA,
@@ -465,6 +469,30 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
     ),
     _CompositeSpec(
+        op_id="vmware.composite.vm.disk.grow",
+        handler=vm_disk_grow_composite,
+        summary="Grow a VM's virtual disk to a larger capacity via ReconfigVM_Task.",
+        description=(
+            "Grows one virtual disk's capacity. The pinned 9.0 REST spec's "
+            "Disk.UpdateSpec carries only backing (no capacity field), so the "
+            "capacity change goes through vim VirtualMachine.ReconfigVM_Task — "
+            "a single-device edit raising the VirtualDisk's capacityInBytes — "
+            "the connector's first mutating VI-JSON call. Reads the VM's "
+            "config.hardware.device to obtain the full VirtualDisk device + its "
+            "current capacity, refuses a shrink (status='invalid_shrink') "
+            "before any write, issues the ReconfigVM_Task edit through the same "
+            "governance seam as the REST write composites, and polls the "
+            "returned Task to a terminal state before reporting status='grown'. "
+            "Grow-only by contract. Equivalent of 'govc vm.disk.change -size'."
+        ),
+        parameter_schema=VM_DISK_GROW_PARAMETER_SCHEMA,
+        response_schema=VM_DISK_GROW_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "disk", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
         op_id="vmware.composite.host.evacuate",
         handler=host_evacuate_composite,
         summary="Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.",
@@ -551,8 +579,9 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 14 composites total -- 5 read (T5 / #508) + 9 write (T6 /
-    #509, plus single-VM ``vm.power`` / #2301). (The former
+    Scope: 15 composites total -- 5 read (T5 / #508) + 10 write (T6 /
+    #509, single-VM ``vm.power`` / #2301, and the mutating VI-JSON
+    ``vm.disk.grow`` / #2893). (The former
     ``host.network_uplinks`` / ``host.vsan_health`` reads were re-shipped
     as typed ops in #2258.)
     Each composite's ``safety_level`` +

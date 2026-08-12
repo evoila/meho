@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 9 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 10 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 9 write composites onto the per-op preview hook shipped
+This wires all 10 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -28,6 +28,9 @@ helpers, never the mutating sub-ops.
 ``vm.snapshot.revert``    echo: vm, snapshot_name
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
+``vm.disk.grow``          live-read: vm, name, disk, disk_label,
+                          current_capacity_bytes, requested_capacity_bytes,
+                          delta_bytes
 ========================  ====================================================
 
 Two preview depths, chosen per composite
@@ -40,7 +43,12 @@ Two preview depths, chosen per composite
   (:func:`._write._resolve_vm_list` / :func:`._write._resolve_cluster_hosts`),
   so the reviewer sees the resolved entity list (capped at
   :data:`_PREVIEW_RESOLVED_CAP`, with ``total_resolved`` carrying the
-  uncapped count).
+  uncapped count). ``vm.disk.grow`` is also a live-read builder, but
+  single-entity: the decision is the *from→to capacity delta*, and the
+  current capacity is a live vCenter read (:func:`._write._resolve_disk_info`),
+  not a param — so the preview reads the disk's current size + label and
+  echoes the requested capacity so the approver sees the disk grows (never
+  shrinks) and by how much.
 * **Param echo** (no I/O — the ``secret.move`` precedent, #1580) for the
   five single-entity composites whose params fully name the blast
   radius. ``vm.power`` additionally echoes ``power_kind`` so the approver
@@ -74,11 +82,12 @@ Redaction posture
 
 The whole-builder ``classify_op`` gate runs in
 :func:`~meho_backplane.operations._preview.build_proposed_effect` before
-any builder fires: the 9 op_ids classify as ``write`` (``.create`` /
-``.patch`` suffixes) or ``other`` — none is a credential class, so none
-is suppressed. The previews themselves carry only vSphere inventory
-identity (moids, display names, power states) and the operator's own
-dispatch params — infrastructure topology, never credential material.
+any builder fires: the 10 op_ids classify as ``write`` (``.create`` /
+``.patch`` suffixes) or ``other`` (``vm.disk.grow`` — ``.grow`` is not a
+write suffix) — none is a credential class, so none is suppressed. The
+previews themselves carry only vSphere inventory identity (moids, display
+names, power states, disk capacities) and the operator's own dispatch
+params — infrastructure topology, never credential material.
 
 Fail-soft: every builder either declines (``None`` → identifier-only
 default) on malformed params or lets resolution faults propagate into
@@ -96,7 +105,9 @@ from typing import Any
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
     _resolve_cluster_hosts,
+    _resolve_disk_info,
     _resolve_vm_list,
+    _resolve_vm_name,
 )
 from meho_backplane.operations._preview import (
     PreviewBuilder,
@@ -339,7 +350,63 @@ async def _vm_power_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
-#: op_id → builder for the 9 write composites. Module-level so the
+async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.disk.grow`` — live-read the current→requested capacity delta.
+
+    The delta *is* the decision: the reviewer must see that the disk grows
+    (never shrinks) and by how much. Reads the REST ``Disk.Info`` for the
+    disk's ``label`` + current ``capacity`` (bytes) — the load-bearing read,
+    shared with the handler-family via :func:`._write._resolve_disk_info` —
+    and best-effort the VM display name, then echoes the requested capacity
+    and the computed ``delta_bytes``. A failing disk read propagates into
+    the #1628 ``preview_unavailable`` marker (the delta is unknowable, so
+    the park is honest about it rather than showing a bare identifier). The
+    per-VM ``ReconfigVM_Task`` write never fires here. Declines (``None``)
+    without a resolved connector or on malformed params.
+    """
+    vm = ctx.params.get("vm")
+    disk = ctx.params.get("disk")
+    capacity_bytes = ctx.params.get("capacity_bytes")
+    if (
+        not isinstance(vm, str)
+        or not isinstance(disk, str)
+        or not isinstance(capacity_bytes, int)
+        or isinstance(capacity_bytes, bool)
+        or ctx.connector_instance is None
+    ):
+        return None
+    disk_info = await _resolve_disk_info(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        vm=vm,
+        disk=disk,
+    )
+    raw_capacity = disk_info.get("capacity")
+    current_bytes = (
+        raw_capacity
+        if isinstance(raw_capacity, int) and not isinstance(raw_capacity, bool)
+        else None
+    )
+    name = await _resolve_vm_name(
+        ctx.connector_instance,  # type: ignore[arg-type]
+        ctx.target,
+        ctx.operator,
+        vm=vm,
+    )
+    label = disk_info.get("label")
+    return {
+        "vm": vm,
+        "name": name,
+        "disk": disk,
+        "disk_label": label if isinstance(label, str) else None,
+        "current_capacity_bytes": current_bytes,
+        "requested_capacity_bytes": capacity_bytes,
+        "delta_bytes": (capacity_bytes - current_bytes if current_bytes is not None else None),
+    }
+
+
+#: op_id → builder for the 10 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
@@ -348,6 +415,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.migrate": _vm_migrate_preview,
     "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
+    "vmware.composite.vm.disk.grow": _vm_disk_grow_preview,
     "vmware.composite.host.evacuate": _host_evacuate_preview,
     "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
     "vmware.composite.cluster.patch": _cluster_patch_preview,
@@ -355,7 +423,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 9 write-composite park-time preview builders. Import-time.
+    """Wire the 10 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

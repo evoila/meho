@@ -22,9 +22,12 @@ ops that let an RDC operator see what ArgoCD sees without reaching for the
   allow-lists.
 * ``argocd.repo.list`` -- ``GET /api/v1/repositories``; configured repos +
   connection state.
+* ``argocd.cluster.list`` -- ``GET /api/v1/clusters``; destination clusters +
+  connection state (#2855). The credential-bearing ``config`` field is
+  stripped from every item before returning.
 
-All six are ``safety_level="safe"`` + ``requires_approval=False`` and carry a
-``read-only`` tag — this Task registers no write/mutating op (``app.sync`` /
+All seven are ``safety_level="safe"`` + ``requires_approval=False`` and carry a
+``read-only`` tag — these read ops register no write/mutating op (``app.sync`` /
 ``rollback`` / ``set`` are a deferred, approval-gated follow-up).
 
 The dataclass + tuple shape mirrors the bind9 (#367) and Kubernetes
@@ -86,9 +89,9 @@ class ArgoCdOp:
 
 #: Curated ``when_to_use`` blurbs per group. ``register_typed_operation``
 #: requires a non-empty string whenever ``group_key`` is set (G0.9-T4a #731);
-#: the registrar looks each op's ``group_key`` up here. Three groups: the
-#: application read surface, the project allow-list surface, and the
-#: repository inventory surface.
+#: the registrar looks each op's ``group_key`` up here. Four groups: the
+#: application read surface, the project allow-list surface, the repository
+#: inventory surface, and the destination-cluster inventory surface.
 ARGOCD_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "argocd-apps": (
         "Use to inspect ArgoCD Applications and their GitOps reconciliation "
@@ -116,6 +119,17 @@ ARGOCD_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "diagnosing a 'ComparisonError'/'repository not accessible' app "
         "condition or confirming a repo is registered before pointing an "
         "Application at it."
+    ),
+    "argocd-clusters": (
+        "Use to inventory the Kubernetes destination clusters registered in "
+        "ArgoCD and each one's connection state (argocd.cluster.list): the "
+        "cluster API server URL, symbolic name, whether ArgoCD can currently "
+        "reach and authenticate to it (connectionState Successful / Failed), "
+        "and its Kubernetes serverVersion. The right group when the question "
+        "is 'which destination clusters does this ArgoCD manage?', 'is cluster "
+        "X reachable?', or when an Application reports its destination cluster "
+        "unreachable. Read-only — the per-cluster credential config is never "
+        "returned."
     ),
 }
 
@@ -497,9 +511,66 @@ _REPO_LIST = ArgoCdOp(
 )
 
 
+# ---------------------------------------------------------------------------
+# argocd.cluster.list
+# ---------------------------------------------------------------------------
+
+_CLUSTER_LIST = ArgoCdOp(
+    op_id="argocd.cluster.list",
+    handler_attr="cluster_list",
+    summary="List ArgoCD destination clusters and their connection state.",
+    description=(
+        "Lists the Kubernetes destination clusters registered in ArgoCD via "
+        "GET /api/v1/clusters. Each item carries the cluster's API server URL "
+        "(server), symbolic name, a connectionState (status Successful / "
+        "Failed plus a message and the attemptedAt timestamp) reflecting "
+        "whether ArgoCD can currently reach and authenticate to the cluster, "
+        "the Kubernetes serverVersion, and info (applicationsCount + the "
+        "cached connection state). Use to inventory which destination "
+        "clusters an ArgoCD instance manages and confirm each is reachable "
+        "before pointing an Application at it, or when an app reports "
+        "cluster-unreachable. The per-cluster credential material (the config "
+        "field: bearer token / TLS client cert+key / basic auth / AWS / exec "
+        "provider) is stripped from every item. safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "items": {"type": ["array", "null"]},
+            "metadata": {"type": "object"},
+        },
+        "additionalProperties": True,
+    },
+    group_key="argocd-clusters",
+    tags=("read-only", "argocd", "gitops"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call when the operator asks which destination clusters ArgoCD "
+            "manages, or to check a destination cluster's reachability / "
+            "connection state and Kubernetes version before pointing an "
+            "Application at it or when diagnosing a cluster-unreachable app."
+        ),
+        "parameter_hints": {},
+        "output_shape": (
+            "{items: [Cluster, ...], metadata: {...}}. Read each item's "
+            "connectionState.status (Successful / Failed) and .message, "
+            "serverVersion, and info.applicationsCount. The credential-bearing "
+            "config field is stripped and never returned."
+        ),
+    },
+)
+
+
 #: The ops :class:`ArgoCdConnector` registers at lifespan startup — the full
-#: G3.12-T2 read core. Ordered apps → projects → repos to match the
-#: operator's typical drill path.
+#: G3.12-T2 read core plus the #2855 cluster read. Ordered apps → projects →
+#: repos → clusters to match the operator's typical drill path.
 ARGOCD_OPS: tuple[ArgoCdOp, ...] = (
     _APP_LIST,
     _APP_GET,
@@ -507,4 +578,5 @@ ARGOCD_OPS: tuple[ArgoCdOp, ...] = (
     _APP_RESOURCE_TREE,
     _APPPROJECT_LIST,
     _REPO_LIST,
+    _CLUSTER_LIST,
 )

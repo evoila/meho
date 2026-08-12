@@ -162,6 +162,18 @@ class PostgresConnector(Connector):
         async with self._connection(target, operator) as conn:
             return await queries.fetch_settings(conn, params.get("names"))
 
+    async def replication(
+        self, operator: Operator, target: Target, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``postgres.replication`` -- physical replication health + standby lag.
+
+        Cluster-wide views, so no ``database`` param -- connects to the default
+        maintenance database like ``postgres.activity``.
+        """
+        del params  # declared empty in schema
+        async with self._connection(target, operator) as conn:
+            return await queries.fetch_replication(conn)
+
     async def run_query(
         self, operator: Operator, target: Target, params: dict[str, Any]
     ) -> dict[str, Any]:

@@ -13,6 +13,8 @@ uses, without reaching for ``psql`` against ``:5432``:
 * ``postgres.indexes`` -- user indexes with scan counters + on-disk sizes.
 * ``postgres.activity`` -- current sessions (``pg_stat_activity``, no query text).
 * ``postgres.settings`` -- curated (or caller-named) runtime settings.
+* ``postgres.replication`` -- physical replication health + standby lag
+  (``pg_stat_replication`` / ``pg_stat_wal_receiver``).
 * ``postgres.query`` -- a guarded free-form read-only SELECT.
 
 Every op is ``safety_level="safe"`` + ``requires_approval=False`` and carries a
@@ -76,11 +78,14 @@ PG_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "postgres-runtime": (
         "Use to inspect a PostgreSQL instance's live runtime: the current "
         "sessions and what they are waiting on (postgres.activity, from "
-        "pg_stat_activity) or the effective configuration parameters "
-        "(postgres.settings). The right group for 'what is blocking / idle in "
-        "transaction right now?' or 'what are max_connections / shared_buffers "
-        "/ the autovacuum knobs set to?'. Read-only; the session query text is "
-        "intentionally not returned by postgres.activity."
+        "pg_stat_activity), the effective configuration parameters "
+        "(postgres.settings), or the physical streaming replication health and "
+        "standby lag (postgres.replication, from pg_stat_replication / "
+        "pg_stat_wal_receiver). The right group for 'what is blocking / idle in "
+        "transaction right now?', 'what are max_connections / shared_buffers / "
+        "the autovacuum knobs set to?', or 'is the standby caught up before I "
+        "fail over?'. Read-only; the session query text is intentionally not "
+        "returned by postgres.activity."
     ),
     "postgres-query": (
         "Use to run an ad-hoc read-only SQL query when no curated op fits "
@@ -352,6 +357,55 @@ _SETTINGS = PostgresOp(
 )
 
 
+_REPLICATION = PostgresOp(
+    op_id="postgres.replication",
+    handler_attr="replication",
+    summary="Snapshot physical streaming replication health and standby lag.",
+    description=(
+        "Returns a physical streaming replication snapshot from both role "
+        "sides: the connected standbys from pg_stat_replication (primary-side, "
+        "one row per standby with sent/write/flush/replay LSNs, the "
+        "write/flush/replay lag in seconds, and sync_state), the WAL receiver "
+        "from pg_stat_wal_receiver (standby-side, 0 or 1 row, populated only "
+        "while actively streaming), and the recovery role (pg_is_in_recovery) "
+        "plus the last replayed-transaction timestamp. The op for 'is "
+        "replication healthy and how far behind is the standby before I fail "
+        "over or take the primary down?'. Physical streaming replication only "
+        "(not logical). safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    response_schema=_LIST_RESPONSE_SCHEMA,
+    group_key="postgres-runtime",
+    tags=("read-only", "postgres", "runtime", "replication"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call to check streaming replication health and standby lag before "
+            "a failover or before taking the primary down. Run against the "
+            "primary to see per-standby lag (standbys[]); against a standby to "
+            "see its WAL receiver state and replay staleness (wal_receiver, "
+            "in_recovery=true)."
+        ),
+        "parameter_hints": {},
+        "output_shape": (
+            "{in_recovery, last_xact_replay_timestamp, standbys:[{pid, usename, "
+            "application_name, client_addr, state, sent_lsn, write_lsn, "
+            "flush_lsn, replay_lsn, write_lag, flush_lag, replay_lag, "
+            "sync_state, sync_priority, reply_time}], wal_receiver:{status, "
+            "receive_start_lsn, written_lsn, flushed_lsn, latest_end_lsn, "
+            "last_msg_send_time, last_msg_receipt_time, slot_name, sender_host, "
+            "sender_port} | null}. LSNs are canonical 'X/Y' strings; the *_lag "
+            "fields are float seconds; timestamps are ISO-8601 or null."
+        ),
+    },
+)
+
+
 _QUERY = PostgresOp(
     op_id="postgres.query",
     handler_attr="run_query",
@@ -425,5 +479,6 @@ PG_OPS: tuple[PostgresOp, ...] = (
     _INDEXES,
     _ACTIVITY,
     _SETTINGS,
+    _REPLICATION,
     _QUERY,
 )

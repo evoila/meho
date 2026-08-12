@@ -5,9 +5,10 @@
 
 Coverage matrix (per Task #588 acceptance criteria):
 
-* ``parse_named_checkconf_zones`` -- one row per top-level zone,
-  including zones nested inside ``view`` blocks; ``file`` / ``type``
-  extracted from inner directives.
+* ``parse_named_checkconf_zones`` -- one row per zone, including zones
+  nested inside ``view`` blocks; ``file`` / ``type`` extracted from
+  inner directives; ``view`` attributed from the enclosing ``view``
+  block (null outside any view, disambiguating split-horizon).
 * ``parse_zonefile`` -- one row per rrset member; absolute names,
   integer TTLs, canonical class / type / rdata strings; SOA, NS, MX,
   TXT, A, AAAA, CNAME all round-trip.
@@ -120,7 +121,12 @@ def _completed_process(stdout: str = "", exit_status: int = 0) -> Any:
 def test_parse_zones_master_zone_extracts_name_file_type() -> None:
     output = 'zone "evba.lab" {\n\ttype master;\n\tfile "/etc/bind/db.evba.lab";\n};\n'
     assert parse_named_checkconf_zones(output) == [
-        {"name": "evba.lab", "file": "/etc/bind/db.evba.lab", "type": "master"}
+        {
+            "name": "evba.lab",
+            "file": "/etc/bind/db.evba.lab",
+            "type": "master",
+            "view": None,
+        }
     ]
 
 
@@ -165,18 +171,94 @@ def test_parse_zones_walks_through_options_and_view_blocks() -> None:
     ext_row = next(r for r in rows if r["name"] == "ext.example.com")
     assert ext_row["type"] == "slave"
     assert ext_row["file"] == "/etc/bind/views/ext.example.com"
+    # The bare top-level zone carries no view; the view-wrapped zone is
+    # attributed to its enclosing ``view`` block. The nested
+    # ``masters { ... };`` inside the view must not close it early.
+    assert next(r for r in rows if r["name"] == "evba.lab")["view"] is None
+    assert ext_row["view"] == "external"
 
 
 def test_parse_zones_handles_hint_zone_without_file_gracefully() -> None:
     """``type hint`` zones lacking a ``file`` directive surface ``file=None``."""
     output = 'zone "." {\n\ttype hint;\n};\n'
     rows = parse_named_checkconf_zones(output)
-    assert rows == [{"name": ".", "file": None, "type": "hint"}]
+    assert rows == [{"name": ".", "file": None, "type": "hint", "view": None}]
 
 
 def test_parse_zones_empty_input_returns_empty_list() -> None:
     assert parse_named_checkconf_zones("") == []
     assert parse_named_checkconf_zones("options { };\n") == []
+
+
+def test_parse_zones_split_horizon_attributes_view_per_block() -> None:
+    """Same zone name under two views yields two rows differing by ``view``.
+
+    Mirrors the consumer's per-user split-horizon topology: a ``default``
+    view plus one per-operator view, each serving the same lab zone name.
+    The rows must be distinguishable by ``view`` even though ``name`` and
+    ``type`` are identical. The ``match-clients { ... };`` block inside
+    the second view is a single-line balanced brace pair -- the view must
+    stay open across it so its zone is still attributed correctly.
+    """
+    output = (
+        'view "default" {\n'
+        '\tzone "site-a.vcf.lab" {\n'
+        "\t\ttype master;\n"
+        '\t\tfile "/etc/bind/db.site-a";\n'
+        "\t};\n"
+        "};\n"
+        'view "operator-alice" {\n'
+        "\tmatch-clients { 10.9.0.7; };\n"
+        '\tzone "site-a.vcf.lab" {\n'
+        "\t\ttype master;\n"
+        '\t\tfile "/etc/bind/views/alice/db.site-a";\n'
+        "\t};\n"
+        "};\n"
+    )
+    rows = parse_named_checkconf_zones(output)
+    assert rows == [
+        {
+            "name": "site-a.vcf.lab",
+            "file": "/etc/bind/db.site-a",
+            "type": "master",
+            "view": "default",
+        },
+        {
+            "name": "site-a.vcf.lab",
+            "file": "/etc/bind/views/alice/db.site-a",
+            "type": "master",
+            "view": "operator-alice",
+        },
+    ]
+    # Same name + type across both rows; only ``view`` (and file) differ.
+    assert rows[0]["name"] == rows[1]["name"]
+    assert rows[0]["type"] == rows[1]["type"]
+    assert rows[0]["view"] != rows[1]["view"]
+
+
+def test_parse_zones_no_views_attributes_null_view() -> None:
+    """No ``view`` blocks: bare top-level zones carry ``view=None``.
+
+    ``named-checkconf -p`` prints zones bare at the top level when the
+    config declares no views (it does not synthesise the internal
+    ``_default`` view), so ``view`` must be null -- not ``"_default"``.
+    """
+    output = (
+        "options {\n"
+        '\tdirectory "/var/cache/bind";\n'
+        "};\n"
+        'zone "evba.lab" {\n'
+        "\ttype master;\n"
+        '\tfile "/etc/bind/db.evba.lab";\n'
+        "};\n"
+        'zone "10.5.50.in-addr.arpa" {\n'
+        "\ttype master;\n"
+        '\tfile "/etc/bind/db.10.5.50";\n'
+        "};\n"
+    )
+    rows = parse_named_checkconf_zones(output)
+    assert {row["name"] for row in rows} == {"evba.lab", "10.5.50.in-addr.arpa"}
+    assert all(row["view"] is None for row in rows)
 
 
 # ---------------------------------------------------------------------------

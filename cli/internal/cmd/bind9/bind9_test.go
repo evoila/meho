@@ -297,18 +297,23 @@ func TestPrintAboutErrorRendersErrorString(t *testing.T) {
 	}
 }
 
-// TestPrintZoneListTable — happy-path render with 2 zones.
+// TestPrintZoneListTable — happy-path render including the `view`
+// column: two split-horizon rows sharing a zone name under different
+// views, plus a bare zone whose `view` is null (rendered blank).
 func TestPrintZoneListTable(t *testing.T) {
 	r := &CallResult{
 		Status:     "ok",
 		OpID:       "bind9.zone.list",
-		Result:     json.RawMessage(`{"rows":[{"name":"evba.lab","type":"master","file":"/etc/bind/db.evba.lab"},{"name":"50.5.10.in-addr.arpa","type":"master","file":"/etc/bind/db.10.5.50"}],"total":2}`),
+		Result:     json.RawMessage(`{"rows":[{"name":"site-a.vcf.lab","type":"master","file":"/etc/bind/db.site-a","view":"default"},{"name":"site-a.vcf.lab","type":"master","file":"/etc/bind/views/alice/db.site-a","view":"operator-alice"},{"name":"evba.lab","type":"master","file":"/etc/bind/db.evba.lab","view":null}],"total":3}`),
 		DurationMs: 12.0,
 	}
 	var buf bytes.Buffer
 	printZoneList(&buf, r)
 	out := buf.String()
-	for _, want := range []string{"evba.lab", "master", "/etc/bind/db.evba.lab", "50.5.10.in-addr.arpa"} {
+	// The `view` header renders; the two split-horizon rows are
+	// distinguishable by their view names; the null-view zone still
+	// renders (its blank view column is not asserted directly).
+	for _, want := range []string{"view", "site-a.vcf.lab", "master", "default", "operator-alice", "evba.lab", "/etc/bind/views/alice/db.site-a"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("printZoneList missing %q in output:\n%s", want, out)
 		}

@@ -184,6 +184,14 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "``pfsense.config.show`` when the operator needs to inspect or "
         "export the complete pfSense config.xml."
     ),
+    "dhcp": (
+        "Use for pfSense DHCP lease-state operations: reading the live "
+        "DHCPv4 lease table (``pfsense.dhcp.leases``). Call when the "
+        "operator wants to know which IPs are currently leased, to whom, "
+        "or how close a DHCP pool is to exhaustion before provisioning "
+        "more hosts on a segment. Rows carry the client IP, MAC, hostname, "
+        "lease start/end, and effective binding state."
+    ),
 }
 
 
@@ -580,6 +588,27 @@ class PfSenseConnector(SshConnector):
         )
 
         return await _pfsense_config_show(self, target, params, operator)
+
+    async def dhcp_leases(
+        self,
+        target: Target,
+        params: dict[str, Any],
+        operator: Operator | None = None,
+    ) -> dict[str, Any]:
+        """Bound-method shim for ``pfsense.dhcp.leases`` (#2849).
+
+        Delegates to
+        :func:`~meho_backplane.connectors.pfsense.ops_read.pfsense_dhcp_leases`.
+        A busy pool's lease table can be large; the dispatcher's default
+        :class:`~meho_backplane.operations.jsonflux_reducer.JsonFluxReducer`
+        wraps the result in a ``ResultHandle`` when ``total`` exceeds its
+        configured threshold.
+        """
+        from meho_backplane.connectors.pfsense.ops_read import (
+            pfsense_dhcp_leases as _pfsense_dhcp_leases,
+        )
+
+        return await _pfsense_dhcp_leases(self, target, params, operator)
 
     @classmethod
     async def register_operations(cls) -> None:

@@ -24,7 +24,8 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   attributes: `product="pfsense"`, `version="2.7"`, `impl_id="pfsense-ssh"`.
   Inherits the per-target asyncssh connection pool and `aclose()` from the
   adapter; overrides `_auth_config` to reject password auth, plus `fingerprint`,
-  `probe`, `execute`, `about`, and the 7 T2 read-op bound-method shims.
+  `probe`, `execute`, `about`, and the read-op bound-method shims (the 7 T2 ops
+  plus `dhcp_leases`, #2849).
 
 - **`_auth_config()` override** — the load-bearing auth constraint. Requires
   `ssh_private_key` in the target's **Vault secret** (`target.secret_ref` is a
@@ -37,18 +38,22 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   REPL) instead of a POSIX shell, causing any subsequent command to hang.
 
 - **Op metadata** (`ops.py`) — the `PfSenseOp` dataclass, the `_pfsense_ops()`
-  composition function, and the `PFSENSE_OPS` tuple (8 ops total after T2).
-  T1 shipped `pfsense.about`; T2 adds 7 read ops via the `ops_read` module.
+  composition function, and the `PFSENSE_OPS` tuple (9 ops total). T1 shipped
+  `pfsense.about`; T2 (#847) adds 7 read ops via the `ops_read` module; #2849
+  appends `pfsense.dhcp.leases`.
 
-- **Read op parsers** (`ops_read.py`) — pure parsers for pfctl and config.xml
-  output, plus the 7 T2 handler functions and the `READ_OPS` tuple:
+- **Read op parsers** (`ops_read.py`) — pure parsers for pfctl, config.xml, and
+  the ISC dhcpd lease DB, plus the handler functions and the `READ_OPS` tuple:
   - `parse_pfctl_rules` / `parse_pfctl_states` / `parse_pfctl_nat` — pfctl
     output parsers.
   - `parse_ifconfig` / `_netmask_to_cidr` — ifconfig output parser.
   - `parse_gateways_xml` — XML parser for the `<gateways>` block.
+  - `parse_dhcp_leases` (#2849) — parses `/var/dhcpd/var/db/dhcpd.leases`
+    (log-structured ISC dhcpd lease DB) into de-duplicated lease rows; an
+    `active` lease whose `ends` is past reads as `expired`.
   - Handler functions: `pfsense_version`, `pfsense_firewall_rules`,
     `pfsense_firewall_state`, `pfsense_nat_rules`, `pfsense_interface_list`,
-    `pfsense_gateway_list`, `pfsense_config_show`.
+    `pfsense_gateway_list`, `pfsense_config_show`, `pfsense_dhcp_leases`.
 
 ## Control flow
 
@@ -149,7 +154,7 @@ Two-phase registration, identical to the bind9 pattern:
   (`connectors/registry.py`, `operations/typed_register.py`) — registration
   infrastructure.
 
-## Op surface (T1 + T2, 8 ops)
+## Op surface (9 ops)
 
 | Op ID | Command | Group |
 |---|---|---|
@@ -161,13 +166,23 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.interface.list` | `ifconfig -a` | `network` |
 | `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) | `network` |
 | `pfsense.config.show` | `cat /cf/conf/config.xml` (full) | `config` |
+| `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` |
 
-All 8 ops are `safety_level="safe"`, `requires_approval=False`.
+All 9 ops are `safety_level="safe"`, `requires_approval=False`.
 
-`pfsense.firewall.state` returns `{rows, total}` and is the primary JSONFlux
-reduction candidate on busy firewalls (large state tables). The future reducer
-(key `pfsense_firewall_state`) spills to the HandleStore when `total` exceeds
-its threshold; today's `PassThroughReducer` returns the inline payload.
+`pfsense.firewall.state` and `pfsense.dhcp.leases` both return `{rows, total}`
+and are the JSONFlux reduction candidates: connection-state tables and busy
+DHCP pools can each carry many rows. The reducer (key `pfsense_firewall_state`
+/ `pfsense_dhcp_leases`) wraps the payload in a `ResultHandle` when `total`
+exceeds its threshold; smaller payloads pass through inline. Handle-vs-inline
+is the reducer's job, not the connector's — every handler returns rows inline.
+
+`pfsense.dhcp.leases` reads the live ISC dhcpd lease database (pfSense chroots
+`dhcpd` under `/var/dhcpd`). The file is log-structured, so the parser
+de-duplicates to the last block per IP; timestamps are UTC; an `active` lease
+whose `ends` has passed is reported as `expired`. DHCPv6 (`dhcpd6.leases`) and
+pool-exhaustion percentage math (correlating against the `config.xml` `<range>`)
+are out of scope — follow-ups.
 
 ## Known issues
 
@@ -180,6 +195,9 @@ its threshold; today's `PassThroughReducer` returns the inline payload.
 - Task #844 (this skeleton): G3.7-T1 PfSenseConnector skeleton.
 - Task #847 (this): G3.7-T2 pfSense 7 read ops (landed).
 - Task #850 (final): G3.7-T3 pfSense CLI verbs + E2E + onboarding doc.
+- Task #2849: `pfsense.dhcp.leases` — ISC dhcpd lease-DB read op (connector
+  read-op coverage wave 2, initiative #2833). Grammar per `dhcpd.leases(5)`;
+  chroot path confirmed against pfSense's `status_dhcp_leases.php`.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

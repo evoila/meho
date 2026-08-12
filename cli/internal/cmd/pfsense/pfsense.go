@@ -16,6 +16,7 @@
 //   - `meho pfsense network interface [--target T]` — pfsense.interface.list
 //   - `meho pfsense network gateway [--target T]`   — pfsense.gateway.list
 //   - `meho pfsense config show [--target T]`    — pfsense.config.show
+//   - `meho pfsense dhcp leases [--target T]`    — pfsense.dhcp.leases
 //
 // Every verb is a thin Cobra command that POSTs to
 // `/api/v1/operations/call` with a pre-baked connector_id. No new
@@ -75,6 +76,7 @@ const ConnectorID = "pfsense-ssh-2.7"
 //   - `pfsense nat rules`         — sub-tree
 //   - `pfsense network <interface|gateway>` — sub-tree
 //   - `pfsense config show`       — sub-tree
+//   - `pfsense dhcp leases`       — sub-tree
 func NewRootCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pfsense",
@@ -103,6 +105,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newNatCmd())
 	cmd.AddCommand(newNetworkCmd())
 	cmd.AddCommand(newConfigCmd())
+	cmd.AddCommand(newDhcpCmd())
 	return cmd
 }
 

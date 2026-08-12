@@ -110,7 +110,7 @@ register_connector_v2(
 
 # Queue the typed-op upsert onto the lifespan-driven registrar list. The
 # runner (``run_typed_op_registrars``) iterates after
-# ``_eager_import_connectors`` so the five typed read descriptors land
+# ``_eager_import_connectors`` so the six typed read descriptors land
 # before the first dispatch — no ingested catalog state required (VCFA
 # ships no vendor spec; typed conversion is the only working read path).
 register_typed_op_registrar(register_vcfa_typed_operations)

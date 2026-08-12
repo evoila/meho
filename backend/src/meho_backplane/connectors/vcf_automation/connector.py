@@ -130,6 +130,7 @@ from meho_backplane.connectors.vcf_automation.typed_ops import (
     PROVIDER_REGIONS_PATH,
     PROVIDER_SITE_PATH,
     TENANT_ABOUT_PATH,
+    TENANT_DEPLOYMENTS_PATH,
     TENANT_PROJECTS_PATH,
 )
 
@@ -725,6 +726,21 @@ class VcfAutomationConnector(HttpConnector):
             target,
             "GET",
             TENANT_PROJECTS_PATH,
+            operator=operator,
+            params=_tenant_odata_query(params),
+        )
+
+    async def tenant_deployment_list(
+        self,
+        operator: Operator,
+        target: VcfAutomationTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``vcfa.tenant.deployment.list`` — ``GET /iaas/api/deployments`` (tenant plane)."""
+        return await self._request_json(
+            target,
+            "GET",
+            TENANT_DEPLOYMENTS_PATH,
             operator=operator,
             params=_tenant_odata_query(params),
         )

@@ -53,7 +53,9 @@ from meho_backplane.connectors.vmware_rest import VmwareRestConnector
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites import _write
 from meho_backplane.connectors.vmware_rest.composites._write import (
+    cluster_drs_rule_create_composite,
     cluster_patch_composite,
+    folder_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
@@ -1919,5 +1921,523 @@ async def test_vm_clone_from_template_clone_body_reaches_the_wire_respx(
             "type": "Datastore",
             "value": "datastore-15",
         }
+    finally:
+        await connector.aclose()
+
+
+# ===========================================================================
+# cluster.drs_rule.create (vim ClusterComputeResource reconfigure — #2895)
+# ===========================================================================
+
+
+def _vm_row(vm: str, name: str) -> dict[str, Any]:
+    """A VM listing row as ``GET:/vcenter/vm`` returns it (moid + display name)."""
+    return {"vm": vm, "name": name, "power_state": "POWERED_ON"}
+
+
+class _DrsRuleConnector:
+    """Recording double for the drs_rule.create REST reads + vim writes.
+
+    Serves the VM-name resolution (``GET:/vcenter/vm``), the existing-rules
+    collision read + the ``ReconfigureComputeResource_Task`` write + the Task
+    poll (the two ``RetrievePropertiesEx`` reads keyed apart by the request
+    body's ``specSet`` object type — ``ClusterComputeResource`` vs ``Task``).
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(
+        self,
+        *,
+        vms: list[dict[str, Any]] | None = None,
+        existing_rules: list[dict[str, Any]] | None = None,
+        task_state: str = "success",
+        task_error: str | None = None,
+        reconfig_task: str = "task-rule-1",
+    ) -> None:
+        self.vms = [_vm_row("vm-1", "web-01"), _vm_row("vm-2", "web-02")] if vms is None else vms
+        self.existing_rules = existing_rules or []
+        self.task_state = task_state
+        self.task_error = task_error
+        self.reconfig_task = reconfig_task
+        self.rest_calls: list[tuple[str, Any]] = []
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        self.rest_calls.append((path, params))
+        return {"value": self.vms}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/ReconfigureComputeResource_Task"):
+            return {"type": "Task", "value": self.reconfig_task}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "ClusterComputeResource":
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
+                        "propSet": [{"name": "configurationEx.rule", "val": self.existing_rules}],
+                    }
+                ]
+            }
+        if spec_type == "Task":
+            info: dict[str, Any] = {"state": self.task_state}
+            if self.task_error is not None:
+                info["error"] = {"localizedMessage": self.task_error}
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "Task", "value": self.reconfig_task},
+                        "propSet": [{"name": "info", "val": info}],
+                    }
+                ]
+            }
+        raise AssertionError(f"unexpected RetrievePropertiesEx type {spec_type!r}")
+
+    @property
+    def reconfig_bodies(self) -> list[Any]:
+        return [
+            body
+            for path, body in self.vmomi_calls
+            if path.endswith("/ReconfigureComputeResource_Task")
+        ]
+
+
+async def test_drs_rule_create_happy_path_adds_anti_affinity_and_polls(gate: _GateRecorder) -> None:
+    """Anti-affinity: resolve VMs -> gated reconfigure add -> poll success -> status=created."""
+    conn = _DrsRuleConnector()
+    out = await cluster_drs_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "web-02"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["task"] == "task-rule-1"
+    assert out["rule_type"] == "anti_affinity"
+    assert out["resolved_vms"] == [
+        {"vm": "vm-1", "name": "web-01"},
+        {"vm": "vm-2", "name": "web-02"},
+    ]
+
+    # The single mutating sub-op was gated with its vi-json governance op_id +
+    # logical params (resolved moids name the entities the write touches).
+    assert gate.gated_op_ids == [
+        "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+    ]
+    gated = gate.calls[0]
+    assert gated["safety_level"] == "dangerous"
+    assert gated["requires_approval"] is False
+    assert gated["params"]["vms"] == ["vm-1", "vm-2"]
+
+    # The reconfigure body is a single-rule add with modify:true + MoRefs.
+    assert len(conn.reconfig_bodies) == 1
+    body = conn.reconfig_bodies[0]
+    assert body["modify"] is True
+    assert body["spec"]["_typeName"] == "ClusterConfigSpecEx"
+    rules_spec = body["spec"]["rulesSpec"]
+    assert len(rules_spec) == 1
+    assert rules_spec[0]["operation"] == "add"
+    info = rules_spec[0]["info"]
+    assert info["_typeName"] == "ClusterAntiAffinityRuleSpec"
+    assert info["name"] == "keep-apart"
+    assert info["enabled"] is True
+    assert info["vm"] == [
+        {"type": "VirtualMachine", "value": "vm-1"},
+        {"type": "VirtualMachine", "value": "vm-2"},
+    ]
+
+
+async def test_drs_rule_create_affinity_uses_affinity_type(gate: _GateRecorder) -> None:
+    """rule_type=affinity tags the rule info ``ClusterAffinityRuleSpec``."""
+    conn = _DrsRuleConnector()
+    out = await cluster_drs_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-together",
+            "rule_type": "affinity",
+            "vms": ["web-01", "web-02"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    info = conn.reconfig_bodies[0]["spec"]["rulesSpec"][0]["info"]
+    assert info["_typeName"] == "ClusterAffinityRuleSpec"
+
+
+async def test_drs_rule_create_name_collision_returns_structured_status(
+    gate: _GateRecorder,
+) -> None:
+    """An existing rule with the same name -> status=rule_exists; no write, no gate."""
+    conn = _DrsRuleConnector(existing_rules=[{"name": "keep-apart", "key": 1}])
+    out = await cluster_drs_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "web-02"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "rule_exists"
+    assert out["task"] is None
+    # The reconfigure never fired, and the gate was never consulted.
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+async def test_drs_rule_create_insufficient_vms_refused_before_write(gate: _GateRecorder) -> None:
+    """Fewer than two VMs resolve -> status=insufficient_vms; no write, no gate."""
+    conn = _DrsRuleConnector(vms=[_vm_row("vm-1", "web-01")])
+    out = await cluster_drs_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "ghost"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "insufficient_vms"
+    assert out["resolved_vms"] == [{"vm": "vm-1", "name": "web-01"}]
+    assert conn.reconfig_bodies == []
+    assert gate.calls == []
+
+
+async def test_drs_rule_create_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the reconfigure returns verbatim; no write fires."""
+    op_id = "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _DrsRuleConnector()
+    out = await cluster_drs_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "web-02"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == op_id
+    assert conn.reconfig_bodies == []
+
+
+async def test_drs_rule_create_task_fault_raises(gate: _GateRecorder) -> None:
+    """A terminal task error raises (the dispatcher wraps it connector_error)."""
+    conn = _DrsRuleConnector(task_state="error", task_error="Cluster rule conflict.")
+    with pytest.raises(RuntimeError, match="Cluster rule conflict"):
+        await cluster_drs_rule_create_composite(
+            operator=_make_operator(),
+            target=object(),
+            params={
+                "cluster": "domain-c1",
+                "rule_name": "keep-apart",
+                "rule_type": "anti_affinity",
+                "vms": ["web-01", "web-02"],
+            },
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+async def test_drs_rule_create_poll_timeout_returns_timeout_status(
+    monkeypatch: pytest.MonkeyPatch, gate: _GateRecorder
+) -> None:
+    """A poll that never sees a terminal state returns status=timeout with the task id."""
+    monkeypatch.setattr(_write, "_DRS_RULE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _DrsRuleConnector(task_state="running")
+    out = await cluster_drs_rule_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "web-02"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["task"] == "task-rule-1"
+
+
+async def test_drs_rule_create_reconfig_body_reaches_the_wire_respx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """respx-verified: the ReconfigureComputeResource_Task POST body carries
+    modify:true + a single ClusterRuleSpec add with the resolved VM MoRefs,
+    mounted on the /sdk/vim25 base.
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+
+    base = "https://vc-grow.test.invalid"
+    vijson = "/sdk/vim25/8.0.3.0"
+    vm_list = {"value": [_vm_row("vm-1", "web-01"), _vm_row("vm-2", "web-02")]}
+    rules_result = {
+        "objects": [
+            {
+                "obj": {"type": "ClusterComputeResource", "value": "domain-c1"},
+                "propSet": [{"name": "configurationEx.rule", "val": []}],
+            }
+        ]
+    }
+    task_result = {
+        "objects": [
+            {
+                "obj": {"type": "Task", "value": "task-1"},
+                "propSet": [{"name": "info", "val": {"state": "success"}}],
+            }
+        ]
+    }
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=base) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.get("/api/vcenter/vm").respond(200, json=vm_list)
+            # collision read then Task poll share the RetrievePropertiesEx URL.
+            mock.post(f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+                side_effect=[
+                    httpx.Response(200, json=rules_result),
+                    httpx.Response(200, json=task_result),
+                ]
+            )
+            reconfig = mock.post(
+                f"{vijson}/ClusterComputeResource/domain-c1/ReconfigureComputeResource_Task"
+            ).respond(200, json={"type": "Task", "value": "task-1"})
+            out = await cluster_drs_rule_create_composite(
+                operator=_make_operator(),
+                target=_StubTarget(),
+                params={
+                    "cluster": "domain-c1",
+                    "rule_name": "keep-apart",
+                    "rule_type": "anti_affinity",
+                    "vms": ["web-01", "web-02"],
+                },
+                connector=connector,
+            )
+        assert isinstance(out, dict)
+        assert out["status"] == "created"
+        assert reconfig.called
+        body = json.loads(reconfig.calls[0].request.content)
+        assert body["modify"] is True
+        assert body["spec"]["_typeName"] == "ClusterConfigSpecEx"
+        assert len(body["spec"]["rulesSpec"]) == 1
+        assert body["spec"]["rulesSpec"][0]["operation"] == "add"
+        info = body["spec"]["rulesSpec"][0]["info"]
+        assert info["_typeName"] == "ClusterAntiAffinityRuleSpec"
+        assert info["vm"] == [
+            {"type": "VirtualMachine", "value": "vm-1"},
+            {"type": "VirtualMachine", "value": "vm-2"},
+        ]
+    finally:
+        await connector.aclose()
+
+
+# ===========================================================================
+# folder.create (synchronous vim Folder.CreateFolder — #2895)
+# ===========================================================================
+
+
+class _FolderCreateConnector:
+    """Recording double for folder.create: parent REST read + vim CreateFolder.
+
+    Serves the parent-folder resolution (``GET:/vcenter/folder``) and the
+    synchronous ``Folder.CreateFolder`` vim POST — which returns the new
+    Folder MoRef directly, so **no** ``RetrievePropertiesEx`` poll ever fires.
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(
+        self,
+        *,
+        parents: list[dict[str, Any]] | None = None,
+        new_folder_moid: str = "group-v99",
+    ) -> None:
+        self.parents = [{"folder": "group-v1", "name": "prod"}] if parents is None else parents
+        self.new_folder_moid = new_folder_moid
+        self.rest_calls: list[tuple[str, Any]] = []
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        self.rest_calls.append((path, params))
+        return {"value": self.parents}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        return {"type": "Folder", "value": self.new_folder_moid}
+
+
+async def test_folder_create_happy_path_is_synchronous_no_poll(gate: _GateRecorder) -> None:
+    """Resolve parent -> gated CreateFolder -> new folder MoRef returned; NO task poll."""
+    conn = _FolderCreateConnector()
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "prod", "folder_name": "cluster-nodes"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "created"
+    assert out["folder"] == "group-v99"
+    assert out["parent_folder"] == "prod"
+    assert out["parent_folder_id"] == "group-v1"
+    assert out["new_folder_name"] == "cluster-nodes"
+
+    # Gated with the CreateFolder governance op_id + resolved-parent params.
+    assert gate.gated_op_ids == ["POST:/Folder/{moId}/CreateFolder"]
+    assert gate.calls[0]["params"] == {"parent_folder": "group-v1", "folder_name": "cluster-nodes"}
+
+    # Exactly one vmomi call — the CreateFolder itself. No RetrievePropertiesEx
+    # poll: CreateFolder is synchronous and returns the folder MoRef directly.
+    assert len(conn.vmomi_calls) == 1
+    path, body = conn.vmomi_calls[0]
+    assert path == "/Folder/group-v1/CreateFolder"
+    assert body == {"name": "cluster-nodes"}
+
+
+async def test_folder_create_parent_not_found_refused_before_write(gate: _GateRecorder) -> None:
+    """No parent match -> status=parent_not_found; no write, no gate."""
+    conn = _FolderCreateConnector(parents=[])
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "ghost", "folder_name": "cluster-nodes"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "parent_not_found"
+    assert out["folder"] is None
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+async def test_folder_create_ambiguous_parent_refused_before_write(gate: _GateRecorder) -> None:
+    """A parent name matching >1 folder -> status=ambiguous_parent; no write."""
+    conn = _FolderCreateConnector(
+        parents=[{"folder": "group-v1", "name": "prod"}, {"folder": "group-v2", "name": "prod"}]
+    )
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "prod", "folder_name": "cluster-nodes"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "ambiguous_parent"
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+async def test_folder_create_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on CreateFolder returns verbatim; no folder is created."""
+    op_id = "POST:/Folder/{moId}/CreateFolder"
+    _install_gate(monkeypatch, _GateRecorder(gate_for={op_id: _awaiting(op_id)}))
+    conn = _FolderCreateConnector()
+    out = await folder_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"parent_folder": "prod", "folder_name": "cluster-nodes"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == op_id
+    assert conn.vmomi_calls == []
+
+
+async def test_folder_create_body_reaches_the_wire_respx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """respx-verified: the CreateFolder POST body carries {name}, mounted on
+    /sdk/vim25, and the returned Folder MoRef is unwrapped into the result.
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+
+    base = "https://vc-grow.test.invalid"
+    vijson = "/sdk/vim25/8.0.3.0"
+    parents = {"value": [{"folder": "group-v1", "name": "prod"}]}
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=base) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.get("/api/vcenter/folder").respond(200, json=parents)
+            create = mock.post(f"{vijson}/Folder/group-v1/CreateFolder").respond(
+                200, json={"type": "Folder", "value": "group-v42"}
+            )
+            out = await folder_create_composite(
+                operator=_make_operator(),
+                target=_StubTarget(),
+                params={"parent_folder": "prod", "folder_name": "cluster-nodes"},
+                connector=connector,
+            )
+        assert isinstance(out, dict)
+        assert out["status"] == "created"
+        assert out["folder"] == "group-v42"
+        assert create.called
+        body = json.loads(create.calls[0].request.content)
+        assert body == {"name": "cluster-nodes"}
     finally:
         await connector.aclose()

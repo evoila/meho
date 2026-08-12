@@ -8,11 +8,11 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 16 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 18 hand-authored composites
 that orchestrate cross-spec workflows: 5 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`) and 11 write composites (G3.1-T6 / `#509`, plus the
+in `#2258`) and 13 write composites (G3.1-T6 / `#509`, plus the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893`, and the folder-template
 `vm.clone_from_template` / `#2894`). The
@@ -118,8 +118,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   the direct session under the same governance seam.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 14
-  `_CompositeSpec` rows (5 read + 9 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 18
+  `_CompositeSpec` rows (5 read + 13 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -344,7 +344,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 15 composites (5 reads + 10 writes) land as `source_kind="composite"`
+The 18 composites (5 reads + 13 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -411,7 +411,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 15 composites are hand-authored aggregators the connector ships as
+The 18 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -463,6 +463,8 @@ enum) are:
 | `host.evacuate` | `evacuated`, `partial`, `aborted` |
 | `host.detach_from_vds` | `detached`, `incomplete` |
 | `cluster.patch` | `completed`, `stopped` |
+| `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
+| `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
 
 `vm.create` is the only composite that issues a compensating
 mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
@@ -591,6 +593,50 @@ radius without leaking credential material. New vim sub-op paths
 declared in `_VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE` and reconciled against
 the pinned `vi-json.yaml`.
 
+### vim cluster / inventory writes (`cluster.drs_rule.create` + `folder.create`, #2895)
+
+Two more vim-only writes ride the #2893 substrate (Task E). Neither has a
+usable REST write path (`/vcenter/cluster` is list/get/evc-mode only, and
+the tag-based compute-policies surface is tag-scoped rather than an explicit
+VM list; `/vcenter/folder` is GET-only — both spec-verified against the
+pinned `vi-json.yaml`).
+
+**`cluster.drs_rule.create`** adds a DRS affinity / anti-affinity rule by
+*explicit VM list* through vim
+`ClusterComputeResource.ReconfigureComputeResource_Task`. Flow: resolve the
+rule's VM names to MoRefs **scoped to the cluster** (a *read*
+`GET:/vcenter/vm?filter.names&filter.clusters`, un-gated) — fewer than two
+resolve → `status='insufficient_vms'` before any write; read the cluster's
+existing rules (`configurationEx.rule` via `RetrievePropertiesEx`, un-gated)
+for the idempotence / name-collision check — a duplicate name →
+`status='rule_exists'`, a **structured status rather than a raw vim
+`DuplicateName` fault**; then issue a single-rule `ClusterConfigSpecEx`
+delta with `modify=true` — `rulesSpec=[{operation: "add", info:
+{_typeName: "ClusterA(nti)AffinityRuleSpec", name, enabled, vm:
+[MoRefs]}}]` — through `_write_vmomi_sub_op`, and poll the returned Task via
+`poll_vim_task`. The `_typeName` discriminator is required on the `spec`
+(the request type declares the base `ComputeResourceConfigSpec`) and on the
+`info` (the base `ClusterRuleInfo`); the `ClusterRuleSpec` array item and
+the VM MoRefs need none (declared type == runtime type), mirroring the
+disk-grow `VirtualDeviceConfigSpec` precedent. The park-time preview is the
+fan-out blast-radius pattern (like `vm.power.bulk`): `{cluster,
+cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}`,
+`resolved` capped at 20.
+
+**`folder.create`** creates a VM folder under a named parent through vim
+`Folder.CreateFolder` — which is **synchronous**: it returns the new Folder
+`ManagedObjectReference` directly, **not** a `*_Task`, so (unlike
+disk-grow / drs_rule) the returned MoRef is unwrapped into the result and
+**never polled** (`poll_vim_task` is not called). Flow: resolve the parent
+folder *name* to a moid (`GET:/vcenter/folder?filter.names&filter.type=VIRTUAL_MACHINE`,
+un-gated; no match → `status='parent_not_found'`, >1 → `ambiguous_parent`,
+both before any write), then issue the single `CreateFolder` through
+`_write_vmomi_sub_op`. The preview is a param echo `{parent_folder,
+new_folder_name}` (no I/O — the params fully name the blast radius). Both
+mutating writes flow through the same `enforce_subop_policy` gate the REST
+and disk-grow writes do, so an agent principal without a grant is denied and
+a policy-parked write never reaches the wire.
+
 ### Read-composite best-effort enrichment (`datastore.usage`, #1908)
 
 Read composites distinguish **load-bearing** sub-ops from **optional
@@ -670,7 +716,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 9 write composites ship `requires_approval=True`, so a human/agent
+All 13 write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -694,6 +740,8 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
 | `vm.migrate` | `{vm, cluster, target_host, target_host_source}` | param echo, no I/O |
 | `vm.power` | `{vm, verb, power_kind}` echo (`power_kind` = `hard` vs Tools-soft `guest`) | param echo, no I/O |
+| `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
+| `folder.create` | `{parent_folder, new_folder_name}` echo | param echo, no I/O |
 
 The live-read previews resolve the same entity set the approved
 dispatch would act on, through the **same shared helpers** the handlers
@@ -819,8 +867,10 @@ they never park.
   `host.vsan_health`, later re-shipped as typed ops in #2258); T6
   (#509) ships 8 write composites, #2301 adds a 9th (single-VM
   `vm.power`, incl. Tools soft shutdown), #2893 adds a 10th (the
-  mutating VI-JSON `vm.disk.grow`), and #2894 an 11th (the
-  folder-template `vm.clone_from_template`) — 16 composites today. The
+  mutating VI-JSON `vm.disk.grow`), #2894 an 11th (the folder-template
+  `vm.clone_from_template`), and #2895 a 12th + 13th (the vim cluster /
+  inventory writes `cluster.drs_rule.create` + `folder.create`) — 18
+  composites today. The
   "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)
   is fully ticked.

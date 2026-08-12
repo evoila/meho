@@ -175,12 +175,13 @@ async def test_register_vmware_composite_operations_inserts_five_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_EXPECTED_OP_IDS)
-    # Embedding service called once per composite -- 16 total: 5 reads
-    # (T5 #508) + 11 writes (T6 #509 + single-VM vm.power #2301 + mutating
+    # Embedding service called once per composite -- 18 total: 5 reads
+    # (T5 #508) + 13 writes (T6 #509 + single-VM vm.power #2301 + mutating
     # VI-JSON vm.disk.grow #2893 + folder-template vm.clone_from_template
-    # #2894). (The former host.network_uplinks / host.vsan_health reads
-    # were re-shipped as typed ops in #2258.)
-    assert stub_embedding_service.encode_one.call_count == 16
+    # #2894 + vim cluster/inventory writes cluster.drs_rule.create +
+    # folder.create #2895). (The former host.network_uplinks /
+    # host.vsan_health reads were re-shipped as typed ops in #2258.)
+    assert stub_embedding_service.encode_one.call_count == 18
 
 
 @pytest.mark.asyncio
@@ -427,17 +428,18 @@ async def test_tags_include_composite_and_read_only(
 async def test_register_vmware_composite_operations_is_idempotent(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 5 read rows persist; embedding stays at 16.
+    """Running the registrar twice -> 5 read rows persist; embedding stays at 18.
 
     The second run's body-hash skip path is what holds across both
     read and write composites; this test asserts the read rows still
-    persist after the combined registrar (5 reads + 11 writes / T6 +
+    persist after the combined registrar (5 reads + 13 writes / T6 +
     single-VM vm.power #2301 + mutating VI-JSON vm.disk.grow #2893 +
-    folder-template vm.clone_from_template #2894).
+    folder-template vm.clone_from_template #2894 + vim cluster/inventory
+    writes cluster.drs_rule.create + folder.create #2895).
     """
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 16
+    assert first_count == 18
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Skip-re-embed path -- second run is a no-op for the embedding

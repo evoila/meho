@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: protocol-driven composite handlers for the
+# code-quality-allow: 13 protocol-driven composite handlers for the
 # vSphere REST + VI-JSON write surface ship in one module per the issue
 # body's design; splitting them by group would scatter the shared
 # sub-op_id constants + helpers across files for no readability gain. Each
 # handler's body is the documented orchestration workflow from #509's spec
-# (plus the mutating VI-JSON disk-grow from #2893 and folder-template clone
-# from #2894).
+# (plus the mutating VI-JSON disk-grow from #2893, the folder-template clone
+# from #2894, and the vim cluster / inventory writes — DRS-rule + folder
+# create — from #2895).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (11 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (13 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -99,7 +100,9 @@ if TYPE_CHECKING:
     from meho_backplane.connectors.vmware_rest.connector import VmwareRestConnector
 
 __all__ = [
+    "cluster_drs_rule_create_composite",
     "cluster_patch_composite",
+    "folder_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "vm_clone_composite",
@@ -159,6 +162,11 @@ _OP_REMOVE_DVS_HOST = "POST:/vcenter/network/dvs/{dvs}?action=remove_host"
 # REST Disk.Info read — the disk-grow park-time preview reads label +
 # current capacity (bytes) off this; the disk id is the vim device key.
 _OP_GET_VM_DISK = "GET:/vcenter/vm/{vm}/hardware/disk/{disk}"
+# REST Cluster.Info read — the drs_rule park-time preview reads the
+# cluster's display name off this (``Vcenter.Cluster.Info.name``); cosmetic,
+# best-effort. ``/vcenter/cluster/{cluster}`` is the get half of the
+# cluster module's list/get/evc-mode surface (spec-verified).
+_OP_GET_CLUSTER = "GET:/vcenter/cluster/{cluster}"
 
 # vim (VI-JSON) op_ids for the disk-grow write path. These are the
 # canonical ``METHOD:/path`` keys the ingest parser emits from
@@ -256,6 +264,78 @@ _DEFAULT_CUSTOMIZATION_SPEC_MANAGER_MOID = "CustomizationSpecManager"
 # Default wall-clock bound for the CloneVM_Task poll — mirrors the 600s
 # ``vm.clone`` convention.
 _CLONE_FROM_TEMPLATE_TASK_TIMEOUT_SECONDS = 600.0
+
+# vim (VI-JSON) op_ids for the #2895 cluster / inventory writes. Same
+# governance-op_id discipline as the disk-grow vim constants: the
+# ``METHOD:/path`` key the ingest parser emits from ``vi-json.yaml`` is the
+# key fed to :func:`enforce_subop_policy`; the concrete path (moId
+# substituted) is what :meth:`VmwareRestConnector._post_vmomi_json` POSTs.
+# Kept out of the ``_SUB_OPS_*`` namespace so the vCenter-REST
+# ingest-reconcile sweep does not treat a vi-json path as a ``vcenter.yaml``
+# row; the pinned ``vi-json.yaml`` reconcile asserts them instead.
+#
+# ``ReconfigureComputeResource_Task`` is the only route to add a DRS
+# affinity / anti-affinity rule by explicit VM list: no cluster-rules REST
+# path exists and the tag-based compute-policies surface is semantically
+# wrong (tag-scoped, spec-verified). It rides the pinned spec's
+# ``ClusterConfigSpecEx.rulesSpec`` delta with ``modify=true`` and returns a
+# ``*_Task`` MoRef to poll. ``Folder.CreateFolder`` is the only route to
+# create a VM folder (``/vcenter/folder`` is GET-only, spec-verified) and is
+# **synchronous** — it returns the new Folder MoRef directly, NOT a Task, so
+# it is never polled.
+_OP_RECONFIGURE_COMPUTE_RESOURCE_TASK = (
+    "POST:/ClusterComputeResource/{moId}/ReconfigureComputeResource_Task"
+)
+_OP_CREATE_FOLDER = "POST:/Folder/{moId}/CreateFolder"
+
+# vim data-object type discriminators (``_typeName``) for the DRS-rule
+# reconfigure body. ``ReconfigureComputeResourceRequestType.spec`` is
+# declared as the base ``ComputeResourceConfigSpec``, so a cluster
+# reconfigure must tag the spec ``ClusterConfigSpecEx`` for the vim25-JSON
+# binding to deserialise the subtype; likewise ``ClusterRuleSpec.info`` is
+# declared as the base ``ClusterRuleInfo``, so the affinity / anti-affinity
+# subtype is tagged. The ``ClusterRuleSpec`` array item and the
+# ``VirtualMachine`` MoRefs need no ``_typeName`` (declared type == runtime
+# type), mirroring the disk-grow ``VirtualDeviceConfigSpec`` precedent
+# (spec-verified against the pinned ``vi-json.yaml``).
+_CLUSTER_CONFIG_SPEC_EX_TYPE = "ClusterConfigSpecEx"
+_CLUSTER_AFFINITY_RULE_TYPE = "ClusterAffinityRuleSpec"
+_CLUSTER_ANTI_AFFINITY_RULE_TYPE = "ClusterAntiAffinityRuleSpec"
+_CLUSTER_COMPUTE_RESOURCE_MO_TYPE = "ClusterComputeResource"
+# Property path the collision / idempotence read queries on the cluster:
+# ``ClusterComputeResource.configurationEx`` is a ``ClusterConfigInfoEx``
+# whose ``rule`` array holds the existing ``ClusterRuleInfo`` rules
+# (spec-verified). Read un-gated via the shared ``RetrievePropertiesEx``.
+_PROP_CONFIGURATION_EX_RULE = "configurationEx.rule"
+
+# operator-facing ``rule_type`` -> vim rule-info ``_typeName``.
+_DRS_RULE_TYPE_TYPE_NAMES: dict[str, str] = {
+    "affinity": _CLUSTER_AFFINITY_RULE_TYPE,
+    "anti_affinity": _CLUSTER_ANTI_AFFINITY_RULE_TYPE,
+}
+
+# A DRS affinity / anti-affinity rule constrains the relative placement of
+# >=2 VMs; a single-VM (or empty) rule is meaningless, so the handler
+# refuses one (``status="insufficient_vms"``) before any write.
+_DRS_RULE_MIN_VMS = 2
+
+# Default wall-clock bound for the ReconfigureComputeResource_Task poll —
+# mirrors the 600s disk-grow / vm.clone convention.
+_DRS_RULE_TASK_TIMEOUT_SECONDS = 600.0
+
+#: vi-json sub-op manifests for the #2895 writes (parallel to
+#: ``_VIM_SUB_OPS_VM_DISK_GROW``; named out of the ``_SUB_OPS_*`` namespace
+#: so the vcenter.yaml ingest-reconcile sweep skips them). The pinned
+#: ``vi-json.yaml`` reconcile lane introspects these to assert every
+#: declared vim path exists in the spec. drs_rule reads existing rules via
+#: ``RetrievePropertiesEx`` then writes ``ReconfigureComputeResource_Task``;
+#: folder.create is a single synchronous ``CreateFolder`` (no poll → no
+#: ``RetrievePropertiesEx``).
+_VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
+)
+_VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER,)
 
 
 def _power_vm_op_id(action: str) -> str:
@@ -2174,3 +2254,410 @@ async def vm_clone_from_template_composite(
         task=outcome.task,
         customization_spec_name=customization_spec_name,
     )
+
+
+# ===========================================================================
+# cluster.drs_rule.create (vim ClusterComputeResource reconfigure — #2895)
+# ===========================================================================
+#
+# Add a DRS affinity / anti-affinity rule by *explicit VM list*. No REST
+# path exists (the /vcenter/cluster module is list/get/evc-mode only; the
+# tag-based compute-policies surface is tag-scoped, not an explicit VM list
+# — spec-verified), so the rule add rides vim
+# ``ClusterComputeResource.ReconfigureComputeResource_Task`` with a
+# ``ClusterConfigSpecEx.rulesSpec`` delta (``modify=true`` — touches nothing
+# else). Rides the #2893 substrate: the governed ``_write_vmomi_sub_op``
+# seam + the ``poll_vim_task`` helper (the reconfigure returns a ``*_Task``).
+
+
+def _build_cluster_rules_retrieve_params(cluster_moid: str) -> dict[str, Any]:
+    """Build the ``RetrievePropertiesEx`` body reading a cluster's DRS rules.
+
+    A single ``PropertyFilterSpec`` scoped to the ClusterComputeResource
+    object requesting ``configurationEx.rule`` — the array of existing
+    ``ClusterRuleInfo`` rules, each carrying its ``name``. The idempotence /
+    name-collision check reads this before any write so a duplicate rule
+    name returns a structured status instead of a raw vim ``DuplicateName``
+    fault. The singleton ``propertyCollector`` moId rides the path, so the
+    body is only the method args (the shape the typed reads send).
+    """
+    return {
+        "specSet": [
+            {
+                "propSet": [
+                    {
+                        "type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE,
+                        "pathSet": [_PROP_CONFIGURATION_EX_RULE],
+                    }
+                ],
+                "objectSet": [
+                    {"obj": {"type": _CLUSTER_COMPUTE_RESOURCE_MO_TYPE, "value": cluster_moid}}
+                ],
+            }
+        ],
+        "options": {},
+    }
+
+
+def _extract_cluster_rule_names(retrieve_result: Any) -> set[str]:
+    """Pull the existing DRS rule names off a ``RetrievePropertiesEx`` result."""
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    names: set[str] = set()
+    if not isinstance(objects, list):
+        return names
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        for prop in obj.get("propSet", []) or []:
+            if not isinstance(prop, dict) or prop.get("name") != _PROP_CONFIGURATION_EX_RULE:
+                continue
+            for rule in prop.get("val") or []:
+                if isinstance(rule, dict) and isinstance(rule.get("name"), str):
+                    names.add(rule["name"])
+    return names
+
+
+async def _resolve_cluster_name(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    cluster: str,
+) -> str | None:
+    """Best-effort cluster display name via ``GET:/vcenter/cluster/{cluster}``.
+
+    Cosmetic for the drs_rule preview — a transport fault nulls the name
+    rather than sinking the preview, since the cluster moid + resolved VM
+    set (not the name) is the decision. Mirrors :func:`_resolve_vm_name`.
+    """
+    try:
+        info = await _read_sub_op(
+            connector, target, operator, _OP_GET_CLUSTER, {"cluster": cluster}
+        )
+    except httpx.HTTPError:
+        return None
+    payload = _unwrap_value(info)
+    name = payload.get("name") if isinstance(payload, dict) else None
+    return name if isinstance(name, str) else None
+
+
+async def _resolve_drs_rule_vms(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    cluster_moid: str,
+    vm_names: list[str],
+) -> list[dict[str, Any]]:
+    """Resolve the rule's VM names to ``[{vm, name}]`` rows, scoped to the cluster.
+
+    Read-only single ``GET:/vcenter/vm`` (via the shared
+    :func:`_resolve_vm_list`) filtered by both ``names`` and ``clusters`` — a
+    DRS rule is cluster-local, so scoping the resolution to the cluster
+    disambiguates same-named VMs in other clusters and drops any name that
+    does not name a VM in this cluster. Shared with the park-time preview
+    builder so the reviewer sees the same resolved set the approved write
+    references.
+    """
+    rows = await _resolve_vm_list(
+        connector=connector,
+        target=target,
+        operator=operator,
+        filter_dict={"names": vm_names, "clusters": [cluster_moid]},
+    )
+    resolved: list[dict[str, Any]] = []
+    for row in rows:
+        moid = row.get("vm")
+        if isinstance(moid, str):
+            name = row.get("name")
+            resolved.append({"vm": moid, "name": name if isinstance(name, str) else None})
+    return resolved
+
+
+async def cluster_drs_rule_create_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Add a DRS affinity / anti-affinity rule via ReconfigureComputeResource_Task.
+
+    Op-id: ``vmware.composite.cluster.drs_rule.create``. No REST path exists
+    for a classic DRS rule by explicit VM list, so the add rides vim
+    ``ClusterComputeResource.ReconfigureComputeResource_Task`` with a
+    single-rule ``ClusterConfigSpecEx.rulesSpec`` delta (``modify=true``).
+
+    Flow:
+
+    1. Resolve the rule's VM *names* to MoRefs, scoped to the cluster (a
+       *read*, un-gated). Fewer than two resolve → ``status="insufficient_vms"``
+       before any write (an affinity / anti-affinity rule needs >=2 VMs).
+    2. Read the cluster's existing rules (``configurationEx.rule``, a *read*)
+       for the idempotence / name-collision check: a duplicate name returns
+       ``status="rule_exists"`` — a structured status, not a raw vim
+       ``DuplicateName`` fault.
+    3. Issue the single ``ReconfigureComputeResource_Task`` add through the
+       governed vmomi write seam (:func:`_write_vmomi_sub_op` → the #2254
+       gate); a parked/denied gate returns the :class:`OperationResult`
+       verbatim and no reconfigure fires.
+    4. Poll the returned ``*_Task`` MoRef to a terminal state via the shared
+       :func:`~meho_backplane.connectors.vmware_rest.vim_task.poll_vim_task`
+       helper before reporting ``status="created"``. A task fault raises (the
+       dispatcher wraps it ``connector_error``); a poll timeout returns
+       ``status="timeout"`` with the task id.
+    """
+    cluster_moid = params["cluster"]
+    rule_name = params["rule_name"]
+    rule_type = params["rule_type"]
+    enabled = bool(params.get("enabled", True))
+    vm_names = [n for n in (params.get("vms") or []) if isinstance(n, str)]
+    rule_info_type = _DRS_RULE_TYPE_TYPE_NAMES[rule_type]
+
+    resolved = await _resolve_drs_rule_vms(
+        connector=connector,
+        target=target,
+        operator=operator,
+        cluster_moid=cluster_moid,
+        vm_names=vm_names,
+    )
+    if len(resolved) < _DRS_RULE_MIN_VMS:
+        return {
+            "status": "insufficient_vms",
+            "cluster": cluster_moid,
+            "rule_name": rule_name,
+            "rule_type": rule_type,
+            "enabled": enabled,
+            "task": None,
+            "resolved_vms": resolved,
+            "guidance": (
+                f"a DRS {rule_type} rule needs at least {_DRS_RULE_MIN_VMS} VMs in the cluster; "
+                f"{len(resolved)} of {len(vm_names)} requested name(s) resolved to a VM in "
+                f"cluster {cluster_moid!r}"
+            ),
+        }
+
+    existing = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_cluster_rules_retrieve_params(cluster_moid),
+    )
+    if rule_name in _extract_cluster_rule_names(existing):
+        return {
+            "status": "rule_exists",
+            "cluster": cluster_moid,
+            "rule_name": rule_name,
+            "rule_type": rule_type,
+            "enabled": enabled,
+            "task": None,
+            "resolved_vms": resolved,
+            "guidance": (
+                f"a DRS rule named {rule_name!r} already exists on cluster {cluster_moid!r}; "
+                "rule names are the idempotence key — pick a new name or remove the existing rule"
+            ),
+        }
+
+    reconfig_spec = {
+        "spec": {
+            _VMOMI_TYPE_NAME_KEY: _CLUSTER_CONFIG_SPEC_EX_TYPE,
+            "rulesSpec": [
+                {
+                    "operation": "add",
+                    "info": {
+                        _VMOMI_TYPE_NAME_KEY: rule_info_type,
+                        "name": rule_name,
+                        "enabled": enabled,
+                        "vm": [
+                            {"type": _VIRTUAL_MACHINE_MO_TYPE, "value": row["vm"]}
+                            for row in resolved
+                        ],
+                    },
+                }
+            ],
+        },
+        "modify": True,
+    }
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_RECONFIGURE_COMPUTE_RESOURCE_TASK,
+        vmomi_path=f"/ClusterComputeResource/{cluster_moid}/ReconfigureComputeResource_Task",
+        body=reconfig_spec,
+        params={
+            "cluster": cluster_moid,
+            "rule_name": rule_name,
+            "rule_type": rule_type,
+            "vms": [row["vm"] for row in resolved],
+        },
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_DRS_RULE_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == "error":
+        raise RuntimeError(
+            f"cluster.drs_rule.create: ReconfigureComputeResource_Task on cluster "
+            f"{cluster_moid!r} faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return {
+            "status": "timeout",
+            "cluster": cluster_moid,
+            "rule_name": rule_name,
+            "rule_type": rule_type,
+            "enabled": enabled,
+            "task": outcome.task,
+            "resolved_vms": resolved,
+            "guidance": (
+                f"ReconfigureComputeResource_Task {outcome.task} did not reach a terminal state "
+                f"within {int(_DRS_RULE_TASK_TIMEOUT_SECONDS)}s; poll the task or re-read the "
+                "cluster's DRS rules — the rule add may still complete in the background"
+            ),
+        }
+    return {
+        "status": "created",
+        "cluster": cluster_moid,
+        "rule_name": rule_name,
+        "rule_type": rule_type,
+        "enabled": enabled,
+        "task": outcome.task,
+        "resolved_vms": resolved,
+        "guidance": None,
+    }
+
+
+# ===========================================================================
+# folder.create (vim Folder.CreateFolder — synchronous, #2895)
+# ===========================================================================
+#
+# Create a VM folder under a named parent. ``/vcenter/folder`` is GET-only
+# (spec-verified), so the create rides vim ``Folder.CreateFolder`` — which
+# is **synchronous**: it returns the new Folder ``ManagedObjectReference``
+# directly (NOT a ``*_Task``), so unlike drs_rule / disk-grow there is no
+# poll. Rides the #2893 governed vmomi write seam (``_write_vmomi_sub_op``).
+
+
+def _moref_value(moref: Any) -> str | None:
+    """Return the ``value`` field of a vim ``ManagedObjectReference``, else ``None``.
+
+    A synchronous vim method that returns an object reference (e.g.
+    ``Folder.CreateFolder`` → the new Folder MoRef) serialises as
+    ``{"type": "Folder", "value": "group-v123"}``. A bare moid string is
+    tolerated so a caller that already unwrapped the MoRef passes through.
+    """
+    if isinstance(moref, dict):
+        value = moref.get("value")
+        return value if isinstance(value, str) else None
+    return moref if isinstance(moref, str) else None
+
+
+async def _resolve_parent_vm_folder(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    parent_name: str,
+) -> tuple[str | None, str | None]:
+    """Resolve a VM-folder parent by display name to its moid.
+
+    Read-only ``GET:/vcenter/folder`` filtered by ``names`` + the
+    ``VIRTUAL_MACHINE`` folder type (the same listing ``vm.create`` resolves
+    its placement folder from). Returns ``(moid, None)`` on a unique match,
+    ``(None, "parent_not_found")`` on no match, or ``(None,
+    "ambiguous_parent")`` when the name resolves to more than one VM folder —
+    a structured status the caller surfaces instead of guessing a parent.
+    """
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_FOLDERS,
+        {"filter.names": [parent_name], "filter.type": "VIRTUAL_MACHINE"},
+    )
+    entries = _unwrap_value(listing)
+    rows = [e for e in entries if isinstance(e, dict)] if isinstance(entries, list) else []
+    if not rows:
+        return None, "parent_not_found"
+    if len(rows) > 1:
+        return None, "ambiguous_parent"
+    moid = rows[0].get("folder")
+    if not isinstance(moid, str):
+        return None, "parent_not_found"
+    return moid, None
+
+
+async def folder_create_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Create a VM folder under a named parent via the synchronous vim CreateFolder.
+
+    Op-id: ``vmware.composite.folder.create``. ``/vcenter/folder`` is
+    GET-only (spec-verified), so the create rides vim ``Folder.CreateFolder``,
+    which is **synchronous** — it returns the new Folder
+    ``ManagedObjectReference`` directly, not a ``*_Task``, so (unlike
+    drs_rule / disk-grow) the returned MoRef is **not** polled.
+
+    Flow: resolve the parent folder *name* to a moid (a *read*; no match →
+    ``status="parent_not_found"``, >1 match → ``status="ambiguous_parent"``),
+    then issue the single ``CreateFolder`` through the governed vmomi write
+    seam (:func:`_write_vmomi_sub_op` → the #2254 gate). A parked/denied gate
+    returns the :class:`OperationResult` verbatim and no folder is created;
+    otherwise the new folder MoRef is unwrapped into ``status="created"``.
+    """
+    parent_name = params["parent_folder"]
+    new_name = params["folder_name"]
+
+    parent_moid, resolve_error = await _resolve_parent_vm_folder(
+        connector=connector, target=target, operator=operator, parent_name=parent_name
+    )
+    if parent_moid is None:
+        return {
+            "status": resolve_error,
+            "parent_folder": parent_name,
+            "parent_folder_id": None,
+            "new_folder_name": new_name,
+            "folder": None,
+            "guidance": (
+                f"parent VM folder name {parent_name!r} "
+                + (
+                    "resolved to more than one folder — pass a unique parent name"
+                    if resolve_error == "ambiguous_parent"
+                    else "did not resolve to a VM folder"
+                )
+            ),
+        }
+
+    gate, folder_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_CREATE_FOLDER,
+        vmomi_path=f"/Folder/{parent_moid}/CreateFolder",
+        body={"name": new_name},
+        params={"parent_folder": parent_moid, "folder_name": new_name},
+    )
+    if gate is not None:
+        return gate
+
+    new_folder_moid = _moref_value(folder_payload)
+    return {
+        "status": "created",
+        "parent_folder": parent_name,
+        "parent_folder_id": parent_moid,
+        "new_folder_name": new_name,
+        "folder": new_folder_moid,
+        "guidance": None,
+    }

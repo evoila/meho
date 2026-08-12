@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema 2020-12 parameter + response schemas for the 15 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 18 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -25,10 +25,12 @@ Conventions
   schema verbatim on ``describe_operation`` calls.
 * The 5 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 10 write composites inherit T4's
+  each. The 13 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
-  (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, and the mutating
-  VI-JSON ``vm.disk.grow`` / #2893). The schema
+  (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
+  VI-JSON ``vm.disk.grow`` / #2893, the folder-template
+  ``vm.clone_from_template`` / #2894, and the vim cluster / inventory
+  writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895). The schema
   text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
@@ -41,6 +43,8 @@ from typing import Any
 __all__ = [
     "CLUSTER_DRS_RECOMMENDATIONS_PARAMETER_SCHEMA",
     "CLUSTER_DRS_RECOMMENDATIONS_RESPONSE_SCHEMA",
+    "CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA",
+    "CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA",
     "CLUSTER_PATCH_PARAMETER_SCHEMA",
     "CLUSTER_PATCH_RESPONSE_SCHEMA",
     "DATASTORE_USAGE_MAX_VM_NAMES",
@@ -48,6 +52,8 @@ __all__ = [
     "DATASTORE_USAGE_RESPONSE_SCHEMA",
     "EVENT_TAIL_PARAMETER_SCHEMA",
     "EVENT_TAIL_RESPONSE_SCHEMA",
+    "FOLDER_CREATE_PARAMETER_SCHEMA",
+    "FOLDER_CREATE_RESPONSE_SCHEMA",
     "HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA",
     "HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
@@ -555,7 +561,7 @@ NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA: dict[str, Any] = {
 # Write composites (G3.1-T6 / #509)
 # ===========================================================================
 #
-# The 10 write composites inherit T4's ``safety_level="dangerous"`` +
+# The 13 write composites inherit T4's ``safety_level="dangerous"`` +
 # ``requires_approval=True`` defaults. The registrar passes those
 # explicitly anyway to keep the policy posture obvious at the call site
 # alongside the read overrides.
@@ -1065,6 +1071,94 @@ VM_DISK_GROW_PARAMETER_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["vm", "disk", "capacity_bytes"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.cluster.drs_rule.create`` parameter schema.
+#:
+#: Add a DRS affinity / anti-affinity rule by *explicit VM list* via vim
+#: ``ClusterComputeResource.ReconfigureComputeResource_Task`` (no cluster-rules
+#: REST path exists; the tag-based compute-policies surface is semantically
+#: wrong — tag-scoped, not an explicit VM list). Rule names are the
+#: idempotence key: a duplicate returns ``status='rule_exists'`` before any
+#: write. VM names resolve to MoRefs scoped to the cluster; fewer than two
+#: resolve → ``status='insufficient_vms'``.
+CLUSTER_DRS_RULE_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "cluster": {
+            "type": "string",
+            "minLength": 1,
+            "description": "ClusterComputeResource moid the rule is added to (e.g. 'domain-c1').",
+        },
+        "rule_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the new rule. Rule names are the idempotence key — a "
+                "name already present on the cluster returns "
+                "``status='rule_exists'`` before any write, not a raw vim "
+                "``DuplicateName`` fault."
+            ),
+        },
+        "rule_type": {
+            "type": "string",
+            "enum": ["affinity", "anti_affinity"],
+            "description": (
+                "``'affinity'`` keeps the VMs on the same host "
+                "(``ClusterAffinityRuleSpec``); ``'anti_affinity'`` keeps them "
+                "on separate hosts (``ClusterAntiAffinityRuleSpec``)."
+            ),
+        },
+        "vms": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+            "minItems": 2,
+            "description": (
+                "Display names of the VMs the rule governs. Resolved to MoRefs "
+                "scoped to the cluster (a name not naming a VM in the cluster is "
+                "dropped); fewer than two resolve → ``status='insufficient_vms'``."
+            ),
+        },
+        "enabled": {
+            "type": "boolean",
+            "default": True,
+            "description": "Whether the rule is enabled on creation. Defaults to true.",
+        },
+    },
+    "required": ["cluster", "rule_name", "rule_type", "vms"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.folder.create`` parameter schema.
+#:
+#: Create a VM folder under a named parent via the **synchronous** vim
+#: ``Folder.CreateFolder`` (``/vcenter/folder`` is GET-only, so vim is the
+#: sole write path). The parent is resolved by display name among the
+#: ``VIRTUAL_MACHINE`` folders; no match → ``status='parent_not_found'``,
+#: more than one → ``status='ambiguous_parent'``.
+FOLDER_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "parent_folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the parent VM folder the new folder is created "
+                "under. Resolved to its moid via ``GET:/vcenter/folder`` filtered "
+                "to VIRTUAL_MACHINE folders; an ambiguous or unknown name is "
+                "refused with a structured status before any write."
+            ),
+        },
+        "folder_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Name of the new sub-folder to create under the parent.",
+        },
+    },
+    "required": ["parent_folder", "folder_name"],
     "additionalProperties": False,
 }
 
@@ -1600,4 +1694,100 @@ VM_DISK_GROW_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm", "disk", "to_capacity_bytes"],
+}
+
+
+#: ``vmware.composite.cluster.drs_rule.create`` response schema.
+CLUSTER_DRS_RULE_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "rule_exists", "insufficient_vms", "timeout"],
+            "description": (
+                "``'created'`` — the ReconfigureComputeResource_Task add reached "
+                "terminal success; ``'rule_exists'`` — a rule with this name is "
+                "already present (idempotence key; refused before any write); "
+                "``'insufficient_vms'`` — fewer than two of the requested VM names "
+                "resolved to a VM in the cluster (refused before any write); "
+                "``'timeout'`` — the reconfigure task did not reach a terminal "
+                "state within the poll bound (it may still complete in the "
+                "background)."
+            ),
+        },
+        "cluster": {"type": "string", "description": "ClusterComputeResource moid."},
+        "rule_name": {"type": "string", "description": "Name of the rule."},
+        "rule_type": {
+            "type": "string",
+            "enum": ["affinity", "anti_affinity"],
+            "description": "Rule kind requested.",
+        },
+        "enabled": {"type": "boolean", "description": "Whether the rule was created enabled."},
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "ReconfigureComputeResource_Task moid — present once the write was "
+                "issued (``created`` / ``timeout``); ``null`` on the pre-write refusals."
+            ),
+        },
+        "resolved_vms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "vm": {"type": "string"},
+                    "name": {"type": ["string", "null"]},
+                },
+            },
+            "description": "The ``[{vm, name}]`` MoRefs the rule references, resolved from names.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "cluster", "rule_name", "rule_type"],
+}
+
+
+#: ``vmware.composite.folder.create`` response schema.
+FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created", "parent_not_found", "ambiguous_parent"],
+            "description": (
+                "``'created'`` — the synchronous CreateFolder returned the new "
+                "folder MoRef; ``'parent_not_found'`` — the parent name matched no "
+                "VM folder; ``'ambiguous_parent'`` — it matched more than one "
+                "(both refused before any write)."
+            ),
+        },
+        "parent_folder": {
+            "type": "string",
+            "description": "The parent folder display name the operator supplied.",
+        },
+        "parent_folder_id": {
+            "type": ["string", "null"],
+            "description": "Resolved parent folder moid; ``null`` on a resolution refusal.",
+        },
+        "new_folder_name": {"type": "string", "description": "The requested new folder name."},
+        "folder": {
+            "type": ["string", "null"],
+            "description": (
+                "The new folder's moid — CreateFolder is synchronous and returns "
+                "the MoRef directly (no task poll). ``null`` on a resolution refusal."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on a non-``created`` status; ``null`` on success."
+            ),
+        },
+    },
+    "required": ["status", "parent_folder", "new_folder_name"],
 }

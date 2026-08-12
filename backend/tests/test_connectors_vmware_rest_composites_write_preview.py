@@ -79,6 +79,8 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.host.evacuate",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",
+        "vmware.composite.cluster.drs_rule.create",
+        "vmware.composite.folder.create",
     }
 )
 
@@ -289,14 +291,14 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 9 write composites register a builder (criterion 4)
+# Wiring — all 13 write composites register a builder (criterion 4)
 # ===========================================================================
 
 
-def test_all_eleven_write_composites_register_a_preview_builder() -> None:
+def test_all_thirteen_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 11
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 13
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -332,6 +334,15 @@ async def test_live_read_builders_decline_without_a_connector_instance() -> None
             {"host": "host-1", "dvs": "dvs-1", "fallback_network": "net"},
         ),
         (_write_preview._cluster_patch_preview, {"cluster": "domain-c1"}),
+        (
+            _write_preview._cluster_drs_rule_create_preview,
+            {
+                "cluster": "domain-c1",
+                "rule_name": "keep-apart",
+                "rule_type": "anti_affinity",
+                "vms": ["web-01", "web-02"],
+            },
+        ),
     ):
         assert await builder(_make_preview_ctx(params, connector_instance=None)) is None
 
@@ -500,6 +511,8 @@ async def test_echo_builders_decline_on_malformed_params() -> None:
     assert await _write_preview._host_evacuate_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_detach_from_vds_preview(_make_preview_ctx({})) is None
     assert await _write_preview._cluster_patch_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._folder_create_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._cluster_drs_rule_create_preview(_make_preview_ctx({})) is None
 
 
 # ===========================================================================
@@ -877,3 +890,87 @@ async def test_disk_grow_preview_vm_name_is_best_effort() -> None:
     assert preview["disk_label"] == "Hard disk 1"
     assert preview["current_capacity_bytes"] == _TEN_GIB
     assert preview["delta_bytes"] == _TWENTY_GIB - _TEN_GIB
+
+
+# ===========================================================================
+# cluster.drs_rule.create — the capped VM fan-out + cluster-name preview (#2895)
+# ===========================================================================
+
+
+async def test_drs_rule_create_park_carries_capped_vm_fanout(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked row's preview names the cluster + resolved VM set (fan-out pattern)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
+        "value": [
+            {"vm": "vm-1", "name": "web-01", "power_state": "POWERED_ON"},
+            {"vm": "vm-2", "name": "web-02", "power_state": "POWERED_OFF"},
+        ]
+    }
+    recorder.responses["/vcenter/cluster/domain-c1"] = {"name": "prod-cluster"}
+
+    _, row = await _park(
+        "vmware.composite.cluster.drs_rule.create",
+        {
+            "cluster": "domain-c1",
+            "rule_name": "keep-apart",
+            "rule_type": "anti_affinity",
+            "vms": ["web-01", "web-02"],
+        },
+    )
+
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.cluster.drs_rule.create"
+    ) == {
+        "op_class": "write",
+        "preview": {
+            "cluster": "domain-c1",
+            "cluster_name": "prod-cluster",
+            "rule_type": "anti_affinity",
+            "rule_name": "keep-apart",
+            "enabled": True,
+            "resolved": [
+                {"vm": "vm-1", "name": "web-01", "power_state": "POWERED_ON"},
+                {"vm": "vm-2", "name": "web-02", "power_state": "POWERED_OFF"},
+            ],
+            "total_resolved": 2,
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # The VM resolution is load-bearing (first read); the cluster name is a
+    # second best-effort GET. No ReconfigureComputeResource_Task mutation fires.
+    assert recorder.read_calls[0][0] == "/vcenter/vm"
+    assert ("/vcenter/cluster/domain-c1", None) in recorder.read_calls
+    assert all(verb == "GET" for verb, _, _ in recorder.calls)
+
+
+async def test_drs_rule_create_preview_caps_resolved_at_twenty(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A rule over >20 VMs caps ``resolved`` at 20 but keeps the true ``total_resolved``."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm"] = {
+        "value": [{"vm": f"vm-{i}", "name": f"web-{i}"} for i in range(25)]
+    }
+    _, row = await _park(
+        "vmware.composite.cluster.drs_rule.create",
+        {
+            "cluster": "domain-c1",
+            "rule_name": "spread",
+            "rule_type": "anti_affinity",
+            "vms": [f"web-{i}" for i in range(25)],
+        },
+    )
+    preview = row.proposed_effect["preview"]
+    assert len(preview["resolved"]) == 20
+    assert preview["total_resolved"] == 25
+
+
+async def test_folder_create_preview_echoes_parent_and_new_name() -> None:
+    """folder.create preview is a param echo — parent + new folder name, no I/O."""
+    preview = await _write_preview._folder_create_preview(
+        _make_preview_ctx({"parent_folder": "prod", "folder_name": "cluster-nodes"})
+    )
+    assert preview == {"parent_folder": "prod", "new_folder_name": "cluster-nodes"}

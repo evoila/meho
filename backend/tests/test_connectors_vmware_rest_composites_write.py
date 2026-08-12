@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 11 vmware-rest write-composite handler functions.
+"""Unit tests for the 16 vmware-rest write-composite handler functions.
 
 Post-#2256 the write composites dispatch their sub-ops **directly on the
 connector session** -- ``connector._get_json`` / ``connector._post_json``
@@ -61,10 +61,13 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
+    vm_nic_repoint_composite,
     vm_power_bulk_composite,
     vm_power_composite,
+    vm_resize_composite,
     vm_snapshot_revert_composite,
 )
 
@@ -962,7 +965,9 @@ async def test_host_detach_from_vds_happy_path(gate: _GateRecorder) -> None:
     """Portgroup GET + VM GET + per-VM NIC PATCH + DVS remove POST; status=detached."""
     conn = _RecordingConnector(
         {
-            "/api/vcenter/network/distributed-portgroup": [],
+            # #1602 fix: distributed portgroups are listed via the generic
+            # /vcenter/network resource (no dedicated portgroup path).
+            "/api/vcenter/network": [],
             "/api/vcenter/vm": [{"vm": "vm-1"}, {"vm": "vm-2"}],
             "/api/vcenter/vm/vm-1/network": {},
             "/api/vcenter/vm/vm-2/network": {},
@@ -2441,3 +2446,362 @@ async def test_folder_create_body_reaches_the_wire_respx(
         assert body == {"name": "cluster-nodes"}
     finally:
         await connector.aclose()
+
+
+# ===========================================================================
+# vm.resize (#2891)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_vm_resize_powered_off_patches_cpu_and_memory(gate: _GateRecorder) -> None:
+    """Read sizing -> PATCH cpu -> PATCH memory (both gated, spec-wrapped bodies)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1": {
+                "name": "web-1",
+                "power_state": "POWERED_OFF",
+                "cpu": {"count": 1, "cores_per_socket": 1, "hot_add_enabled": False},
+                "memory": {"size_MiB": 1024, "hot_add_enabled": False},
+            },
+            "/api/vcenter/vm/vm-1/hardware/cpu": {},
+            "/api/vcenter/vm/vm-1/hardware/memory": {},
+        }
+    )
+    out = await vm_resize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cpu_count": 4, "cores_per_socket": 2, "memory_mib": 8192},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "resized"
+    assert out["name"] == "web-1"
+    assert out["applied"] == {"cpu": True, "memory": True}
+    assert out["from"] == {"cpu_count": 1, "cores_per_socket": 1, "memory_MiB": 1024}
+    assert out["to"] == {"cpu_count": 4, "cores_per_socket": 2, "memory_MiB": 8192}
+    # Read is not gated; both PATCHes are, with the spec-wrapped bodies.
+    assert gate.gated_op_ids == [
+        "PATCH:/vcenter/vm/{vm}/hardware/cpu",
+        "PATCH:/vcenter/vm/{vm}/hardware/memory",
+    ]
+    cpu_call = next(c for c in conn.calls if c["path"].endswith("/hardware/cpu"))
+    mem_call = next(c for c in conn.calls if c["path"].endswith("/hardware/memory"))
+    assert cpu_call["method"] == "PATCH"
+    assert cpu_call["body"] == {"spec": {"count": 4, "cores_per_socket": 2}}
+    assert mem_call["body"] == {"spec": {"size_MiB": 8192}}
+
+
+@pytest.mark.asyncio
+async def test_vm_resize_powered_on_without_hot_add_requires_power_off(
+    gate: _GateRecorder,
+) -> None:
+    """A powered-on VM with hot-add disabled surfaces requires_power_off, never a 400."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1": {
+                "name": "web-1",
+                "power_state": "POWERED_ON",
+                "cpu": {"count": 2, "cores_per_socket": 1, "hot_add_enabled": False},
+                "memory": {"size_MiB": 2048, "hot_add_enabled": False},
+            }
+        }
+    )
+    out = await vm_resize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cpu_count": 4},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "requires_power_off"
+    assert out["applied"] == {"cpu": False, "memory": False}
+    assert "power off" in out["guidance"]
+    # Only the read fired; no PATCH was gated or issued.
+    assert gate.calls == []
+    assert [c["method"] for c in conn.calls] == ["GET"]
+
+
+@pytest.mark.asyncio
+async def test_vm_resize_no_requested_change_is_no_change(gate: _GateRecorder) -> None:
+    """Requested values matching current -> no_change; no PATCH dispatched."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1": {
+                "name": "web-1",
+                "power_state": "POWERED_OFF",
+                "cpu": {"count": 4, "cores_per_socket": 2},
+                "memory": {"size_MiB": 8192},
+            }
+        }
+    )
+    out = await vm_resize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cpu_count": 4, "memory_mib": 8192},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "no_change"
+    assert gate.calls == []
+    assert len(conn.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_vm_resize_memory_failure_after_cpu_is_partial(gate: _GateRecorder) -> None:
+    """CPU PATCH lands, memory PATCH faults -> status=partial (CPU already applied)."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1": {
+                "name": "web-1",
+                "power_state": "POWERED_OFF",
+                "cpu": {"count": 1},
+                "memory": {"size_MiB": 1024},
+            },
+            "/api/vcenter/vm/vm-1/hardware/cpu": {},
+            "/api/vcenter/vm/vm-1/hardware/memory": _http_error(
+                400, "https://vc/api/vcenter/vm/vm-1/hardware/memory"
+            ),
+        }
+    )
+    out = await vm_resize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cpu_count": 4, "memory_mib": 8192},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "partial"
+    assert out["applied"] == {"cpu": True, "memory": False}
+    assert "memory update failed" in out["guidance"]
+
+
+@pytest.mark.asyncio
+async def test_vm_resize_gate_short_circuits_before_any_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked CPU gate returns the awaiting result verbatim; no PATCH is issued."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1": {
+                "power_state": "POWERED_OFF",
+                "cpu": {"count": 1},
+                "memory": {"size_MiB": 1024},
+            }
+        }
+    )
+    gate = _install_gate(
+        monkeypatch,
+        _GateRecorder(gate_for={"PATCH:/vcenter/vm/{vm}/hardware/cpu": _awaiting("resize")}),
+    )
+    out = await vm_resize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cpu_count": 4},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    # Only the read + the gated (but not issued) CPU PATCH attempt; no memory.
+    assert [c["method"] for c in conn.calls] == ["GET"]
+    assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/cpu"]
+
+
+# ===========================================================================
+# vm.nic.repoint (#2891)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_happy_path(gate: _GateRecorder) -> None:
+    """Read NIC -> resolve portgroup by name -> PATCH backing (gated, spec-wrapped)."""
+    # The NIC GET and the NIC PATCH mount to the same path (the PATCH carries
+    # no ?action suffix); one canned value serves both -- the handler ignores
+    # the PATCH's return payload.
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "mac_address": "00:50:56:aa:bb:cc",
+                "backing": {
+                    "type": "DISTRIBUTED_PORTGROUP",
+                    "network": "dvportgroup-1",
+                    "network_name": "old-net",
+                },
+            },
+            "/api/vcenter/network": [
+                {"network": "dvportgroup-9", "name": "prod-net", "type": "DISTRIBUTED_PORTGROUP"}
+            ],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-net"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "repointed"
+    assert out["mac_address"] == "00:50:56:aa:bb:cc"
+    assert out["current_backing"]["network"] == "dvportgroup-1"
+    assert out["requested_backing"] == {
+        "portgroup_id": "dvportgroup-9",
+        "portgroup_name": "prod-net",
+    }
+    # The NIC read + the network resolve read are not gated; only the PATCH is.
+    assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"]
+    patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
+    assert patch_call["body"] == {
+        "spec": {"backing": {"type": "DISTRIBUTED_PORTGROUP", "network": "dvportgroup-9"}}
+    }
+    # The portgroup resolve used the corrected /vcenter/network path (#1602 fix).
+    net_read = next(c for c in conn.calls if c["path"] == "/api/vcenter/network")
+    assert net_read["method"] == "GET"
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_portgroup_not_found(gate: _GateRecorder) -> None:
+    """No portgroup matches the name -> status=not_found; no PATCH dispatched."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "mac_address": "00:50:56:aa:bb:cc",
+                "backing": {"type": "STANDARD_PORTGROUP"},
+            },
+            "/api/vcenter/network": [],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "nic": "4000", "portgroup_name": "ghost"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "not_found"
+    assert out["requested_backing"] == {"portgroup_id": None, "portgroup_name": "ghost"}
+    assert gate.calls == []
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_ambiguous_portgroup(gate: _GateRecorder) -> None:
+    """Two portgroups share the name -> status=ambiguous with candidates; no PATCH."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/ethernet/4000": {"mac_address": "aa", "backing": {}},
+            "/api/vcenter/network": [
+                {"network": "dvportgroup-1", "name": "dup", "type": "DISTRIBUTED_PORTGROUP"},
+                {"network": "dvportgroup-2", "name": "dup", "type": "DISTRIBUTED_PORTGROUP"},
+            ],
+        }
+    )
+    out = await vm_nic_repoint_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "nic": "4000", "portgroup_name": "dup"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "ambiguous"
+    assert len(out["candidates"]) == 2
+    assert gate.calls == []
+
+
+# ===========================================================================
+# vm.device.cdrom (#2891)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_vm_device_cdrom_remove(gate: _GateRecorder) -> None:
+    """Read backing -> DELETE the device (gated); status=removed, backing surfaced."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "backing": {"type": "ISO_FILE", "iso_file": "[datastore1] installer.iso"},
+                "state": "CONNECTED",
+            },
+        }
+    )
+    out = await vm_device_cdrom_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cdrom": "16000", "action": "remove"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "removed"
+    assert out["current_backing"]["iso_file"] == "[datastore1] installer.iso"
+    assert out["state"] == "CONNECTED"
+    assert gate.gated_op_ids == ["DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"]
+    delete_call = next(c for c in conn.calls if c["method"] == "DELETE")
+    assert delete_call["body"] is None
+
+
+@pytest.mark.asyncio
+async def test_vm_device_cdrom_disconnect(gate: _GateRecorder) -> None:
+    """action=disconnect -> POST ?action=disconnect (gated); status=disconnected."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "backing": {"type": "HOST_DEVICE", "host_device": "/dev/cdrom"},
+                "state": "CONNECTED",
+            },
+            "/api/vcenter/vm/vm-1/hardware/cdrom/16000?action=disconnect": {},
+        }
+    )
+    out = await vm_device_cdrom_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cdrom": "16000", "action": "disconnect"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "disconnected"
+    assert gate.gated_op_ids == ["POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"]
+    post_call = next(c for c in conn.calls if c["method"] == "POST")
+    assert post_call["path"] == "/api/vcenter/vm/vm-1/hardware/cdrom/16000?action=disconnect"
+    assert post_call["body"] is None
+
+
+@pytest.mark.asyncio
+async def test_vm_device_cdrom_update_patches_backing(gate: _GateRecorder) -> None:
+    """action=update with backing -> PATCH backing (gated, spec-wrapped); status=updated."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "backing": {"type": "ISO_FILE", "iso_file": "[local] pinned.iso"},
+                "state": "CONNECTED",
+            },
+        }
+    )
+    out = await vm_device_cdrom_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "vm": "vm-1",
+            "cdrom": "16000",
+            "action": "update",
+            "backing": {"type": "CLIENT_DEVICE"},
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "updated"
+    assert out["requested_backing"] == {"type": "CLIENT_DEVICE"}
+    assert gate.gated_op_ids == ["PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"]
+    patch_call = next(c for c in conn.calls if c["method"] == "PATCH")
+    assert patch_call["body"] == {"spec": {"backing": {"type": "CLIENT_DEVICE"}}}
+
+
+@pytest.mark.asyncio
+async def test_vm_device_cdrom_update_without_backing_is_invalid_request(
+    gate: _GateRecorder,
+) -> None:
+    """action=update with no backing -> invalid_request; no write issued."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "backing": {"type": "ISO_FILE"},
+                "state": "NOT_CONNECTED",
+            },
+        }
+    )
+    out = await vm_device_cdrom_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"vm": "vm-1", "cdrom": "16000", "action": "update"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert out["status"] == "invalid_request"
+    assert gate.calls == []
+    assert [c["method"] for c in conn.calls] == ["GET"]

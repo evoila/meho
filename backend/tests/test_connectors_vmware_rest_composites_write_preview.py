@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` previews for the 11 vmware write composites.
+"""Park-time ``proposed_effect`` previews for the 16 vmware write composites.
 
 G0.22-T3 (#1608) acceptance criteria, under the post-#2256 direct-session
 model:
@@ -19,11 +19,12 @@ model:
    directly on the connector session (no ``dispatch_child``, no ingested
    descriptor), so the park-time preview works on a fresh boot with zero
    catalog ingest.
-4. All 11 write composites register a builder (5 live-read + 6 param
-   echo); the wiring test pins the full set. ``vm.disk.grow`` is the fifth
-   live-read builder — its from→to capacity delta is a live vCenter read.
-   ``vm.clone_from_template`` is a param-echo builder — its params fully
-   name the blast radius (secret-bearing GOSC contents are never echoed).
+4. All 16 write composites register a builder (9 live-read + 7 param
+   echo); the wiring test pins the full set. ``vm.disk.grow`` is a
+   single-entity live-read builder — its from→to capacity delta is a live
+   vCenter read. ``vm.clone_from_template`` is a param-echo builder — its
+   params fully name the blast radius (secret-bearing GOSC contents are
+   never echoed).
 
 Plus the #1628 follow-up: a *failed* live-read preview parks with the
 identifier fields **and** an explicit ``preview_unavailable`` marker +
@@ -76,6 +77,9 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.vm.power",
         "vmware.composite.vm.power.bulk",
         "vmware.composite.vm.disk.grow",
+        "vmware.composite.vm.resize",
+        "vmware.composite.vm.nic.repoint",
+        "vmware.composite.vm.device.cdrom",
         "vmware.composite.host.evacuate",
         "vmware.composite.host.detach_from_vds",
         "vmware.composite.cluster.patch",
@@ -240,7 +244,7 @@ class _RecordingConnector:
 
 
 async def _bootstrap_registry(stub_embedding_service: AsyncMock) -> _RecordingConnector:
-    """Register the connector + 14 composites and seed the recording instance."""
+    """Register the connector + 17 composites and seed the recording instance."""
     register_connector_v2(
         product="vmware",
         version="9.0",
@@ -291,14 +295,14 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 13 write composites register a builder (criterion 4)
+# Wiring — all 16 write composites register a builder (criterion 4)
 # ===========================================================================
 
 
-def test_all_thirteen_write_composites_register_a_preview_builder() -> None:
+def test_all_sixteen_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 13
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 16
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -320,11 +324,13 @@ def _make_preview_ctx(params: dict[str, Any], *, connector_instance: Any = None)
 
 
 async def test_live_read_builders_decline_without_a_connector_instance() -> None:
-    """The four fan-out builders decline (return None) when no connector resolved.
+    """The live-read builders decline (return None) when no connector resolved.
 
     Post-#2256 the live-read builders resolve their blast radius on the
     connector session; with ``connector_instance=None`` there is nothing to
     read, so they decline to the identifier-only default rather than raise.
+    Covers the four fan-out builders, the cluster.drs_rule.create builder,
+    and the three #2891 hardware builders.
     """
     for builder, params in (
         (_write_preview._vm_power_bulk_preview, {"action": "stop"}),
@@ -342,6 +348,15 @@ async def test_live_read_builders_decline_without_a_connector_instance() -> None
                 "rule_type": "anti_affinity",
                 "vms": ["web-01", "web-02"],
             },
+        ),
+        (_write_preview._vm_resize_preview, {"vm": "vm-1", "cpu_count": 4}),
+        (
+            _write_preview._vm_nic_repoint_preview,
+            {"vm": "vm-1", "nic": "4000", "portgroup_name": "pg"},
+        ),
+        (
+            _write_preview._vm_device_cdrom_preview,
+            {"vm": "vm-1", "cdrom": "16000", "action": "remove"},
         ),
     ):
         assert await builder(_make_preview_ctx(params, connector_instance=None)) is None
@@ -974,3 +989,293 @@ async def test_folder_create_preview_echoes_parent_and_new_name() -> None:
         _make_preview_ctx({"parent_folder": "prod", "folder_name": "cluster-nodes"})
     )
     assert preview == {"parent_folder": "prod", "new_folder_name": "cluster-nodes"}
+
+
+# ===========================================================================
+# #2891 hardware-write builders — live-read from->to diffs (builder-direct)
+# ===========================================================================
+
+
+async def test_vm_resize_preview_live_reads_current_sizing() -> None:
+    """The resize preview pairs the live-read current sizing with the request."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {
+            "name": "web-1",
+            "power_state": "POWERED_OFF",
+            "cpu": {"count": 2, "cores_per_socket": 1},
+            "memory": {"size_MiB": 2048},
+        }
+    }
+    preview = await _write_preview._vm_resize_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "cpu_count": 4, "memory_mib": 8192}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": "web-1",
+        "power_state": "POWERED_OFF",
+        "current": {"cpu_count": 2, "cores_per_socket": 1, "memory_MiB": 2048},
+        "requested": {"cpu_count": 4, "cores_per_socket": None, "memory_MiB": 8192},
+    }
+    assert recorder.specs == ["/vcenter/vm/vm-1"]
+
+
+async def test_vm_nic_repoint_preview_reads_backing_and_resolves_portgroup() -> None:
+    """The NIC preview surfaces the from->to network pair the reviewer needs."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {
+                        "type": "DISTRIBUTED_PORTGROUP",
+                        "network": "dvportgroup-1",
+                        "network_name": "old-net",
+                    },
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {
+                        "network": "dvportgroup-9",
+                        "name": "prod-net",
+                        "type": "DISTRIBUTED_PORTGROUP",
+                    }
+                ]
+            },
+        }
+    )
+    preview = await _write_preview._vm_nic_repoint_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-net"}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": "web-1",
+        "nic": "4000",
+        "mac_address": "00:50:56:aa:bb:cc",
+        "current_backing": {
+            "type": "DISTRIBUTED_PORTGROUP",
+            "network": "dvportgroup-1",
+            "network_name": "old-net",
+        },
+        "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+    }
+    assert recorder.specs == [
+        "/vcenter/vm/vm-1",
+        "/vcenter/vm/vm-1/hardware/ethernet/4000",
+        "/vcenter/network",
+    ]
+
+
+async def test_vm_device_cdrom_preview_live_reads_current_backing() -> None:
+    """The CD-ROM preview surfaces the host-local ISO backing + state to the approver."""
+    recorder = _RecordingConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
+                    "state": "CONNECTED",
+                }
+            },
+        }
+    )
+    preview = await _write_preview._vm_device_cdrom_preview(
+        _make_preview_ctx(
+            {"vm": "vm-1", "cdrom": "16000", "action": "remove"}, connector_instance=recorder
+        )
+    )
+    assert preview == {
+        "vm": "vm-1",
+        "name": "web-1",
+        "cdrom": "16000",
+        "action": "remove",
+        "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] installer.iso"},
+        "state": "CONNECTED",
+    }
+    assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+async def test_hardware_builders_decline_on_malformed_params() -> None:
+    """Missing required params decline (→ identifier-only default), even with a connector."""
+    recorder = _RecordingConnector()
+    assert (
+        await _write_preview._vm_resize_preview(_make_preview_ctx({}, connector_instance=recorder))
+        is None
+    )
+    assert (
+        await _write_preview._vm_nic_repoint_preview(
+            _make_preview_ctx({"vm": "vm-1", "nic": "4000"}, connector_instance=recorder)
+        )
+        is None
+    )
+    assert (
+        await _write_preview._vm_device_cdrom_preview(
+            _make_preview_ctx({"vm": "vm-1", "cdrom": "16000"}, connector_instance=recorder)
+        )
+        is None
+    )
+    # Declined before issuing any read.
+    assert recorder.calls == []
+
+
+# ===========================================================================
+# #2891 hardware writes — park path carries the from->to diff (criterion 3)
+# ===========================================================================
+
+
+async def test_vm_resize_park_carries_sizing_from_to_diff(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked resize row names the current + requested sizing (from->to)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {
+            "name": "web-1",
+            "power_state": "POWERED_OFF",
+            "cpu": {"count": 1, "cores_per_socket": 1},
+            "memory": {"size_MiB": 1024},
+        }
+    }
+
+    _, row = await _park(
+        "vmware.composite.vm.resize", {"vm": "vm-1", "cpu_count": 4, "memory_mib": 8192}
+    )
+
+    assert _strip_uniform_identity(row.proposed_effect, op_id="vmware.composite.vm.resize") == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-1",
+            "power_state": "POWERED_OFF",
+            "current": {"cpu_count": 1, "cores_per_socket": 1, "memory_MiB": 1024},
+            "requested": {"cpu_count": 4, "cores_per_socket": None, "memory_MiB": 8192},
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Only the read-only VM info GET fired — no CPU / memory PATCH.
+    assert recorder.specs == ["/vcenter/vm/vm-1"]
+
+
+async def test_vm_nic_repoint_park_carries_network_from_to_pair(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked NIC row names the current backing + resolved target portgroup."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {"mac_address": "aa:bb", "backing": {"type": "STANDARD_PORTGROUP"}}
+            },
+            "/vcenter/network": {
+                "value": [
+                    {
+                        "network": "dvportgroup-9",
+                        "name": "prod-net",
+                        "type": "DISTRIBUTED_PORTGROUP",
+                    }
+                ]
+            },
+        }
+    )
+
+    _, row = await _park(
+        "vmware.composite.vm.nic.repoint",
+        {"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-net"},
+    )
+
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.vm.nic.repoint"
+    ) == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-1",
+            "nic": "4000",
+            "mac_address": "aa:bb",
+            "current_backing": {"type": "STANDARD_PORTGROUP"},
+            "requested_backing": {"portgroup_id": "dvportgroup-9", "portgroup_name": "prod-net"},
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Only read-only resolution GETs fired — no NIC PATCH.
+    assert recorder.specs == [
+        "/vcenter/vm/vm-1",
+        "/vcenter/vm/vm-1/hardware/ethernet/4000",
+        "/vcenter/network",
+    ]
+
+
+async def test_vm_device_cdrom_park_carries_current_backing(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """The parked CD-ROM row names the current backing (host-local ISO) + action."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1": {"value": {"name": "web-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
+                    "state": "CONNECTED",
+                }
+            },
+        }
+    )
+
+    _, row = await _park(
+        "vmware.composite.vm.device.cdrom",
+        {"vm": "vm-1", "cdrom": "16000", "action": "remove"},
+    )
+
+    assert _strip_uniform_identity(
+        row.proposed_effect, op_id="vmware.composite.vm.device.cdrom"
+    ) == {
+        "op_class": "other",
+        "preview": {
+            "vm": "vm-1",
+            "name": "web-1",
+            "cdrom": "16000",
+            "action": "remove",
+            "current_backing": {"type": "ISO_FILE", "iso_file": "[esx-1-local] pinned.iso"},
+            "state": "CONNECTED",
+        },
+        "preview_populated": True,
+        "safety_level": "dangerous",
+    }
+    # Only the read-only backing GETs fired — no DELETE.
+    assert recorder.specs == ["/vcenter/vm/vm-1", "/vcenter/vm/vm-1/hardware/cdrom/16000"]
+
+
+async def test_vm_resize_preview_failure_parks_with_unavailable_marker(
+    stub_embedding_service: AsyncMock,
+) -> None:
+    """A failing VM-info read parks with identifiers + the preview_unavailable marker (#1628)."""
+    recorder = await _bootstrap_registry(stub_embedding_service)
+    recorder.failures["/vcenter/vm/vm-1"] = "vCenter VM read unavailable"
+
+    target = _FakeVmwareTarget()
+    _, row = await _park(
+        "vmware.composite.vm.resize",
+        {"vm": "vm-1", "cpu_count": 4},
+        target=target,
+    )
+
+    effect = row.proposed_effect
+    assert effect["op_id"] == "vmware.composite.vm.resize"
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert effect["target_id"] == str(target.id)
+    assert effect["safety_level"] == "dangerous"
+    assert effect["preview_unavailable"] is True
+    assert "GET:/vcenter/vm/vm-1" in effect["preview_error"]
+    assert "preview" not in effect

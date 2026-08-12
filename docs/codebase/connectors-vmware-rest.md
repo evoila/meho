@@ -8,14 +8,17 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 18 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 21 hand-authored composites
 that orchestrate cross-spec workflows: 5 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`) and 13 write composites (G3.1-T6 / `#509`, plus the
+in `#2258`) and 16 write composites (G3.1-T6 / `#509`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
-mutating VI-JSON `vm.disk.grow` / `#2893`, and the folder-template
-`vm.clone_from_template` / `#2894`). The
+mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
+`vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
+`cluster.drs_rule.create` + `folder.create` / `#2895`, and the `#2891`
+post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
+`vm.device.cdrom`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -70,12 +73,16 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — nine module-level
+- **Write composites** (`composites/_write.py`) — twelve module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
   `vm_power_composite`, `vm_power_bulk_composite`,
+  `vm_resize_composite`, `vm_nic_repoint_composite`,
+  `vm_device_cdrom_composite`,
   `host_evacuate_composite`, `host_detach_from_vds_composite`,
-  `cluster_patch_composite`). Since
+  `cluster_patch_composite`). The last three (`#2891`) are the
+  post-clone hardware reconfigure trio — see the **Hardware write
+  composites** subsection under Control flow. Since
   `#2256` each accepts `(operator, target, params, connector)` and
   issues its raw-REST sub-ops **directly on the resolved connector
   session** — `connector._get_json` (`_read_sub_op`) for the resolution
@@ -118,8 +125,8 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   the direct session under the same governance seam.
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 18
-  `_CompositeSpec` rows (5 read + 13 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 21
+  `_CompositeSpec` rows (5 read + 16 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -131,7 +138,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
   therefore works on a **fresh boot with zero catalog ingest** — the same
   direct-session property the 5 read composites (`#2253`) and, since
-  `#2256`, the 9 write composites now share. The only `dispatch_child`
+  `#2256`, the 12 write composites now share. The only `dispatch_child`
   leg left on the whole vmware surface is the `host.evacuate` →
   `vm.migrate` composite→composite recursion (a registrar-guaranteed
   `source_kind="composite"` row, not an ingested primitive, `#2248`). The metadata
@@ -246,9 +253,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 14 `vmware.composite.*` rows with
+   queued registrar and upserts: the 17 `vmware.composite.*` rows with
    `source_kind="composite"` (5 reads with `safety_level="safe"` +
-   `requires_approval=False`; 9 writes with `safety_level="dangerous"`
+   `requires_approval=False`; 12 writes with `safety_level="dangerous"`
    + `requires_approval=True`), plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -344,7 +351,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 18 composites (5 reads + 13 writes) land as `source_kind="composite"`
+The 21 composites (5 reads + 16 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -411,7 +418,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 18 composites are hand-authored aggregators the connector ships as
+The 21 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -465,12 +472,71 @@ enum) are:
 | `cluster.patch` | `completed`, `stopped` |
 | `cluster.drs_rule.create` | `created`, `rule_exists`, `insufficient_vms`, `timeout` (idempotent on rule name — a duplicate `rule_exists` is refused before any write; `insufficient_vms` when fewer than two named VMs resolve to the cluster; `timeout` when the `ReconfigureComputeResource_Task` poll gives up) |
 | `folder.create` | `created`, `parent_not_found`, `ambiguous_parent` (synchronous `CreateFolder` — the resolution refusals are structured, not raw vim faults) |
+| `vm.resize` | `resized`, `requires_power_off`, `no_change`, `partial` |
+| `vm.nic.repoint` | `repointed`, `not_found`, `ambiguous` |
+| `vm.device.cdrom` | `removed`, `updated`, `disconnected`, `invalid_request` |
 
 `vm.create` is the only composite that issues a compensating
 mutation (`DELETE:/vcenter/vm/{vm}`) on partial failure. The other
 write composites prefer "stop and report" semantics over silent
 rollback -- the operator decides whether to manually finish or
-revert.
+revert. `vm.resize`'s `partial` follows the same rule: a CPU PATCH
+that lands followed by a failing memory PATCH is reported (CPU stays
+applied), not rolled back.
+
+### Hardware write composites (`vm.resize` / `vm.nic.repoint` / `vm.device.cdrom`, #2891)
+
+The post-clone reconfigure trio are pure vSphere Automation REST
+writes (no `pyvmomi`). A freshly-cloned VM is stuck at the template's
+sizing, on the template's portgroup, and with the template's CD-ROM
+backing — these three composites rightsize it, move its NIC, and clear
+a host-pinning ISO:
+
+- **`vm.resize`** reads current sizing + hot-add flags via
+  `GET:/vcenter/vm/{vm}` (one read serves `name`, `power_state`,
+  `cpu.{count,cores_per_socket,hot_add_enabled}`,
+  `memory.{size_MiB,hot_add_enabled}`), then PATCHes
+  `PATCH:/vcenter/vm/{vm}/hardware/cpu` and/or
+  `PATCH:/vcenter/vm/{vm}/hardware/memory`. When the VM is powered on
+  and the requested change cannot be made live — no hot-add for the
+  changed dimension, a decrease, or any `cores_per_socket` change — the
+  handler returns `requires_power_off` **before** issuing the PATCH, so
+  the operator gets a typed status instead of a raw vCenter 400.
+- **`vm.nic.repoint`** reads the NIC's current backing + MAC via
+  `GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}`, resolves the target
+  distributed portgroup by display name via
+  `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`, then PATCHes
+  `PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}` with
+  `{backing: {type: DISTRIBUTED_PORTGROUP, network: <moid>}}`. A name
+  that matches zero / many portgroups refuses the repoint
+  (`not_found` / `ambiguous`) with no PATCH issued.
+- **`vm.device.cdrom`** reads the device's current backing + state via
+  `GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}` (surfacing a host-local
+  ISO path the approver needs to see), then dispatches the `action`:
+  `remove` (`DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}`), `update`
+  (`PATCH` the backing — requires a `backing` param, e.g.
+  `{type: CLIENT_DEVICE}` to un-pin a host-local ISO), or `disconnect`
+  (`POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect`).
+
+All three register a live-read **from->to** preview builder in
+`_write_preview.py`, so the parked approval row names the current state
+alongside the requested change (the delta is the decision the four-eyes
+reviewer signs off). Update PATCH bodies are wrapped in the
+`{"spec": {...}}` envelope the connector's `_write_sub_op` authors,
+matching the other write composites.
+
+**Portgroup resolution — the #1602 lesson.** There is no dedicated
+`distributed-portgroup` list resource in the REST Automation API;
+distributed portgroups are enumerated via the generic
+`GET:/vcenter/network` resource filtered to `DISTRIBUTED_PORTGROUP`
+(each summary row is `{network (id), name, type}`). The
+`_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"`
+constant `_write.py` carried (declared by `#509`, singular spelling,
+absent from the pinned spec) was corrected to `_OP_LIST_NETWORK =
+"GET:/vcenter/network"` as part of `#2891` — the same shape
+`_read.py`'s `network.portgroup.audit` composite already used. The
+`host.detach_from_vds` composite's pre-flight portgroup read moved to
+the corrected path too.
 
 ### Mutating VI-JSON write substrate (`vm.disk.grow`, #2893)
 
@@ -716,7 +782,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 13 write composites ship `requires_approval=True`, so a human/agent
+All 16 write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -727,7 +793,7 @@ approver could not tell a one-VM power cycle from a 1000-VM outage.
 composite on the generic per-op hook (`register_preview_builder`,
 `operations/_preview.py`, #1437). The builder result lands under
 `proposed_effect["preview"]`, wrapped with the op's sensitivity
-`op_class` (see [`approvals.md`](approvals.md)). Two depths:
+`op_class` (see [`approvals.md`](approvals.md)). Three depths:
 
 | Composite | Preview | Depth |
 | --- | --- | --- |
@@ -735,6 +801,9 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `host.evacuate` | `{host, tolerate_partial_failure, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `host.detach_from_vds` | `{host, dvs, fallback_network, resolved, total_resolved}` | live read (`GET:/vcenter/vm`) |
 | `cluster.patch` | `{cluster, patch_method, resolved, total_resolved}` | live read (`GET:/vcenter/cluster/{cluster}/host`) |
+| `vm.resize` | `{vm, name, power_state, current, requested}` sizing from->to | live read (`GET:/vcenter/vm/{vm}`) |
+| `vm.nic.repoint` | `{vm, name, nic, mac_address, current_backing, requested_backing}` network from->to | live read (`ethernet/{nic}` + `GET:/vcenter/network`) |
+| `vm.device.cdrom` | `{vm, name, cdrom, action, current_backing, state}` (the host-local ISO path) | live read (`cdrom/{cdrom}`) |
 | `vm.create` | creation-spec echo (name, guest_os, sizing, networks, power-on) | param echo, no I/O |
 | `vm.clone` | clone-coordinates echo | param echo, no I/O |
 | `vm.snapshot.revert` | `{vm, snapshot_name}` echo | param echo, no I/O |
@@ -743,7 +812,14 @@ composite on the generic per-op hook (`register_preview_builder`,
 | `cluster.drs_rule.create` | `{cluster, cluster_name, rule_type, rule_name, enabled, resolved, total_resolved}` | live read (`GET:/vcenter/vm` + `GET:/vcenter/cluster/{cluster}`) |
 | `folder.create` | `{parent_folder, new_folder_name}` echo | param echo, no I/O |
 
-The live-read previews resolve the same entity set the approved
+The `#2891` hardware previews are a live-read **from->to diff**: the
+delta between the VM's current sizing / NIC backing / CD-ROM backing
+and the requested change is exactly what the approver signs off, so
+the builder reads current state via the shared
+`_write._read_vm_info` / `_write._read_ethernet_nic` /
+`_write._read_cdrom` / `_write._resolve_distributed_portgroup` helpers
+(the same ones the handlers use) and pairs it with the request. The
+fan-out live-read previews resolve the same entity set the approved
 dispatch would act on, through the **same shared helpers** the handlers
 use at dispatch time (`_write._resolve_vm_list` /
 `_write._resolve_cluster_hosts`) — one resolution code path, two call
@@ -868,8 +944,10 @@ they never park.
   (#509) ships 8 write composites, #2301 adds a 9th (single-VM
   `vm.power`, incl. Tools soft shutdown), #2893 adds a 10th (the
   mutating VI-JSON `vm.disk.grow`), #2894 an 11th (the folder-template
-  `vm.clone_from_template`), and #2895 a 12th + 13th (the vim cluster /
-  inventory writes `cluster.drs_rule.create` + `folder.create`) — 18
+  `vm.clone_from_template`), #2895 a 12th + 13th (the vim cluster /
+  inventory writes `cluster.drs_rule.create` + `folder.create`), and
+  #2891 a 14th / 15th / 16th (the post-clone hardware reconfigure trio
+  `vm.resize` / `vm.nic.repoint` / `vm.device.cdrom`) — 21
   composites today. The
   "All hand-authored composites land as endpoint_descriptor rows with
   source_kind='composite'" Definition-of-done line in [#227](https://github.com/evoila/meho/issues/227)

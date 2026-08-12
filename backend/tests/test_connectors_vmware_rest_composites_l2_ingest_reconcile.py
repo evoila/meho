@@ -3,12 +3,14 @@
 
 """op_id reconciliation between the write composites and the ingest pipeline.
 
-G3.16-T1 (#1414). The 9 REST-sub-op vmware-rest write composites each
+G3.16-T1 (#1414). The 12 REST-sub-op vmware-rest write composites each
 declare the L2 sub-ops they dispatch into via ``_SUB_OPS_*`` tuples in
-:mod:`~meho_backplane.connectors.vmware_rest.composites._write`; the tenth
-write composite, ``vm.disk.grow`` (#2893), dispatches into vi-json instead
-and declares its sub-ops in ``_VIM_SUB_OPS_VM_DISK_GROW`` (reconciled in the
-dedicated vi-json section at the end of this module). At
+:mod:`~meho_backplane.connectors.vmware_rest.composites._write`; the four
+vi-json write composites (``vm.disk.grow`` / #2893,
+``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
+``cluster.drs_rule.create`` + ``folder.create`` / #2895) dispatch into
+vi-json instead and declare their sub-ops in ``_VIM_SUB_OPS_*`` tuples
+(reconciled in the dedicated vi-json section at the end of this module). At
 dispatch time :func:`~...composites._preflight.preflight_l2_dependencies`
 looks each sub-op_id up in ``endpoint_descriptor`` and raises
 :class:`~meho_backplane.operations.composite.CompositeL2DependencyMissing`
@@ -31,7 +33,7 @@ the parser emits from ``vcenter.yaml``. The two surfaces that could drift:
 
 This module proves the match automatically, without a live backplane:
 
-1. Derive the full set of raw L2 sub-op_ids the 8 composites need by
+1. Derive the full set of raw L2 sub-op_ids the 12 composites need by
    introspecting the live ``_SUB_OPS_*`` constants (so the test tracks
    any future edit to those tuples -- no hardcoded mirror to drift).
 2. Build a representative OpenAPI fixture whose ``paths`` are keyed
@@ -79,12 +81,13 @@ _GETADDRINFO_PATCH = patch(
 
 
 def _required_raw_sub_op_ids() -> set[str]:
-    """Union of every ``_SUB_OPS_*`` op_id across the 9 REST write composites.
+    """Union of every ``_SUB_OPS_*`` op_id across the 12 REST write composites.
 
-    ``vm.disk.grow``'s vi-json sub-ops live in ``_VIM_SUB_OPS_VM_DISK_GROW``
-    (a distinct namespace this ``_SUB_OPS_*`` sweep deliberately skips), so
-    a vcenter.yaml-shaped fixture never has to model a vi-json path; the
-    vi-json section at the end of this module reconciles them separately.
+    The four vi-json write composites' sub-ops live in ``_VIM_SUB_OPS_*``
+    tuples (a distinct namespace this ``_SUB_OPS_*`` sweep deliberately
+    skips), so a vcenter.yaml-shaped fixture never has to model a vi-json
+    path; the vi-json section at the end of this module reconciles them
+    separately.
 
     Excludes composite-to-composite references (``vmware.composite.*``):
     those are not ``endpoint_descriptor`` rows and the pre-flight walk
@@ -104,7 +107,7 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Nine ``_SUB_OPS_*`` module constants today, one per write composite.
+    Twelve ``_SUB_OPS_*`` module constants today, one per write composite.
     Pinning the exact set means a renamed or dropped constant can't
     silently shrink the reconciled set to a vacuous pass.
     """
@@ -115,9 +118,12 @@ def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
         "_SUB_OPS_HOST_EVACUATE",
         "_SUB_OPS_VM_CLONE",
         "_SUB_OPS_VM_CREATE",
+        "_SUB_OPS_VM_DEVICE_CDROM",
         "_SUB_OPS_VM_MIGRATE",
+        "_SUB_OPS_VM_NIC_REPOINT",
         "_SUB_OPS_VM_POWER",
         "_SUB_OPS_VM_POWER_BULK",
+        "_SUB_OPS_VM_RESIZE",
         "_SUB_OPS_VM_SNAPSHOT_REVERT",
     ]
 

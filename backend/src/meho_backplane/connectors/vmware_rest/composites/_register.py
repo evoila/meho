@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 18 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 21 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,11 +26,13 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 13 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 16 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
-``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
-``cluster.drs_rule.create`` + ``folder.create`` / #2895) inherit the T4
+``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
+``cluster.drs_rule.create`` + ``folder.create`` / #2895, and the #2891
+hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
+``vm.device.cdrom``) inherit the T4
 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
 the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -60,10 +62,13 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
+    vm_nic_repoint_composite,
     vm_power_bulk_composite,
     vm_power_composite,
+    vm_resize_composite,
     vm_snapshot_revert_composite,
 )
 from meho_backplane.connectors.vmware_rest.composites.schemas import (
@@ -93,14 +98,20 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CLONE_RESPONSE_SCHEMA,
     VM_CREATE_PARAMETER_SCHEMA,
     VM_CREATE_RESPONSE_SCHEMA,
+    VM_DEVICE_CDROM_PARAMETER_SCHEMA,
+    VM_DEVICE_CDROM_RESPONSE_SCHEMA,
     VM_DISK_GROW_PARAMETER_SCHEMA,
     VM_DISK_GROW_RESPONSE_SCHEMA,
     VM_MIGRATE_PARAMETER_SCHEMA,
     VM_MIGRATE_RESPONSE_SCHEMA,
+    VM_NIC_REPOINT_PARAMETER_SCHEMA,
+    VM_NIC_REPOINT_RESPONSE_SCHEMA,
     VM_POWER_BULK_PARAMETER_SCHEMA,
     VM_POWER_BULK_RESPONSE_SCHEMA,
     VM_POWER_PARAMETER_SCHEMA,
     VM_POWER_RESPONSE_SCHEMA,
+    VM_RESIZE_PARAMETER_SCHEMA,
+    VM_RESIZE_RESPONSE_SCHEMA,
     VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA,
     VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA,
 )
@@ -214,7 +225,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
 class _CompositeSpec(NamedTuple):
     """Per-composite registration arguments.
 
-    Field-table form rather than fourteen repeated kwargs blocks:
+    Field-table form rather than seventeen repeated kwargs blocks:
     keeps the op_id / handler / schemas / group / tags / policy
     posture adjacent per composite and drops the outer registrar
     function below the 100-line block limit. Common fields
@@ -652,6 +663,76 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
     ),
+    # ----------------------------------------------------------------
+    # Hardware write composites (#2891) -- dangerous / requires approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.vm.resize",
+        handler=vm_resize_composite,
+        summary="Reconfigure a VM's CPU count / cores-per-socket and/or memory.",
+        description=(
+            "Reads current sizing + hot-add flags via GET:/vcenter/vm/{vm}, "
+            "then PATCHes PATCH:/vcenter/vm/{vm}/hardware/cpu and/or "
+            "PATCH:/vcenter/vm/{vm}/hardware/memory. A freshly-cloned VM is "
+            "stuck at the template's sizing; this rightsizes it. A change a "
+            "powered-on VM cannot take live (no hot-add, a decrease, or a "
+            "cores_per_socket change) returns status='requires_power_off' "
+            "rather than a raw vCenter 400; a request already matching "
+            "current returns 'no_change'. Equivalent of the sizing half of "
+            "'govc vm.change'."
+        ),
+        parameter_schema=VM_RESIZE_PARAMETER_SCHEMA,
+        response_schema=VM_RESIZE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.nic.repoint",
+        handler=vm_nic_repoint_composite,
+        summary="Repoint a vNIC to a different distributed portgroup.",
+        description=(
+            "Reads the NIC's current backing + MAC via "
+            "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}, resolves the "
+            "target portgroup by display name via "
+            "GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP (there "
+            "is no dedicated portgroup list resource), then PATCHes the NIC "
+            "backing to {type: DISTRIBUTED_PORTGROUP, network}. A name that "
+            "resolves to zero / many portgroups refuses the repoint "
+            "(status='not_found' / 'ambiguous') with no PATCH issued. The "
+            "from->to network pair is what the four-eyes reviewer needs. "
+            "Equivalent of 'govc vm.network.change'."
+        ),
+        parameter_schema=VM_NIC_REPOINT_PARAMETER_SCHEMA,
+        response_schema=VM_NIC_REPOINT_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "networking"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.device.cdrom",
+        handler=vm_device_cdrom_composite,
+        summary="Remove / update / disconnect a VM CD-ROM device.",
+        description=(
+            "Reads the CD-ROM's current backing + state via "
+            "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom} (the host-local ISO "
+            "path the approver needs to see), then dispatches the requested "
+            "action: 'remove' (DELETE the device), 'update' (PATCH its "
+            "backing, e.g. to CLIENT_DEVICE to un-pin a host-local ISO), or "
+            "'disconnect' (POST ?action=disconnect). A template shipping a "
+            "host-local-ISO-backed CD-ROM silently pins every clone to one "
+            "host and blocks vMotion; this clears it. Equivalent of "
+            "'govc device.cdrom.eject' / 'govc device.remove'."
+        ),
+        parameter_schema=VM_DEVICE_CDROM_PARAMETER_SCHEMA,
+        response_schema=VM_DEVICE_CDROM_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "hardware"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
 )
 
 
@@ -668,11 +749,13 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 18 composites total -- 5 read (T5 / #508) + 13 write (T6 /
+    Scope: 21 composites total -- 5 read (T5 / #508) + 16 write (T6 /
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
-    ``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
-    ``cluster.drs_rule.create`` + ``folder.create`` / #2895). (The former
+    ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
+    ``cluster.drs_rule.create`` + ``folder.create`` / #2895, and the #2891
+    hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
+    ``vm.device.cdrom``). (The former
     ``host.network_uplinks`` / ``host.vsan_health`` reads were re-shipped
     as typed ops in #2258.)
     Each composite's ``safety_level`` +

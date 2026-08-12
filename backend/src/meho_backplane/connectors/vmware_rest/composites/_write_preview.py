@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 13 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 16 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 13 write composites onto the per-op preview hook shipped
+This wires all 16 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -37,6 +37,12 @@ helpers, never the mutating sub-ops.
 ``cluster.drs_rule.create`` live-read: cluster, cluster_name, rule_type,
                           rule_name, enabled, resolved, total_resolved
 ``folder.create``         echo: parent_folder, new_folder_name
+``vm.resize``             live-read: ``{vm, name, power_state, current,
+                          requested}`` sizing from->to
+``vm.nic.repoint``        live-read: ``{vm, name, nic, mac_address,
+                          current_backing, requested_backing}`` network from->to
+``vm.device.cdrom``       live-read: ``{vm, name, cdrom, action,
+                          current_backing, state}`` (the host-local ISO path)
 ========================  ====================================================
 
 Two preview depths, chosen per composite
@@ -55,6 +61,16 @@ Two preview depths, chosen per composite
   not a param — so the preview reads the disk's current size + label and
   echoes the requested capacity so the approver sees the disk grows (never
   shrinks) and by how much.
+* **Live-read from->to diff** for the three #2891 hardware composites
+  (``vm.resize`` / ``vm.nic.repoint`` / ``vm.device.cdrom``): the delta
+  *is* the decision, so the builder live-reads the VM's current sizing /
+  NIC backing / CD-ROM backing via the same shared helpers the handlers
+  use (:func:`._write._read_vm_info` / :func:`._write._read_ethernet_nic`
+  / :func:`._write._read_cdrom` /
+  :func:`._write._resolve_distributed_portgroup`) and pairs it with the
+  requested change. Declines (``None`` -> identifier-only default) when no
+  connector resolved or the VM read returns no dict, and fails-soft on a
+  resolution fault exactly like the fan-out builders.
 * **Param echo** (no I/O — the ``secret.move`` precedent, #1580) for the
   six single-entity composites whose params fully name the blast
   radius. ``vm.clone_from_template`` echoes only the customization spec
@@ -114,9 +130,13 @@ from typing import Any
 
 from meho_backplane.connectors.vmware_rest.composites._write import (
     _GUEST_POWER_VERBS,
+    _read_cdrom,
+    _read_ethernet_nic,
+    _read_vm_info,
     _resolve_cluster_hosts,
     _resolve_cluster_name,
     _resolve_disk_info,
+    _resolve_distributed_portgroup,
     _resolve_vm_list,
     _resolve_vm_name,
 )
@@ -518,7 +538,140 @@ async def _folder_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     return {"parent_folder": parent_folder, "new_folder_name": folder_name}
 
 
-#: op_id → builder for the 13 write composites. Module-level so the
+async def _vm_resize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.resize`` — live-read the current sizing, echo the requested.
+
+    The from->to diff is the decision the approver signs off: which VM,
+    what it is now (cpu_count / cores_per_socket / memory_MiB + power
+    state), and what it would become. Reads current sizing via the shared
+    :func:`._write._read_vm_info` (one read-only GET); no CPU/memory PATCH
+    fires here.
+    """
+    vm = ctx.params.get("vm")
+    if not isinstance(vm, str) or ctx.connector_instance is None:
+        return None
+    info = await _read_vm_info(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+    )
+    if info is None:
+        return None
+    cpu_raw = info.get("cpu")
+    mem_raw = info.get("memory")
+    cpu = cpu_raw if isinstance(cpu_raw, dict) else {}
+    mem = mem_raw if isinstance(mem_raw, dict) else {}
+    return {
+        "vm": vm,
+        "name": info.get("name"),
+        "power_state": info.get("power_state"),
+        "current": {
+            "cpu_count": cpu.get("count"),
+            "cores_per_socket": cpu.get("cores_per_socket"),
+            "memory_MiB": mem.get("size_MiB"),
+        },
+        "requested": {
+            "cpu_count": ctx.params.get("cpu_count"),
+            "cores_per_socket": ctx.params.get("cores_per_socket"),
+            "memory_MiB": ctx.params.get("memory_mib"),
+        },
+    }
+
+
+async def _vm_nic_repoint_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.nic.repoint`` — live-read the NIC + resolve the target portgroup.
+
+    The from->to network pair is what the four-eyes reviewer needs: the
+    NIC's current backing (which network it is on now) and the target
+    portgroup (name + resolved moid). Reads the NIC via
+    :func:`._write._read_ethernet_nic` and resolves the portgroup via
+    :func:`._write._resolve_distributed_portgroup` (the same helper the
+    approved dispatch binds); the VM ``name`` comes from
+    :func:`._write._read_vm_info`. No NIC PATCH fires here.
+    """
+    vm = ctx.params.get("vm")
+    nic = ctx.params.get("nic")
+    portgroup_name = ctx.params.get("portgroup_name")
+    if (
+        not isinstance(vm, str)
+        or not isinstance(nic, str)
+        or not isinstance(portgroup_name, str)
+        or ctx.connector_instance is None
+    ):
+        return None
+    info = await _read_vm_info(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+    )
+    nic_info = await _read_ethernet_nic(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+        nic_id=nic,
+    )
+    network_moid, _resolution, _candidates = await _resolve_distributed_portgroup(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        portgroup_name=portgroup_name,
+    )
+    return {
+        "vm": vm,
+        "name": info.get("name") if info else None,
+        "nic": nic,
+        "mac_address": nic_info.get("mac_address") if nic_info else None,
+        "current_backing": nic_info.get("backing") if nic_info else None,
+        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+    }
+
+
+async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.device.cdrom`` — live-read the current backing + state.
+
+    The host-local ISO path in the current backing is exactly what the
+    approver needs to see before removing / updating / disconnecting the
+    device. Reads the CD-ROM via :func:`._write._read_cdrom` and the VM
+    ``name`` via :func:`._write._read_vm_info`; no DELETE / PATCH /
+    disconnect fires here.
+    """
+    vm = ctx.params.get("vm")
+    cdrom = ctx.params.get("cdrom")
+    action = ctx.params.get("action")
+    if (
+        not isinstance(vm, str)
+        or not isinstance(cdrom, str)
+        or not isinstance(action, str)
+        or ctx.connector_instance is None
+    ):
+        return None
+    info = await _read_vm_info(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+    )
+    cdrom_info = await _read_cdrom(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        vm_moid=vm,
+        cdrom_id=cdrom,
+    )
+    return {
+        "vm": vm,
+        "name": info.get("name") if info else None,
+        "cdrom": cdrom,
+        "action": action,
+        "current_backing": cdrom_info.get("backing") if cdrom_info else None,
+        "state": cdrom_info.get("state") if cdrom_info else None,
+    }
+
+
+#: op_id → builder for the 16 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
@@ -529,6 +682,9 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.power": _vm_power_preview,
     "vmware.composite.vm.power.bulk": _vm_power_bulk_preview,
     "vmware.composite.vm.disk.grow": _vm_disk_grow_preview,
+    "vmware.composite.vm.resize": _vm_resize_preview,
+    "vmware.composite.vm.nic.repoint": _vm_nic_repoint_preview,
+    "vmware.composite.vm.device.cdrom": _vm_device_cdrom_preview,
     "vmware.composite.host.evacuate": _host_evacuate_preview,
     "vmware.composite.host.detach_from_vds": _host_detach_from_vds_preview,
     "vmware.composite.cluster.patch": _cluster_patch_preview,
@@ -538,7 +694,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 13 write-composite park-time preview builders. Import-time.
+    """Wire the 16 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

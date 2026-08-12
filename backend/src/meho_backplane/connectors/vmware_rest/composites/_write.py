@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: 13 protocol-driven composite handlers for the
+# code-quality-allow: 16 protocol-driven composite handlers for the
 # vSphere REST + VI-JSON write surface ship in one module per the issue
 # body's design; splitting them by group would scatter the shared
 # sub-op_id constants + helpers across files for no readability gain. Each
 # handler's body is the documented orchestration workflow from #509's spec
 # (plus the mutating VI-JSON disk-grow from #2893, the folder-template clone
-# from #2894, and the vim cluster / inventory writes — DRS-rule + folder
-# create — from #2895).
+# from #2894, the vim cluster / inventory writes — DRS-rule + folder
+# create — from #2895, and the #2891 hardware writes — vm.resize /
+# vm.nic.repoint / vm.device.cdrom).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (13 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (16 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -108,10 +109,13 @@ __all__ = [
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",
+    "vm_device_cdrom_composite",
     "vm_disk_grow_composite",
     "vm_migrate_composite",
+    "vm_nic_repoint_composite",
     "vm_power_bulk_composite",
     "vm_power_composite",
+    "vm_resize_composite",
     "vm_snapshot_revert_composite",
 ]
 
@@ -157,7 +161,14 @@ _OP_GET_DRS_RECOMMENDATIONS = "GET:/vcenter/cluster/{cluster}/drs/recommendation
 _OP_DEPLOY_LIBRARY_VM = "POST:/vcenter/vm-template/library-items?action=deploy"
 _OP_GET_TASK = "GET:/cis/tasks/{task}"
 _OP_HOST_PATCH = "POST:/vcenter/host/{host}?action=patch"
-_OP_LIST_PORTGROUPS = "GET:/vcenter/network/distributed-portgroup"
+# There is NO dedicated ``distributed-portgroup(s)`` list resource in the
+# REST Automation API: distributed portgroups are enumerated via the
+# generic network resource filtered to ``DISTRIBUTED_PORTGROUP`` (the
+# #1602 reconciliation lesson -- the singular ``distributed-portgroup``
+# op_id #509 declared here was absent from the pinned spec). Each summary
+# row is ``{network (id), name, type}``. Mirrors ``_read._OP_LIST_NETWORK``.
+_OP_LIST_NETWORK = "GET:/vcenter/network"
+_NETWORK_TYPE_DISTRIBUTED_PORTGROUP = "DISTRIBUTED_PORTGROUP"
 _OP_REMOVE_DVS_HOST = "POST:/vcenter/network/dvs/{dvs}?action=remove_host"
 # REST Disk.Info read — the disk-grow park-time preview reads label +
 # current capacity (bytes) off this; the disk id is the vim device key.
@@ -337,6 +348,21 @@ _VIM_SUB_OPS_CLUSTER_DRS_RULE_CREATE: tuple[str, ...] = (
 )
 _VIM_SUB_OPS_FOLDER_CREATE: tuple[str, ...] = (_OP_CREATE_FOLDER,)
 
+# Hardware write ops (#2891). Post-clone reconfigure of a VM's virtual
+# hardware, straight vSphere Automation REST. CPU/memory update and the
+# ethernet/cdrom device sub-resources take the update spec wrapped in the
+# ``{"spec": {...}}`` envelope this connector's write sub-ops author (see
+# ``_write_sub_op``); the CD-ROM ``disconnect`` rides an ``?action=``
+# suffix like the other action endpoints (power / relocate / maintenance).
+_OP_UPDATE_VM_CPU = "PATCH:/vcenter/vm/{vm}/hardware/cpu"
+_OP_UPDATE_VM_MEMORY = "PATCH:/vcenter/vm/{vm}/hardware/memory"
+_OP_GET_VM_NIC = "GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}"
+_OP_UPDATE_VM_NIC = "PATCH:/vcenter/vm/{vm}/hardware/ethernet/{nic}"
+_OP_GET_VM_CDROM = "GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
+_OP_UPDATE_VM_CDROM = "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
+_OP_DELETE_VM_CDROM = "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
+_OP_DISCONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"
+
 
 def _power_vm_op_id(action: str) -> str:
     """Build the per-action canonical op_id for ``POST:/vcenter/vm/{vm}/power``.
@@ -390,6 +416,9 @@ _COMPOSITE_OP_ID_VM_POWER = "vmware.composite.vm.power"
 _COMPOSITE_OP_ID_HOST_EVACUATE = "vmware.composite.host.evacuate"
 _COMPOSITE_OP_ID_HOST_DETACH_FROM_VDS = "vmware.composite.host.detach_from_vds"
 _COMPOSITE_OP_ID_CLUSTER_PATCH = "vmware.composite.cluster.patch"
+_COMPOSITE_OP_ID_VM_RESIZE = "vmware.composite.vm.resize"
+_COMPOSITE_OP_ID_VM_NIC_REPOINT = "vmware.composite.vm.nic.repoint"
+_COMPOSITE_OP_ID_VM_DEVICE_CDROM = "vmware.composite.vm.device.cdrom"
 
 # Per-composite sub-op-id tuples. Pre-#2256 these fed the L2 pre-flight
 # check that guarded a missing catalog ingest; the direct-session migration
@@ -449,7 +478,7 @@ _SUB_OPS_HOST_EVACUATE: tuple[str, ...] = (
     _host_maintenance_op_id("enter"),
 )
 _SUB_OPS_HOST_DETACH_FROM_VDS: tuple[str, ...] = (
-    _OP_LIST_PORTGROUPS,
+    _OP_LIST_NETWORK,
     _OP_LIST_VMS,
     _OP_ATTACH_VM_NIC,
     _OP_REMOVE_DVS_HOST,
@@ -459,6 +488,22 @@ _SUB_OPS_CLUSTER_PATCH: tuple[str, ...] = (
     _host_maintenance_op_id("enter"),
     _host_maintenance_op_id("exit"),
     _OP_HOST_PATCH,
+)
+_SUB_OPS_VM_RESIZE: tuple[str, ...] = (
+    _OP_GET_VM,
+    _OP_UPDATE_VM_CPU,
+    _OP_UPDATE_VM_MEMORY,
+)
+_SUB_OPS_VM_NIC_REPOINT: tuple[str, ...] = (
+    _OP_GET_VM_NIC,
+    _OP_LIST_NETWORK,
+    _OP_UPDATE_VM_NIC,
+)
+_SUB_OPS_VM_DEVICE_CDROM: tuple[str, ...] = (
+    _OP_GET_VM_CDROM,
+    _OP_UPDATE_VM_CDROM,
+    _OP_DELETE_VM_CDROM,
+    _OP_DISCONNECT_VM_CDROM,
 )
 
 
@@ -1430,7 +1475,11 @@ async def host_detach_from_vds_composite(
     fallback_network = params["fallback_network"]
 
     await _read_sub_op(
-        connector, target, operator, _OP_LIST_PORTGROUPS, {"filter.hosts": [host_moid]}
+        connector,
+        target,
+        operator,
+        _OP_LIST_NETWORK,
+        {"filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP], "filter.hosts": [host_moid]},
     )
     vms = await _resolve_vm_list(
         connector=connector, target=target, operator=operator, filter_dict={"hosts": [host_moid]}
@@ -2661,3 +2710,416 @@ async def folder_create_composite(
         "folder": new_folder_moid,
         "guidance": None,
     }
+
+
+# ===========================================================================
+# Hardware write composites (#2891): vm.resize / vm.nic.repoint /
+# vm.device.cdrom -- pure vSphere Automation REST post-clone reconfigure.
+# ===========================================================================
+
+
+async def _read_vm_info(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moid: str,
+) -> dict[str, Any] | None:
+    """Read a VM's config via ``GET:/vcenter/vm/{vm}`` (name, power_state, cpu, memory).
+
+    Shared seam (#1608): the ``vm.resize`` handler + preview read current
+    sizing here, and the ``vm.nic.repoint`` / ``vm.device.cdrom`` previews
+    read the VM's display ``name`` from it. One read-only GET on the
+    connector session; returns the unwrapped ``Vm.Info`` dict, or ``None``
+    when the payload is not a dict.
+    """
+    payload = await _read_sub_op(connector, target, operator, _OP_GET_VM, {"vm": vm_moid})
+    info = _unwrap_value(payload)
+    return info if isinstance(info, dict) else None
+
+
+async def _read_ethernet_nic(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moid: str,
+    nic_id: str,
+) -> dict[str, Any] | None:
+    """Read one vNIC via ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}`` (mac + backing).
+
+    Shared between the ``vm.nic.repoint`` handler and its preview builder
+    (#1608). Returns the unwrapped ``Ethernet.Info`` dict or ``None``.
+    """
+    payload = await _read_sub_op(
+        connector, target, operator, _OP_GET_VM_NIC, {"vm": vm_moid, "nic": nic_id}
+    )
+    info = _unwrap_value(payload)
+    return info if isinstance(info, dict) else None
+
+
+async def _read_cdrom(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    vm_moid: str,
+    cdrom_id: str,
+) -> dict[str, Any] | None:
+    """Read one CD-ROM via ``GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}`` (backing + state).
+
+    Shared between the ``vm.device.cdrom`` handler and its preview builder
+    (#1608). Returns the unwrapped ``Cdrom.Info`` dict or ``None``.
+    """
+    payload = await _read_sub_op(
+        connector, target, operator, _OP_GET_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+    )
+    info = _unwrap_value(payload)
+    return info if isinstance(info, dict) else None
+
+
+async def _resolve_distributed_portgroup(
+    *,
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    portgroup_name: str,
+) -> tuple[str | None, str, list[dict[str, Any]]]:
+    """Resolve a distributed-portgroup display name to its network moid.
+
+    Reads ``GET:/vcenter/network`` filtered to ``DISTRIBUTED_PORTGROUP`` +
+    the name (the #1602 fix -- there is no dedicated portgroup list
+    resource). Returns ``(network_moid, "ok", [])`` on a unique match,
+    ``(None, "not_found", [])`` on no match, or ``(None, "ambiguous",
+    candidates)`` when the name is not unique. Shared between the
+    ``vm.nic.repoint`` handler (dispatch time) and its preview builder
+    (#1608), so the reviewer sees the same portgroup the approved dispatch
+    will bind.
+    """
+    listing = await _read_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_LIST_NETWORK,
+        {
+            "filter.types": [_NETWORK_TYPE_DISTRIBUTED_PORTGROUP],
+            "filter.names": [portgroup_name],
+        },
+    )
+    rows = _unwrap_value(listing)
+    matches = (
+        [row for row in rows if isinstance(row, dict) and row.get("name") == portgroup_name]
+        if isinstance(rows, list)
+        else []
+    )
+    if not matches:
+        return None, "not_found", []
+    if len(matches) > 1:
+        return None, "ambiguous", matches
+    network_moid = matches[0].get("network")
+    if not isinstance(network_moid, str):
+        return None, "not_found", matches
+    return network_moid, "ok", []
+
+
+def _resize_requires_power_off(
+    *,
+    current: dict[str, Any],
+    cpu_count: int | None,
+    cores_per_socket: int | None,
+    memory_mib: int | None,
+    cpu_hot_add: bool,
+    memory_hot_add: bool,
+) -> str | None:
+    """Return a reason when a *powered-on* VM cannot take the resize live, else ``None``.
+
+    vCenter refuses (HTTP 400) a live CPU/memory change that is not a
+    hot-add: a count/size *increase* needs the matching hot-add flag; a
+    *decrease* or any ``cores_per_socket`` change is never live. Surfacing
+    this as a typed ``requires_power_off`` status (rather than letting the
+    PATCH 400) is the composite's contract. Consulted only when the VM is
+    powered on.
+    """
+    cur_count = current.get("cpu_count")
+    cur_cores = current.get("cores_per_socket")
+    cur_mem = current.get("memory_MiB")
+    if (
+        cpu_count is not None
+        and cpu_count != cur_count
+        and (not cpu_hot_add or (isinstance(cur_count, int) and cpu_count < cur_count))
+    ):
+        return "CPU count change needs hot-add (increase only) on a powered-on VM; power off first"
+    if (
+        cores_per_socket is not None
+        and isinstance(cur_cores, int)
+        and cores_per_socket != cur_cores
+    ):
+        return "cores_per_socket cannot change on a powered-on VM; power off first"
+    if (
+        memory_mib is not None
+        and memory_mib != cur_mem
+        and (not memory_hot_add or (isinstance(cur_mem, int) and memory_mib < cur_mem))
+    ):
+        return "memory change needs hot-add (increase only) on a powered-on VM; power off first"
+    return None
+
+
+async def vm_resize_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Reconfigure a VM's CPU count / cores-per-socket and/or memory.
+
+    Op-id: ``vmware.composite.vm.resize``. Reads current sizing + hot-add
+    flags via ``GET:/vcenter/vm/{vm}``, then PATCHes ``hardware/cpu``
+    and/or ``hardware/memory``. A change a powered-on VM cannot take live
+    returns ``status='requires_power_off'`` (never a raw 400); a request
+    already matching current returns ``no_change``; a CPU PATCH that lands
+    followed by a memory PATCH that faults returns ``partial``.
+    """
+    vm_moid = params["vm"]
+    req_cpu_count = params.get("cpu_count")
+    req_cores = params.get("cores_per_socket")
+    req_mem = params.get("memory_mib")
+
+    info = await _read_vm_info(
+        connector=connector, target=target, operator=operator, vm_moid=vm_moid
+    )
+    if info is None:
+        raise RuntimeError(f"vm.resize: GET:/vcenter/vm/{vm_moid} returned no VM info dict")
+    cpu_raw = info.get("cpu")
+    mem_raw = info.get("memory")
+    cpu_info = cpu_raw if isinstance(cpu_raw, dict) else {}
+    mem_info = mem_raw if isinstance(mem_raw, dict) else {}
+    power_state = info.get("power_state")
+    from_sizing = {
+        "cpu_count": cpu_info.get("count"),
+        "cores_per_socket": cpu_info.get("cores_per_socket"),
+        "memory_MiB": mem_info.get("size_MiB"),
+    }
+    base = {
+        "vm": vm_moid,
+        "name": info.get("name"),
+        "power_state": power_state,
+        "from": from_sizing,
+        "to": {"cpu_count": req_cpu_count, "cores_per_socket": req_cores, "memory_MiB": req_mem},
+    }
+
+    cpu_changes = (req_cpu_count is not None and req_cpu_count != from_sizing["cpu_count"]) or (
+        req_cores is not None and req_cores != from_sizing["cores_per_socket"]
+    )
+    mem_changes = req_mem is not None and req_mem != from_sizing["memory_MiB"]
+    if not cpu_changes and not mem_changes:
+        return {
+            **base,
+            "status": "no_change",
+            "applied": {"cpu": False, "memory": False},
+            "guidance": None,
+        }
+
+    if power_state == "POWERED_ON":
+        reason = _resize_requires_power_off(
+            current=from_sizing,
+            cpu_count=req_cpu_count,
+            cores_per_socket=req_cores,
+            memory_mib=req_mem,
+            cpu_hot_add=bool(cpu_info.get("hot_add_enabled")),
+            memory_hot_add=bool(mem_info.get("hot_add_enabled")),
+        )
+        if reason is not None:
+            return {
+                **base,
+                "status": "requires_power_off",
+                "applied": {"cpu": False, "memory": False},
+                "guidance": reason,
+            }
+
+    applied_cpu = False
+    if cpu_changes:
+        cpu_spec: dict[str, Any] = {}
+        if req_cpu_count is not None:
+            cpu_spec["count"] = req_cpu_count
+        if req_cores is not None:
+            cpu_spec["cores_per_socket"] = req_cores
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_UPDATE_VM_CPU, {"vm": vm_moid, "spec": cpu_spec}
+        )
+        if gate is not None:
+            return gate
+        applied_cpu = True
+
+    if mem_changes:
+        try:
+            gate, _ = await _write_sub_op(
+                connector,
+                target,
+                operator,
+                _OP_UPDATE_VM_MEMORY,
+                {"vm": vm_moid, "spec": {"size_MiB": req_mem}},
+            )
+        except httpx.HTTPError as exc:
+            if applied_cpu:
+                return {
+                    **base,
+                    "status": "partial",
+                    "applied": {"cpu": True, "memory": False},
+                    "guidance": f"CPU applied; memory update failed: {exc}",
+                }
+            raise
+        if gate is not None:
+            return gate
+        return {
+            **base,
+            "status": "resized",
+            "applied": {"cpu": applied_cpu, "memory": True},
+            "guidance": None,
+        }
+
+    return {
+        **base,
+        "status": "resized",
+        "applied": {"cpu": applied_cpu, "memory": False},
+        "guidance": None,
+    }
+
+
+async def vm_nic_repoint_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Repoint an existing vNIC to a different distributed portgroup.
+
+    Op-id: ``vmware.composite.vm.nic.repoint``. Reads the NIC's current
+    backing + MAC via ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}``,
+    resolves the target portgroup by name via ``GET:/vcenter/network``
+    filtered to ``DISTRIBUTED_PORTGROUP`` (the #1602 fix -- no dedicated
+    portgroup list resource), then PATCHes the NIC backing. A name that
+    resolves to zero / many portgroups refuses the repoint
+    (``not_found`` / ``ambiguous``) with no PATCH issued.
+    """
+    vm_moid = params["vm"]
+    nic_id = params["nic"]
+    portgroup_name = params["portgroup_name"]
+
+    nic_info = await _read_ethernet_nic(
+        connector=connector, target=target, operator=operator, vm_moid=vm_moid, nic_id=nic_id
+    )
+    mac_address = nic_info.get("mac_address") if nic_info else None
+    current_backing = nic_info.get("backing") if nic_info else None
+
+    network_moid, resolution, candidates = await _resolve_distributed_portgroup(
+        connector=connector, target=target, operator=operator, portgroup_name=portgroup_name
+    )
+    base = {
+        "vm": vm_moid,
+        "nic": nic_id,
+        "mac_address": mac_address,
+        "current_backing": current_backing,
+        "requested_backing": {"portgroup_id": network_moid, "portgroup_name": portgroup_name},
+    }
+    if resolution == "not_found":
+        return {
+            **base,
+            "status": "not_found",
+            "candidates": [],
+            "guidance": f"no distributed portgroup named {portgroup_name!r}",
+        }
+    if resolution == "ambiguous":
+        return {
+            **base,
+            "status": "ambiguous",
+            "candidates": candidates,
+            "guidance": "multiple distributed portgroups share the name; pass a unique name",
+        }
+
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_UPDATE_VM_NIC,
+        {
+            "vm": vm_moid,
+            "nic": nic_id,
+            "spec": {
+                "backing": {"type": _NETWORK_TYPE_DISTRIBUTED_PORTGROUP, "network": network_moid}
+            },
+        },
+    )
+    if gate is not None:
+        return gate
+    return {**base, "status": "repointed", "candidates": [], "guidance": None}
+
+
+async def vm_device_cdrom_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Remove / update / disconnect a VM CD-ROM device.
+
+    Op-id: ``vmware.composite.vm.device.cdrom``. Reads the device's
+    current backing + state via ``GET:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``
+    (the host-local ISO path the approver needs to see), then dispatches
+    the requested ``action``: ``remove`` (DELETE the device), ``update``
+    (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
+    ``?action=disconnect``). ``update`` without a ``backing`` object
+    returns ``invalid_request`` with no write issued.
+    """
+    vm_moid = params["vm"]
+    cdrom_id = params["cdrom"]
+    action = params["action"]
+
+    cdrom_info = await _read_cdrom(
+        connector=connector, target=target, operator=operator, vm_moid=vm_moid, cdrom_id=cdrom_id
+    )
+    base = {
+        "vm": vm_moid,
+        "cdrom": cdrom_id,
+        "action": action,
+        "current_backing": cdrom_info.get("backing") if cdrom_info else None,
+        "state": cdrom_info.get("state") if cdrom_info else None,
+        "requested_backing": None,
+        "guidance": None,
+    }
+
+    if action == "remove":
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_DELETE_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+        )
+        if gate is not None:
+            return gate
+        return {**base, "status": "removed"}
+
+    if action == "disconnect":
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _OP_DISCONNECT_VM_CDROM, {"vm": vm_moid, "cdrom": cdrom_id}
+        )
+        if gate is not None:
+            return gate
+        return {**base, "status": "disconnected"}
+
+    backing = params.get("backing")
+    if not isinstance(backing, dict):
+        return {
+            **base,
+            "status": "invalid_request",
+            "guidance": "action='update' needs a 'backing' object, e.g. {'type': 'CLIENT_DEVICE'}",
+        }
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_UPDATE_VM_CDROM,
+        {"vm": vm_moid, "cdrom": cdrom_id, "spec": {"backing": backing}},
+    )
+    if gate is not None:
+        return gate
+    return {**base, "status": "updated", "requested_backing": backing}

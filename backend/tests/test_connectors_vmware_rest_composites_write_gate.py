@@ -41,6 +41,7 @@ from meho_backplane.auth.operator import Operator, PrincipalKind, TenantRole
 from meho_backplane.connectors import OperationResult
 from meho_backplane.connectors.vmware_rest._mount import adapt_filter_params
 from meho_backplane.connectors.vmware_rest.composites._write import (
+    vm_clone_from_template_composite,
     vm_create_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -372,5 +373,163 @@ async def test_disk_grow_human_operator_vmomi_write_auto_executes(
     assert out["status"] == "grown"
     # The reconfigure write executed on the session; the sub-op auto-executed.
     assert len(conn.reconfig_writes) == 1
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+
+
+# ===========================================================================
+# vm.clone_from_template — the mutating VI-JSON CloneVM_Task flows through the
+# same gate (#2894)
+# ===========================================================================
+
+
+_CLONE_OP_ID = "POST:/VirtualMachine/{moId}/CloneVM_Task"
+
+
+class _CloneRecordingConnector:
+    """Recording double for the clone-from-template governance tests.
+
+    Serves the template resolution (REST ``GET:/vcenter/vm``), the
+    ``config.template`` assert + ``Task.info`` poll (both vmomi
+    ``RetrievePropertiesEx``, keyed apart by the request body's ``specSet``
+    object type) and records every ``CloneVM_Task`` write, so the tests can
+    assert the mutating vmomi POST never fired when the gate parks / denies.
+    """
+
+    def __init__(self) -> None:
+        self.clone_writes: list[Any] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"/api{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params("/api", query)
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        return {"value": [{"vm": "vm-42", "name": "ubuntu-template"}]}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        if path.endswith("/CloneVM_Task"):
+            self.clone_writes.append(json)
+            return {"type": "Task", "value": "task-clone-1"}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": "vm-42"},
+                        "propSet": [{"name": "config.template", "val": True}],
+                    }
+                ]
+            }
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "Task", "value": "task-clone-1"},
+                    "propSet": [
+                        {
+                            "name": "info",
+                            "val": {
+                                "state": "success",
+                                "result": {"type": "VirtualMachine", "value": "vm-99"},
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+
+def _clone_gate_params() -> dict[str, Any]:
+    return {
+        "source_template": "ubuntu-template",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+    }
+
+
+@pytest.mark.asyncio
+async def test_clone_from_template_gated_vmomi_write_queues_and_never_reaches_wire(
+    session: AsyncSession,
+) -> None:
+    """An agent-gated CloneVM_Task queues for approval; the vmomi write never fires.
+
+    The #2894 gate rides #2893's ``_write_vmomi_sub_op`` seam: a *mutating
+    VI-JSON* CloneVM_Task is a write, not transport detail, so with a
+    ``needs_approval`` grant on the vim method the composite returns
+    ``awaiting_approval``, writes a durable pending row, and issues no clone.
+    """
+    await _grant(
+        principal_sub="agent-write-composite",
+        op_pattern=_CLONE_OP_ID,
+        verdict=PermissionVerdict.NEEDS_APPROVAL,
+    )
+    conn = _CloneRecordingConnector()
+
+    out = await vm_clone_from_template_composite(
+        operator=_operator(),
+        target=None,
+        params=_clone_gate_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _CLONE_OP_ID
+    request_id = uuid.UUID(out.extras["approval_request_id"])
+    row = await session.get(ApprovalRequest, request_id)
+    assert row is not None
+    assert row.op_id == _CLONE_OP_ID
+    assert row.connector_id == "vmware-rest-9.0"
+    assert row.status == ApprovalRequestStatus.PENDING.value
+    # The mutating CloneVM_Task never reached the wire.
+    assert conn.clone_writes == []
+
+
+@pytest.mark.asyncio
+async def test_clone_from_template_dangerous_vmomi_write_denied_without_grant(
+    session: AsyncSession,
+) -> None:
+    """An agent with no grant is denied the dangerous CloneVM_Task; it never runs."""
+    conn = _CloneRecordingConnector()
+    out = await vm_clone_from_template_composite(
+        operator=_operator(sub="agent-no-grant"),
+        target=None,
+        params=_clone_gate_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "denied"
+    assert out.op_id == _CLONE_OP_ID
+    count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
+    assert count == 0
+    assert conn.clone_writes == []
+
+
+@pytest.mark.asyncio
+async def test_clone_from_template_human_operator_vmomi_write_auto_executes(
+    session: AsyncSession,
+) -> None:
+    """A human operator's already-approved composite auto-executes the CloneVM_Task."""
+    conn = _CloneRecordingConnector()
+    out = await vm_clone_from_template_composite(
+        operator=_operator(principal_kind=PrincipalKind.USER, sub="human-op"),
+        target=None,
+        params=_clone_gate_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "cloned"
+    # The CloneVM_Task executed on the session; the sub-op auto-executed.
+    assert len(conn.clone_writes) == 1
     count = await session.scalar(select(func.count()).select_from(ApprovalRequest))
     assert count == 0

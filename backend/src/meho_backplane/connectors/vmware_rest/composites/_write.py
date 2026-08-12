@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: 9 protocol-driven composite handlers for the
+# code-quality-allow: protocol-driven composite handlers for the
 # vSphere REST + VI-JSON write surface ship in one module per the issue
 # body's design; splitting them by group would scatter the shared
 # sub-op_id constants + helpers across files for no readability gain. Each
 # handler's body is the documented orchestration workflow from #509's spec
-# (plus the mutating VI-JSON disk-grow from #2893).
+# (plus the mutating VI-JSON disk-grow from #2893 and folder-template clone
+# from #2894).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (9 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (11 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -102,6 +103,7 @@ __all__ = [
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "vm_clone_composite",
+    "vm_clone_from_template_composite",
     "vm_create_composite",
     "vm_disk_grow_composite",
     "vm_migrate_composite",
@@ -209,6 +211,51 @@ _PROP_CONFIG_HARDWARE_DEVICE = "config.hardware.device"
 # Default wall-clock bound for the ReconfigVM_Task poll — mirrors the 600s
 # ``vm.clone`` convention.
 _DISK_GROW_TASK_TIMEOUT_SECONDS = 600.0
+
+# vim (VI-JSON) op_ids for the folder-template clone write path (#2894).
+# Same ``METHOD:/path`` shape the ingest parser emits from ``vi-json.yaml``
+# (moId rides the path as ``{moId}``); kept out of the ``_SUB_OPS_*``
+# namespace so the vcenter.yaml reconcile sweep skips them (the pinned
+# ``vi-json.yaml`` reconcile lane asserts them instead). ``CloneVM_Task`` is
+# the canonical folder-template deploy API (what govc/terraform use) — the
+# REST ``vm.clone`` content-library path cannot deploy a marked-as-template
+# folder VM, and only the vim path supports inline customization at clone
+# time. ``GetCustomizationSpec`` resolves a stored GOSC spec (by name) to the
+# full ``CustomizationSpec`` embedded inline in the clone; the config read
+# (``RetrievePropertiesEx``, shared with disk-grow) asserts the source is a
+# template.
+_OP_CLONE_VM_TASK = "POST:/VirtualMachine/{moId}/CloneVM_Task"
+_OP_GET_CUSTOMIZATION_SPEC = "POST:/CustomizationSpecManager/{moId}/GetCustomizationSpec"
+
+#: vi-json sub-op manifest for ``vm.clone_from_template`` (parallel to
+#: ``_VIM_SUB_OPS_VM_DISK_GROW``; named out of the ``_SUB_OPS_*`` namespace so
+#: the vcenter.yaml sweep skips it). The pinned ``vi-json.yaml`` reconcile
+#: lane introspects this to assert every declared vim path exists in the spec.
+_VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE: tuple[str, ...] = (
+    _OP_RETRIEVE_PROPERTIES,
+    _OP_GET_CUSTOMIZATION_SPEC,
+    _OP_CLONE_VM_TASK,
+)
+
+# vim ManagedObjectReference type discriminators for the clone placement
+# MoRefs. A vim MoRef serialises as ``{"type": <T>, "value": <moid>}`` — the
+# handler wraps the operator-supplied placement moids into these.
+_FOLDER_MO_TYPE = "Folder"
+_RESOURCE_POOL_MO_TYPE = "ResourcePool"
+_HOST_SYSTEM_MO_TYPE = "HostSystem"
+_DATASTORE_MO_TYPE = "Datastore"
+
+# The vim property the template assert reads off the resolved source VM.
+_PROP_CONFIG_TEMPLATE = "config.template"
+
+# Standard ``ServiceContent.customizationSpecManager`` singleton moid;
+# overridable via the ``customization_spec_manager_moid`` param (mirrors the
+# performance composite's ``perf_manager_moid`` default of ``"PerfMgr"``).
+_DEFAULT_CUSTOMIZATION_SPEC_MANAGER_MOID = "CustomizationSpecManager"
+
+# Default wall-clock bound for the CloneVM_Task poll — mirrors the 600s
+# ``vm.clone`` convention.
+_CLONE_FROM_TEMPLATE_TASK_TIMEOUT_SECONDS = 600.0
 
 
 def _power_vm_op_id(action: str) -> str:
@@ -1749,3 +1796,381 @@ async def vm_disk_grow_composite(
         "delta_bytes": delta,
         "guidance": None,
     }
+
+
+# ===========================================================================
+# vm.clone_from_template (folder-template CloneVM_Task — Task D, #2894)
+# ===========================================================================
+#
+# Clones a *folder VM template* (a marked-as-template VM in a VM folder) via
+# vim ``VirtualMachine.CloneVM_Task``. The existing ``vm.clone`` composite is
+# content-library-only (``POST:/vcenter/vm-template/library-items?action=deploy``)
+# and a folder template has no clone path on the REST surface at all;
+# ``CloneVM_Task`` is the canonical folder-template deploy API (what
+# govc/terraform use) and uniquely supports inline guest customization at
+# clone time. Rides the #2893 substrate: the mutating CloneVM_Task flows
+# through the governed vmomi write seam (:func:`_write_vmomi_sub_op` → the
+# #2254 gate) and the returned ``*_Task`` MoRef is driven to a terminal state
+# via the shared :func:`~...vim_task.poll_vim_task` helper.
+
+
+def _moref(mo_type: str, moid: str) -> dict[str, str]:
+    """A vim ``ManagedObjectReference`` JSON object (``{type, value}``)."""
+    return {"type": mo_type, "value": moid}
+
+
+def _build_config_template_retrieve_params(vm_moid: str) -> dict[str, Any]:
+    """Build the ``RetrievePropertiesEx`` body reading a VM's ``config.template``.
+
+    A single ``PropertyFilterSpec`` scoped to the VirtualMachine requesting
+    ``config.template`` -- the boolean that distinguishes a marked-as-template
+    VM from a regular one. The singleton ``propertyCollector`` moId rides the
+    path, so the body is only the method args (the shape the typed reads +
+    the disk-grow config read send).
+    """
+    return {
+        "specSet": [
+            {
+                "propSet": [{"type": _VIRTUAL_MACHINE_MO_TYPE, "pathSet": [_PROP_CONFIG_TEMPLATE]}],
+                "objectSet": [{"obj": {"type": _VIRTUAL_MACHINE_MO_TYPE, "value": vm_moid}}],
+            }
+        ],
+        "options": {},
+    }
+
+
+def _extract_config_template(retrieve_result: Any, vm_moid: str) -> bool | None:
+    """Pull the ``config.template`` bool off a RetrievePropertiesEx result.
+
+    Returns the boolean when present, else ``None`` (the caller treats an
+    absent / non-bool value as "cannot confirm a template" and refuses the
+    clone). Matches the object by moid when the ``obj`` MoRef is present.
+    """
+    payload = _unwrap_value(retrieve_result)
+    objects = payload.get("objects", []) if isinstance(payload, dict) else payload
+    if not isinstance(objects, list):
+        return None
+    for obj in objects:
+        if not isinstance(obj, dict):
+            continue
+        obj_moid = obj.get("obj", {}).get("value") if isinstance(obj.get("obj"), dict) else None
+        if obj_moid is not None and obj_moid != vm_moid:
+            continue
+        for prop in obj.get("propSet", []) or []:
+            if isinstance(prop, dict) and prop.get("name") == _PROP_CONFIG_TEMPLATE:
+                val = prop.get("val")
+                return val if isinstance(val, bool) else None
+    return None
+
+
+def _extract_cloned_vm_moid(task_result: Any) -> str | None:
+    """Pull the new VM moid out of a SUCCEEDED CloneVM_Task ``result`` MoRef.
+
+    ``TaskInfo.result`` for ``CloneVM_Task`` is the new VirtualMachine
+    ``ManagedObjectReference`` (``{"type": "VirtualMachine", "value":
+    "vm-99"}``); a bare moid string is tolerated. ``None`` when the shape is
+    neither -- the clone still succeeded, the moid is just unreadable.
+    """
+    if isinstance(task_result, dict):
+        value = task_result.get("value")
+        return value if isinstance(value, str) else None
+    return task_result if isinstance(task_result, str) else None
+
+
+async def _resolve_template_moid(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    name: str,
+) -> tuple[str | None, str | None, list[str]]:
+    """Resolve a source-template display name to a unique VM moid.
+
+    Reads ``GET:/vcenter/vm?filter.names=<name>`` (a read sub-op, un-gated)
+    and returns ``(moid, error_status, candidates)``:
+
+    * ``(moid, None, [])`` -- exactly one match.
+    * ``(None, "template_not_found", [])`` -- no match.
+    * ``(None, "ambiguous_template", [moids])`` -- more than one match; the
+      operator re-issues against an unambiguous moid.
+
+    Name resolution (not a moid param) is the flow the #2894 body prescribes,
+    mirroring the ``vmware.vm.info`` typed read; the ``config.template``
+    assert that follows is what proves the resolved VM is actually a template.
+    """
+    listing = await _read_sub_op(
+        connector, target, operator, _OP_LIST_VMS, {"filter.names": [name]}
+    )
+    rows = _unwrap_value(listing)
+    if not isinstance(rows, list):
+        return None, "template_not_found", []
+    moids = [row["vm"] for row in rows if isinstance(row, dict) and isinstance(row.get("vm"), str)]
+    if not moids:
+        return None, "template_not_found", []
+    if len(moids) > 1:
+        return None, "ambiguous_template", moids
+    return moids[0], None, []
+
+
+async def _resolve_customization_spec(
+    connector: VmwareRestConnector,
+    target: Any,
+    operator: Operator,
+    *,
+    spec_name: str,
+    manager_moid: str,
+) -> dict[str, Any]:
+    """Resolve a stored GOSC spec by name to its inline vim ``CustomizationSpec``.
+
+    vim ``CloneSpec.customization`` takes a full ``CustomizationSpec`` inline,
+    not a by-name reference, so a stored spec (e.g. one created by #2892's
+    ``guest.customization_spec.create``) is resolved to its object form via
+    ``CustomizationSpecManager.GetCustomizationSpec`` (a *read* -- un-gated,
+    routed straight through ``_post_vmomi_json``) and its ``.spec`` field is
+    embedded in the clone. Composing here means the clone yields a customized
+    VM without a separate ``vm.customize`` dispatch. Raises when the spec name
+    does not resolve to a usable ``CustomizationSpecItem`` -- the operator
+    named a customization that vCenter cannot supply, so the clone must not
+    proceed with a silently-uncustomized VM.
+    """
+    item = await connector._post_vmomi_json(
+        target,
+        f"/CustomizationSpecManager/{manager_moid}/GetCustomizationSpec",
+        operator=operator,
+        json={"name": spec_name},
+    )
+    payload = _unwrap_value(item)
+    spec = payload.get("spec") if isinstance(payload, dict) else None
+    if not isinstance(spec, dict):
+        raise RuntimeError(
+            f"vm.clone_from_template: customization spec {spec_name!r} did not resolve to a "
+            f"CustomizationSpecItem with a spec (got {type(spec).__name__}); confirm the GOSC "
+            "spec name exists on this vCenter"
+        )
+    return spec
+
+
+def _build_clone_body(
+    *,
+    new_vm_name: str,
+    folder_moid: str,
+    pool_moid: str,
+    datastore_moid: str,
+    host_moid: str | None,
+    power_on: bool,
+    customization: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Assemble the ``CloneVM_Task`` request body from the placement params.
+
+    Shape (spec-verified against ``vi-json.yaml``): ``CloneVMRequestType`` =
+    ``{folder: Folder-MoRef, name, spec: VirtualMachineCloneSpec}`` where the
+    ``CloneSpec`` carries a ``VirtualMachineRelocateSpec`` ``location``
+    (``pool`` + ``datastore`` MoRefs, optional ``host`` pin), ``template:
+    false`` (clone to a VM, never a template) and ``powerOn``. ``customization``
+    (an inline ``CustomizationSpec``) is added only when a GOSC spec was
+    requested.
+    """
+    location: dict[str, Any] = {
+        "pool": _moref(_RESOURCE_POOL_MO_TYPE, pool_moid),
+        "datastore": _moref(_DATASTORE_MO_TYPE, datastore_moid),
+    }
+    if host_moid is not None:
+        location["host"] = _moref(_HOST_SYSTEM_MO_TYPE, host_moid)
+    clone_spec: dict[str, Any] = {"location": location, "template": False, "powerOn": power_on}
+    if customization is not None:
+        clone_spec["customization"] = customization
+    return {"folder": _moref(_FOLDER_MO_TYPE, folder_moid), "name": new_vm_name, "spec": clone_spec}
+
+
+def _clone_result(
+    status: str,
+    *,
+    source_template: str,
+    new_vm_name: str,
+    folder: str,
+    source_template_id: str | None = None,
+    new_vm_id: str | None = None,
+    task: str | None = None,
+    customization_spec_name: str | None = None,
+    candidates: list[str] | None = None,
+    guidance: str | None = None,
+) -> dict[str, Any]:
+    """Build the uniform ``vm.clone_from_template`` response envelope."""
+    return {
+        "status": status,
+        "source_template": source_template,
+        "source_template_id": source_template_id,
+        "new_vm_name": new_vm_name,
+        "new_vm_id": new_vm_id,
+        "folder": folder,
+        "task": task,
+        "customization_spec_name": customization_spec_name,
+        "candidates": candidates,
+        "guidance": guidance,
+    }
+
+
+async def vm_clone_from_template_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Clone a folder VM template via ``CloneVM_Task``, with optional GOSC.
+
+    Op-id: ``vmware.composite.vm.clone_from_template``. The folder-template
+    counterpart to ``vm.clone`` (content-library only). Flow:
+
+    1. Resolve ``source_template`` (a display name) to a unique VM moid via
+       ``GET:/vcenter/vm?filter.names=`` -- refuse on no / multiple matches.
+    2. Assert the resolved VM is a template (``config.template`` via a vmomi
+       ``RetrievePropertiesEx`` *read*) -- refuse a non-template source with
+       ``status='not_a_template'`` before any clone.
+    3. When ``customization_spec_name`` is set, resolve the stored GOSC spec
+       to its inline ``CustomizationSpec`` (``CustomizationSpecManager.
+       GetCustomizationSpec``) so the clone customizes in one dispatch.
+    4. Issue ``CloneVM_Task`` through the governed vmomi write seam
+       (:func:`_write_vmomi_sub_op` → the #2254 gate); a parked/denied gate
+       returns the :class:`OperationResult` verbatim and no clone fires.
+    5. Poll the returned Task to terminal via
+       :func:`~...vim_task.poll_vim_task`. A fault raises (dispatcher wraps
+       ``connector_error``, mirroring ``vm.disk.grow``); a timeout returns
+       ``status='timeout'`` with the task id; success returns
+       ``status='cloned'`` with the new VM moid from ``TaskInfo.result``.
+    """
+    source_template = params["source_template"]
+    new_vm_name = params["new_vm_name"]
+    folder_moid = params["folder"]
+    pool_moid = params["resource_pool"]
+    datastore_moid = params["datastore"]
+    host_moid = params.get("host")
+    power_on = bool(params.get("power_on", False))
+    customization_spec_name = params.get("customization_spec_name")
+    manager_moid = params.get(
+        "customization_spec_manager_moid", _DEFAULT_CUSTOMIZATION_SPEC_MANAGER_MOID
+    )
+
+    template_moid, resolve_error, candidates = await _resolve_template_moid(
+        connector, target, operator, name=source_template
+    )
+    if resolve_error is not None:
+        return _clone_result(
+            resolve_error,
+            source_template=source_template,
+            new_vm_name=new_vm_name,
+            folder=folder_moid,
+            candidates=candidates or None,
+            guidance=(
+                f"source_template {source_template!r} matched "
+                f"{'no VM' if resolve_error == 'template_not_found' else 'more than one VM'}; "
+                "re-issue against an unambiguous marked-as-template VM"
+            ),
+        )
+    # ``resolve_error is None`` implies a unique moid resolved (the two are
+    # correlated in ``_resolve_template_moid``'s return contract).
+    assert template_moid is not None
+
+    template_check = await connector._post_vmomi_json(
+        target,
+        _VMOMI_RETRIEVE_PROPERTIES_PATH,
+        operator=operator,
+        json=_build_config_template_retrieve_params(template_moid),
+    )
+    if _extract_config_template(template_check, template_moid) is not True:
+        return _clone_result(
+            "not_a_template",
+            source_template=source_template,
+            source_template_id=template_moid,
+            new_vm_name=new_vm_name,
+            folder=folder_moid,
+            guidance=(
+                f"{source_template!r} ({template_moid}) is not a marked-as-template VM "
+                "(config.template is not true); mark it as a template or clone it with "
+                "vmware.composite.vm.clone (content-library) instead"
+            ),
+        )
+
+    customization = None
+    if customization_spec_name is not None:
+        customization = await _resolve_customization_spec(
+            connector,
+            target,
+            operator,
+            spec_name=customization_spec_name,
+            manager_moid=manager_moid,
+        )
+
+    clone_body = _build_clone_body(
+        new_vm_name=new_vm_name,
+        folder_moid=folder_moid,
+        pool_moid=pool_moid,
+        datastore_moid=datastore_moid,
+        host_moid=host_moid,
+        power_on=power_on,
+        customization=customization,
+    )
+    # Identity-only gate params: they name the blast radius (source, target,
+    # placement, spec *name*) for the durable ApprovalRequest without ever
+    # serialising the resolved CustomizationSpec's secret-bearing fields
+    # (GOSC secret hygiene, #1503).
+    gate_params = {
+        "source_template": source_template,
+        "source_template_id": template_moid,
+        "new_vm_name": new_vm_name,
+        "folder": folder_moid,
+        "resource_pool": pool_moid,
+        "datastore": datastore_moid,
+        "host": host_moid,
+        "power_on": power_on,
+        "customization_spec_name": customization_spec_name,
+    }
+    gate, task_payload = await _write_vmomi_sub_op(
+        connector,
+        target,
+        operator,
+        op_id=_OP_CLONE_VM_TASK,
+        vmomi_path=f"/VirtualMachine/{template_moid}/CloneVM_Task",
+        body=clone_body,
+        params=gate_params,
+    )
+    if gate is not None:
+        return gate
+
+    outcome = await poll_vim_task(
+        connector,
+        target,
+        operator,
+        task=_unwrap_value(task_payload),
+        timeout_seconds=_CLONE_FROM_TEMPLATE_TASK_TIMEOUT_SECONDS,
+    )
+    if outcome.state == "error":
+        raise RuntimeError(
+            f"vm.clone_from_template: CloneVM_Task cloning {source_template!r} ({template_moid}) "
+            f"to {new_vm_name!r} faulted: {outcome.error_message or '<no fault reported>'}"
+        )
+    if outcome.timed_out:
+        return _clone_result(
+            "timeout",
+            source_template=source_template,
+            source_template_id=template_moid,
+            new_vm_name=new_vm_name,
+            folder=folder_moid,
+            task=outcome.task,
+            customization_spec_name=customization_spec_name,
+            guidance=(
+                f"CloneVM_Task {outcome.task} did not reach a terminal state within "
+                f"{int(_CLONE_FROM_TEMPLATE_TASK_TIMEOUT_SECONDS)}s; poll the task or list the "
+                f"folder — the clone {new_vm_name!r} may still complete in the background"
+            ),
+        )
+    return _clone_result(
+        "cloned",
+        source_template=source_template,
+        source_template_id=template_moid,
+        new_vm_name=new_vm_name,
+        new_vm_id=_extract_cloned_vm_moid(outcome.result),
+        folder=folder_moid,
+        task=outcome.task,
+        customization_spec_name=customization_spec_name,
+    )

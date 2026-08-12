@@ -327,3 +327,74 @@ def test_vm_disk_grow_vi_json_paths_exist_in_the_pinned_spec() -> None:
             f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
             "disk-grow vi-json sub-op targets a path the spec does not serve"
         )
+
+
+# ---------------------------------------------------------------------------
+# vm.clone_from_template VI-JSON sub-op reconciliation (#2894)
+# ---------------------------------------------------------------------------
+#
+# vm.clone_from_template's mutating path is vi-json, not vcenter REST:
+# ``POST:/VirtualMachine/{moId}/CloneVM_Task`` (the folder-template clone) plus
+# its config-template assert read
+# ``POST:/PropertyCollector/{moId}/RetrievePropertiesEx`` and the optional GOSC
+# resolve ``POST:/CustomizationSpecManager/{moId}/GetCustomizationSpec``. These
+# are declared in ``_write._VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE`` (deliberately
+# NOT in the ``_SUB_OPS_*`` namespace, so the vcenter.yaml sweep above skips
+# them). Same ``METHOD:/path`` keying as disk-grow — the moId rides the path as
+# ``{moId}`` — so the same reconciliation proof applies, and it is additionally
+# checked against the pinned ``vi-json.yaml`` when the spec-shelf is configured.
+
+
+def test_vm_clone_from_template_vi_json_sub_op_manifest_is_the_expected_triple() -> None:
+    """Pin the clone manifest so a drift can't shrink the reconcile."""
+    assert set(_write._VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE) == {
+        "POST:/VirtualMachine/{moId}/CloneVM_Task",
+        "POST:/PropertyCollector/{moId}/RetrievePropertiesEx",
+        "POST:/CustomizationSpecManager/{moId}/GetCustomizationSpec",
+    }
+
+
+def test_vm_clone_from_template_vi_json_sub_ops_round_trip_through_ingest() -> None:
+    """The clone vi-json op_ids are byte-for-byte what the parser emits.
+
+    Proves the ``METHOD:/path`` op_id strings the composite gates on match what
+    ``parse_openapi`` produces from a vi-json-shaped spec (the ``{moId}`` path
+    template survives), so ``enforce_subop_policy``'s op_id / a grant's
+    op_pattern resolve against the ingested rows once the operator ingests
+    ``vi-json.yaml`` — the vi-json analogue of the vcenter reconcile above.
+    """
+    required = set(_write._VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE)
+    spec = _build_vcenter_fixture(required)
+    spec_bytes = json.dumps(spec).encode()
+    spec_url = "https://specs.example.test/vi-json.yaml"
+
+    with _GETADDRINFO_PATCH, respx.mock(assert_all_called=False) as router:
+        router.get(spec_url).mock(
+            return_value=httpx.Response(
+                200, content=spec_bytes, headers={"content-type": "application/json"}
+            )
+        )
+        rows = parse_openapi(spec_url, spec_source="spec:vi-json.yaml")
+    ingested_op_ids = {row.op_id for row in rows}
+    assert required <= ingested_op_ids
+
+
+def test_vm_clone_from_template_vi_json_paths_exist_in_the_pinned_spec() -> None:
+    """Each clone vi-json sub-op path is a real POST path in the pinned vi-json.yaml.
+
+    The definitive #2894 grounding: the folder-template clone's mutating call
+    (and its config-template assert + GOSC resolve reads) must target paths
+    that actually exist in the pinned spec. Skips when the spec-shelf is not
+    configured (the canary's convention), so CI — where the env vars are wired
+    — is the operator-visible signal.
+    """
+    spec_path = resolve_vi_json_yaml()
+    if spec_path is None:
+        pytest.skip(VCENTER_SPEC_REASON)
+    spec_text = spec_path.read_text(encoding="utf-8")
+    for op_id in _write._VIM_SUB_OPS_VM_CLONE_FROM_TEMPLATE:
+        _, _, path = op_id.partition(":")
+        assert _vi_json_path_item_has_post(spec_text, path), (
+            f"{path!r} is not a POST path item in the pinned vi-json.yaml — the "
+            "clone-from-template vi-json sub-op targets a path the spec does not serve"
+        )

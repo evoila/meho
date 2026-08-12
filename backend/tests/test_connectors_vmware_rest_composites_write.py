@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 10 vmware-rest write-composite handler functions.
+"""Unit tests for the 11 vmware-rest write-composite handler functions.
 
 Post-#2256 the write composites dispatch their sub-ops **directly on the
 connector session** -- ``connector._get_json`` / ``connector._post_json``
@@ -57,6 +57,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
+    vm_clone_from_template_composite,
     vm_create_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -1454,5 +1455,469 @@ async def test_vm_disk_grow_reconfig_body_reaches_the_wire_respx(
         assert change["device"]["_typeName"] == "VirtualDisk"
         assert change["device"]["key"] == 2000
         assert change["device"]["capacityInBytes"] == _TWENTY_GIB
+    finally:
+        await connector.aclose()
+
+
+# ===========================================================================
+# vm.clone_from_template (folder-template CloneVM_Task — Task D, #2894)
+# ===========================================================================
+
+
+_CLONE_OP_ID = "POST:/VirtualMachine/{moId}/CloneVM_Task"
+_TEMPLATE_ROWS = [{"vm": "vm-42", "name": "ubuntu-2404-template"}]
+# A minimal-but-valid vim CustomizationSpec shape (identity + globalIPSettings
+# are the required fields per vi-json.yaml); the handler embeds whatever
+# GetCustomizationSpec returns verbatim, so the exact contents are opaque.
+_RESOLVED_GOSC_SPEC = {
+    "_typeName": "CustomizationSpec",
+    "identity": {"_typeName": "CustomizationLinuxPrep", "hostName": {"name": "web-01"}},
+    "globalIPSettings": {"_typeName": "CustomizationGlobalIPSettings"},
+}
+
+
+class _CloneFromTemplateConnector:
+    """Recording double serving the clone-from-template REST + VI-JSON sub-ops.
+
+    ``vm.clone_from_template`` resolves the template name (REST
+    ``GET:/vcenter/vm``), asserts ``config.template`` (vmomi
+    ``RetrievePropertiesEx`` on a VirtualMachine), optionally resolves a GOSC
+    spec (``GetCustomizationSpec``), writes ``CloneVM_Task``, then polls
+    ``Task.info`` (``RetrievePropertiesEx`` on a Task). The two
+    ``RetrievePropertiesEx`` reads are keyed apart by the request body's
+    ``specSet`` object type — exactly the seam a real vCenter keys them by.
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(
+        self,
+        *,
+        template_rows: list[dict[str, Any]] | None = None,
+        is_template: bool = True,
+        task_state: str = "success",
+        task_error: str | None = None,
+        task_result: Any = None,
+        customization_spec: dict[str, Any] | None = None,
+        clone_task: str = "task-clone-1",
+    ) -> None:
+        self.template_rows = _TEMPLATE_ROWS if template_rows is None else template_rows
+        self.is_template = is_template
+        self.task_state = task_state
+        self.task_error = task_error
+        self.task_result = (
+            task_result
+            if task_result is not None
+            else {
+                "_typeName": "ManagedObjectReference",
+                "type": "VirtualMachine",
+                "value": "vm-99",
+            }
+        )
+        self.customization_spec = customization_spec
+        self.clone_task = clone_task
+        self.rest_calls: list[tuple[str, Any]] = []
+        self.vmomi_calls: list[tuple[str, Any]] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    def _spec(self, path: str) -> str:
+        return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        spec = self._spec(path)
+        self.rest_calls.append((spec, params))
+        if spec == "/vcenter/vm":
+            return {"value": self.template_rows}
+        return {"value": {}}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append((path, json))
+        if path.endswith("/CloneVM_Task"):
+            return {"type": "Task", "value": self.clone_task}
+        if path.endswith("/GetCustomizationSpec"):
+            return {"spec": self.customization_spec}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            moid = json["specSet"][0]["objectSet"][0]["obj"]["value"]
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": moid},
+                        "propSet": [{"name": "config.template", "val": self.is_template}],
+                    }
+                ]
+            }
+        info: dict[str, Any] = {"state": self.task_state}
+        if self.task_error is not None:
+            info["error"] = {"localizedMessage": self.task_error}
+        if self.task_state == "success":
+            info["result"] = self.task_result
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "Task", "value": self.clone_task},
+                    "propSet": [{"name": "info", "val": info}],
+                }
+            ]
+        }
+
+    @property
+    def clone_bodies(self) -> list[Any]:
+        return [body for path, body in self.vmomi_calls if path.endswith("/CloneVM_Task")]
+
+    @property
+    def get_customization_calls(self) -> list[tuple[str, Any]]:
+        return [(p, b) for p, b in self.vmomi_calls if p.endswith("/GetCustomizationSpec")]
+
+
+def _clone_params(**overrides: Any) -> dict[str, Any]:
+    """Schema-valid clone params with the required placement moids filled in."""
+    params: dict[str, Any] = {
+        "source_template": "ubuntu-2404-template",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+    }
+    params.update(overrides)
+    return params
+
+
+async def test_vm_clone_from_template_happy_path_clones_and_polls(gate: _GateRecorder) -> None:
+    """Resolve template -> assert template -> gated CloneVM_Task -> poll -> status=cloned."""
+    conn = _CloneFromTemplateConnector()
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(power_on=True),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "cloned"
+    assert out["source_template"] == "ubuntu-2404-template"
+    assert out["source_template_id"] == "vm-42"
+    assert out["new_vm_name"] == "web-01"
+    assert out["new_vm_id"] == "vm-99"
+    assert out["folder"] == "group-v10"
+    assert out["task"] == "task-clone-1"
+    assert out["customization_spec_name"] is None
+
+    # The template name was resolved via GET:/vcenter/vm and the CloneVM_Task
+    # was issued on the resolved template moid.
+    assert ("/vcenter/vm", {"names": ["ubuntu-2404-template"]}) in conn.rest_calls
+    clone_paths = [p for p, _ in conn.vmomi_calls if p.endswith("/CloneVM_Task")]
+    assert clone_paths == ["/VirtualMachine/vm-42/CloneVM_Task"]
+
+    # The single mutating sub-op was gated with the vi-json CloneVM_Task op_id
+    # + identity-only params (never the resolved CustomizationSpec).
+    assert gate.gated_op_ids == [_CLONE_OP_ID]
+    gated = gate.calls[0]
+    assert gated["safety_level"] == "dangerous"
+    assert gated["requires_approval"] is False
+    assert gated["params"] == {
+        "source_template": "ubuntu-2404-template",
+        "source_template_id": "vm-42",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+        "host": None,
+        "power_on": True,
+        "customization_spec_name": None,
+    }
+
+    # The CloneVM_Task body: folder MoRef + name + CloneSpec (template:false,
+    # powerOn, relocate placement pool+datastore, no host pin, no customization).
+    assert len(conn.clone_bodies) == 1
+    body = conn.clone_bodies[0]
+    assert body["folder"] == {"type": "Folder", "value": "group-v10"}
+    assert body["name"] == "web-01"
+    spec = body["spec"]
+    assert spec["template"] is False
+    assert spec["powerOn"] is True
+    assert spec["location"]["pool"] == {"type": "ResourcePool", "value": "resgroup-8"}
+    assert spec["location"]["datastore"] == {"type": "Datastore", "value": "datastore-15"}
+    assert "host" not in spec["location"]
+    assert "customization" not in spec
+
+
+async def test_vm_clone_from_template_host_pin_included_when_given(gate: _GateRecorder) -> None:
+    """An explicit host moid rides the RelocateSpec as a HostSystem MoRef."""
+    conn = _CloneFromTemplateConnector()
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(host="host-19"),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "cloned"
+    body = conn.clone_bodies[0]
+    assert body["spec"]["location"]["host"] == {"type": "HostSystem", "value": "host-19"}
+    assert gate.calls[0]["params"]["host"] == "host-19"
+
+
+async def test_vm_clone_from_template_with_customization_embeds_resolved_spec(
+    gate: _GateRecorder,
+) -> None:
+    """customization_spec_name -> GetCustomizationSpec -> spec embedded inline (composes #2892).
+
+    Proves acceptance criterion 3: a clone with ``customization_spec_name``
+    yields a customized clone in one dispatch — the resolved
+    ``CustomizationSpec`` rides the ``CloneSpec.customization`` field, with no
+    separate ``vm.customize`` call, and the gate params echo only the spec
+    *name* (never the secret-bearing spec contents).
+    """
+    conn = _CloneFromTemplateConnector(customization_spec=_RESOLVED_GOSC_SPEC)
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(customization_spec_name="linux-web-gosc"),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "cloned"
+    assert out["customization_spec_name"] == "linux-web-gosc"
+
+    # The GOSC spec was resolved by name on the CustomizationSpecManager singleton.
+    assert conn.get_customization_calls == [
+        (
+            "/CustomizationSpecManager/CustomizationSpecManager/GetCustomizationSpec",
+            {"name": "linux-web-gosc"},
+        )
+    ]
+    # The resolved spec is embedded verbatim into CloneSpec.customization.
+    assert conn.clone_bodies[0]["spec"]["customization"] == _RESOLVED_GOSC_SPEC
+    # The gate params carry the spec name, NOT the resolved secret-bearing spec.
+    assert gate.calls[0]["params"]["customization_spec_name"] == "linux-web-gosc"
+    assert "customization" not in gate.calls[0]["params"]
+
+
+async def test_vm_clone_from_template_custom_manager_moid_overrides_default(
+    gate: _GateRecorder,
+) -> None:
+    """An operator-supplied customization_spec_manager_moid is used for the resolve."""
+    conn = _CloneFromTemplateConnector(customization_spec=_RESOLVED_GOSC_SPEC)
+    await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(
+            customization_spec_name="linux-web-gosc",
+            customization_spec_manager_moid="custom-spec-mgr",
+        ),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert conn.get_customization_calls[0][0] == (
+        "/CustomizationSpecManager/custom-spec-mgr/GetCustomizationSpec"
+    )
+
+
+async def test_vm_clone_from_template_refuses_non_template_source(gate: _GateRecorder) -> None:
+    """A resolved-but-non-template source is refused before any clone; no gate."""
+    conn = _CloneFromTemplateConnector(is_template=False)
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "not_a_template"
+    assert out["source_template_id"] == "vm-42"
+    assert out["task"] is None
+    # The config.template read fired; no CloneVM_Task, never gated.
+    assert conn.clone_bodies == []
+    assert gate.calls == []
+
+
+async def test_vm_clone_from_template_template_not_found(gate: _GateRecorder) -> None:
+    """An unresolvable source name -> template_not_found; no template read, no gate."""
+    conn = _CloneFromTemplateConnector(template_rows=[])
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "template_not_found"
+    assert out["source_template_id"] is None
+    assert conn.clone_bodies == []
+    assert conn.vmomi_calls == []
+    assert gate.calls == []
+
+
+async def test_vm_clone_from_template_ambiguous_template(gate: _GateRecorder) -> None:
+    """A source name matching >1 VM -> ambiguous_template with candidate moids; no gate."""
+    conn = _CloneFromTemplateConnector(
+        template_rows=[{"vm": "vm-42", "name": "dup"}, {"vm": "vm-43", "name": "dup"}]
+    )
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(source_template="dup"),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "ambiguous_template"
+    assert out["candidates"] == ["vm-42", "vm-43"]
+    assert out["source_template_id"] is None
+    assert conn.clone_bodies == []
+    assert gate.calls == []
+
+
+async def test_vm_clone_from_template_gate_short_circuits_before_the_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the CloneVM_Task write returns verbatim; no clone fires."""
+    gate = _install_gate(
+        monkeypatch,
+        _GateRecorder(gate_for={_CLONE_OP_ID: _awaiting(_CLONE_OP_ID)}),
+    )
+    conn = _CloneFromTemplateConnector()
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert out.op_id == _CLONE_OP_ID
+    # The resolve + template reads fired; the CloneVM_Task write was gated off the wire.
+    assert conn.clone_bodies == []
+    assert gate.gated_op_ids == [_CLONE_OP_ID]
+
+
+async def test_vm_clone_from_template_task_fault_raises(gate: _GateRecorder) -> None:
+    """A terminal CloneVM_Task error raises (the dispatcher wraps it connector_error)."""
+    conn = _CloneFromTemplateConnector(
+        task_state="error",
+        task_error="The name 'web-01' already exists.",
+    )
+    with pytest.raises(RuntimeError, match="already exists"):
+        await vm_clone_from_template_composite(
+            operator=_make_operator(),
+            target=object(),
+            params=_clone_params(),
+            connector=conn,  # type: ignore[arg-type]
+        )
+
+
+async def test_vm_clone_from_template_poll_timeout_returns_timeout_status(
+    monkeypatch: pytest.MonkeyPatch, gate: _GateRecorder
+) -> None:
+    """A poll that never sees a terminal state returns status=timeout with the task id."""
+    monkeypatch.setattr(_write, "_CLONE_FROM_TEMPLATE_TASK_TIMEOUT_SECONDS", 0.0)
+    conn = _CloneFromTemplateConnector(task_state="running")
+    out = await vm_clone_from_template_composite(
+        operator=_make_operator(),
+        target=object(),
+        params=_clone_params(),
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, dict)
+    assert out["status"] == "timeout"
+    assert out["task"] == "task-clone-1"
+    assert out["new_vm_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# respx-verified CloneVM_Task wire body (through a real connector)
+# ---------------------------------------------------------------------------
+
+
+async def test_vm_clone_from_template_clone_body_reaches_the_wire_respx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """respx-verified: the CloneVM_Task POST body carries template:false + the
+    relocate placement, mounted on the /sdk/vim25 base.
+
+    Drives the real handler through a real ``VmwareRestConnector`` over an
+    httpx (respx) transport, so the assertion is on the actual wire bytes, not
+    a recording double. The #2254 gate is auto-executed here (its governance
+    is proven end-to-end in the gate + e2e lanes) so the write reaches the wire.
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+
+    base = "https://vc-clone.test.invalid"
+    vijson = "/sdk/vim25/8.0.3.0"
+    template_check = {
+        "objects": [
+            {
+                "obj": {"type": "VirtualMachine", "value": "vm-42"},
+                "propSet": [{"name": "config.template", "val": True}],
+            }
+        ]
+    }
+    task_poll = {
+        "objects": [
+            {
+                "obj": {"type": "Task", "value": "task-1"},
+                "propSet": [
+                    {
+                        "name": "info",
+                        "val": {
+                            "state": "success",
+                            "result": {"type": "VirtualMachine", "value": "vm-99"},
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    connector = VmwareRestConnector(session_loader=_stub_loader)
+    _patch_no_revoke_aclose(connector)
+    try:
+        async with respx.mock(base_url=base) as mock:
+            mock.post("/api/session").respond(200, json="tok")
+            mock.get("/api/about").respond(200, json={"version": "8.0.3"})
+            mock.get("/api/vcenter/vm").respond(200, json={"value": _TEMPLATE_ROWS})
+            # config.template read then Task poll share the RetrievePropertiesEx URL.
+            mock.post(f"{vijson}/PropertyCollector/propertyCollector/RetrievePropertiesEx").mock(
+                side_effect=[
+                    httpx.Response(200, json=template_check),
+                    httpx.Response(200, json=task_poll),
+                ]
+            )
+            clone = mock.post(f"{vijson}/VirtualMachine/vm-42/CloneVM_Task").respond(
+                200, json={"type": "Task", "value": "task-1"}
+            )
+            out = await vm_clone_from_template_composite(
+                operator=_make_operator(),
+                target=_StubTarget(name="vc-clone", host="vc-clone.test.invalid"),
+                params=_clone_params(power_on=True),
+                connector=connector,
+            )
+        assert isinstance(out, dict)
+        assert out["status"] == "cloned"
+        assert out["new_vm_id"] == "vm-99"
+        assert clone.called
+        body = json.loads(clone.calls[0].request.content)
+        assert body["folder"] == {"type": "Folder", "value": "group-v10"}
+        assert body["name"] == "web-01"
+        assert body["spec"]["template"] is False
+        assert body["spec"]["powerOn"] is True
+        assert body["spec"]["location"]["pool"] == {"type": "ResourcePool", "value": "resgroup-8"}
+        assert body["spec"]["location"]["datastore"] == {
+            "type": "Datastore",
+            "value": "datastore-15",
+        }
     finally:
         await connector.aclose()

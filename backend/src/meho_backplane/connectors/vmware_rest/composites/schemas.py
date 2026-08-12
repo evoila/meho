@@ -56,6 +56,8 @@ __all__ = [
     "NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA",
     "PERFORMANCE_SUMMARY_PARAMETER_SCHEMA",
     "PERFORMANCE_SUMMARY_RESPONSE_SCHEMA",
+    "VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA",
+    "VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA",
     "VM_CLONE_PARAMETER_SCHEMA",
     "VM_CLONE_RESPONSE_SCHEMA",
     "VM_CREATE_PARAMETER_SCHEMA",
@@ -690,6 +692,116 @@ VM_CLONE_PARAMETER_SCHEMA: dict[str, Any] = {
 }
 
 
+#: ``vmware.composite.vm.clone_from_template`` parameter schema.
+#:
+#: Clones a **folder VM template** (a marked-as-template VM) via vim
+#: ``VirtualMachine.CloneVM_Task`` — the path ``vm.clone`` (content-library
+#: only) cannot serve. Placement moids (``folder`` / ``resource_pool`` /
+#: ``datastore`` / ``host``) are vim MoRef values the operator resolves from
+#: list ops; ``source_template`` is a display **name** resolved to a moid at
+#: dispatch time and asserted to be a template before any clone fires.
+VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "source_template": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the source **folder VM template** (a "
+                "marked-as-template VM). Resolved to a moid via "
+                "``GET:/vcenter/vm?filter.names=`` and asserted to carry "
+                "``config.template=true`` (PropertyCollector read) before any "
+                "clone is issued — a non-template source is refused with "
+                "``status='not_a_template'``, an unknown name with "
+                "``'template_not_found'``, an ambiguous name with "
+                "``'ambiguous_template'``."
+            ),
+        },
+        "new_vm_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Display name for the newly cloned virtual machine.",
+        },
+        "folder": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Destination VM ``Folder`` moid (e.g. 'group-v42'). The "
+                "``CloneVM_Task`` ``folder`` argument — where the new VM is "
+                "placed in the inventory tree."
+            ),
+        },
+        "resource_pool": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "``ResourcePool`` moid the clone attaches to (e.g. "
+                "'resgroup-8'). Required by vim for a template→VM clone — it "
+                "determines the compute resources available to the clone. For "
+                "a DRS cluster, pass the cluster's root resource pool moid."
+            ),
+        },
+        "datastore": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "``Datastore`` moid the clone's files are copied to (e.g. "
+                "'datastore-15'). Always required — it names where the new "
+                "VM lands on physical storage."
+            ),
+        },
+        "host": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional ``HostSystem`` moid to pin the clone onto a specific "
+                "host (e.g. 'host-19'). When unset the resource pool (and DRS, "
+                "if enabled) place the VM."
+            ),
+        },
+        "power_on": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Power the clone on after creation (``CloneSpec.powerOn``). "
+                "When a customization spec is applied, the first power-on "
+                "completes the guest customization; defaults to false."
+            ),
+        },
+        "customization_spec_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional name of an existing guest OS customization "
+                "specification (GOSC, e.g. one created by "
+                "``vmware.composite.guest.customization_spec.create``). "
+                "Resolved to its full ``CustomizationSpec`` via vim "
+                "``CustomizationSpecManager.GetCustomizationSpec`` and applied "
+                "inline in the clone (``CloneSpec.customization``), so the "
+                "clone yields a customized VM without a separate customize "
+                "dispatch. Secret-bearing customization fields are never "
+                "echoed onto the approval preview — only the spec name is."
+            ),
+        },
+        "customization_spec_manager_moid": {
+            "type": "string",
+            "minLength": 1,
+            "default": "CustomizationSpecManager",
+            "description": (
+                "vim ``CustomizationSpecManager`` singleton moid used to "
+                "resolve ``customization_spec_name``. Defaults to the standard "
+                "``ServiceContent.customizationSpecManager`` value; overridable "
+                "for a deploy whose singleton moid differs (mirrors the "
+                "performance composite's ``perf_manager_moid``). Ignored when "
+                "``customization_spec_name`` is unset."
+            ),
+        },
+    },
+    "required": ["source_template", "new_vm_name", "folder", "resource_pool", "datastore"],
+    "additionalProperties": False,
+}
+
+
 #: ``vmware.composite.vm.snapshot.revert`` parameter schema.
 #:
 #: Idempotent revert by snapshot name. Ambiguity (multiple snapshots
@@ -1049,6 +1161,94 @@ VM_CLONE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "task_id"],
+}
+
+
+#: ``vmware.composite.vm.clone_from_template`` response schema.
+VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "cloned",
+                "template_not_found",
+                "ambiguous_template",
+                "not_a_template",
+                "timeout",
+            ],
+            "description": (
+                "``'cloned'`` — the CloneVM_Task reached terminal success; "
+                "``'template_not_found'`` — the source name matched no VM; "
+                "``'ambiguous_template'`` — the name matched more than one VM; "
+                "``'not_a_template'`` — the source resolved but is not a "
+                "marked-as-template VM (``config.template`` is not true); "
+                "``'timeout'`` — the clone task did not reach a terminal state "
+                "within the poll bound (it may still complete in the "
+                "background). A vim task *fault* raises (wrapped "
+                "``connector_error``), it is not a status here."
+            ),
+        },
+        "source_template": {
+            "type": "string",
+            "description": "The source template display name that was requested.",
+        },
+        "source_template_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The resolved source VM moid; ``null`` on ``template_not_found`` "
+                "/ ``ambiguous_template`` (nothing uniquely resolved)."
+            ),
+        },
+        "new_vm_name": {
+            "type": "string",
+            "description": "The requested display name for the clone.",
+        },
+        "new_vm_id": {
+            "type": ["string", "null"],
+            "description": (
+                "The cloned VM's moid, read from the CloneVM_Task result on "
+                "success; ``null`` on every non-``cloned`` status."
+            ),
+        },
+        "folder": {
+            "type": "string",
+            "description": "The destination folder moid the clone was placed in.",
+        },
+        "task": {
+            "type": ["string", "null"],
+            "description": (
+                "CloneVM_Task moid — present once the clone write was issued "
+                "(``cloned`` / ``timeout``); ``null`` on the pre-write "
+                "refusals (``template_not_found`` / ``ambiguous_template`` / "
+                "``not_a_template``)."
+            ),
+        },
+        "customization_spec_name": {
+            "type": ["string", "null"],
+            "description": (
+                "Echo of the applied GOSC spec name, or ``null`` when the "
+                "clone requested no inline customization."
+            ),
+        },
+        "candidates": {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+            "description": (
+                "On ``ambiguous_template``, the moids the name matched so the "
+                "operator can re-issue against an unambiguous template; "
+                "``null`` otherwise."
+            ),
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Operator-facing next-step hint on non-``cloned`` statuses; "
+                "``null`` when ``status='cloned'``."
+            ),
+        },
+    },
+    "required": ["status", "source_template", "new_vm_name"],
 }
 
 

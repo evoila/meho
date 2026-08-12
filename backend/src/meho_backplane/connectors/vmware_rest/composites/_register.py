@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 15 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 16 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,9 +26,10 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 10 write
-composites (T6 / #509, single-VM ``vm.power`` / #2301, and the mutating
-VI-JSON ``vm.disk.grow`` / #2893) inherit the T4
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 11 write
+composites (T6 / #509, single-VM ``vm.power`` / #2301, the mutating
+VI-JSON ``vm.disk.grow`` / #2893, and the folder-template
+``vm.clone_from_template`` / #2894) inherit the T4
 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
 the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
@@ -54,6 +55,7 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
+    vm_clone_from_template_composite,
     vm_create_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -78,6 +80,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     NETWORK_PORTGROUP_AUDIT_RESPONSE_SCHEMA,
     PERFORMANCE_SUMMARY_PARAMETER_SCHEMA,
     PERFORMANCE_SUMMARY_RESPONSE_SCHEMA,
+    VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA,
+    VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA,
     VM_CLONE_PARAMETER_SCHEMA,
     VM_CLONE_RESPONSE_SCHEMA,
     VM_CREATE_PARAMETER_SCHEMA,
@@ -171,7 +175,9 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Use for VM-lifecycle write composites: create with NIC "
         "attach + optional power-on (rollback on partial failure), "
         "clone from a content-library template (long-running task "
-        "polling), revert to a named snapshot (ambiguity-rejecting), "
+        "polling) or from a folder VM template (CloneVM_Task, with "
+        "optional inline guest customization), revert to a named "
+        "snapshot (ambiguity-rejecting), "
         "migrate via DRS or explicit host, bulk power across a "
         "filter, or a single-VM power verb (on/off/reset plus a "
         "Tools-mediated guest_shutdown/guest_reboot for one-off "
@@ -493,6 +499,34 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         requires_approval=True,
     ),
     _CompositeSpec(
+        op_id="vmware.composite.vm.clone_from_template",
+        handler=vm_clone_from_template_composite,
+        summary="Clone a folder VM template via CloneVM_Task, with optional inline GOSC.",
+        description=(
+            "Clones a folder VM template (a marked-as-template VM) via vim "
+            "VirtualMachine.CloneVM_Task — the path vm.clone (content-library "
+            "only) cannot serve. Resolves source_template by name "
+            "(GET:/vcenter/vm?filter.names) and asserts config.template "
+            "(PropertyCollector) before any clone, refusing a non-template "
+            "source with status='not_a_template'. Builds the CloneSpec "
+            "placement (folder / resource pool / datastore, optional host), "
+            "optionally resolves customization_spec_name to an inline "
+            "CustomizationSpec via CustomizationSpecManager.GetCustomizationSpec "
+            "(composing with the GOSC surface so the clone customizes in one "
+            "dispatch), issues CloneVM_Task through the same governance seam as "
+            "the REST write composites, and polls the returned Task to a "
+            "terminal state before reporting status='cloned'. The connector's "
+            "folder-template deploy path — what govc/terraform use — and the "
+            "only clone that supports inline customization at clone time."
+        ),
+        parameter_schema=VM_CLONE_FROM_TEMPLATE_PARAMETER_SCHEMA,
+        response_schema=VM_CLONE_FROM_TEMPLATE_RESPONSE_SCHEMA,
+        group_key="vm",
+        tags=["composite", "write", "vm", "lifecycle", "vi-json"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
         op_id="vmware.composite.host.evacuate",
         handler=host_evacuate_composite,
         summary="Migrate every VM off a host (via recursive vm.migrate) then enter maintenance.",
@@ -579,9 +613,10 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 15 composites total -- 5 read (T5 / #508) + 10 write (T6 /
-    #509, single-VM ``vm.power`` / #2301, and the mutating VI-JSON
-    ``vm.disk.grow`` / #2893). (The former
+    Scope: 16 composites total -- 5 read (T5 / #508) + 11 write (T6 /
+    #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
+    ``vm.disk.grow`` / #2893, and the folder-template
+    ``vm.clone_from_template`` / #2894). (The former
     ``host.network_uplinks`` / ``host.vsan_health`` reads were re-shipped
     as typed ops in #2258.)
     Each composite's ``safety_level`` +

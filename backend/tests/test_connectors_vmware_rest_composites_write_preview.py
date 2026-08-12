@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` previews for the 10 vmware write composites.
+"""Park-time ``proposed_effect`` previews for the 11 vmware write composites.
 
 G0.22-T3 (#1608) acceptance criteria, under the post-#2256 direct-session
 model:
@@ -19,9 +19,11 @@ model:
    directly on the connector session (no ``dispatch_child``, no ingested
    descriptor), so the park-time preview works on a fresh boot with zero
    catalog ingest.
-4. All 10 write composites register a builder (5 live-read + 5 param
+4. All 11 write composites register a builder (5 live-read + 6 param
    echo); the wiring test pins the full set. ``vm.disk.grow`` is the fifth
    live-read builder — its from→to capacity delta is a live vCenter read.
+   ``vm.clone_from_template`` is a param-echo builder — its params fully
+   name the blast radius (secret-bearing GOSC contents are never echoed).
 
 Plus the #1628 follow-up: a *failed* live-read preview parks with the
 identifier fields **and** an explicit ``preview_unavailable`` marker +
@@ -68,6 +70,7 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
     {
         "vmware.composite.vm.create",
         "vmware.composite.vm.clone",
+        "vmware.composite.vm.clone_from_template",
         "vmware.composite.vm.snapshot.revert",
         "vmware.composite.vm.migrate",
         "vmware.composite.vm.power",
@@ -290,10 +293,10 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 # ===========================================================================
 
 
-def test_all_ten_write_composites_register_a_preview_builder() -> None:
+def test_all_eleven_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 10
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 11
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -393,6 +396,59 @@ async def test_vm_clone_preview_echoes_clone_coordinates() -> None:
     }
 
 
+async def test_vm_clone_from_template_preview_echoes_clone_coordinates() -> None:
+    """The clone-coordinates echo names the full blast radius, minus GOSC secrets."""
+    preview = await _write_preview._vm_clone_from_template_preview(
+        _make_preview_ctx(
+            {
+                "source_template": "ubuntu-2404-template",
+                "new_vm_name": "web-01",
+                "folder": "group-v10",
+                "resource_pool": "resgroup-8",
+                "datastore": "datastore-15",
+                "host": "host-19",
+                "power_on": True,
+                "customization_spec_name": "linux-web-gosc",
+            }
+        )
+    )
+    assert preview == {
+        "source_template": "ubuntu-2404-template",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+        "host": "host-19",
+        "power_on": True,
+        "customization_spec_name": "linux-web-gosc",
+    }
+
+
+async def test_vm_clone_from_template_preview_defaults_optional_fields_to_none() -> None:
+    """Only the required placement params supplied → host / customization echo as None."""
+    preview = await _write_preview._vm_clone_from_template_preview(
+        _make_preview_ctx(
+            {
+                "source_template": "ubuntu-2404-template",
+                "new_vm_name": "web-01",
+                "folder": "group-v10",
+                "resource_pool": "resgroup-8",
+                "datastore": "datastore-15",
+            }
+        )
+    )
+    assert preview == {
+        "source_template": "ubuntu-2404-template",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+        "host": None,
+        "power_on": False,
+        "customization_spec_name": None,
+    }
+
+
 async def test_vm_snapshot_revert_preview_echoes_revert_coordinates() -> None:
     preview = await _write_preview._vm_snapshot_revert_preview(
         _make_preview_ctx({"vm": "vm-1", "snapshot_name": "pre-upgrade"})
@@ -436,6 +492,7 @@ async def test_echo_builders_decline_on_malformed_params() -> None:
     """Missing required params decline (→ identifier-only default), never raise."""
     assert await _write_preview._vm_create_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_clone_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._vm_clone_from_template_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_snapshot_revert_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_migrate_preview(_make_preview_ctx({})) is None
     assert await _write_preview._vm_power_preview(_make_preview_ctx({})) is None

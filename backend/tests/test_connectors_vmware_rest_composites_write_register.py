@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Registration tests for the 10 vmware-rest write composites.
+"""Registration tests for the 11 vmware-rest write composites.
 
 Coverage matrix (G3.1-T6 / #509 acceptance criteria, plus single-VM
 ``vm.power`` / #2301):
 
-* All 10 expected write ``op_id`` rows land in ``endpoint_descriptor``
+* All 11 expected write ``op_id`` rows land in ``endpoint_descriptor``
   with ``source_kind="composite"``, ``safety_level="dangerous"``,
   ``requires_approval=True`` (T4's defaults intentionally inherited).
 * Each row's ``handler_ref`` resolves to the module-level dotted path
@@ -14,7 +14,7 @@ Coverage matrix (G3.1-T6 / #509 acceptance criteria, plus single-VM
 * Each row's ``group_key`` resolves to ``vm`` / ``host`` / ``cluster``
   per the canary's stub-LLM taxonomy.
 * Combined with #508's 5 read composites, the registrar produces
-  **15 rows** total. (The former host.network_uplinks / host.vsan_health
+  **16 rows** total. (The former host.network_uplinks / host.vsan_health
   reads were re-shipped as typed ops in #2258.)
 * Per-composite ``parameter_schema`` + ``response_schema`` persist
   with the documented required keys.
@@ -45,6 +45,7 @@ from meho_backplane.connectors.vmware_rest.composites import (
     host_evacuate_composite,
     register_vmware_composite_operations,
     vm_clone_composite,
+    vm_clone_from_template_composite,
     vm_create_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -57,11 +58,13 @@ from meho_backplane.db.models import EndpointDescriptor, OperationGroup
 from meho_backplane.operations import reset_dispatcher_caches
 from meho_backplane.settings import get_settings
 
-# 10 write composites (T6 / #509, single-VM vm.power / #2301, and the
-# mutating VI-JSON vm.disk.grow / #2893).
+# 11 write composites (T6 / #509, single-VM vm.power / #2301, the
+# mutating VI-JSON vm.disk.grow / #2893, and the folder-template
+# vm.clone_from_template / #2894).
 _WRITE_OP_IDS: tuple[str, ...] = (
     "vmware.composite.vm.create",
     "vmware.composite.vm.clone",
+    "vmware.composite.vm.clone_from_template",
     "vmware.composite.vm.snapshot.revert",
     "vmware.composite.vm.migrate",
     "vmware.composite.vm.power",
@@ -84,8 +87,8 @@ _READ_OP_IDS: tuple[str, ...] = (
     "vmware.composite.network.portgroup.audit",
 )
 
-# 15 total -- 5 read (T5 / #508) + 10 write (T6 / #509 + vm.power / #2301 +
-# vm.disk.grow / #2893).
+# 16 total -- 5 read (T5 / #508) + 11 write (T6 / #509 + vm.power / #2301 +
+# vm.disk.grow / #2893 + vm.clone_from_template / #2894).
 _ALL_OP_IDS: tuple[str, ...] = _READ_OP_IDS + _WRITE_OP_IDS
 
 
@@ -95,6 +98,9 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
     ),
     "vmware.composite.vm.clone": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_clone_composite"
+    ),
+    "vmware.composite.vm.clone_from_template": (
+        "meho_backplane.connectors.vmware_rest.composites._write.vm_clone_from_template_composite"
     ),
     "vmware.composite.vm.snapshot.revert": (
         "meho_backplane.connectors.vmware_rest.composites._write.vm_snapshot_revert_composite"
@@ -126,6 +132,7 @@ _EXPECTED_HANDLER_REF_BY_OP: dict[str, str] = {
 _EXPECTED_GROUP_KEY_BY_OP: dict[str, str] = {
     "vmware.composite.vm.create": "vm",
     "vmware.composite.vm.clone": "vm",
+    "vmware.composite.vm.clone_from_template": "vm",
     "vmware.composite.vm.snapshot.revert": "vm",
     "vmware.composite.vm.migrate": "vm",
     "vmware.composite.vm.power": "vm",
@@ -182,10 +189,10 @@ async def session() -> AsyncIterator[AsyncSession]:
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_inserts_ten_write_rows(
+async def test_register_vmware_composite_operations_inserts_eleven_write_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar lands all 10 write op_ids in ``endpoint_descriptor``."""
+    """Running the registrar lands all 11 write op_ids in ``endpoint_descriptor``."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -202,10 +209,11 @@ async def test_register_vmware_composite_operations_inserts_ten_write_rows(
 
 
 @pytest.mark.asyncio
-async def test_full_registration_produces_fifteen_composite_rows(
+async def test_full_registration_produces_sixteen_composite_rows(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """5 reads (#508) + 10 writes (#509 + vm.power #2301 + vm.disk.grow #2893) = 15 rows."""
+    """5 reads (#508) + 11 writes (#509 + vm.power #2301 + vm.disk.grow #2893 +
+    vm.clone_from_template #2894) = 16 rows."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     sessionmaker = get_sessionmaker()
     async with sessionmaker() as fresh:
@@ -219,7 +227,7 @@ async def test_full_registration_produces_fifteen_composite_rows(
             .all()
         )
     assert {row.op_id for row in rows} == set(_ALL_OP_IDS)
-    assert len(rows) == 15
+    assert len(rows) == 16
 
 
 @pytest.mark.asyncio
@@ -475,17 +483,17 @@ async def test_write_composite_tags_include_composite_and_write(
 
 
 @pytest.mark.asyncio
-async def test_register_vmware_composite_operations_is_idempotent_across_fifteen(
+async def test_register_vmware_composite_operations_is_idempotent_across_sixteen(
     stub_embedding_service: AsyncMock,
 ) -> None:
-    """Running the registrar twice -> 15 rows total, embedding called 15x once."""
+    """Running the registrar twice -> 16 rows total, embedding called 16x once."""
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     first_count = stub_embedding_service.encode_one.call_count
-    assert first_count == 15
+    assert first_count == 16
 
     await register_vmware_composite_operations(embedding_service=stub_embedding_service)
     # Body-hash skip path -> second run is a no-op for the embedding
-    # pipeline; the row count stays at 15.
+    # pipeline; the row count stays at 16.
     assert stub_embedding_service.encode_one.call_count == first_count
 
     sessionmaker = get_sessionmaker()
@@ -499,7 +507,7 @@ async def test_register_vmware_composite_operations_is_idempotent_across_fifteen
             .scalars()
             .all()
         )
-    assert len(rows) == 15
+    assert len(rows) == 16
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +528,7 @@ def test_all_write_handlers_are_module_level_coroutine_functions() -> None:
     for handler in (
         vm_create_composite,
         vm_clone_composite,
+        vm_clone_from_template_composite,
         vm_snapshot_revert_composite,
         vm_migrate_composite,
         vm_power_composite,

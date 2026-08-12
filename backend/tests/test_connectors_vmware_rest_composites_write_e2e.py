@@ -1101,3 +1101,221 @@ async def test_disk_grow_fresh_boot_dispatchable_without_ingest(
     assert result.status == "ok", result.error
     assert result.result["status"] == "grown"
     assert recorder.reconfig_writes == ["/VirtualMachine/vm-1/ReconfigVM_Task"]
+
+
+# ===========================================================================
+# vm.clone_from_template — mutating VI-JSON: park → approve → resume, #2681
+# envelope (#2894)
+# ===========================================================================
+
+
+class _CloneFromTemplateVmwareConnector:
+    """Recording double for the clone-from-template park→approve→resume E2E.
+
+    ``vm.clone_from_template``'s preview is a pure param-echo (no park-time
+    I/O), so this double is exercised only on dispatch: the template
+    resolution (REST ``GET:/vcenter/vm``) and the VI-JSON sub-ops
+    (``_post_vmomi_json``: the ``config.template`` assert, the
+    ``CloneVM_Task`` write, and the ``Task.info`` poll — the two
+    ``RetrievePropertiesEx`` reads keyed apart by the request body's
+    ``specSet`` object type). Records both surfaces so the test can prove the
+    mutating vmomi write fires only on the approved-resume path.
+    """
+
+    _MOUNT = "/api"
+
+    def __init__(self) -> None:
+        self.rest_calls: list[tuple[str, str]] = []
+        self.vmomi_calls: list[str] = []
+
+    async def mount_op_path(self, target: Any, path: str, operator: Operator) -> str:
+        return f"{self._MOUNT}{path}"
+
+    async def adapt_op_query(
+        self, target: Any, query: dict[str, Any] | None, operator: Operator
+    ) -> dict[str, Any] | None:
+        del target, operator
+        return adapt_filter_params(self._MOUNT, query)
+
+    def _spec(self, path: str) -> str:
+        return path[len(self._MOUNT) :] if path.startswith(self._MOUNT) else path
+
+    async def _get_json(
+        self, target: Any, path: str, *, operator: Operator, params: Any = None
+    ) -> Any:
+        spec = self._spec(path)
+        self.rest_calls.append(("GET", spec))
+        if spec == "/vcenter/vm":
+            return {"value": [{"vm": "vm-42", "name": "ubuntu-template"}]}
+        return {"value": {}}
+
+    async def _post_vmomi_json(
+        self, target: Any, path: str, *, operator: Operator, json: Any = None
+    ) -> Any:
+        self.vmomi_calls.append(path)
+        if path.endswith("/CloneVM_Task"):
+            return {"type": "Task", "value": "task-clone-e2e"}
+        spec_type = json["specSet"][0]["propSet"][0]["type"]
+        if spec_type == "VirtualMachine":
+            return {
+                "objects": [
+                    {
+                        "obj": {"type": "VirtualMachine", "value": "vm-42"},
+                        "propSet": [{"name": "config.template", "val": True}],
+                    }
+                ]
+            }
+        return {
+            "objects": [
+                {
+                    "obj": {"type": "Task", "value": "task-clone-e2e"},
+                    "propSet": [
+                        {
+                            "name": "info",
+                            "val": {
+                                "state": "success",
+                                "result": {"type": "VirtualMachine", "value": "vm-99"},
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+
+    @property
+    def clone_writes(self) -> list[str]:
+        return [p for p in self.vmomi_calls if p.endswith("/CloneVM_Task")]
+
+
+_CLONE_PARAMS: dict[str, Any] = {
+    "source_template": "ubuntu-template",
+    "new_vm_name": "web-01",
+    "folder": "group-v10",
+    "resource_pool": "resgroup-8",
+    "datastore": "datastore-15",
+}
+
+
+@pytest.mark.asyncio
+async def test_clone_from_template_queue_approve_resume_with_2681_envelope(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.clone_from_template: park (with #2681 op-identity envelope) → approve → resume → clone.
+
+    1. A USER dispatch parks at ``awaiting_approval``; the durable row's
+       ``proposed_effect`` carries the uniform #2681 op-identity envelope
+       (``op_id`` / ``connector_id`` / ``target_id`` / ``op_class`` /
+       ``safety_level``) plus the param-echo clone-coordinates preview. No
+       CloneVM_Task fires (the preview is pure param-echo — no reads either).
+    2. A distinct human reviewer approves.
+    3. The ``_approved=True`` resume executes the composite: the template
+       resolution + config.template assert + the (now auto-executed) governed
+       CloneVM_Task + the Task poll run, and the result is ``status='cloned'``.
+    """
+    recorder = _CloneFromTemplateVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+
+    # Step 1: human dispatch -> awaiting_approval; the clone never ran.
+    result1 = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.clone_from_template",
+        target=target,
+        params=_CLONE_PARAMS,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.clone_writes == [], "no clone before approval"
+    # Param-echo preview does no reads.
+    assert recorder.rest_calls == []
+    assert recorder.vmomi_calls == []
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+    assert pending is not None
+    assert pending.target_id == target_id
+    # #2681 uniform op-identity + metadata envelope on the parked row.
+    effect = pending.proposed_effect
+    assert effect["op_id"] == "vmware.composite.vm.clone_from_template"
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert effect["target_id"] == str(target_id)
+    assert effect["op_class"] == "other"
+    assert effect["safety_level"] == "dangerous"
+    assert effect["preview_populated"] is True
+    # The param-echo blast-radius preview — what the approver decides on.
+    assert effect["preview"] == {
+        "source_template": "ubuntu-template",
+        "new_vm_name": "web-01",
+        "folder": "group-v10",
+        "resource_pool": "resgroup-8",
+        "datastore": "datastore-15",
+        "host": None,
+        "power_on": False,
+        "customization_spec_name": None,
+    }
+
+    # Step 2: a distinct human reviewer approves.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=_CLONE_PARAMS)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: resume re-dispatch with the gate bypass -> the clone executes.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.clone_from_template",
+        target=target,
+        params=_CLONE_PARAMS,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == "cloned"
+    assert result2.result["source_template_id"] == "vm-42"
+    assert result2.result["new_vm_id"] == "vm-99"
+    # The mutating CloneVM_Task fired exactly once, on the approved resume.
+    assert recorder.clone_writes == ["/VirtualMachine/vm-42/CloneVM_Task"]
+
+
+@pytest.mark.asyncio
+async def test_clone_from_template_fresh_boot_dispatchable_without_ingest(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.clone_from_template runs to ``cloned`` on the direct session with ZERO ingested rows."""
+    recorder = _CloneFromTemplateVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({"vmware.composite.vm.clone_from_template"}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.clone_from_template",
+        target=_FakeVmwareTarget(),
+        params=_CLONE_PARAMS,
+    )
+    assert "composite_l2_missing" not in (result.error or ""), result.error
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "cloned"
+    assert recorder.clone_writes == ["/VirtualMachine/vm-42/CloneVM_Task"]

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 10 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 11 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 10 write composites onto the per-op preview hook shipped
+This wires all 11 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -25,6 +25,9 @@ helpers, never the mutating sub-ops.
 ``cluster.patch``         ``{cluster, patch_method, resolved, total_resolved}``
 ``vm.create``             echo: name, guest_os, sizing, networks, power-on
 ``vm.clone``              echo: source_vm, target_name, library_item, wait flag
+``vm.clone_from_template`` echo: source_template, new_vm_name, folder,
+                          resource_pool, datastore, host, power_on,
+                          customization_spec_name
 ``vm.snapshot.revert``    echo: vm, snapshot_name
 ``vm.migrate``            echo: vm, cluster, target_host + resolution source
 ``vm.power``              echo: vm, verb, power_kind (hard vs Tools-soft)
@@ -50,8 +53,11 @@ Two preview depths, chosen per composite
   echoes the requested capacity so the approver sees the disk grows (never
   shrinks) and by how much.
 * **Param echo** (no I/O — the ``secret.move`` precedent, #1580) for the
-  five single-entity composites whose params fully name the blast
-  radius. ``vm.power`` additionally echoes ``power_kind`` so the approver
+  six single-entity composites whose params fully name the blast
+  radius. ``vm.clone_from_template`` echoes only the customization spec
+  *name*, never its secret-bearing contents (#1503), so the GOSC keystone
+  composes without leaking sysprep/password material onto the reviewer
+  surface. ``vm.power`` additionally echoes ``power_kind`` so the approver
   sees the soft-vs-hard distinction (a Tools-mediated ``guest_shutdown``
   is a very different blast radius from a hard ``off``).
   ``vm.migrate`` deliberately does **not** pre-resolve a DRS
@@ -82,9 +88,10 @@ Redaction posture
 
 The whole-builder ``classify_op`` gate runs in
 :func:`~meho_backplane.operations._preview.build_proposed_effect` before
-any builder fires: the 10 op_ids classify as ``write`` (``.create`` /
-``.patch`` suffixes) or ``other`` (``vm.disk.grow`` — ``.grow`` is not a
-write suffix) — none is a credential class, so none is suppressed. The
+any builder fires: the 11 op_ids classify as ``write`` (``.create`` /
+``.patch`` suffixes) or ``other`` (``vm.disk.grow`` — ``.grow`` — and
+``vm.clone_from_template`` — ``_template`` — are not write suffixes) —
+none is a credential class, so none is suppressed. The
 previews themselves carry only vSphere inventory identity (moids, display
 names, power states, disk capacities) and the operator's own dispatch
 params — infrastructure topology, never credential material.
@@ -286,6 +293,45 @@ async def _vm_clone_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     }
 
 
+async def _vm_clone_from_template_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.clone_from_template`` — echo the clone coordinates (no I/O).
+
+    Param-echo: the params fully name the blast radius — which template, where
+    it lands (folder / resource pool / datastore / optional host pin), whether
+    it powers on, and which GOSC spec (if any) applies. Only the customization
+    spec *name* is echoed, never its secret-bearing contents (#1503), and no
+    live read is issued, so the preview cannot drift from what the approved
+    dispatch does. Declines (``None``) on malformed params.
+    """
+    source_template = ctx.params.get("source_template")
+    new_vm_name = ctx.params.get("new_vm_name")
+    folder = ctx.params.get("folder")
+    resource_pool = ctx.params.get("resource_pool")
+    datastore = ctx.params.get("datastore")
+    if (
+        not isinstance(source_template, str)
+        or not isinstance(new_vm_name, str)
+        or not isinstance(folder, str)
+        or not isinstance(resource_pool, str)
+        or not isinstance(datastore, str)
+    ):
+        return None
+    host = ctx.params.get("host")
+    customization_spec_name = ctx.params.get("customization_spec_name")
+    return {
+        "source_template": source_template,
+        "new_vm_name": new_vm_name,
+        "folder": folder,
+        "resource_pool": resource_pool,
+        "datastore": datastore,
+        "host": host if isinstance(host, str) else None,
+        "power_on": bool(ctx.params.get("power_on", False)),
+        "customization_spec_name": (
+            customization_spec_name if isinstance(customization_spec_name, str) else None
+        ),
+    }
+
+
 async def _vm_snapshot_revert_preview(ctx: PreviewContext) -> dict[str, Any] | None:
     """Preview ``vm.snapshot.revert`` — echo the revert coordinates (no I/O).
 
@@ -411,6 +457,7 @@ async def _vm_disk_grow_preview(ctx: PreviewContext) -> dict[str, Any] | None:
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
     "vmware.composite.vm.clone": _vm_clone_preview,
+    "vmware.composite.vm.clone_from_template": _vm_clone_from_template_preview,
     "vmware.composite.vm.snapshot.revert": _vm_snapshot_revert_preview,
     "vmware.composite.vm.migrate": _vm_migrate_preview,
     "vmware.composite.vm.power": _vm_power_preview,
@@ -423,7 +470,7 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 10 write-composite park-time preview builders. Import-time.
+    """Wire the 11 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

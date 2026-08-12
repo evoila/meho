@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""G3.7-T9 dispatch smoke — the 10 curated Hetzner Robot read ops over respx.
+"""G3.7-T9 dispatch smoke — the 11 curated Hetzner Robot read ops over respx.
 
 Proves the acceptance criteria for issue #852:
 
@@ -27,7 +27,7 @@ Proves the acceptance criteria for issue #852:
 Why respx and not a real Hetzner Robot Webservice:
 The Hetzner Robot Webservice has no public CI simulator (#536 per the
 Initiative DoD). respx mocks the exact wire contract the connector calls
-(HTTP Basic GET against each of the 10 path endpoints), so the
+(HTTP Basic GET against each of the 11 path endpoints), so the
 session-establishment (Basic auth header computation) and per-op HTTP
 requests all fire through the connector's real httpx client.
 
@@ -36,7 +36,7 @@ The Hetzner Robot consumer sandbox (``https://robot-sandbox.hetzner.com``)
 returns HTTP 200 with empty JSON arrays for every read endpoint. This
 test exercises the same code path: the respx router maps every path to
 ``200 + []`` (or ``200 + {}``) when the ``ROBOT_SANDBOX_OP_IDS`` fixture
-activates the sandbox router. The acceptance confirms all 10 ops tolerate
+activates the sandbox router. The acceptance confirms all 11 ops tolerate
 empty-array responses gracefully (no parsing crash, ``status='ok'``).
 
 Skip conditions:
@@ -118,7 +118,7 @@ def test_mcp_llm_instructions_contain_401_block_warning(op_id: str) -> None:
 # Smoke-test parameters — op ids and per-op path-parameter substitutions.
 # ---------------------------------------------------------------------------
 
-#: All 10 curated Hetzner Robot op ids, sourced from the canonical constant.
+#: All 11 curated Hetzner Robot op ids, sourced from the canonical constant.
 SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in ROBOT_CORE_OPS)
 
 #: Path-parameter substitutions for ops with ``{var}`` templates.
@@ -126,6 +126,7 @@ SMOKE_OP_IDS: tuple[str, ...] = tuple(op.op_id for op in ROBOT_CORE_OPS)
 SMOKE_PARAMS: dict[str, dict[str, object]] = {
     "GET:/server/{server-ip}": {"server-ip": "1.2.3.1"},
     "GET:/vswitch/{id}": {"id": "4321"},
+    "GET:/firewall/{server-ip}": {"server-ip": "1.2.3.1"},
 }
 
 
@@ -354,7 +355,7 @@ async def test_dispatch_writes_audit_row_with_op_id_target_id_params_hash(
 # ---------------------------------------------------------------------------
 # AC5 — sandbox 200/empty-array path.
 # The consumer sandbox returns HTTP 200 with empty arrays for every read op.
-# All 10 ops must tolerate empty-array/object responses without raising.
+# All 11 ops must tolerate empty-array/object responses without raising.
 # ---------------------------------------------------------------------------
 
 

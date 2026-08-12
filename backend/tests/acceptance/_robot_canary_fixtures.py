@@ -7,10 +7,10 @@ Two Robot acceptance modules (dispatch smoke + JSONFlux force-handle)
 share the same plumbing: a registered
 :class:`~meho_backplane.connectors.hetzner_robot.HetznerRobotConnector` instance
 with a stub credentials loader (so no Vault read is required), a probed
-:class:`~meho_backplane.db.models.Target` row, the 10 curated
+:class:`~meho_backplane.db.models.Target` row, the 11 curated
 :class:`~meho_backplane.db.models.EndpointDescriptor` rows from
 :data:`~meho_backplane.connectors.hetzner_robot.core_ops.ROBOT_CORE_OPS`, and a
-:mod:`respx`-mocked Hetzner Robot REST surface answering each of the 10 curated
+:mod:`respx`-mocked Hetzner Robot REST surface answering each of the 11 curated
 read ops.
 
 Hetzner Robot uses HTTP Basic auth on every request — no session establish
@@ -24,7 +24,7 @@ The full Hetzner Robot spec ingest via :class:`IngestionPipelineService`
 needs the Robot OpenAPI spec reachable on the CI runner plus a live LLM
 for the grouping pass. Until the spec-shelf is wired to the meho-runners
 pool, the dispatch leg is exercised against a minimal direct-insert path
-that seeds the 10 curated endpoint_descriptor rows by hand. Same pattern
+that seeds the 11 curated endpoint_descriptor rows by hand. Same pattern
 :mod:`tests.acceptance._harbor_canary_fixtures` and
 :mod:`tests.acceptance._sddc_canary_fixtures` established.
 
@@ -245,6 +245,58 @@ ROBOT_CANARY_RDNS: list[dict[str, object]] = [
     {"rdns": {"ip": "1.2.3.2", "ptr": "canary-server-2.example.com"}},
 ]
 
+#: Synthetic single-server firewall config (server-ip=1.2.3.1). Models the
+#: onboarding template shape: operator /32 allowed on https, lab-internal
+#: 10.0.0.0/8 allowed, final default-discard.
+ROBOT_CANARY_FIREWALL: dict[str, object] = {
+    "firewall": {
+        "server_ip": "1.2.3.1",
+        "server_number": 100001,
+        "status": "active",
+        "filter_ipv6": False,
+        "whitelist_hos": True,
+        "port": "main",
+        "rules": {
+            "input": [
+                {
+                    "name": "operator-https",
+                    "ip_version": "ipv4",
+                    "dst_ip": None,
+                    "dst_port": "443",
+                    "src_ip": "198.51.100.7/32",
+                    "src_port": None,
+                    "protocol": "tcp",
+                    "tcp_flags": None,
+                    "action": "accept",
+                },
+                {
+                    "name": "lab-internal",
+                    "ip_version": "ipv4",
+                    "dst_ip": None,
+                    "dst_port": None,
+                    "src_ip": "10.0.0.0/8",
+                    "src_port": None,
+                    "protocol": None,
+                    "tcp_flags": None,
+                    "action": "accept",
+                },
+                {
+                    "name": "default-discard",
+                    "ip_version": None,
+                    "dst_ip": None,
+                    "dst_port": None,
+                    "src_ip": None,
+                    "src_port": None,
+                    "protocol": None,
+                    "tcp_flags": None,
+                    "action": "discard",
+                },
+            ],
+            "output": [],
+        },
+    }
+}
+
 #: Synthetic SSH key list — 2 keys registered in the Robot portal.
 ROBOT_CANARY_KEYS: list[dict[str, object]] = [
     {
@@ -277,7 +329,7 @@ class IngestedRobotCanary:
 
 
 async def _insert_robot_descriptors() -> None:
-    """Seed the 10 curated Robot core ops + their groups as enabled rows.
+    """Seed the 11 curated Robot core ops + their groups as enabled rows.
 
     One :class:`OperationGroup` per entry in :data:`ROBOT_CORE_GROUPS`
     (``review_status='enabled'``), one :class:`EndpointDescriptor` per
@@ -359,7 +411,7 @@ async def _robot_credentials_loader(
 
 
 def _register_robot_routes(mock: respx.MockRouter) -> None:
-    """Register the 10 Robot read-op routes on *mock*.
+    """Register the 11 Robot read-op routes on *mock*.
 
     Robot uses HTTP Basic on every request — no session establish call
     is needed. Each route returns a pre-seeded JSON body. Templated
@@ -375,11 +427,12 @@ def _register_robot_routes(mock: respx.MockRouter) -> None:
     mock.get("/vswitch/4321").respond(200, json=ROBOT_CANARY_VSWITCH_DETAIL)
     mock.get("/failover").respond(200, json=ROBOT_CANARY_FAILOVERS)
     mock.get("/rdns").respond(200, json=ROBOT_CANARY_RDNS)
+    mock.get("/firewall/1.2.3.1").respond(200, json=ROBOT_CANARY_FIREWALL)
     mock.get("/key").respond(200, json=ROBOT_CANARY_KEYS)
 
 
 def _register_robot_sandbox_routes(mock: respx.MockRouter) -> None:
-    """Register the 10 Robot sandbox routes — every path returns 200 + empty array.
+    """Register the 11 Robot sandbox routes — every path returns 200 + empty array.
 
     Mirrors the Hetzner Robot consumer sandbox behaviour:
     ``https://robot-sandbox.hetzner.com`` returns HTTP 200 with empty JSON
@@ -401,6 +454,7 @@ def _register_robot_sandbox_routes(mock: respx.MockRouter) -> None:
     mock.get("/vswitch/4321").respond(200, json={})
     mock.get("/failover").respond(200, json=[])
     mock.get("/rdns").respond(200, json=[])
+    mock.get("/firewall/1.2.3.1").respond(200, json={})
     mock.get("/key").respond(200, json=[])
 
 
@@ -427,7 +481,7 @@ async def ingested_robot_canary(
     Setup mirrors :func:`tests.acceptance._harbor_canary_fixtures.ingested_harbor_canary`:
 
     1. Insert built-in :class:`OperationGroup` + :class:`EndpointDescriptor`
-       rows for the 10 curated Robot core ops.
+       rows for the 11 curated Robot core ops.
     2. Seed a :class:`Target` with ``product="hetzner"`` and the
        :data:`ROBOT_CANARY_FINGERPRINT` so the resolver binds
        :class:`HetznerRobotConnector`.
@@ -503,7 +557,7 @@ async def ingested_robot_canary_sandbox(
     """Yield a dispatcher-ready Robot setup where every op returns 200 + empty arrays.
 
     Models the Hetzner Robot consumer sandbox
-    (``https://robot-sandbox.hetzner.com``): all 10 read endpoints respond
+    (``https://robot-sandbox.hetzner.com``): all 11 read endpoints respond
     with HTTP 200 + empty JSON arrays (``[]``) or empty objects (``{}``) for
     the query endpoint. Operators who run against the sandbox before they
     have a production Robot account should receive ``status='ok'`` with an

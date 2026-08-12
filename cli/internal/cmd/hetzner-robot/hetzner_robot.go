@@ -3,7 +3,7 @@
 
 // Package hetznerrobot hosts the cobra commands under `meho hetzner-robot
 // ...` for G3.7-T9 (#852) of Initiative #370. v0.2 ships the
-// operator-facing alias verbs over the 10 Hetzner Robot read-only core
+// operator-facing alias verbs over the 11 Hetzner Robot read-only core
 // ops, each pre-baking connector_id="hetzner-rest-2026.04" so operators
 // don't type the connector ID on every dispatch:
 //
@@ -16,6 +16,7 @@
 //   - `meho hetzner-robot vswitch info <id>`                — GET:/vswitch/{id}
 //   - `meho hetzner-robot failover list [--target T]`       — GET:/failover
 //   - `meho hetzner-robot rdns list [--target T]`           — GET:/rdns
+//   - `meho hetzner-robot firewall get <server-ip>`         — GET:/firewall/{server-ip}
 //   - `meho hetzner-robot ssh-key list [--target T]`        — GET:/key
 //   - `meho hetzner-robot operation search "<query>"`       — search pre-scoped
 //   - `meho hetzner-robot operation call <op_id> ...`       — call pre-scoped
@@ -88,6 +89,7 @@ func NewRootCmd() *cobra.Command {
 	cmd.AddCommand(newVswitchCmd())
 	cmd.AddCommand(newFailoverCmd())
 	cmd.AddCommand(newRdnsCmd())
+	cmd.AddCommand(newFirewallCmd())
 	cmd.AddCommand(newSSHKeyCmd())
 	cmd.AddCommand(newOperationCmd())
 	return cmd

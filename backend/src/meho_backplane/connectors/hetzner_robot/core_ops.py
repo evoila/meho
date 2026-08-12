@@ -3,9 +3,9 @@
 
 """Hetzner Robot read-only v0.2 core — curated operator-enabled subset.
 
-This module names the **10 read-only Hetzner Robot operations** the G3.7
-Robot v0.2 ship enables out of the much larger Robot Webservice REST corpus
-the G0.7 spec-ingestion pipeline lands under
+This module names the **11 read-only Hetzner Robot operations** the
+curated Robot read core enables out of the much larger Robot Webservice
+REST corpus the G0.7 spec-ingestion pipeline lands under
 ``connector_id="hetzner-rest-2026.04"``. The curation is two-layered:
 
 * :data:`ROBOT_CORE_GROUPS` — the operator-reviewed ``when_to_use``
@@ -14,7 +14,7 @@ the G0.7 spec-ingestion pipeline lands under
   ops; the ``when_to_use`` is what the agent reads verbatim through
   :func:`~meho_backplane.operations.meta_tools.list_operation_groups`
   to pick a group to search within.
-* :data:`ROBOT_CORE_OPS` — the 10 ``EndpointDescriptor.op_id`` strings
+* :data:`ROBOT_CORE_OPS` — the 11 ``EndpointDescriptor.op_id`` strings
   that flip to ``is_enabled=True`` at operator-review time, paired
   with the per-op ``llm_instructions`` blob the agent inlines into
   the reasoning context when it sees the op in
@@ -49,7 +49,7 @@ registry lookup (``(product, version, impl_id)`` triple) under the same
 token — the row-level product key and the registry key now agree. Same
 short token the SDDC Manager precedent uses (``"sddc"``).
 
-The 10 ops (paths cross-checked against the Hetzner Robot Webservice API
+The 11 ops (paths cross-checked against the Hetzner Robot Webservice API
 at https://robot.hetzner.com/doc/webservice/en.html):
 
 1.  ``GET:/query`` — ``hetzner-robot.about`` — API version + account info.
@@ -69,7 +69,11 @@ at https://robot.hetzner.com/doc/webservice/en.html):
     and their active routing target.
 9.  ``GET:/rdns`` — ``hetzner-robot.rdns.list`` — all reverse DNS entries
     (PTR records) set on the account's IPs.
-10. ``GET:/key`` — ``hetzner-robot.ssh_key.list`` — all SSH public keys
+10. ``GET:/firewall/{server-ip}`` — ``hetzner-robot.firewall.get`` — the
+    per-server packet-filter firewall (active status, whitelist-Hetzner-
+    services flag, and ordered input/output rule set) for one dedicated
+    server addressed by its primary IP.
+11. ``GET:/key`` — ``hetzner-robot.ssh_key.list`` — all SSH public keys
     registered in the Robot portal for the account.
 
 Path families and group_keys
@@ -85,7 +89,7 @@ Curation application
 --------------------
 
 :func:`apply_robot_core_curation` is the operator-review-time substrate
-call that makes exactly the 10 curated ops dispatchable. Mirrors
+call that makes exactly the 11 curated ops dispatchable. Mirrors
 :func:`~meho_backplane.connectors.harbor.core_ops.apply_harbor_core_curation`
 verbatim, threading the "enable group but pin non-core ops disabled" needle
 via the audit-log-driven operator-override exclusion.
@@ -206,19 +210,20 @@ class RobotCoreOp:
 #: matches ``/ip_address``.  More-specific prefixes must precede
 #: less-specific ones where overlap exists (e.g. ``/vswitch/{id}``
 #: before ``/vswitch``). The rules encode every root-level path the
-#: 10 curated ops use; paths outside these prefixes are un-curated
+#: 11 curated ops use; paths outside these prefixes are un-curated
 #: and stay ``is_enabled=False`` after :func:`apply_robot_core_curation`
 #: runs.
 ROBOT_PATH_RULES: Final[tuple[tuple[str, str], ...]] = (
     ("/query", "robot-about"),
     # Server family
     ("/server", "robot-servers"),
-    # Networking — IP, subnet, vSwitch, failover, rDNS
+    # Networking — IP, subnet, vSwitch, failover, rDNS, firewall
     ("/ip", "robot-networking"),
     ("/subnet", "robot-networking"),
     ("/vswitch", "robot-networking"),
     ("/failover", "robot-networking"),
     ("/rdns", "robot-networking"),
+    ("/firewall", "robot-networking"),
     # SSH keys
     ("/key", "robot-ssh-keys"),
 )
@@ -231,7 +236,7 @@ def classify_robot_op(op_id: str) -> str:
     helper strips the verb and matches the path against
     :data:`ROBOT_PATH_RULES` in order.
 
-    Only ``GET`` verbs are considered curated (all 10 core ops are
+    Only ``GET`` verbs are considered curated (all 11 core ops are
     read-only). A non-GET op or a path outside the curated families
     returns ``"none"`` — those rows stay ``is_enabled=False``.
 
@@ -308,10 +313,12 @@ ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
             "Use this group to inspect the networking resources assigned to the "
             "Hetzner Robot account: IP addresses (with lock and traffic status), "
             "subnets (with gateway and IP version), vSwitches (with VLAN and server "
-            "memberships), failover IPs (with active routing targets), and reverse "
-            "DNS entries (PTR records). Use when answering questions about IP "
-            "assignments, routing, network topology, or DNS resolution for any "
-            "resource in the account."
+            "memberships), failover IPs (with active routing targets), reverse "
+            "DNS entries (PTR records), and per-server packet-filter firewall "
+            "configuration (active status, Hetzner-services allowlist flag, and "
+            "ordered input/output rules). Use when answering questions about IP "
+            "assignments, routing, network topology, DNS resolution, or edge "
+            "firewall rules for any resource in the account."
         ),
     ),
     RobotCoreGroup(
@@ -328,7 +335,7 @@ ROBOT_CORE_GROUPS: Final[tuple[RobotCoreGroup, ...]] = (
 )
 
 
-#: The 10 curated read-only Hetzner Robot core ops. Each entry carries
+#: The 11 curated read-only Hetzner Robot core ops. Each entry carries
 #: the op_id (``GET:/path`` form), the curated group assignment, and the
 #: operator-reviewed ``llm_instructions`` blob.
 #:
@@ -574,6 +581,42 @@ ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
             ),
         ),
     ),
+    RobotCoreOp(
+        op_id="GET:/firewall/{server-ip}",
+        group_key="robot-networking",
+        llm_instructions=_instructions(
+            when_to_call=(
+                "Call to read the packet-filter (edge) firewall configuration of "
+                "one dedicated server, addressed by its primary IP. Requires "
+                "server_ip obtained from hetzner-robot.server.list. Use to verify "
+                "a server's firewall after an onboarding template is applied: "
+                "confirm the firewall is active, that the intended operator/lab "
+                "source addresses are allowed on the expected ports (e.g. 22 and "
+                "443), and that the final rule is a default-discard. Answers the "
+                "operator question 'does server X's edge firewall match the "
+                "template'. This is a read only — it never mutates the firewall."
+            ),
+            output_shape=(
+                "Object under a firewall key: {firewall: {status ('active', "
+                "'disabled', or 'in process'), whitelist_hos (bool — whether "
+                "Hetzner's own service IPs are allowlisted), filter_ipv6 (bool), "
+                "port ('main' or 'kvm'), server_ip (string), server_number (int), "
+                "rules: {input: [rule, ...], output: [rule, ...]}}}. Each rule "
+                "carries name (string), ip_version ('ipv4' or 'ipv6', omitted for "
+                "both), src_ip and dst_ip (CIDR strings), src_port and dst_port "
+                "(single port or range strings), protocol ('tcp', 'udp', 'icmp', "
+                "...), tcp_flags (string), and action ('accept' or 'discard'). "
+                "Rules are ordered; the first match wins."
+            ),
+            next_step=(
+                "Inspect rules.input[] in order — the last rule is typically the "
+                "default-discard that the template ends on. Cross-reference "
+                "server_ip with hetzner-robot.server.info to confirm the server, "
+                "or with hetzner-robot.ip.list to see every IP the rule set "
+                "should cover."
+            ),
+        ),
+    ),
     # ---- SSH Keys ----
     RobotCoreOp(
         op_id="GET:/key",
@@ -603,15 +646,18 @@ ROBOT_CORE_OPS: Final[tuple[RobotCoreOp, ...]] = (
 )
 
 
+# code-quality-allow: verbatim mirror of apply_harbor_core_curation (both 107
+# lines); the five-phase substrate-override cascade must stay parallel across
+# the robot/harbor curation helpers, so it is not refactored in isolation.
 async def apply_robot_core_curation(
     review_service: ReviewService,
     *,
     tenant_id: UUID | None,
 ) -> None:
-    """Apply the curated 10-op read core against an ingested Robot connector.
+    """Apply the curated 11-op read core against an ingested Robot connector.
 
     Drives the substrate so that, after this call returns, exactly
-    the 10 ops in :data:`ROBOT_CORE_OPS` are dispatchable
+    the 11 ops in :data:`ROBOT_CORE_OPS` are dispatchable
     (``is_enabled=True``) and every other ingested op stays
     ``is_enabled=False``. The 4 curated groups land
     ``review_status='enabled'`` so the agent's

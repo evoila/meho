@@ -836,6 +836,22 @@ class KeycloakConnector(HttpConnector):
 
         return await keycloak_role_mapping_get(self, operator, target, params)
 
+    async def role_list(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.role.list`` op (#2843)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_role_list
+
+        return await keycloak_role_list(self, operator, target, params)
+
+    async def role_users(
+        self, operator: Operator, target: KeycloakTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Bound-method shim for the ``keycloak.role.users`` op (#2843)."""
+        from meho_backplane.connectors.keycloak.ops_read import keycloak_role_users
+
+        return await keycloak_role_users(self, operator, target, params)
+
     # -- typed-op write handler shims (G3.13-T4 #1406) ------------------
 
     async def realm_create(

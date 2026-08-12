@@ -89,7 +89,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
@@ -371,6 +371,14 @@ _OP_DISCONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=d
 # vCenter REST -- no vim fallback (the issue's grounded gap table).
 _OP_CREATE_CUSTOMIZATION_SPEC = "POST:/vcenter/guest/customization-specs"
 _OP_SET_VM_CUSTOMIZATION = "PUT:/vcenter/vm/{vm}/guest/customization"
+
+#: Default Microsoft time-zone index for the Windows ``GuiUnattended.time_zone``
+#: when the operator does not pin one. ``GuiUnattended.time_zone`` is a REQUIRED
+#: *integer* index in the pinned schema (``Vcenter.Guest.GuiUnattended``,
+#: vcenter.yaml:126181) -- distinct from the Linux tz-name string -- so a value
+#: is always emitted. ``85`` is GMT; operators override via ``windows_time_zone``
+#: (indices: https://support.microsoft.com/help/973627).
+_DEFAULT_WINDOWS_TIME_ZONE: Final[int] = 85
 
 
 def _power_vm_op_id(action: str) -> str:
@@ -3207,9 +3215,18 @@ def _build_interface(nic: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_linux_config(params: dict[str, Any]) -> dict[str, Any]:
-    """Build ``configuration_spec.linux_config`` from the agent params."""
-    linux_config: dict[str, Any] = {"hostname": _build_hostname_generator(params["hostname"])}
-    _put_if_str(linux_config, "domain", params.get("domain"))
+    """Build ``configuration_spec.linux_config`` from the agent params.
+
+    ``hostname`` and ``domain`` are REQUIRED by the pinned
+    ``Vcenter.Guest.LinuxConfiguration`` schema (vcenter.yaml:126320), so
+    ``domain`` is always emitted (empty string when unset) -- omitting it
+    fails even a minimal Linux create. ``time_zone`` (a Linux tz-name
+    string here) is optional and dropped when absent.
+    """
+    linux_config: dict[str, Any] = {
+        "hostname": _build_hostname_generator(params["hostname"]),
+        "domain": params.get("domain") or "",
+    }
     _put_if_str(linux_config, "time_zone", params.get("time_zone"))
     return linux_config
 
@@ -3218,31 +3235,43 @@ def _build_windows_sysprep(params: dict[str, Any]) -> dict[str, Any]:
     """Build the ``windows_config.sysprep`` body, consuming the secret fields.
 
     The credential members (``gui_unattended.password``,
-    ``user_data.product_key``, ``identification.domain_admin_password``)
-    are read here and here only -- they never leave for a reviewer /
-    preview / broadcast surface (#1503).
-    """
-    user_data: dict[str, Any] = {"computer_name": _build_hostname_generator(params["hostname"])}
-    _put_if_str(user_data, "product_key", params.get("windows_product_key"))
-    _put_if_str(user_data, "full_name", params.get("windows_full_name"))
-    _put_if_str(user_data, "organization", params.get("windows_organization"))
+    ``user_data.product_key``, ``domain.domain_password``) are read here
+    and here only -- they never leave for a reviewer / preview /
+    broadcast surface (#1503).
 
-    gui_unattended: dict[str, Any] = {"auto_logon": bool(params.get("windows_auto_logon", False))}
+    ``UserData`` (``full_name`` / ``organization`` / ``product_key``,
+    vcenter.yaml:126067) and ``GuiUnattended`` (``auto_logon`` /
+    ``auto_logon_count`` / ``time_zone``, vcenter.yaml:126181) fields are
+    REQUIRED by the pinned schema, so they are always emitted (empty
+    string / derived defaults) -- their omission fails every Windows
+    create. ``time_zone`` here is the REST integer MS index (not the Linux
+    tz-name string). Domain join lives under ``domain`` ->
+    ``Vcenter.Guest.Domain`` (vcenter.yaml:126104), NOT the pyvmomi
+    ``identification`` key.
+    """
+    auto_logon = bool(params.get("windows_auto_logon", False))
+    user_data: dict[str, Any] = {
+        "computer_name": _build_hostname_generator(params["hostname"]),
+        "full_name": params.get("windows_full_name") or "",
+        "organization": params.get("windows_organization") or "",
+        "product_key": params.get("windows_product_key") or "",
+    }
+
+    gui_unattended: dict[str, Any] = {
+        "auto_logon": auto_logon,
+        "auto_logon_count": 1 if auto_logon else 0,
+        "time_zone": int(params.get("windows_time_zone", _DEFAULT_WINDOWS_TIME_ZONE)),
+    }
     _put_if_str(gui_unattended, "password", params.get("windows_admin_password"))
-    _put_if_str(gui_unattended, "time_zone", params.get("time_zone"))
 
     sysprep: dict[str, Any] = {"user_data": user_data, "gui_unattended": gui_unattended}
 
     join_domain = params.get("windows_join_domain")
     if isinstance(join_domain, str) and join_domain:
-        identification: dict[str, Any] = {"joined_domain": join_domain}
-        _put_if_str(
-            identification, "domain_admin_username", params.get("windows_domain_admin_username")
-        )
-        _put_if_str(
-            identification, "domain_admin_password", params.get("windows_domain_admin_password")
-        )
-        sysprep["identification"] = identification
+        domain: dict[str, Any] = {"type": "DOMAIN", "domain": join_domain}
+        _put_if_str(domain, "domain_username", params.get("windows_domain_admin_username"))
+        _put_if_str(domain, "domain_password", params.get("windows_domain_admin_password"))
+        sysprep["domain"] = domain
     return sysprep
 
 
@@ -3274,8 +3303,14 @@ def _build_customization_create_body(params: dict[str, Any]) -> dict[str, Any]:
             ],
         },
     }
-    create_spec: dict[str, Any] = {"name": params["spec_name"], "spec": customization_spec}
-    _put_if_str(create_spec, "description", params.get("description"))
+    # ``description`` is REQUIRED on the CreateSpec (vcenter.yaml:126873), so
+    # it is always emitted (empty string when unset) -- omitting it fails
+    # even a minimal create.
+    create_spec: dict[str, Any] = {
+        "name": params["spec_name"],
+        "description": params.get("description") or "",
+        "spec": customization_spec,
+    }
     return {"spec": create_spec}
 
 

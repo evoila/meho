@@ -2278,28 +2278,41 @@ GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Active Directory domain the Windows guest joins "
-                "(``sysprep.identification.joined_domain``)."
+                "(``sysprep.domain.domain`` with ``sysprep.domain.type = DOMAIN``)."
             ),
         },
         "windows_domain_admin_username": {
             "type": "string",
             "description": (
-                "Domain account used for the join "
-                "(``sysprep.identification.domain_admin_username``)."
+                "Domain account used for the join (``sysprep.domain.domain_username``)."
             ),
         },
         "windows_domain_admin_password": {
             "type": "string",
             "description": (
                 "SECRET. Password for the domain-join account "
-                "(``sysprep.identification.domain_admin_password``). Never "
-                "serialized to any reviewer-facing surface (#1503)."
+                "(``sysprep.domain.domain_password``). Never serialized to any "
+                "reviewer-facing surface (#1503)."
             ),
         },
         "windows_auto_logon": {
             "type": "boolean",
             "default": False,
-            "description": "Whether the Windows guest auto-logs-on after customization.",
+            "description": (
+                "Whether the Windows guest auto-logs-on after customization. "
+                "Also drives the required ``gui_unattended.auto_logon_count`` "
+                "(``1`` when true, else ``0``)."
+            ),
+        },
+        "windows_time_zone": {
+            "type": "integer",
+            "default": 85,
+            "description": (
+                "Windows guest time zone as a Microsoft time-zone index "
+                "(``gui_unattended.time_zone``; a REQUIRED integer, distinct "
+                "from the Linux ``time_zone`` tz-name string). Defaults to "
+                "``85`` (GMT). See https://support.microsoft.com/help/973627."
+            ),
         },
     },
     "required": ["spec_name", "os_type", "hostname"],

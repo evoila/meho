@@ -69,8 +69,11 @@ means the probe finished, and anything less raises.
 
 from __future__ import annotations
 
+import re
 import shlex
 from typing import TYPE_CHECKING, Any
+
+import yaml
 
 from meho_backplane.connectors.rke2.ops import SSH_TRANSPORT_NOTE, Rke2Op
 
@@ -81,7 +84,9 @@ if TYPE_CHECKING:
 __all__ = [
     "POSTURE_CONFIG_PATHS",
     "READ_OPS",
+    "REDACTED_SENTINEL",
     "RKE2_TOKEN_PATH",
+    "SECRET_CONFIG_KEYS",
     "SERVICE_STATUS_PROPERTIES",
     "SERVICE_UNITS",
     "STATUS_ABSENT",
@@ -94,6 +99,8 @@ __all__ = [
     "parse_posture",
     "parse_posture_probe_output",
     "parse_service_status",
+    "redact_config_content",
+    "rke2_config_get",
     "rke2_posture_show",
     "rke2_service_status",
 ]
@@ -733,6 +740,229 @@ _RKE2_SERVICE_STATUS_OP = Rke2Op(
 )
 
 
-#: The read-only tier ops. ``rke2.about`` (the identity canary) is composed
-#: alongside these in :func:`meho_backplane.connectors.rke2.ops._rke2_ops`.
-READ_OPS: tuple[Rke2Op, ...] = (_RKE2_POSTURE_OP, _RKE2_SERVICE_STATUS_OP)
+# ---------------------------------------------------------------------------
+# rke2.node.config.get -- redacted config.yaml content read (#2854)
+# ---------------------------------------------------------------------------
+
+#: The value substituted for a fully-redacted secret key. Matches the
+#: names-only-disclosure discipline ``changed_config_keys`` established on
+#: the write side: the operator learns the key is set without seeing it.
+REDACTED_SENTINEL: str = "***redacted***"
+
+#: RKE2 ``config.yaml`` top-level keys whose value is a secret in itself and
+#: is replaced wholesale with :data:`REDACTED_SENTINEL`. Grounded against the
+#: RKE2 server-config reference (docs.rke2.io/reference/server_config): the
+#: two join tokens the connector's own write-side docstring names
+#: (``token`` / ``agent-token``, ``ops_write.py``) plus the three etcd S3
+#: snapshot credentials (mapped to ``AWS_ACCESS_KEY_ID`` /
+#: ``AWS_SECRET_ACCESS_KEY`` / ``AWS_SESSION_TOKEN``). Matching is
+#: case-sensitive because RKE2 only honours the exact lowercase-hyphenated
+#: flag names, so a mis-cased key is not a live credential. Sibling ``*-file``
+#: keys and ``private-registry`` are on-disk paths, not secret values, and are
+#: deliberately NOT redacted -- the operator asked to verify them.
+SECRET_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "token",
+        "agent-token",
+        "etcd-s3-access-key",
+        "etcd-s3-secret-key",
+        "etcd-s3-session-token",
+    }
+)
+
+#: The one config key whose value is a datastore DSN that may embed
+#: ``user:password@`` userinfo (external MySQL/Postgres/NATS datastore). Only
+#: the userinfo segment is masked -- the operator's stated need is to verify
+#: the host/port/database, which stays visible.
+_DATASTORE_ENDPOINT_KEY: str = "datastore-endpoint"
+
+#: Matches the ``scheme://userinfo@`` prefix of a DSN so the userinfo (which
+#: may itself contain ``:``) can be masked without disturbing the host/port/
+#: path that follow. ``[^/@\s]+`` stops at the first ``@`` and never crosses a
+#: ``/``, so a credential-less endpoint (no ``@``) is left untouched.
+_DSN_USERINFO_RE = re.compile(r"(?P<scheme>[A-Za-z][A-Za-z0-9+.\-]*://)[^/@\s]+@")
+
+
+def _mask_dsn_userinfo(value: Any) -> tuple[Any, bool]:
+    """Mask the ``user:pass@`` userinfo of a datastore DSN string.
+
+    Returns ``(masked_value, changed)``. A non-string value or a DSN with no
+    userinfo is returned unchanged with ``changed=False``; the host/port/
+    database portion is always preserved so the operator can still verify it.
+    """
+    if not isinstance(value, str):
+        return value, False
+    masked, count = _DSN_USERINFO_RE.subn(rf"\g<scheme>{REDACTED_SENTINEL}@", value)
+    return masked, count > 0
+
+
+def redact_config_content(content: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Return a redacted copy of *content* plus the sorted redacted key names.
+
+    Secret-bearing top-level keys (:data:`SECRET_CONFIG_KEYS`) have their value
+    replaced by :data:`REDACTED_SENTINEL`; ``datastore-endpoint`` has only its
+    DSN userinfo masked. The input mapping is not mutated. A key lands in the
+    returned name list only when it was actually present and masked, mirroring
+    the write side's ``changed_config_keys`` names-only discipline -- so the
+    secret VALUE never appears in the result envelope (and therefore never in
+    the audit ``raw_payload``, which stores the raw handler result), while its
+    NAME is disclosed so the operator knows the key is set.
+    """
+    redacted = dict(content)
+    touched: set[str] = set()
+    for key, value in content.items():
+        if key in SECRET_CONFIG_KEYS:
+            redacted[key] = REDACTED_SENTINEL
+            touched.add(key)
+        elif key == _DATASTORE_ENDPOINT_KEY:
+            masked, changed = _mask_dsn_userinfo(value)
+            if changed:
+                redacted[key] = masked
+                touched.add(key)
+    return redacted, sorted(touched)
+
+
+async def rke2_config_get(
+    connector: Rke2SshConnector,
+    target: Target,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """Handler for ``rke2.node.config.get`` -- redacted config.yaml read (#2854).
+
+    Reads a single bounded ``/etc/rancher/rke2/*.yaml`` file over SSH with the
+    same ``cat`` + :func:`yaml.safe_load` step ``rke2.node.config.update``
+    already runs, and returns the parsed top-level mapping with secret-bearing
+    keys redacted (:func:`redact_config_content`) -- so an operator can verify
+    ``tls-san`` / ``datastore-endpoint`` / ``node-taint`` before or after a
+    config patch without an untracked ``ssh cat`` that would spill the join
+    token into shell history.
+
+    The path is confined by :func:`~meho_backplane.connectors.rke2.ops_write.bound_config_path`
+    (the same ``/etc/rancher/rke2/*.yaml`` filter the write op uses), so a
+    traversal attempt is rejected before any SSH round trip. Non-mapping or
+    unparseable YAML surfaces a structured ``error`` rather than crashing the
+    dispatch. Never mutates the node.
+    """
+    from meho_backplane.connectors.rke2.ops_write import (
+        Rke2WriteSafetyError,
+        bound_config_path,
+    )
+
+    try:
+        path = bound_config_path(params.get("path"))
+    except Rke2WriteSafetyError as exc:
+        return {"error": f"config.get path check: {exc}"}
+
+    quoted_path = shlex.quote(path)
+    read_cmd = f"if [ -e {quoted_path} ]; then cat -- {quoted_path}; fi"
+    read_proc = await connector._run_command(target, read_cmd, operator=operator)
+    if getattr(read_proc, "exit_status", None) not in (0, None):
+        return {"path": path, "error": "failed to read the config file"}
+
+    stdout_raw = read_proc.stdout if hasattr(read_proc, "stdout") else ""
+    stdout = stdout_raw if isinstance(stdout_raw, str) else ""
+    try:
+        parsed = yaml.safe_load(stdout)
+    except yaml.YAMLError as exc:
+        return {"path": path, "error": f"config file is not valid YAML: {exc}"}
+    content: dict[str, Any] = parsed if parsed is not None else {}
+    if not isinstance(content, dict):
+        return {"path": path, "error": "config file is not a YAML mapping"}
+
+    redacted, redacted_keys = redact_config_content(content)
+    return {"path": path, "content": redacted, "redacted_keys": redacted_keys}
+
+
+_RKE2_CONFIG_GET_OP = Rke2Op(
+    op_id="rke2.node.config.get",
+    handler_attr="config_get",
+    summary="Read an RKE2 config.yaml file's content with join/S3 secrets redacted.",
+    description=(
+        "Reads a single ``/etc/rancher/rke2/*.yaml`` file (default "
+        "``config.yaml``) over SSH -- the same ``cat`` + YAML parse "
+        "``rke2.node.config.update`` runs -- and returns the parsed top-level "
+        "mapping so an operator can verify ``tls-san`` / ``datastore-endpoint`` "
+        "/ ``node-taint`` before or after a config patch. Secret-bearing keys "
+        "are REDACTED, not withheld: ``token`` / ``agent-token`` and the etcd "
+        "S3 credentials (``etcd-s3-access-key`` / ``etcd-s3-secret-key`` / "
+        "``etcd-s3-session-token``) are replaced with ``***redacted***``, and "
+        "``datastore-endpoint`` has only its ``user:pass@`` DSN userinfo "
+        "masked (host/port/db preserved). The masked key NAMES are listed in "
+        "``redacted_keys``. The path is confined to ``/etc/rancher/rke2/*.yaml`` "
+        "(traversal rejected before any SSH); non-mapping / invalid YAML "
+        "returns a structured ``error``. safety_level=safe, "
+        "requires_approval=False, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "pattern": r"^/etc/rancher/rke2/[^\x00\n\r]*\.yaml$",
+                "description": (
+                    "Absolute path to the RKE2 config file to read. Must be a "
+                    ".yaml file under /etc/rancher/rke2/ (default "
+                    "/etc/rancher/rke2/config.yaml). Omit for the default."
+                ),
+            },
+        },
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "path": {"type": "string"},
+            "content": {"type": "object"},
+            "redacted_keys": {"type": "array", "items": {"type": "string"}},
+            "error": {"type": "string"},
+        },
+        "required": [],
+        "additionalProperties": True,
+    },
+    group_key="rke2-config-read",
+    tags=("read-only", "rke2", "config"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call to read an RKE2 node's config.yaml content and verify "
+            "non-secret settings (``tls-san``, ``datastore-endpoint`` host, "
+            "``node-taint``, ``cni``, ...) before or after "
+            "``rke2.node.config.update`` -- e.g. re-confirming a "
+            "post-token-rotation config edit landed on every server. Prefer "
+            "this over an untracked ``ssh cat`` of the file: it is governed "
+            "(policy/audit/broadcast) and it REDACTS the join tokens + etcd "
+            "S3 credentials so they never reach the transcript. It reports "
+            "content, not permission modes -- use ``rke2.posture.show`` for "
+            "file modes / token presence. Transport: plain SSH (read-only "
+            "``cat`` of one bounded ``/etc/rancher/rke2/*.yaml`` path)."
+        ),
+        "parameter_hints": {
+            "path": (
+                "Optional; a .yaml file under /etc/rancher/rke2/ (e.g. a "
+                "config.yaml.d drop-in). Omit for /etc/rancher/rke2/config.yaml."
+            ),
+        },
+        "output_shape": (
+            "``{path, content: {<parsed keys>}, redacted_keys: [names]}``. "
+            "``content`` is the parsed top-level YAML mapping with "
+            "``token`` / ``agent-token`` / ``etcd-s3-*`` keys shown as "
+            "``***redacted***`` and ``datastore-endpoint`` userinfo masked; "
+            "``redacted_keys`` lists exactly which keys were masked (empty "
+            "when the file holds no secrets). A missing or empty file yields "
+            "``content: {}``. On a path-bound violation or unparseable YAML: "
+            "``{error}`` (plus ``path`` when the path was valid)."
+        ),
+    },
+)
+
+
+#: The read-only tier ops (posture + service status + redacted config
+#: read). ``rke2.about`` (the identity canary) is composed alongside
+#: these in :func:`meho_backplane.connectors.rke2.ops._rke2_ops`.
+READ_OPS: tuple[Rke2Op, ...] = (
+    _RKE2_POSTURE_OP,
+    _RKE2_SERVICE_STATUS_OP,
+    _RKE2_CONFIG_GET_OP,
+)

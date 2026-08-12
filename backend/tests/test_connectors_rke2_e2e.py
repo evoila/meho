@@ -4,7 +4,8 @@
 """RKE2 connector recorded-fixture / asyncssh fake-shell E2E test (#2221).
 
 Drives ``rke2.about``, ``rke2.posture.show``, the service-state read
-``rke2.node.service.status`` (#2852) and the safe, non-gated snapshot ops
+``rke2.node.service.status`` (#2852), the redacted config-content read
+``rke2.node.config.get`` (#2854), and the safe, non-gated snapshot ops
 ``rke2.etcd-snapshot.save`` (T4 #2431) + the read-only
 ``rke2.etcd-snapshot.list`` (#2853) through the full ``call_operation``
 dispatch stack against an in-process asyncssh fake-shell server that
@@ -115,6 +116,19 @@ _SNAPSHOT_LIST_FIXTURE = (
 # token content). Asserted absent from every dispatch result.
 _TOKEN_VALUE_CANARY = "K10rke2e2ecanarytokenDONOTLEAK::server:zzz999"  # NOSONAR
 
+# rke2.node.config.get (#2854): a config.yaml body whose join token must be
+# REDACTED as it flows through the full dispatch stack. The canary value is
+# asserted absent from the result; tls-san (a non-secret) survives verbatim.
+_CONFIG_TOKEN_CANARY = "K10rke2e2eCONFIGcanaryDONOTLEAK::server:ggg777"  # gitleaks:allow NOSONAR
+_CONFIG_YAML_FIXTURE = (
+    f"token: {_CONFIG_TOKEN_CANARY}\n"
+    "tls-san:\n"
+    "  - 10.0.0.5\n"
+    "  - rke2.lab.example\n"
+    "node-taint:\n"
+    "  - dedicated=infra:NoSchedule\n"
+)
+
 
 # ---------------------------------------------------------------------------
 # In-process fake-shell SSH server
@@ -144,6 +158,9 @@ async def _fake_shell_process_factory(process: Any) -> None:
     elif cmd.startswith("command -v systemctl"):
         # rke2.node.service.status -- the systemctl-show service probe (#2852).
         response = _SERVICE_STATUS_FIXTURE
+    elif cmd.startswith("if [ -e "):
+        # rke2.node.config.get -- the bounded `cat` of config.yaml (#2854).
+        response = _CONFIG_YAML_FIXTURE
     elif cmd.startswith("printf 'ACTIVE="):
         # rke2.token.rotate fingerprint preflight: server node, active,
         # patched version (1.29 is above the CVE-fix range).
@@ -467,6 +484,39 @@ async def test_rke2_e2e_service_status_dispatches_ok(
     # The other unit is not installed here -- not-found nulls its live state.
     assert by_unit["rke2-agent"]["load_state"] == "not-found"
     assert by_unit["rke2-agent"]["active_state"] is None
+
+
+@pytest.mark.asyncio
+async def test_rke2_e2e_config_get_dispatches_ok_and_redacts(
+    rke2_e2e: _Rke2E2EBundle,
+    captured_events: list[Any],
+) -> None:
+    """rke2.node.config.get returns parsed config content with the token redacted.
+
+    Proves the redacted config-content read (#2854) is dispatchable end to end:
+    the non-secret ``tls-san`` survives verbatim while the join ``token`` is
+    masked before it can reach the result envelope (and therefore the audit
+    ``raw_payload``, which stores the raw handler result).
+    """
+    del captured_events
+    result = await call_operation(
+        _OPERATOR,
+        {
+            "connector_id": _CONNECTOR_ID,
+            "op_id": "rke2.node.config.get",
+            "target": {"name": _TARGET_NAME},
+            "params": {},
+        },
+    )
+    assert result["status"] == "ok", f"rke2.node.config.get failed: {result.get('error')}"
+    payload = result["result"]
+    assert payload["path"] == "/etc/rancher/rke2/config.yaml"
+    assert payload["content"]["tls-san"] == ["10.0.0.5", "rke2.lab.example"]
+    assert payload["content"]["node-taint"] == ["dedicated=infra:NoSchedule"]
+    assert payload["content"]["token"] == "***redacted***"
+    assert payload["redacted_keys"] == ["token"]
+    # The planted join token never survives the dispatch (result view + audit).
+    assert _CONFIG_TOKEN_CANARY not in repr(result)
 
 
 @pytest.mark.asyncio

@@ -40,6 +40,7 @@ from uuid import UUID
 import anyio
 import httpx
 import pytest
+import respx
 from sqlalchemy import select
 
 from meho_backplane.auth.operator import Operator, TenantRole
@@ -144,6 +145,9 @@ class _TestServer:
     host: str
     port: int
     hits: list[str] = field(default_factory=list)
+    #: The verbatim ``Host:`` header seen on each hit, in order — lets a
+    #: test pin which host was sent on which redirect hop.
+    request_hosts: list[str] = field(default_factory=list)
 
     @property
     def origin(self) -> str:
@@ -171,12 +175,17 @@ async def _start_http_server(
             parts = request_line.decode("latin-1").split()
             method = parts[0] if parts else "GET"
             path = parts[1] if len(parts) > 1 else "/"
-            # Drain request headers.
+            # Drain request headers, capturing Host for override assertions.
+            request_host = ""
             while True:
                 line = await reader.readline()
                 if line in (b"\r\n", b"\n", b""):
                     break
+                name, sep, value = line.decode("latin-1").partition(":")
+                if sep and name.strip().lower() == "host":
+                    request_host = value.strip()
             state.hits.append(path)
+            state.request_hosts.append(request_host)
             route = routes.get(path, _Route(status=404, body=b"not found"))
             headers = dict(route.headers)
             headers.setdefault("Content-Length", str(len(route.body)))
@@ -694,3 +703,150 @@ def test_response_schema_declares_error_detail() -> None:
     schema = net_http_probe_mod._NET_HTTP_PROBE_RESPONSE_SCHEMA
     assert "error_detail" in schema["properties"]
     assert "error_detail" in schema["required"]
+
+
+# ---------------------------------------------------------------------------
+# host_header — vhost-routed health probes by IP (#2896)
+# ---------------------------------------------------------------------------
+
+
+def test_host_header_is_an_optional_string_in_the_schema() -> None:
+    """AC1: host_header is schema-accepted, optional, additive.
+
+    Present as a string property, absent from ``required`` (so existing
+    callers are unaffected), and the object stays closed
+    (``additionalProperties: false``).
+    """
+    schema = net_http_probe_mod.NET_HTTP_PROBE_PARAMETER_SCHEMA
+    assert schema["properties"]["host_header"]["type"] == "string"
+    assert schema["required"] == ["url"]
+    assert schema["additionalProperties"] is False
+
+
+@pytest.mark.parametrize(
+    ("host_header", "expected_sni"),
+    [
+        ("vcfa.corp.example", "vcfa.corp.example"),
+        ("vcfa.corp.example:8443", "vcfa.corp.example"),
+        # No numeric trailing port ⇒ passed through untouched.
+        ("vcfa.corp.example:", "vcfa.corp.example:"),
+    ],
+)
+def test_sni_from_host_header_strips_only_a_numeric_port(
+    host_header: str, expected_sni: str
+) -> None:
+    """The TLS SNI name is the bare hostname; the Host: header keeps its port."""
+    assert net_http_probe_mod._sni_from_host_header(host_header) == expected_sni
+
+
+async def test_host_header_sends_host_and_sni_on_https(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC1: an https probe by IP with host_header dials the IP but sends the
+    vhost as both the ``Host:`` header and the TLS SNI / cert-verify name.
+
+    ``sni_hostname`` is what httpcore reads as ``server_hostname`` — the
+    single value that drives BOTH the wire SNI extension and the
+    certificate hostname check — so setting it is what keeps ``verify`` on
+    against a cert pinned to the vhost rather than the dialed IP (the
+    #2002/#2863 seam). Transport-verified via respx.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.9")
+    async with respx.mock(base_url="https://203.0.113.9") as mock:
+        route = mock.head("/health").respond(200, headers={"X-App": "vcfa"})
+        result = await net_http_probe(
+            _make_operator(),
+            None,
+            {"url": "https://203.0.113.9/health", "host_header": "vcfa.corp.example:8443"},
+        )
+
+    assert route.called
+    req = route.calls[0].request
+    # Host header = the vhost verbatim (port preserved).
+    assert req.headers["host"] == "vcfa.corp.example:8443"
+    # But the dialed address stays the IP the allowlist gated.
+    assert req.url.host == "203.0.113.9"
+    # SNI / cert-verification name = the bare vhost hostname (port stripped).
+    assert req.extensions["sni_hostname"] == "vcfa.corp.example"
+    assert result["reachable"] is True
+    assert result["status"] == 200
+
+
+async def test_host_header_omitted_dispatches_byte_identically(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC5: without host_header, Host / SNI derive from the URL exactly as
+    before — no forced Host header, no sni_hostname extension."""
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "203.0.113.9")
+    async with respx.mock(base_url="https://203.0.113.9") as mock:
+        route = mock.head("/x").respond(200)
+        await net_http_probe(_make_operator(), None, {"url": "https://203.0.113.9/x"})
+
+    req = route.calls[0].request
+    assert req.headers["host"] == "203.0.113.9"
+    assert "sni_hostname" not in req.extensions
+
+
+async def test_host_header_does_not_widen_the_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_http_probe_op: None,
+) -> None:
+    """AC2: the allowlist gates the DIALED url host, never host_header.
+
+    A non-allowlisted IP carrying an allowlisted-looking host_header is
+    still refused as a dispatch error (#2784) and no socket opens — the
+    header cannot smuggle a probe past the floor.
+    """
+
+    async def _boom(*_a: object, **_kw: object) -> object:
+        raise AssertionError("no request may run when the dialed host is refused")
+
+    monkeypatch.setattr(net_http_probe_mod.httpx.AsyncClient, "send", _boom)
+    # 'localhost' is the only allowlisted token; the dialed 192.168.1.5 is not.
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "localhost")
+
+    result = await _dispatch_probe({"url": "http://192.168.1.5/health", "host_header": "localhost"})
+
+    assert result.status == "error"
+    assert result.extras["error_code"] == "connector_probe_refused"
+    # The refusal names the DIALED IP, not the host_header value.
+    assert result.extras["host"] == "192.168.1.5"
+
+
+async def test_host_header_override_is_dropped_after_the_first_redirect_hop(
+    monkeypatch: pytest.MonkeyPatch,
+    _registered_http_probe_op: None,
+) -> None:
+    """AC3: the override rides hop 1 only; the redirect target keeps its own
+    canonical host, and each hop is re-gated (127.0.0.1 stays allowlisted).
+
+    Carrying a forced ``Host:`` across hops would probe the wrong virtual
+    host, so hop 2 must fall back to the redirect target's own host.
+    """
+    monkeypatch.setenv(PROBE_ALLOWLIST_ENV, "127.0.0.1")
+    srv = await _start_http_server(
+        {
+            "/start": _Route(status=302, headers={"Location": "/final"}),
+            "/final": _Route(status=200, body=b"arrived"),
+        }
+    )
+    try:
+        result = await _dispatch_probe(
+            {
+                "url": f"{srv.origin}/start",
+                "method": "GET",
+                "host_header": "vhost.example:1234",
+            }
+        )
+    finally:
+        srv.server.close()
+        await srv.server.wait_closed()
+
+    assert result.status == "ok", result.error
+    body = result.result
+    assert body["status"] == 200
+    assert [hop["status"] for hop in body["redirect_chain"]] == [302]
+    # Hop 1 carried the forced vhost Host: header.
+    assert srv.request_hosts[0] == "vhost.example:1234"
+    # Hop 2 (the redirect target) carried its own canonical host — override dropped.
+    assert srv.request_hosts[1] == f"127.0.0.1:{srv.port}"

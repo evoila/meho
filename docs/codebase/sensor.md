@@ -17,6 +17,16 @@ The layer is deliberately minimal: a Sensor stores a **bounded** assertion
 model carries no transition logic; the admin service owns create/list/get/
 delete, the runner (#2505) owns claim/advance/park and the result write.
 
+Op-specific probe recipes live with their ops. One worth naming here:
+health-checking a **strict-vhost appliance** (a service that vhost-routes
+and 404s unless the request's `Host:` matches — e.g. VCFA behind a
+NAT-alias IP before DNS exists). Pin a `net.http_probe` Sensor with the
+`host_header` param so the probe dials the IP (what the allowlist gates)
+yet sends the virtual host as the `Host:` header and TLS SNI; otherwise a
+by-IP probe reads a misleading 404 / `tls_error` whether the service is
+healthy or wedged. See `docs/codebase/connectors-net-diagnostics.md`
+§ *Vhost-routed probes by IP*.
+
 ## Key types
 
 - `meho_backplane.db.models.Sensor` — the ORM row. 30 columns: identity

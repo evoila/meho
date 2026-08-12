@@ -278,6 +278,51 @@ transitively via httpx and is now declared a direct dependency in
 `backend/pyproject.toml` so the requirement is explicit (same pattern as
 `dnspython` / `cryptography`).
 
+### Vhost-routed probes by IP — `host_header` (#2896)
+
+A **strict-vhost appliance** (VCFA and friends) vhost-routes: it answers
+only when the request's `Host:` matches a virtual host it serves, and
+returns 404 for anything else. Probed by its NAT-alias IP **before DNS
+exists** — `https://<IP>/health` — the probe derives `Host:` and TLS SNI
+from the URL host (the IP), so a healthy service and a wedged one both
+read 404 (or `tls_error` with `verify` on): the reading is useless. Two
+labs sat API-dead ~14h behind green TCP/UI probes for exactly this.
+
+The optional **`host_header`** param (`hostname[:port]`) decouples the
+vhost identity from the dialed address, the same seam
+`HttpConnector.tls_server_name` uses for target-coupled dispatch (#2002 /
+#2863):
+
+- The raw IP stays in `url` — that host is what is **dialed** and what
+  `assert_probe_allowed` gates. `host_header` is **never dialed** and can
+  **never widen the allowlist**; the SSRF floor is unchanged.
+- `host_header` is sent **verbatim** as the initial request's `Host:`
+  header, and — for an `https` URL — also as
+  `extensions={"sni_hostname": <host minus port>}`. httpcore reads that
+  extension as `server_hostname`, the single value driving **both** the
+  wire TLS SNI extension **and** the certificate hostname check — so the
+  cert is verified against the vhost name and `verify` stays on against a
+  cert pinned to the FQDN rather than the IP. The `Host:` header alone
+  does not suffice for https: without the SNI override the handshake
+  offers the IP and fails verification (`tls_error`).
+- The override rides the **first hop only**. A redirect target has its own
+  canonical host, so `_walk_redirects` drops it after hop 1 (and re-gates
+  every hop's host as before). `headers` / `tls` in the result therefore
+  reflect the vhost-routed virtual host.
+
+Rejected (audit / anti-exfil posture, #2896): a free-form `headers` map
+(open header-injection + exfil surface on a deliberately body-less probe)
+and a full `--resolve`-style name→IP override (equivalent power, more
+surface — a caller can already put the IP in `url` and the vhost in
+`host_header`). The single closed-purpose param is the minimal shape.
+
+**Strict-vhost health sensor.** This makes a deterministic health check
+for a by-IP strict-vhost appliance expressible with the existing Sensor
+machinery: pin a `net.http_probe` Sensor whose args carry the IP `url` +
+the vhost `host_header`, and assert on `$.status` (e.g. `threshold`
+`== 200`, or membership). Without `host_header` the same Sensor reads a
+misleading 404 regardless of health.
+
 ## `net.ntp_check` — clock offset/skew + stratum (T5, #2410)
 
 `net.ntp_check(host, port=123, timeout_seconds?)` sends **one** mode-3

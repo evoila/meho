@@ -87,7 +87,16 @@ _OWNER_TYPE_ROOT: dict[str, str] = {"organization": "organization", "user": "use
 # ``__ROOT__`` is replaced with the closed-map literal above (org / user);
 # ``$login`` / ``$number`` / ``$first`` are GraphQL variables. Reads the
 # project node id + every field (single-select fields additionally carry
-# their ``options {id name}``) + the current items in one round-trip.
+# their ``options {id name}``) + the current items, each with its own
+# Status / Priority / Size / ... field values, in one round-trip.
+#
+# ``fieldValues(first: 20)`` is a per-item bound, not a page size: an item
+# carries one value per set field, and auto-populated values (assignees,
+# labels, linked PRs, repository) precede the custom single-selects in the
+# connection. The live MEHO board's busiest items hold 9 values, where
+# ``first: 8`` drops the trailing ``Track`` single-select on every assigned
+# item; 20 clears that observed max with headroom and needs no per-item
+# cursor (board-item field-value pagination is a separate follow-on).
 _PROJECT_VIEW_QUERY = """
 query ($login: String!, $number: Int!, $first: Int!) {
   __ROOT__(login: $login) {
@@ -105,6 +114,19 @@ query ($login: String!, $number: Int!, $first: Int!) {
         totalCount
         nodes {
           id
+          fieldValues(first: 20) {
+            nodes {
+              __typename
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                name
+                field { ... on ProjectV2FieldCommon { name } }
+              }
+              ... on ProjectV2ItemFieldTextValue {
+                text
+                field { ... on ProjectV2FieldCommon { name } }
+              }
+            }
+          }
           content {
             __typename
             ... on Issue { number title url }
@@ -200,13 +222,49 @@ def _parse_fields(project: dict[str, Any]) -> list[dict[str, Any]]:
     return parsed
 
 
+def _parse_field_values(node: dict[str, Any]) -> dict[str, Any]:
+    """Collapse an item's ``fieldValues.nodes`` array into ``{field name: value}``.
+
+    Only single-select (its selected option ``name``) and plain-text (its
+    ``text``) value types are projected -- the Status / Priority / Size
+    fields the board-status read needs, plus the common free-text field.
+    Every other value type (iteration, number, date, repository, labels,
+    ...) is dropped, mirroring :func:`_parse_fields`' "skip unexpected
+    shapes" defensiveness; a node whose owning field name cannot be
+    resolved is likewise skipped rather than raised.
+    """
+    values_conn = node.get("fieldValues")
+    nodes = values_conn.get("nodes") if isinstance(values_conn, dict) else None
+    if not isinstance(nodes, list):
+        return {}
+    parsed: dict[str, Any] = {}
+    for value_node in nodes:
+        if not isinstance(value_node, dict):
+            continue
+        typename = value_node.get("__typename")
+        if typename == "ProjectV2ItemFieldSingleSelectValue":
+            value = value_node.get("name")
+        elif typename == "ProjectV2ItemFieldTextValue":
+            value = value_node.get("text")
+        else:
+            continue
+        field = value_node.get("field")
+        field_name = field.get("name") if isinstance(field, dict) else None
+        if not isinstance(field_name, str):
+            continue
+        parsed[field_name] = value
+    return parsed
+
+
 def _parse_items(project: dict[str, Any]) -> list[dict[str, Any]]:
     """Collapse the ``items.nodes`` array into ``{item_id, content_type, ...}`` rows.
 
     Each row carries the board ``item_id`` (the node id
     ``project_item_set_field`` needs) plus the underlying content's type,
-    number, title, and url. Draft issues have no number / url; those keys
-    surface as ``None``.
+    number, title, and url, and a ``field_values`` map of the item's set
+    Status / Priority / Size / text fields (see :func:`_parse_field_values`).
+    Draft issues have no number / url; those keys surface as ``None``. An
+    item with no projected field values carries an empty ``field_values``.
     """
     items_conn = project.get("items")
     nodes = items_conn.get("nodes") if isinstance(items_conn, dict) else None
@@ -225,6 +283,7 @@ def _parse_items(project: dict[str, Any]) -> list[dict[str, Any]]:
                 "number": content_dict.get("number"),
                 "title": content_dict.get("title"),
                 "url": content_dict.get("url"),
+                "field_values": _parse_field_values(node),
             }
         )
     return parsed

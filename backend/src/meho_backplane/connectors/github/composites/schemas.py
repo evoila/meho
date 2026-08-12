@@ -247,10 +247,42 @@ PROJECT_VIEW_RESPONSE_SCHEMA: dict[str, Any] = {
         "items": {
             "type": "array",
             "description": (
-                "Board items. Each is ``{item_id, content_type, number, title, url}``; "
-                "``number`` / ``url`` are ``null`` for draft issues."
+                "Board items. Each is ``{item_id, content_type, number, title, url, "
+                "field_values}``; ``number`` / ``url`` are ``null`` for draft issues."
             ),
-            "items": {"type": "object"},
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_id": {
+                        "type": ["string", "null"],
+                        "description": "Board item's node id (input to project_item_set_field).",
+                    },
+                    "content_type": {
+                        "type": ["string", "null"],
+                        "description": "Content type (Issue / PullRequest / DraftIssue).",
+                    },
+                    "number": {
+                        "type": ["integer", "null"],
+                        "description": "The issue / PR number; ``null`` for draft issues.",
+                    },
+                    "title": {"type": ["string", "null"], "description": "The item's title."},
+                    "url": {
+                        "type": ["string", "null"],
+                        "description": "The issue / PR URL; ``null`` for draft issues.",
+                    },
+                    "field_values": {
+                        "type": "object",
+                        "description": (
+                            "The item's current single-select (Status / Priority / Size) and "
+                            'text field values, keyed by field name -- e.g. ``{"Status": "In '
+                            'Progress", "Priority": "high"}``. Only single-select and text '
+                            "field types are projected; other value types (iteration / number "
+                            "/ date / repository / labels / ...) are omitted. Empty when the "
+                            "item has no such field set."
+                        ),
+                    },
+                },
+            },
         },
         "item_count": {
             "type": ["integer", "null"],

@@ -560,6 +560,22 @@ class NsxConnector(HttpConnector):
 
         return await nsx_segment_list_impl(self, operator, target, params)
 
+    async def transport_node_list(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.transport_node.list`` shim (#2836)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_transport_node_list_impl
+
+        return await nsx_transport_node_list_impl(self, operator, target, params)
+
+    async def transport_node_state(
+        self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``nsx.transport_node.state`` shim (#2836)."""
+        from meho_backplane.connectors.nsx.typed_reads import nsx_transport_node_state_impl
+
+        return await nsx_transport_node_state_impl(self, operator, target, params)
+
     async def alarm_list(
         self, operator: Operator, target: NsxTargetLike, params: dict[str, Any]
     ) -> dict[str, Any]:

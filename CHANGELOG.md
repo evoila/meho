@@ -111,6 +111,24 @@ connector-related release-notes line.
   `tasks.recent` `Task.info` read. See
   `docs/codebase/connectors-vmware-rest.md` for the full substrate.
 
+### Added — `net.http_probe` gains a `host_header` param for vhost-routed health probes by IP (#2896)
+
+- A strict-vhost appliance (VCFA and friends) probed by its NAT-alias IP
+  **before DNS exists** returns 404 whether it is healthy or wedged,
+  because the probe derives `Host:` and TLS SNI from the URL host (the
+  IP). The new optional `host_header` (`hostname[:port]`) decouples the
+  vhost identity from the dialed address: it is sent verbatim as the
+  initial request's `Host:` header and — for an `https` URL — also as the
+  TLS SNI + certificate-verification name (`sni_hostname`), so `verify`
+  stays on against a cert pinned to the vhost rather than the IP.
+- The probe allowlist still gates the **dialed** `url` host only —
+  `host_header` is never dialed and cannot widen the allowlist (the #2405
+  / #2784 SSRF floor is unchanged). The override rides the first redirect
+  hop only; each hop is re-gated as before. A closed single-purpose param
+  was chosen over a free-form `headers` map deliberately (no
+  header-injection / exfil surface on a body-less probe). Existing
+  `net.http_probe` calls without the param behave byte-identically.
+
 ## [0.28.0] - 2026-08-07
 
 ### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)

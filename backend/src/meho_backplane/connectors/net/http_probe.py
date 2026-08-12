@@ -131,6 +131,23 @@ NET_HTTP_PROBE_PARAMETER_SCHEMA: dict[str, Any] = {
                 "reason='timeout'."
             ),
         },
+        "host_header": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Optional vhost override (hostname[:port]) for "
+                "health-probing a vhost-routed service by IP before DNS "
+                "exists: put the raw IP in `url` — that host is what is "
+                "dialed AND allowlist-gated — and the virtual host name "
+                "here. It is sent verbatim as the initial request's "
+                "`Host:` header and, for an https `url`, also as the TLS "
+                "SNI + certificate-verification name (so `verify` stays on "
+                "against a cert pinned to the vhost, not the IP). It is "
+                "NEVER dialed and NEVER widens the allowlist — the gate "
+                "stays on the `url` host — and is dropped after the first "
+                "redirect hop (each hop has its own canonical host)."
+            ),
+        },
     },
     "required": ["url"],
     "additionalProperties": False,
@@ -167,7 +184,10 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": ["object", "null"],
             "description": (
                 "Final response headers (lowercased names). Null if no "
-                "response was received. The body is never included."
+                "response was received. The body is never included. When "
+                "host_header is set these reflect the vhost-routed virtual "
+                "host (the origin the Host: header selected), not a default "
+                "vhost."
             ),
         },
         "redirect_chain": {
@@ -188,7 +208,10 @@ _NET_HTTP_PROBE_RESPONSE_SCHEMA: dict[str, Any] = {
             "description": (
                 "TLS summary of the final connection (version, cipher, "
                 "alpn, cert subject/issuer/not_after); null for plain "
-                "HTTP or when no response was received."
+                "HTTP or when no response was received. When host_header is "
+                "set on an https probe the cert reflects the vhost-routed "
+                "virtual host — SNI and certificate verification use the "
+                "vhost name, not the dialed IP."
             ),
         },
         "timing_ms": {
@@ -272,7 +295,10 @@ _NET_HTTP_PROBE_WHEN_TO_USE = (
     "normal result, not an error. The URL host must be inside "
     "MEHO_NETDIAG_PROBE_ALLOWLIST; one that is not fails with "
     "connector_probe_refused rather than reporting a (false) unreachable "
-    "URL."
+    "URL. To health-probe a vhost-routed service by IP before DNS exists "
+    "(a strict-vhost appliance behind a NAT-alias IP), put the IP in the "
+    "URL and the virtual host in the optional host_header param — the "
+    "allowlist still gates only the dialed IP."
 )
 
 _NET_HTTP_PROBE_LLM_INSTRUCTIONS: dict[str, Any] = {
@@ -287,6 +313,13 @@ _NET_HTTP_PROBE_LLM_INSTRUCTIONS: dict[str, Any] = {
         "url": "Required. Absolute http:// or https:// URL. Host must be allowlisted for probing.",
         "method": "Optional. HEAD (default) or GET only.",
         "timeout_seconds": "Optional. Total timeout across the redirect walk (default 5, max 30).",
+        "host_header": (
+            "Optional vhost override (hostname[:port]) to probe a "
+            "vhost-routed service by IP: put the IP in url (dialed + "
+            "allowlist-gated), the vhost here (sent as Host: and, for "
+            "https, as TLS SNI + cert-verify name). Never dialed, never "
+            "widens the allowlist, dropped after the first redirect hop."
+        ),
     },
     "output_shape": (
         "On a clean terminal response: {'reachable': true, 'reason': "
@@ -562,86 +595,158 @@ def _error_detail(exc: BaseException) -> list[dict[str, str]]:
     return detail
 
 
+def _sni_from_host_header(host_header: str) -> str:
+    """Strip an optional trailing ``:port`` off *host_header* for the SNI name.
+
+    The ``Host:`` header carries ``hostname[:port]`` verbatim, but the TLS
+    SNI extension (RFC 6066) — and the certificate-verification name
+    httpcore derives from it — is the bare hostname. ``rpartition`` peels
+    only a numeric trailing port, so a bare hostname passes through
+    untouched.
+    """
+    host, sep, port = host_header.rpartition(":")
+    if sep and port.isdigit():
+        return host
+    return host_header
+
+
+def _host_header_build_kwargs(host_header: str | None, *, is_https: bool) -> dict[str, Any]:
+    """``httpx.build_request`` kwargs that force the vhost ``Host:`` + TLS SNI.
+
+    Empty when no ``host_header`` is given, so the request is built
+    byte-identically to today (SNI / Host derive from the URL). When set,
+    ``Host:`` carries the vhost verbatim (``hostname[:port]``) and — for an
+    https initial URL — the ``sni_hostname`` extension makes the handshake
+    offer the bare vhost hostname as SNI and verify the presented cert
+    against it (httpcore derives ``server_hostname`` from that extension,
+    the #2002/#2863 seam). The ``Host:`` header alone does **not** suffice
+    for https: without the SNI override an IP-dialed probe with ``verify``
+    on offers the IP as SNI and fails cert verification (``tls_error``).
+    Applied to the **first hop only** by :func:`_walk_redirects`.
+    """
+    if not host_header:
+        return {}
+    kwargs: dict[str, Any] = {"headers": {"Host": host_header}}
+    if is_https:
+        kwargs["extensions"] = {"sni_hostname": _sni_from_host_header(host_header)}
+    return kwargs
+
+
+def _advance_or_halt(
+    *,
+    response: httpx.Response,
+    request: httpx.Request,
+    redirect_chain: list[dict[str, Any]],
+    url: str,
+    method: str,
+    started: float,
+) -> dict[str, Any] | tuple[str, str]:
+    """Decide the next step for a ``3xx`` *response* in the redirect walk.
+
+    Returns a terminal ``_result`` dict when the walk must **halt** — the
+    redirect budget is exhausted (``too_many_redirects``), the ``Location``
+    resolves to no follow-up request (treated as terminal), or the next
+    host is refused by the allowlist (``blocked_redirect`` SSRF re-gate,
+    never dialed) — or the ``(next_url, next_method)`` to dial when the
+    redirect target is allowlisted. Appends the current hop to
+    *redirect_chain*.
+    """
+    status = response.status_code
+    redirect_chain.append({"url": str(request.url), "status": status})
+    if len(redirect_chain) > _MAX_REDIRECTS:
+        return _result(
+            url=url,
+            method=method,
+            reachable=True,
+            reason="too_many_redirects",
+            status=status,
+            redirect_chain=redirect_chain,
+            timing_ms=_elapsed_ms(started),
+            final_url=str(request.url),
+        )
+    # httpx's own correctly-built follow-up request (method downgrade on
+    # 301/302/303, relative-Location resolution).
+    next_request = response.next_request
+    if next_request is None:
+        # has_redirect_location but no resolvable next request (e.g.
+        # malformed Location) — treat as terminal.
+        return _result(
+            url=url,
+            method=method,
+            reachable=True,
+            reason=None,
+            status=status,
+            headers=_headers_dict(response.headers),
+            redirect_chain=redirect_chain,
+            tls=_tls_summary(response),
+            timing_ms=_elapsed_ms(started),
+            final_url=str(request.url),
+        )
+    next_host = next_request.url.host
+    try:
+        assert_probe_allowed(next_host)
+    except ProbeNotAllowedError:
+        # SSRF re-gate: the redirect target is refused and never dialed.
+        # reachable=true (the prior host did answer), but the walk halts.
+        _log.info(
+            "net.http_probe.blocked_redirect",
+            blocked_redirect=next_host,
+            from_url=str(request.url),
+        )
+        return _result(
+            url=url,
+            method=method,
+            reachable=True,
+            reason="blocked_redirect",
+            status=status,
+            redirect_chain=redirect_chain,
+            timing_ms=_elapsed_ms(started),
+            final_url=str(request.url),
+            blocked_redirect=next_host,
+        )
+    return str(next_request.url), next_request.method
+
+
 async def _walk_redirects(
     *,
     client: httpx.AsyncClient,
     url: str,
     method: str,
     started: float,
+    first_hop_build_kwargs: dict[str, Any],
 ) -> dict[str, Any]:
     """Issue the request and walk redirects manually, re-gating each hop.
 
     The initial host has already been allowlist-checked by the caller.
-    For every ``3xx`` with a ``Location``, this re-gates the **next**
-    host through :func:`assert_probe_allowed` *before* dialing it; a
-    non-allowlisted target halts the walk with a ``blocked_redirect``
-    result and is never dialed. Bounded by :data:`_MAX_REDIRECTS`.
+    Each ``3xx`` is handed to :func:`_advance_or_halt`, which re-gates the
+    **next** host through :func:`assert_probe_allowed` *before* it is
+    dialed. Bounded by :data:`_MAX_REDIRECTS`. ``first_hop_build_kwargs``
+    (the ``host_header`` vhost override, from :func:`_host_header_build_kwargs`)
+    rides the **first hop only** — a redirect target has its own canonical
+    host, so carrying a forced ``Host:``/SNI across hops would probe the
+    wrong virtual host.
     """
     redirect_chain: list[dict[str, Any]] = []
     current_url = url
     current_method = method
 
-    for _hop in range(_MAX_REDIRECTS + 1):
-        request = client.build_request(current_method, current_url)
+    for hop_index in range(_MAX_REDIRECTS + 1):
+        build_kwargs = first_hop_build_kwargs if hop_index == 0 else {}
+        request = client.build_request(current_method, current_url, **build_kwargs)
         response = await client.send(request, stream=True)
         try:
-            status = response.status_code
             if response.has_redirect_location:
-                redirect_chain.append({"url": str(request.url), "status": status})
-                if len(redirect_chain) > _MAX_REDIRECTS:
-                    return _result(
-                        url=url,
-                        method=method,
-                        reachable=True,
-                        reason="too_many_redirects",
-                        status=status,
-                        redirect_chain=redirect_chain,
-                        timing_ms=_elapsed_ms(started),
-                        final_url=str(request.url),
-                    )
-                # httpx's own correctly-built follow-up request (method
-                # downgrade on 301/302/303, relative-Location resolution).
-                next_request = response.next_request
-                if next_request is None:
-                    # has_redirect_location but no resolvable next request
-                    # (e.g. malformed Location) — treat as terminal.
-                    return _result(
-                        url=url,
-                        method=method,
-                        reachable=True,
-                        reason=None,
-                        status=status,
-                        headers=_headers_dict(response.headers),
-                        redirect_chain=redirect_chain,
-                        tls=_tls_summary(response),
-                        timing_ms=_elapsed_ms(started),
-                        final_url=str(request.url),
-                    )
-                next_host = next_request.url.host
-                try:
-                    assert_probe_allowed(next_host)
-                except ProbeNotAllowedError:
-                    # SSRF re-gate: the redirect target is refused and
-                    # never dialed. reachable=true (the prior host did
-                    # answer), but the walk halts here.
-                    _log.info(
-                        "net.http_probe.blocked_redirect",
-                        blocked_redirect=next_host,
-                        from_url=str(request.url),
-                    )
-                    return _result(
-                        url=url,
-                        method=method,
-                        reachable=True,
-                        reason="blocked_redirect",
-                        status=status,
-                        redirect_chain=redirect_chain,
-                        timing_ms=_elapsed_ms(started),
-                        final_url=str(request.url),
-                        blocked_redirect=next_host,
-                    )
-                current_url = str(next_request.url)
-                current_method = next_request.method
+                outcome = _advance_or_halt(
+                    response=response,
+                    request=request,
+                    redirect_chain=redirect_chain,
+                    url=url,
+                    method=method,
+                    started=started,
+                )
+                if isinstance(outcome, dict):
+                    return outcome
+                current_url, current_method = outcome
                 continue
 
             # Terminal (non-redirect) response: capture TLS before the
@@ -653,7 +758,7 @@ async def _walk_redirects(
                 method=method,
                 reachable=True,
                 reason=None,
-                status=status,
+                status=response.status_code,
                 headers=_headers_dict(response.headers),
                 redirect_chain=redirect_chain,
                 tls=tls,
@@ -699,6 +804,8 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
     url = str(params["url"])
     method = str(params.get("method", "HEAD")).upper()
     timeout = _clamp_timeout(params.get("timeout_seconds", _DEFAULT_TIMEOUT_SECONDS))
+    host_header_raw = params.get("host_header")
+    host_header = str(host_header_raw) if host_header_raw else None
 
     # Parse + validate the URL locally before any network work.
     try:
@@ -708,10 +815,16 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
     if parsed.scheme not in ("http", "https") or not parsed.host:
         return _result(url=url, method=method, reachable=False, reason="invalid_url")
 
-    # Gate the initial host BEFORE any socket opens. A refusal propagates
-    # (#2784): no request was issued, so there is no observation to report
-    # — the dispatcher renders it as ``connector_probe_refused``.
+    # Gate the initial host BEFORE any socket opens. This gates the
+    # **dialed** ``url`` host only — never ``host_header``, which is an
+    # HTTP/TLS routing hint, is never dialed, and so can never widen the
+    # allowlist. A refusal propagates (#2784): no request was issued, so
+    # there is no observation to report — the dispatcher renders it as
+    # ``connector_probe_refused``.
     assert_probe_allowed(parsed.host)
+    first_hop_build_kwargs = _host_header_build_kwargs(
+        host_header, is_https=parsed.scheme == "https"
+    )
 
     started = time.perf_counter()
     # Fresh client per call (NOT HttpConnector's per-target pool);
@@ -725,7 +838,13 @@ async def net_http_probe(operator: Operator, target: Any, params: dict[str, Any]
             timeout=httpx.Timeout(timeout),
         ) as client:
             return await asyncio.wait_for(
-                _walk_redirects(client=client, url=url, method=method, started=started),
+                _walk_redirects(
+                    client=client,
+                    url=url,
+                    method=method,
+                    started=started,
+                    first_hop_build_kwargs=first_hop_build_kwargs,
+                ),
                 timeout=timeout,
             )
     except (TimeoutError, httpx.TimeoutException) as exc:
@@ -787,7 +906,15 @@ async def register_net_http_probe_operations(
             "product, never a connector error. A connection-level "
             "failure also carries error_detail: the actual mapped "
             "exception chain (innermost-first {type, message}, bounded) "
-            "behind the reason code."
+            "behind the reason code. An optional host_header "
+            "(hostname[:port]) health-probes a vhost-routed service by IP "
+            "before DNS exists: the IP goes in url and the virtual host in "
+            "host_header, sent verbatim as the initial Host: header and — "
+            "for an https url — as the TLS SNI + certificate-verification "
+            "name (so verify stays on against a cert pinned to the vhost). "
+            "The allowlist always gates the DIALED url host, never "
+            "host_header (which is never dialed and cannot widen it); the "
+            "override is dropped after the first redirect hop."
         ),
         parameter_schema=NET_HTTP_PROBE_PARAMETER_SCHEMA,
         response_schema=_NET_HTTP_PROBE_RESPONSE_SCHEMA,

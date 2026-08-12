@@ -35,6 +35,18 @@ The audited set (three ops):
   ``GET /suite-api/api/resources`` list the ingested curation still
   browses).
 
+A fourth typed read joins the set in wave 2 (#2838), extending the
+surface from resource *identity* to resource *metric values*:
+
+* ``vrops.resource.stats`` — sizing / resource-pressure read. A
+  ``GET /suite-api/api/resources/stats/latest`` returning the latest
+  metric **values** vROps computed for named resources (current CPU
+  demand, memory workload, capacity-remaining). ``resourceId`` is a
+  required list (typically fed from ``vrops.resource.query``); the
+  schema refuses an unbounded all-resource stats read. Closes the gap
+  where the backplane could find resources and see alerts but never
+  read the values vROps exists to compute.
+
 Sibling precedent for the dataclass + registrar shape:
 :mod:`meho_backplane.connectors.argocd.ops` (metadata dataclasses here,
 thin bound-method handlers on the connector, a module-level registrar
@@ -64,6 +76,7 @@ __all__ = [
     "VROPS_LIVENESS_OP",
     "VROPS_RESOURCE_QUERY_BODY_FIELDS",
     "VROPS_RESOURCE_QUERY_OP",
+    "VROPS_RESOURCE_STATS_OP",
     "VROPS_TYPED_OPS",
     "VROPS_TYPED_WHEN_TO_USE_BY_GROUP",
     "VropsTypedOp",
@@ -80,6 +93,7 @@ _log = structlog.get_logger(__name__)
 _LIVENESS_GROUP_KEY = "vrops-liveness"
 _ALERT_TRIAGE_GROUP_KEY = "vrops-alert-triage"
 _RESOURCE_QUERY_GROUP_KEY = "vrops-resource-query"
+_RESOURCE_STATS_GROUP_KEY = "vrops-resource-stats"
 
 #: Top-level ``ResourceQuerySpec`` body fields ``vrops.resource.query``
 #: forwards (a curated subset of the full spec). ``page`` / ``pageSize``
@@ -156,6 +170,14 @@ VROPS_TYPED_WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "with pagination. The right group when the question is 'find the "
         "resource(s) matching X' or 'which monitored objects are in state "
         "Y?'. Read-only."
+    ),
+    _RESOURCE_STATS_GROUP_KEY: (
+        "Use to read the latest metric/stat *values* vROps computed for "
+        "specific resources — current CPU demand, memory workload, "
+        "capacity-remaining — the sizing and resource-pressure answer. The "
+        "right group when the question is 'what is this VM/host actually "
+        "using?' or 'how much capacity is left?'. Feed resource UUIDs from "
+        "the vrops-resource-query group. Read-only."
     ),
 }
 
@@ -427,13 +449,106 @@ VROPS_RESOURCE_QUERY_OP = VropsTypedOp(
 )
 
 
+VROPS_RESOURCE_STATS_OP = VropsTypedOp(
+    op_id="vrops.resource.stats",
+    handler_attr="resource_stats",
+    summary="Read the latest vROps stat/metric values for named resources (sizing input).",
+    description=(
+        "Reads GET /suite-api/api/resources/stats/latest directly on the "
+        "connector's OpsToken session (no catalog ingest) to return the "
+        "latest metric *values* vROps computed for one or more resources — "
+        "the sizing / resource-pressure answer vROps exists to give (current "
+        "CPU demand, memory workload, capacity-remaining). resourceId is a "
+        "required list of resource UUIDs (typically from a prior "
+        "vrops.resource.query); an unbounded all-resource stats read is "
+        "refused at the schema layer. Optional statKey restricts to specific "
+        "stat keys (e.g. 'cpu|demandmhz', 'mem|workload'); omit to return "
+        "every stat the named resources report. Optional currentOnly reports "
+        "only current values. resourceId and statKey serialise to repeated "
+        "query params. Unlike vrops.resource.query (which filters resources "
+        "by whether they report a statKey but never returns the value), this "
+        "op returns the value. Large stat sets are reduced to a JSONFlux "
+        "handle, the same posture vrops.alert.list / vrops.resource.query "
+        "take. safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "resourceId": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "minItems": 1,
+                "description": (
+                    "Resource UUIDs (typically from vrops.resource.query) to "
+                    "read latest stat values for. Required — at least one; an "
+                    "unbounded all-resource stats read is refused."
+                ),
+            },
+            "statKey": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1},
+                "description": (
+                    "Restrict to these stat keys (e.g. 'cpu|demandmhz', "
+                    "'mem|workload', 'cpu|capacity_remaining'). Omit to return "
+                    "every stat the named resources report."
+                ),
+            },
+            "currentOnly": {
+                "type": "boolean",
+                "description": "When true, report only current stat values.",
+            },
+        },
+        "required": ["resourceId"],
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "values": {"type": "array"},
+        },
+        "additionalProperties": True,
+    },
+    group_key=_RESOURCE_STATS_GROUP_KEY,
+    tags=("read-only", "vrops", "vmware", "stats", "metrics"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_use": (
+            "Call when the operator is sizing a cluster / VM or diagnosing "
+            "resource pressure and needs vROps's own computed metric values "
+            "— current CPU demand, memory workload, capacity-remaining — for "
+            "specific resources. Feed resourceId from a prior "
+            "vrops.resource.query; narrow with statKey when only certain "
+            "metrics matter."
+        ),
+        "parameter_hints": {
+            "resourceId": "Required list of resource UUIDs from vrops.resource.query.",
+            "statKey": "e.g. 'cpu|demandmhz' / 'mem|workload'; omit for all stats.",
+            "currentOnly": "true to report only current values.",
+        },
+        "output_shape": (
+            "{values: [{resourceId, stats: {stat: [{statKey: {key}, data: "
+            "[number], timestamps: [epoch_ms], ...}, ...]}}, ...]}. Each stat "
+            "entry carries the metric's latest data point(s) and timestamp(s) "
+            "for one statKey on one resource. Large sets return a JSONFlux "
+            "handle — drill in with result_query / result_aggregate. Field "
+            "names follow the VCF Operations 9.0 Suite API stats-of-resources "
+            "shape; confirm against a live target if exact-shape parsing is "
+            "ever needed (the handler passes the payload through unparsed)."
+        ),
+    },
+)
+
+
 #: The typed ops :class:`VcfOperationsConnector` registers at lifespan
-#: startup — the audited vROps read set (#2303). The tuple shape lets a
-#: future typed read join without touching the registrar.
+#: startup — the audited vROps read set (#2303) plus the sizing stat-value
+#: read (#2838). The tuple shape lets a future typed read join without
+#: touching the registrar.
 VROPS_TYPED_OPS: tuple[VropsTypedOp, ...] = (
     VROPS_LIVENESS_OP,
     VROPS_ALERT_LIST_OP,
     VROPS_RESOURCE_QUERY_OP,
+    VROPS_RESOURCE_STATS_OP,
 )
 
 

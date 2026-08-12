@@ -24,6 +24,17 @@ func TestRepointedVerbsDispatchTypedOpIDs(t *testing.T) {
 	}{
 		{name: "domain list", args: []string{"domain", "list"}, wantOp: "sddc.domain.list"},
 		{name: "manager list", args: []string{"manager", "list"}, wantOp: "sddc.manager.list"},
+		{name: "network-pool list", args: []string{"network-pool", "list"}, wantOp: "sddc.network_pool.list"},
+		{
+			name:   "network-pool get",
+			args:   []string{"network-pool", "get", "np-01"},
+			wantOp: "sddc.network_pool.get",
+			checkParam: func(t *testing.T, p map[string]any) {
+				if p["id"] != "np-01" {
+					t.Errorf("network-pool get: id param not forwarded; got %v", p)
+				}
+			},
+		},
 		{
 			name:   "cluster list",
 			args:   []string{"cluster", "list", "--domain", "domain-mgmt"},

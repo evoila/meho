@@ -71,14 +71,15 @@ unauthenticated version endpoint), so it goes through
 Operations
 ----------
 
-The audited 12-read lab-audit set (#2306) ships as **typed** ops
-(``source_kind="typed"``) via the bound-method shims below, registered
-through :mod:`meho_backplane.connectors.sddc_manager.typed_ops`; they
-dispatch on a fresh boot with zero catalog ingest. ``sddc.credential.list``
+The audited 12-read lab-audit set (#2306), extended with the network-pool
+pre-flight reads (#2837), ships as **typed** ops (``source_kind="typed"``)
+via the bound-method shims below, registered through
+:mod:`meho_backplane.connectors.sddc_manager.typed_ops`; they dispatch on
+a fresh boot with zero catalog ingest. ``sddc.credential.list``
 (``GET /v1/credentials``) is credential-read gated
 (``requires_approval=True`` + ``credential_read`` classification +
-boundary redaction). The four non-audited reads (release, domain detail,
-network-pools, bundles) and the wider ingested 375-op VCF catalog stay
+boundary redaction). The three non-audited reads (release, domain detail,
+bundles) and the wider ingested 375-op VCF catalog stay
 browsable as profiled-dispatch breadth (#2271) under their own
 ``METHOD:path`` op_ids, enable-able through the generic review flow
 (``ReviewService.enable_reads``) — two surfaces, no resolver shadowing
@@ -604,6 +605,22 @@ class SddcManagerConnector(HttpConnector):
         from meho_backplane.connectors.sddc_manager.typed_reads import sddc_nsxt_cluster_list_impl
 
         return await sddc_nsxt_cluster_list_impl(self, operator, target, params)
+
+    async def network_pool_list(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.network_pool.list`` shim (#2837)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_network_pool_list_impl
+
+        return await sddc_network_pool_list_impl(self, operator, target, params)
+
+    async def network_pool_get(
+        self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """``sddc.network_pool.get`` shim (#2837)."""
+        from meho_backplane.connectors.sddc_manager.typed_reads import sddc_network_pool_get_impl
+
+        return await sddc_network_pool_get_impl(self, operator, target, params)
 
     async def credential_list(
         self, operator: Operator, target: SddcTargetLike, params: dict[str, Any]

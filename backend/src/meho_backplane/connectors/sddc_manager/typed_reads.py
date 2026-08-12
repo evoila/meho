@@ -24,9 +24,10 @@ calls in the connector's internal ``_get_json_with_session_retry``
 helper (that helper serves the fingerprint/probe path, which the
 dispatcher does not drive).
 
-The audited 12-read set (paths from the #2294 lab audit, cross-checked
+The typed read set -- the audited #2294 12-read lab-audit surface (#2306),
+extended with the network-pool pre-flight reads (#2837) -- cross-checked
 against the VCF / SDDC Manager 9.0 API at
-https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/):
+https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/:
 
 * ``sddc.domain.list`` -- ``GET /v1/domains`` (management + workload
   domain inventory).
@@ -40,6 +41,11 @@ https://developer.broadcom.com/xapis/vmware-cloud-foundation-api/latest/):
   inventory; optional ``domainId`` filter).
 * ``sddc.nsxt_cluster.list`` -- ``GET /v1/nsxt-clusters`` (NSX-T manager
   cluster inventory).
+* ``sddc.network_pool.list`` -- ``GET /v1/network-pools`` (network-pool
+  inventory for host commissioning).
+* ``sddc.network_pool.get`` -- ``GET /v1/network-pools/{id}`` (one pool's
+  ``networks[]`` with per-network free/used IP capacity, the
+  host-commissioning IP-capacity pre-flight).
 * ``sddc.credential.list`` -- ``GET /v1/credentials`` (nested-infra
   credential inventory). **Credential-read gated** (#2306): dispatch
   routes through the approval queue (``requires_approval=True``) and the
@@ -80,6 +86,8 @@ __all__ = [
     "sddc_host_list_impl",
     "sddc_license_list_impl",
     "sddc_manager_list_impl",
+    "sddc_network_pool_get_impl",
+    "sddc_network_pool_list_impl",
     "sddc_nsxt_cluster_list_impl",
     "sddc_system_info_impl",
     "sddc_task_list_impl",
@@ -105,6 +113,8 @@ _SYSTEM_PATH = "/v1/system"
 _VCF_SERVICES_PATH = "/v1/vcf-services"
 _SDDC_MANAGERS_PATH = "/v1/sddc-managers"
 _LICENSE_KEYS_PATH = "/v1/license-keys"
+_NETWORK_POOLS_PATH = "/v1/network-pools"
+_NETWORK_POOL_GET_PATH = "/v1/network-pools/{id}"
 
 #: Sentinel written in place of a scrubbed secret value. A non-empty
 #: marker (rather than dropping the key) keeps the shape stable so the
@@ -282,6 +292,45 @@ async def sddc_nsxt_cluster_list_impl(
     """
     del params  # schema declares the param object empty
     return await connector._get_json(target, _NSXT_CLUSTERS_PATH, operator=operator)
+
+
+async def sddc_network_pool_list_impl(
+    connector: SddcManagerConnector,
+    operator: Operator,
+    target: SddcTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``sddc.network_pool.list`` -- ``GET /v1/network-pools``.
+
+    Lists the VCF network pools SDDC Manager defines for host
+    commissioning as a paginated ``{elements: [...]}`` envelope. The entry
+    point for the host-commissioning IP-capacity pre-flight: pick the pool
+    a domain / cluster draws from, then read its per-network free-vs-used
+    IP counts with ``sddc.network_pool.get``.
+    """
+    del params  # schema declares the param object empty
+    return await connector._get_json(target, _NETWORK_POOLS_PATH, operator=operator)
+
+
+async def sddc_network_pool_get_impl(
+    connector: SddcManagerConnector,
+    operator: Operator,
+    target: SddcTargetLike,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    """``sddc.network_pool.get`` -- ``GET /v1/network-pools/{id}``.
+
+    Reads one network pool's detail, including its ``networks[]`` -- each
+    network's ``type`` (VSAN / VMOTION / ...), ``vlanId``, ``subnet`` /
+    ``mask`` / ``gateway``, the ``ipPools[]`` ranges, and the ``freeIps``
+    / ``usedIps`` lists whose lengths are the free-vs-used capacity an
+    operator confirms before commissioning N hosts. Requires a pool ``id``
+    from ``sddc.network_pool.list``. The vendor payload is returned intact
+    -- no capacity field is dropped or reshaped.
+    """
+    pool_id = params["id"]
+    path = _NETWORK_POOL_GET_PATH.format(id=pool_id)
+    return await connector._get_json(target, path, operator=operator)
 
 
 async def sddc_credential_list_impl(

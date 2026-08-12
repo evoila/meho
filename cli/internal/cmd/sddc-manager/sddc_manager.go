@@ -13,7 +13,8 @@
 //   - `meho sddc-manager domain info <id> [--target T]`     — GET:/v1/domains/{id}
 //   - `meho sddc-manager cluster list [--domain D] [--target T]`   — GET:/v1/clusters
 //   - `meho sddc-manager host list [--domain D] [--cluster C] [--target T]` — GET:/v1/hosts
-//   - `meho sddc-manager network-pool list [--target T]`    — GET:/v1/network-pools
+//   - `meho sddc-manager network-pool list [--target T]`    — sddc.network_pool.list
+//   - `meho sddc-manager network-pool get <id> [--target T]` — sddc.network_pool.get
 //   - `meho sddc-manager bundle list [--target T]`          — GET:/v1/bundles
 //   - `meho sddc-manager workflow list [--status S] [--target T]`  — GET:/v1/tasks
 //   - `meho sddc-manager operation search/call`             — meta-tool wrappers

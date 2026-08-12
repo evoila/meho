@@ -157,6 +157,12 @@ real operator through the same loader.
 | `k8s.configmap.list`   | safe   | `CoreV1Api.list_namespaced_config_map()` / `list_config_map_for_all_namespaces()` -- **keys only, NO values** + `label_selector`. |
 | `k8s.configmap.info`   | safe   | `CoreV1Api.read_namespaced_config_map()` -- full data + binary_data. |
 | `k8s.event.list`       | safe   | `CoreV1Api.list_namespaced_event()` / `list_event_for_all_namespaces()` -- pulls up to `MAX_EVENT_LIMIT` (500) rows, sorts client-side by `last_seen` desc, truncates to caller's `--limit`. Server has no `lastTimestamp` ordering guarantee. EventSeries `count` honoured. Forwards `label_selector` + `field_selector`. |
+| `k8s.storageclass.list` | safe  | `StorageV1Api.list_storage_class()` -- name / provisioner / `is_default` (GA `storageclass.kubernetes.io/is-default-class` annotation) / reclaim_policy / volume_binding_mode / allow_expansion. Cluster-scoped, no params. (`ops_storage.py`) |
+| `k8s.persistentvolume.list` | safe | `CoreV1Api.list_persistent_volume()` -- name / phase / capacity / storage_class / claim_ref (`namespace/name`) / access_modes / reclaim_policy. Cluster-scoped, no params. (`ops_storage.py`) |
+| `k8s.persistentvolumeclaim.list` | safe | `CoreV1Api.list_namespaced_persistent_volume_claim()` / `list_persistent_volume_claim_for_all_namespaces()` -- name / namespace / status / capacity (`status.capacity.storage`) / storage_class / volume_name / access_modes. `namespace` XOR `all_namespaces`. Backs `k8s.ls /<ns>/persistentvolumeclaims`. (`ops_storage.py`) |
+| `k8s.crd.list`         | safe   | `ApiextensionsV1Api.list_custom_resource_definition()` -- group / kind / plural / scope / versions (`{name, served, storage}`). Discovery op for the generic CR reads. (`ops_customresource.py`) |
+| `k8s.cr.list`          | safe   | Generic CR list over `CustomObjectsApi.list_namespaced_custom_object()` (with `namespace`) / `list_cluster_custom_object()` (without). Rows = metadata + bounded JSON `spec_excerpt` (cap `CR_SPEC_EXCERPT_MAX_BYTES` = 2048 B, `spec_truncated` flag). Requires `group`/`version`/`plural`. (`ops_customresource.py`) |
+| `k8s.cr.info`          | safe   | Generic single CR read over `CustomObjectsApi.get_namespaced_custom_object()` / `get_cluster_custom_object()`. Single-object projection (metadata + bounded `spec_excerpt`), not a rows envelope. Requires `group`/`version`/`plural`/`name`. (`ops_customresource.py`) |
 | `k8s.logs`             | safe   | `CoreV1Api.read_namespaced_pod_log()` non-streaming -- tail / container / since / previous + 1 MiB cap. |
 | `k8s.exec`             | **dangerous** (`requires_approval=True`) | `CoreV1Api.connect_get_namespaced_pod_exec()` over the `WsApiClient` websocket transport -- bounded argv command-and-capture: stdout / stderr demuxed from the `v4.channel.k8s.io` channels + exit code parsed from the channel-3 status frame, per-stream 1 MiB cap, bounded timeout. Interactive `-it` deferred. |
 
@@ -341,6 +347,40 @@ configmap when?". v0.2 classifies `info` as `op_class=read`; G6.3 may
 upgrade specific configmap-name patterns (managed-by
 `secret-translator`, names matching `*-secret-config`) to
 `sensitive-read`.
+
+### Storage + custom-resource read tier (#2830, `ops_storage.py` / `ops_customresource.py`)
+
+Six safe reads that close the pre-flight sizing gap (the RDC Hetzner
+consumer session that fell back to raw kubectl):
+
+- **Storage** (`ops_storage.py`): `k8s.storageclass.list`,
+  `k8s.persistentvolume.list`, `k8s.persistentvolumeclaim.list`. The two
+  cluster-scoped list ops (StorageClass, PV) take no parameters (the
+  `k8s.node.list` shape); PVC adopts the shared `namespace` XOR
+  `all_namespaces` selector. `is_default` reads the GA
+  `storageclass.kubernetes.io/is-default-class` annotation; PVC/PV
+  capacity is the `storage` quantity plucked from `status.capacity` /
+  `spec.capacity`; a PV's `claim_ref` renders as `namespace/name`.
+- **Custom resources** (`ops_customresource.py`): `k8s.crd.list` is the
+  discovery op (group / version / plural / scope / versions), and
+  `k8s.cr.list` / `k8s.cr.info` read objects generically over
+  `CustomObjectsApi` (namespaced call when a `namespace` is supplied,
+  cluster call otherwise). CustomObjectsApi returns plain dicts, so the
+  projection walks dict keys. Result size is bounded: the projection
+  keeps metadata identifiers + `labels` and a JSON `spec_excerpt` capped
+  at `CR_SPEC_EXCERPT_MAX_BYTES` (2048 B); over the cap, `spec_truncated`
+  is `true` and the excerpt is a preview (not parseable JSON). The
+  verbose `managedFields` / `annotations` metadata blocks are dropped.
+
+This tier also retires the `cluster_kinds` **dead-end advertisements**:
+`k8s.ls /` had long listed `storageclasses` / `persistentvolumes` in its
+root output (and the namespace walk counted `persistentvolumeclaims`)
+with no op behind them. The op ids are exactly
+`k8s.storageclass.list` / `k8s.persistentvolume.list` /
+`k8s.persistentvolumeclaim.list` so the `k8s.ls` singular-normalisation
+map (`_PLURAL_TO_SINGULAR_KIND`, pre-wired) forwards
+`k8s.ls /<ns>/persistentvolumeclaims` to the new op instead of the
+`unknown_op` envelope.
 
 ## Control flow
 

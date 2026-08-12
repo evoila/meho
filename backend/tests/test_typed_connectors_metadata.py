@@ -64,7 +64,18 @@ from meho_backplane.settings import get_settings
 # regression test below reads these to assert one OperationGroup row
 # per declared group lands with a curated when_to_use.
 _K8S_GROUPS: Final[frozenset[str]] = frozenset(
-    {"cluster", "inventory", "workload", "network", "config", "events", "logs", "exec"}
+    {
+        "cluster",
+        "inventory",
+        "workload",
+        "network",
+        "config",
+        "events",
+        "logs",
+        "exec",
+        "storage",
+        "custom_resources",
+    }
 )
 _VAULT_GROUPS: Final[frozenset[str]] = frozenset({"auth", "kv", "sys"})
 _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(

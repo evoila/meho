@@ -188,6 +188,29 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "Interactive shells ('kubectl exec -it') are deliberately out "
         "of scope -- command-and-capture only."
     ),
+    "storage": (
+        "Use for storage sizing and capacity questions: "
+        "``k8s.storageclass.list`` (which class is default, what "
+        "provisioner backs it, can it expand), "
+        "``k8s.persistentvolume.list`` (provisioned volumes -- phase / "
+        "capacity / bound claim) and ``k8s.persistentvolumeclaim.list`` "
+        "(what workloads have requested -- per-namespace or "
+        "cluster-wide). The right group for pre-flight cluster sizing "
+        "before provisioning new workloads. Pair with the 'workload' "
+        "group to map a PVC back to the pod that mounts it."
+    ),
+    "custom_resources": (
+        "Use to read custom resources generically -- the state that "
+        "lives outside built-in kinds on GitOps clusters (MetalLB "
+        "IPAddressPools, cert-manager Certificates, ExternalSecrets, "
+        "Argo/Flux). ``k8s.crd.list`` discovers which CRDs exist plus "
+        "the group/version/plural triple; ``k8s.cr.list`` / "
+        "``k8s.cr.info`` read the objects (metadata + a bounded spec "
+        "excerpt). The right group when the operator's question names a "
+        "resource kind no built-in op covers ('which MetalLB pool "
+        "ranges are allocated?'). Start with ``k8s.crd.list`` to learn "
+        "the arguments the read ops need."
+    ),
 }
 
 
@@ -794,6 +817,200 @@ class KubernetesConnector(Connector):
         sorted_rows = sort_event_rows_recent_first(rows)
         truncated = sorted_rows[:limit]
         return {"rows": truncated, "total": len(truncated)}
+
+    async def k8s_storageclass_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List StorageClasses -- name / provisioner / default / expansion.
+
+        Op-id: ``k8s.storageclass.list``. Wraps
+        ``StorageV1Api.list_storage_class()`` and projects each
+        :class:`V1StorageClass` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_storage.storageclass_row`.
+        Cluster-scoped (no parameters, mirrors ``k8s.node.list``).
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_storage import storageclass_row
+
+        del params
+        api_client = await self._get_api_client(target, operator)
+        storage_v1 = client.StorageV1Api(api_client)
+        resp = await storage_v1.list_storage_class()
+        rows = [storageclass_row(sc) for sc in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_persistentvolume_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List PersistentVolumes -- phase / capacity / storage class / claim.
+
+        Op-id: ``k8s.persistentvolume.list``. Wraps
+        ``CoreV1Api.list_persistent_volume()`` and projects each
+        :class:`V1PersistentVolume` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_storage.persistentvolume_row`.
+        Cluster-scoped (no parameters, mirrors ``k8s.node.list``).
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_storage import persistentvolume_row
+
+        del params
+        api_client = await self._get_api_client(target, operator)
+        core_v1 = client.CoreV1Api(api_client)
+        resp = await core_v1.list_persistent_volume()
+        rows = [persistentvolume_row(pv) for pv in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_persistentvolumeclaim_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List PersistentVolumeClaims per-namespace or cluster-wide.
+
+        Op-id: ``k8s.persistentvolumeclaim.list``. Branches on
+        ``all_namespaces`` between
+        ``CoreV1Api.list_namespaced_persistent_volume_claim(namespace, ...)``
+        and
+        ``CoreV1Api.list_persistent_volume_claim_for_all_namespaces(...)``
+        (the shared XOR selector, G0.17-T1 #1330) and projects each
+        :class:`V1PersistentVolumeClaim` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_storage.persistentvolumeclaim_row`.
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_storage import persistentvolumeclaim_row
+
+        namespace: str | None = params.get("namespace")
+        all_namespaces = bool(params.get("all_namespaces", False))
+        api_client = await self._get_api_client(target, operator)
+        core_v1 = client.CoreV1Api(api_client)
+        if all_namespaces:
+            resp = await core_v1.list_persistent_volume_claim_for_all_namespaces()
+        else:
+            # Schema enforces XOR; ``or ""`` is defensive against a
+            # future schema relaxation.
+            resp = await core_v1.list_namespaced_persistent_volume_claim(namespace=namespace or "")
+        rows = [persistentvolumeclaim_row(pvc) for pvc in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_crd_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List CustomResourceDefinitions -- group / kind / plural / scope / versions.
+
+        Op-id: ``k8s.crd.list``. Wraps
+        ``ApiextensionsV1Api.list_custom_resource_definition()`` and
+        projects each :class:`V1CustomResourceDefinition` through
+        :func:`~meho_backplane.connectors.kubernetes.ops_customresource.crd_row`.
+        The discovery op for the generic ``k8s.cr.*`` reads.
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_customresource import crd_row
+
+        del params
+        api_client = await self._get_api_client(target, operator)
+        ext_v1 = client.ApiextensionsV1Api(api_client)
+        resp = await ext_v1.list_custom_resource_definition()
+        rows = [crd_row(crd) for crd in resp.items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_cr_list(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """List custom-resource objects by group/version/plural.
+
+        Op-id: ``k8s.cr.list``. Branches on whether a ``namespace`` is
+        supplied between
+        ``CustomObjectsApi.list_namespaced_custom_object(...)`` and
+        ``CustomObjectsApi.list_cluster_custom_object(...)`` -- the
+        cluster form lists a namespaced CRD across every namespace, or a
+        cluster-scoped CRD's objects. CustomObjectsApi returns a plain
+        dict (CRs have no typed model), so the ``items`` list is read
+        with ``.get`` and each object projects through
+        :func:`~meho_backplane.connectors.kubernetes.ops_customresource.custom_resource_row`
+        (metadata + bounded spec excerpt).
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_customresource import custom_resource_row
+
+        group: str = params["group"]
+        version: str = params["version"]
+        plural: str = params["plural"]
+        namespace: str | None = params.get("namespace")
+        api_client = await self._get_api_client(target, operator)
+        custom = client.CustomObjectsApi(api_client)
+        if namespace:
+            resp = await custom.list_namespaced_custom_object(
+                group=group, version=version, namespace=namespace, plural=plural
+            )
+        else:
+            resp = await custom.list_cluster_custom_object(
+                group=group, version=version, plural=plural
+            )
+        items = resp.get("items") or []
+        rows = [custom_resource_row(obj) for obj in items]
+        return {"rows": rows, "total": len(rows)}
+
+    async def k8s_cr_info(
+        self,
+        operator: Operator,
+        target: KubernetesTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read one named custom-resource object.
+
+        Op-id: ``k8s.cr.info``. Branches on whether a ``namespace`` is
+        supplied between
+        ``CustomObjectsApi.get_namespaced_custom_object(...)`` and
+        ``CustomObjectsApi.get_cluster_custom_object(...)`` and returns
+        the single-object projection from
+        :func:`~meho_backplane.connectors.kubernetes.ops_customresource.custom_resource_row`
+        (a flat dict, not a rows/total envelope -- the counterpart to
+        ``k8s.configmap.info``).
+
+        ``operator`` is forwarded to :meth:`_get_api_client`; see
+        :meth:`about` for the threading rationale.
+        """
+        from meho_backplane.connectors.kubernetes.ops_customresource import custom_resource_row
+
+        group: str = params["group"]
+        version: str = params["version"]
+        plural: str = params["plural"]
+        name: str = params["name"]
+        namespace: str | None = params.get("namespace")
+        api_client = await self._get_api_client(target, operator)
+        custom = client.CustomObjectsApi(api_client)
+        if namespace:
+            obj = await custom.get_namespaced_custom_object(
+                group=group, version=version, namespace=namespace, plural=plural, name=name
+            )
+        else:
+            obj = await custom.get_cluster_custom_object(
+                group=group, version=version, plural=plural, name=name
+            )
+        return custom_resource_row(obj)
 
     async def k8s_ls(
         self,

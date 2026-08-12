@@ -246,6 +246,40 @@ def _members_from_hello(hello: dict[str, Any]) -> list[dict[str, str]]:
     return members
 
 
+def _primary_optime_date(members: list[Mapping[str, Any]]) -> _dt.datetime | None:
+    """Return the elected primary's ``optimeDate`` from a ``replSetGetStatus`` list.
+
+    Scans for the member whose ``stateStr`` is ``PRIMARY``; returns ``None`` when
+    no primary is currently elected or that member carries no ``optimeDate``, in
+    which case per-member replication lag is undefined.
+    """
+    for member in members:
+        if member.get("stateStr") == "PRIMARY":
+            optime = member.get("optimeDate")
+            return optime if isinstance(optime, _dt.datetime) else None
+    return None
+
+
+def _member_lag_seconds(
+    member: Mapping[str, Any], primary_optime: _dt.datetime | None
+) -> float | None:
+    """Seconds *member* trails the primary's oplog, or ``None`` when undefined.
+
+    ``None`` on the primary's own row (zero lag by definition), when no member is
+    currently ``PRIMARY``, or when *member* has no ``optimeDate`` (e.g. an
+    arbiter, which bears no data); otherwise the wall-clock delta between the
+    primary's and the member's last-applied oplog entry (``optimeDate``).
+    """
+    if member.get("stateStr") == "PRIMARY":
+        return None
+    if primary_optime is None:
+        return None
+    member_optime = member.get("optimeDate")
+    if not isinstance(member_optime, _dt.datetime):
+        return None
+    return (primary_optime - member_optime).total_seconds()
+
+
 async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict[str, Any]:
     """Return replica-set health from ``hello`` + ``replSetGetStatus``.
 
@@ -256,6 +290,11 @@ async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict
     ``clusterMonitor`` privilege; on a standalone it raises
     :data:`NO_REPLICATION_ENABLED_CODE` and the connector reports
     ``is_replica_set=False`` rather than surfacing an error.
+
+    Each ``repl_set_status.members`` entry also carries ``optime_date``,
+    ``sync_source_host``, ``last_heartbeat``, and a computed ``lag_seconds`` —
+    the seconds a member trails the primary's oplog (``None`` on the primary and
+    when no primary is elected or the member holds no ``optimeDate``).
     """
     hello = await _hello(client)
     set_name = hello.get("setName")
@@ -278,6 +317,8 @@ async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict
             payload["is_replica_set"] = False
             return payload
         raise
+    raw_members = status.get("members", [])
+    primary_optime = _primary_optime_date(raw_members)
     payload["repl_set_status"] = {
         "set": status.get("set"),
         "members": [
@@ -286,8 +327,12 @@ async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict
                 "state": member.get("stateStr"),
                 "health": member.get("health"),
                 "uptime": member.get("uptime"),
+                "optime_date": _jsonable(member.get("optimeDate")),
+                "sync_source_host": member.get("syncSourceHost"),
+                "last_heartbeat": _jsonable(member.get("lastHeartbeat")),
+                "lag_seconds": _member_lag_seconds(member, primary_optime),
             }
-            for member in status.get("members", [])
+            for member in raw_members
         ],
     }
     return payload

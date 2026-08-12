@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` previews for the 16 vmware write composites.
+"""Park-time ``proposed_effect`` previews for the 18 vmware write composites.
 
 G0.22-T3 (#1608) acceptance criteria, under the post-#2256 direct-session
 model:
@@ -19,12 +19,14 @@ model:
    directly on the connector session (no ``dispatch_child``, no ingested
    descriptor), so the park-time preview works on a fresh boot with zero
    catalog ingest.
-4. All 16 write composites register a builder (9 live-read + 7 param
+4. All 18 write composites register a builder (10 live-read + 8 param
    echo); the wiring test pins the full set. ``vm.disk.grow`` is a
    single-entity live-read builder — its from→to capacity delta is a live
    vCenter read. ``vm.clone_from_template`` is a param-echo builder — its
    params fully name the blast radius (secret-bearing GOSC contents are
-   never echoed).
+   never echoed). ``guest.customization_spec.create`` is a param-echo
+   builder (IDENTITY fields only, #1503); ``vm.customize`` is a live-read
+   builder.
 
 Plus the #1628 follow-up: a *failed* live-read preview parks with the
 identifier fields **and** an explicit ``preview_unavailable`` marker +
@@ -37,6 +39,7 @@ the park-time listing reads run directly on it.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -85,6 +88,8 @@ _WRITE_COMPOSITE_OP_IDS: frozenset[str] = frozenset(
         "vmware.composite.cluster.patch",
         "vmware.composite.cluster.drs_rule.create",
         "vmware.composite.folder.create",
+        "vmware.composite.guest.customization_spec.create",
+        "vmware.composite.vm.customize",
     }
 )
 
@@ -295,14 +300,14 @@ def _strip_uniform_identity(effect: dict[str, Any], *, op_id: str) -> dict[str, 
 
 
 # ===========================================================================
-# Wiring — all 16 write composites register a builder (criterion 4)
+# Wiring — all 18 write composites register a builder (criterion 4)
 # ===========================================================================
 
 
-def test_all_sixteen_write_composites_register_a_preview_builder() -> None:
+def test_all_eighteen_write_composites_register_a_preview_builder() -> None:
     """Importing the composites package wires a builder per write composite."""
     assert set(_write_preview._WRITE_PREVIEW_BUILDERS) == set(_WRITE_COMPOSITE_OP_IDS)
-    assert len(_WRITE_COMPOSITE_OP_IDS) == 16
+    assert len(_WRITE_COMPOSITE_OP_IDS) == 18
     for op_id, builder in _write_preview._WRITE_PREVIEW_BUILDERS.items():
         assert _PREVIEW_BUILDERS.get(op_id) is builder, op_id
 
@@ -525,6 +530,104 @@ async def test_echo_builders_decline_on_malformed_params() -> None:
     assert await _write_preview._vm_power_bulk_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_evacuate_preview(_make_preview_ctx({})) is None
     assert await _write_preview._host_detach_from_vds_preview(_make_preview_ctx({})) is None
+
+
+# ===========================================================================
+# GOSC create preview — IDENTITY-only echo, never secret material (#1503)
+# ===========================================================================
+
+
+async def test_guest_customization_spec_create_preview_echoes_identity_only() -> None:
+    """The create preview surfaces the blast radius without any credential value.
+
+    Given a Windows spec carrying an admin password, a product key, and a
+    domain-join password, the builder returns ONLY the identity keys — no
+    secret field name and no secret value appears anywhere in the output.
+    """
+    preview = await _write_preview._guest_customization_spec_create_preview(
+        _make_preview_ctx(
+            {
+                "spec_name": "gosc-win",
+                "os_type": "windows",
+                "hostname": "win-01",
+                "interfaces": [
+                    {"ip_address": "10.0.0.5", "prefix": 24, "gateways": ["10.0.0.1"]},
+                    {},  # DHCP NIC — no ip_address
+                ],
+                "windows_admin_password": "pw-admin-SECRET",
+                "windows_product_key": "KEY-SECRET",
+                "windows_domain_admin_password": "pw-join-SECRET",
+            }
+        )
+    )
+    assert preview == {
+        "spec_name": "gosc-win",
+        "os_type": "windows",
+        "hostname_scheme": "FIXED:win-01",
+        "nic_count": 2,
+        "static_ip_summary": ["10.0.0.5"],
+    }
+    # Defence in depth: no secret value bled into the serialised preview.
+    blob = json.dumps(preview)
+    assert "SECRET" not in blob
+
+
+async def test_guest_customization_spec_create_preview_declines_on_malformed() -> None:
+    """Missing spec_name / os_type declines (→ identifier-only default), never raises."""
+    assert (
+        await _write_preview._guest_customization_spec_create_preview(_make_preview_ctx({})) is None
+    )
+    assert (
+        await _write_preview._guest_customization_spec_create_preview(
+            _make_preview_ctx({"spec_name": "x"})
+        )
+        is None
+    )
+
+
+# ===========================================================================
+# vm.customize preview — live-read power state, no secret (spec-name reference)
+# ===========================================================================
+
+
+async def test_vm_customize_preview_resolves_power_state() -> None:
+    """With a connector, the preview live-reads the VM to surface moid + power state."""
+    recorder = _RecordingConnector()
+    recorder.responses["/vcenter/vm"] = {
+        "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+    }
+    preview = await _write_preview._vm_customize_preview(
+        _make_preview_ctx({"name": "app", "spec_name": "gosc-lin"}, connector_instance=recorder)
+    )
+    assert preview == {
+        "vm": "vm-7",
+        "name": "app",
+        "spec_name": "gosc-lin",
+        "power_state": "POWERED_OFF",
+        "applies_on": "next_power_on",
+    }
+    # The preview issued exactly the one resolution read.
+    assert [c[0] for c in recorder.calls] == ["GET"]
+
+
+async def test_vm_customize_preview_echoes_without_connector() -> None:
+    """No connector → name + spec echo with power_state unknown (still no secret)."""
+    preview = await _write_preview._vm_customize_preview(
+        _make_preview_ctx({"name": "app", "spec_name": "gosc-lin"}, connector_instance=None)
+    )
+    assert preview == {
+        "vm": None,
+        "name": "app",
+        "spec_name": "gosc-lin",
+        "power_state": None,
+        "applies_on": "next_power_on",
+    }
+
+
+async def test_vm_customize_preview_declines_on_malformed() -> None:
+    """Missing name / spec_name declines (→ identifier-only default), never raises."""
+    assert await _write_preview._vm_customize_preview(_make_preview_ctx({})) is None
+    assert await _write_preview._vm_customize_preview(_make_preview_ctx({"name": "app"})) is None
     assert await _write_preview._cluster_patch_preview(_make_preview_ctx({})) is None
     assert await _write_preview._folder_create_preview(_make_preview_ctx({})) is None
     assert await _write_preview._cluster_drs_rule_create_preview(_make_preview_ctx({})) is None

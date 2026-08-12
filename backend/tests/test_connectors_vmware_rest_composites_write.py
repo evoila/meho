@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 16 vmware-rest write-composite handler functions.
+"""Unit tests for the 18 vmware-rest write-composite handler functions.
 
 Post-#2256 the write composites dispatch their sub-ops **directly on the
 connector session** -- ``connector._get_json`` / ``connector._post_json``
@@ -56,11 +56,13 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
+    guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_customize_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -2804,4 +2806,297 @@ async def test_vm_device_cdrom_update_without_backing_is_invalid_request(
     )
     assert out["status"] == "invalid_request"
     assert gate.calls == []
+    assert [c["method"] for c in conn.calls] == ["GET"]
+
+
+# ===========================================================================
+# guest.customization_spec.create (GOSC create)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_guest_customization_spec_create_linux_body(gate: _GateRecorder) -> None:
+    """Linux GOSC: one POST whose spec-wrapped body maps the agent subset to vCenter."""
+    conn = _RecordingConnector({"/api/vcenter/guest/customization-specs": {"value": {}}})
+    out = await guest_customization_spec_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "spec_name": "gosc-lin",
+            "description": "web tier",
+            "os_type": "linux",
+            "hostname": "web-01",
+            "domain": "corp.test",
+            "time_zone": "Europe/Vienna",
+            "interfaces": [
+                {"ip_address": "10.0.0.5", "prefix": 24, "gateways": ["10.0.0.1"]},
+                {},  # a NIC with no ip_address configures DHCP
+            ],
+            "dns_servers": ["10.0.0.2"],
+            "dns_suffix_list": ["corp.test"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", "/api/vcenter/guest/customization-specs"),
+    ]
+    body = conn.calls[0]["body"]["spec"]
+    assert body["name"] == "gosc-lin"
+    assert body["description"] == "web tier"
+    linux = body["spec"]["configuration_spec"]["linux_config"]
+    assert linux["hostname"] == {"type": "FIXED", "fixed_name": "web-01"}
+    assert linux["domain"] == "corp.test"
+    assert linux["time_zone"] == "Europe/Vienna"
+    # windows_config is absent on the linux branch.
+    assert "windows_config" not in body["spec"]["configuration_spec"]
+    # Interfaces: one STATIC ipv4, one DHCP.
+    interfaces = body["spec"]["interfaces"]
+    assert interfaces[0] == {
+        "adapter": {
+            "ipv4": {
+                "type": "STATIC",
+                "ip_address": "10.0.0.5",
+                "prefix": 24,
+                "gateways": ["10.0.0.1"],
+            }
+        }
+    }
+    assert interfaces[1] == {"adapter": {"ipv4": {"type": "DHCP"}}}
+    assert body["spec"]["global_dns_settings"] == {
+        "dns_servers": ["10.0.0.2"],
+        "dns_suffix_list": ["corp.test"],
+    }
+    # The single write was gated dangerous / no-approval.
+    assert gate.gated_op_ids == ["POST:/vcenter/guest/customization-specs"]
+    assert gate.calls[0]["safety_level"] == "dangerous"
+    assert gate.calls[0]["requires_approval"] is False
+    assert out == {"status": "created", "spec_name": "gosc-lin", "os_type": "linux"}
+
+
+@pytest.mark.asyncio
+async def test_guest_customization_spec_create_windows_sysprep_body(gate: _GateRecorder) -> None:
+    """Windows GOSC: the sysprep body carries the credentials (the real vCenter call).
+
+    Secret hygiene is about *reviewer* surfaces (proven in the e2e lane); the
+    actual customization-specs POST body legitimately carries the sysprep
+    credentials -- that IS the API call that provisions the guest.
+    """
+    conn = _RecordingConnector({"/api/vcenter/guest/customization-specs": {"value": {}}})
+    out = await guest_customization_spec_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "spec_name": "gosc-win",
+            "os_type": "windows",
+            "hostname": "win-01",
+            "windows_admin_password": "pw-admin",
+            "windows_product_key": "KEY-123",
+            "windows_organization": "evoila",
+            "windows_join_domain": "corp.test",
+            "windows_domain_admin_username": "svc-join",
+            "windows_domain_admin_password": "pw-join",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    sysprep = conn.calls[0]["body"]["spec"]["spec"]["configuration_spec"]["windows_config"][
+        "sysprep"
+    ]
+    assert sysprep["user_data"]["computer_name"] == {"type": "FIXED", "fixed_name": "win-01"}
+    assert sysprep["user_data"]["product_key"] == "KEY-123"
+    assert sysprep["user_data"]["organization"] == "evoila"
+    assert sysprep["gui_unattended"]["password"] == "pw-admin"
+    assert sysprep["identification"] == {
+        "joined_domain": "corp.test",
+        "domain_admin_username": "svc-join",
+        "domain_admin_password": "pw-join",
+    }
+    assert out["status"] == "created"
+    assert out["os_type"] == "windows"
+
+
+@pytest.mark.asyncio
+async def test_guest_customization_spec_create_gate_short_circuits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the create returns the OperationResult; no POST fires."""
+    conn = _RecordingConnector({})
+    _install_gate(
+        monkeypatch,
+        _GateRecorder(
+            gate_for={
+                "POST:/vcenter/guest/customization-specs": _awaiting(
+                    "POST:/vcenter/guest/customization-specs"
+                )
+            }
+        ),
+    )
+    out = await guest_customization_spec_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"spec_name": "gosc-lin", "os_type": "linux", "hostname": "web-01"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert conn.calls == [], "no write may fire once the gate parks"
+
+
+# ===========================================================================
+# vm.customize (GOSC apply)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_powered_off_sets_customization(gate: _GateRecorder) -> None:
+    """Resolve by name -> PUT the named spec on a powered-off VM."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+            },
+            "/api/vcenter/vm/vm-7/guest/customization": {"value": {}},
+        }
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "app", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/vm"),
+        ("PUT", "/api/vcenter/vm/vm-7/guest/customization"),
+    ]
+    # The resolve read forwards the name filter; PUT body is the named spec ref.
+    assert conn.calls[0]["query"] == {"names": ["app"]}
+    assert conn.calls[1]["body"] == {"spec": {"name": "gosc-lin"}}
+    # Only the PUT was gated (the resolve GET is never gated).
+    assert gate.gated_op_ids == ["PUT:/vcenter/vm/{vm}/guest/customization"]
+    assert out["status"] == "customization_set"
+    assert out["vm"] == "vm-7"
+    assert out["power_state"] == "POWERED_OFF"
+    assert out["applies_on"] == "next_power_on"
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_powered_on_refused(gate: _GateRecorder) -> None:
+    """A powered-on VM is refused with a structured precondition status; no PUT fires."""
+    conn = _RecordingConnector(
+        {"/api/vcenter/vm": {"value": [{"vm": "vm-9", "name": "db", "power_state": "POWERED_ON"}]}}
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "db", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # Only the resolve GET fired; the PUT never did.
+    assert [c["method"] for c in conn.calls] == ["GET"]
+    assert gate.gated_op_ids == []
+    assert out["status"] == "precondition_failed"
+    assert out["vm"] == "vm-9"
+    assert out["power_state"] == "POWERED_ON"
+    assert out["applies_on"] is None
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_power_on_after(gate: _GateRecorder) -> None:
+    """power_on=True: PUT the customization then start the VM."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+            },
+            "/api/vcenter/vm/vm-7/guest/customization": {"value": {}},
+            "/api/vcenter/vm/vm-7/power?action=start": {"value": {}},
+        }
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "app", "spec_name": "gosc-lin", "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/vm"),
+        ("PUT", "/api/vcenter/vm/vm-7/guest/customization"),
+        ("POST", "/api/vcenter/vm/vm-7/power?action=start"),
+    ]
+    assert gate.gated_op_ids == [
+        "PUT:/vcenter/vm/{vm}/guest/customization",
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    ]
+    assert out["status"] == "powered_on"
+    assert out["applies_on"] == "next_power_on"
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_not_found(gate: _GateRecorder) -> None:
+    """An empty resolve listing yields not_found; no write."""
+    conn = _RecordingConnector({"/api/vcenter/vm": {"value": []}})
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "ghost", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert gate.gated_op_ids == []
+    assert out["status"] == "not_found"
+    assert out["vm"] is None
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_ambiguous(gate: _GateRecorder) -> None:
+    """Multiple name matches yield ambiguous with candidates; no write."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [
+                    {"vm": "vm-1", "name": "dup", "power_state": "POWERED_OFF"},
+                    {"vm": "vm-2", "name": "dup", "power_state": "POWERED_ON"},
+                ]
+            }
+        }
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "dup", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert gate.gated_op_ids == []
+    assert out["status"] == "ambiguous"
+    assert [c["vm"] for c in out["candidates"]] == ["vm-1", "vm-2"]
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_gate_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A parked gate on the PUT returns the OperationResult; the PUT never fires."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+            }
+        }
+    )
+    _install_gate(
+        monkeypatch,
+        _GateRecorder(
+            gate_for={
+                "PUT:/vcenter/vm/{vm}/guest/customization": _awaiting(
+                    "PUT:/vcenter/vm/{vm}/guest/customization"
+                )
+            }
+        ),
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "app", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    # The resolve GET fired but the PUT did not.
     assert [c["method"] for c in conn.calls] == ["GET"]

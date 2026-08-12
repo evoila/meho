@@ -48,6 +48,8 @@ from meho_backplane.connectors.vmware_rest import (
     VmwareRestConnector,
     VsphereTargetLike,
 )
+from meho_backplane.connectors.vmware_rest.composites import _write
+from meho_backplane.connectors.vmware_rest.composites._write import vm_customize_composite
 
 # ---------------------------------------------------------------------------
 # Mocked vCenter surface
@@ -1100,3 +1102,62 @@ async def test_tasks_recent_over_modern_mount_returns_task_rows(
     assert task["entity"] == "vm-9"
     assert task["state"] == "success"
     assert task["progress"] == 100
+
+
+# ---------------------------------------------------------------------------
+# vm.customize (GOSC apply, #2892) — respx-verified PUT wire body
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_puts_named_spec_over_respx(
+    vcsim_target: _VcsimTarget,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Apply on a powered-off VM issues the PUT with the named-spec wire body.
+
+    Exercises the real connector transport (respx-intercepted): the resolve
+    listing mounts onto ``/api/vcenter/vm``, and the customization set mounts
+    onto ``PUT /api/vcenter/vm/{vm}/guest/customization`` with the
+    ``{"spec": {"name": <spec>}}`` body. The #2254 governance seam is stubbed
+    to auto-execute so the write reaches the wire (the seam itself is proven
+    end-to-end in the write-gate lane).
+    """
+
+    async def _auto_execute(**_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(_write, "enforce_subop_policy", _auto_execute)
+
+    async def _loader(_target: VsphereTargetLike, _operator: Operator) -> dict[str, str]:
+        return {"username": "user", "password": "pass"}
+
+    connector = VmwareRestConnector(session_loader=_loader)
+
+    async with respx.mock(
+        base_url=VCENTER_BASE_URL,
+        assert_all_called=False,
+        assert_all_mocked=False,
+    ) as mock:
+        mock.post("/api/session").respond(200, json=SESSION_TOKEN)
+        mock.get("/api/about").respond(200, json=ABOUT_PAYLOAD)
+        mock.delete("/api/session").respond(204)
+        # Modern /api VM listing returns a bare array of summary rows.
+        mock.get("/api/vcenter/vm").respond(
+            200, json=[{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+        )
+        put_route = mock.put("/api/vcenter/vm/vm-7/guest/customization").respond(200, json={})
+        try:
+            result = await vm_customize_composite(
+                operator=_operator(),
+                target=vcsim_target,
+                params={"name": "app", "spec_name": "gosc-lin"},
+                connector=connector,
+            )
+        finally:
+            await connector.aclose()
+
+    assert result["status"] == "customization_set"
+    assert put_route.called
+    sent_body = json.loads(put_route.calls.last.request.content)
+    assert sent_body == {"spec": {"name": "gosc-lin"}}

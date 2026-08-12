@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""End-to-end activation tests for the 12 vmware-rest write composites.
+"""End-to-end activation tests for the 14 vmware-rest write composites.
 
 Post-#2256 the write composites dispatch every raw-REST sub-op **directly
 on the connector session** (``connector._get_json`` / ``connector._post_json``
@@ -36,6 +36,7 @@ lives in :mod:`tests.integration.test_connectors_vmware_rest_vcsim`.
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
@@ -304,6 +305,8 @@ _WRITE_COMPOSITES: dict[str, str] = {
     "vmware.composite.host.evacuate": "host.evacuate",
     "vmware.composite.host.detach_from_vds": "host.detach_from_vds",
     "vmware.composite.cluster.patch": "cluster.patch",
+    "vmware.composite.guest.customization_spec.create": "guest.customization_spec.create",
+    "vmware.composite.vm.customize": "vm.customize",
 }
 
 
@@ -349,6 +352,12 @@ def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
             "fallback_network": "net-fallback",
         },
         "vmware.composite.cluster.patch": {"cluster": "domain-c1"},
+        "vmware.composite.guest.customization_spec.create": {
+            "spec_name": "gosc-benign",
+            "os_type": "linux",
+            "hostname": "vm-benign",
+        },
+        "vmware.composite.vm.customize": {"name": "vm-benign", "spec_name": "gosc-benign"},
     }[composite_op_id]
 
 
@@ -410,21 +419,26 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
             "/vcenter/vm": empty,
         },
         "vmware.composite.cluster.patch": {"/vcenter/cluster/domain-c1/host": empty},
+        # create: the POST default ({"value": {}}) is enough -> status='created'.
+        "vmware.composite.guest.customization_spec.create": {},
+        # customize: empty VM listing -> status='not_found' (benign no-work).
+        "vmware.composite.vm.customize": {"/vcenter/vm": empty},
     }
     return per_composite[composite_op_id]
 
 
 # ===========================================================================
-# Guard: the REST-sub-op write set is exactly the expected twelve
+# Guard: the REST-sub-op write set is exactly the expected fourteen
 # ===========================================================================
 
 
-def test_write_composite_set_is_the_expected_twelve() -> None:
+def test_write_composite_set_is_the_expected_fourteen() -> None:
     """Pins the REST-sub-op write set so a renamed / dropped composite can't shrink coverage.
 
-    Covers the 12 REST-sub-op write composites the parametrized fresh-boot +
-    park machinery below drives. The four vi-json write composites
-    (``vm.disk.grow`` / #2893, ``vm.clone_from_template`` / #2894,
+    Covers the 14 REST-sub-op write composites the parametrized fresh-boot +
+    park machinery below drives (the 12 T6/#509 + vm.power + #2891 hardware
+    writes, plus the two GOSC composites / #2892). The four vi-json write
+    composites (``vm.disk.grow`` / #2893, ``vm.clone_from_template`` / #2894,
     ``cluster.drs_rule.create`` + ``folder.create`` / #2895) are
     dispatch-shaped differently (vmomi sub-ops keyed by request body, not
     REST spec-paths) and are covered by their own dedicated sections at the
@@ -432,7 +446,7 @@ def test_write_composite_set_is_the_expected_twelve() -> None:
     """
     registrar_write_op_ids = {f"vmware.composite.{name}" for name in _WRITE_COMPOSITES.values()}
     assert set(_WRITE_COMPOSITES) == registrar_write_op_ids
-    assert len(_WRITE_COMPOSITES) == 12
+    assert len(_WRITE_COMPOSITES) == 14
 
 
 # ===========================================================================
@@ -451,7 +465,7 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     """Each composite runs to a benign business status on the direct session.
 
     No ingested ``endpoint_descriptor`` rows exist in the catalog here — only
-    the 21 composite rows the registrar upserts. Reaching a business status
+    the 23 composite rows the registrar upserts. Reaching a business status
     (``created`` / ``no_recommendation`` / ``detached`` / ...) rather than a
     generic execution error proves every raw-REST sub-op resolved via the
     connector session, not a catalog lookup (the two-world / fresh-boot DoD).
@@ -828,7 +842,7 @@ async def test_write_composite_human_dispatch_parks_for_approval(
     Every write composite ships ``requires_approval=True``; G11.7-T1 (#1401)
     routes a human/service principal to the approval queue
     (``awaiting_approval``) at the top-level gate — before the handler (and
-    thus any sub-op) runs. Proves the park half for all 12; the recorder
+    thus any sub-op) runs. Proves the park half for all 14; the recorder
     stays empty of writes because the composite never executed (the
     live-read preview builders issue read-only GETs, which is expected).
     """
@@ -1921,3 +1935,203 @@ async def test_hardware_write_park_carries_uniform_identity_envelope(
     # The live-read builder populated a from->to preview.
     assert effect["preview_populated"] is True
     assert "preview" in effect
+
+
+# ===========================================================================
+# GOSC secret hygiene (#1503) across all three reviewer surfaces (#2892)
+# ===========================================================================
+
+#: Distinctive secret literals planted in the customization spec params so a
+#: leak onto any reviewer surface is caught by a substring scan.
+_ADMIN_PW = "S3cr3t-Admin-P@ssw0rd-LEAK-CANARY"
+_PRODUCT_KEY = "AAAAA-BBBBB-CCCCC-DDDDD-LEAKKEY"
+_DOMAIN_JOIN_PW = "D0main-J0in-P@ss-LEAK-CANARY"
+_ALL_SECRETS = (_ADMIN_PW, _PRODUCT_KEY, _DOMAIN_JOIN_PW)
+
+
+def _windows_gosc_params() -> dict[str, Any]:
+    """A Windows GOSC create spec carrying every secret-bearing field."""
+    return {
+        "spec_name": "gosc-win-prod",
+        "os_type": "windows",
+        "hostname": "win-app-01",
+        "interfaces": [{"ip_address": "10.20.0.5", "prefix": 24, "gateways": ["10.20.0.1"]}],
+        "dns_servers": ["10.20.0.2"],
+        "windows_admin_password": _ADMIN_PW,
+        "windows_product_key": _PRODUCT_KEY,
+        "windows_join_domain": "corp.example.test",
+        "windows_domain_admin_username": "svc-join",
+        "windows_domain_admin_password": _DOMAIN_JOIN_PW,
+    }
+
+
+def _assert_no_secret(blob: str, *, surface: str) -> None:
+    """Fail if any planted secret literal appears in *blob* (a serialised surface)."""
+    for secret in _ALL_SECRETS:
+        assert secret not in blob, f"secret leaked onto the {surface} surface"
+
+
+@pytest.mark.asyncio
+async def test_gosc_create_secret_hygiene_across_all_surfaces(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """GOSC create with inline secrets never leaks them to reviewer surfaces (#1503).
+
+    The single most important correctness property of #2892. A Windows
+    customization spec carrying an admin password, a product key, and a
+    domain-join password is dispatched by a USER (parks), inspected on the
+    durable ``ApprovalRequest.proposed_effect``, approved, and resumed. Every
+    reviewer-facing surface is scanned for the planted secret literals:
+
+    * ``proposed_effect`` — the bespoke preview echoes IDENTITY fields only.
+    * broadcast frame — the op is pinned ``credential_write`` so the params
+      collapse to aggregate-only (no ``params`` key at all).
+    * audit payload — the durable row stores only a params hash.
+
+    Also asserts the #2681 uniform op-identity envelope on the parked row.
+    """
+    recorder = _RecordingVmwareConnector()
+    await _bootstrap(recorder, stub_embedding_service)
+
+    target_id = uuid.uuid4()
+    async with get_sessionmaker()() as s:
+        s.add(
+            TargetORM(
+                id=target_id,
+                tenant_id=_TENANT_ID,
+                name="prod-vcenter",
+                product="vmware",
+                host="vcenter.prod.invalid",
+                aliases=[],
+            )
+        )
+        await s.commit()
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    target = _FakeVmwareTarget(target_id=target_id)
+    params = _windows_gosc_params()
+    op_id = "vmware.composite.guest.customization_spec.create"
+
+    # Step 1: USER dispatch -> parked; the create POST did not fire.
+    result1 = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        target=target,
+        params=params,
+    )
+    assert result1.status == "awaiting_approval", result1.error
+    assert recorder.calls == [], "the create must not run before approval"
+    approval_request_id = UUID(result1.extras["approval_request_id"])
+
+    # --- Surface 1: proposed_effect (identity-only preview + #2681 envelope) ---
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+    assert pending is not None
+    effect = pending.proposed_effect
+    _assert_no_secret(json.dumps(effect), surface="proposed_effect")
+    # Identity preview (bespoke builder output nests under ``preview``) is
+    # present and complete -- and carries no secret field.
+    preview = effect["preview"]
+    assert preview["spec_name"] == "gosc-win-prod"
+    assert preview["os_type"] == "windows"
+    assert preview["hostname_scheme"] == "FIXED:win-app-01"
+    assert preview["nic_count"] == 1
+    assert preview["static_ip_summary"] == ["10.20.0.5"]
+    # The preview echoes ONLY identity keys -- no credential field bled in.
+    assert set(preview) == {
+        "spec_name",
+        "os_type",
+        "hostname_scheme",
+        "nic_count",
+        "static_ip_summary",
+    }
+    # #2681 uniform op-identity envelope: identity + metadata stamped on every
+    # parked row regardless of the per-op preview outcome.
+    assert effect["op_id"] == op_id
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert isinstance(effect["target_id"], str)
+    assert effect["op_class"] == "credential_write"
+    assert effect["safety_level"] == "dangerous"
+
+    # Step 2: approve.
+    reviewer = _make_operator(sub="ops-reviewer", principal_kind=PrincipalKind.USER)
+    async with get_sessionmaker()() as s:
+        row = await approve_request(s, approval_request_id, operator=reviewer, params=params)
+        await s.commit()
+    assert row.status == ApprovalRequestStatus.APPROVED.value
+
+    # Step 3: resume -> the create executes; secrets ride into the vCenter
+    # request body (the real API call) but nowhere else.
+    result2 = await dispatch(
+        operator=reviewer,
+        connector_id=_CONNECTOR_ID,
+        op_id=op_id,
+        target=target,
+        params=params,
+        _approved=True,
+    )
+    assert result2.status == "ok", result2.error
+    assert result2.result["status"] == "created"
+    assert recorder.calls == [("POST", "/vcenter/guest/customization-specs")]
+
+    # --- Surface 2: broadcast frame (params collapsed to aggregate-only) ---
+    gosc_events = [e for e in captured_events if e.op_id == op_id]
+    assert gosc_events, "no broadcast event captured for the GOSC create"
+    for event in gosc_events:
+        assert event.op_class == "credential_write"
+        # The credential-class collapse drops the params dict entirely.
+        assert "params" not in event.payload, event.payload
+        _assert_no_secret(json.dumps(event.payload, default=str), surface="broadcast")
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_preview_and_broadcast_carry_no_secret(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.customize (the apply half) echoes only a spec-name reference -- no secret.
+
+    The second half of "redaction covered for both ops": ``vm.customize``
+    references a saved spec by name and never carries credential material, so
+    its ``proposed_effect`` and broadcast frame are safe by construction. This
+    pins that: the preview surfaces the VM + spec name + resolved power state,
+    and no secret literal can appear (there is none in its params).
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm": {
+                "value": [{"vm": "vm-55", "name": "app-01", "power_state": "POWERED_OFF"}]
+            }
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+
+    requester = _make_operator(sub="ops-human", principal_kind=PrincipalKind.USER)
+    result = await dispatch(
+        operator=requester,
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.customize",
+        target=_FakeVmwareTarget(),
+        params={"name": "app-01", "spec_name": "gosc-win-prod"},
+    )
+    assert result.status == "awaiting_approval", result.error
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        pending = await s.get(ApprovalRequest, approval_request_id)
+    assert pending is not None
+    effect = pending.proposed_effect
+    preview = effect["preview"]
+    # Identity preview resolved the VM's power state via the live read.
+    assert preview["name"] == "app-01"
+    assert preview["spec_name"] == "gosc-win-prod"
+    assert preview["vm"] == "vm-55"
+    assert preview["power_state"] == "POWERED_OFF"
+    assert preview["applies_on"] == "next_power_on"
+    # #2681 envelope stamped here too.
+    assert effect["op_id"] == "vmware.composite.vm.customize"
+    assert effect["safety_level"] == "dangerous"

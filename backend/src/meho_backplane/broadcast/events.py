@@ -171,6 +171,18 @@ _CREDENTIAL_WRITE_OPS: Final[frozenset[str]] = frozenset(
         # written token in full. Pinning it collapses the broadcast to
         # aggregate-only. (The op result itself returns key NAMES only.)
         "rke2.node.config.update",
+        # #2892 — the GOSC customization-spec create composite. Its params
+        # carry Windows sysprep credentials (``windows_admin_password`` /
+        # ``windows_product_key`` / ``windows_domain_admin_password``). The
+        # ``password`` fields trip the key-name scrub, but ``product_key``
+        # does not (``key`` is neither an anywhere- nor a final-position
+        # secret token), so a plain ``write`` classification (the ``.create``
+        # suffix) would broadcast the product key in full. Pinning it
+        # collapses the whole params dict to aggregate-only (#1503); the
+        # park-time preview additionally echoes identity fields only. The
+        # sibling ``vmware.composite.vm.customize`` carries only a spec-name
+        # reference (no secret) and is not pinned.
+        "vmware.composite.guest.customization_spec.create",
     }
 )
 

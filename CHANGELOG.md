@@ -197,6 +197,30 @@ connector-related release-notes line.
   `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP` the read
   composites already use.
 
+### Added — vmware-rest guest customization (GOSC) composites: create + apply, secret-hygienic (#2892)
+
+- Two new `vmware-rest` write composites make guest OS customization a
+  first-class agent workflow — how a cloned VM gets its hostname, per-NIC
+  static IP + gateway + DNS, and (on Windows) its sysprep identity on
+  first boot. `vmware.composite.guest.customization_spec.create`
+  (`POST:/vcenter/guest/customization-specs`) creates a reusable named
+  spec covering the Linux and Windows/sysprep cases;
+  `vmware.composite.vm.customize`
+  (`PUT:/vcenter/vm/{vm}/guest/customization`) resolves a VM by name and
+  applies a saved spec, refusing a powered-on VM with a structured
+  `precondition_failed` status and optionally powering it on afterward.
+  Both are `dangerous` + `requires_approval`, dispatch every sub-op on the
+  direct connector session (fresh-boot dispatchable, zero catalog ingest),
+  and gate each mutating sub-call through `enforce_subop_policy`.
+- GOSC secret hygiene (#1503) is enforced across all three reviewer
+  surfaces: the create op is pinned `credential_write` (broadcast params
+  collapse to aggregate-only), its park-time preview echoes identity
+  fields only (`spec_name` / `os_type` / `hostname_scheme` / `nic_count` /
+  `static_ip_summary` — never admin passwords, product keys, or
+  domain-join credentials), and the durable audit row stores only a params
+  hash. A dedicated end-to-end test proves no secret material reaches the
+  approval, broadcast, or audit surface.
+
 ## [0.28.0] - 2026-08-07
 
 ### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)

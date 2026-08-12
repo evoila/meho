@@ -2,12 +2,15 @@
 # Copyright (c) 2026 evoila Group
 #
 # code-quality-allow: file-size — the connector hosts fingerprint / probe /
-# auth + the two robot write handlers, and #2856 adds the nine typed-read
-# shims. The read *bodies* already live in ``typed_reads`` (this file keeps
-# only the thin shims); the shims must be methods on the connector class
-# because the dispatcher binds the resolved handler to the connector
-# instance. Matches the NSX/SDDC on-connector shim placement and the other
-# >600-line connectors in this package.
+# auth, the two robot write handlers, the nine typed-read shims (#2856), and
+# the artifact_vulnerabilities CVE read (#2857). The read *bodies* already
+# live in ``typed_reads`` (this file keeps only the thin shims); every op
+# handler must be a method on the connector class because the dispatcher
+# binds the resolved handler to the per-process connector instance at
+# dispatch time (``_maybe_bind_method``), so the handler bodies that remain
+# here cannot move off this file without losing that binding. Matches the
+# NSX/SDDC on-connector shim placement and the other >600-line connectors in
+# this package.
 
 """HarborConnector — hand-rolled HttpConnector subclass for Harbor 2.x.
 
@@ -58,6 +61,7 @@ import asyncio
 import base64
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import structlog
@@ -122,6 +126,76 @@ def _parse_harbor_version(harbor_version: str) -> tuple[str | None, str | None]:
         version_str, build_str = harbor_version.split("-", 1)
         return version_str or None, build_str or None
     return harbor_version, None
+
+
+#: The current-format native vulnerability report media type. Sent as the
+#: ``X-Accept-Vulnerabilities`` request header so Harbor renders the report
+#: in the pluggable-scanner-spec v1.1 shape (per-item field names ``id`` /
+#: ``fix_version`` / ``description``). Harbor's own ``acceptVulnerabilities``
+#: parameter default comma-joins this type with the legacy
+#: ``vnd.scanner.adapter.vuln.report.harbor+json; version=1.0`` (first-match
+#: wins); pinning the current type alone keeps the projected field names
+#: stable instead of depending on which format Harbor falls back to.
+_VULN_REPORT_MIME = "application/vnd.security.vulnerability.report; version=1.1"
+
+
+def _encode_segment(value: Any) -> str:
+    """Percent-encode one URL path segment (OpenAPI ``style: simple``).
+
+    Matches how the generic dispatcher expands a ``{var}`` path template
+    (:func:`meho_backplane.operations._branches._substitute_path`): every
+    reserved char is encoded (empty safe set), so a nested ``repository_name``
+    (``team/nginx`` -> ``team%2Fnginx``) cannot leak a path separator and a
+    ``sha256:`` digest reference has its ``:`` encoded to ``%3A``. This is the
+    same resolution ``harbor.artifact.info`` uses, one segment shallower.
+    """
+    return quote(str(value), safe="")
+
+
+def _project_vulnerability(item: dict[str, Any]) -> dict[str, Any]:
+    """Project one native-report ``VulnerabilityItem`` to the agent shape.
+
+    Reads the pluggable-scanner-spec v1.1 field names (``id`` / ``fix_version``
+    / ``description``), NOT the Harbor Security-Hub ``VulnerabilityItem``
+    spellings (``cve_id`` / ``fixed_version`` / ``desc``) — the
+    ``additions/vulnerabilities`` endpoint returns the scanner-native report,
+    not a Security-Hub row. ``links`` is coerced to a list so the projected
+    shape stays uniform even when a scanner omits it.
+    """
+    links = item.get("links")
+    return {
+        "id": item.get("id"),
+        "package": item.get("package"),
+        "version": item.get("version"),
+        "fix_version": item.get("fix_version"),
+        "severity": item.get("severity"),
+        "description": item.get("description"),
+        "links": links if isinstance(links, list) else [],
+    }
+
+
+def _extract_vuln_report(payload: Any) -> dict[str, Any]:
+    """Pull the ``HarborVulnerabilityReport`` out of the endpoint response.
+
+    Harbor keys the report by the resolved MIME type (mirroring
+    ``scan_overview``): ``{"application/vnd.security.vulnerability.report;
+    version=1.1": {..report..}}``. Prefer the exact requested key, then a bare
+    already-unwrapped report, then any single MIME-keyed value carrying a
+    ``vulnerabilities`` array (tolerating whitespace / version variance in the
+    returned key). Returns ``{}`` when no report shape is recognisable so the
+    handler yields an empty list rather than raising.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    report = payload.get(_VULN_REPORT_MIME)
+    if isinstance(report, dict):
+        return report
+    if "vulnerabilities" in payload:
+        return payload
+    for value in payload.values():
+        if isinstance(value, dict) and "vulnerabilities" in value:
+            return value
+    return {}
 
 
 class HarborConnector(HttpConnector):
@@ -603,6 +677,97 @@ class HarborConnector(HttpConnector):
         from meho_backplane.connectors.harbor.typed_reads import harbor_robot_list_impl
 
         return await harbor_robot_list_impl(self, operator, target, params)
+
+    async def artifact_vulnerabilities(
+        self,
+        operator: Operator,
+        target: HarborTargetLike,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read one artifact's full CVE list via Harbor 2.x.
+
+        Op-id: ``harbor.artifact.vulnerabilities``. Classified ``read``
+        (:func:`~meho_backplane.broadcast.events.classify_op`), safety_level
+        ``safe``, no approval — a non-mutating supply-chain / promotion-gate
+        read.
+
+        ``GET .../artifacts/{reference}/additions/vulnerabilities`` with the
+        ``X-Accept-Vulnerabilities`` header pinned to the current native report
+        format. This is the detail behind ``harbor.artifact.info``'s
+        ``scan_overview`` (which carries severity *counts* only); it answers
+        "is CVE-X in image Y" and "what is the fixed-in version for package P"
+        that counts alone cannot.
+
+        The response is the scanner-native report keyed by MIME type; the
+        handler unwraps it, projects each ``VulnerabilityItem`` to
+        ``{id, package, version, fix_version, severity, description, links}``,
+        and returns ``{severity, scanner, generated_at, vulnerabilities}``.
+        ``vulnerabilities`` is the single set-shaped field, so the dispatcher's
+        JSONFlux reducer materialises it into a result handle when a real
+        image's CVE list crosses the ~50-row / 4 KB threshold (CLAUDE.md
+        postulate 6); a named-CVE lookup against that handle is a
+        ``result_query`` ``WHERE id = ...`` away.
+
+        Uses :meth:`_request_json` (not :meth:`_get_json`) because the read
+        needs the per-call ``X-Accept-Vulnerabilities`` header, which
+        ``_get_json`` does not forward; GET stays idempotent so the tenacity
+        retry still applies. The dispatched ``operator`` threads to the
+        operator-context Vault credential read the same way the robot ops
+        thread it.
+
+        Parameters
+        ----------
+        operator
+            Request-scoped operator; its validated JWT authenticates the
+            per-target Vault credential read.
+        target
+            Resolved Harbor target.
+        params
+            Schema-validated: ``project_name`` (str), ``repository_name``
+            (str), ``reference`` (str — a tag name or a ``sha256:`` digest).
+
+        Returns
+        -------
+        dict[str, Any]
+            ``{severity, scanner, generated_at, vulnerabilities: [...]}`` — the
+            overall severity, scanner provenance, and the projected per-CVE
+            list. ``vulnerabilities`` is ``[]`` for a clean (scanned,
+            zero-finding) artifact.
+
+        Raises
+        ------
+        httpx.HTTPStatusError
+            On any 4xx/5xx from Harbor (e.g. 404 when the artifact has never
+            been scanned). The dispatcher wraps it as a ``connector_error``
+            OperationResult.
+        """
+        project = _encode_segment(params["project_name"])
+        repository = _encode_segment(params["repository_name"])
+        reference = _encode_segment(params["reference"])
+        path = (
+            f"/api/v2.0/projects/{project}/repositories/{repository}"
+            f"/artifacts/{reference}/additions/vulnerabilities"
+        )
+        payload = await self._request_json(
+            target,
+            "GET",
+            path,
+            operator=operator,
+            extra_headers={"X-Accept-Vulnerabilities": _VULN_REPORT_MIME},
+        )
+        report = _extract_vuln_report(payload)
+        raw_vulnerabilities = report.get("vulnerabilities")
+        vulnerabilities = [
+            _project_vulnerability(item)
+            for item in (raw_vulnerabilities if isinstance(raw_vulnerabilities, list) else [])
+            if isinstance(item, dict)
+        ]
+        return {
+            "severity": report.get("severity"),
+            "scanner": report.get("scanner"),
+            "generated_at": report.get("generated_at"),
+            "vulnerabilities": vulnerabilities,
+        }
 
     async def invalidate_credentials(self, target: HarborTargetLike) -> None:
         """Duck-typed credential-eviction hook for the dispatch path (#2396).

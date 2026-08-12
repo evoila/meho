@@ -11,6 +11,9 @@ the G0.6 dispatch shim. G3.5-T9 (#621) added the robot lifecycle typed ops
 broadcast classifier. G3.5-T10 (#622) added the `meho harbor …` CLI verb tree
 (`cli/internal/cmd/harbor/`), the real-container E2E test against
 `goharbor/harbor-core:v2.11.0`, and `docs/cross-repo/harbor-onboarding.md`.
+Wave-2 (#2857) adds `harbor.artifact.vulnerabilities` — a standalone typed
+read for the per-artifact CVE list behind `harbor.artifact.info`'s
+`scan_overview` severity counts.
 
 **#2856** converted the 9-op read core from the original ingested-curation
 apparatus (a retired `core_ops.py` whose ops only dispatched once a per-deploy
@@ -34,8 +37,9 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
   resolves and binds to the per-process instance at dispatch time: the 9
   read shims (`about` / `health` / `project_list` / `project_info` /
   `repository_list` / `repository_info` / `artifact_list` / `artifact_info`
-  / `robot_list`, each delegating to a `typed_reads` body) and the two robot
-  writes (`robot_create` / `robot_delete`).
+  / `robot_list`, each delegating to a `typed_reads` body), the two robot
+  writes (`robot_create` / `robot_delete`), and the standalone
+  `artifact_vulnerabilities` CVE-detail read (#2857).
 - **`HarborTargetLike`** (`session.py`) — runtime-checkable Protocol capturing
   the minimum target shape the connector reads: `name`, `host`, `port`,
   `secret_ref`, and `auth_model`. No `sso_realm` field — Harbor sends
@@ -86,6 +90,11 @@ Source: `backend/src/meho_backplane/connectors/harbor/`.
 - **`register_harbor_robot_operations`** (`ops.py`) — async lifespan registrar
   that upserts `harbor.robot.create` and `harbor.robot.delete` (also
   `source_kind="typed"`). Idempotent.
+- **`register_harbor_artifact_operations`** (`ops.py`) — async lifespan
+  registrar that upserts the standalone typed read `harbor.artifact.vulnerabilities`
+  (#2857) into `endpoint_descriptor` (group `harbor-artifacts`, `safety_level=safe`,
+  no approval). Same lifespan/idempotency contract as the robot registrar; queued
+  separately in `__init__.py`.
 
 ## Control flow
 
@@ -170,6 +179,44 @@ executes. `robot_delete` (op `harbor.robot.delete`) stays ungated — a
 through `auth_headers` → `_load_credentials` for the operator-context Vault
 read and use non-retried HTTP calls (Harbor write endpoints are non-idempotent).
 
+### artifact_vulnerabilities(operator, target, params)
+
+Typed op handler for `harbor.artifact.vulnerabilities` (#2857) — the per-CVE
+vulnerability list behind `harbor.artifact.info`'s `scan_overview` (which
+carries severity **counts** only). Classified `read` (`classify_op`;
+`.vulnerabilities` is a `_READ_SUFFIXES` entry, so the broadcast sensitivity
+matches its `harbor.artifact.info` sibling rather than falling through to the
+full-detail `other` class). `safety_level=safe`, no approval.
+
+Like the robot handlers, the signature carries `operator: Operator` so the
+dispatched operator threads in and is forwarded to `auth_headers` →
+`_load_credentials` for the operator-context Vault read.
+
+1. Percent-encodes `project_name`, `repository_name`, `reference` with
+   `quote(value, safe="")` — the OpenAPI simple-style encoding the generic
+   dispatcher uses for `harbor.artifact.info`, so a nested `repository_name`
+   slash (`team/nginx` → `team%2Fnginx`) and a `sha256:` reference colon
+   (`→ %3A`) never leak path structure.
+2. Calls `_request_json(target, "GET", path, operator=operator,
+   extra_headers={"X-Accept-Vulnerabilities": "application/vnd.security.vulnerability.report; version=1.1"})`.
+   `_request_json` (not `_get_json`) is used because `_get_json` does not
+   forward per-call headers; GET stays idempotent, so the tenacity retry still
+   applies.
+3. Unwraps the MIME-keyed `HarborVulnerabilityReport` (Harbor keys the report
+   by the resolved media type, mirroring `scan_overview`; a bare already-unwrapped
+   report is tolerated) and projects each native `VulnerabilityItem` to
+   `{id, package, version, fix_version, severity, description, links}`. Field
+   names follow the pluggable-scanner-spec v1.1 (`id` / `fix_version` /
+   `description`), **not** the Harbor Security-Hub `VulnerabilityItem` spellings
+   (`cve_id` / `fixed_version` / `desc`).
+4. Returns `{severity, scanner, generated_at, vulnerabilities: [...]}`.
+   `vulnerabilities` is the single set-shaped field, so the dispatcher's
+   JSONFlux reducer materialises it into a result handle when a real image's
+   CVE list crosses the ~50-row / 4 KB threshold (postulate 6). A named-CVE
+   lookup against that handle is a `result_query`
+   `SELECT ... WHERE id = 'CVE-…'` away. A never-scanned artifact returns
+   Harbor 404 → `httpx.HTTPStatusError` → `connector_error`.
+
 ### execute() shim
 
 `execute()` synthesises a system `Operator` and delegates to
@@ -193,14 +240,20 @@ construct a real `Operator` and call `dispatch` directly — they bypass this sh
   `OperationResult`, `AuthModel`.
 - **`meho_backplane.operations.typed_register`** — `register_typed_operation`,
   `register_typed_op_registrar`, `run_typed_op_registrars`, `derive_handler_ref`.
-- **`meho_backplane.broadcast.events`** — `classify_op` returns `read` for all
-  9 read ops (via the `.about` / `.health` / `.list` / `.info` read suffixes)
+- **`meho_backplane.broadcast.events`** — `classify_op` returns `read` for the
+  9 read-core ops and `harbor.artifact.vulnerabilities` (via the `.about` /
+  `.health` / `.list` / `.info` read suffixes plus `.vulnerabilities`, #2857)
   and `credential_mint` for `harbor.robot.create`.
 
 ## The 9 read-only core ops
 
-All ops register under `connector_id="harbor-rest-2.x"` as `source_kind="typed"`
-and dispatch on a fresh boot with zero catalog ingest.
+All register under `connector_id="harbor-rest-2.x"` as `source_kind="typed"`
+and dispatch on a fresh boot with zero catalog ingest. The 9 rows below are the
+audited read core (`HARBOR_TYPED_OPS`, via `register_harbor_typed_operations`);
+the trailing `harbor.artifact.vulnerabilities` row (#2857) is a **standalone
+typed read** registered separately in `ops.py` via
+`register_harbor_artifact_operations` — read-only like the core, but not one of
+the 9.
 
 | Op id | Group | Vendor path (Harbor 2.x) |
 |---|---|---|
@@ -213,6 +266,7 @@ and dispatch on a fresh boot with zero catalog ingest.
 | `harbor.artifact.list` | `harbor-artifacts` | `GET …/repositories/{repository_name}/artifacts` |
 | `harbor.artifact.info` | `harbor-artifacts` | `GET …/artifacts/{reference}` |
 | `harbor.robot.list` | `harbor-robots` | `GET /api/v2.0/robots` |
+| `harbor.artifact.vulnerabilities` *(standalone typed read, #2857)* | `harbor-artifacts` | `GET …/artifacts/{reference}/additions/vulnerabilities` |
 
 **Robot id + secret invariant**: `harbor.robot.list` returns each robot's
 numeric `id` (needed for `harbor.robot.delete`) and never a `secret` — Harbor
@@ -235,6 +289,12 @@ this invariant explicitly.
 - `tests/acceptance/test_g35_harbor_jsonflux_force_handle.py` — JSONFlux
   force-handle seam test using `harbor.artifact.list` (bare JSON array shape,
   distinct from NSX/SDDC's pagination envelopes).
+- `tests/test_connectors_harbor_cve.py` — unit tests for
+  `harbor.artifact.vulnerabilities` (#2857): native-report projection (CVE id
+  field present), the `X-Accept-Vulnerabilities` header, path-segment encoding
+  parity with `harbor.artifact.info`, MIME-keyed / bare envelope unwrap, empty
+  and 404 paths, `dispatch_typed` operator threading, and the `read`
+  classification.
 - `tests/integration/test_connectors_harbor_container.py` — env-gated real
   Harbor `v2.11.0` stack E2E: `harbor.about` + `harbor.robot.list` reads and
   the robot create/delete four-eyes flow, all `source_kind="typed"`.
@@ -253,10 +313,16 @@ this invariant explicitly.
 
 - Issues: #619 (G3.5-T7 skeleton), #621 (G3.5-T9 robot lifecycle +
   credential_mint classifier), #622 (G3.5-T10 CLI verbs + real-container E2E +
-  harbor-onboarding.md), **#2856 (typed read-core conversion)**
+  harbor-onboarding.md), **#2856 (typed read-core conversion)**,
+  #2857 (wave-2 CVE-detail read `harbor.artifact.vulnerabilities`)
 - Precedent: Task #2358 / Goal #2247 — the NSX (#2302) and SDDC Manager (#2306)
   typed-read conversions this task mirrors
 - Initiative: #368 (G3.5 tier-2 batch), #2833 (connector read-op coverage wave 2)
+- Harbor `getVulnerabilitiesAddition` + `acceptVulnerabilities` header:
+  https://github.com/goharbor/harbor/blob/v2.11.0/api/v2.0/swagger.yaml
+- Native report `VulnerabilityItem` shape (`id` / `fix_version` /
+  `description`): goharbor/pluggable-scanner-spec v1.1
+  (`application/vnd.security.vulnerability.report; version=1.1`)
 - HttpConnector base: `backend/src/meho_backplane/connectors/adapters/http.py`
 - Broadcast classifier: `backend/src/meho_backplane/broadcast/events.py` (`classify_op`)
 - Handler resolution: `backend/src/meho_backplane/operations/_handler_resolve.py`

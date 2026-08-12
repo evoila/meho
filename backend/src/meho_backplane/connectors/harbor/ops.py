@@ -44,7 +44,7 @@ from typing import Any
 
 from meho_backplane.retrieval.embedding import EmbeddingService
 
-__all__ = ["register_harbor_robot_operations"]
+__all__ = ["register_harbor_artifact_operations", "register_harbor_robot_operations"]
 
 
 #: Curated ``when_to_use`` blurb for the Harbor ``robot`` group --
@@ -343,5 +343,193 @@ async def register_harbor_robot_operations(
         # full-detail-broadcast contrast the credential_mint tests pin.
         requires_approval=False,
         llm_instructions=_HARBOR_ROBOT_DELETE_LLM_INSTRUCTIONS,
+        embedding_service=embedding_service,
+    )
+
+
+# ---------------------------------------------------------------------------
+# harbor.artifact.vulnerabilities
+# ---------------------------------------------------------------------------
+
+#: Curated ``when_to_use`` for the ``harbor-artifacts`` group.
+#: ``harbor.artifact.vulnerabilities`` registers into the same group the
+#: artifact list/info reads live under (the sibling harbor-read-core typed
+#: promotion, #2856); ``register_typed_operation`` requires a non-empty
+#: string whenever ``group_key`` is set, and typed-register group creation is
+#: first-write-wins. Kept close to the sibling artifact-read blurb so the two
+#: Harbor wave-2 tasks reconcile trivially at merge.
+_HARBOR_ARTIFACTS_WHEN_TO_USE: str = (
+    "Use this group to list or inspect artifacts (images, Helm charts, OCI "
+    "artifacts) within a repository and to read an artifact's full "
+    "vulnerability detail. Each artifact carries its tags, digest, push time, "
+    "SBOM accessor, and signature status; harbor.artifact.vulnerabilities "
+    "returns the per-CVE list (id, severity, affected package, installed and "
+    "fixed-in version, description) that sits behind harbor.artifact.info's "
+    "severity-count scan overview. The right group for 'what tags exist for "
+    "image X', 'what digest does tag Y resolve to', 'has this image been "
+    "signed', 'does this artifact have an SBOM', and 'which CVEs are in image "
+    "X:tag / is CVE-NNNN present before I promote it'."
+)
+
+_HARBOR_ARTIFACT_VULN_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "project_name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": "Harbor project name (from harbor.project.list).",
+        },
+        "repository_name": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Bare repository/image name within the project (from "
+                "harbor.repository.list) -- e.g. 'nginx', or 'team/nginx' for a "
+                "nested repository. The project prefix is NOT repeated here."
+            ),
+        },
+        "reference": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "Artifact reference: a tag name (e.g. 'v1.2.3') or a digest "
+                "('sha256:...'). A digest pins an exact artifact; a tag may move."
+            ),
+        },
+    },
+    "required": ["project_name", "repository_name", "reference"],
+    "additionalProperties": False,
+}
+
+_HARBOR_ARTIFACT_VULN_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "severity": {
+            "type": ["string", "null"],
+            "description": "Overall severity of the scan report (e.g. 'Critical').",
+        },
+        "scanner": {
+            "type": ["object", "null"],
+            "description": "Scanner provenance ({name, vendor, version}).",
+        },
+        "generated_at": {
+            "type": ["string", "null"],
+            "description": "When the scan report was generated (ISO-8601).",
+        },
+        "vulnerabilities": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": ["string", "null"]},
+                    "package": {"type": ["string", "null"]},
+                    "version": {"type": ["string", "null"]},
+                    "fix_version": {"type": ["string", "null"]},
+                    "severity": {"type": ["string", "null"]},
+                    "description": {"type": ["string", "null"]},
+                    "links": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+            "description": (
+                "Per-CVE list. A large list is reduced to a JSONFlux handle "
+                "with a bounded inline sample; the full set is reachable via "
+                "result_query."
+            ),
+        },
+    },
+    "additionalProperties": True,
+}
+
+_HARBOR_ARTIFACT_VULN_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "Read the full per-CVE vulnerability list for one Harbor artifact -- "
+        "the detail behind harbor.artifact.info's scan_overview, which carries "
+        "severity COUNTS only. Use when answering 'which CVEs are in image "
+        "X:tag', 'is CVE-2024-NNNN present', or 'what is the fixed-in version "
+        "for package P' before promoting an image. Requires project_name + "
+        "repository_name + reference (a tag or sha256 digest) -- the same "
+        "coordinates as harbor.artifact.info, one segment deeper. The artifact "
+        "must already be scanned; an unscanned artifact returns a "
+        "connector_error (Harbor 404)."
+    ),
+    "parameter_hints": {
+        "project_name": "Harbor project name (from harbor.project.list).",
+        "repository_name": (
+            "Bare image name within the project (from harbor.repository.list); "
+            "e.g. 'nginx', or 'team/nginx' for a nested repo. No project prefix."
+        ),
+        "reference": (
+            "A tag (e.g. 'v1.2.3') or a digest ('sha256:...'). Digests pin an "
+            "exact artifact; tags may move."
+        ),
+    },
+    "output_shape": (
+        "{severity (overall, e.g. 'Critical'), scanner {name, vendor, version}, "
+        "generated_at, vulnerabilities: [{id (CVE/GHSA id), package, version, "
+        "fix_version, severity, description, links[]}, ...]}. A large list is "
+        "reduced to a JSONFlux handle with a bounded inline sample plus a "
+        "fetch_more envelope; the full set is reachable via result_query."
+    ),
+    "next_step": (
+        "For a named-CVE lookup against a reduced handle, drill in with "
+        "result_query, e.g. SELECT id, severity, package, fix_version FROM "
+        "result WHERE id = 'CVE-2024-3094'. For a promotion gate, filter on "
+        "severity or on fix_version (non-empty = fixable). Pair with "
+        "harbor.artifact.info for the at-a-glance severity counts."
+    ),
+}
+
+
+async def register_harbor_artifact_operations(
+    *,
+    embedding_service: EmbeddingService | None = None,
+) -> None:
+    """Upsert harbor.artifact.vulnerabilities into ``endpoint_descriptor``.
+
+    Standalone typed read (source_kind="typed") so it dispatches on a fresh
+    boot with zero catalog ingest -- the same shape as ``harbor.robot.create``
+    / ``.delete`` above and the sibling harbor-read-core promotion (#2856).
+    Called once per process from the FastAPI lifespan via
+    :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`;
+    idempotent (the body-hash skip path in
+    :func:`~meho_backplane.operations.typed_register.register_typed_operation`).
+
+    Test seam: ``embedding_service`` lets fixtures inject a stub so chassis
+    tests don't load the ONNX model.
+    """
+    from meho_backplane.connectors.harbor.connector import HarborConnector
+    from meho_backplane.operations.typed_register import register_typed_operation
+
+    await register_typed_operation(
+        product="harbor",
+        version="2.x",
+        impl_id="harbor-rest",
+        op_id="harbor.artifact.vulnerabilities",
+        handler=HarborConnector.artifact_vulnerabilities,
+        summary="Read an artifact's per-CVE vulnerability list in Harbor.",
+        description=(
+            "Reads one artifact's full vulnerability report via "
+            "GET /api/v2.0/projects/{project_name}/repositories/{repository_name}"
+            "/artifacts/{reference}/additions/vulnerabilities (Harbor v2 artifact "
+            "API, operationId getVulnerabilitiesAddition) with the "
+            "X-Accept-Vulnerabilities header pinned to the current native report "
+            "format 'application/vnd.security.vulnerability.report; version=1.1'. "
+            "The detail behind harbor.artifact.info's scan_overview severity "
+            "counts: each vulnerability is projected to {id, package, version, "
+            "fix_version, severity, description, links}. safety_level=safe, "
+            "read-only, no approval. A large CVE list is JSONFlux-reduced to a "
+            "result handle (CLAUDE.md postulate 6)."
+        ),
+        parameter_schema=_HARBOR_ARTIFACT_VULN_PARAMETER_SCHEMA,
+        response_schema=_HARBOR_ARTIFACT_VULN_RESPONSE_SCHEMA,
+        group_key="harbor-artifacts",
+        when_to_use=_HARBOR_ARTIFACTS_WHEN_TO_USE,
+        tags=["read-only", "harbor", "artifact", "vulnerability", "security"],
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions=_HARBOR_ARTIFACT_VULN_LLM_INSTRUCTIONS,
         embedding_service=embedding_service,
     )

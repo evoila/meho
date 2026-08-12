@@ -12,9 +12,13 @@ mounted):
   accessor (``requires_approval=True``).
 * ``vault.token.list_accessors`` lists accessor handles
   (``safety_level="safe"``).
+* ``vault.token.lookup_accessor`` reads one token's TTL / policies /
+  expiry by its accessor (``safety_level="safe"``).
 
 There is **no bulk-revoke op** by design -- never revoke broadly to
-recover from one leak (the vault skill's loudest Don't-rule).
+recover from one leak (the vault skill's loudest Don't-rule). There is
+likewise no bulk full-detail lookup: an agent that needs many tokens'
+detail lists accessors then looks up each of interest.
 
 **Secret redaction is at the classification layer, not the handler**
 (#1397 / #1401). ``vault.token.create``'s minted client token rides in
@@ -24,8 +28,10 @@ the *response* (under Vault's ``auth`` envelope);
 write-suffix), so the broadcast collapses to aggregate-only and the
 audit row holds only a ``params_hash``. The caller's ``OperationResult``
 still carries the token (the whole point of minting). A token
-**accessor** (``revoke_accessor`` param, ``list_accessors`` response) is
-a reference handle, not the token secret -- deliberately not redacted.
+**accessor** (``revoke_accessor`` / ``lookup_accessor`` param,
+``list_accessors`` response) is a reference handle, not the token secret
+-- deliberately not redacted; ``lookup_accessor``'s response also omits
+the token ``id`` (Vault blanks it), so it exposes no secret.
 
 Handler shape mirrors :mod:`meho_backplane.connectors.vault.ops_auth`:
 ``async def (operator, target, params) -> dict``, raises on failure,
@@ -42,7 +48,7 @@ from typing import Any
 
 import meho_backplane.auth.vault as _auth_vault
 from meho_backplane.auth.operator import Operator
-from meho_backplane.connectors.vault.ops_auth import _extract_keys
+from meho_backplane.connectors.vault.ops_auth import _extract_data, _extract_keys
 from meho_backplane.connectors.vault.ops_token_schemas import (
     VAULT_TOKEN_CREATE_LLM_INSTRUCTIONS,
     VAULT_TOKEN_CREATE_PARAMETER_SCHEMA,
@@ -50,6 +56,9 @@ from meho_backplane.connectors.vault.ops_token_schemas import (
     VAULT_TOKEN_LIST_ACCESSORS_LLM_INSTRUCTIONS,
     VAULT_TOKEN_LIST_ACCESSORS_PARAMETER_SCHEMA,
     VAULT_TOKEN_LIST_ACCESSORS_RESPONSE_SCHEMA,
+    VAULT_TOKEN_LOOKUP_ACCESSOR_LLM_INSTRUCTIONS,
+    VAULT_TOKEN_LOOKUP_ACCESSOR_PARAMETER_SCHEMA,
+    VAULT_TOKEN_LOOKUP_ACCESSOR_RESPONSE_SCHEMA,
     VAULT_TOKEN_REVOKE_ACCESSOR_LLM_INSTRUCTIONS,
     VAULT_TOKEN_REVOKE_ACCESSOR_PARAMETER_SCHEMA,
     VAULT_TOKEN_REVOKE_ACCESSOR_RESPONSE_SCHEMA,
@@ -60,6 +69,7 @@ __all__ = [
     "TOKEN_WHEN_TO_USE",
     "vault_token_create",
     "vault_token_list_accessors",
+    "vault_token_lookup_accessor",
     "vault_token_revoke_accessor",
 ]
 
@@ -169,14 +179,43 @@ async def vault_token_list_accessors(
     return {"keys": _extract_keys(payload)}
 
 
+async def vault_token_lookup_accessor(
+    operator: Operator, target: Any, params: dict[str, Any]
+) -> dict[str, Any]:
+    """Look up ONE token's TTL / policies / expiry by its accessor.
+
+    Op-id: ``vault.token.lookup_accessor``. Delegates to hvac's
+    ``client.auth.token.lookup_accessor(accessor=...)`` (POST
+    /v1/auth/token/lookup-accessor) and returns the unwrapped ``data``
+    metadata dict (policies, ttl, expire_time, period, display_name,
+    creation_time, renewable, ...). The accessor is a reference handle,
+    not the token secret, and Vault deliberately blanks the token ``id``
+    in a lookup-accessor response -- the endpoint exists precisely so this
+    is a safe read. Unlike ``list_accessors`` (which normalises an
+    empty-store ``404`` to ``{"keys": []}``), a single-accessor lookup has
+    no "legitimately empty" case: an unknown accessor is a genuine
+    not-found, so the underlying :class:`hvac.exceptions.InvalidPath`
+    propagates as a read-phase ``connector_error`` rather than being
+    swallowed.
+    """
+    accessor: str = str(params["accessor"]).strip()
+
+    async with _auth_vault.vault_client_for_operator(operator) as client:
+        payload = await asyncio.to_thread(client.auth.token.lookup_accessor, accessor=accessor)
+
+    return _extract_data(payload)
+
+
 # --- spec table ------------------------------------------------------------
 
 TOKEN_WHEN_TO_USE: str = (
     "Use to manage Vault TOKEN lifecycle: mint a client token "
     "(vault.token.create -- requires approval; the token is secret and "
     "redacted from audit/broadcast), surgically revoke ONE token by its "
-    "accessor (vault.token.revoke_accessor -- requires approval), and "
-    "list active token accessors (vault.token.list_accessors -- safe). "
+    "accessor (vault.token.revoke_accessor -- requires approval), "
+    "list active token accessors (vault.token.list_accessors -- safe), "
+    "and look up one token's TTL/policies/expiry by its accessor "
+    "(vault.token.lookup_accessor -- safe). "
     "There is intentionally NO bulk-revoke op: never revoke broadly to "
     "recover from one leak. Accessors are non-secret reference handles. "
     "Route entity/group/policy questions to the 'identity' group."
@@ -250,5 +289,30 @@ TOKEN_OP_SPECS: tuple[dict[str, Any], ...] = (
         "safety_level": "safe",
         "requires_approval": False,
         "llm_instructions": VAULT_TOKEN_LIST_ACCESSORS_LLM_INSTRUCTIONS,
+    },
+    {
+        "op_id": "vault.token.lookup_accessor",
+        "handler": vault_token_lookup_accessor,
+        "group_key": "token",
+        "summary": "Look up one token's TTL/policies/expiry by its accessor.",
+        "description": (
+            "Reads one token's metadata by its accessor (POST "
+            "/v1/auth/token/lookup-accessor) -- policies, ttl, expire_time, "
+            "period (periodic tokens), display_name, creation_time, "
+            "renewable. Answers 'what policies does this token carry and "
+            "when does it expire' for a token audit / access review. "
+            "Read-only; registered safety_level=safe, "
+            "requires_approval=False. The accessor is a non-secret "
+            "reference handle and Vault blanks the token id in the "
+            "response, so no secret is exposed. Unlike list_accessors, an "
+            "unknown accessor is a genuine not-found and surfaces as a "
+            "connector_error (InvalidPath)."
+        ),
+        "parameter_schema": VAULT_TOKEN_LOOKUP_ACCESSOR_PARAMETER_SCHEMA,
+        "response_schema": VAULT_TOKEN_LOOKUP_ACCESSOR_RESPONSE_SCHEMA,
+        "tags": ["read-only", "token", "identity"],
+        "safety_level": "safe",
+        "requires_approval": False,
+        "llm_instructions": VAULT_TOKEN_LOOKUP_ACCESSOR_LLM_INSTRUCTIONS,
     },
 )

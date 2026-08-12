@@ -14,9 +14,11 @@ Secret-material discipline (#1412): the ``vault.token.create``
 classification layer -- :func:`meho_backplane.broadcast.events.classify_op`
 maps ``vault.token.create`` to ``credential_mint`` (aggregate-only
 broadcast, ``params_hash`` only in the audit row) -- not in these
-schemas. A token **accessor** (``revoke_accessor`` param,
-``list_accessors`` response) is a reference handle, not the token secret
--- deliberately not redacted.
+schemas. A token **accessor** (``revoke_accessor`` / ``lookup_accessor``
+param, ``list_accessors`` response) is a reference handle, not the token
+secret -- deliberately not redacted. Vault also blanks the token ``id``
+in a ``lookup-accessor`` response, so the metadata read (#2844) exposes
+no secret either.
 """
 
 from __future__ import annotations
@@ -30,6 +32,9 @@ __all__ = [
     "VAULT_TOKEN_LIST_ACCESSORS_LLM_INSTRUCTIONS",
     "VAULT_TOKEN_LIST_ACCESSORS_PARAMETER_SCHEMA",
     "VAULT_TOKEN_LIST_ACCESSORS_RESPONSE_SCHEMA",
+    "VAULT_TOKEN_LOOKUP_ACCESSOR_LLM_INSTRUCTIONS",
+    "VAULT_TOKEN_LOOKUP_ACCESSOR_PARAMETER_SCHEMA",
+    "VAULT_TOKEN_LOOKUP_ACCESSOR_RESPONSE_SCHEMA",
     "VAULT_TOKEN_REVOKE_ACCESSOR_LLM_INSTRUCTIONS",
     "VAULT_TOKEN_REVOKE_ACCESSOR_PARAMETER_SCHEMA",
     "VAULT_TOKEN_REVOKE_ACCESSOR_RESPONSE_SCHEMA",
@@ -239,10 +244,107 @@ VAULT_TOKEN_LIST_ACCESSORS_LLM_INSTRUCTIONS: dict[str, Any] = {
         "Enumerate every active token by its accessor handle. Read-only; "
         "registered safe (no approval). Accessors are non-secret "
         "references usable to look up or surgically revoke one token "
-        "(vault.token.revoke_accessor) -- this never returns token secrets."
+        "(vault.token.lookup_accessor / vault.token.revoke_accessor) -- "
+        "this never returns token secrets."
     ),
     "parameter_hints": {},
     "output_shape": (
         "On success: {'keys': [...]} -- accessor handles. An empty store yields {'keys': []}."
+    ),
+}
+
+
+# --- token.lookup_accessor -------------------------------------------------
+
+VAULT_TOKEN_LOOKUP_ACCESSOR_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "accessor": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "\\S",
+            "description": (
+                "The accessor of the single token to look up (from a "
+                "token.create response or token.list_accessors). A reference "
+                "handle, not the token secret."
+            ),
+        },
+    },
+    "required": ["accessor"],
+    "additionalProperties": False,
+}
+
+VAULT_TOKEN_LOOKUP_ACCESSOR_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "description": (
+        "The token's metadata, unwrapped from Vault's {'data': {...}} "
+        "envelope. Vault's lookup-accessor deliberately blanks the token id "
+        "(the raw secret), so the accessor cannot recover the token. "
+        "Carries at least policies / ttl / expire_time / period / "
+        "display_name / creation_time / renewable; additional Vault fields "
+        "(meta, path, orphan, entity_id, num_uses, ...) pass through."
+    ),
+    "properties": {
+        "policies": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Policies attached to the token (the privilege grant).",
+        },
+        "ttl": {
+            "type": "integer",
+            "description": "Remaining time-to-live in seconds (0 for a non-expiring token).",
+        },
+        "expire_time": {
+            "type": ["string", "null"],
+            "description": "RFC3339 expiry timestamp; null for a non-expiring token.",
+        },
+        "period": {
+            "type": ["integer", "null"],
+            "description": (
+                "Renewal period in seconds for a PERIODIC token (0/null "
+                "otherwise) -- the field that answers 'when does the "
+                "scheduler token's fuse blow' (evoila/meho#2328)."
+            ),
+        },
+        "display_name": {
+            "type": "string",
+            "description": "Human-readable display name stamped on the token.",
+        },
+        "creation_time": {
+            "type": "integer",
+            "description": "Unix epoch seconds when the token was minted.",
+        },
+        "renewable": {
+            "type": "boolean",
+            "description": "Whether the token can be renewed.",
+        },
+    },
+    "additionalProperties": True,
+}
+
+VAULT_TOKEN_LOOKUP_ACCESSOR_LLM_INSTRUCTIONS: dict[str, Any] = {
+    "when_to_use": (
+        "Look up ONE token's metadata by its accessor -- its policies, "
+        "remaining TTL, expiry timestamp, periodic-renewal period, display "
+        "name, creation time, and renewable flag. Use to audit 'what "
+        "policies does this token carry and when does it expire' (e.g. "
+        "diagnosing a silently-dead periodic token) or an access review "
+        "('any long-lived broad-policy tokens still active'). Read-only; "
+        "registered safe (no approval) -- the accessor is a non-secret "
+        "reference handle and Vault's lookup-accessor never returns the "
+        "token secret. An unknown accessor surfaces as a connector_error "
+        "(InvalidPath)."
+    ),
+    "parameter_hints": {
+        "accessor": (
+            "Required. The accessor of the token to look up (from "
+            "list_accessors or a create response)."
+        ),
+    },
+    "output_shape": (
+        "On success: the token's metadata dict (policies, ttl, expire_time, "
+        "period, display_name, creation_time, renewable, and additional "
+        "Vault fields). On failure: a connector_error OperationResult "
+        "(InvalidPath when the accessor does not exist)."
     ),
 }

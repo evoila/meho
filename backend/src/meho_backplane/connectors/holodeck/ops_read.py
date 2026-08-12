@@ -138,6 +138,7 @@ __all__ = [
     "GROWTH_DIRS",
     "READ_OPS",
     "KubectlSafetyError",
+    "holodeck_backups_list",
     "holodeck_config_show",
     "holodeck_disk_usage",
     "holodeck_k8s_exec",
@@ -146,6 +147,7 @@ __all__ = [
     "holodeck_pod_info",
     "holodeck_pod_list",
     "holodeck_service_list",
+    "parse_backup_listing_output",
     "parse_disk_usage_output",
     "parse_kubectl_command",
     "parse_logs_tail_output",
@@ -676,6 +678,58 @@ def parse_disk_usage_output(
     }
 
 
+def parse_backup_listing_output(stdout: str) -> list[dict[str, Any]]:
+    """Parse ``find ... -printf '%T@ %s %p\\n' | sort -rn`` output into rows.
+
+    Each non-empty line carries three fields in the order the ``-printf``
+    format emits them, separated by a single space:
+
+    * ``%T@`` -- the file's modification time as seconds since the epoch,
+      *with a fractional part* (GNU findutils ``find(1)``); parsed to a
+      float.
+    * ``%s`` -- the file's size in bytes; parsed to an int.
+    * ``%p`` -- the file path. It is the trailing field and may itself
+      contain spaces, so only the first two fields are split off; the rest
+      of the line is the path verbatim.
+
+    The remote pipeline already orders newest-first (``sort -rn`` on the
+    numeric ``%T@`` field -- the same ordering ``holodeck.backups.prune``
+    uses internally to pick its keep window), so this parser **preserves**
+    input order rather than re-sorting. A row whose mtime or size field is
+    non-numeric is skipped, mirroring the :func:`_parse_du_bytes`
+    non-numeric guard so a stray line never crashes the envelope.
+
+    Returns ``[{path, mtime, size_bytes}, ...]`` newest-first.
+
+    >>> rows = parse_backup_listing_output(
+    ...     "1699999999.5 4096 /var/backups/db-2.sql.gz\\n"
+    ...     "1699990000.1 8192 /var/backups/db-1.sql.gz\\n"
+    ... )
+    >>> [r["path"] for r in rows]
+    ['/var/backups/db-2.sql.gz', '/var/backups/db-1.sql.gz']
+    >>> rows[0]["size_bytes"]
+    4096
+    """
+    rows: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        # Split on the two literal separator spaces the ``-printf`` format
+        # emits; maxsplit=2 keeps a path containing spaces intact as the
+        # trailing field.
+        parts = line.split(" ", 2)
+        if len(parts) < 3:
+            continue
+        mtime_field, size_field, path = parts
+        try:
+            mtime = float(mtime_field)
+            size_bytes = int(size_field)
+        except ValueError:
+            continue
+        rows.append({"path": path, "mtime": mtime, "size_bytes": size_bytes})
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Handler functions (bound-method shims on HolodeckConnector)
 # ---------------------------------------------------------------------------
@@ -1041,6 +1095,63 @@ async def holodeck_disk_usage(
         dir_usages.append((path, du_text))
 
     return parse_disk_usage_output(df_root_text=df_root_text, dir_usages=dir_usages)
+
+
+async def holodeck_backups_list(
+    self: HolodeckConnector,
+    target: Any,
+    params: dict[str, Any],
+    operator: Operator | None = None,
+) -> dict[str, Any]:
+    """List backup artefacts under ``/var/backups`` newest-first.
+
+    Op-id: ``holodeck.backups.list``. *params*:
+
+    * ``path`` -- optional sub-path under ``/var/backups`` (absolute or
+      relative to it). Resolved via
+      :func:`~meho_backplane.connectors.holodeck.ops_write.resolve_backup_dir`,
+      the **same** bound ``holodeck.backups.prune`` applies -- a traversal
+      or absolute-path escape is rejected before any SSH traffic. Omit to
+      list the root.
+
+    Runs ``find <dir> -maxdepth 1 -type f -printf '%T@ %s %p\\n' | sort
+    -rn`` over plain SSH -- the read-only half of the prune handler's own
+    listing pipeline, with a ``%s`` (size) field added and the destructive
+    ``tail | cut | xargs rm`` tail dropped. Returns a ``{rows, total}``
+    envelope (:func:`parse_backup_listing_output`) whose rows are ordered
+    newest-first, exactly the ordering ``backups.prune`` uses internally to
+    decide its keep window -- so a caller can pass the same ``keep_newest``
+    a prune request proposes and locally read off which rows (index >=
+    ``keep_newest``) that prune would delete, without executing anything.
+
+    An SSH/transport failure surfaces as
+    ``{rows: [], total: 0, error: "<reason>"}`` so an empty result caused
+    by a broken connection is distinguishable from a genuinely empty
+    directory (the backup-landing health-check signal).
+    """
+    # Reuse the prune handler's own path bound -- imported lazily to keep
+    # the ops / ops_read / ops_write module triangle free of an import
+    # cycle (the same convention connector.py and ops._holodeck_ops use).
+    from meho_backplane.connectors.holodeck.ops_write import (
+        HolodeckWriteSafetyError,
+        resolve_backup_dir,
+    )
+
+    try:
+        resolved_dir = resolve_backup_dir(params.get("path"))
+    except HolodeckWriteSafetyError as exc:
+        return {"rows": [], "total": 0, "error": f"backups.list safety check: {exc}"}
+
+    quoted_dir = shlex.quote(resolved_dir)
+    cmd = f"find {quoted_dir} -maxdepth 1 -type f -printf '%T@ %s %p\\n' | sort -rn"
+    try:
+        proc = await self._run_command(target, cmd, operator=operator)
+    except Exception as exc:
+        return {"rows": [], "total": 0, "error": str(exc)}
+    stdout = (proc.stdout or "") if hasattr(proc, "stdout") else ""
+    content = stdout if isinstance(stdout, str) else ""
+    rows = parse_backup_listing_output(content)
+    return {"rows": rows, "total": len(rows)}
 
 
 # ---------------------------------------------------------------------------
@@ -1699,6 +1810,96 @@ READ_OPS: tuple[HolodeckOp, ...] = (
                 "``percent_used`` is computed from the byte counts. "
                 "Each sub-section's ``ok`` flips false when its "
                 "sub-command failed or produced empty output."
+            ),
+        },
+    ),
+    HolodeckOp(
+        op_id="holodeck.backups.list",
+        handler_attr="backups_list",
+        summary="List /var/backups artefacts newest-first (pre-prune review + landing).",
+        description=(
+            "Runs ``find <dir> -maxdepth 1 -type f -printf '%T@ %s %p' | "
+            "sort -rn`` over plain SSH -- the read-only half of "
+            "``holodeck.backups.prune``'s own listing pipeline, with a size "
+            "field added and the destructive ``rm`` tail removed. An "
+            "optional ``path`` sub-directory is resolved and confined to "
+            "/var/backups/** via the same bound the prune write op applies "
+            "(a traversal or absolute-path escape is rejected before any "
+            "SSH traffic); the listing runs at -maxdepth 1 so it never "
+            "recurses into a subtree. Returns a ``{rows, total}`` envelope "
+            "with one row per file ({path, mtime, size_bytes}) ordered "
+            "newest-first -- the exact ordering the prune uses to pick its "
+            "keep window, so a caller can pass the same ``keep_newest`` a "
+            "prune request proposes and locally read off which rows that "
+            "prune would delete, without executing anything. Also answers "
+            "the routine backup-landing health check (how old / how large "
+            "is the newest artefact). safety_level=safe, "
+            "requires_approval=False -- pure ``find``, no mutation."
+        ),
+        parameter_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Optional sub-path under /var/backups (absolute or "
+                        "relative to it). Must resolve strictly within "
+                        "/var/backups/**. Omit to list the root."
+                    ),
+                },
+            },
+            "additionalProperties": False,
+        },
+        response_schema={
+            "type": "object",
+            "properties": {
+                "rows": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "mtime": {"type": "number"},
+                            "size_bytes": {"type": "integer"},
+                        },
+                    },
+                },
+                "total": {"type": "integer"},
+                "error": {"type": ["string", "null"]},
+            },
+            "additionalProperties": True,
+        },
+        group_key="backups",
+        tags=("read-only", "backups", "list", "holodeck"),
+        safety_level="safe",
+        requires_approval=False,
+        llm_instructions={
+            "when_to_use": (
+                "Call before approving a ``holodeck.backups.prune`` (so the "
+                "reviewer sees exactly which files past the keep window "
+                "would be deleted, not just a ``keep_newest`` count), or as "
+                "a routine backup-landing health check on ``/var/backups`` "
+                "(is the hourly backup still landing? how old / how large "
+                "is the newest artefact?). Complements "
+                "``holodeck.disk.usage``'s aggregate byte count with the "
+                "per-file drill-down. " + _SSH_TRANSPORT_NOTE
+            ),
+            "parameter_hints": {
+                "path": (
+                    "Optional; must stay within /var/backups/**. Omit to "
+                    "list the root. Same bound as ``holodeck.backups.prune``."
+                ),
+            },
+            "output_shape": (
+                "``{rows: [{path, mtime, size_bytes}], total: N}``, rows "
+                "newest-first (by mtime). ``mtime`` is epoch seconds with a "
+                "fractional part (``find -printf '%T@'``); ``size_bytes`` is "
+                "an integer (``%s``). The ordering matches "
+                "``holodeck.backups.prune``'s keep window, so rows at index "
+                ">= keep_newest are the ones that prune would remove. "
+                "``error`` is set (rows empty) when the SSH command failed "
+                "-- distinct from a genuinely empty directory."
             ),
         },
     ),

@@ -24,7 +24,11 @@ the 7 read ops (`config.show`, `pod.list`, `pod.info`, `service.list`,
 registered under `connector_id="holodeck-ssh-9.0"`. G3.8-T3 (#855) ships
 the CLI verbs + E2E acceptance suite + onboarding doc. G3.18-T1 (#2153)
 appends `holodeck.disk.usage` — root-fs `df` + `du` on a fixed growth-dir
-set for pre-eviction disk diagnosis — bringing the total to 9 ops.
+set for pre-eviction disk diagnosis — bringing the total to 9 ops. #2847
+appends `holodeck.backups.list` — a safe per-file inventory of
+`/var/backups` reusing `holodeck.backups.prune`'s own `find` listing —
+taking the read surface to **10 ops** (13 total, including the 3
+approval-gated write ops).
 
 Source: `backend/src/meho_backplane/connectors/holodeck/`.
 
@@ -41,11 +45,14 @@ Source: `backend/src/meho_backplane/connectors/holodeck/`.
 - **Read-op handlers + parsers** (`ops_read.py`) — `holodeck_config_show`,
   `holodeck_pod_list`, `holodeck_pod_info`, `holodeck_service_list`,
   `holodeck_k8s_exec`, `holodeck_logs_tail`, `holodeck_networking_show`,
-  `holodeck_disk_usage`. Pure parsers: `parse_kubectl_command`
-  (verb-safelist enforcement), `parse_logs_tail_output` (GNU `tail`
-  `==> path <==` header split), `parse_networking_payload` (four-section
-  composer), `parse_disk_usage_output` (root-fs `df -B1` + per-dir
-  `du -sb` composer with per-section `ok`). `GROWTH_DIRS` is the fixed
+  `holodeck_disk_usage`, `holodeck_backups_list`. Pure parsers:
+  `parse_kubectl_command` (verb-safelist enforcement),
+  `parse_logs_tail_output` (GNU `tail` `==> path <==` header split),
+  `parse_networking_payload` (four-section composer),
+  `parse_disk_usage_output` (root-fs `df -B1` + per-dir `du -sb` composer
+  with per-section `ok`), `parse_backup_listing_output` (`find -printf
+  '%T@ %s %p'` → `{path, mtime, size_bytes}` rows, newest-first order
+  preserved). `GROWTH_DIRS` is the fixed
   code constant (`/var/backups`, `/holodeck-runtime`) the disk-usage op
   measures — no operator path parameter. `KubectlSafetyError` is the
   `ValueError` subclass the dispatcher's error envelope picks up when a
@@ -158,7 +165,7 @@ Four-stage health check; each stage maps to a distinct
 
 The probe does not mutate state. `Get-Service` is read-only on Photon.
 
-### Read ops (T2 surface + G3.18-T1 disk.usage)
+### Read ops (T2 surface + G3.18-T1 disk.usage + #2847 backups.list)
 
 The read ops route through the dispatcher's standard
 `call_operation` path. Each registers via `register_typed_operation()` with
@@ -273,6 +280,27 @@ disclosure (CLAUDE.md postulate 5 + Initiative #371).
   it can never become an arbitrary `du`. This is the complete
   pre-eviction disk signal for the 74 GB root fs (VCF-9.x backup fill).
 
+- **`holodeck.backups.list`** (group `backups`, JSONFlux-shaped, #2847).
+  Runs `find <dir> -maxdepth 1 -type f -printf '%T@ %s %p' | sort -rn`
+  over **plain SSH** — the read-only half of `holodeck.backups.prune`'s
+  own listing pipeline (same `find -maxdepth 1`, plus a `%s` size field,
+  minus the destructive `tail | cut | xargs rm` tail). An optional `path`
+  sub-directory is confined to `/var/backups/**` via `resolve_backup_dir`
+  (the shared resolver both this op and `backups.prune` call, so the
+  single `bound_backup_path` safety bound is never duplicated). Returns a
+  `{rows, total}` envelope with one `{path, mtime, size_bytes}` row per
+  file, **newest-first** — the exact ordering `backups.prune` uses to pick
+  its keep window, so a caller can pass the same `keep_newest` a prune
+  request proposes and locally read off which rows (index ≥ `keep_newest`)
+  that prune would delete, without executing anything. A transport failure
+  surfaces as `{rows: [], total: 0, error}` so an empty result from a
+  broken connection is distinguishable from a genuinely empty directory
+  (the backup-landing health-check signal). Closes the inspection half of
+  the same root-SSH fallback the `backups.prune` write op retired: a
+  reviewer approving that destructive prune is no longer asked to do so
+  blind. `parse_backup_listing_output` is the pure parser. `safety_level=
+  safe`, `requires_approval=False` — pure `find`, no mutation.
+
 ### Write ops (G3.18-T2 surface, approval-gated)
 
 `ops_write.py` (module `WRITE_OPS`, appended to `HOLODECK_OPS` via
@@ -289,7 +317,9 @@ Each handler validates its inputs against a fixed allowlist and **rejects
 before composing** the command, then `shlex.quote`s every interpolated
 token — the same reject-then-compose posture as `_COMPONENT_SAFE_RE` /
 `parse_kubectl_command`. `bound_backup_path` / `bound_image_tar` are the pure
-path-bounding helpers (unit-tested directly).
+path-bounding helpers (unit-tested directly); `resolve_backup_dir` wraps
+`bound_backup_path` with the root-default behaviour and is the single
+resolver `backups.prune` and `backups.list` (#2847) both call.
 
 - **`holodeck.k8s.pods.gc`** (group `k8s-write`). Runs one
   `kubectl delete pods --field-selector status.phase=<phase>` per requested
@@ -305,7 +335,9 @@ path-bounding helpers (unit-tested directly).
 - **`holodeck.backups.prune`** (group `backups-write`). Removes backup
   artefacts under `/var/backups`, keeping the newest `keep_newest` (explicit
   int, required). An optional `path` sub-directory is resolved via
-  `bound_backup_path`, which rejects any value that escapes `/var/backups/**`
+  `resolve_backup_dir` (shared with the `holodeck.backups.list` read op,
+  #2847), which defaults to the root and routes any sub-path through
+  `bound_backup_path` — rejecting any value that escapes `/var/backups/**`
   (relative/absolute traversal, or the root itself). The listing runs at
   `find -maxdepth 1` so the prune never recurses into a subtree.
 - **`holodeck.images.import`** (group `images-write`). Runs

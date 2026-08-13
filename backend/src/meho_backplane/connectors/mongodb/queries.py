@@ -13,7 +13,8 @@ command reference and to unit-test with a fake client).
 Command facts are pinned to the MongoDB manual:
 ``listDatabases`` / ``listCollections`` / ``dbStats`` / ``collStats`` /
 ``listIndexes`` / ``serverStatus`` / ``buildInfo`` / ``hello`` /
-``replSetGetStatus`` (https://www.mongodb.com/docs/manual/reference/command/).
+``replSetGetStatus`` / ``currentOp``
+(https://www.mongodb.com/docs/manual/reference/command/).
 """
 
 from __future__ import annotations
@@ -31,11 +32,13 @@ from pymongo.errors import OperationFailure
 from meho_backplane.connectors.mongodb.session import DEFAULT_AUTH_SOURCE, assert_read_command
 
 __all__ = [
+    "CURRENT_OP_SLIM_FIELDS",
     "NO_REPLICATION_ENABLED_CODE",
     "SERVER_STATUS_SLIM_FIELDS",
     "SERVER_STATUS_SUPPRESSED_SECTIONS",
     "fetch_collection_stats",
     "fetch_collections",
+    "fetch_current_ops",
     "fetch_databases",
     "fetch_db_stats",
     "fetch_estimated_count",
@@ -83,6 +86,34 @@ SERVER_STATUS_SLIM_FIELDS: tuple[str, ...] = (
     "storageEngine",
     "repl",
     "ok",
+)
+
+#: The triage-safe per-operation fields kept from a ``currentOp`` document. This
+#: is a positive projection (the same "fetch, then keep only the triage-safe
+#: subset" shape as :data:`SERVER_STATUS_SLIM_FIELDS`), not a drop-list: an op
+#: document is rebuilt from only these fields, so the query-bearing fields a
+#: ``currentOp`` entry can carry — ``command`` / ``originatingCommand`` /
+#: ``query`` / ``comment`` (all of which embed literal filter values and can
+#: preserve a ``comment`` even when the command is truncated) — never reach an
+#: :class:`OperationResult`, and a future server version adding a new
+#: value-bearing field cannot leak through a stale drop-list. ``planSummary`` is
+#: kept: it reports the chosen index's key pattern (field names, already public
+#: via ``mongodb.indexes``), not the literal query values. Mirrors the
+#: query-text omission ``postgres.activity`` applies to ``pg_stat_activity``.
+CURRENT_OP_SLIM_FIELDS: tuple[str, ...] = (
+    "opid",
+    "op",
+    "ns",
+    "active",
+    "secs_running",
+    "microsecs_running",
+    "client",
+    "desc",
+    "connectionId",
+    "planSummary",
+    "numYields",
+    "waitingForLock",
+    "currentOpTime",
 )
 
 
@@ -336,6 +367,38 @@ async def fetch_replica_status(client: AsyncMongoClient[dict[str, Any]]) -> dict
         ],
     }
     return payload
+
+
+async def fetch_current_ops(client: AsyncMongoClient[dict[str, Any]]) -> dict[str, Any]:
+    """Snapshot the in-flight operations via ``currentOp``, without query text.
+
+    Issues ``{"currentOp": 1, "$all": False}`` against the ``admin`` database.
+    ``$all: False`` (the command's own default) excludes idle connections and
+    internal system operations, so the payload stays a triage-sized snapshot of
+    the operations actually running. Each returned operation is projected down to
+    :data:`CURRENT_OP_SLIM_FIELDS`, dropping the query-bearing ``command`` /
+    ``originatingCommand`` fields that can carry literal filter values or secrets
+    — the same discipline ``postgres.activity`` applies to the in-flight query
+    text. An operator finds the long-runners by sorting the result on
+    ``secs_running`` (client-side, or via ``result_query`` on a handle).
+
+    Requires the ``inprog`` privilege (the built-in ``clusterMonitor`` role) —
+    the same role ``mongodb.replica_status``'s ``replSetGetStatus`` already
+    assumes, so no new elevated grant.
+
+    ``currentOp`` is deprecated as a command since MongoDB 6.2 in favour of the
+    ``$currentOp`` aggregation stage, but is still served through MongoDB 8.x,
+    inside this connector's supported range; the single fixed command keeps the
+    closed read-command allowlist a one-entry addition rather than admitting the
+    generic ``aggregate`` command.
+    """
+    assert_read_command("currentOp")
+    result = await _admin(client).command({"currentOp": 1, "$all": False})
+    operations = [
+        {field: _jsonable(op[field]) for field in CURRENT_OP_SLIM_FIELDS if field in op}
+        for op in result.get("inprog", [])
+    ]
+    return {"operations": operations}
 
 
 async def fetch_fingerprint(

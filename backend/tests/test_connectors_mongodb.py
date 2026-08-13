@@ -286,6 +286,7 @@ def test_every_op_is_safe_read_only_with_closed_schema() -> None:
         "mongodb.count",
         "mongodb.server_status",
         "mongodb.replica_status",
+        "mongodb.current_ops",
     }
     for op in MONGO_OPS:
         assert op.safety_level == "safe", op.op_id
@@ -314,6 +315,7 @@ def test_read_command_allowlist_is_the_closed_fixed_set() -> None:
                 "buildInfo",
                 "hello",
                 "replSetGetStatus",
+                "currentOp",
             }
         )
         == MONGO_READ_COMMANDS
@@ -571,6 +573,59 @@ async def test_replica_status_lag_is_null_without_primary_or_optime(
     assert members["arb:27017"]["lag_seconds"] is None
     assert members["arb:27017"]["optime_date"] is None
     assert members["arb:27017"]["last_heartbeat"] is None
+
+
+@pytest.mark.asyncio
+async def test_current_ops_omits_command_and_query_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AC: mongodb.current_ops returns ops but never the query-bearing fields.
+
+    The currentOp ``command`` / ``originatingCommand`` documents carry literal
+    filter values (and preserve a ``comment`` even when truncated), so the slim
+    projection strips them — mirroring ``postgres.activity``'s query-text
+    omission (:func:`test_activity_omits_query_text`).
+    """
+    admin = _FakeDb(
+        command_responses={
+            "currentOp": {
+                "inprog": [
+                    {
+                        "opid": 12345,
+                        "op": "query",
+                        "ns": "app.events",
+                        "active": True,
+                        "secs_running": 87,
+                        "microsecs_running": 87_000_000,
+                        "client": "10.0.0.5:51000",
+                        "desc": "conn42",
+                        "connectionId": 42,
+                        "planSummary": "COLLSCAN",
+                        "numYields": 3,
+                        "waitingForLock": False,
+                        "currentOpTime": "2026-08-12T10:00:00.000+00:00",
+                        # The query-bearing documents that must be stripped:
+                        "command": {"find": "events", "filter": {"token": "s3cr3t"}},
+                        "originatingCommand": {"aggregate": "events", "pipeline": []},
+                    }
+                ],
+                "ok": 1.0,
+            }
+        }
+    )
+    client = _FakeClient(default=admin)
+    _patch_client(monkeypatch, client)
+
+    result = await MongoDbConnector().current_ops(_make_operator(), _MongoTarget(), {})
+    op = result["operations"][0]
+    # The triage-safe fields survive the projection...
+    assert op["opid"] == 12345
+    assert op["secs_running"] == 87
+    assert op["ns"] == "app.events"
+    # ...but neither query-bearing document reaches the result.
+    assert "command" not in op
+    assert "originatingCommand" not in op
+    assert client.closed is True
 
 
 @pytest.mark.asyncio

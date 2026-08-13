@@ -117,8 +117,8 @@ func newOperationCallCmd() *cobra.Command {
 			"\"harbor-rest-2.x\" pre-baked. Use when an op doesn't have a\n" +
 			"dedicated alias yet.\n\n" +
 			"Exit codes mirror meho operation call.",
-		Example: "  meho harbor operation call GET:/api/v2.0/systeminfo --target prod-harbor\n" +
-			"  meho harbor operation call GET:/api/v2.0/projects --target prod-harbor --json",
+		Example: "  meho harbor operation call harbor.about --target prod-harbor\n" +
+			"  meho harbor operation call harbor.project.list --target prod-harbor --json",
 		Args:          cobra.ExactArgs(1),
 		SilenceUsage:  true,
 		SilenceErrors: true,

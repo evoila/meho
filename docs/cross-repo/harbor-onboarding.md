@@ -17,14 +17,15 @@ Copyright (c) 2026 evoila Group
 
 ## What this surface is
 
-The `harbor-rest-2.x` connector is a **hybrid** connector:
+The `harbor-rest-2.x` connector is a **fully typed** connector:
 
-- The 9 curated read-only ops are **ingested** from the Harbor 2.x
-  OpenAPI spec via the G0.7 ingest pipeline, stored as
-  `EndpointDescriptor` rows with `source_kind='ingested'`, and enabled
-  via [`apply_harbor_core_curation`](../../backend/src/meho_backplane/connectors/harbor/core_ops.py).
-- Two **typed** ops (`harbor.robot.create`, `harbor.robot.delete`) are
-  registered by the G3.5-T9 (#621) registrar and stored with
+- The 9 read-only ops (`harbor.about` … `harbor.robot.list`) are
+  registered as **typed** ops (`source_kind='typed'`) by the
+  `register_harbor_typed_operations` registrar (#2856). They dispatch on
+  a fresh boot with **zero catalog ingest** — no spec ingest or curation
+  step is required.
+- Two **typed** write ops (`harbor.robot.create`, `harbor.robot.delete`)
+  are registered by the G3.5-T9 (#621) registrar, also
   `source_kind='typed'`.
 
 All ops dispatch through the same `POST /api/v1/operations/call` route
@@ -40,15 +41,15 @@ The v0.2 op surface (Initiative
 
 | Group | CLI verb | `op_id` | Notes |
 | --- | --- | --- | --- |
-| harbor-system | `meho harbor about` | `GET:/api/v2.0/systeminfo` | Version, auth mode, registry URL |
-| harbor-system | `meho harbor health` | `GET:/api/v2.0/health` | Composite health: DB / redis / registry / jobservice |
-| harbor-projects | `meho harbor project list` | `GET:/api/v2.0/projects` | Project inventory (public + private) |
-| harbor-projects | `meho harbor project info <name>` | `GET:/api/v2.0/projects/{project_name}` | Full project detail + quota |
-| harbor-repositories | `meho harbor repository list <project>` | `GET:/api/v2.0/projects/{project_name}/repositories` | Image repositories in a project |
-| harbor-repositories | `meho harbor repository info <project> <repo>` | `GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}` | Repository detail |
-| harbor-artifacts | `meho harbor artifact list <project> <repo>` | `GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts` | Artifacts (tags + digests + SBOM/sig status) |
-| harbor-artifacts | `meho harbor artifact info <project> <repo> <ref>` | `GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}/artifacts/{reference}` | Full artifact metadata |
-| harbor-robots | `meho harbor robot list` | `GET:/api/v2.0/robots` | System-level robots (no secret returned) |
+| harbor-system | `meho harbor about` | `harbor.about` | Version, auth mode, registry URL |
+| harbor-system | `meho harbor health` | `harbor.health` | Composite health: DB / redis / registry / jobservice |
+| harbor-projects | `meho harbor project list` | `harbor.project.list` | Project inventory (public + private) |
+| harbor-projects | `meho harbor project info <name>` | `harbor.project.info` | Full project detail + quota |
+| harbor-repositories | `meho harbor repository list <project>` | `harbor.repository.list` | Image repositories in a project |
+| harbor-repositories | `meho harbor repository info <project> <repo>` | `harbor.repository.info` | Repository detail |
+| harbor-artifacts | `meho harbor artifact list <project> <repo>` | `harbor.artifact.list` | Artifacts (tags + digests + SBOM/sig status) |
+| harbor-artifacts | `meho harbor artifact info <project> <repo> <ref>` | `harbor.artifact.info` | Full artifact metadata |
+| harbor-robots | `meho harbor robot list` | `harbor.robot.list` | System-level robots (no secret returned) |
 | harbor-robots | `meho harbor robot create …` | `harbor.robot.create` | Mint a project-scoped robot credential |
 | harbor-robots | `meho harbor robot delete …` | `harbor.robot.delete` | Delete a robot account |
 
@@ -65,7 +66,7 @@ but the broadcast event collapses to aggregate-only — the secret never
 appears in the SSE stream or in `audit_log.payload`. Store it immediately
 after `meho harbor robot create` returns; Harbor does not expose it again.
 
-`GET:/api/v2.0/robots` (list) never returns `secret` in any entry —
+`harbor.robot.list` (list) never returns `secret` in any entry —
 this is a Harbor API guarantee, not a MEHO filter.
 
 ## Prerequisites
@@ -84,9 +85,9 @@ this is a Harbor API guarantee, not a MEHO filter.
   `host` (the Harbor FQDN — no `https://`), `port` (default 443),
   `secret_ref` (the Vault path to the credentials), and
   `auth_model="shared_service_account"`.
-- **The 9 curated ingested ops registered + enabled.** Run
-  `apply_harbor_core_curation` once per Harbor target after the G0.7
-  spec ingest (see the curation step below).
+- **No ingest or curation step.** The read core + robot write ops are
+  code-shipped typed ops (#2856); they register at backplane startup and
+  dispatch on a fresh boot with zero catalog state.
 - **An operator session.** `meho login <backplane-url>` writes the
   session token the CLI reuses. `meho harbor …` requires `operator` role
   minimum.
@@ -134,62 +135,18 @@ vault kv put kv/harbor/prod-harbor \
   password="<service-account-password>"
 ```
 
-## Spec ingest (Swagger 2.0 → OpenAPI 3.x conversion)
+## No spec ingest or curation needed
 
-Harbor publishes its API spec at
-[`api/v2.0/swagger.yaml`](https://raw.githubusercontent.com/goharbor/harbor/v2.11.0/api/v2.0/swagger.yaml),
-which is a **Swagger 2.0** document (`swagger: "2.0"`). The G0.7 ingest
-parser is OpenAPI-3.x-only and **does not convert in-process**, so
-handing it the raw `swagger.yaml` is rejected with an actionable
-`UnsupportedSpecError`:
-
-```text
-Swagger 2.0 specs are not ingestible directly (document declares
-swagger='2.0'); convert it to OpenAPI 3.x first (e.g. the
-swagger2openapi CLI `npx swagger2openapi swagger.yaml -o openapi.yaml`,
-or the hosted converter at https://converter.swagger.io/), then ingest
-the converted 3.x document
-```
-
-Convert once, then ingest the 3.x output:
-
-```bash
-# Option A — swagger2openapi CLI (Node; the de-facto oas-kit converter)
-npx swagger2openapi swagger.yaml -o harbor-openapi3.yaml
-
-# Option B — the hosted converter (no local Node toolchain)
-curl -sS https://converter.swagger.io/api/convert \
-  -H 'Content-Type: application/yaml' \
-  --data-binary @swagger.yaml -o harbor-openapi3.json
-
-# Ingest the converted 3.x document via the explicit-quadruple shape
-meho connector ingest \
-  --product harbor --version 2.x --impl harbor-rest \
-  --spec ./harbor-openapi3.yaml
-```
-
-The conversion preserves every operation; the 3.x output ingests
-through the same path an OpenAPI-3.x vendor surface would. The catalog
-row for `harbor/2.x` flags this same SHARP EDGE (#1532).
-
-## Curation step (run once per Harbor target)
-
-The 9 read-only ops must be enabled via the operator-review substrate
-before they are dispatchable. Run once after the spec ingest above:
-
-```bash
-# From the backplane's Python environment:
-python -c "
-import asyncio
-from meho_backplane.connectors.harbor.core_ops import apply_harbor_core_curation
-from meho_backplane.operations.ingest.service import ReviewService
-# ReviewService takes a pg_session_factory; wire appropriately.
-asyncio.run(apply_harbor_core_curation(review_service, tenant_id=None))
-"
-```
-
-After the curation completes, the ops appear in `meho operation search`
-and every `meho harbor …` alias verb dispatches without error.
+The read core and the robot write ops are code-shipped **typed** ops
+(`source_kind='typed'`, #2856) — mirroring the NSX (#2302) and SDDC
+Manager (#2306) conversions under Task #2358. They register at backplane
+startup (`run_typed_op_registrars`) and dispatch on a fresh boot with
+**zero catalog state**. There is no Harbor OpenAPI spec ingest, no
+Swagger-2.0 → OpenAPI-3.x conversion, and no operator-review curation
+step to run: once the target is registered (above) and its credentials
+are in Vault, every `meho harbor …` verb works end to end. The ops are
+immediately visible in `meho operation search` (or
+`meho harbor operation search`).
 
 ## Quick-start
 
@@ -227,7 +184,7 @@ meho harbor artifact list library ubuntu --target prod-harbor --json | \
   jq '.result[] | {digest: .digest, tags: [.tags[].name]}'
 
 # Escape hatch: run any harbor-rest-2.x op by op_id
-meho harbor operation call GET:/api/v2.0/systeminfo --target prod-harbor
+meho harbor operation call harbor.about --target prod-harbor
 meho harbor operation search "robot accounts"
 ```
 
@@ -286,12 +243,12 @@ meho harbor robot list --target prod-harbor --json | \
 
 ### `meho harbor about`
 
-Dispatches `GET:/api/v2.0/systeminfo`. Human output: `harbor_version`,
+Dispatches `harbor.about`. Human output: `harbor_version`,
 `auth_mode`, `registry_url`, `external_url`.
 
 ```text
 $ meho harbor about --target prod-harbor
-harbor-rest-2.x GET:/api/v2.0/systeminfo — status=ok (38ms)
+harbor-rest-2.x harbor.about — status=ok (38ms)
   version:      v2.11.0
   auth_mode:    db_auth
   registry_url: harbor.rdc.evoila.io
@@ -300,31 +257,31 @@ harbor-rest-2.x GET:/api/v2.0/systeminfo — status=ok (38ms)
 
 ### `meho harbor health`
 
-Dispatches `GET:/api/v2.0/health`. Renders overall status plus
+Dispatches `harbor.health`. Renders overall status plus
 per-component rows: `core`, `database`, `jobservice`, `redis`,
 `registry`, `registryctl`.
 
 ### `meho harbor project list`
 
-Dispatches `GET:/api/v2.0/projects`. Renders `name`, `public` flag,
+Dispatches `harbor.project.list`. Renders `name`, `public` flag,
 `repo_count`, and `owner`. Large registries may have many projects;
 use `--json | jq` to filter.
 
 ### `meho harbor project info <project_name>`
 
-Dispatches `GET:/api/v2.0/projects/{project_name}`. Renders full
+Dispatches `harbor.project.info`. Renders full
 project detail including quota usage/limit (in bytes), `repo_count`,
 and metadata flags (`public`, `auto_scan`, etc.).
 
 ### `meho harbor repository list <project_name>`
 
-Dispatches `GET:/api/v2.0/projects/{project_name}/repositories`.
+Dispatches `harbor.repository.list`.
 Renders `name` (in `{project}/{repo}` form), `artifact_count`, and
 `pull_count`.
 
 ### `meho harbor repository info <project_name> <repository_name>`
 
-Dispatches `GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}`.
+Dispatches `harbor.repository.info`.
 The `repository_name` is the bare image name without the project prefix
 (e.g. `ubuntu`, not `library/ubuntu`).
 
@@ -341,7 +298,7 @@ all tags, and accessory types (SBOM, signature).
 
 ### `meho harbor robot list`
 
-Dispatches `GET:/api/v2.0/robots`. Renders `id`, `name`, `enabled`,
+Dispatches `harbor.robot.list`. Renders `id`, `name`, `enabled`,
 and `expires_at` (Unix timestamp; `-1` = never). **Never returns the
 robot secret** — Harbor's list endpoint does not include it.
 
@@ -374,8 +331,8 @@ Escape hatch to dispatch any `harbor-rest-2.x` op by `op_id` without
 a dedicated alias verb.
 
 ```bash
-meho harbor operation call GET:/api/v2.0/health --target prod-harbor
-meho harbor operation call GET:/api/v2.0/projects \
+meho harbor operation call harbor.health --target prod-harbor
+meho harbor operation call harbor.project.list \
   --target prod-harbor --json | jq '.result[].name'
 ```
 
@@ -388,27 +345,28 @@ operator-only ergonomics (CLAUDE.md postulate 5); agents do not use them.
 Example agent reasoning sequence:
 
 1. `search_operations(connector_id="harbor-rest-2.x", query="artifact SBOM")`
-   → returns `GET:.../artifacts` and `GET:.../artifacts/{reference}` hits.
-2. `call_operation(connector_id="harbor-rest-2.x", op_id="GET:.../artifacts", …)`
+   → returns `harbor.artifact.list` and `harbor.artifact.info` hits.
+2. `call_operation(connector_id="harbor-rest-2.x", op_id="harbor.artifact.list", …)`
    → returns the artifact list with `accessories[].type` entries.
 3. If `accessories[].type == "build.sbom"`, call
-   `GET:.../artifacts/{reference}` for the full SBOM accessor link.
+   `harbor.artifact.info` for the full SBOM accessor link.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `auth_expired` on any verb | Vault path wrong or credentials rotated | `vault kv get kv/harbor/<slug>` + re-run curation |
+| `auth_expired` on any verb | Vault path wrong or credentials rotated | `vault kv get kv/harbor/<slug>` + re-stage the secret |
 | `HTTP 401: unauthorized` from connector | Harbor admin password changed | Update Vault secret + restart backplane |
 | `HTTP 404: project not found` | Project name typo or project in different tenant | `meho harbor project list` to confirm name |
 | `HTTP 403: forbidden` on robot create | Service account lacks robot-management permission | Use Harbor admin or a system-level robot |
-| `op_id unknown_op` on dispatch | Curation not yet run or ops not ingested | Run `apply_harbor_core_curation` + ingest step |
+| `op_id unknown_op` on dispatch | Op id typo, or a backplane build predating #2856 | Check the op id table above; the typed read core registers at startup, so confirm the backplane ships it (no ingest/curation to run) |
 | Artifact list returns a JSONFlux handle | > JSONFlux threshold items (default 100) | Use `result_query` meta-tool to paginate the handle |
 
 ## Related resources
 
 - [`docs/codebase/connectors-harbor.md`](../codebase/connectors-harbor.md) — engineering reference
-- [`backend/src/meho_backplane/connectors/harbor/core_ops.py`](../../backend/src/meho_backplane/connectors/harbor/core_ops.py) — curated op metadata
+- [`backend/src/meho_backplane/connectors/harbor/typed_ops.py`](../../backend/src/meho_backplane/connectors/harbor/typed_ops.py) — typed read-op metadata + registrar
+- [`backend/src/meho_backplane/connectors/harbor/typed_reads.py`](../../backend/src/meho_backplane/connectors/harbor/typed_reads.py) — read-op bodies + llm_instructions
 - [`backend/src/meho_backplane/connectors/harbor/ops.py`](../../backend/src/meho_backplane/connectors/harbor/ops.py) — typed op registrar (robot create/delete)
 - [`cli/internal/cmd/harbor/`](../../cli/internal/cmd/harbor/) — CLI verb tree source
 - [Harbor 2.11 API reference](https://goharbor.io/docs/2.11.0/build-customize-contribute/configure-swagger/) — upstream REST spec

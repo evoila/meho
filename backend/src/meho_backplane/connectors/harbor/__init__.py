@@ -6,9 +6,9 @@
 Importing this package registers :class:`HarborConnector` against the
 v2 connector registry under
 ``(product="harbor", version="2.x", impl_id="harbor-rest")``, and
-queues the robot lifecycle typed-op upserts onto the lifespan-driven
-registrar list so ``endpoint_descriptor`` rows land before the first
-dispatch.
+queues the typed-op upserts (the 9-op read core + the two robot
+lifecycle writes) onto the lifespan-driven registrar list so
+``endpoint_descriptor`` rows land before the first dispatch.
 
 Registration is split between two phases (mirroring the Vault precedent
 in :mod:`meho_backplane.connectors.vault`):
@@ -18,9 +18,19 @@ in :mod:`meho_backplane.connectors.vault`):
 
 * **Asynchronous (lifespan startup)** —
   :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
-  invokes :func:`~meho_backplane.connectors.harbor.ops.register_harbor_robot_operations`,
-  which upserts the ``endpoint_descriptor`` rows for ``harbor.robot.create``
-  and ``harbor.robot.delete``.
+  invokes
+  :func:`~meho_backplane.connectors.harbor.typed_ops.register_harbor_typed_operations`
+  (the audited read core) and
+  :func:`~meho_backplane.connectors.harbor.ops.register_harbor_robot_operations`
+  (the robot create/delete writes), upserting the ``endpoint_descriptor``
+  rows for each.
+
+Both surfaces are **typed** (``source_kind="typed"``): they dispatch on
+a fresh boot with zero catalog ingest. The read core was converted from
+the retired ingested-curation apparatus (``harbor.core_ops``) under
+#2856, mirroring the NSX (#2302) and SDDC Manager (#2306) conversions —
+the same Task #2358 fix that closed Goal #2247's "per-deploy
+catalog-state failure class."
 
 The v1 :func:`~meho_backplane.connectors.registry.register_connector` entry
 point is deliberately **not** called. The connector advertises an explicit
@@ -29,35 +39,11 @@ point is deliberately **not** called. The connector advertises an explicit
 :func:`~meho_backplane.connectors.resolver.resolve_connector`'s tie-break
 ladder. Same pattern :mod:`meho_backplane.connectors.sddc_manager` and
 :mod:`meho_backplane.connectors.nsx` established.
-
-Once G0.7-T8 (#408) lands its
-:func:`ensure_connector_class_registered` auto-shim in main, the idempotency
-check there will no-op on the
-``(product="harbor", version="2.x", impl_id="harbor-rest")`` triple
-because this module has already registered the hand-rolled class. Until then,
-this module is the only registration path.
-
-Spec-ingested read ops (#620) arrive via G0.7 ingestion of the Harbor 2.x
-OpenAPI spec. The robot lifecycle ops (create/delete) ship here in #621 as
-hand-registered typed ops — the redaction contract (``credential_mint``
-classification) is load-bearing and must not depend on spec-derived
-``op_class`` heuristics.
 """
 
+from typing import Final
+
 from meho_backplane.connectors.harbor.connector import HarborConnector
-from meho_backplane.connectors.harbor.core_ops import (
-    HARBOR_CONNECTOR_ID,
-    HARBOR_CORE_GROUPS,
-    HARBOR_CORE_OPS,
-    HARBOR_IMPL_ID,
-    HARBOR_PATH_RULES,
-    HARBOR_PRODUCT,
-    HARBOR_VERSION,
-    HarborCoreGroup,
-    HarborCoreOp,
-    apply_harbor_core_curation,
-    classify_harbor_op,
-)
 from meho_backplane.connectors.harbor.ops import register_harbor_robot_operations
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
@@ -65,8 +51,26 @@ from meho_backplane.connectors.harbor.session import (
     SessionCredentials,
     load_credentials_from_vault,
 )
+from meho_backplane.connectors.harbor.typed_ops import (
+    HARBOR_TYPED_OPS,
+    HARBOR_TYPED_WHEN_TO_USE_BY_GROUP,
+    HarborTypedOp,
+    register_harbor_typed_operations,
+)
 from meho_backplane.connectors.registry import register_connector_v2
 from meho_backplane.operations.typed_register import register_typed_op_registrar
+
+#: Endpoint-descriptor product key — what
+#: :func:`~meho_backplane.operations._lookup.parse_connector_id` extracts
+#: from ``"harbor-rest-2.x"`` (first hyphen-segment of impl_id
+#: ``"harbor-rest"``). Matches :attr:`HarborConnector.product` directly.
+HARBOR_PRODUCT: Final[str] = "harbor"
+HARBOR_VERSION: Final[str] = "2.x"
+HARBOR_IMPL_ID: Final[str] = "harbor-rest"
+
+#: Connector-id slug the G0.6 dispatcher's ``parse_connector_id``
+#: round-trips back to the triple above: ``"harbor-rest-2.x"``.
+HARBOR_CONNECTOR_ID: Final[str] = f"{HARBOR_IMPL_ID}-{HARBOR_VERSION}"
 
 register_connector_v2(
     product="harbor",
@@ -88,28 +92,27 @@ register_connector_v2(
     cls=HarborConnector,
 )
 
-# Queue the robot lifecycle typed-op upsert onto the lifespan-driven
-# registrar list. harbor.robot.create is classified credential_mint —
-# the broadcast collapses to aggregate-only so the minted secret never
-# appears in the SSE feed.
+# Queue the typed-op upserts onto the lifespan-driven registrar list.
+# The read core (harbor.about … harbor.robot.list) and the two robot
+# writes (harbor.robot.create is credential_mint — the broadcast
+# collapses to aggregate-only so the minted secret never appears in the
+# SSE feed) all register as source_kind="typed".
+register_typed_op_registrar(register_harbor_typed_operations)
 register_typed_op_registrar(register_harbor_robot_operations)
 
 __all__ = [
     "HARBOR_CONNECTOR_ID",
-    "HARBOR_CORE_GROUPS",
-    "HARBOR_CORE_OPS",
     "HARBOR_IMPL_ID",
-    "HARBOR_PATH_RULES",
     "HARBOR_PRODUCT",
+    "HARBOR_TYPED_OPS",
+    "HARBOR_TYPED_WHEN_TO_USE_BY_GROUP",
     "HARBOR_VERSION",
     "HarborConnector",
-    "HarborCoreGroup",
-    "HarborCoreOp",
     "HarborCredentialsLoader",
     "HarborTargetLike",
+    "HarborTypedOp",
     "SessionCredentials",
-    "apply_harbor_core_curation",
-    "classify_harbor_op",
     "load_credentials_from_vault",
     "register_harbor_robot_operations",
+    "register_harbor_typed_operations",
 ]

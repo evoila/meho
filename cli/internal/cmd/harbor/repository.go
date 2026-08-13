@@ -34,7 +34,7 @@ func newRepositoryListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "list <project_name>",
 		Short: "List repositories within a Harbor project",
-		Long: "list dispatches GET:/api/v2.0/projects/{project_name}/repositories\n" +
+		Long: "list dispatches harbor.repository.list\n" +
 			"against connector_id=\"harbor-rest-2.x\" and renders a table of\n" +
 			"repository names, artifact counts, and pull counts.\n" +
 			"--json emits the full OperationResult envelope.",
@@ -59,7 +59,7 @@ func runRepositoryList(cmd *cobra.Command, projectName, targetName string, jsonO
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	opID := "GET:/api/v2.0/projects/{project_name}/repositories"
+	opID := "harbor.repository.list"
 	params := map[string]any{"project_name": projectName}
 	r, err := conn.Call(cmd.Context(), backplaneURL, opID, targetName, params)
 	if err != nil {
@@ -69,7 +69,7 @@ func runRepositoryList(cmd *cobra.Command, projectName, targetName string, jsonO
 }
 
 func printRepositoryList(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:.../repositories — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
+	fmt.Fprintf(w, "%s harbor.repository.list — status=%s (%.0fms)\n", ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)
 		return
@@ -107,7 +107,7 @@ func newRepositoryInfoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info <project_name> <repository_name>",
 		Short: "Show full details for a Harbor repository",
-		Long: "info dispatches GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}\n" +
+		Long: "info dispatches harbor.repository.info\n" +
 			"against connector_id=\"harbor-rest-2.x\" and renders repository\n" +
 			"detail including pull count, artifact count, and timestamps.\n" +
 			"--json emits the full OperationResult envelope.",
@@ -132,7 +132,7 @@ func runRepositoryInfo(cmd *cobra.Command, projectName, repoName, targetName str
 	if err != nil {
 		return output.RenderError(cmd.ErrOrStderr(), backplane.ClassifyError(err), jsonOut)
 	}
-	opID := "GET:/api/v2.0/projects/{project_name}/repositories/{repository_name}"
+	opID := "harbor.repository.info"
 	params := map[string]any{
 		"project_name":    projectName,
 		"repository_name": repoName,
@@ -145,7 +145,7 @@ func runRepositoryInfo(cmd *cobra.Command, projectName, repoName, targetName str
 }
 
 func printRepositoryInfo(w io.Writer, r *CallResult) {
-	fmt.Fprintf(w, "%s GET:.../repositories/{name} — status=%s (%.0fms)\n",
+	fmt.Fprintf(w, "%s harbor.repository.info — status=%s (%.0fms)\n",
 		ConnectorID, r.Status, r.DurationMs)
 	if r.Status != "ok" {
 		printErrorTrailer(w, r)

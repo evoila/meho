@@ -1669,7 +1669,8 @@ async def test_token_list_and_revoke_accessor_against_dev_vault(
     vault_e2e: tuple[_VaultTarget, str],
     captured_events: list[BroadcastEvent],
 ) -> None:
-    """list_accessors enumerates accessors; revoke_accessor surgically revokes one."""
+    """list_accessors enumerates accessors; lookup_accessor reads one token's
+    metadata; revoke_accessor surgically revokes one."""
     target, addr = vault_e2e
     minted = await dispatch(
         operator=_make_operator(sub="op-token-for-revoke"),
@@ -1691,6 +1692,22 @@ async def test_token_list_and_revoke_accessor_against_dev_vault(
     )
     assert listing.status == "ok", listing.error
     assert accessor in listing.result["keys"]
+
+    looked_up = await dispatch(
+        operator=_make_operator(sub="op-token-lookup"),
+        connector_id="vault-1.x",
+        op_id="vault.token.lookup_accessor",
+        target=target,
+        params={"accessor": accessor},
+    )
+    assert looked_up.status == "ok", looked_up.error
+    # The audit fields the op exists to surface, against a real Vault.
+    assert "default" in looked_up.result["policies"]
+    assert looked_up.result["ttl"] > 0
+    for field_name in ("expire_time", "display_name", "creation_time", "renewable"):
+        assert field_name in looked_up.result, f"missing {field_name}"
+    # lookup-accessor never returns the raw token id (Vault blanks it).
+    assert not looked_up.result.get("id")
 
     revoke = await dispatch(
         operator=_make_operator(sub="op-token-revoke"),

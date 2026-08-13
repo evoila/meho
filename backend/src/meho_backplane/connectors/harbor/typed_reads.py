@@ -463,9 +463,9 @@ _ARTIFACT_LIST_INSTRUCTIONS: dict[str, object] = {
     ),
     "output_shape": (
         "Array of Artifact objects; each carries digest (sha256:…), "
-        "tags[] (name + push_time), size, push_time, media_type, "
-        "accessories[] (SBOM, signature, cosign entries), and "
-        "addition_links (for detailed scan reports)."
+        "tags[] (name + push_time), size, push_time, media_type, and "
+        "accessories[] (SBOM, signature, cosign entries). Per-artifact "
+        "CVE detail is available via harbor.artifact.vulnerabilities."
     ),
     "next_step": (
         "Pick a tag or digest as the reference for harbor.artifact.info "
@@ -480,20 +480,25 @@ _ARTIFACT_INFO_INSTRUCTIONS: dict[str, object] = {
         "Call to read the full metadata of one Harbor artifact by "
         "project_name, repository_name, and reference (a tag name "
         "or digest 'sha256:…'). Returns all tags, labels, "
-        "vulnerability summary, SBOM accessors, signature status, "
-        "and addition_links for detailed scan reports. Use when "
+        "vulnerability summary (severity counts), SBOM accessors, and "
+        "signature status. For the per-CVE vulnerability list (id, "
+        "severity, package, fixed-in version) behind the scan, call "
+        "harbor.artifact.vulnerabilities. Use when "
         "answering 'what vulnerabilities does image X:tag have', "
         "'is this artifact signed', or 'what SBOM is attached'."
     ),
     "output_shape": (
         "Artifact object with digest, tags[], size, push_time, "
         "media_type, labels[], accessories[] (SBOM + signature entries), "
-        "scan_overview (vulnerability counts by severity), and "
-        "addition_links mapping to detailed report endpoints."
+        "and scan_overview (vulnerability counts by severity). The "
+        "per-CVE detail behind those counts lives in "
+        "harbor.artifact.vulnerabilities."
     ),
     "next_step": (
-        "Surface scan_overview severity counts to the operator; "
-        "for a signed artifact, confirm the signature in accessories[] "
+        "Surface scan_overview severity counts to the operator, then "
+        "call harbor.artifact.vulnerabilities for the per-CVE list when "
+        "a named-CVE or fixed-in-version answer is needed. For a signed "
+        "artifact, confirm the signature in accessories[] "
         "where type == 'notation.signature' or 'cosign.signature'. "
         "Cross-reference the digest with harbor.robot.list if "
         "investigating which robot pushed the artifact."

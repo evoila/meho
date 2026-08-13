@@ -332,7 +332,12 @@ _WRITE_OPS: Final[frozenset[str]] = frozenset(
 #: the full-detail ``other`` class. ``.versions`` is the KV-v2
 #: version-metadata browse (``vault.kv.versions`` — G3.3-T1 #545): a
 #: read of metadata only (no secret values), so it likewise classifies
-#: ``read`` rather than ``credential_read``.
+#: ``read`` rather than ``credential_read``. ``.vulnerabilities`` is the
+#: Harbor per-artifact CVE-list read (``harbor.artifact.vulnerabilities`` --
+#: #2857): a non-mutating supply-chain read whose noun suffix (like
+#: ``.health`` / ``.versions``) would otherwise fall through to the
+#: full-detail ``other`` class rather than broadcast at the same ``read``
+#: sensitivity as its ``harbor.artifact.info`` sibling.
 _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".list",
     ".info",
@@ -342,6 +347,7 @@ _READ_SUFFIXES: Final[tuple[str, ...]] = (
     ".health",
     ".seal_status",
     ".versions",
+    ".vulnerabilities",
 )
 
 #: Underscore-spelled mirrors of the dotted verb suffixes, applied only to

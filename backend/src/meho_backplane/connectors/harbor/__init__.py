@@ -6,9 +6,10 @@
 Importing this package registers :class:`HarborConnector` against the
 v2 connector registry under
 ``(product="harbor", version="2.x", impl_id="harbor-rest")``, and
-queues the typed-op upserts (the 9-op read core + the two robot
-lifecycle writes) onto the lifespan-driven registrar list so
-``endpoint_descriptor`` rows land before the first dispatch.
+queues the typed-op upserts (the 9-op read core, the two robot
+lifecycle writes, and the standalone artifact CVE-detail read) onto the
+lifespan-driven registrar list so ``endpoint_descriptor`` rows land
+before the first dispatch.
 
 Registration is split between two phases (mirroring the Vault precedent
 in :mod:`meho_backplane.connectors.vault`):
@@ -20,10 +21,12 @@ in :mod:`meho_backplane.connectors.vault`):
   :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
   invokes
   :func:`~meho_backplane.connectors.harbor.typed_ops.register_harbor_typed_operations`
-  (the audited read core) and
+  (the audited read core),
   :func:`~meho_backplane.connectors.harbor.ops.register_harbor_robot_operations`
-  (the robot create/delete writes), upserting the ``endpoint_descriptor``
-  rows for each.
+  (the robot create/delete writes), and
+  :func:`~meho_backplane.connectors.harbor.ops.register_harbor_artifact_operations`
+  (the standalone ``harbor.artifact.vulnerabilities`` CVE-detail read,
+  #2857), upserting the ``endpoint_descriptor`` rows for each.
 
 Both surfaces are **typed** (``source_kind="typed"``): they dispatch on
 a fresh boot with zero catalog ingest. The read core was converted from
@@ -44,7 +47,10 @@ ladder. Same pattern :mod:`meho_backplane.connectors.sddc_manager` and
 from typing import Final
 
 from meho_backplane.connectors.harbor.connector import HarborConnector
-from meho_backplane.connectors.harbor.ops import register_harbor_robot_operations
+from meho_backplane.connectors.harbor.ops import (
+    register_harbor_artifact_operations,
+    register_harbor_robot_operations,
+)
 from meho_backplane.connectors.harbor.session import (
     HarborCredentialsLoader,
     HarborTargetLike,
@@ -100,6 +106,12 @@ register_connector_v2(
 register_typed_op_registrar(register_harbor_typed_operations)
 register_typed_op_registrar(register_harbor_robot_operations)
 
+# Queue the standalone artifact CVE-detail read (harbor.artifact.vulnerabilities,
+# #2857). A typed read that dispatches with zero catalog ingest — the same shape
+# as the robot ops above — so the per-CVE surface behind harbor.artifact.info's
+# scan_overview is reachable independent of the read-core ingest state.
+register_typed_op_registrar(register_harbor_artifact_operations)
+
 __all__ = [
     "HARBOR_CONNECTOR_ID",
     "HARBOR_IMPL_ID",
@@ -113,6 +125,7 @@ __all__ = [
     "HarborTypedOp",
     "SessionCredentials",
     "load_credentials_from_vault",
+    "register_harbor_artifact_operations",
     "register_harbor_robot_operations",
     "register_harbor_typed_operations",
 ]

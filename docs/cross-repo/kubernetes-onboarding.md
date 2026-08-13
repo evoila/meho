@@ -314,7 +314,7 @@ $ meho k8s ingress list --target rke2-meho --namespace argocd
 
 | Verb | op_id | Result |
 | --- | --- | --- |
-| `service list` | `k8s.service.list` | `{rows: [{name, namespace, type, cluster_ip, external_ips, ports, selector}], total}` |
+| `service list` | `k8s.service.list` | `{rows: [{name, namespace, type, cluster_ip, external_ips, ports, selector, lb_ingress}], total}` |
 | `ingress list` | `k8s.ingress.list` | `{rows: [{name, namespace, class, hosts, tls_hosts, rules: [{host, paths: [{path, path_type, service, port}]}]}], total}` |
 
 ### Config — `meho k8s configmap …`

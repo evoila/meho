@@ -139,7 +139,7 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
     "network": (
         "Use for service-routing and ingress questions: "
         "``k8s.service.list`` (ClusterIP / NodePort / LoadBalancer "
-        "with endpoint counts) and ``k8s.ingress.list`` (hostname + "
+        "with its assigned VIP) and ``k8s.ingress.list`` (hostname + "
         "path -> backend mappings). The right group for 'how is this "
         "workload exposed?' or 'which hostname routes to which "
         "service?'. Pair with the 'workload' group to map back to "

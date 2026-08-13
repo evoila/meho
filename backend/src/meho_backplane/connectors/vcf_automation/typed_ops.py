@@ -16,7 +16,8 @@ This module converts the **audited read set** (evoila/meho#2294 row 22:
 "org/region list + provider health"; the VCFA follow-up: "org/region
 list, /iaas/api/projects + about") to ``source_kind="typed"`` operations
 that dispatch through the connector's own dual-plane session — no
-``endpoint_descriptor`` catalog state required. Five ops:
+``endpoint_descriptor`` catalog state required. Six ops — the five
+#2294 audited reads plus the #2839 tenant deployment list:
 
 Provider plane (``/cloudapi/1.0.0/*`` — Basic-auth →
 ``X-VMWARE-VCLOUD-ACCESS-TOKEN`` JWT session):
@@ -32,6 +33,7 @@ Tenant plane (``/iaas/api/*`` — JSON-body login → ``{"token": …}``
 session):
 
 * ``vcfa.tenant.project.list`` — ``GET /iaas/api/projects``
+* ``vcfa.tenant.deployment.list`` — ``GET /iaas/api/deployments``
 * ``vcfa.tenant.about`` — ``GET /iaas/api/about``
 
 Every op declares the **plane it rides** (``provider`` / ``tenant``).
@@ -74,6 +76,7 @@ __all__ = [
     "PROVIDER_REGIONS_PATH",
     "PROVIDER_SITE_PATH",
     "TENANT_ABOUT_PATH",
+    "TENANT_DEPLOYMENTS_PATH",
     "TENANT_PROJECTS_PATH",
     "VCFA_TYPED_OPS",
     "VCFA_TYPED_WHEN_TO_USE_BY_GROUP",
@@ -88,6 +91,7 @@ PROVIDER_ORGS_PATH: Final[str] = "/cloudapi/1.0.0/orgs"
 PROVIDER_REGIONS_PATH: Final[str] = "/cloudapi/1.0.0/regions"
 PROVIDER_SITE_PATH: Final[str] = "/cloudapi/1.0.0/site"
 TENANT_PROJECTS_PATH: Final[str] = "/iaas/api/projects"
+TENANT_DEPLOYMENTS_PATH: Final[str] = "/iaas/api/deployments"
 TENANT_ABOUT_PATH: Final[str] = "/iaas/api/about"
 
 
@@ -153,7 +157,10 @@ VCFA_TYPED_WHEN_TO_USE_BY_GROUP: Final[dict[str, str]] = {
     "vcfa-tenant-reads": (
         "Use on the VCFA **tenant plane** to read within one tenant "
         "organization: list projects, the deployment-scoping construct "
-        "every deployment belongs to (vcfa.tenant.project.list), or read "
+        "every deployment belongs to (vcfa.tenant.project.list), list "
+        "deployments — which exist, which failed, which are stuck "
+        "in-progress, narrowable with a status $filter "
+        "(vcfa.tenant.deployment.list), or read "
         "the IaaS API self-describe surface — supported API versions + "
         "latest version — as a tenant-plane reachability/version probe "
         "(vcfa.tenant.about). Tenant-plane ops authenticate with the "
@@ -414,6 +421,86 @@ _TENANT_PROJECT_LIST = VcfaTypedOp(
     },
 )
 
+_TENANT_DEPLOYMENT_LIST = VcfaTypedOp(
+    op_id="vcfa.tenant.deployment.list",
+    handler_attr="tenant_deployment_list",
+    plane="tenant",
+    path=TENANT_DEPLOYMENTS_PATH,
+    summary="List deployments within the tenant organization (tenant plane).",
+    description=(
+        "Lists deployments within the tenant organization via "
+        "GET /iaas/api/deployments on the tenant plane — the tenant-plane "
+        "inventory answer to 'which deployments exist, which failed, which "
+        "are stuck in-progress'; typically the first read when a tenant "
+        "reports 'my deployment didn't come up'. Supports OData-style "
+        "$filter / $orderby / $top / $skip query params; narrow to failures "
+        "with a status filter (e.g. \"status eq 'CREATE_FAILED'\"). Returns a "
+        "'content' array; each entry carries id, name, description, status, "
+        "projectId, blueprintId, ownedBy, createdAt, lastUpdatedAt, and "
+        "resources[], plus totalElements / totalPages page metadata. "
+        "safety_level=safe, read-only."
+    ),
+    parameter_schema={
+        "type": "object",
+        "properties": {
+            "$filter": {
+                "type": "string",
+                "minLength": 1,
+                "description": (
+                    "Optional OData filter expression (e.g. \"status eq 'CREATE_FAILED'\")."
+                ),
+            },
+            "$orderby": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional OData order-by expression.",
+            },
+            "$top": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Optional page size (OData $top).",
+            },
+            "$skip": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional offset (OData $skip).",
+            },
+        },
+        "additionalProperties": False,
+    },
+    response_schema={
+        "type": "object",
+        "properties": {
+            "content": {"type": ["array", "null"]},
+            "totalElements": {"type": ["integer", "null"]},
+            "totalPages": {"type": ["integer", "null"]},
+        },
+        "additionalProperties": True,
+    },
+    group_key="vcfa-tenant-reads",
+    tags=("read-only", "vcfa", "tenant"),
+    safety_level="safe",
+    requires_approval=False,
+    llm_instructions={
+        "when_to_call": (
+            "Call on the tenant plane to list deployments in the tenant org — "
+            "the first read when a tenant asks 'which deployments exist' or "
+            "reports 'my deployment didn't come up'. Narrow with a status "
+            "$filter (e.g. \"status eq 'CREATE_FAILED'\") to isolate failed or "
+            "in-progress deployments."
+        ),
+        "output_shape": (
+            "{content: [Deployment, ...], totalElements, totalPages}. Each "
+            "Deployment carries id, name, status, projectId, blueprintId, "
+            "ownedBy, createdAt, lastUpdatedAt, resources[]."
+        ),
+        "next_step": (
+            "Cross-reference projectId against vcfa.tenant.project.list, or "
+            "inspect a failed deployment's status to triage the failure."
+        ),
+    },
+)
+
 _TENANT_ABOUT = VcfaTypedOp(
     op_id="vcfa.tenant.about",
     handler_attr="tenant_about",
@@ -460,15 +547,17 @@ _TENANT_ABOUT = VcfaTypedOp(
 )
 
 
-#: The five typed VCFA read ops the connector registers at lifespan
-#: startup — the audited read set (#2294). Ordered provider → tenant,
-#: probe last within each plane, to match the operator's typical drill
-#: path (inventory first, health as needed).
+#: The six typed VCFA read ops the connector registers at lifespan
+#: startup — the #2294 audited read set plus the #2839 tenant deployment
+#: list. Ordered provider → tenant, probe last within each plane, to
+#: match the operator's typical drill path (inventory first, health as
+#: needed).
 VCFA_TYPED_OPS: Final[tuple[VcfaTypedOp, ...]] = (
     _PROVIDER_ORG_LIST,
     _PROVIDER_REGION_LIST,
     _PROVIDER_HEALTH,
     _TENANT_PROJECT_LIST,
+    _TENANT_DEPLOYMENT_LIST,
     _TENANT_ABOUT,
 )
 

@@ -13,15 +13,17 @@ G3.6-T11 (#836) added the dual-plane spec ingestion + operator-review
 curation. G3.6-T12 (#840) shipped the recorded-fixture E2E. The operator
 runbook lives at `docs/cross-repo/g36-vcfa-canary.md`.
 
-**Typed reads (T5 #2305).** VCFA ships **no vendor OpenAPI spec** (the
-provider plane publishes none; the tenant plane ships only Swagger 2.0
-fragments the ingest parser rejects by decision #2090), so the curated
-`core_ops` ingested-curation path is dispatch-inert on a real deploy —
-there is nothing to ingest. The **audited read set** (evoila/meho#2294:
-org/region list, provider health, `/iaas/api/projects` + tenant `about`)
-is therefore served by `source_kind="typed"` ops (`typed_ops.py`) that
-dispatch through the connector's own dual-plane session with **zero
-catalog state**. Five ops:
+**Typed reads (T5 #2305; deployment list #2839).** VCFA ships **no
+vendor OpenAPI spec** (the provider plane publishes none; the tenant
+plane ships only Swagger 2.0 fragments the ingest parser rejects by
+decision #2090), so there is nothing to ingest — the hand-curated
+`core_ops` ingested-enable apparatus that once wrapped this gap was
+dispatch-inert on a real deploy and was **retired in #2362**. The
+**audited read set** (evoila/meho#2294: org/region list, provider
+health, `/iaas/api/projects` + tenant `about`), plus the tenant
+**deployment list** (#2839), is served by `source_kind="typed"` ops
+(`typed_ops.py`) that dispatch through the connector's own dual-plane
+session with **zero catalog state**. Six ops:
 
 | op_id | plane | path |
 |---|---|---|
@@ -29,6 +31,7 @@ catalog state**. Five ops:
 | `vcfa.provider.region.list` | provider | `GET /cloudapi/1.0.0/regions` |
 | `vcfa.provider.health` | provider | `GET /cloudapi/1.0.0/site` |
 | `vcfa.tenant.project.list` | tenant | `GET /iaas/api/projects` |
+| `vcfa.tenant.deployment.list` | tenant | `GET /iaas/api/deployments` |
 | `vcfa.tenant.about` | tenant | `GET /iaas/api/about` |
 
 Each op **declares the plane it rides**; `typed_ops._validate_typed_op_planes`
@@ -37,15 +40,19 @@ asserts at import time that the declared `plane` matches
 surfacing as a misrouted HTTP 401. The `org create` write
 (`POST /cloudapi/1.0.0/orgs`) is deliberately out of scope — a first
 write on a read-only connector belongs in a G3.x-mold approval-gated
-write-surface initiative. The remaining `core_ops` /`_core_data`
-ingested-curation surface is now the 5-group / 6-op browse remainder
-(the two get-by-id ops, provider users list, tenant deployment/blueprint
-browse) — declined from typed conversion because they are not in the
-operator-run audited set.
+write-surface initiative. Per-id deployment detail
+(`vcfa.tenant.deployment.get`), blueprint listing, and the provider
+users list remain unconverted — a natural fast-follow, not part of the
+"which deployments exist / which failed" answer this surface delivers.
+The hand-curated ingested-enable apparatus (`core_ops.py` / `_core_data`)
+those once lived under was retired in #2362; the wider ingested catalog
+would stay browsable through the generic `ReviewService.enable_reads`
+flow only where a convertible OpenAPI 3.x spec exists — which, for VCFA,
+it does not.
 
 `register_typed_operations` (a classmethod on the connector, queued onto
 the lifespan registrar list via `register_vcfa_typed_operations` in
-`__init__.py`) upserts the five descriptors on startup — the same
+`__init__.py`) upserts the six descriptors on startup — the same
 argocd / bind9 / Kubernetes typed-registrar shape.
 
 Source: `backend/src/meho_backplane/connectors/vcf_automation/`.
@@ -93,42 +100,20 @@ domains.
   lands. Mirrors `load_credentials_from_vault` in `connectors/sddc_manager/`
   and `load_session_credentials_from_vault` in `connectors/nsx/` /
   `connectors/vmware_rest/`.
-- **`VcfaCoreGroup` / `VcfaCoreOp`** (`core_ops.py`) — frozen dataclasses
-  carrying the operator-review metadata for one curated group / op. Each
-  entry includes a `plane` field (`"provider"` or `"tenant"`) that is
-  asserted at module import time to match
-  `_routing.plane_for_path(path)` — a path-vs-plane drift fails import
-  rather than surfacing as a misrouted 401 in production.
 - **`VCFA_TYPED_OPS` / `VcfaTypedOp` / `VCFA_TYPED_WHEN_TO_USE_BY_GROUP`**
-  (`typed_ops.py`) — the five typed read ops (T5 #2305) and their two
-  per-plane groups (`vcfa-provider-reads`, `vcfa-tenant-reads`). Each
-  `VcfaTypedOp` carries a `plane` + `path`; the module's
-  `_validate_typed_op_planes()` cross-checks them at import.
-- **`VCFA_CORE_GROUPS` / `VCFA_CORE_OPS`** (`core_ops.py`) — the
-  ingested-curation browse remainder: 5 curated groups (3 provider + 2
-  tenant) and 6 curated ops (3 provider + 3 tenant) left after the
-  audited read set moved to `typed_ops.py`. Every group's `when_to_use`
-  names its plane explicitly so the agent's `list_operation_groups`
-  step routes correctly across the dual-plane surface.
+  (`typed_ops.py`) — the six typed read ops (T5 #2305; tenant deployment
+  list #2839) and their two per-plane groups (`vcfa-provider-reads`,
+  `vcfa-tenant-reads`). Each `VcfaTypedOp` carries a `plane` + `path`;
+  the module's `_validate_typed_op_planes()` cross-checks them at import
+  so a declared-plane / path drift fails the import rather than
+  surfacing as a misrouted 401.
 - **`VCFA_PRODUCT` / `VCFA_VERSION` / `VCFA_IMPL_ID` /
-  `VCFA_CONNECTOR_ID`** (`core_ops.py`) — DB-side keys. Since #1814 the
+  `VCFA_CONNECTOR_ID`** (`__init__.py`) — DB-side keys. Since #1814 the
   registry key `VcfAutomationConnector.product` was unified to `"vcfa"`,
   matching `VCFA_PRODUCT` (what `parse_connector_id("vcfa-rest-9.0")`
   extracts). All `endpoint_descriptor` and `operation_group` rows carry
-  `product="vcfa"`.
-- **`apply_vcfa_core_curation`** (`core_ops.py`) — async helper
-  driving `ReviewService.edit_group` + `enable_group` +
-  `edit_op(is_enabled=False)` (for non-core ops in curated groups)
-  + `edit_op(llm_instructions=…)` (for the 6 core ops) so exactly
-  the curated set is dispatchable after the call returns. Mirrors
-  `apply_nsx_core_curation` / `apply_harbor_core_curation`
-  verbatim; the audit-log-driven operator-override exclusion is the
-  mechanism that threads "enable only ops X, Y, Z under group G"
-  through `ReviewService.enable_group`'s cascade.
-- **`classify_vcfa_op` / `VCFA_PATH_RULES`** (`core_ops.py`) —
-  path-prefix classifier. Tenant rules (`/iaas/api/*`) are listed
-  first defensively; the two planes never share a path family so
-  ordering is not load-bearing today.
+  `product="vcfa"`. Relocated here from the retired `core_ops` /
+  `_core_data` curation modules (#2358).
 
 ## Control flow
 
@@ -287,38 +272,20 @@ VCFA's session has an idle timeout, and a per-target network call during
 lifespan shutdown is more risk than benefit) and delegates to
 `HttpConnector.aclose()` which closes every per-target httpx client.
 
-### Operator-review curation (G3.6-T11 #836)
+### Operator-review curation (retired #2362)
 
-`apply_vcfa_core_curation(review_service, *, tenant_id)` is the
-post-ingest helper that drives the substrate so exactly the 6 curated
-ops in `VCFA_CORE_OPS` end `is_enabled=True` and the 5 curated groups
-in `VCFA_CORE_GROUPS` end `review_status='enabled'`. (This path applies
-only to the ingested-curation browse remainder; the audited read set is
-served typed and needs no curation.) The control flow mirrors
-`apply_nsx_core_curation`:
-
-1. `ReviewService.get_review_payload("vcfa-rest-9.0", tenant_id)` loads
-   the post-ingest state.
-2. For each non-core op in a curated group, `ReviewService.edit_op(...,
-   is_enabled=False)` writes an operator-override audit row so the
-   follow-on `enable_group` cascade skips it.
-3. `ReviewService.edit_group` lands the curated `name` +
-   plane-named `when_to_use`; `ReviewService.enable_group` flips
-   `review_status='enabled'` and cascades `is_enabled=True` only to
-   the 6 core ops.
-4. `ReviewService.edit_op(..., llm_instructions=…)` lands the per-op
-   guidance blob on each of the 6 curated ops.
-
-The helper is safe to re-run (end-state idempotent) but emits redundant
-audit rows on re-runs — the intended posture is one-shot per ingest.
-The ingestion + operator-review wiring expects both VCFA specs
-(`vcf-automation-9.0/cloudapi.yaml` + `vcf-automation-9.0/iaas.yaml`)
-to be ingested under the same `(product, version, impl_id) = ("vcfa",
-"9.0", "vcfa-rest")` triple **before** the helper runs — the same
-multi-spec-merge contract `register_ingested_operations` implements
-for vSphere's `vcenter.yaml` + `vi-json.yaml`. Each row carries a
-`spec:cloudapi` or `spec:iaas` tag so operators can filter the review
-payload per plane.
+The hand-curated ingested-enable apparatus G3.6-T11 (#836) once
+added — `apply_vcfa_core_curation`, `VCFA_CORE_OPS` /
+`VCFA_CORE_GROUPS`, `classify_vcfa_op` / `VCFA_PATH_RULES` — was
+**retired in #2362** (T7 of #2358), along with the equivalent modules
+in five sibling connectors. It had zero production call sites
+(`apply_vcfa_core_curation` was invoked only by tests; real deploys
+enable ingested ops through the generic review flow), and for VCFA it
+was dispatch-inert regardless: the product ships no ingestible OpenAPI
+3.x spec (see the **Typed reads** note above), so there was never a
+catalog row to curate. The working read surface is the typed ops in
+`typed_ops.py`; `ReviewService.enable_reads` remains the generic path
+for ingested breadth on connectors that *do* publish a convertible spec.
 
 ## Dependencies
 
@@ -351,9 +318,9 @@ payload per plane.
   `nsx` / `sddc_manager` precedents.
 - The classic vCD `/api/versions` response is XML; the connector reads
   status only and does not parse "latest non-deprecated version" out of it.
-  Operators who need that string call the wrapper directly; the curated
-  ingest in #836 will route through the structured `/cloudapi/*` and
-  `/iaas/api/*` paths instead.
+  Operators who need that string call the wrapper directly; the typed
+  `vcfa.provider.health` / `vcfa.tenant.about` probes read the structured
+  `/cloudapi/*` and `/iaas/api/*` version surfaces instead.
 - The VCFA tenant/consumption plane's only *vendor-published*
   machine-readable surface is the 8 **Swagger 2.0** fragments vendored
   under [`vmware/vra-sdk-go`
@@ -367,11 +334,10 @@ payload per plane.
   ["Product ships only Swagger
   2.0"](../cross-repo/connector-ingestion.md#product-ships-only-swagger-20)
   runbook section, which uses VCFA as the worked example). This is
-  **orthogonal to the curated 11-op read core**: `VCFA_CORE_OPS` is
-  sourced from the OpenAPI-3.x `vcf-automation-9.0/cloudapi.yaml` +
-  `iaas.yaml` documents, so lighting up the core never touches the
-  vra-sdk-go 2.0 fragments — converting them only *widens* the surface
-  beyond the curated core.
+  **orthogonal to the typed read surface**: the working reads in
+  `typed_ops.py` dispatch with zero catalog state, so they never touch
+  the vra-sdk-go 2.0 fragments — converting those would only *widen* the
+  ingested browse breadth, not change the typed reads.
 - `--resolve`-style DNS override (consumer-wrapper-only) has no direct
   httpx equivalent in the connector — operators are expected to make the
   appliance's FQDN resolvable on the meho-backplane host (typical: split-DNS
@@ -404,8 +370,8 @@ payload per plane.
 - Precedent: `connectors/nsx/connector.py` (session-cookie + XSRF +
   401-retry-once); `connectors/sddc_manager/connector.py` (per-target
   credential cache, dispatch-shim shape); `connectors/vmware_rest/`
-  (dual-spec ingestion shape — same `spec_source` tagging that #836 will
-  apply to the provider + tenant plane specs);
+  (dual-spec ingestion shape — the `spec_source` tagging precedent for a
+  connector that ingests two specs under one triple);
   `connectors/adapters/http.py` (`HttpConnector`);
   `connectors/registry.py:108` (`register_connector_v2`).
 - VCFA API references:

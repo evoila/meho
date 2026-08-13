@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""End-to-end activation tests for the 8 vmware-rest write composites.
+"""End-to-end activation tests for the 12 vmware-rest write composites.
 
 Post-#2256 the write composites dispatch every raw-REST sub-op **directly
 on the connector session** (``connector._get_json`` / ``connector._post_json``
@@ -298,6 +298,9 @@ _WRITE_COMPOSITES: dict[str, str] = {
     "vmware.composite.vm.migrate": "vm.migrate",
     "vmware.composite.vm.power": "vm.power",
     "vmware.composite.vm.power.bulk": "vm.power.bulk",
+    "vmware.composite.vm.resize": "vm.resize",
+    "vmware.composite.vm.nic.repoint": "vm.nic.repoint",
+    "vmware.composite.vm.device.cdrom": "vm.device.cdrom",
     "vmware.composite.host.evacuate": "host.evacuate",
     "vmware.composite.host.detach_from_vds": "host.detach_from_vds",
     "vmware.composite.cluster.patch": "cluster.patch",
@@ -328,6 +331,17 @@ def _benign_params_for(composite_op_id: str) -> dict[str, Any]:
         },
         "vmware.composite.vm.power": {"vm": "vm-1", "verb": "on"},
         "vmware.composite.vm.power.bulk": {"action": "start"},
+        "vmware.composite.vm.resize": {"vm": "vm-1", "cpu_count": 2},
+        "vmware.composite.vm.nic.repoint": {
+            "vm": "vm-1",
+            "nic": "4000",
+            "portgroup_name": "prod-pg",
+        },
+        "vmware.composite.vm.device.cdrom": {
+            "vm": "vm-1",
+            "cdrom": "16000",
+            "action": "disconnect",
+        },
         "vmware.composite.host.evacuate": {"host": "host-1"},
         "vmware.composite.host.detach_from_vds": {
             "host": "host-1",
@@ -357,9 +371,42 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
         "vmware.composite.vm.migrate": {"/vcenter/cluster/domain-c1/drs/recommendations": empty},
         "vmware.composite.vm.power": {},
         "vmware.composite.vm.power.bulk": {"/vcenter/vm": empty},
+        "vmware.composite.vm.resize": {
+            "/vcenter/vm/vm-1": {
+                "value": {
+                    "name": "vm-1",
+                    "power_state": "POWERED_OFF",
+                    "cpu": {"count": 1, "cores_per_socket": 1},
+                    "memory": {"size_MiB": 1024},
+                }
+            }
+        },
+        "vmware.composite.vm.nic.repoint": {
+            "/vcenter/vm/vm-1": {"value": {"name": "vm-1"}},
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {"type": "STANDARD_PORTGROUP"},
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {"network": "dvportgroup-9", "name": "prod-pg", "type": "DISTRIBUTED_PORTGROUP"}
+                ]
+            },
+        },
+        "vmware.composite.vm.device.cdrom": {
+            "/vcenter/vm/vm-1": {"value": {"name": "vm-1"}},
+            "/vcenter/vm/vm-1/hardware/cdrom/16000": {
+                "value": {
+                    "backing": {"type": "ISO_FILE", "iso_file": "[local] pinned.iso"},
+                    "state": "CONNECTED",
+                }
+            },
+        },
         "vmware.composite.host.evacuate": {"/vcenter/vm": empty},
         "vmware.composite.host.detach_from_vds": {
-            "/vcenter/network/distributed-portgroup": empty,
+            "/vcenter/network": empty,
             "/vcenter/vm": empty,
         },
         "vmware.composite.cluster.patch": {"/vcenter/cluster/domain-c1/host": empty},
@@ -368,22 +415,24 @@ def _benign_responses_for(composite_op_id: str) -> dict[str, Any]:
 
 
 # ===========================================================================
-# Guard: the REST-sub-op write set is exactly the expected nine
+# Guard: the REST-sub-op write set is exactly the expected twelve
 # ===========================================================================
 
 
-def test_write_composite_set_is_the_expected_nine() -> None:
+def test_write_composite_set_is_the_expected_twelve() -> None:
     """Pins the REST-sub-op write set so a renamed / dropped composite can't shrink coverage.
 
-    Covers the 9 REST-sub-op write composites the parametrized fresh-boot +
-    park machinery below drives. The tenth write composite, the mutating
-    VI-JSON ``vm.disk.grow`` (#2893), is dispatch-shaped differently (vmomi
-    sub-ops keyed by request body, not REST spec-paths) and is covered by
-    its own dedicated section at the end of this module.
+    Covers the 12 REST-sub-op write composites the parametrized fresh-boot +
+    park machinery below drives. The four vi-json write composites
+    (``vm.disk.grow`` / #2893, ``vm.clone_from_template`` / #2894,
+    ``cluster.drs_rule.create`` + ``folder.create`` / #2895) are
+    dispatch-shaped differently (vmomi sub-ops keyed by request body, not
+    REST spec-paths) and are covered by their own dedicated sections at the
+    end of this module.
     """
     registrar_write_op_ids = {f"vmware.composite.{name}" for name in _WRITE_COMPOSITES.values()}
     assert set(_WRITE_COMPOSITES) == registrar_write_op_ids
-    assert len(_WRITE_COMPOSITES) == 9
+    assert len(_WRITE_COMPOSITES) == 12
 
 
 # ===========================================================================
@@ -402,7 +451,7 @@ async def test_write_composite_executes_through_dispatch_without_ingest(
     """Each composite runs to a benign business status on the direct session.
 
     No ingested ``endpoint_descriptor`` rows exist in the catalog here — only
-    the 15 composite rows the registrar upserts. Reaching a business status
+    the 21 composite rows the registrar upserts. Reaching a business status
     (``created`` / ``no_recommendation`` / ``detached`` / ...) rather than a
     generic execution error proves every raw-REST sub-op resolved via the
     connector session, not a catalog lookup (the two-world / fresh-boot DoD).
@@ -703,7 +752,8 @@ async def test_host_detach_from_vds_sub_op_sequence(
     recorder = _RecordingVmwareConnector()
     recorder.responses.update(
         {
-            "/vcenter/network/distributed-portgroup": {"value": []},
+            # #1602 fix: distributed portgroups list via /vcenter/network.
+            "/vcenter/network": {"value": []},
             "/vcenter/vm": {"value": [{"vm": "vm-a"}]},
         }
     )
@@ -722,7 +772,7 @@ async def test_host_detach_from_vds_sub_op_sequence(
     assert result.result["status"] == "detached"
     assert result.result["vms_migrated"] == ["vm-a"]
     assert recorder.calls == [
-        ("GET", "/vcenter/network/distributed-portgroup"),
+        ("GET", "/vcenter/network"),
         ("GET", "/vcenter/vm"),
         ("PATCH", "/vcenter/vm/vm-a/network"),
         ("POST", "/vcenter/network/dvs/dvs-1?action=remove_host"),
@@ -778,8 +828,9 @@ async def test_write_composite_human_dispatch_parks_for_approval(
     Every write composite ships ``requires_approval=True``; G11.7-T1 (#1401)
     routes a human/service principal to the approval queue
     (``awaiting_approval``) at the top-level gate — before the handler (and
-    thus any sub-op) runs. Proves the park half for all 8; the recorder stays
-    empty because the composite never executed.
+    thus any sub-op) runs. Proves the park half for all 12; the recorder
+    stays empty of writes because the composite never executed (the
+    live-read preview builders issue read-only GETs, which is expected).
     """
     recorder = _RecordingVmwareConnector()
     await _bootstrap(recorder, stub_embedding_service)
@@ -1683,3 +1734,190 @@ async def test_folder_create_fresh_boot_dispatchable_without_ingest(
     assert result.status == "ok", result.error
     assert result.result["status"] == "created"
     assert recorder.create_writes == ["/Folder/group-v1/CreateFolder"]
+
+
+# ===========================================================================
+# Hardware write composites (#2891) — sub-op sequence through dispatch
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_vm_resize_sub_op_sequence(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.resize: read VM info -> PATCH cpu -> PATCH memory."""
+    recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/vm/vm-1"] = {
+        "value": {
+            "name": "web-1",
+            "power_state": "POWERED_OFF",
+            "cpu": {"count": 1, "cores_per_socket": 1},
+            "memory": {"size_MiB": 1024},
+        }
+    }
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({"vmware.composite.vm.resize"}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.resize",
+        target=_FakeVmwareTarget(),
+        params={"vm": "vm-1", "cpu_count": 4, "memory_mib": 8192},
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "resized"
+    assert result.result["applied"] == {"cpu": True, "memory": True}
+    assert recorder.calls == [
+        ("GET", "/vcenter/vm/vm-1"),
+        ("PATCH", "/vcenter/vm/vm-1/hardware/cpu"),
+        ("PATCH", "/vcenter/vm/vm-1/hardware/memory"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vm_nic_repoint_sub_op_sequence(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.nic.repoint: read NIC -> resolve portgroup via /vcenter/network -> PATCH backing."""
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(
+        {
+            "/vcenter/vm/vm-1/hardware/ethernet/4000": {
+                "value": {
+                    "mac_address": "00:50:56:aa:bb:cc",
+                    "backing": {"type": "STANDARD_PORTGROUP"},
+                }
+            },
+            "/vcenter/network": {
+                "value": [
+                    {"network": "dvportgroup-9", "name": "prod-pg", "type": "DISTRIBUTED_PORTGROUP"}
+                ]
+            },
+        }
+    )
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({"vmware.composite.vm.nic.repoint"}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.nic.repoint",
+        target=_FakeVmwareTarget(),
+        params={"vm": "vm-1", "nic": "4000", "portgroup_name": "prod-pg"},
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "repointed"
+    assert result.result["requested_backing"] == {
+        "portgroup_id": "dvportgroup-9",
+        "portgroup_name": "prod-pg",
+    }
+    assert recorder.calls == [
+        ("GET", "/vcenter/vm/vm-1/hardware/ethernet/4000"),
+        ("GET", "/vcenter/network"),
+        ("PATCH", "/vcenter/vm/vm-1/hardware/ethernet/4000"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_vm_device_cdrom_remove_sub_op_sequence(
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """vm.device.cdrom (remove): read backing -> DELETE the device."""
+    recorder = _RecordingVmwareConnector()
+    recorder.responses["/vcenter/vm/vm-1/hardware/cdrom/16000"] = {
+        "value": {
+            "backing": {"type": "ISO_FILE", "iso_file": "[local] pinned.iso"},
+            "state": "CONNECTED",
+        }
+    }
+    await _bootstrap(recorder, stub_embedding_service)
+    await _clear_requires_approval({"vmware.composite.vm.device.cdrom"}, recorder)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id="vmware.composite.vm.device.cdrom",
+        target=_FakeVmwareTarget(),
+        params={"vm": "vm-1", "cdrom": "16000", "action": "remove"},
+    )
+
+    assert result.status == "ok", result.error
+    assert result.result["status"] == "removed"
+    assert recorder.calls == [
+        ("GET", "/vcenter/vm/vm-1/hardware/cdrom/16000"),
+        ("DELETE", "/vcenter/vm/vm-1/hardware/cdrom/16000"),
+    ]
+
+
+# ===========================================================================
+# Park-envelope uniformity for the #2891 hardware writes (#2681)
+# ===========================================================================
+
+#: The op-identity + metadata fields every parked envelope carries
+#: uniformly (#2681). The bespoke ``preview`` content key is deliberately
+#: not in this set — it is asserted separately.
+_ENVELOPE_IDENTITY_META_KEYS = frozenset(
+    {"op_id", "connector_id", "target_id", "op_class", "preview_populated", "safety_level"}
+)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "composite_op_id",
+    [
+        "vmware.composite.vm.resize",
+        "vmware.composite.vm.nic.repoint",
+        "vmware.composite.vm.device.cdrom",
+    ],
+)
+async def test_hardware_write_park_carries_uniform_identity_envelope(
+    composite_op_id: str,
+    stub_embedding_service: AsyncMock,
+    session: AsyncSession,
+    captured_events: list[BroadcastEvent],
+) -> None:
+    """A parked hardware-write composite carries the #2681 uniform op-identity envelope.
+
+    The G0.38 #2681 contract: every parked ``proposed_effect`` carries the
+    same op-identity + metadata field-set (op_id / connector_id /
+    target_id / op_class / preview_populated / safety_level) regardless of
+    the per-op preview outcome. Here the live-read builders additionally
+    populate a from->to ``preview``, so ``preview_populated`` is True.
+    """
+    recorder = _RecordingVmwareConnector()
+    recorder.responses.update(_benign_responses_for(composite_op_id))
+    await _bootstrap(recorder, stub_embedding_service)
+
+    result = await dispatch(
+        operator=_make_operator(),
+        connector_id=_CONNECTOR_ID,
+        op_id=composite_op_id,
+        target=_FakeVmwareTarget(),
+        params=_benign_params_for(composite_op_id),
+    )
+    assert result.status == "awaiting_approval", result.error
+    approval_request_id = UUID(result.extras["approval_request_id"])
+    async with get_sessionmaker()() as s:
+        row = await s.get(ApprovalRequest, approval_request_id)
+    assert row is not None
+    effect = dict(row.proposed_effect)
+
+    # The uniform op-identity + metadata envelope is present (#2681).
+    assert effect.keys() >= _ENVELOPE_IDENTITY_META_KEYS, sorted(effect)
+    assert effect["op_id"] == composite_op_id
+    assert effect["connector_id"] == _CONNECTOR_ID
+    assert isinstance(effect["target_id"], str)
+    assert effect["safety_level"] == "dangerous"
+    assert effect["op_class"] == "other"
+    # The live-read builder populated a from->to preview.
+    assert effect["preview_populated"] is True
+    assert "preview" in effect

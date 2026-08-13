@@ -177,6 +177,26 @@ connector-related release-notes line.
   previews: a capped VM fan-out (cluster + cluster name + resolved VM set)
   for the rule op, a parent + new-folder-name echo for the folder op.
 
+### Added — vSphere hardware write composites: `vm.resize` / `vm.nic.repoint` / `vm.device.cdrom` (#2891)
+
+- Three new dangerous, approval-gated `vmware.composite.*` write
+  composites reconfigure a VM's virtual hardware post-clone over pure
+  vSphere Automation REST — no `pyvmomi`. `vm.resize` reads current
+  sizing + hot-add flags and PATCHes `hardware/cpu` / `hardware/memory`,
+  returning a typed `requires_power_off` status (never a raw 400) when a
+  powered-on VM cannot take the change live. `vm.nic.repoint` resolves a
+  distributed portgroup by display name and repoints an existing vNIC's
+  backing to it. `vm.device.cdrom` removes / updates / disconnects a
+  CD-ROM device — clearing a template's host-local-ISO backing that
+  would otherwise pin every clone to one host and block vMotion. Each
+  ships a live-read **from->to** approval preview so the four-eyes
+  reviewer sees the current state alongside the requested change. Also
+  fixes the #1602 defect: the write surface's distributed-portgroup
+  resolution moved off the unresolvable singular
+  `/vcenter/network/distributed-portgroup` path to the generic
+  `GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP` the read
+  composites already use.
+
 ## [0.28.0] - 2026-08-07
 
 ### Added — seven more Do-real-work guides on the docs site: topology, broadcast, memory/knowledge, audit forensics, runbooks, scheduler, satellite gateway (#2829)

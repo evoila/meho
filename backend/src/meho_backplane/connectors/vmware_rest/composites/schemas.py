@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema 2020-12 parameter + response schemas for the 18 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 21 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -25,12 +25,14 @@ Conventions
   schema verbatim on ``describe_operation`` calls.
 * The 5 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 13 write composites inherit T4's
+  each. The 16 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
   (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
   VI-JSON ``vm.disk.grow`` / #2893, the folder-template
-  ``vm.clone_from_template`` / #2894, and the vim cluster / inventory
-  writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895). The schema
+  ``vm.clone_from_template`` / #2894, the vim cluster / inventory
+  writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895, and
+  the #2891 hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
+  ``vm.device.cdrom``). The schema
   text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
@@ -68,14 +70,20 @@ __all__ = [
     "VM_CLONE_RESPONSE_SCHEMA",
     "VM_CREATE_PARAMETER_SCHEMA",
     "VM_CREATE_RESPONSE_SCHEMA",
+    "VM_DEVICE_CDROM_PARAMETER_SCHEMA",
+    "VM_DEVICE_CDROM_RESPONSE_SCHEMA",
     "VM_DISK_GROW_PARAMETER_SCHEMA",
     "VM_DISK_GROW_RESPONSE_SCHEMA",
     "VM_MIGRATE_PARAMETER_SCHEMA",
     "VM_MIGRATE_RESPONSE_SCHEMA",
+    "VM_NIC_REPOINT_PARAMETER_SCHEMA",
+    "VM_NIC_REPOINT_RESPONSE_SCHEMA",
     "VM_POWER_BULK_PARAMETER_SCHEMA",
     "VM_POWER_BULK_RESPONSE_SCHEMA",
     "VM_POWER_PARAMETER_SCHEMA",
     "VM_POWER_RESPONSE_SCHEMA",
+    "VM_RESIZE_PARAMETER_SCHEMA",
+    "VM_RESIZE_RESPONSE_SCHEMA",
     "VM_SNAPSHOT_REVERT_PARAMETER_SCHEMA",
     "VM_SNAPSHOT_REVERT_RESPONSE_SCHEMA",
 ]
@@ -1790,4 +1798,317 @@ FOLDER_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "parent_folder", "new_folder_name"],
+}
+
+
+# ---------------------------------------------------------------------------
+# Hardware write composites (#2891) -- parameter + response schemas
+# ---------------------------------------------------------------------------
+#
+# Three pure-REST hardware writes from the #2859 provisioning flow:
+# reconfigure CPU/memory (a freshly-cloned VM is stuck at the template's
+# sizing), repoint a vNIC to a different distributed portgroup, and
+# remove/edit/disconnect a CD-ROM (a template shipping a host-local-ISO
+# CD-ROM pins every clone to one host and blocks vMotion). Each is
+# ``dangerous`` / ``requires_approval=True`` like the other write
+# composites.
+
+
+#: ``vmware.composite.vm.resize`` parameter schema.
+#:
+#: Reads current sizing, then PATCHes CPU and/or memory. At least one of
+#: ``cpu_count`` / ``cores_per_socket`` / ``memory_mib`` must be present
+#: (``anyOf``). A change a powered-on VM cannot take live (no hot-add, a
+#: decrease, or any cores_per_socket change) returns
+#: ``status='requires_power_off'`` rather than a raw vCenter 400.
+VM_RESIZE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid to resize.",
+        },
+        "cpu_count": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "New total vCPU count. Omit to leave CPU count unchanged. "
+                "On a powered-on VM an increase requires CPU hot-add; a "
+                "decrease requires power off (surfaced as "
+                "``status='requires_power_off'``, never a raw 400)."
+            ),
+        },
+        "cores_per_socket": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "New cores-per-socket. The total vCPU count must be a "
+                "multiple of this value. Not hot-changeable -- a change on "
+                "a powered-on VM returns ``status='requires_power_off'``."
+            ),
+        },
+        "memory_mib": {
+            "type": "integer",
+            "minimum": 1,
+            "description": (
+                "New memory size in MiB (maps to the vSphere ``size_MiB`` "
+                "field). Omit to leave memory unchanged. On a powered-on VM "
+                "an increase requires memory hot-add; a decrease requires "
+                "power off (``status='requires_power_off'``)."
+            ),
+        },
+    },
+    "required": ["vm"],
+    "anyOf": [
+        {"required": ["cpu_count"]},
+        {"required": ["cores_per_socket"]},
+        {"required": ["memory_mib"]},
+    ],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.nic.repoint`` parameter schema.
+#:
+#: Repoints an existing vNIC to a different distributed portgroup,
+#: resolved by display name via
+#: ``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP`` (there is
+#: no dedicated portgroup list resource -- the #1602 reconciliation
+#: lesson). Ambiguous / missing names refuse the repoint.
+VM_NIC_REPOINT_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid owning the vNIC.",
+        },
+        "nic": {
+            "type": "string",
+            "minLength": 1,
+            "description": "vNIC device id (e.g. ``4000``) to repoint.",
+        },
+        "portgroup_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Display name of the target distributed portgroup. "
+                "Resolved to its network moid via "
+                "``GET:/vcenter/network?filter.types=DISTRIBUTED_PORTGROUP``. "
+                "A name matching zero portgroups returns "
+                "``status='not_found'``; more than one returns "
+                "``status='ambiguous'`` with the candidates listed."
+            ),
+        },
+    },
+    "required": ["vm", "nic", "portgroup_name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.device.cdrom`` parameter schema.
+#:
+#: Verb-driven CD-ROM edit: ``remove`` (DELETE the device), ``update``
+#: (PATCH its backing -- requires ``backing``), or ``disconnect`` (POST
+#: ``?action=disconnect``; the device stays but the guest sees it
+#: unplugged). The resolution read surfaces the current backing (the
+#: host-local ISO path the approver needs to see) into the preview.
+VM_DEVICE_CDROM_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "vm": {
+            "type": "string",
+            "minLength": 1,
+            "description": "VM moid owning the CD-ROM device.",
+        },
+        "cdrom": {
+            "type": "string",
+            "minLength": 1,
+            "description": "CD-ROM device id (e.g. ``16000``).",
+        },
+        "action": {
+            "type": "string",
+            "enum": ["remove", "update", "disconnect"],
+            "description": (
+                "``remove`` -> ``DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}``; "
+                "``update`` -> ``PATCH`` the backing (requires ``backing``); "
+                "``disconnect`` -> ``POST ?action=disconnect`` (the device "
+                "stays, the guest sees it unplugged)."
+            ),
+        },
+        "backing": {
+            "type": "object",
+            "additionalProperties": True,
+            "description": (
+                "New CD-ROM backing spec when ``action='update'`` (e.g. "
+                '``{"type": "CLIENT_DEVICE"}`` to un-pin a host-local '
+                "ISO backing). Ignored for ``remove`` / ``disconnect``."
+            ),
+        },
+    },
+    "required": ["vm", "cdrom", "action"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.resize`` response schema.
+VM_RESIZE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["resized", "requires_power_off", "no_change", "partial"],
+            "description": (
+                "``'resized'`` -- every requested dimension applied; "
+                "``'requires_power_off'`` -- the VM is powered on and the "
+                "change cannot be made live (no hot-add, a decrease, or a "
+                "cores_per_socket change); ``'no_change'`` -- the requested "
+                "values already match current; ``'partial'`` -- CPU applied "
+                "but the memory PATCH failed."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid the resize targeted."},
+        "name": {
+            "type": ["string", "null"],
+            "description": "VM display name read from ``GET:/vcenter/vm/{vm}``.",
+        },
+        "power_state": {
+            "type": ["string", "null"],
+            "description": "VM power state at read time (e.g. ``POWERED_ON`` / ``POWERED_OFF``).",
+        },
+        "applied": {
+            "type": "object",
+            "properties": {
+                "cpu": {"type": "boolean"},
+                "memory": {"type": "boolean"},
+            },
+            "required": ["cpu", "memory"],
+            "description": "Which dimensions the composite actually PATCHed.",
+        },
+        "from": {
+            "type": "object",
+            "properties": {
+                "cpu_count": {"type": ["integer", "null"]},
+                "cores_per_socket": {"type": ["integer", "null"]},
+                "memory_MiB": {"type": ["integer", "null"]},
+            },
+            "description": "Current sizing read before the change.",
+        },
+        "to": {
+            "type": "object",
+            "properties": {
+                "cpu_count": {"type": ["integer", "null"]},
+                "cores_per_socket": {"type": ["integer", "null"]},
+                "memory_MiB": {"type": ["integer", "null"]},
+            },
+            "description": "Requested sizing (``null`` for dimensions left unchanged).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Next-step hint on ``requires_power_off`` / ``partial``; ``null`` otherwise."
+            ),
+        },
+    },
+    "required": ["status", "vm", "applied", "from", "to"],
+}
+
+
+#: ``vmware.composite.vm.nic.repoint`` response schema.
+VM_NIC_REPOINT_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["repointed", "not_found", "ambiguous"],
+            "description": (
+                "``'repointed'`` -- the NIC backing was PATCHed to the "
+                "target portgroup; ``'not_found'`` -- no distributed "
+                "portgroup matched ``portgroup_name``; ``'ambiguous'`` -- "
+                "more than one did (candidates listed, no PATCH issued)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid owning the NIC."},
+        "nic": {"type": "string", "description": "vNIC device id repointed."},
+        "mac_address": {
+            "type": ["string", "null"],
+            "description": (
+                "NIC MAC address read from ``GET:/vcenter/vm/{vm}/hardware/ethernet/{nic}``."
+            ),
+        },
+        "current_backing": {
+            "type": ["object", "null"],
+            "description": "The NIC's backing before the repoint (type, network, network_name).",
+        },
+        "requested_backing": {
+            "type": "object",
+            "properties": {
+                "portgroup_id": {"type": ["string", "null"]},
+                "portgroup_name": {"type": "string"},
+            },
+            "required": ["portgroup_id", "portgroup_name"],
+            "description": "The target distributed portgroup (moid resolved from the name).",
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Matching portgroup rows when ``status='ambiguous'`` (empty otherwise).",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": (
+                "Disambiguation hint on ``not_found`` / ``ambiguous``; ``null`` otherwise."
+            ),
+        },
+    },
+    "required": ["status", "vm", "nic", "requested_backing"],
+}
+
+
+#: ``vmware.composite.vm.device.cdrom`` response schema.
+VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["removed", "updated", "disconnected", "invalid_request"],
+            "description": (
+                "``'removed'`` -- the device was deleted; ``'updated'`` -- "
+                "its backing was PATCHed; ``'disconnected'`` -- the device "
+                "was disconnected in-guest; ``'invalid_request'`` -- "
+                "``action='update'`` without a ``backing`` object (no write "
+                "issued)."
+            ),
+        },
+        "vm": {"type": "string", "description": "VM moid owning the CD-ROM."},
+        "cdrom": {"type": "string", "description": "CD-ROM device id acted on."},
+        "action": {
+            "type": "string",
+            "enum": ["remove", "update", "disconnect"],
+            "description": "The verb requested.",
+        },
+        "current_backing": {
+            "type": ["object", "null"],
+            "description": (
+                "The CD-ROM backing read before the change (the host-local "
+                "ISO path the approver needs to see)."
+            ),
+        },
+        "state": {
+            "type": ["string", "null"],
+            "description": (
+                "Connection state at read time (e.g. ``CONNECTED`` / ``NOT_CONNECTED``)."
+            ),
+        },
+        "requested_backing": {
+            "type": ["object", "null"],
+            "description": "Echoed target backing when ``action='update'``; ``null`` otherwise.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Hint on ``invalid_request``; ``null`` otherwise.",
+        },
+    },
+    "required": ["status", "vm", "cdrom", "action"],
 }

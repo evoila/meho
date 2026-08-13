@@ -14,9 +14,11 @@ Covers:
 - ``gcloud.compute.subnetworks.list`` — aggregatedList path; per-region;
   nextPageToken.
 - ``gcloud.iam.policy.read`` — POST getIamPolicy; binding parse.
+- ``gcloud.iam.service_account_keys.list`` — per-SA key inventory;
+  required service_account_email; no key material in the row schema.
 - ``register_gcloud_typed_operations`` — idempotent; AttributeError on
   missing handler; raises on unknown group_key.
-- GCLOUD_OPS has 8 entries; all ops are safe + non-approving.
+- GCLOUD_OPS has 9 entries; all ops are safe + non-approving.
 
 Auth is fully mocked via the same ADC + impersonation mock pattern
 established in ``test_connectors_gcloud_auth.py``.
@@ -124,8 +126,8 @@ def _make_connector(token: str = "test-bearer-token") -> GcloudConnector:
 # ---------------------------------------------------------------------------
 
 
-def test_gcloud_ops_has_eight_entries() -> None:
-    assert len(GCLOUD_OPS) == 8
+def test_gcloud_ops_has_nine_entries() -> None:
+    assert len(GCLOUD_OPS) == 9
 
 
 def test_gcloud_ops_op_ids_are_unique() -> None:
@@ -156,6 +158,7 @@ def test_all_gcloud_ops_have_expected_op_ids() -> None:
         "gcloud.compute.networks.list",
         "gcloud.compute.subnetworks.list",
         "gcloud.iam.policy.read",
+        "gcloud.iam.service_account_keys.list",
     }
     actual = {op.op_id for op in GCLOUD_OPS}
     assert actual == expected
@@ -164,6 +167,32 @@ def test_all_gcloud_ops_have_expected_op_ids() -> None:
 def test_gcloud_ops_is_tuple_of_gcloud_op() -> None:
     for op in GCLOUD_OPS:
         assert isinstance(op, GcloudOp)
+
+
+def test_gcloud_sa_keys_list_op_metadata() -> None:
+    """The SA-key inventory op is an iam-group read whose row schema carries no
+    key material and whose only required param is service_account_email."""
+    op = next(o for o in GCLOUD_OPS if o.op_id == "gcloud.iam.service_account_keys.list")
+    assert op.handler_attr == "gcloud_iam_service_account_keys_list"
+    assert op.group_key == "iam"
+    assert op.safety_level == "safe"
+    assert op.requires_approval is False
+    # Required param is the SA email; key_types is optional.
+    assert op.parameter_schema["required"] == ["service_account_email"]
+    assert set(op.parameter_schema["properties"]) == {"service_account_email", "key_types"}
+    # The row schema must never expose private/public key material.
+    assert op.response_schema is not None
+    row_props = op.response_schema["properties"]["rows"]["items"]["properties"]
+    assert set(row_props) == {
+        "name",
+        "key_type",
+        "key_origin",
+        "valid_after_time",
+        "valid_before_time",
+        "disabled",
+    }
+    assert "privateKeyData" not in row_props
+    assert "publicKeyData" not in row_props
 
 
 # ---------------------------------------------------------------------------
@@ -1011,8 +1040,8 @@ async def test_register_gcloud_typed_operations_idempotent() -> None:
     ):
         await GcloudConnector.register_gcloud_typed_operations()
         await GcloudConnector.register_gcloud_typed_operations()
-    # 8 ops x 2 calls = 16 total register invocations
-    assert mock_register.call_count == 16
+    # 9 ops x 2 calls = 18 total register invocations
+    assert mock_register.call_count == 18
 
 
 @pytest.mark.asyncio
@@ -1038,7 +1067,7 @@ async def test_register_gcloud_typed_operations_accepts_embedding_service_kwarg(
     ):
         # Mirrors run_typed_op_registrars: the kwarg is always supplied.
         await GcloudConnector.register_gcloud_typed_operations(embedding_service=None)
-    assert mock_register.call_count == 8
+    assert mock_register.call_count == 9
 
 
 @pytest.mark.asyncio

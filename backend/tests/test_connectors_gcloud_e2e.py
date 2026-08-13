@@ -5,7 +5,7 @@
 
 Acceptance criteria addressed here:
 
-(a) All 8 gcloud read ops dispatch through the full connector handler path
+(a) All 9 gcloud read ops dispatch through the full connector handler path
     with respx-mocked GCP REST responses and return the expected shape.
 (b) Audit row: each dispatch records op_id + target_id + params_hash via
     the audit module — asserted via patched audit_and_broadcast_safe.
@@ -181,7 +181,7 @@ class _AuditCapture:
 
 
 # ---------------------------------------------------------------------------
-# (a) All 8 ops — happy-path E2E with respx-mocked GCP REST
+# (a) All 9 ops — happy-path E2E with respx-mocked GCP REST
 # ---------------------------------------------------------------------------
 
 
@@ -318,6 +318,113 @@ async def test_gcloud_e2e_iam_service_accounts_list_returns_sa_rows() -> None:
     # disabled flag preserved
     old_row = next(r for r in result["rows"] if r["email"] != _SA_EMAIL)
     assert old_row["disabled"] is True
+    await connector.aclose()
+
+
+_SA_KEYS_URL = (
+    f"https://iam.googleapis.com/v1/projects/{_GCP_PROJECT}/serviceAccounts/{_SA_EMAIL}/keys"
+)
+
+
+@pytest.mark.asyncio
+async def test_gcloud_e2e_iam_service_account_keys_list_returns_key_rows() -> None:
+    """gcloud.iam.service_account_keys.list: per-key rows with key_type + expiry.
+
+    Fixture carries one USER_MANAGED and one SYSTEM_MANAGED key. Asserts the
+    row shape surfaces key_type and valid_before_time and never leaks private
+    or public key material.
+    """
+    connector = _make_connector()
+    _, patch_fn, _ = _make_adc_loader()
+
+    with (
+        patch("google.auth.impersonated_credentials.Credentials", side_effect=patch_fn),
+        respx.mock() as mock,
+    ):
+        route = mock.get(_SA_KEYS_URL).respond(
+            200,
+            json={
+                "keys": [
+                    {
+                        "name": f"projects/{_GCP_PROJECT}/serviceAccounts/{_SA_EMAIL}/keys/aaa111",
+                        "keyType": "USER_MANAGED",
+                        "keyOrigin": "USER_PROVIDED",
+                        "validAfterTime": "2026-01-01T00:00:00Z",
+                        "validBeforeTime": "2027-01-01T00:00:00Z",
+                        "disabled": False,
+                    },
+                    {
+                        "name": f"projects/{_GCP_PROJECT}/serviceAccounts/{_SA_EMAIL}/keys/sys999",
+                        "keyType": "SYSTEM_MANAGED",
+                        "keyOrigin": "GOOGLE_PROVIDED",
+                        "validAfterTime": "2026-08-01T00:00:00Z",
+                        "validBeforeTime": "2026-08-22T00:00:00Z",
+                        "disabled": False,
+                    },
+                ]
+            },
+        )
+        result = await connector.gcloud_iam_service_account_keys_list(
+            _OPERATOR, _E2E_TARGET, params={"service_account_email": _SA_EMAIL}
+        )
+
+    assert route.called
+    assert result["total"] == 2
+    by_type = {r["key_type"]: r for r in result["rows"]}
+    assert set(by_type) == {"USER_MANAGED", "SYSTEM_MANAGED"}
+    # USER_MANAGED is the org-policy violation; its expiry must surface.
+    user_key = by_type["USER_MANAGED"]
+    assert user_key["valid_before_time"] == "2027-01-01T00:00:00Z"
+    assert user_key["valid_after_time"] == "2026-01-01T00:00:00Z"
+    assert user_key["key_origin"] == "USER_PROVIDED"
+    assert user_key["disabled"] is False
+    # No private/public key material ever surfaces in a row.
+    for row in result["rows"]:
+        assert set(row) == {
+            "name",
+            "key_type",
+            "key_origin",
+            "valid_after_time",
+            "valid_before_time",
+            "disabled",
+        }
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gcloud_e2e_iam_service_account_keys_list_requires_email() -> None:
+    """A missing or blank service_account_email raises before any HTTP call."""
+    connector = _make_connector()
+    with pytest.raises(ValueError, match="service_account_email"):
+        await connector.gcloud_iam_service_account_keys_list(_OPERATOR, _E2E_TARGET, params={})
+    with pytest.raises(ValueError, match="service_account_email"):
+        await connector.gcloud_iam_service_account_keys_list(
+            _OPERATOR, _E2E_TARGET, params={"service_account_email": "  "}
+        )
+    await connector.aclose()
+
+
+@pytest.mark.asyncio
+async def test_gcloud_e2e_iam_service_account_keys_list_forwards_key_types_filter() -> None:
+    """The key_types param maps to the API's repeated keyTypes[] query filter."""
+    connector = _make_connector()
+    _, patch_fn, _ = _make_adc_loader()
+
+    with (
+        patch("google.auth.impersonated_credentials.Credentials", side_effect=patch_fn),
+        respx.mock() as mock,
+    ):
+        route = mock.get(_SA_KEYS_URL).respond(200, json={"keys": []})
+        result = await connector.gcloud_iam_service_account_keys_list(
+            _OPERATOR,
+            _E2E_TARGET,
+            params={"service_account_email": _SA_EMAIL, "key_types": ["USER_MANAGED"]},
+        )
+
+    assert result == {"rows": [], "total": 0}
+    # The keyTypes[] filter reached the wire.
+    sent_url = str(route.calls.last.request.url)
+    assert "keyTypes=USER_MANAGED" in sent_url
     await connector.aclose()
 
 
@@ -534,14 +641,14 @@ async def test_gcloud_e2e_iam_policy_read_returns_bindings() -> None:
 
 @pytest.mark.asyncio
 async def test_gcloud_e2e_audit_params_hash_field_present_in_all_ops() -> None:
-    """All 8 gcloud ops produce a result that carries sufficient fields for audit.
+    """All 9 gcloud ops produce a result that carries sufficient fields for audit.
 
     Verifies that each handler returns a non-None result dict — the
     dispatcher computes ``params_hash = compute_params_hash(params)`` before
     calling the handler; this test ensures the handler side does not swallow
     or transform params in a way that would break the audit path.
 
-    One combined respx.mock() scope covers all 8 ops in sequence to keep the
+    One combined respx.mock() scope covers all 9 ops in sequence to keep the
     test fast while verifying each handler independently.
     """
     connector = _make_connector()
@@ -551,7 +658,7 @@ async def test_gcloud_e2e_audit_params_hash_field_present_in_all_ops() -> None:
         patch("google.auth.impersonated_credentials.Credentials", side_effect=patch_fn),
         respx.mock(assert_all_called=False) as mock,
     ):
-        # Seed minimal mock responses for all 8 GCP endpoints
+        # Seed minimal mock responses for all 9 GCP endpoints
         mock.get(f"https://cloudresourcemanager.googleapis.com/v1/projects/{_GCP_PROJECT}").respond(
             200,
             json={
@@ -578,8 +685,9 @@ async def test_gcloud_e2e_audit_params_hash_field_present_in_all_ops() -> None:
         mock.post(
             f"https://cloudresourcemanager.googleapis.com/v1/projects/{_GCP_PROJECT}:getIamPolicy"
         ).respond(200, json={"version": 1, "etag": "e", "bindings": []})
+        mock.get(_SA_KEYS_URL).respond(200, json={"keys": []})
 
-        # Dispatch all 8 ops and verify each returns a non-None result
+        # Dispatch all 9 ops and verify each returns a non-None result
         handler_method_map: dict[str, tuple[str, dict[str, Any]]] = {
             "gcloud.about": ("gcloud_about", {}),
             "gcloud.project.describe": ("gcloud_project_describe", {}),
@@ -589,6 +697,10 @@ async def test_gcloud_e2e_audit_params_hash_field_present_in_all_ops() -> None:
             "gcloud.compute.networks.list": ("gcloud_compute_networks_list", {}),
             "gcloud.compute.subnetworks.list": ("gcloud_compute_subnetworks_list", {}),
             "gcloud.iam.policy.read": ("gcloud_iam_policy_read", {}),
+            "gcloud.iam.service_account_keys.list": (
+                "gcloud_iam_service_account_keys_list",
+                {"service_account_email": _SA_EMAIL},
+            ),
         }
         for op_id, (method_name, params) in handler_method_map.items():
             handler = getattr(connector, method_name)
@@ -603,7 +715,7 @@ async def test_gcloud_e2e_audit_params_hash_field_present_in_all_ops() -> None:
 
 @pytest.mark.asyncio
 async def test_gcloud_e2e_all_ops_have_op_id_registered() -> None:
-    """All 8 GCLOUD_OPS have op_id and handler_attr — audit op_id binding verified.
+    """All 9 GCLOUD_OPS have op_id and handler_attr — audit op_id binding verified.
 
     The dispatcher writes ``payload['op_id'] = op_id`` into the audit row.
     This test pins the full op_id registry to catch regressions where an op
@@ -619,6 +731,7 @@ async def test_gcloud_e2e_all_ops_have_op_id_registered() -> None:
         "gcloud.compute.networks.list",
         "gcloud.compute.subnetworks.list",
         "gcloud.iam.policy.read",
+        "gcloud.iam.service_account_keys.list",
     }
     registered_op_ids = {op.op_id for op in GCLOUD_OPS}
     assert registered_op_ids == expected_op_ids, (
@@ -768,8 +881,8 @@ async def test_gcloud_live_integration_about() -> None:
 
 @_SKIP_LIVE
 @pytest.mark.asyncio
-async def test_gcloud_live_integration_all_8_ops_return_ok_status() -> None:
-    """Live integration: all 8 gcloud ops return non-None results against real GCP.
+async def test_gcloud_live_integration_all_9_ops_return_ok_status() -> None:
+    """Live integration: all 9 gcloud ops return non-None results against real GCP.
 
     Requires the same environment variables as test_gcloud_live_integration_about.
     Dispatches each op against the real GCP REST APIs; asserts the result is
@@ -808,6 +921,14 @@ async def test_gcloud_live_integration_all_8_ops_return_ok_status() -> None:
             ("gcloud.compute.networks.list", "gcloud_compute_networks_list", {}),
             ("gcloud.compute.subnetworks.list", "gcloud_compute_subnetworks_list", {}),
             ("gcloud.iam.policy.read", "gcloud_iam_policy_read", {}),
+            # keys.list is per-SA: inspect the impersonated SA itself (always
+            # exists; iam.serviceAccountKeys.list is covered by the same
+            # roles/iam.serviceAccountViewer the service_accounts.list op needs).
+            (
+                "gcloud.iam.service_account_keys.list",
+                "gcloud_iam_service_account_keys_list",
+                {"service_account_email": impersonate_sa},
+            ),
         ]
         for op_id, method_name, params in handler_method_map:
             handler = getattr(connector, method_name)

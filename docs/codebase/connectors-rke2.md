@@ -63,20 +63,28 @@ T3 (#2430) adds two more **approval-gated node-write ops**
   restart — it returns `restart_required: true` and changed key **names**
   only (never a value; the config body carries `token:` join credentials).
 
-T4 (#2431) adds the lone **safe, non-gated snapshot op** (in the
-`rke2-etcd-snapshot` group):
+T4 (#2431) + #2853 add the **safe, non-gated snapshot tier** (both in the
+`rke2-etcd-snapshot` group), sharing one embedded-etcd-server precondition
+guard:
 
-- `rke2.etcd-snapshot.save` — triggers an on-demand managed-etcd snapshot on
-  a server node (`rke2 etcd-snapshot save`, embedded-etcd only). It is
-  `safety_level="safe"` / `requires_approval=false` because it is read-only
-  with respect to *running* cluster state (it copies etcd to a file on disk)
-  and returns only a snapshot name + path, never etcd contents. An optional
-  `name` param is charset-bounded to `^[A-Za-z0-9._-]+$` at the schema
-  boundary AND re-checked in the handler; a fail-closed precondition guard
-  refuses a non-server / external-`datastore-endpoint` node. Like the sibling
-  T3 node-write ops it runs **as root over plain SSH** (`_run_command`, no
-  `sudo` argv) — the connector already authenticates as root, so no sudo
-  construction is needed and the repo-wide sudo-guard stays satisfied.
+- `rke2.etcd-snapshot.save` (T4 #2431) — triggers an on-demand managed-etcd
+  snapshot on a server node (`rke2 etcd-snapshot save`, embedded-etcd only).
+  It is `safety_level="safe"` / `requires_approval=false` because it is
+  read-only with respect to *running* cluster state (it copies etcd to a file
+  on disk) and returns only a snapshot name + path, never etcd contents. An
+  optional `name` param is charset-bounded to `^[A-Za-z0-9._-]+$` at the
+  schema boundary AND re-checked in the handler. It is **active** (it writes a
+  file), so it is deliberately NOT `read-only`-tagged.
+- `rke2.etcd-snapshot.list` (#2853) — enumerates the managed-etcd snapshots
+  that already exist on a server node (`rke2 etcd-snapshot list`). Takes no
+  operator params and returns `{snapshots: [{name, location, size_bytes,
+  created_at}, …]}` — a genuine read (it enumerates, mutating nothing), so it
+  DOES carry the `read-only` tag. It is the read counterpart `.save` lacked:
+  the way to **confirm a fresh snapshot landed after a token rotation** (a
+  snapshot taken before the rotation was made with the retired token — the
+  `claude-rdc-hetzner-dc#615` runbook step). The set-shaped result is
+  materialised into a JSONFlux result handle by the central reducer above its
+  row/byte threshold. See [List output parsing](#list-output-parsing-2853).
 
 Initiative #2833 (read-op coverage wave 2, #2852) adds a **second safe
 read-only op** alongside the posture tier, in a new `rke2-service-read` group:
@@ -104,11 +112,18 @@ read-only op** alongside the posture tier, in a new `rke2-service-read` group:
   `Rke2ServiceStatusProbeError` rather than being served as a service-state
   answer — the same infrastructure-failure discipline `rke2.posture.show` uses.
 
-Seven ops total: three safe read-only (T1 `about` / `posture.show` + the
+Both snapshot ops run **as root over plain SSH** (`_run_command`, no `sudo`
+argv) — like the sibling T3 node-write ops, the connector already
+authenticates as root, so no sudo construction is needed and the repo-wide
+sudo-guard stays satisfied.
+
+Eight ops total: three safe read-only (T1 `about` / `posture.show` + the
 #2852 `node.service.status`), three `dangerous` / `requires_approval=true`
-write ops (T2 + T3), and one safe non-gated snapshot op (T4). The snapshot op
-is safe / no-approval like the read ops but is neither read-only-tagged nor in
-the dangerous write tier — it belongs to neither sweep set.
+write ops (T2 + T3), and two safe non-gated snapshot ops (`.save` T4 #2431,
+`.list` #2853). `.save` is safe / no-approval but active, so it is neither
+`read-only`-tagged nor in the dangerous write tier — it belongs to neither
+sweep set; `.list` is safe / no-approval and genuinely read-only, so it
+carries the `read-only` tag alongside the T1 read tier.
 
 Source: `backend/src/meho_backplane/connectors/rke2/`.
 
@@ -148,7 +163,7 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
   `Bind9Op` / `HolodeckOp`), `SSH_TRANSPORT_NOTE` (the plain-SSH reminder
   copied into every op's `when_to_use`), `_RKE2_ABOUT_OP`, and `RKE2_OPS`
   (`about` + the `READ_OPS` posture tuple + the `WRITE_OPS` write tuple +
-  the `SNAPSHOT_OPS` tuple).
+  the `SNAPSHOT_OPS` tuple — the latter now `.save` + `.list`).
 
 - **Write ops** (`ops_write.py`, #2429 + #2430) — the three approval-gated
   write ops share one module:
@@ -178,18 +193,26 @@ Source: `backend/src/meho_backplane/connectors/rke2/`.
     `RKE2_WHEN_TO_USE_WRITE_BY_GROUP` (`rke2-token-write` + `rke2-node-write`,
     merged into the connector's `_WHEN_TO_USE_BY_GROUP`).
 
-- **Snapshot handler + parser** (`ops_snapshot.py`, #2431) —
-  `rke2_etcd_snapshot_save` (the async handler: guard → save → parse, both run
-  as root over plain `_run_command` with **no** `sudo` argv),
-  `parse_saved_snapshot_name` (recovers the name from the RKE2
-  `Snapshot <name> saved.` log), `_validate_name` (fail-closed charset
-  re-check), and the `Rke2SnapshotNameError` / `Rke2SnapshotPreconditionError`
-  / `Rke2SnapshotError` structured errors. The `rke2` binary is invoked by
-  absolute path; the single optional `name` is the only operator input and
-  is `shlex.quote`'d into the argv after the charset re-check. The precondition
-  guard's own exit status is checked before its stdout verdict is read, so an
-  SSH/transport failure surfaces as a distinct transport error rather than a
-  mislabeled "not an embedded-etcd server" verdict (fail-closed either way).
+- **Snapshot handlers + parsers** (`ops_snapshot.py`, #2431 + #2853) — two
+  handlers sharing one guard:
+  - `rke2_etcd_snapshot_save` (#2431): guard → save → parse, run as root over
+    plain `_run_command` with **no** `sudo` argv; `parse_saved_snapshot_name`
+    recovers the name from the RKE2 `Snapshot <name> saved.` log;
+    `_validate_name` is the fail-closed charset re-check of the single optional
+    `name` (the only operator input), `shlex.quote`'d into the argv.
+  - `rke2_etcd_snapshot_list` (#2853): guard → `rke2 etcd-snapshot list` →
+    `parse_snapshot_list`, also root-over-plain-SSH, no operator params.
+    Returns `{snapshots: [{name, location, size_bytes, created_at}, …]}`.
+  - `_run_precondition_guard` — the **shared** embedded-etcd-server guard both
+    handlers run first (a genuine reuse of `_GUARD_CMD`, not a per-op
+    reimplementation). Its own exit status is checked before its stdout verdict
+    is read, so an SSH/transport failure surfaces as a distinct transport error
+    (`Rke2SnapshotError`) rather than a mislabeled "not an embedded-etcd server"
+    verdict (fail-closed either way); an external-`datastore-endpoint` or
+    non-server node raises `Rke2SnapshotPreconditionError`.
+  - Structured errors: `Rke2SnapshotNameError` / `Rke2SnapshotPreconditionError`
+    / `Rke2SnapshotError`. The `rke2` binary is invoked by absolute path in
+    both handlers.
 
 - **Registration** (`__init__.py`) — two-phase, mirroring bind9/holodeck.
   Synchronous `register_connector_v2` at import time (versioned triple +
@@ -336,6 +359,38 @@ stdout verdict is interpreted, so a transport/SSH failure surfaces as a
 distinct error rather than a mislabeled node-role verdict (fail-closed either
 way).
 
+## List output parsing (#2853)
+
+`rke2 etcd-snapshot list` prints a `Name / Location / Size / Created` table.
+RKE2's own docs (`docs.rke2.io/datastore/backup_restore`, fetched 2026-08-12)
+document **only** this table for the `list` subcommand — a `-o json` /
+`--output json` flag was requested upstream (`k3s-io/k3s#5130`) but neither its
+schema nor its per-version availability is documented. Rather than parse an
+unconfirmed JSON shape from memory (the no-guessing-on-APIs rule), the handler
+parses the documented table, which is version-universal.
+
+The parse is deliberately drift-resilient, because two columns vary across
+RKE2 versions:
+
+- **`Location`** — `local`, a `file://` URL, a bare filesystem path, or an
+  `s3://` URL depending on version and store. It is a single whitespace-free
+  token in every form, and is **passed through verbatim** (never rewritten
+  against `SNAPSHOT_DEFAULT_DIR` — the vendor is the source of truth for where
+  a snapshot actually lives, including S3).
+- **`Size`** — the documented format is a raw byte count (e.g. `52428800`), but
+  some transcripts show a human string (`50 MiB`). `size_bytes` is the integer
+  when the column is a bare integer, else `null` (fail-closed — never a guessed
+  unit conversion).
+
+Each row is matched by a single regex (`_SNAPSHOT_LIST_ROW_RE`) that anchors the
+final column as an ISO-8601 timestamp. That anchor is what lets the same regex
+**skip the header row** — its `Created` label is not a timestamp — without
+depending on the header's casing (`Name` vs `NAME`), and also skips blank lines
+and any "no snapshots" notice. An empty `snapshots` list therefore means the
+node genuinely has no snapshots, not a parse failure. This mirrors the
+regex-based text parsing `parse_saved_snapshot_name` already does for `.save`'s
+log line.
+
 ## Broadcast / approval wiring (T3 #2430)
 
 - `rke2.node.service.restart` classifies plain `write` via the `.restart`
@@ -354,13 +409,19 @@ way).
 - `rke2.token.rotate` (T2 #2429), `rke2.node.service.restart` /
   `rke2.node.config.update` (T3 #2430), and `rke2.etcd-snapshot.save`
   (T4 #2431) are all landed — the Initiative #2172 SSH write/maintenance
-  surface is complete.
-- The node-write ops (service.restart / config.update) and the snapshot op
+  surface is complete. `rke2.etcd-snapshot.list` (#2853) adds the snapshot
+  read counterpart on top of that surface.
+- The node-write ops (service.restart / config.update) and the snapshot ops
   assume `root` SSH access (consistent with the read posture tier); a future
   non-root + sudo-password path would route the mutating node ops through
   `_sudo.run_remote_bash_with_sudo` (as `token.rotate` already does) if a
-  target ever connects as a non-root user. `rke2.etcd-snapshot.save` would
-  surface a `connector_error` on such a target rather than executing.
+  target ever connects as a non-root user. `rke2.etcd-snapshot.save` /
+  `rke2.etcd-snapshot.list` would surface a `connector_error` on such a
+  target rather than executing.
+- `rke2.etcd-snapshot.list` parses the documented `Name/Location/Size/Created`
+  table (not `-o json`) because the JSON flag's schema and per-version
+  availability are undocumented; if a future RKE2 pins a stable JSON contract,
+  the handler could prefer it. See [List output parsing](#list-output-parsing-2853).
 - The rotate is a **single-node atomic op**: multi-node token-propagation /
   restart choreography is an operator-composed runbook of T2+T3 ops, not part
   of this op (per the Initiative DoD).
@@ -374,6 +435,10 @@ way).
 
 - Parent Initiative #2172 (SSH cluster-node OS-lifecycle write ops); Task
   #2221 (this scaffold). Adapter fix prerequisite #2155.
+- Snapshot read tier: Task #2853 (`rke2.etcd-snapshot.list`, parent Initiative
+  #2833 connector read-op coverage). Vendor: `rke2 etcd-snapshot list` —
+  `docs.rke2.io/datastore/backup_restore` (Name/Location/Size/Created table);
+  JSON flag requested at `k3s-io/k3s#5130` (schema/availability undocumented).
 - Mold: holodeck-ssh (G3.18 #2145 / `docs/codebase/connectors-holodeck.md`),
   bind9-ssh (`docs/codebase/connectors-bind9.md`).
 - Cross-repo coordination: `docs/cross-repo/rke2-infra-coordination.md`.

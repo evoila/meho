@@ -18,10 +18,11 @@ The approval-gated write ops land in
 :mod:`meho_backplane.connectors.rke2.ops_write` and are composed onto
 :data:`RKE2_OPS` here via :data:`WRITE_OPS`: ``rke2.token.rotate`` (T2 #2429)
 plus ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430).
-The safe, non-gated ``rke2.etcd-snapshot.save`` op (T4 #2431) is composed
-in from :mod:`~meho_backplane.connectors.rke2.ops_snapshot` via
-:data:`SNAPSHOT_OPS` -- it is the lone non-gated op in the Initiative #2172
-surface.
+The safe, non-gated snapshot ops ``rke2.etcd-snapshot.save`` (T4 #2431)
+and ``rke2.etcd-snapshot.list`` (#2853) are composed in from
+:mod:`~meho_backplane.connectors.rke2.ops_snapshot` via
+:data:`SNAPSHOT_OPS` -- the two safe / no-approval ops in the surface
+(``.save`` is active, ``.list`` is read-only).
 
 The dataclass + tuple shape mirrors
 :mod:`~meho_backplane.connectors.bind9.ops` and
@@ -136,8 +137,9 @@ def _rke2_ops() -> tuple[Rke2Op, ...]:
     read-only posture tier: ``rke2.posture.show``) + ``WRITE_OPS`` (the
     approval-gated write tier: ``rke2.token.rotate`` (T2 #2429) plus
     ``rke2.node.service.restart`` / ``rke2.node.config.update`` (T3 #2430))
-    + ``SNAPSHOT_OPS`` (the safe, non-gated ``rke2.etcd-snapshot.save`` --
-    T4 #2431). This layers the write + snapshot tiers onto the read surface
+    + ``SNAPSHOT_OPS`` (the safe, non-gated ``rke2.etcd-snapshot.save``
+    (T4 #2431) + ``rke2.etcd-snapshot.list`` (#2853)). This layers the
+    write + snapshot tiers onto the read surface
     exactly as
     :func:`meho_backplane.connectors.holodeck.ops._holodeck_ops` layers its
     ``WRITE_OPS`` on.

@@ -152,6 +152,13 @@ lease 192.168.1.150 {
 }
 """
 
+# Live ``dpinger`` view for the single WAN_DHCP gateway in the config
+# fixture above -- monitor IP matches so the merge lands on that row.
+_FIXTURE_GATEWAY_STATUS = """\
+Name      Monitor        Source        Delay     StdDev    Loss    Status  Substatus
+WAN_DHCP  192.168.1.254  192.168.1.1   0.651ms   0.112ms   0.0%    online  none
+"""
+
 # Map SSH command string → pre-recorded stdout.
 _FIXTURE_RESPONSES: dict[str, str] = {
     "cat /etc/version": _FIXTURE_VERSION,
@@ -161,6 +168,7 @@ _FIXTURE_RESPONSES: dict[str, str] = {
     "ifconfig -a": _FIXTURE_IFCONFIG,
     "cat /cf/conf/config.xml": _FIXTURE_CONFIG_XML,
     "cat /var/dhcpd/var/db/dhcpd.leases": _FIXTURE_DHCP_LEASES,
+    "pfSsh.php playback gatewaystatus": _FIXTURE_GATEWAY_STATUS,
 }
 
 # ---------------------------------------------------------------------------
@@ -618,6 +626,11 @@ async def test_pfsense_e2e_gateway_list_dispatches_ok(
     assert len(rows) == 1
     assert rows[0]["name"] == "WAN_DHCP"
     assert rows[0]["defaultgw"] is True
+    # Live dpinger health merged from the second command.
+    assert rows[0]["status"] == "online"
+    assert rows[0]["delay_ms"] == 0.651
+    assert rows[0]["loss_pct"] == 0.0
+    assert rows[0]["substatus"] == "none"
 
 
 @pytest.mark.asyncio

@@ -51,6 +51,9 @@ Source: `backend/src/meho_backplane/connectors/pfsense/`.
   - `parse_dhcp_leases` (#2849) — parses `/var/dhcpd/var/db/dhcpd.leases`
     (log-structured ISC dhcpd lease DB) into de-duplicated lease rows; an
     `active` lease whose `ends` is past reads as `expired`.
+  - `parse_gateway_status` / `_parse_metric` — parser for the live
+    `pfSsh.php playback gatewaystatus` (dpinger) table, keyed by gateway
+    name.
   - Handler functions: `pfsense_version`, `pfsense_firewall_rules`,
     `pfsense_firewall_state`, `pfsense_nat_rules`, `pfsense_interface_list`,
     `pfsense_gateway_list`, `pfsense_config_show`, `pfsense_dhcp_leases`.
@@ -164,7 +167,7 @@ Two-phase registration, identical to the bind9 pattern:
 | `pfsense.firewall.state` | `pfctl -ss` | `firewall` |
 | `pfsense.nat.rules` | `pfctl -sn` | `nat` |
 | `pfsense.interface.list` | `ifconfig -a` | `network` |
-| `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) | `network` |
+| `pfsense.gateway.list` | `cat /cf/conf/config.xml` (gateways block) + `pfSsh.php playback gatewaystatus` (live dpinger status) | `network` |
 | `pfsense.config.show` | `cat /cf/conf/config.xml` (full) | `config` |
 | `pfsense.dhcp.leases` | `cat /var/dhcpd/var/db/dhcpd.leases` (ISC dhcpd lease DB) | `dhcp` |
 
@@ -184,6 +187,18 @@ whose `ends` has passed is reported as `expired`. DHCPv6 (`dhcpd6.leases`) and
 pool-exhaustion percentage math (correlating against the `config.xml` `<range>`)
 are out of scope — follow-ups.
 
+`pfsense.gateway.list` runs **two** SSH commands and merges them (mirroring
+`bind9.zone.read`): `cat /cf/conf/config.xml` for the static `<gateways>`
+block, then `pfSsh.php playback gatewaystatus` for pfSense's live `dpinger`
+view. The live state is keyed by gateway name and overlaid onto each config
+row as `status` (`online`/`down`), `delay_ms`, `stddev_ms`, `loss_pct`, and
+`substatus`. `config.xml` alone only answers "what gateways are configured";
+the second command answers "is this gateway degraded right now". A gateway
+present in `config.xml` but absent from the live view (e.g. on a down
+interface `dpinger` is not monitoring) keeps its row with all five health
+fields `null`; a failure of the status command degrades the whole set to
+`null` health rather than failing the op.
+
 ## Known issues
 
 - `known_hosts=None` in the SSH adapter disables host-key verification for
@@ -198,6 +213,8 @@ are out of scope — follow-ups.
 - Task #2849: `pfsense.dhcp.leases` — ISC dhcpd lease-DB read op (connector
   read-op coverage wave 2, initiative #2833). Grammar per `dhcpd.leases(5)`;
   chroot path confirmed against pfSense's `status_dhcp_leases.php`.
+- Task #2850: project live `dpinger` status (up/RTT/loss) onto
+  `pfsense.gateway.list` via `pfSsh.php playback gatewaystatus`.
 - Parent initiative: #370 (G3.7 tier-3 standalone connectors).
 - Bind9 connector (canonical typed-SSH reference): `docs/codebase/connectors-bind9.md`.
 - `SshConnector` adapter: `backend/src/meho_backplane/connectors/adapters/ssh.py`.

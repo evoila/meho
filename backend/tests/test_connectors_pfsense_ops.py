@@ -56,6 +56,7 @@ from meho_backplane.connectors.pfsense import PFSENSE_OPS, PfSenseConnector
 from meho_backplane.connectors.pfsense.ops_read import (
     _netmask_to_cidr,
     parse_dhcp_leases,
+    parse_gateway_status,
     parse_gateways_xml,
     parse_ifconfig,
     parse_pfctl_nat,
@@ -438,6 +439,85 @@ def test_parse_gateways_xml_no_gateways_block_returns_empty_list() -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_gateway_status
+# ---------------------------------------------------------------------------
+
+# Captured ``pfSsh.php playback gatewaystatus`` output (whitespace-padded
+# table from pfSense's ``return_gateways_status_text``). One healthy
+# gateway, one online-with-warning gateway, one down gateway.
+_GATEWAY_STATUS_SAMPLE = """\
+Name          Monitor         Source          Delay      StdDev     Loss     Status    Substatus
+WAN_DHCP      192.168.0.1     192.168.0.100   0.651ms    0.112ms    0.0%     online    none
+VPN_GW        10.8.0.1        10.8.0.2        54.926ms   11.309ms   0.0%     online    delay
+WANGW_LTE     1.1.1.1         10.0.5.1        0ms        0ms        100%     down      highloss
+"""
+
+
+def test_parse_gateway_status_keys_by_gateway_name() -> None:
+    status = parse_gateway_status(_GATEWAY_STATUS_SAMPLE)
+    assert set(status) == {"WAN_DHCP", "VPN_GW", "WANGW_LTE"}
+
+
+def test_parse_gateway_status_online_gateway_fields() -> None:
+    status = parse_gateway_status(_GATEWAY_STATUS_SAMPLE)
+    wan = status["WAN_DHCP"]
+    assert wan["status"] == "online"
+    assert wan["delay_ms"] == 0.651
+    assert wan["stddev_ms"] == 0.112
+    assert wan["loss_pct"] == 0.0
+    assert wan["substatus"] == "none"
+
+
+def test_parse_gateway_status_down_gateway_fields() -> None:
+    status = parse_gateway_status(_GATEWAY_STATUS_SAMPLE)
+    lte = status["WANGW_LTE"]
+    assert lte["status"] == "down"
+    assert lte["loss_pct"] == 100.0
+    assert lte["delay_ms"] == 0.0
+    assert lte["substatus"] == "highloss"
+
+
+def test_parse_gateway_status_metric_fields_are_float() -> None:
+    vpn = parse_gateway_status(_GATEWAY_STATUS_SAMPLE)["VPN_GW"]
+    assert isinstance(vpn["delay_ms"], float)
+    assert isinstance(vpn["stddev_ms"], float)
+    assert isinstance(vpn["loss_pct"], float)
+    assert vpn["delay_ms"] == 54.926
+
+
+def test_parse_gateway_status_skips_header_row() -> None:
+    status = parse_gateway_status(_GATEWAY_STATUS_SAMPLE)
+    assert "Name" not in status
+
+
+def test_parse_gateway_status_empty_input_returns_empty_dict() -> None:
+    assert parse_gateway_status("") == {}
+    assert parse_gateway_status("\n\n") == {}
+
+
+def test_parse_gateway_status_short_line_skipped_without_crash() -> None:
+    # A line that does not split into the expected 8 columns is ignored.
+    output = (
+        "Name Monitor Source Delay StdDev Loss Status Substatus\n"
+        "PARTIAL 10.0.0.1 online\n"
+        "WAN_DHCP 1.1.1.1 10.0.0.2 0.6ms 0.1ms 0.0% online none\n"
+    )
+    status = parse_gateway_status(output)
+    assert set(status) == {"WAN_DHCP"}
+
+
+def test_parse_gateway_status_unparseable_metric_becomes_none() -> None:
+    output = (
+        "Name Monitor Source Delay StdDev Loss Status Substatus\n"
+        "PENDING_GW 1.1.1.1 10.0.0.2 ~ms ~ms ~% pending none\n"
+    )
+    row = parse_gateway_status(output)["PENDING_GW"]
+    assert row["delay_ms"] is None
+    assert row["loss_pct"] is None
+    assert row["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
 # Bound-method shims -- pfsense_version
 # ---------------------------------------------------------------------------
 
@@ -579,25 +659,129 @@ async def test_pfsense_interface_list_empty_output_returns_empty_rows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pfsense_gateway_list_reads_config_xml() -> None:
+async def test_pfsense_gateway_list_runs_both_commands() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _proc(_CONFIG_XML_WITH_GATEWAYS)
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_XML_WITH_GATEWAYS),
+            _proc(_GATEWAY_STATUS_SAMPLE),
+        ]
         result = await connector.gateway_list(_TARGET, {})
-    mock_cmd.assert_awaited_once_with(_TARGET, "cat /cf/conf/config.xml", operator=None)
+    commands = [call.args[1] for call in mock_cmd.await_args_list]
+    assert commands == ["cat /cf/conf/config.xml", "pfSsh.php playback gatewaystatus"]
     assert result["total"] == 2
     names = [r["name"] for r in result["rows"]]
     assert "WAN_DHCP" in names
 
 
 @pytest.mark.asyncio
+async def test_pfsense_gateway_list_merges_live_dpinger_status() -> None:
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_XML_WITH_GATEWAYS),
+            _proc(_GATEWAY_STATUS_SAMPLE),
+        ]
+        result = await connector.gateway_list(_TARGET, {})
+    wan = next(r for r in result["rows"] if r["name"] == "WAN_DHCP")
+    assert wan["status"] == "online"
+    assert wan["delay_ms"] == 0.651
+    assert wan["stddev_ms"] == 0.112
+    assert wan["loss_pct"] == 0.0
+    assert wan["substatus"] == "none"
+    # Static config fields are preserved alongside the live overlay.
+    assert wan["interface"] == "wan"
+    assert wan["defaultgw"] is True
+
+
+@pytest.mark.asyncio
+async def test_pfsense_gateway_list_unmonitored_gateway_has_null_health() -> None:
+    # LAN_GW is in config.xml but absent from the gatewaystatus sample.
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_XML_WITH_GATEWAYS),
+            _proc(_GATEWAY_STATUS_SAMPLE),
+        ]
+        result = await connector.gateway_list(_TARGET, {})
+    lan = next(r for r in result["rows"] if r["name"] == "LAN_GW")
+    assert lan["status"] is None
+    assert lan["delay_ms"] is None
+    assert lan["stddev_ms"] is None
+    assert lan["loss_pct"] is None
+    assert lan["substatus"] is None
+    # The unmonitored gateway is never dropped.
+    assert lan["gateway"] == "10.0.0.254"
+
+
+@pytest.mark.asyncio
+async def test_pfsense_gateway_list_status_command_failure_degrades_to_null() -> None:
+    # A failed gatewaystatus command must not lose the config listing.
+    connector = PfSenseConnector()
+    with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
+        mock_cmd.side_effect = [
+            _proc(_CONFIG_XML_WITH_GATEWAYS),
+            _proc("", exit_status=127),
+        ]
+        result = await connector.gateway_list(_TARGET, {})
+    assert result["total"] == 2
+    assert all(row["status"] is None for row in result["rows"])
+    assert "error" not in result
+
+
+@pytest.mark.asyncio
 async def test_pfsense_gateway_list_malformed_xml_returns_empty_rows() -> None:
     connector = PfSenseConnector()
     with patch.object(connector, "_run_command", new_callable=AsyncMock) as mock_cmd:
-        mock_cmd.return_value = _proc("<broken xml")
+        mock_cmd.side_effect = [_proc("<broken xml"), _proc(_GATEWAY_STATUS_SAMPLE)]
         result = await connector.gateway_list(_TARGET, {})
     assert result["rows"] == []
     assert result["total"] == 0
+
+
+def test_pfsense_gateway_list_response_schema_accepts_merged_rows() -> None:
+    """The updated response_schema declares the merged live-health fields."""
+    from jsonschema import Draft202012Validator
+
+    op = next(o for o in PFSENSE_OPS if o.op_id == "pfsense.gateway.list")
+    assert op.response_schema is not None
+    payload = {
+        "rows": [
+            {
+                "name": "WAN_DHCP",
+                "interface": "wan",
+                "gateway": "192.168.0.1",
+                "monitor": "192.168.0.1",
+                "descr": "WAN gateway",
+                "defaultgw": True,
+                "status": "online",
+                "delay_ms": 0.651,
+                "stddev_ms": 0.112,
+                "loss_pct": 0.0,
+                "substatus": "none",
+            },
+            {
+                "name": "LAN_GW",
+                "interface": "lan",
+                "gateway": "10.0.0.254",
+                "monitor": None,
+                "descr": None,
+                "defaultgw": False,
+                "status": None,
+                "delay_ms": None,
+                "stddev_ms": None,
+                "loss_pct": None,
+                "substatus": None,
+            },
+        ],
+        "total": 2,
+    }
+    # Raises jsonschema.ValidationError if the declared types reject the row.
+    Draft202012Validator(op.response_schema).validate(payload)
+    # The numeric health fields are genuinely constrained (not just waved
+    # through by additionalProperties) -- a string delay_ms is rejected.
+    bad = {"rows": [{"name": "X", "delay_ms": "not-a-number"}], "total": 1}
+    assert not Draft202012Validator(op.response_schema).is_valid(bad)
 
 
 # ---------------------------------------------------------------------------

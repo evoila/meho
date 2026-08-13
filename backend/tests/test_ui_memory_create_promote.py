@@ -1494,6 +1494,15 @@ def test_promote_modal_for_user_scope_lists_user_tenant_and_user_target() -> Non
     # for a USER source -- the ladder forbids the cross-ladder leap.
     assert 'value="tenant"' not in body
     assert 'value="target"' not in body
+    # #219: the promote form is migrated off dead daisyUI-v4 classes
+    # (removed in v5 — zero compiled rules — which collapsed the
+    # label-over-input column).
+    assert "form-control" not in body
+    assert "label-text" not in body
+    # #219: the dialog is kept compact + centred (max-w-md) so the native
+    # "Promote to" <select> sits high enough to open its option list
+    # downward instead of upward over the heading.
+    assert "max-w-md" in body
 
 
 def test_promote_modal_for_tenant_scope_returns_400() -> None:

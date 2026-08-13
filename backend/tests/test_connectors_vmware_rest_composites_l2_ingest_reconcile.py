@@ -3,13 +3,14 @@
 
 """op_id reconciliation between the write composites and the ingest pipeline.
 
-G3.16-T1 (#1414). The 12 REST-sub-op vmware-rest write composites each
+G3.16-T1 (#1414). The 14 REST-sub-op vmware-rest write composites each
 declare the L2 sub-ops they dispatch into via ``_SUB_OPS_*`` tuples in
-:mod:`~meho_backplane.connectors.vmware_rest.composites._write`; the four
-vi-json write composites (``vm.disk.grow`` / #2893,
-``vm.clone_from_template`` / #2894, and the vim cluster / inventory writes
-``cluster.drs_rule.create`` + ``folder.create`` / #2895) dispatch into
-vi-json instead and declare their sub-ops in ``_VIM_SUB_OPS_*`` tuples
+:mod:`~meho_backplane.connectors.vmware_rest.composites._write` (the nine
+T6/#509 + vm.power writes, the #2891 hardware trio, and the two GOSC
+composites / #2892); the four vi-json write composites (``vm.disk.grow`` /
+#2893, ``vm.clone_from_template`` / #2894, and the vim cluster / inventory
+writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895) dispatch
+into vi-json instead and declare their sub-ops in ``_VIM_SUB_OPS_*`` tuples
 (reconciled in the dedicated vi-json section at the end of this module). At
 dispatch time :func:`~...composites._preflight.preflight_l2_dependencies`
 looks each sub-op_id up in ``endpoint_descriptor`` and raises
@@ -33,7 +34,7 @@ the parser emits from ``vcenter.yaml``. The two surfaces that could drift:
 
 This module proves the match automatically, without a live backplane:
 
-1. Derive the full set of raw L2 sub-op_ids the 12 composites need by
+1. Derive the full set of raw L2 sub-op_ids the 14 composites need by
    introspecting the live ``_SUB_OPS_*`` constants (so the test tracks
    any future edit to those tuples -- no hardcoded mirror to drift).
 2. Build a representative OpenAPI fixture whose ``paths`` are keyed
@@ -81,7 +82,7 @@ _GETADDRINFO_PATCH = patch(
 
 
 def _required_raw_sub_op_ids() -> set[str]:
-    """Union of every ``_SUB_OPS_*`` op_id across the 12 REST write composites.
+    """Union of every ``_SUB_OPS_*`` op_id across the 14 REST write composites.
 
     The four vi-json write composites' sub-ops live in ``_VIM_SUB_OPS_*``
     tuples (a distinct namespace this ``_SUB_OPS_*`` sweep deliberately
@@ -107,17 +108,21 @@ def _required_raw_sub_op_ids() -> set[str]:
 def test_write_composite_sub_op_tuples_are_all_discovered() -> None:
     """Guard: the introspection finds every write composite's sub-op tuple.
 
-    Twelve ``_SUB_OPS_*`` module constants today, one per write composite.
-    Pinning the exact set means a renamed or dropped constant can't
-    silently shrink the reconciled set to a vacuous pass.
+    Fourteen ``_SUB_OPS_*`` module constants today, one per REST write
+    composite (the nine T6/#509 + vm.power writes, the #2891 hardware trio,
+    plus the two GOSC composites / #2892). Pinning the exact set means a
+    renamed or dropped constant can't silently shrink the reconciled set to
+    a vacuous pass.
     """
     tuple_names = sorted(n for n in dir(_write) if n.startswith("_SUB_OPS_"))
     assert tuple_names == [
         "_SUB_OPS_CLUSTER_PATCH",
+        "_SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE",
         "_SUB_OPS_HOST_DETACH_FROM_VDS",
         "_SUB_OPS_HOST_EVACUATE",
         "_SUB_OPS_VM_CLONE",
         "_SUB_OPS_VM_CREATE",
+        "_SUB_OPS_VM_CUSTOMIZE",
         "_SUB_OPS_VM_DEVICE_CDROM",
         "_SUB_OPS_VM_MIGRATE",
         "_SUB_OPS_VM_NIC_REPOINT",

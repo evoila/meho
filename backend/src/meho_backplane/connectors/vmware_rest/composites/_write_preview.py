@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Park-time ``proposed_effect`` preview builders for the 16 vmware write composites.
+"""Park-time ``proposed_effect`` preview builders for the 18 vmware write composites.
 
 G0.22-T3 (#1608). Before this module, a parked ``vmware.composite.*``
 write stored only the identifier default ``{op_id, connector_id,
@@ -9,7 +9,7 @@ target_id}`` in :attr:`~meho_backplane.db.models.ApprovalRequest.proposed_effect
 — and because the original dispatch ``params`` are deliberately never
 serialised onto a reviewer-facing surface (#1503), the four-eyes
 approver could not tell a one-VM power cycle from a 1000-VM outage.
-This wires all 16 write composites onto the per-op preview hook shipped
+This wires all 18 write composites onto the per-op preview hook shipped
 by #1437 (:mod:`meho_backplane.operations._preview`), following the
 argocd pattern (#1452): reuse the handlers' own read-only resolution
 helpers, never the mutating sub-ops.
@@ -43,7 +43,24 @@ helpers, never the mutating sub-ops.
                           current_backing, requested_backing}`` network from->to
 ``vm.device.cdrom``       live-read: ``{vm, name, cdrom, action,
                           current_backing, state}`` (the host-local ISO path)
+``guest.customization_``  echo: spec_name, os_type, hostname_scheme,
+``spec.create``           nic_count, static_ip_summary (IDENTITY only --
+                          never the Windows admin / product-key /
+                          domain-join credentials, #1503)
+``vm.customize``          live-read: vm, name, power_state, spec_name,
+                          applies_on (spec reference carries no secret)
 ========================  ====================================================
+
+GOSC secret hygiene (#1503) is the load-bearing property of the two
+guest-customization builders. ``guest.customization_spec.create`` reads
+ONLY the identity keys (``spec_name`` / ``os_type`` / ``hostname`` /
+``interfaces`` ip+prefix+gateway) -- it never touches the
+``windows_admin_password`` / ``windows_product_key`` /
+``windows_domain_admin_password`` params, so no credential can reach the
+durable ``proposed_effect`` row by construction. Defence in depth: the
+op is pinned ``credential_write`` so its broadcast collapses to
+aggregate-only regardless of the builder, and the durable audit row
+stores only a params hash.
 
 Two preview depths, chosen per composite
 ========================================
@@ -107,7 +124,7 @@ Redaction posture
 
 The whole-builder ``classify_op`` gate runs in
 :func:`~meho_backplane.operations._preview.build_proposed_effect` before
-any builder fires: the 11 op_ids classify as ``write`` (``.create`` /
+any builder fires: the 18 op_ids classify as ``write`` (``.create`` /
 ``.patch`` suffixes) or ``other`` (``vm.disk.grow`` — ``.grow`` — and
 ``vm.clone_from_template`` — ``_template`` — are not write suffixes) —
 none is a credential class, so none is suppressed. The
@@ -671,7 +688,83 @@ async def _vm_device_cdrom_preview(ctx: PreviewContext) -> dict[str, Any] | None
     }
 
 
-#: op_id → builder for the 16 write composites. Module-level so the
+async def _guest_customization_spec_create_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``guest.customization_spec.create`` — IDENTITY fields only (no I/O).
+
+    **Secret hygiene (#1503) is the whole point of this builder.** It
+    reads ONLY the identity keys (``spec_name`` / ``os_type`` /
+    ``hostname`` / ``interfaces`` ip+prefix+gateway) and never the
+    ``windows_admin_password`` / ``windows_product_key`` /
+    ``windows_domain_admin_password`` params -- so no credential can
+    reach the durable ``proposed_effect`` row through this path by
+    construction. The reviewer still sees the full blast radius: which
+    spec, which OS, the host name, and the per-NIC static IPs the guest
+    will come up on.
+    """
+    spec_name = ctx.params.get("spec_name")
+    os_type = ctx.params.get("os_type")
+    if not isinstance(spec_name, str) or not isinstance(os_type, str):
+        return None
+    raw_interfaces = ctx.params.get("interfaces")
+    interfaces = raw_interfaces if isinstance(raw_interfaces, list) else []
+    static_ips = [
+        nic["ip_address"]
+        for nic in interfaces
+        if isinstance(nic, dict) and isinstance(nic.get("ip_address"), str) and nic["ip_address"]
+    ]
+    hostname = ctx.params.get("hostname")
+    return {
+        "spec_name": spec_name,
+        "os_type": os_type,
+        "hostname_scheme": f"FIXED:{hostname}" if isinstance(hostname, str) and hostname else None,
+        "nic_count": len(interfaces),
+        "static_ip_summary": static_ips,
+    }
+
+
+async def _vm_customize_preview(ctx: PreviewContext) -> dict[str, Any] | None:
+    """Preview ``vm.customize`` — resolve the VM by name for its power state.
+
+    Echoes the VM name, the spec being applied, and ``applies_on``, and
+    (when a connector is resolved) live-reads the VM by name via the
+    shared :func:`._write._resolve_vm_list` to surface the moid + current
+    power state -- the load-bearing fact for the reviewer, since a
+    powered-on VM will be refused at dispatch. The spec reference carries
+    no secret (the credential material lives in the saved spec created
+    separately), so a plain echo is safe. Falls back to the name-only
+    echo when no connector is available or the name is not unambiguous.
+    """
+    vm_name = ctx.params.get("name")
+    spec_name = ctx.params.get("spec_name")
+    if not isinstance(vm_name, str) or not isinstance(spec_name, str):
+        return None
+    preview: dict[str, Any] = {
+        "vm": None,
+        "name": vm_name,
+        "spec_name": spec_name,
+        "power_state": None,
+        "applies_on": "next_power_on",
+    }
+    if ctx.connector_instance is None:
+        return preview
+    rows = await _resolve_vm_list(
+        connector=ctx.connector_instance,  # type: ignore[arg-type]
+        target=ctx.target,
+        operator=ctx.operator,
+        filter_dict={"names": [vm_name]},
+    )
+    if len(rows) == 1:
+        row = rows[0]
+        vm_moid = row.get("vm")
+        power_state = row.get("power_state")
+        if isinstance(vm_moid, str):
+            preview["vm"] = vm_moid
+        if isinstance(power_state, str):
+            preview["power_state"] = power_state
+    return preview
+
+
+#: op_id → builder for the 18 write composites. Module-level so the
 #: registration below and the wiring tests share one source of truth.
 _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.vm.create": _vm_create_preview,
@@ -690,11 +783,13 @@ _WRITE_PREVIEW_BUILDERS: dict[str, PreviewBuilder] = {
     "vmware.composite.cluster.patch": _cluster_patch_preview,
     "vmware.composite.cluster.drs_rule.create": _cluster_drs_rule_create_preview,
     "vmware.composite.folder.create": _folder_create_preview,
+    "vmware.composite.guest.customization_spec.create": _guest_customization_spec_create_preview,
+    "vmware.composite.vm.customize": _vm_customize_preview,
 }
 
 
 def _register_vmware_write_preview_builders() -> None:
-    """Wire the 16 write-composite park-time preview builders. Import-time.
+    """Wire the 18 write-composite park-time preview builders. Import-time.
 
     The 5 read composites register no builder — they are
     ``requires_approval=False`` and never park, so a preview would be

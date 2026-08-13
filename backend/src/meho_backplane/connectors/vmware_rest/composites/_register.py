@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""``register_vmware_composite_operations`` -- registrar for the 21 composites.
+"""``register_vmware_composite_operations`` -- registrar for the 23 composites.
 
 Module-level async function called from the lifespan-driven
 :func:`~meho_backplane.operations.typed_register.run_typed_op_registrars`
@@ -26,15 +26,16 @@ The 5 read composites (T5 / #508) pass
 T4's ``dangerous`` / ``True`` defaults. (The former
 ``host.network_uplinks`` and ``host.vsan_health`` reads were re-shipped
 as typed ops in #2258; see
-:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 16 write
+:mod:`~meho_backplane.connectors.vmware_rest.typed_ops`.) The 18 write
 composites (T6 / #509, single-VM ``vm.power`` / #2301, the mutating
 VI-JSON ``vm.disk.grow`` / #2893, the folder-template
 ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
-``cluster.drs_rule.create`` + ``folder.create`` / #2895, and the #2891
+``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
 hardware writes -- ``vm.resize`` / ``vm.nic.repoint`` /
-``vm.device.cdrom``) inherit the T4
-defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity at
-the call site; the helper would default to those values anyway).
+``vm.device.cdrom``, and the two GOSC composites
+``guest.customization_spec.create`` / ``vm.customize`` / #2892) inherit
+the T4 defaults explicitly (pass ``"dangerous"`` / ``True`` for clarity
+at the call site; the helper would default to those values anyway).
 Each :class:`_CompositeSpec` row carries its own ``safety_level`` +
 ``requires_approval`` so the policy posture is implied by the row,
 not by global state.
@@ -57,11 +58,13 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
+    guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_customize_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -84,6 +87,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     EVENT_TAIL_RESPONSE_SCHEMA,
     FOLDER_CREATE_PARAMETER_SCHEMA,
     FOLDER_CREATE_RESPONSE_SCHEMA,
+    GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
+    GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
     HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA,
     HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA,
     HOST_EVACUATE_PARAMETER_SCHEMA,
@@ -98,6 +103,8 @@ from meho_backplane.connectors.vmware_rest.composites.schemas import (
     VM_CLONE_RESPONSE_SCHEMA,
     VM_CREATE_PARAMETER_SCHEMA,
     VM_CREATE_RESPONSE_SCHEMA,
+    VM_CUSTOMIZE_PARAMETER_SCHEMA,
+    VM_CUSTOMIZE_RESPONSE_SCHEMA,
     VM_DEVICE_CDROM_PARAMETER_SCHEMA,
     VM_DEVICE_CDROM_RESPONSE_SCHEMA,
     VM_DISK_GROW_PARAMETER_SCHEMA,
@@ -218,6 +225,20 @@ _WHEN_TO_USE_BY_GROUP: dict[str, str] = {
         "host offline' workflows. Pair with 'networking' for the "
         "DVS-audit prerequisite to host_detach_from_vds, and with "
         "'cluster' / 'vm' for the pre-flight reads."
+    ),
+    "guest": (
+        "Use for guest OS customization (GOSC) write composites -- how a "
+        "cloned VM gets its network identity on first boot. Write "
+        "(dangerous / approval-required): create a reusable named "
+        "customization spec (hostname + per-NIC static IP + gateway + "
+        "DNS for Linux, or a Windows sysprep spec), and apply a saved "
+        "spec to a powered-off VM (optional power-on afterward so it "
+        "applies that boot). The right group after a 'vm' clone/create "
+        "when the question is 'give this VM its hostname and static IP'. "
+        "Pair with 'vm' for the clone/create that produces the VM, and "
+        "with 'networking' when the per-NIC IPs need portgroup context. "
+        "GOSC specs can carry admin / sysprep credentials; those never "
+        "reach a reviewer surface (the create op is credential-class)."
     ),
 }
 
@@ -733,6 +754,63 @@ _COMPOSITES: tuple[_CompositeSpec, ...] = (
         safety_level="dangerous",
         requires_approval=True,
     ),
+    # ----------------------------------------------------------------
+    # Guest customization (GOSC) composites (#2892) -- dangerous / approval
+    # ----------------------------------------------------------------
+    _CompositeSpec(
+        op_id="vmware.composite.guest.customization_spec.create",
+        handler=guest_customization_spec_create_composite,
+        summary="Create a reusable named guest customization (GOSC) spec.",
+        description=(
+            "Creates a named GuestOS customization spec via "
+            "POST:/vcenter/guest/customization-specs from the tractable "
+            "provisioning subset: hostname (FIXED HostnameGenerator), "
+            "per-NIC static IP / prefix / gateways, and global DNS, for "
+            "either a Linux (linux_config) or Windows "
+            "(windows_config sysprep) guest. The spec a later "
+            "vmware.composite.vm.customize -- or a clone's "
+            "guest_customization_spec -- references by name so a cloned "
+            "VM comes up with its hostname and network identity. Windows "
+            "admin / product-key / domain-join credentials are consumed "
+            "into the sysprep body but never serialized onto any "
+            "reviewer / preview / broadcast / audit surface (#1503): the "
+            "op is credential-class and its park-time preview echoes "
+            "identity fields only."
+        ),
+        parameter_schema=GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA,
+        response_schema=GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA,
+        group_key="guest",
+        tags=["composite", "write", "guest", "customization", "provisioning"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
+    _CompositeSpec(
+        op_id="vmware.composite.vm.customize",
+        handler=vm_customize_composite,
+        summary="Apply a saved customization spec to a VM (by name); optional power-on.",
+        description=(
+            "Resolves a VM by display name via GET:/vcenter/vm, then "
+            "applies a saved customization spec via "
+            "PUT:/vcenter/vm/{vm}/guest/customization with the spec name. "
+            "vCenter only accepts a pending customization on a "
+            "powered-off VM, so the composite pre-checks the resolved "
+            "power state and refuses a powered-on VM with "
+            "status='precondition_failed' rather than letting the PUT "
+            "400. Ambiguous / missing names return "
+            "status='ambiguous' / 'not_found'. With power_on=True the VM "
+            "is powered on afterward via "
+            "POST:/vcenter/vm/{vm}/power?action=start so the "
+            "customization applies on that boot. The spec reference "
+            "carries no secret (the credential material lives in the "
+            "saved spec)."
+        ),
+        parameter_schema=VM_CUSTOMIZE_PARAMETER_SCHEMA,
+        response_schema=VM_CUSTOMIZE_RESPONSE_SCHEMA,
+        group_key="guest",
+        tags=["composite", "write", "guest", "vm", "customization"],
+        safety_level="dangerous",
+        requires_approval=True,
+    ),
 )
 
 
@@ -749,15 +827,16 @@ async def register_vmware_composite_operations(
     on every lifespan startup; the skip-re-embed branch keeps that
     cheap.
 
-    Scope: 21 composites total -- 5 read (T5 / #508) + 16 write (T6 /
+    Scope: 23 composites total -- 5 read (T5 / #508) + 18 write (T6 /
     #509, single-VM ``vm.power`` / #2301, the mutating VI-JSON
     ``vm.disk.grow`` / #2893, the folder-template
     ``vm.clone_from_template`` / #2894, the vim cluster / inventory writes
-    ``cluster.drs_rule.create`` + ``folder.create`` / #2895, and the #2891
+    ``cluster.drs_rule.create`` + ``folder.create`` / #2895, the #2891
     hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
-    ``vm.device.cdrom``). (The former
-    ``host.network_uplinks`` / ``host.vsan_health`` reads were re-shipped
-    as typed ops in #2258.)
+    ``vm.device.cdrom``, and the two GOSC composites
+    ``guest.customization_spec.create`` / ``vm.customize`` / #2892). (The
+    former ``host.network_uplinks`` / ``host.vsan_health`` reads were
+    re-shipped as typed ops in #2258.)
     Each composite's ``safety_level`` +
     ``requires_approval`` come from its :class:`_CompositeSpec` row:
     reads pass ``"safe"`` / ``False``; writes pass ``"dangerous"`` /

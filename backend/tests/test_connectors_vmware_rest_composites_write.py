@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""Unit tests for the 16 vmware-rest write-composite handler functions.
+"""Unit tests for the 18 vmware-rest write-composite handler functions.
 
 Post-#2256 the write composites dispatch their sub-ops **directly on the
 connector session** -- ``connector._get_json`` / ``connector._post_json``
@@ -37,6 +37,7 @@ respx-transport parity proof lives in
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,6 +46,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 import respx
+from jsonschema import Draft202012Validator, ValidationError
 
 from meho_backplane.auth.operator import Operator, TenantRole
 from meho_backplane.connectors import OperationResult
@@ -56,11 +58,13 @@ from meho_backplane.connectors.vmware_rest.composites._write import (
     cluster_drs_rule_create_composite,
     cluster_patch_composite,
     folder_create_composite,
+    guest_customization_spec_create_composite,
     host_detach_from_vds_composite,
     host_evacuate_composite,
     vm_clone_composite,
     vm_clone_from_template_composite,
     vm_create_composite,
+    vm_customize_composite,
     vm_device_cdrom_composite,
     vm_disk_grow_composite,
     vm_migrate_composite,
@@ -2804,4 +2808,582 @@ async def test_vm_device_cdrom_update_without_backing_is_invalid_request(
     )
     assert out["status"] == "invalid_request"
     assert gate.calls == []
+    assert [c["method"] for c in conn.calls] == ["GET"]
+
+
+# ===========================================================================
+# guest.customization_spec.create (GOSC create)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_guest_customization_spec_create_linux_body(gate: _GateRecorder) -> None:
+    """Linux GOSC: one POST whose spec-wrapped body maps the agent subset to vCenter."""
+    conn = _RecordingConnector({"/api/vcenter/guest/customization-specs": {"value": {}}})
+    out = await guest_customization_spec_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "spec_name": "gosc-lin",
+            "description": "web tier",
+            "os_type": "linux",
+            "hostname": "web-01",
+            "domain": "corp.test",
+            "time_zone": "Europe/Vienna",
+            "interfaces": [
+                {"ip_address": "10.0.0.5", "prefix": 24, "gateways": ["10.0.0.1"]},
+                {},  # a NIC with no ip_address configures DHCP
+            ],
+            "dns_servers": ["10.0.0.2"],
+            "dns_suffix_list": ["corp.test"],
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("POST", "/api/vcenter/guest/customization-specs"),
+    ]
+    body = conn.calls[0]["body"]["spec"]
+    assert body["name"] == "gosc-lin"
+    assert body["description"] == "web tier"
+    linux = body["spec"]["configuration_spec"]["linux_config"]
+    assert linux["hostname"] == {"type": "FIXED", "fixed_name": "web-01"}
+    assert linux["domain"] == "corp.test"
+    assert linux["time_zone"] == "Europe/Vienna"
+    # windows_config is absent on the linux branch.
+    assert "windows_config" not in body["spec"]["configuration_spec"]
+    # Interfaces: one STATIC ipv4, one DHCP.
+    interfaces = body["spec"]["interfaces"]
+    assert interfaces[0] == {
+        "adapter": {
+            "ipv4": {
+                "type": "STATIC",
+                "ip_address": "10.0.0.5",
+                "prefix": 24,
+                "gateways": ["10.0.0.1"],
+            }
+        }
+    }
+    assert interfaces[1] == {"adapter": {"ipv4": {"type": "DHCP"}}}
+    assert body["spec"]["global_dns_settings"] == {
+        "dns_servers": ["10.0.0.2"],
+        "dns_suffix_list": ["corp.test"],
+    }
+    # The single write was gated dangerous / no-approval.
+    assert gate.gated_op_ids == ["POST:/vcenter/guest/customization-specs"]
+    assert gate.calls[0]["safety_level"] == "dangerous"
+    assert gate.calls[0]["requires_approval"] is False
+    assert out == {"status": "created", "spec_name": "gosc-lin", "os_type": "linux"}
+
+
+@pytest.mark.asyncio
+async def test_guest_customization_spec_create_windows_sysprep_body(gate: _GateRecorder) -> None:
+    """Windows GOSC: the sysprep body carries the credentials (the real vCenter call).
+
+    Secret hygiene is about *reviewer* surfaces (proven in the e2e lane); the
+    actual customization-specs POST body legitimately carries the sysprep
+    credentials -- that IS the API call that provisions the guest.
+    """
+    conn = _RecordingConnector({"/api/vcenter/guest/customization-specs": {"value": {}}})
+    out = await guest_customization_spec_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={
+            "spec_name": "gosc-win",
+            "os_type": "windows",
+            "hostname": "win-01",
+            "windows_admin_password": "pw-admin",
+            "windows_product_key": "KEY-123",
+            "windows_organization": "evoila",
+            "windows_join_domain": "corp.test",
+            "windows_domain_admin_username": "svc-join",
+            "windows_domain_admin_password": "pw-join",
+        },
+        connector=conn,  # type: ignore[arg-type]
+    )
+    sysprep = conn.calls[0]["body"]["spec"]["spec"]["configuration_spec"]["windows_config"][
+        "sysprep"
+    ]
+    assert sysprep["user_data"]["computer_name"] == {"type": "FIXED", "fixed_name": "win-01"}
+    assert sysprep["user_data"]["product_key"] == "KEY-123"
+    assert sysprep["user_data"]["organization"] == "evoila"
+    # UserData.full_name is REQUIRED -> always emitted (default "") even unset.
+    assert sysprep["user_data"]["full_name"] == ""
+    assert sysprep["gui_unattended"]["password"] == "pw-admin"
+    # GuiUnattended.auto_logon_count + time_zone are REQUIRED: count derives
+    # from auto_logon (unset -> False -> 0); time_zone is the integer MS index
+    # default (85), NOT the Linux tz-name string.
+    assert sysprep["gui_unattended"]["auto_logon"] is False
+    assert sysprep["gui_unattended"]["auto_logon_count"] == 0
+    assert sysprep["gui_unattended"]["time_zone"] == 85
+    # B1: domain join is the REST ``domain`` block (Vcenter.Guest.Domain),
+    # NOT the pyvmomi ``identification`` key.
+    assert "identification" not in sysprep
+    assert sysprep["domain"] == {
+        "type": "DOMAIN",
+        "domain": "corp.test",
+        "domain_username": "svc-join",
+        "domain_password": "pw-join",
+    }
+    assert out["status"] == "created"
+    assert out["os_type"] == "windows"
+
+
+# ---------------------------------------------------------------------------
+# GOSC create-body contract vs. the pinned CustomizationSpec schema (M1 #2892)
+# ---------------------------------------------------------------------------
+#
+# CI was green while the create body was wrong (B1/B2) because the
+# ingest-reconcile lane checks sub-op PATHS only and the unit test above had
+# encoded the broken Windows shape as its expected value. This lane closes that
+# gap: it validates the built ``POST /vcenter/guest/customization-specs`` body
+# against a JSON-Schema mirror of the pinned vCenter
+# ``Vcenter.Guest.CustomizationSpecs.CreateSpec``, transcribed field-for-field
+# from the connector's pinned 9.0 spec
+# (claude-rdc-hetzner-dc/docs/vcenter-9.0/vcenter.yaml, cited line anchors per
+# ``$defs`` entry). ``additionalProperties: False`` on every object turns a
+# stray pyvmomi/SOAP field name (e.g. ``identification``) into a validation
+# failure; the per-object ``required`` lists turn an omitted mandatory field
+# (e.g. ``auto_logon_count`` / ``description`` / ``domain`` / ``product_key``)
+# into one. So a wrong field name or a missing required field now fails CI --
+# for both the Linux and the Windows/sysprep branch.
+_PINNED_CREATE_SPEC_SCHEMA: dict[str, Any] = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$ref": "#/$defs/CreateSpec",
+    "$defs": {
+        "HostnameGenerator": {  # vcenter.yaml:125992
+            "type": "object",
+            "required": ["type"],
+            "additionalProperties": False,
+            "properties": {
+                "type": {"enum": ["FIXED", "PREFIX", "VIRTUAL_MACHINE", "USER_INPUT_REQUIRED"]},
+                "fixed_name": {"type": "string"},
+                "prefix": {"type": "string"},
+            },
+        },
+        "Ipv4": {  # vcenter.yaml:126513
+            "type": "object",
+            "required": ["type"],
+            "additionalProperties": False,
+            "properties": {
+                "type": {"enum": ["DHCP", "STATIC", "USER_INPUT_REQUIRED"]},
+                "ip_address": {"type": "string"},
+                "prefix": {"type": "integer"},
+                "gateways": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "IPSettings": {  # vcenter.yaml:126728 -- ipv4 is "currently required".
+            "type": "object",
+            "required": ["ipv4"],
+            "additionalProperties": False,
+            "properties": {"ipv4": {"$ref": "#/$defs/Ipv4"}},
+        },
+        "AdapterMapping": {  # vcenter.yaml:126762
+            "type": "object",
+            "required": ["adapter"],
+            "additionalProperties": False,
+            "properties": {
+                "mac_address": {"type": "string"},
+                "adapter": {"$ref": "#/$defs/IPSettings"},
+            },
+        },
+        "GlobalDNSSettings": {  # vcenter.yaml:126486
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "dns_suffix_list": {"type": "array", "items": {"type": "string"}},
+                "dns_servers": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "UserData": {  # vcenter.yaml:126067
+            "type": "object",
+            "required": ["computer_name", "full_name", "organization", "product_key"],
+            "additionalProperties": False,
+            "properties": {
+                "computer_name": {"$ref": "#/$defs/HostnameGenerator"},
+                "full_name": {"type": "string"},
+                "organization": {"type": "string"},
+                "product_key": {"type": "string"},
+            },
+        },
+        "Domain": {  # vcenter.yaml:126104
+            "type": "object",
+            "required": ["type"],
+            "additionalProperties": False,
+            "properties": {
+                "type": {"enum": ["WORKGROUP", "DOMAIN"]},
+                "workgroup": {"type": "string"},
+                "domain": {"type": "string"},
+                "domain_username": {"type": "string"},
+                "domain_password": {"type": "string"},
+                "domain_ou": {"type": "string"},
+            },
+        },
+        "GuiUnattended": {  # vcenter.yaml:126181
+            "type": "object",
+            "required": ["auto_logon", "auto_logon_count", "time_zone"],
+            "additionalProperties": False,
+            "properties": {
+                "auto_logon": {"type": "boolean"},
+                "auto_logon_count": {"type": "integer"},
+                "password": {"type": "string"},
+                "time_zone": {"type": "integer"},
+            },
+        },
+        "WindowsSysprep": {  # vcenter.yaml:126221
+            "type": "object",
+            "required": ["gui_unattended", "user_data"],
+            "additionalProperties": False,
+            "properties": {
+                "gui_run_once_commands": {"type": "array", "items": {"type": "string"}},
+                "user_data": {"$ref": "#/$defs/UserData"},
+                "domain": {"$ref": "#/$defs/Domain"},
+                "gui_unattended": {"$ref": "#/$defs/GuiUnattended"},
+            },
+        },
+        "WindowsConfiguration": {  # vcenter.yaml:126264
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "reboot": {"enum": ["REBOOT", "NO_REBOOT", "SHUTDOWN"]},
+                "sysprep": {"$ref": "#/$defs/WindowsSysprep"},
+                "sysprep_xml": {"type": "string"},
+            },
+        },
+        "LinuxConfiguration": {  # vcenter.yaml:126320
+            "type": "object",
+            "required": ["domain", "hostname"],
+            "additionalProperties": False,
+            "properties": {
+                "hostname": {"$ref": "#/$defs/HostnameGenerator"},
+                "domain": {"type": "string"},
+                "time_zone": {"type": "string"},
+                "script_text": {"type": "string"},
+                "compatible_customization_method": {"type": "string"},
+            },
+        },
+        # ConfigurationSpec (vcenter.yaml:126452) also allows cloud_config; the
+        # provisioning-subset builder only emits windows_config / linux_config.
+        "ConfigurationSpec": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "windows_config": {"$ref": "#/$defs/WindowsConfiguration"},
+                "linux_config": {"$ref": "#/$defs/LinuxConfiguration"},
+            },
+        },
+        "CustomizationSpec": {  # vcenter.yaml:126790
+            "type": "object",
+            "required": ["configuration_spec", "global_dns_settings", "interfaces"],
+            "additionalProperties": False,
+            "properties": {
+                "configuration_spec": {"$ref": "#/$defs/ConfigurationSpec"},
+                "global_dns_settings": {"$ref": "#/$defs/GlobalDNSSettings"},
+                "interfaces": {"type": "array", "items": {"$ref": "#/$defs/AdapterMapping"}},
+            },
+        },
+        "CreateSpec": {  # vcenter.yaml:126873 -- the POST body.
+            "type": "object",
+            "required": ["description", "name", "spec"],
+            "additionalProperties": False,
+            "properties": {
+                "spec": {"$ref": "#/$defs/CustomizationSpec"},
+                "description": {"type": "string"},
+                "name": {"type": "string"},
+            },
+        },
+    },
+}
+
+_GOSC_LINUX_MINIMAL: dict[str, Any] = {
+    "spec_name": "gosc-lin",
+    "os_type": "linux",
+    "hostname": "web-01",
+}
+_GOSC_LINUX_FULL: dict[str, Any] = {
+    "spec_name": "gosc-lin",
+    "description": "web tier",
+    "os_type": "linux",
+    "hostname": "web-01",
+    "domain": "corp.test",
+    "time_zone": "Europe/Vienna",
+    "interfaces": [
+        {"ip_address": "10.0.0.5", "prefix": 24, "gateways": ["10.0.0.1"]},
+        {},  # a NIC with no ip_address -> DHCP
+    ],
+    "dns_servers": ["10.0.0.2"],
+    "dns_suffix_list": ["corp.test"],
+}
+_GOSC_WINDOWS_MINIMAL: dict[str, Any] = {
+    "spec_name": "gosc-win",
+    "os_type": "windows",
+    "hostname": "win-01",
+}
+_GOSC_WINDOWS_DOMAIN_JOIN: dict[str, Any] = {
+    "spec_name": "gosc-win",
+    "os_type": "windows",
+    "hostname": "win-01",
+    "windows_admin_password": "pw-admin",
+    "windows_product_key": "KEY-123",
+    "windows_organization": "evoila",
+    "windows_full_name": "Ops Team",
+    "windows_time_zone": 110,
+    "windows_auto_logon": True,
+    "windows_join_domain": "corp.test",
+    "windows_domain_admin_username": "svc-join",
+    "windows_domain_admin_password": "pw-join",
+    "interfaces": [{"ip_address": "10.0.0.5", "prefix": 24, "gateways": ["10.0.0.1"]}],
+}
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param(_GOSC_LINUX_MINIMAL, id="linux-minimal"),
+        pytest.param(_GOSC_LINUX_FULL, id="linux-static-and-dhcp"),
+        pytest.param(_GOSC_WINDOWS_MINIMAL, id="windows-minimal"),
+        pytest.param(_GOSC_WINDOWS_DOMAIN_JOIN, id="windows-domain-join"),
+    ],
+)
+def test_gosc_create_body_conforms_to_pinned_customization_spec_schema(
+    params: dict[str, Any],
+) -> None:
+    """The built create body validates against the pinned CreateSpec schema.
+
+    Guards the create BODY shape (field names + required fields) that the
+    ingest-reconcile lane -- which checks sub-op PATHS only -- cannot. The
+    minimal Linux and minimal Windows cases exercise the always-emitted
+    required fields (``description`` / ``domain`` / ``UserData`` /
+    ``GuiUnattended``) that ``_put_if_str`` used to drop.
+    """
+    body = _write._build_customization_create_body(params)
+    # The connector wraps the CreateSpec under the request-body ``spec`` key.
+    Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA).validate(body["spec"])
+
+
+def test_gosc_create_body_schema_rejects_pyvmomi_shape_and_missing_required() -> None:
+    """The contract lane bites: the pre-fix B1/B2 regressions fail validation.
+
+    Proves the schema mirror is not vacuously green -- the exact broken shapes
+    this iteration fixes (the pyvmomi ``identification`` key; an omitted
+    required ``GuiUnattended.auto_logon_count``; an omitted required
+    ``CreateSpec.description``) are each rejected.
+    """
+    validator = Draft202012Validator(_PINNED_CREATE_SPEC_SCHEMA)
+    good = _write._build_customization_create_body(_GOSC_WINDOWS_DOMAIN_JOIN)
+    validator.validate(good["spec"])  # sanity: the corrected body is valid.
+
+    # B1 regression: the pyvmomi ``identification`` block is not a
+    # WindowsSysprep property -> additionalProperties rejects it.
+    b1 = copy.deepcopy(good)
+    b1_sysprep = b1["spec"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]
+    b1_sysprep.pop("domain", None)
+    b1_sysprep["identification"] = {
+        "joined_domain": "corp.test",
+        "domain_admin_username": "svc-join",
+        "domain_admin_password": "pw-join",
+    }
+    with pytest.raises(ValidationError):
+        validator.validate(b1["spec"])
+
+    # B2 regression: GuiUnattended.auto_logon_count is required -> dropping it
+    # (as the old _put_if_str-built body did) fails.
+    b2 = copy.deepcopy(good)
+    del b2["spec"]["spec"]["configuration_spec"]["windows_config"]["sysprep"]["gui_unattended"][
+        "auto_logon_count"
+    ]
+    with pytest.raises(ValidationError):
+        validator.validate(b2["spec"])
+
+    # B2 regression: CreateSpec.description is required -> dropping it fails.
+    b3 = copy.deepcopy(good)
+    del b3["spec"]["description"]
+    with pytest.raises(ValidationError):
+        validator.validate(b3["spec"])
+
+
+@pytest.mark.asyncio
+async def test_guest_customization_spec_create_gate_short_circuits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parked gate on the create returns the OperationResult; no POST fires."""
+    conn = _RecordingConnector({})
+    _install_gate(
+        monkeypatch,
+        _GateRecorder(
+            gate_for={
+                "POST:/vcenter/guest/customization-specs": _awaiting(
+                    "POST:/vcenter/guest/customization-specs"
+                )
+            }
+        ),
+    )
+    out = await guest_customization_spec_create_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"spec_name": "gosc-lin", "os_type": "linux", "hostname": "web-01"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    assert conn.calls == [], "no write may fire once the gate parks"
+
+
+# ===========================================================================
+# vm.customize (GOSC apply)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_powered_off_sets_customization(gate: _GateRecorder) -> None:
+    """Resolve by name -> PUT the named spec on a powered-off VM."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+            },
+            "/api/vcenter/vm/vm-7/guest/customization": {"value": {}},
+        }
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "app", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/vm"),
+        ("PUT", "/api/vcenter/vm/vm-7/guest/customization"),
+    ]
+    # The resolve read forwards the name filter; PUT body is the named spec ref.
+    assert conn.calls[0]["query"] == {"names": ["app"]}
+    assert conn.calls[1]["body"] == {"spec": {"name": "gosc-lin"}}
+    # Only the PUT was gated (the resolve GET is never gated).
+    assert gate.gated_op_ids == ["PUT:/vcenter/vm/{vm}/guest/customization"]
+    assert out["status"] == "customization_set"
+    assert out["vm"] == "vm-7"
+    assert out["power_state"] == "POWERED_OFF"
+    assert out["applies_on"] == "next_power_on"
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_powered_on_refused(gate: _GateRecorder) -> None:
+    """A powered-on VM is refused with a structured precondition status; no PUT fires."""
+    conn = _RecordingConnector(
+        {"/api/vcenter/vm": {"value": [{"vm": "vm-9", "name": "db", "power_state": "POWERED_ON"}]}}
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "db", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    # Only the resolve GET fired; the PUT never did.
+    assert [c["method"] for c in conn.calls] == ["GET"]
+    assert gate.gated_op_ids == []
+    assert out["status"] == "precondition_failed"
+    assert out["vm"] == "vm-9"
+    assert out["power_state"] == "POWERED_ON"
+    assert out["applies_on"] is None
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_power_on_after(gate: _GateRecorder) -> None:
+    """power_on=True: PUT the customization then start the VM."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+            },
+            "/api/vcenter/vm/vm-7/guest/customization": {"value": {}},
+            "/api/vcenter/vm/vm-7/power?action=start": {"value": {}},
+        }
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "app", "spec_name": "gosc-lin", "power_on": True},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert [(c["method"], c["path"]) for c in conn.calls] == [
+        ("GET", "/api/vcenter/vm"),
+        ("PUT", "/api/vcenter/vm/vm-7/guest/customization"),
+        ("POST", "/api/vcenter/vm/vm-7/power?action=start"),
+    ]
+    assert gate.gated_op_ids == [
+        "PUT:/vcenter/vm/{vm}/guest/customization",
+        "POST:/vcenter/vm/{vm}/power?action=start",
+    ]
+    assert out["status"] == "powered_on"
+    assert out["applies_on"] == "next_power_on"
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_not_found(gate: _GateRecorder) -> None:
+    """An empty resolve listing yields not_found; no write."""
+    conn = _RecordingConnector({"/api/vcenter/vm": {"value": []}})
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "ghost", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert gate.gated_op_ids == []
+    assert out["status"] == "not_found"
+    assert out["vm"] is None
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_ambiguous(gate: _GateRecorder) -> None:
+    """Multiple name matches yield ambiguous with candidates; no write."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [
+                    {"vm": "vm-1", "name": "dup", "power_state": "POWERED_OFF"},
+                    {"vm": "vm-2", "name": "dup", "power_state": "POWERED_ON"},
+                ]
+            }
+        }
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "dup", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert gate.gated_op_ids == []
+    assert out["status"] == "ambiguous"
+    assert [c["vm"] for c in out["candidates"]] == ["vm-1", "vm-2"]
+
+
+@pytest.mark.asyncio
+async def test_vm_customize_gate_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A parked gate on the PUT returns the OperationResult; the PUT never fires."""
+    conn = _RecordingConnector(
+        {
+            "/api/vcenter/vm": {
+                "value": [{"vm": "vm-7", "name": "app", "power_state": "POWERED_OFF"}]
+            }
+        }
+    )
+    _install_gate(
+        monkeypatch,
+        _GateRecorder(
+            gate_for={
+                "PUT:/vcenter/vm/{vm}/guest/customization": _awaiting(
+                    "PUT:/vcenter/vm/{vm}/guest/customization"
+                )
+            }
+        ),
+    )
+    out = await vm_customize_composite(
+        operator=_make_operator(),
+        target=object(),
+        params={"name": "app", "spec_name": "gosc-lin"},
+        connector=conn,  # type: ignore[arg-type]
+    )
+    assert isinstance(out, OperationResult)
+    assert out.status == "awaiting_approval"
+    # The resolve GET fired but the PUT did not.
     assert [c["method"] for c in conn.calls] == ["GET"]

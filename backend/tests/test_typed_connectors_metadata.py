@@ -79,7 +79,7 @@ _K8S_GROUPS: Final[frozenset[str]] = frozenset(
 )
 _VAULT_GROUPS: Final[frozenset[str]] = frozenset({"auth", "kv", "sys"})
 _VMWARE_COMPOSITE_GROUPS: Final[frozenset[str]] = frozenset(
-    {"cluster", "events", "performance", "storage", "networking", "vm", "host"}
+    {"cluster", "events", "performance", "storage", "networking", "vm", "host", "guest"}
 )
 _BIND9_GROUPS: Final[frozenset[str]] = frozenset({"identity", "zone", "record", "config"})
 

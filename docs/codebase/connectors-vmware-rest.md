@@ -8,17 +8,18 @@ that dispatches ingested vCenter REST operations under the
 triple. It pairs with the G0.7 ingestion pipeline's auto-shim (which
 makes ~1,275 + ~2,195 `endpoint_descriptor` rows resolvable but not
 dispatchable) to deliver real session-authenticated calls against
-vSphere 8.5+ / ESXi 8.5+ targets, plus 21 hand-authored composites
+vSphere 8.5+ / ESXi 8.5+ targets, plus 23 hand-authored composites
 that orchestrate cross-spec workflows: 5 read composites
 (G3.1-T5 / `#508`; the `host.network_uplinks` / `#2080` and
 `host.vsan_health` / `#2135` reads were later re-shipped as typed ops
-in `#2258`) and 16 write composites (G3.1-T6 / `#509`, the
+in `#2258`) and 18 write composites (G3.1-T6 / `#509`, the
 single-VM `vm.power` verb incl. Tools soft shutdown / `#2301`, the
 mutating VI-JSON `vm.disk.grow` / `#2893`, the folder-template
 `vm.clone_from_template` / `#2894`, the vim cluster / inventory writes
-`cluster.drs_rule.create` + `folder.create` / `#2895`, and the `#2891`
+`cluster.drs_rule.create` + `folder.create` / `#2895`, the `#2891`
 post-clone hardware reconfigure trio `vm.resize` / `vm.nic.repoint` /
-`vm.device.cdrom`). The
+`vm.device.cdrom`, and the two guest-customization (GOSC) composites
+`guest.customization_spec.create` + `vm.customize` / `#2892`). The
 write composites cover every state-mutating operator workflow named
 in [#214](https://github.com/evoila/meho/issues/214) as required for
 govc-wrapper retirement.
@@ -73,16 +74,18 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   cluster-wide `overall_health` colour plus the health-test `groups`
   list. It is likewise best-effort (a failed health-service read nulls
   `groups` / `overall_health` with a `read_note`).
-- **Write composites** (`composites/_write.py`) — twelve module-level
+- **Write composites** (`composites/_write.py`) — fourteen module-level
   `async def` handlers (`vm_create_composite`, `vm_clone_composite`,
   `vm_snapshot_revert_composite`, `vm_migrate_composite`,
   `vm_power_composite`, `vm_power_bulk_composite`,
   `vm_resize_composite`, `vm_nic_repoint_composite`,
   `vm_device_cdrom_composite`,
   `host_evacuate_composite`, `host_detach_from_vds_composite`,
-  `cluster_patch_composite`). The last three (`#2891`) are the
-  post-clone hardware reconfigure trio — see the **Hardware write
-  composites** subsection under Control flow. Since
+  `cluster_patch_composite`, `guest_customization_spec_create_composite`,
+  `vm_customize_composite`). The `vm_resize` / `vm_nic_repoint` /
+  `vm_device_cdrom` trio (`#2891`) is the post-clone hardware reconfigure
+  trio — see the **Hardware write composites** subsection under Control
+  flow. Since
   `#2256` each accepts `(operator, target, params, connector)` and
   issues its raw-REST sub-ops **directly on the resolved connector
   session** — `connector._get_json` (`_read_sub_op`) for the resolution
@@ -123,10 +126,60 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   recursion-depth contextvar (default cap 8) handles the depth-1 nesting
   cleanly, and the resolved `vm.migrate` runs its own relocate write on
   the direct session under the same governance seam.
+- **Guest customization (GOSC) composites** (`#2892`, group `guest`) —
+  `guest_customization_spec_create_composite`
+  (`POST:/vcenter/guest/customization-specs`) creates a reusable named
+  customization spec from the tractable provisioning subset (hostname as a
+  FIXED `HostnameGenerator`, per-NIC static IP / prefix / gateways, global
+  DNS, for a Linux `linux_config` or a Windows `windows_config` sysprep);
+  `vm_customize_composite`
+  (`PUT:/vcenter/vm/{vm}/guest/customization`) resolves a VM by display
+  name and applies a saved spec by name, refusing a powered-on VM with a
+  structured `precondition_failed` status (vCenter only accepts a pending
+  customization on a powered-off VM) and optionally powering it on
+  afterward so the customization applies on that boot. GOSC is how a cloned
+  VM gets its hostname + network identity on first boot; the create op's
+  `spec_name` is what `vm.customize` — and a clone's
+  `CloneSpec.guest_customization_spec` (consumed by the Task-D clone op) —
+  reference. The body builders map the agent subset onto the vCenter
+  `CreateSpec {name, description, spec:CustomizationSpec}` /
+  `SetSpec {name}`, wrapped in the operation's `spec` parameter per the
+  connector's REST convention.
+
+  **GOSC secret hygiene (`#1503`) — the load-bearing property.** A
+  customization spec can carry Windows admin passwords, sysprep product
+  keys, and domain-join credentials
+  (`windows_admin_password` / `windows_product_key` /
+  `windows_domain_admin_password`). Those values are consumed into the
+  sysprep request body — the real API call that provisions the guest — but
+  must never serialize onto a reviewer / preview / broadcast / audit
+  surface. Three independent surfaces enforce this:
+  1. **`proposed_effect` (approval park).** The bespoke park-time preview
+     builder (`_write_preview._guest_customization_spec_create_preview`)
+     reads ONLY identity keys and echoes
+     `{spec_name, os_type, hostname_scheme, nic_count, static_ip_summary}`
+     — it never touches the credential params, so no secret can reach the
+     durable `ApprovalRequest.proposed_effect` row by construction.
+  2. **Broadcast frame.** `guest.customization_spec.create` is pinned into
+     `broadcast/events._CREDENTIAL_WRITE_OPS`, so `redact_payload` collapses
+     its params to aggregate-only on the feed. The pin is required (not just
+     nice-to-have): the `password`-suffixed fields trip the runtime
+     key-name scrub, but `product_key` does not (`key` is neither an
+     anywhere- nor final-position secret token), and the classifier-coverage
+     CI gate (`test_broadcast_classifier_coverage`) fails a secret-bearing
+     schema that is not pinned to a credential class.
+  3. **Audit row.** The durable `audit_log` payload stores only a
+     `params_hash`, never the raw params — safe by construction.
+
+  `vm.customize` carries only a spec-name reference (no secret), so it is
+  not pinned; its preview live-reads the VM's power state for the reviewer.
+  The end-to-end proof across all three surfaces lives in
+  `test_connectors_vmware_rest_composites_write_e2e`
+  (`test_gosc_create_secret_hygiene_across_all_surfaces`).
 - **`register_vmware_composite_operations`** (`composites/_register.py`)
   — async registrar function called from `run_typed_op_registrars` at
-  lifespan startup. Iterates a single `_COMPOSITES` tuple of 21
-  `_CompositeSpec` rows (5 read + 16 write); each row carries its
+  lifespan startup. Iterates a single `_COMPOSITES` tuple of 23
+  `_CompositeSpec` rows (5 read + 18 write); each row carries its
   own `safety_level` + `requires_approval` so the policy posture is
   implied by the spec, not by global defaults. Idempotent on re-run
   via the body-hash skip path.
@@ -138,7 +191,7 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
   `dispatch_child`, no ingested-descriptor sub-ops, no L2 pre-flight. It
   therefore works on a **fresh boot with zero catalog ingest** — the same
   direct-session property the 5 read composites (`#2253`) and, since
-  `#2256`, the 12 write composites now share. The only `dispatch_child`
+  `#2256`, the 14 write composites now share. The only `dispatch_child`
   leg left on the whole vmware surface is the `host.evacuate` →
   `vm.migrate` composite→composite recursion (a registrar-guaranteed
   `source_kind="composite"` row, not an ingested primitive, `#2248`). The metadata
@@ -253,9 +306,9 @@ Source: `backend/src/meho_backplane/connectors/vmware_rest/`.
    (in `ensure_connector_class_registered`, once #408's pipeline lands
    in main) no-ops on subsequent ingests against the same triple.
 5. Lifespan calls `run_typed_op_registrars()`, which iterates every
-   queued registrar and upserts: the 17 `vmware.composite.*` rows with
+   queued registrar and upserts: the 23 `vmware.composite.*` rows with
    `source_kind="composite"` (5 reads with `safety_level="safe"` +
-   `requires_approval=False`; 12 writes with `safety_level="dangerous"`
+   `requires_approval=False`; 18 writes with `safety_level="dangerous"`
    + `requires_approval=True`), plus the `vmware.host.usage` row with
    `source_kind="typed"` (`safety_level="safe"` + `requires_approval=False`).
    The typed row resolves and dispatches with **zero catalog ingest** —
@@ -351,7 +404,7 @@ reach this method.
 
 ### Composite dispatch
 
-The 21 composites (5 reads + 16 writes) land as `source_kind="composite"`
+The 23 composites (5 reads + 18 writes) land as `source_kind="composite"`
 rows in `endpoint_descriptor`. At dispatch time:
 
 1. Dispatcher resolves `(vmware-rest-9.0, vmware.composite.<verb>)`
@@ -418,7 +471,7 @@ caller.
 
 ### L1/L2 dispatch — direct-session (two-world migration, Goal #2247)
 
-The 21 composites are hand-authored aggregators the connector ships as
+The 23 composites are hand-authored aggregators the connector ships as
 `source_kind='composite'` descriptors. Each composite's body issues its
 raw-REST sub-ops (`GET:/vcenter/datastore`,
 `POST:/vcenter/vm/{vm}/power?action=start`, etc.) **directly on the
@@ -782,7 +835,7 @@ so existing string-matching consumers keep working.
 
 ### Park-time approval previews (#1608)
 
-All 16 write composites ship `requires_approval=True`, so a human/agent
+All 18 write composites ship `requires_approval=True`, so a human/agent
 dispatch parks as a durable `ApprovalRequest` row. Pre-#1608 that row's
 `proposed_effect` was the identifier-only default `{op_id, connector_id,
 target_id}` — and since the dispatch `params` are deliberately never
@@ -991,7 +1044,7 @@ they never park.
   "GET:/vcenter/network/distributed-portgroup"` has the identical
   unresolvable spelling. #1602 is scoped to the read
   `network.portgroup.audit` composite only; the write-side fix plus a
-  reconcile guard over the 9 write composites' `_SUB_OPS_*` against the
+  reconcile guard over the 14 write composites' `_SUB_OPS_*` against the
   real pinned spec (the existing
   `test_connectors_vmware_rest_composites_l2_ingest_reconcile.py`
   synthesises its fixture *from* the constants, so it cannot catch a

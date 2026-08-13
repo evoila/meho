@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
-# code-quality-allow: 16 protocol-driven composite handlers for the
+# code-quality-allow: 18 protocol-driven composite handlers for the
 # vSphere REST + VI-JSON write surface ship in one module per the issue
 # body's design; splitting them by group would scatter the shared
 # sub-op_id constants + helpers across files for no readability gain. Each
 # handler's body is the documented orchestration workflow from #509's spec
-# (plus the mutating VI-JSON disk-grow from #2893, the folder-template clone
-# from #2894, the vim cluster / inventory writes — DRS-rule + folder
-# create — from #2895, and the #2891 hardware writes — vm.resize /
-# vm.nic.repoint / vm.device.cdrom).
+# (plus the single-VM vm.power from #2301, the mutating VI-JSON disk-grow
+# from #2893, the folder-template clone from #2894, the vim cluster /
+# inventory writes — DRS-rule + folder create — from #2895, the #2891
+# hardware writes — vm.resize / vm.nic.repoint / vm.device.cdrom, and the
+# GOSC create/apply from #2892).
 
-"""Write-shaped ``vmware.composite.*`` handler functions (16 composites).
+"""Write-shaped ``vmware.composite.*`` handler functions (18 composites).
 
 Companion to :mod:`._read`. Post-#2256 each handler is a module-level
 ``async def`` taking the dispatcher's composite-branch keyword args
@@ -88,7 +89,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import httpx
 
@@ -104,11 +105,13 @@ __all__ = [
     "cluster_drs_rule_create_composite",
     "cluster_patch_composite",
     "folder_create_composite",
+    "guest_customization_spec_create_composite",
     "host_detach_from_vds_composite",
     "host_evacuate_composite",
     "vm_clone_composite",
     "vm_clone_from_template_composite",
     "vm_create_composite",
+    "vm_customize_composite",
     "vm_device_cdrom_composite",
     "vm_disk_grow_composite",
     "vm_migrate_composite",
@@ -363,6 +366,20 @@ _OP_UPDATE_VM_CDROM = "PATCH:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_DELETE_VM_CDROM = "DELETE:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}"
 _OP_DISCONNECT_VM_CDROM = "POST:/vcenter/vm/{vm}/hardware/cdrom/{cdrom}?action=disconnect"
 
+# Guest customization (GOSC) sub-ops (#2892). Create a reusable named
+# customization spec, then apply a saved one to a VM. Both are plain
+# vCenter REST -- no vim fallback (the issue's grounded gap table).
+_OP_CREATE_CUSTOMIZATION_SPEC = "POST:/vcenter/guest/customization-specs"
+_OP_SET_VM_CUSTOMIZATION = "PUT:/vcenter/vm/{vm}/guest/customization"
+
+#: Default Microsoft time-zone index for the Windows ``GuiUnattended.time_zone``
+#: when the operator does not pin one. ``GuiUnattended.time_zone`` is a REQUIRED
+#: *integer* index in the pinned schema (``Vcenter.Guest.GuiUnattended``,
+#: vcenter.yaml:126181) -- distinct from the Linux tz-name string -- so a value
+#: is always emitted. ``85`` is GMT; operators override via ``windows_time_zone``
+#: (indices: https://support.microsoft.com/help/973627).
+_DEFAULT_WINDOWS_TIME_ZONE: Final[int] = 85
+
 
 def _power_vm_op_id(action: str) -> str:
     """Build the per-action canonical op_id for ``POST:/vcenter/vm/{vm}/power``.
@@ -419,6 +436,10 @@ _COMPOSITE_OP_ID_CLUSTER_PATCH = "vmware.composite.cluster.patch"
 _COMPOSITE_OP_ID_VM_RESIZE = "vmware.composite.vm.resize"
 _COMPOSITE_OP_ID_VM_NIC_REPOINT = "vmware.composite.vm.nic.repoint"
 _COMPOSITE_OP_ID_VM_DEVICE_CDROM = "vmware.composite.vm.device.cdrom"
+_COMPOSITE_OP_ID_GUEST_CUSTOMIZATION_SPEC_CREATE = (
+    "vmware.composite.guest.customization_spec.create"
+)
+_COMPOSITE_OP_ID_VM_CUSTOMIZE = "vmware.composite.vm.customize"
 
 # Per-composite sub-op-id tuples. Pre-#2256 these fed the L2 pre-flight
 # check that guarded a missing catalog ingest; the direct-session migration
@@ -504,6 +525,12 @@ _SUB_OPS_VM_DEVICE_CDROM: tuple[str, ...] = (
     _OP_UPDATE_VM_CDROM,
     _OP_DELETE_VM_CDROM,
     _OP_DISCONNECT_VM_CDROM,
+)
+_SUB_OPS_GUEST_CUSTOMIZATION_SPEC_CREATE: tuple[str, ...] = (_OP_CREATE_CUSTOMIZATION_SPEC,)
+_SUB_OPS_VM_CUSTOMIZE: tuple[str, ...] = (
+    _OP_LIST_VMS,
+    _OP_SET_VM_CUSTOMIZATION,
+    _power_vm_op_id("start"),
 )
 
 
@@ -3123,3 +3150,332 @@ async def vm_device_cdrom_composite(
     if gate is not None:
         return gate
     return {**base, "status": "updated", "requested_backing": backing}
+
+
+# ===========================================================================
+# guest.customization_spec.create + vm.customize (GOSC) (#2892)
+# ===========================================================================
+#
+# GOSC is how a cloned VM gets its network identity (hostname, per-NIC
+# static IP + gateway + DNS) and, on Windows, its sysprep identity on
+# first boot. Two composites: create a reusable named spec, then apply a
+# saved spec to a VM. Both plain REST -- no vim fallback.
+#
+# Secret hygiene (#1503) is load-bearing: the create params carry Windows
+# admin / product-key / domain-join credentials. The handler consumes
+# them into the sysprep body but they never reach a reviewer surface --
+# the op is pinned ``credential_write`` (broadcast collapses to
+# aggregate-only), the park-time preview echoes identity only
+# (:mod:`._write_preview`), and the durable audit row stores a params
+# hash. The handler builders below are the ONLY code that touches the
+# secret values.
+
+
+def _put_if_str(target: dict[str, Any], key: str, value: Any) -> None:
+    """Set ``target[key] = value`` only when *value* is a non-empty string.
+
+    Keeps the vCenter customization body free of empty / ``None`` fields
+    (the API rejects some empty-string members) and holds the builders'
+    branching down.
+    """
+    if isinstance(value, str) and value:
+        target[key] = value
+
+
+def _build_hostname_generator(hostname: str) -> dict[str, Any]:
+    """Build a FIXED ``HostnameGenerator`` for *hostname*.
+
+    vCenter models the guest host name as a generator
+    (``{type: FIXED|PREFIX|VIRTUAL_MACHINE, fixed_name, prefix}``); the
+    provisioning subset always pins an explicit name, so ``FIXED`` with
+    ``fixed_name`` is the only shape built.
+    """
+    return {"type": "FIXED", "fixed_name": hostname}
+
+
+def _build_interface(nic: dict[str, Any]) -> dict[str, Any]:
+    """Map one agent-facing NIC dict to a vCenter ``AdapterMapping``.
+
+    A NIC with an ``ip_address`` becomes a STATIC ``ipv4`` block
+    (``{type, ip_address, prefix?, gateways?}``); a NIC without one
+    becomes a DHCP adapter. Shape: ``{"adapter": {"ipv4": {...}}}``.
+    """
+    ip_address = nic.get("ip_address")
+    if isinstance(ip_address, str) and ip_address:
+        ipv4: dict[str, Any] = {"type": "STATIC", "ip_address": ip_address}
+        prefix = nic.get("prefix")
+        if isinstance(prefix, int):
+            ipv4["prefix"] = prefix
+        gateways = nic.get("gateways")
+        if isinstance(gateways, list) and gateways:
+            ipv4["gateways"] = [g for g in gateways if isinstance(g, str)]
+    else:
+        ipv4 = {"type": "DHCP"}
+    return {"adapter": {"ipv4": ipv4}}
+
+
+def _build_linux_config(params: dict[str, Any]) -> dict[str, Any]:
+    """Build ``configuration_spec.linux_config`` from the agent params.
+
+    ``hostname`` and ``domain`` are REQUIRED by the pinned
+    ``Vcenter.Guest.LinuxConfiguration`` schema (vcenter.yaml:126320), so
+    ``domain`` is always emitted (empty string when unset) -- omitting it
+    fails even a minimal Linux create. ``time_zone`` (a Linux tz-name
+    string here) is optional and dropped when absent.
+    """
+    linux_config: dict[str, Any] = {
+        "hostname": _build_hostname_generator(params["hostname"]),
+        "domain": params.get("domain") or "",
+    }
+    _put_if_str(linux_config, "time_zone", params.get("time_zone"))
+    return linux_config
+
+
+def _build_windows_sysprep(params: dict[str, Any]) -> dict[str, Any]:
+    """Build the ``windows_config.sysprep`` body, consuming the secret fields.
+
+    The credential members (``gui_unattended.password``,
+    ``user_data.product_key``, ``domain.domain_password``) are read here
+    and here only -- they never leave for a reviewer / preview /
+    broadcast surface (#1503).
+
+    ``UserData`` (``full_name`` / ``organization`` / ``product_key``,
+    vcenter.yaml:126067) and ``GuiUnattended`` (``auto_logon`` /
+    ``auto_logon_count`` / ``time_zone``, vcenter.yaml:126181) fields are
+    REQUIRED by the pinned schema, so they are always emitted (empty
+    string / derived defaults) -- their omission fails every Windows
+    create. ``time_zone`` here is the REST integer MS index (not the Linux
+    tz-name string). Domain join lives under ``domain`` ->
+    ``Vcenter.Guest.Domain`` (vcenter.yaml:126104), NOT the pyvmomi
+    ``identification`` key.
+    """
+    auto_logon = bool(params.get("windows_auto_logon", False))
+    user_data: dict[str, Any] = {
+        "computer_name": _build_hostname_generator(params["hostname"]),
+        "full_name": params.get("windows_full_name") or "",
+        "organization": params.get("windows_organization") or "",
+        "product_key": params.get("windows_product_key") or "",
+    }
+
+    gui_unattended: dict[str, Any] = {
+        "auto_logon": auto_logon,
+        "auto_logon_count": 1 if auto_logon else 0,
+        "time_zone": int(params.get("windows_time_zone", _DEFAULT_WINDOWS_TIME_ZONE)),
+    }
+    _put_if_str(gui_unattended, "password", params.get("windows_admin_password"))
+
+    sysprep: dict[str, Any] = {"user_data": user_data, "gui_unattended": gui_unattended}
+
+    join_domain = params.get("windows_join_domain")
+    if isinstance(join_domain, str) and join_domain:
+        domain: dict[str, Any] = {"type": "DOMAIN", "domain": join_domain}
+        _put_if_str(domain, "domain_username", params.get("windows_domain_admin_username"))
+        _put_if_str(domain, "domain_password", params.get("windows_domain_admin_password"))
+        sysprep["domain"] = domain
+    return sysprep
+
+
+def _build_customization_create_body(params: dict[str, Any]) -> dict[str, Any]:
+    """Assemble the ``POST:/vcenter/guest/customization-specs`` request body.
+
+    Maps the agent-facing GOSC subset onto the vCenter ``CreateSpec``
+    (``{name, description, spec}``) whose ``spec`` is a
+    ``CustomizationSpec`` (``{configuration_spec, interfaces,
+    global_dns_settings}``), wrapped in the operation's ``spec``
+    parameter per the connector's REST convention.
+    """
+    if params["os_type"] == "linux":
+        configuration_spec = {"linux_config": _build_linux_config(params)}
+    else:
+        configuration_spec = {
+            "windows_config": {"reboot": "REBOOT", "sysprep": _build_windows_sysprep(params)},
+        }
+    interfaces = [
+        _build_interface(nic) for nic in params.get("interfaces") or [] if isinstance(nic, dict)
+    ]
+    customization_spec: dict[str, Any] = {
+        "configuration_spec": configuration_spec,
+        "interfaces": interfaces,
+        "global_dns_settings": {
+            "dns_servers": [s for s in params.get("dns_servers") or [] if isinstance(s, str)],
+            "dns_suffix_list": [
+                s for s in params.get("dns_suffix_list") or [] if isinstance(s, str)
+            ],
+        },
+    }
+    # ``description`` is REQUIRED on the CreateSpec (vcenter.yaml:126873), so
+    # it is always emitted (empty string when unset) -- omitting it fails
+    # even a minimal create.
+    create_spec: dict[str, Any] = {
+        "name": params["spec_name"],
+        "description": params.get("description") or "",
+        "spec": customization_spec,
+    }
+    return {"spec": create_spec}
+
+
+async def guest_customization_spec_create_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Create a reusable named guest customization (GOSC) spec.
+
+    Op-id: ``vmware.composite.guest.customization_spec.create``. Single
+    write sub-op (``POST:/vcenter/guest/customization-specs``) routed
+    through the #2254 governance seam. The Windows credential params are
+    consumed into the sysprep body by
+    :func:`_build_customization_create_body` and never surface on a
+    reviewer / preview / broadcast / audit surface (#1503) -- the op is
+    pinned ``credential_write``.
+
+    On a parked / denied gate the seam's :class:`OperationResult` returns
+    verbatim; a transport / vCenter fault propagates as the dispatcher's
+    ``connector_error``.
+    """
+    spec_name = params["spec_name"]
+    os_type = params["os_type"]
+    body = _build_customization_create_body(params)
+    gate, _ = await _write_sub_op(connector, target, operator, _OP_CREATE_CUSTOMIZATION_SPEC, body)
+    if gate is not None:
+        return gate
+    return {"status": "created", "spec_name": spec_name, "os_type": os_type}
+
+
+def _vm_customize_identity(row: dict[str, Any]) -> dict[str, Any]:
+    """Identity projection of a VM listing row for the ``ambiguous`` candidate list."""
+    return {key: row[key] for key in ("vm", "name", "power_state") if row.get(key) is not None}
+
+
+def _vm_customize_result(
+    *,
+    status: str,
+    vm: str | None,
+    name: str,
+    spec_name: str,
+    power_state: str | None,
+    applies_on: str | None,
+    guidance: str | None,
+    candidates: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the canonical ``vm.customize`` response envelope."""
+    return {
+        "status": status,
+        "vm": vm,
+        "name": name,
+        "spec_name": spec_name,
+        "power_state": power_state,
+        "applies_on": applies_on,
+        "candidates": candidates or [],
+        "guidance": guidance,
+    }
+
+
+async def vm_customize_composite(
+    *,
+    operator: Operator,
+    target: Any,
+    params: dict[str, Any],
+    connector: VmwareRestConnector,
+) -> dict[str, Any] | OperationResult:
+    """Apply a saved customization spec to a VM (resolved by name); optional power-on.
+
+    Op-id: ``vmware.composite.vm.customize``. Resolves the VM by display
+    name, refuses a powered-on VM with a structured
+    ``precondition_failed`` (vCenter only accepts a pending customization
+    on a powered-off VM), then ``PUT:/vcenter/vm/{vm}/guest/customization``
+    with the named spec. When ``power_on=True`` the VM is powered on
+    afterward so the customization applies on that boot.
+
+    The single spec reference carries no secret (the secret material
+    lives in the saved spec, created separately); the write sub-ops route
+    through the #2254 governance seam.
+    """
+    vm_name = params["name"]
+    spec_name = params["spec_name"]
+    power_on = bool(params.get("power_on", False))
+
+    vms = await _resolve_vm_list(
+        connector=connector, target=target, operator=operator, filter_dict={"names": [vm_name]}
+    )
+    if not vms:
+        return _vm_customize_result(
+            status="not_found",
+            vm=None,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=None,
+            applies_on=None,
+            guidance=f"no VM named {vm_name!r} resolved",
+        )
+    if len(vms) > 1:
+        return _vm_customize_result(
+            status="ambiguous",
+            vm=None,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=None,
+            applies_on=None,
+            guidance="multiple VMs share the requested name -- rename or clean up duplicates",
+            candidates=[_vm_customize_identity(row) for row in vms],
+        )
+    vm_row = vms[0]
+    vm_moid = vm_row.get("vm")
+    power_state = vm_row.get("power_state") if isinstance(vm_row.get("power_state"), str) else None
+    if not isinstance(vm_moid, str):
+        return _vm_customize_result(
+            status="not_found",
+            vm=None,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=None,
+            applies_on=None,
+            guidance="matched VM listing row missing ``vm`` key",
+        )
+    if power_state == "POWERED_ON":
+        return _vm_customize_result(
+            status="precondition_failed",
+            vm=vm_moid,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=power_state,
+            applies_on=None,
+            guidance="VM is powered on; power it off before setting a pending guest customization",
+        )
+
+    gate, _ = await _write_sub_op(
+        connector,
+        target,
+        operator,
+        _OP_SET_VM_CUSTOMIZATION,
+        {"vm": vm_moid, "spec": {"name": spec_name}},
+    )
+    if gate is not None:
+        return gate
+
+    if power_on:
+        gate, _ = await _write_sub_op(
+            connector, target, operator, _power_vm_op_id("start"), {"vm": vm_moid}
+        )
+        if gate is not None:
+            return gate
+        return _vm_customize_result(
+            status="powered_on",
+            vm=vm_moid,
+            name=vm_name,
+            spec_name=spec_name,
+            power_state=power_state,
+            applies_on="next_power_on",
+            guidance=None,
+        )
+    return _vm_customize_result(
+        status="customization_set",
+        vm=vm_moid,
+        name=vm_name,
+        spec_name=spec_name,
+        power_state=power_state,
+        applies_on="next_power_on",
+        guidance=None,
+    )

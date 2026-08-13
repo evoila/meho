@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2026 evoila Group
 
-"""JSON Schema 2020-12 parameter + response schemas for the 21 vmware-rest composites.
+"""JSON Schema 2020-12 parameter + response schemas for the 23 vmware-rest composites.
 
 Each schema is the operator-facing input contract; the dispatcher
 validates inbound ``params`` against the registered schema before
@@ -25,14 +25,15 @@ Conventions
   schema verbatim on ``describe_operation`` calls.
 * The 5 read composites are read-only -- the registration call site
   pins ``safety_level="safe"`` and ``requires_approval=False`` on
-  each. The 16 write composites inherit T4's
+  each. The 18 write composites inherit T4's
   ``safety_level="dangerous"`` + ``requires_approval=True`` defaults
   (G3.1-T6 / #509, single-VM ``vm.power`` / #2301, the mutating
   VI-JSON ``vm.disk.grow`` / #2893, the folder-template
   ``vm.clone_from_template`` / #2894, the vim cluster / inventory
-  writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895, and
+  writes ``cluster.drs_rule.create`` + ``folder.create`` / #2895,
   the #2891 hardware writes ``vm.resize`` / ``vm.nic.repoint`` /
-  ``vm.device.cdrom``). The schema
+  ``vm.device.cdrom``, and the two GOSC composites
+  ``guest.customization_spec.create`` / ``vm.customize`` / #2892). The schema
   text reflects which side of that line
   each composite sits on; the registration call site enforces the
   policy.
@@ -56,6 +57,8 @@ __all__ = [
     "EVENT_TAIL_RESPONSE_SCHEMA",
     "FOLDER_CREATE_PARAMETER_SCHEMA",
     "FOLDER_CREATE_RESPONSE_SCHEMA",
+    "GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA",
+    "GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA",
     "HOST_DETACH_FROM_VDS_PARAMETER_SCHEMA",
     "HOST_DETACH_FROM_VDS_RESPONSE_SCHEMA",
     "HOST_EVACUATE_PARAMETER_SCHEMA",
@@ -70,6 +73,8 @@ __all__ = [
     "VM_CLONE_RESPONSE_SCHEMA",
     "VM_CREATE_PARAMETER_SCHEMA",
     "VM_CREATE_RESPONSE_SCHEMA",
+    "VM_CUSTOMIZE_PARAMETER_SCHEMA",
+    "VM_CUSTOMIZE_RESPONSE_SCHEMA",
     "VM_DEVICE_CDROM_PARAMETER_SCHEMA",
     "VM_DEVICE_CDROM_RESPONSE_SCHEMA",
     "VM_DISK_GROW_PARAMETER_SCHEMA",
@@ -2111,4 +2116,338 @@ VM_DEVICE_CDROM_RESPONSE_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["status", "vm", "cdrom", "action"],
+}
+
+
+# ===========================================================================
+# Guest customization (GOSC) composites (#2892)
+# ===========================================================================
+#
+# Two write composites cover guest OS customization -- how a cloned VM
+# gets its hostname, per-NIC static IP + gateway + DNS, and (on Windows)
+# its sysprep identity on first boot. Both are dangerous / approval-gated.
+#
+# Secret hygiene (#1503) is load-bearing here: the create schema carries
+# Windows admin / product-key / domain-join credentials, and those values
+# must never reach a reviewer, preview, broadcast, or audit surface. The
+# op is pinned ``credential_write`` in ``broadcast/events.py`` (params
+# collapse to aggregate-only on the feed) and its park-time preview
+# builder echoes IDENTITY fields only (``_write_preview``); the durable
+# audit row stores only a params hash. See the connector doc for the
+# full three-surface argument.
+
+
+#: ``vmware.composite.guest.customization_spec.create`` parameter schema.
+#:
+#: Creates a reusable named GuestOS customization spec via
+#: ``POST:/vcenter/guest/customization-specs``. The agent-facing shape is
+#: the tractable provisioning subset (hostname + per-NIC static IP +
+#: DNS, linux or windows/sysprep) -- not the full vendor
+#: ``CustomizationSpec`` surface. The handler maps it onto the vCenter
+#: ``CreateSpec`` (``{name, description, spec}``) whose ``spec`` is a
+#: ``CustomizationSpec`` (``{configuration_spec, interfaces,
+#: global_dns_settings}``).
+#:
+#: The ``windows_*`` credential fields (``windows_admin_password`` /
+#: ``windows_product_key`` / ``windows_domain_admin_password``) are
+#: SECRET: they are consumed by the handler into the sysprep body but
+#: never echoed onto any reviewer / preview / broadcast / audit surface
+#: (#1503). The op is pinned ``credential_write`` so the broadcast feed
+#: collapses these params to aggregate-only.
+GUEST_CUSTOMIZATION_SPEC_CREATE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "spec_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name for the new customization spec (``CreateSpec.name``). "
+                "This is the name a later ``vmware.composite.vm.customize`` "
+                "(or a clone's ``guest_customization_spec``) references."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "default": "",
+            "description": "Free-text description stored on the spec (``CreateSpec.description``).",
+        },
+        "os_type": {
+            "type": "string",
+            "enum": ["linux", "windows"],
+            "description": (
+                "Selects the guest OS branch: ``linux`` builds "
+                "``configuration_spec.linux_config``; ``windows`` builds "
+                "``configuration_spec.windows_config`` with a sysprep body."
+            ),
+        },
+        "hostname": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Guest host name. Mapped to a FIXED "
+                "``HostnameGenerator`` (``{type: FIXED, fixed_name: "
+                "<hostname>}``) on ``linux_config.hostname`` / the Windows "
+                "``user_data.computer_name``."
+            ),
+        },
+        "domain": {
+            "type": "string",
+            "default": "",
+            "description": "DNS domain for the guest (``linux_config.domain``).",
+        },
+        "time_zone": {
+            "type": "string",
+            "description": (
+                "Guest time zone (a tz-database name on Linux, e.g. "
+                "``Europe/Vienna``). Omitted from the body when absent."
+            ),
+        },
+        "interfaces": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "ip_address": {
+                        "type": "string",
+                        "description": (
+                            "Static IPv4 address for this NIC. Omit the "
+                            "field to configure the NIC for DHCP instead."
+                        ),
+                    },
+                    "prefix": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 32,
+                        "description": "Subnet prefix length for the static IPv4 address.",
+                    },
+                    "gateways": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Default gateway IPs for this NIC.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            "default": [],
+            "description": (
+                "Per-NIC IP settings in adapter order. Each entry maps to a "
+                "``CustomizationSpec.interfaces`` ``AdapterMapping`` "
+                "(``{adapter: {ipv4: {type, ip_address, prefix, gateways}}}``). "
+                "An entry with no ``ip_address`` yields a DHCP adapter; the "
+                "empty list leaves adapters unconfigured."
+            ),
+        },
+        "dns_servers": {
+            "type": "array",
+            "items": {"type": "string"},
+            "default": [],
+            "description": "Global DNS server IPs (``global_dns_settings.dns_servers``).",
+        },
+        "dns_suffix_list": {
+            "type": "array",
+            "items": {"type": "string"},
+            "default": [],
+            "description": "Global DNS search suffixes (``global_dns_settings.dns_suffix_list``).",
+        },
+        "windows_admin_password": {
+            "type": "string",
+            "description": (
+                "SECRET. Local Administrator password for the Windows "
+                "guest (``windows_config.sysprep.gui_unattended.password``). "
+                "Never serialized to any reviewer / preview / broadcast / "
+                "audit surface (#1503)."
+            ),
+        },
+        "windows_product_key": {
+            "type": "string",
+            "description": (
+                "SECRET. Windows product / license key "
+                "(``windows_config.sysprep.user_data.product_key``). Never "
+                "serialized to any reviewer-facing surface (#1503)."
+            ),
+        },
+        "windows_organization": {
+            "type": "string",
+            "description": "Windows registered organization (``user_data.organization``).",
+        },
+        "windows_full_name": {
+            "type": "string",
+            "description": "Windows registered owner name (``user_data.full_name``).",
+        },
+        "windows_join_domain": {
+            "type": "string",
+            "description": (
+                "Active Directory domain the Windows guest joins "
+                "(``sysprep.domain.domain`` with ``sysprep.domain.type = DOMAIN``)."
+            ),
+        },
+        "windows_domain_admin_username": {
+            "type": "string",
+            "description": (
+                "Domain account used for the join (``sysprep.domain.domain_username``)."
+            ),
+        },
+        "windows_domain_admin_password": {
+            "type": "string",
+            "description": (
+                "SECRET. Password for the domain-join account "
+                "(``sysprep.domain.domain_password``). Never serialized to any "
+                "reviewer-facing surface (#1503)."
+            ),
+        },
+        "windows_auto_logon": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "Whether the Windows guest auto-logs-on after customization. "
+                "Also drives the required ``gui_unattended.auto_logon_count`` "
+                "(``1`` when true, else ``0``)."
+            ),
+        },
+        "windows_time_zone": {
+            "type": "integer",
+            "default": 85,
+            "description": (
+                "Windows guest time zone as a Microsoft time-zone index "
+                "(``gui_unattended.time_zone``; a REQUIRED integer, distinct "
+                "from the Linux ``time_zone`` tz-name string). Defaults to "
+                "``85`` (GMT). See https://support.microsoft.com/help/973627."
+            ),
+        },
+    },
+    "required": ["spec_name", "os_type", "hostname"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.guest.customization_spec.create`` response schema.
+GUEST_CUSTOMIZATION_SPEC_CREATE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["created"],
+            "description": (
+                "``'created'`` -- the spec was created via "
+                "``POST:/vcenter/guest/customization-specs``. Transport / "
+                "vCenter faults surface as the dispatcher's "
+                "``connector_error`` rather than a business status."
+            ),
+        },
+        "spec_name": {
+            "type": "string",
+            "description": (
+                "Name of the created spec -- echoed back so the caller can "
+                "chain it into ``vmware.composite.vm.customize`` or a "
+                "clone's ``guest_customization_spec``."
+            ),
+        },
+        "os_type": {
+            "type": "string",
+            "enum": ["linux", "windows"],
+            "description": "The guest OS branch the spec was built for.",
+        },
+    },
+    "required": ["status", "spec_name", "os_type"],
+}
+
+
+#: ``vmware.composite.vm.customize`` parameter schema.
+#:
+#: Applies a saved customization spec to a VM (resolved by display name)
+#: via ``PUT:/vcenter/vm/{vm}/guest/customization``. vCenter only accepts
+#: a pending customization on a powered-off VM; the composite pre-checks
+#: the resolved power state and refuses a powered-on VM with a structured
+#: ``precondition_failed`` status rather than letting the PUT 400.
+VM_CUSTOMIZE_PARAMETER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "VM display name. Resolved via "
+                "``GET:/vcenter/vm?filter.names=...`` to the moid + power "
+                "state; multiple matches return ``status='ambiguous'``."
+            ),
+        },
+        "spec_name": {
+            "type": "string",
+            "minLength": 1,
+            "description": (
+                "Name of the saved customization spec to apply "
+                "(``Customization.SetSpec.name``). Typically the "
+                "``spec_name`` from a prior "
+                "``guest.customization_spec.create``."
+            ),
+        },
+        "power_on": {
+            "type": "boolean",
+            "default": False,
+            "description": (
+                "When true, power the VM on via "
+                "``POST:/vcenter/vm/{vm}/power?action=start`` after setting "
+                "the pending customization, so it applies on that boot. "
+                "Default false leaves the VM powered off."
+            ),
+        },
+    },
+    "required": ["name", "spec_name"],
+    "additionalProperties": False,
+}
+
+
+#: ``vmware.composite.vm.customize`` response schema.
+VM_CUSTOMIZE_RESPONSE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "customization_set",
+                "powered_on",
+                "not_found",
+                "ambiguous",
+                "precondition_failed",
+            ],
+            "description": (
+                "``'customization_set'`` -- the pending customization was "
+                "set (VM left powered-off); ``'powered_on'`` -- set then "
+                "powered on so it applies this boot; ``'not_found'`` / "
+                "``'ambiguous'`` -- name did not resolve to exactly one VM; "
+                "``'precondition_failed'`` -- the VM is powered on and must "
+                "be powered off first."
+            ),
+        },
+        "vm": {
+            "type": ["string", "null"],
+            "description": "Resolved VM moid; ``null`` on ``not_found`` / ``ambiguous``.",
+        },
+        "name": {"type": "string", "description": "VM display name the caller supplied."},
+        "spec_name": {"type": "string", "description": "Customization spec name applied."},
+        "power_state": {
+            "type": ["string", "null"],
+            "description": (
+                "Resolved power state at dispatch time (``POWERED_ON`` / "
+                "``POWERED_OFF`` / ``SUSPENDED``); ``null`` when the VM did "
+                "not resolve."
+            ),
+        },
+        "applies_on": {
+            "type": ["string", "null"],
+            "description": (
+                "``'next_power_on'`` once the customization is set; ``null`` when nothing was set."
+            ),
+        },
+        "candidates": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Identity projections of the matched VMs when ``status='ambiguous'``.",
+        },
+        "guidance": {
+            "type": ["string", "null"],
+            "description": "Human-readable next step on a non-success status; ``null`` otherwise.",
+        },
+    },
+    "required": ["status", "name", "spec_name"],
 }

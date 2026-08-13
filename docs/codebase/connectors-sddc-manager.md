@@ -17,10 +17,12 @@ fresh boot with zero catalog ingest. This is now the documented operational
 surface; the wider ingested VCF catalog stays as profiled-dispatch breadth
 (#2271) under its own `METHOD:path` op_ids (two surfaces, no resolver
 shadowing — typed ops never resolve through `endpoint_descriptor` rows, #2262).
-The four non-audited reads (release, domain detail, network-pools, bundles) and
-the wider VCF catalog stay as ordinary `source_kind="ingested"` breadth, enabled
-generically through `ReviewService.enable_reads`. The hand-curated
-ingested-enable apparatus (`core_ops.py`) was retired in #2358 (T7 of #2266).
+The network-pool reads were promoted to typed ops in #2837 (host-commissioning
+IP-capacity pre-flight); the three remaining non-audited reads (release, domain
+detail, bundles) and the wider VCF catalog stay as ordinary
+`source_kind="ingested"` breadth, enabled generically through
+`ReviewService.enable_reads`. The hand-curated ingested-enable apparatus
+(`core_ops.py`) was retired in #2358 (T7 of #2266).
 
 Source: `backend/src/meho_backplane/connectors/sddc_manager/`.
 
@@ -146,7 +148,8 @@ client.
 
 ## `typed_ops.py` / `typed_reads.py` — typed read surface (#2306)
 
-The audited 12-read lab-audit set ships as typed ops. `typed_reads.py` holds
+The audited 12-read lab-audit set, plus the network-pool pre-flight reads added
+in #2837, ships as typed ops. `typed_reads.py` holds
 the async handler bodies (each issues one `connector._get_json(...)` on the
 token session); `connector.py` exposes them as thin bound-method shims
 (`domain_list`, `credential_list`, …) so the dispatcher's `import_handler`
@@ -165,6 +168,8 @@ dispatcher's #2067 recovery arm, which calls the connector's public
 | `sddc.host.list` | `sddc-inventory` | `GET /v1/hosts` |
 | `sddc.vcenter.list` | `sddc-inventory` | `GET /v1/vcenters` |
 | `sddc.nsxt_cluster.list` | `sddc-inventory` | `GET /v1/nsxt-clusters` |
+| `sddc.network_pool.list` | `sddc-inventory` | `GET /v1/network-pools` |
+| `sddc.network_pool.get` | `sddc-inventory` | `GET /v1/network-pools/{id}` |
 | `sddc.credential.list` | `sddc-credentials` | `GET /v1/credentials` |
 | `sddc.task.list` | `sddc-tasks-typed` | `GET /v1/tasks` |
 | `sddc.system.info` | `sddc-platform` | `GET /v1/system` |
@@ -181,17 +186,17 @@ not dispatchable without operator approval), the op-id is on
 `credential_read` and audit/broadcast rows collapse to aggregate-only), and the
 handler scrubs every secret-keyed value at the connector boundary
 (`_redact_secrets`). Three layers; no secret ever rides the result. `safety_level`
-is `caution`; the other 11 reads are `safe` / no-approval.
+is `caution`; the other 13 reads are `safe` / no-approval.
 
 ## Ingested breadth + read enablement
 
 The audited operational reads (domains list + status, clusters, hosts, vcenters,
-nsxt-clusters, credentials, tasks, system, vcf-services, sddc-managers,
-license-keys) are typed ops (see the typed read surface above) and dispatch on a
-fresh boot with zero catalog state.
+nsxt-clusters, network pools list + detail, credentials, tasks, system,
+vcf-services, sddc-managers, license-keys) are typed ops (see the typed read
+surface above) and dispatch on a fresh boot with zero catalog state.
 
-The four non-audited reads (`GET:/v1/releases/system`, `GET:/v1/domains/{id}`,
-`GET:/v1/network-pools`, `GET:/v1/bundles`) and the wider VCF API catalog land as
+The three non-audited reads (`GET:/v1/releases/system`, `GET:/v1/domains/{id}`,
+`GET:/v1/bundles`) and the wider VCF API catalog land as
 ordinary `source_kind="ingested"` `endpoint_descriptor` rows via G0.7 spec
 ingestion and stay browsable as profiled-dispatch breadth. They are enabled
 through the **generic review flow** — `ReviewService.enable_reads(connector_id,
@@ -235,7 +240,8 @@ so all list-verb printers share the same decode path.
 | `domain.go` | `meho sddc-manager domain info <id>` | `GET:/v1/domains/{id}` |
 | `cluster.go` | `meho sddc-manager cluster list [--domain <id>]` | `GET:/v1/clusters` |
 | `host.go` | `meho sddc-manager host list [--domain <id>] [--cluster <id>]` | `GET:/v1/hosts` |
-| `network_pool.go` | `meho sddc-manager network-pool list` | `GET:/v1/network-pools` |
+| `network_pool.go` | `meho sddc-manager network-pool list` | `sddc.network_pool.list` |
+| `network_pool.go` | `meho sddc-manager network-pool get <id>` | `sddc.network_pool.get` |
 | `bundle.go` | `meho sddc-manager bundle list` | `GET:/v1/bundles` |
 | `workflow.go` | `meho sddc-manager workflow list [--status <state>]` | `GET:/v1/tasks` |
 | `operation.go` | `meho sddc-manager operation search <query>` | `GET /api/v1/operations/search` |
@@ -244,11 +250,14 @@ so all list-verb printers share the same decode path.
 All verbs share `--target`, `--json`, and `--backplane` flags. The
 `--backplane` flag defaults to the URL written by the most recent `meho login`.
 
-### `domain info` path parameter
+### `domain info` / `network-pool get` path parameter
 
-`GET:/v1/domains/{id}` requires `{"id": "<domain-id>"}` in the params map for
-the dispatcher's path substitution. The CLI verb passes this as
-`params = map[string]any{"id": domainID}` before calling `dispatchOp`.
+`GET:/v1/domains/{id}` and the typed `sddc.network_pool.get` both require
+`{"id": "<id>"}` in the params map for the dispatcher's path substitution. Each
+CLI verb passes this as `params = map[string]any{"id": <id>}` before calling
+`conn.Call`. `network-pool get` renders the pool's `networks[]` with per-network
+`free=`/`used=` counts (from the `freeIps` / `usedIps` arrays) — the
+host-commissioning IP-capacity pre-flight; `--json` emits the full envelope.
 
 ### Tests
 
@@ -257,9 +266,11 @@ the dispatcher's path substitution. The CLI verb passes this as
 - All 9 top-level verbs assembled by `NewRootCmd`.
 - `decodeElementsResult` with `elements[]`-wrapped and bare-array payloads.
 - Wire-level dispatch: `connector_id` baked, empty target → null, domain info
-  sends id param, workflow list sends status filter, operation search sends
-  connector_id.
-- All verb printer renderers (table output, JSON path).
+  and network-pool get send the id param, workflow list sends status filter,
+  operation search sends connector_id.
+- The `network-pool` sub-tree assembles both `list` and `get`.
+- All verb printer renderers (table output, JSON path), including
+  `network-pool get`'s per-network free/used capacity table.
 
 ## Known issues
 

@@ -25,11 +25,12 @@ check there will no-op on the
 because this module has already registered the hand-rolled class. Until then,
 this module is the only registration path.
 
-Operations span two surfaces. The audited 12-read lab-audit set (#2306)
-ships as first-class **typed** ops in :mod:`.typed_ops` / :mod:`.typed_reads`
+Operations span two surfaces. The audited 12-read lab-audit set (#2306),
+extended with the network-pool pre-flight reads (#2837), ships as
+first-class **typed** ops in :mod:`.typed_ops` / :mod:`.typed_reads`
 (``source_kind="typed"``), dispatchable on a fresh boot with zero catalog
-ingest. The four non-audited reads (release, domain detail, network-pools,
-bundles) and the wider VCF API catalog arrive via G0.7 spec ingestion
+ingest. The three non-audited reads (release, domain detail, bundles) and
+the wider VCF API catalog arrive via G0.7 spec ingestion
 against the ``endpoint_descriptor`` table and stay browsable as
 profiled-dispatch breadth, enable-able through the generic review flow
 (``ReviewService.enable_reads``) — the hand-curated ingested-enable
